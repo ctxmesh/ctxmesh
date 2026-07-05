@@ -1,0 +1,30 @@
+# Dockerfile.launcher — standalone launcher image.
+#
+# Builds only the launcher binary (cmd/launcher) as a distroless/static image.
+# This image is an ENTRYPOINT layer: users compose it by setting AGENT_ENTRYPOINT
+# to the path of their agent binary inside their own image.
+#
+# Usage example (in a downstream Dockerfile):
+#   COPY --from=launcher:latest /launcher /launcher
+#   COPY myapp /myapp
+#   ENV AGENT_ENTRYPOINT=/myapp
+#   ENTRYPOINT ["/launcher"]
+#
+# See examples/echo-agent/Dockerfile for the canonical combined pattern.
+
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o launcher ./cmd/launcher
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/launcher /launcher
+USER 65532:65532
+ENTRYPOINT ["/launcher"]

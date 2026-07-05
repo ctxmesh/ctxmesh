@@ -99,6 +99,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
+.PHONY: docker-build-launcher
+docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
+	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
+
+.PHONY: docker-build-example
+docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
+	$(CONTAINER_TOOL) build -t echo-agent:latest -f examples/echo-agent/Dockerfile .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
