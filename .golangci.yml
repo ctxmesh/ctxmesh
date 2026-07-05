@@ -53,6 +53,9 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - goconst # repeated literals in table-driven tests are fine
+        path: _test\.go
     paths:
       - third_party$
       - builtin$
