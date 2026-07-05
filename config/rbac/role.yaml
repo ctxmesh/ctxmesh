@@ -8,6 +8,7 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments
+  - agentversions
   verbs:
   - create
   - delete
@@ -30,3 +31,15 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
