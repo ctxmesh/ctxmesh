@@ -1,0 +1,182 @@
+# PR/branch pipeline per ADR 0003 (agent-brain/decisions/0003):
+# lint -> unit -> envtest -> build -> { e2e, security }
+# e2e is owned by the agent-brain harness (ADR 0004): this job checks out the
+# (private) brain with the fine-grained BRAIN_CHECKOUT_TOKEN secret and drives
+# `make -C harness tier2 SLICE=m0-deploy`.
+name: CI
+
+on:
+  push:
+    branches: [main, "m*"]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Verify linter configuration
+        run: make lint-config
+      - name: golangci-lint (incl. gofumpt)
+        run: make lint
+
+  unit:
+    name: unit
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Unit tests
+        run: make test
+
+  envtest:
+    name: envtest
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Envtest integration tests
+        run: make test-integration
+
+  build:
+    name: build
+    needs: envtest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Build manager binary
+        run: make build
+      - name: Build manager image
+        run: make docker-build
+
+  e2e:
+    name: e2e
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check out agent-brain (harness owns e2e — ADR 0004)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctx-mesh/agent-brain
+          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          path: agent-brain
+          persist-credentials: false
+          # Brain ref mirrors the engine branch (m<n> <-> m<n>, main <-> main),
+          # per the per-milestone branching convention in agent-brain/CLAUDE.md.
+          ref: ${{ github.head_ref || github.ref_name }}
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: Bring up the harness cluster
+        run: make -C agent-brain/harness dev-up
+      - name: Run the M0 e2e slice
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: make -C agent-brain/harness tier2 SLICE=m0-deploy
+
+  security:
+    name: security
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: Build image for scanning
+        run: make docker-build
+      - name: Trivy image scan (HIGH/CRITICAL, unfixed ignored)
+        # Pinned trivy version — bump deliberately; the vuln DB updates at runtime.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.2 image --exit-code 1 \
+            --severity HIGH,CRITICAL --ignore-unfixed controller:latest
+
+  conventional-commits:
+    name: conventional-commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: PR commits follow Conventional Commits
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          bad=0
+          while IFS= read -r subj; do
+            case "$subj" in
+              Merge*) continue ;;
+            esac
+            if ! printf '%s' "$subj" | grep -qE '^(feat|fix|chore|docs|test|refactor|perf|build|ci|style|revert)(\([a-z0-9./-]+\))?!?: .+'; then
+              echo "not conventional: $subj"
+              bad=1
+            fi
+          done < <(git log --format=%s "origin/${BASE_REF}..HEAD")
+          exit "$bad"
