@@ -101,7 +101,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// ── Step 3: Knative Service ───────────────────────────────────────────────
 	log.Info("Reconciling Knative Service", "name", deploy.Name)
-	ksvc, err := r.reconcileKnativeService(ctx, &deploy)
+	ksvc, err := r.reconcileKnativeService(ctx, &deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
 	}
@@ -163,9 +163,16 @@ func (r *AgentDeploymentReconciler) ensureAgentVersion(
 // namespace match the AgentDeployment. It returns the ksvc as it stands on the
 // API server after the operation (including any pre-existing status from the
 // Knative controller).
+//
+// hash is the spec-hash used as the stable RevisionTemplate name suffix. Setting
+// a deterministic name makes CreateOrUpdate idempotent across reconcile cycles:
+// the same hash → same revision name → Knative sees no template change → no new
+// revision is created on re-reconcile. A changed spec produces a new hash and
+// therefore a new revision, which is the desired behaviour.
 func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
+	hash string,
 ) (*servingv1.Service, error) {
 	port := deploy.Spec.Port
 	if port == 0 {
@@ -201,6 +208,12 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
+					// Stable revision name: {service}-{spec-hash}. Knative creates a
+					// new revision only when spec.template changes; by fixing the name
+					// to the content-addressed hash, re-reconciles of an unchanged spec
+					// are a true no-op (no spurious second revision).
+					// Knative requires the name to start with "{service}-".
+					Name: deploy.Name + "-" + hash,
 					Annotations: map[string]string{
 						"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
 						"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
