@@ -1,0 +1,47 @@
+# Nightly full e2e per ADR 0003: the complete milestone acceptance (tier 3)
+# on a fresh kind cluster. The milestone number below advances as milestones
+# close (co-evolution rule in the agent-brain harness README).
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  full-e2e:
+    name: nightly-full-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check out agent-brain (harness owns e2e — ADR 0004)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctx-mesh/agent-brain
+          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          path: agent-brain
+          persist-credentials: false
+          # Brain ref mirrors the engine branch (nightly runs on main <-> main).
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: Bring up the harness cluster
+        run: make -C agent-brain/harness dev-up
+      - name: Full milestone acceptance (tier 3)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: make -C agent-brain/harness tier3 M=0
