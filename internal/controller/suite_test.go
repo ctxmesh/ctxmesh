@@ -29,6 +29,7 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -47,6 +48,11 @@ var (
 // TestMain bootstraps the envtest environment for all integration tests in this
 // package. It mirrors the Kubebuilder scaffold pattern but uses stdlib testing
 // rather than Ginkgo (ADR 0003: stdlib-only test pyramid).
+//
+// CRD directories loaded:
+//   - config/crd/bases — our AgentDeployment and AgentVersion CRDs
+//   - test/integration/testdata/crds — Knative Serving CRDs (serving-crds.yaml,
+//     pinned to knative-v1.22.1 / knative.dev/serving v0.49.1)
 func TestMain(m *testing.M) {
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
@@ -54,7 +60,10 @@ func TestMain(m *testing.M) {
 	defer testCancel()
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			filepath.Join("..", "..", "test", "integration", "testdata", "crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -73,6 +82,9 @@ func TestMain(m *testing.M) {
 	}
 	if err = agentsv1alpha1.AddToScheme(testScheme); err != nil {
 		panic("failed to add agents/v1alpha1 scheme: " + err.Error())
+	}
+	if err = servingv1.AddToScheme(testScheme); err != nil {
+		panic("failed to add Knative serving/v1 scheme: " + err.Error())
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
