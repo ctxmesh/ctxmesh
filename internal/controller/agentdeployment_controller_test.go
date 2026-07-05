@@ -126,6 +126,10 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	}
 	assert.Equal(t, fmt.Sprintf("%d", port), envMap["AGENT_PORT"], "AGENT_PORT env var")
 
+	// Stable revision name — must be "{service}-{hash}" for idempotent reconciles.
+	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash), ksvc.Spec.Template.Name,
+		"revision name must be stable spec-hash-based name")
+
 	// Autoscaling annotations
 	tmplAnnotations := ksvc.Spec.Template.Annotations
 	assert.Equal(t, "0", tmplAnnotations["autoscaling.knative.dev/min-scale"], "min-scale annotation")
@@ -164,6 +168,56 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 		}
 	}
 	require.NotNil(t, readyCond, "Ready condition must be set in status")
+}
+
+// TestReconcile_IdempotentRereconcile verifies that reconciling the same
+// AgentDeployment twice does NOT create a second Knative revision. This
+// exercises the stable revision-name fix: a re-reconcile (triggered by a ksvc
+// status update watch) must be a true no-op from Knative's perspective.
+func TestReconcile_IdempotentRereconcile(t *testing.T) {
+	const (
+		name      = "idem-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:          "ghcr.io/ctx-mesh/example-agent:latest",
+			ExecutionModel: "serving",
+			Port:           8080,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	r := newReconciler()
+
+	// First reconcile — creates ksvc with stable revision name.
+	reconcileNN(t, r, name, namespace)
+
+	hash, err := specHash(deploy.Spec)
+	require.NoError(t, err)
+	expectedRevName := fmt.Sprintf("%s-%s", name, hash)
+
+	var ksvc1 servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc1))
+	assert.Equal(t, expectedRevName, ksvc1.Spec.Template.Name,
+		"revision name after first reconcile")
+	rv1 := ksvc1.ResourceVersion
+
+	// Second reconcile (simulating a status-update re-queue) — must be a no-op.
+	reconcileNN(t, r, name, namespace)
+
+	var ksvc2 servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc2))
+	assert.Equal(t, expectedRevName, ksvc2.Spec.Template.Name,
+		"revision name must be unchanged after re-reconcile")
+	assert.Equal(t, rv1, ksvc2.ResourceVersion,
+		"ksvc ResourceVersion must be unchanged — no spurious update on re-reconcile")
 }
 
 // TestReconcile_SpecUpdate verifies that a spec change produces a new AgentVersion
@@ -231,13 +285,15 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 		types.NamespacedName{Name: version1Name, Namespace: namespace}, &av1Still),
 		"old AgentVersion %q must still exist", version1Name)
 
-	// ksvc template must reflect new image
+	// ksvc template must reflect new image and new revision name.
 	var ksvc servingv1.Service
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
 	require.Len(t, ksvc.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, "ghcr.io/ctx-mesh/example-agent:v2", ksvc.Spec.Template.Spec.Containers[0].Image,
 		"ksvc container image must be updated to v2")
+	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash2), ksvc.Spec.Template.Name,
+		"revision name must change when spec changes")
 
 	// status.latestVersion must point to the new version
 	var updated agentsv1alpha1.AgentDeployment
