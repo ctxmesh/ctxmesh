@@ -61,42 +61,14 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet ## Run unit tests. Envtest suites are tagged 'integration' and run via test-integration.
-	go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	go test ./... -coverprofile cover.out
 
 .PHONY: test-integration
 test-integration: manifests generate fmt vet setup-envtest ## Run envtest-backed integration tests (build tag 'integration').
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags=integration $$(go list -tags=integration ./... | grep -v /e2e) -coverprofile cover-integration.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags=integration $$(go list -tags=integration ./...) -coverprofile cover-integration.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# kubectl kuberc is disabled by default for test isolation; enable with:
-# - KUBECTL_KUBERC=true
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= agent-engine-test-e2e
-
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
-
-.PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
-
-.PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+# e2e/acceptance tests are black-box and live in the agent-brain harness
+# (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -126,6 +98,14 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
+
+.PHONY: docker-build-launcher
+docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
+	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
+
+.PHONY: docker-build-example
+docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
+	$(CONTAINER_TOOL) build -t echo-agent:latest -f examples/echo-agent/Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

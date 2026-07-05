@@ -1,6 +1,6 @@
 # Nightly full e2e per ADR 0003: the complete milestone acceptance (tier 3)
-# on a fresh kind cluster. The milestone number below advances as milestones
-# close (co-evolution rule in the agent-brain harness README).
+# on a fresh kind cluster with Knative Serving. The milestone number below
+# advances as milestones close (co-evolution rule in the agent-brain harness README).
 name: Nightly
 
 on:
@@ -39,9 +39,9 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           kind version
-      - name: Bring up the harness cluster
-        run: make -C agent-brain/harness dev-up
+      - name: Bring up the harness cluster (Knative Serving + Kourier)
+        run: make -C agent-brain/harness dev-up M=1
       - name: Full milestone acceptance (tier 3)
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        run: make -C agent-brain/harness tier3 M=0
+        run: make -C agent-brain/harness tier3 M=1
