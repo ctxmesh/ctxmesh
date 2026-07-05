@@ -3,7 +3,7 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.15.0
-domain: ctx-mesh.io
+domain: ctxmesh.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: agent-engine
