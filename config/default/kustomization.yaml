@@ -41,6 +41,7 @@ patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
+    name: controller-manager   # scope: the gateway Deployment must not get manager flags
 
 # Uncomment the patches line if you enable Metrics and CertManager
 # [METRICS-WITH-CERTS] To enable metrics protected with certManager, uncomment the following line.
