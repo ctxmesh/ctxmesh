@@ -47,7 +47,7 @@ type futureField struct {
 // futureFields is the set of recognised-but-not-yet-supported top-level fields.
 // Fields not in knownFields and not in futureFields are fully unknown → hard error.
 var futureFields = map[string]futureField{
-	"prompt":   {milestone: "M3"},
+	"prompt":   {milestone: "M9"},
 	"tools":    {milestone: "M4"},
 	"memory":   {milestone: "M5"},
 	"budget":   {milestone: "M8"},
