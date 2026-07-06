@@ -35,18 +35,26 @@ spec:
             - name: http
               containerPort: 4000
               protocol: TCP
+          # LiteLLM (Python) can take >75s to come up on throttled CI nodes —
+          # long enough for the liveness probe to kill it mid-start. The
+          # startupProbe gives it up to 5 min; liveness/readiness only run
+          # after it succeeds.
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /health/liveliness
               port: 4000
-            initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health/readiness
               port: 4000
-            initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
           resources:
