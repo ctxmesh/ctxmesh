@@ -27,6 +27,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -90,6 +93,15 @@ func TestMain(m *testing.M) {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
 	if err != nil {
 		panic("failed to create envtest client: " + err.Error())
+	}
+
+	// Ensure the agent-engine-system namespace exists. It is used by the
+	// ModelRoute controller tests for the gateway ConfigMap and Deployment.
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "agent-engine-system"}}
+	if nsErr := k8sClient.Create(testCtx, ns); nsErr != nil {
+		if !apierrors.IsAlreadyExists(nsErr) {
+			panic("failed to create agent-engine-system namespace: " + nsErr.Error())
+		}
 	}
 
 	code := m.Run()
