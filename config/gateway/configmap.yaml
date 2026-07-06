@@ -1,0 +1,17 @@
+# Bootstrap ConfigMap for the LiteLLM gateway.
+# The ModelRoute controller owns the content of config.yaml; this manifest
+# ships an empty model_list so the gateway pod can start before any ModelRoute
+# exists. The controller uses CreateOrUpdate, so this initial value is
+# overwritten on the first reconcile.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: system
+  labels:
+    control-plane: gateway
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+data:
+  config.yaml: |
+    model_list: []
