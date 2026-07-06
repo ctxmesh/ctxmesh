@@ -52,10 +52,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 500m
               memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi   # LiteLLM (Python) OOMs below ~1Gi at startup
           volumeMounts:
             - name: gateway-config
               mountPath: /etc/litellm
