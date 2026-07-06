@@ -2,7 +2,8 @@
 # lint -> unit -> envtest -> build -> { e2e, security }
 # e2e is owned by the agent-brain harness (ADR 0004): this job checks out the
 # (private) brain with the fine-grained BRAIN_CHECKOUT_TOKEN secret and drives
-# `make -C harness tier2 SLICE=m1-invoke` on a kind cluster with Knative Serving.
+# `make -C harness tier2 SLICE=m2-gateway` on a kind cluster with Knative Serving.
+# m2-gateway supersets the m1 deploy path; m1-specific coverage stays in envtest.
 name: CI
 
 on:
@@ -93,7 +94,7 @@ jobs:
     name: e2e
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     permissions:
       contents: read
     steps:
@@ -121,10 +122,10 @@ jobs:
           kind version
       - name: Bring up the harness cluster (Knative Serving + Kourier)
         run: make -C agent-brain/harness dev-up M=1
-      - name: Run the M1 e2e slice
+      - name: Run the M2 e2e slice
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        run: make -C agent-brain/harness tier2 SLICE=m1-invoke
+        run: make -C agent-brain/harness tier2 SLICE=m2-gateway
 
   security:
     name: security
