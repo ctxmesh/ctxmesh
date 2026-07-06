@@ -44,7 +44,7 @@ spec:
               path: /health/liveliness
               port: 4000
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 90   # 7.5 min — CI nodes are heavily shared
           livenessProbe:
             httpGet:
               path: /health/liveliness
@@ -62,7 +62,7 @@ spec:
               cpu: 100m
               memory: 512Mi
             limits:
-              cpu: "1"
+              cpu: "2"         # startup is CPU-bound; 1 CPU starves it on busy nodes
               memory: 1536Mi   # LiteLLM (Python) OOMs below ~1Gi at startup
           volumeMounts:
             - name: gateway-config
