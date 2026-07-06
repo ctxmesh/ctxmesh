@@ -1,0 +1,7 @@
+apiVersion: agents.ctxmesh.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: minimal-agent
+spec:
+  image: ghcr.io/ctx-mesh/minimal:latest
+  executionModel: serving

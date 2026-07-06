@@ -1,0 +1,16 @@
+apiVersion: agents.ctxmesh.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: full-agent
+spec:
+  image: ghcr.io/ctx-mesh/full:v1
+  executionModel: serving
+  resources:
+    cpu: 500m
+    memory: 256Mi
+  scaling:
+    min: 1
+    max: 5
+  env:
+    - name: MODEL_ROUTE
+      value: default-model

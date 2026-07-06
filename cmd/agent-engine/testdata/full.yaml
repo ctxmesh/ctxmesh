@@ -1,0 +1,11 @@
+name: full-agent
+image: ghcr.io/ctx-mesh/full:v1
+executionModel: serving
+resources:
+  cpu: "500m"
+  memory: "256Mi"
+scaling:
+  min: 1
+  max: 5
+model:
+  route: default-model
