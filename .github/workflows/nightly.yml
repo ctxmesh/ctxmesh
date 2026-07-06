@@ -44,4 +44,5 @@ jobs:
       - name: Full milestone acceptance (tier 3)
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        run: make -C agent-brain/harness tier3 M=1
+        # M=2: advances after each milestone close (co-evolution rule, harness/README.md)
+        run: make -C agent-brain/harness tier3 M=2
