@@ -188,9 +188,15 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		}
 	}
 
-	// AGENT_PORT is always the first env var; user env vars follow.
-	env := make([]corev1.EnvVar, 0, 1+len(deploy.Spec.Env))
+	// Platform env vars come first so they are always present; user env is appended
+	// last and may override platform defaults if the operator deliberately sets the
+	// same name (consistent with the treatment of AGENT_PORT).
+	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
 	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
+	env = append(env, corev1.EnvVar{
+		Name:  "MODEL_GATEWAY_URL",
+		Value: "http://agent-engine-gateway.agent-engine-system.svc:4000",
+	})
 	env = append(env, deploy.Spec.Env...)
 
 	var resources corev1.ResourceRequirements

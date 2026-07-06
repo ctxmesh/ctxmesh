@@ -14,10 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// echo-agent is a reference agent implementation that satisfies the M1 runtime
-// contract (specs/agent-serving.md §"Runtime contract subset (M1)"):
+// echo-agent is a reference agent implementation that satisfies the M2 runtime
+// contract (specs/agent-serving.md §"Runtime contract subset"):
 //
-//   - POST /invoke   — echoes the request body as a JSON response (no LLM call until M2)
+//   - POST /invoke   — when MODEL_ROUTE is set, calls $MODEL_GATEWAY_URL/chat/completions
+//     (OpenAI-style) and returns {"agent":"echo-agent","completion":<text>,"route":<alias>};
+//     without MODEL_ROUTE, echoes the request body unchanged (M1 behaviour).
 //   - GET  /healthz  — liveness probe; returns 200 ok
 //   - GET  /readyz   — readiness probe; returns 200 ok
 //
@@ -27,6 +29,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -82,15 +85,49 @@ func main() {
 	log.Println("echo-agent: stopped")
 }
 
-// invokeResponse is the JSON payload returned by POST /invoke.
+// agentName is the value returned in every /invoke response's "agent" field.
+const agentName = "echo-agent"
+
+// invokeResponse is the JSON payload returned by POST /invoke when MODEL_ROUTE is set.
 type invokeResponse struct {
-	Agent string `json:"agent"`
-	Echo  string `json:"echo"`
-	Model string `json:"model"`
+	Agent      string `json:"agent"`
+	Completion string `json:"completion,omitempty"`
+	Route      string `json:"route,omitempty"`
+	Echo       string `json:"echo,omitempty"`
 }
 
-// handleInvoke handles POST /invoke. It reads the request body and echoes it
-// back as a JSON object. Non-POST methods are rejected with 405.
+// chatRequest is the OpenAI-compatible request body sent to the model gateway.
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+}
+
+// chatMessage is a single message in an OpenAI-style conversation.
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// chatResponse is the OpenAI-compatible response from the model gateway.
+// Only the fields needed to extract the completion text are parsed.
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// gatewayClient is a package-level HTTP client for gateway calls. It is a
+// variable so tests can substitute a custom transport backed by httptest.Server.
+var gatewayClient = &http.Client{Timeout: 30 * time.Second}
+
+// handleInvoke handles POST /invoke.
+//   - With MODEL_ROUTE set: POSTs to $MODEL_GATEWAY_URL/chat/completions and
+//     returns {"agent","completion","route"}.
+//   - Without MODEL_ROUTE: echoes the request body as {"agent","echo"} (M1 behaviour).
+//
+// Non-POST methods are rejected with 405.
 func handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed — use POST", http.StatusMethodNotAllowed)
@@ -104,16 +141,91 @@ func handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = r.Body.Close() }()
 
-	resp := invokeResponse{
-		Agent: "echo-agent",
-		Echo:  string(body),
-		Model: "none-until-M2",
+	route := os.Getenv("MODEL_ROUTE")
+	if route == "" {
+		// M1 echo path — MODEL_ROUTE not configured.
+		resp := invokeResponse{
+			Agent: agentName,
+			Echo:  string(body),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("echo-agent: encode response: %v", err)
+		}
+		return
 	}
 
+	// Gateway path — call the model gateway.
+	completion, err := callGateway(r.Context(), route, string(body))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("gateway error: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	resp := invokeResponse{
+		Agent:      agentName,
+		Completion: completion,
+		Route:      route,
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("echo-agent: encode response: %v", err)
 	}
+}
+
+// callGateway POSTs an OpenAI-compatible chat/completions request to the model
+// gateway and returns the content of the first choice message.
+// The Authorization header carries a dummy bearer token; LiteLLM in dev mode
+// accepts any value.
+func callGateway(ctx context.Context, route, userContent string) (string, error) {
+	gatewayURL := os.Getenv("MODEL_GATEWAY_URL")
+	if gatewayURL == "" {
+		return "", fmt.Errorf("MODEL_GATEWAY_URL not set")
+	}
+
+	reqBody := chatRequest{
+		Model: route,
+		Messages: []chatMessage{
+			{Role: "user", Content: userContent},
+		},
+	}
+	reqBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshalling request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		gatewayURL+"/chat/completions", bytes.NewReader(reqBytes))
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	// Dummy bearer token — LiteLLM in dev mode accepts any value (no auth configured).
+	httpReq.Header.Set("Authorization", "Bearer dummy")
+
+	resp, err := gatewayClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("gateway request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading gateway response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var chatResp chatResponse
+	if err := json.Unmarshal(respBytes, &chatResp); err != nil {
+		return "", fmt.Errorf("parsing gateway response: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("gateway returned no choices")
+	}
+	return chatResp.Choices[0].Message.Content, nil
 }
 
 // handleHealth handles GET /healthz and GET /readyz. Both return 200 ok;

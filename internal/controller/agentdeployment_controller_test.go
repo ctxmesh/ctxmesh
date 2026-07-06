@@ -119,12 +119,14 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 
 	assert.Equal(t, image, c.Image, "container image")
 
-	// AGENT_PORT env var
+	// Platform env vars — AGENT_PORT and MODEL_GATEWAY_URL are always injected.
 	envMap := make(map[string]string, len(c.Env))
 	for _, e := range c.Env {
 		envMap[e.Name] = e.Value
 	}
 	assert.Equal(t, fmt.Sprintf("%d", port), envMap["AGENT_PORT"], "AGENT_PORT env var")
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL env var")
 
 	// Stable revision name — must be "{service}-{hash}" for idempotent reconciles.
 	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash), ksvc.Spec.Template.Name,
@@ -381,6 +383,8 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 		envMap[e.Name] = e.Value
 	}
 	assert.Equal(t, "9090", envMap["AGENT_PORT"], "AGENT_PORT must reflect custom port")
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL must always be injected")
 	assert.Equal(t, "debug", envMap["LOG_LEVEL"], "user LOG_LEVEL env var must be present")
 
 	// Port on container
