@@ -55,7 +55,10 @@ const (
 //   - ConfigMap CreateOrUpdate: identical content → resourceVersion unchanged.
 //   - Deployment update: identical annotation + env → resourceVersion unchanged.
 //   - Status updates use optimistic locking; transient conflicts are non-fatal.
-//
+type ModelRouteReconciler struct {
+	client.Client
+}
+
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/finalizers,verbs=update
@@ -63,9 +66,6 @@ const (
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
-type ModelRouteReconciler struct {
-	client.Client
-}
 
 // Reconcile is the main reconcile loop. It is triggered by any change to a
 // ModelRoute, SecretBinding, or Secret (via watchers in SetupWithManager) and
