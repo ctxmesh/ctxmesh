@@ -59,7 +59,7 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
+              cpu: 50m       # scheduling headroom on ~2-CPU CI nodes
               memory: 512Mi
             limits:
               cpu: "2"         # startup is CPU-bound; 1 CPU starves it on busy nodes
