@@ -24,8 +24,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctx-mesh/agent-engine/api/v1alpha1"
-	"github.com/ctx-mesh/agent-engine/internal/gateway"
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/gateway"
 )
 
 const testNS = "default"

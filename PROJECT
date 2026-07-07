@@ -7,7 +7,7 @@ domain: ctxmesh.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: agent-engine
-repo: github.com/ctx-mesh/agent-engine
+repo: github.com/ctxmesh/agent-engine
 resources:
 - api:
     crdVersion: v1
@@ -16,7 +16,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: AgentDeployment
-  path: github.com/ctx-mesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agent-engine/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -24,7 +24,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: AgentVersion
-  path: github.com/ctx-mesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agent-engine/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -33,7 +33,7 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: ModelRoute
-  path: github.com/ctx-mesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agent-engine/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -41,6 +41,6 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: SecretBinding
-  path: github.com/ctx-mesh/agent-engine/api/v1alpha1
+  path: github.com/ctxmesh/agent-engine/api/v1alpha1
   version: v1alpha1
 version: "3"

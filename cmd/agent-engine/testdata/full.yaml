@@ -1,5 +1,5 @@
 name: full-agent
-image: ghcr.io/ctx-mesh/full:v1
+image: ghcr.io/ctxmesh/full:v1
 executionModel: serving
 resources:
   cpu: "500m"

@@ -1,4 +1,4 @@
-module github.com/ctx-mesh/agent-engine
+module github.com/ctxmesh/agent-engine
 
 go 1.26.4
 

@@ -1,2 +1,2 @@
 name: minimal-agent
-image: ghcr.io/ctx-mesh/minimal:latest
+image: ghcr.io/ctxmesh/minimal:latest
