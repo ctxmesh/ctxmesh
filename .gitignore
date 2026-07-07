@@ -31,3 +31,6 @@ go.work
 
 # macOS
 .DS_Store
+
+# build artifacts
+/agent-engine

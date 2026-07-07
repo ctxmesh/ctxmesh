@@ -5,10 +5,30 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments
   - agentversions
+  - modelroutes
   verbs:
   - create
   - delete
@@ -21,16 +41,36 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/finalizers
+  - modelroutes/finalizers
   verbs:
   - update
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
+  - modelroutes/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - secretbindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - serving.knative.dev
   resources:

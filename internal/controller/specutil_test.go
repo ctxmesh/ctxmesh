@@ -24,12 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctx-mesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
 func TestSpecHash_Determinism(t *testing.T) {
 	spec := agentsv1alpha1.AgentDeploymentSpec{
-		Image:          "ghcr.io/ctx-mesh/echo-agent:latest",
+		Image:          "ghcr.io/ctxmesh/echo-agent:latest",
 		ExecutionModel: "serving",
 		Port:           8080,
 	}
@@ -45,11 +45,11 @@ func TestSpecHash_Determinism(t *testing.T) {
 
 func TestSpecHash_DifferentSpecs(t *testing.T) {
 	spec1 := agentsv1alpha1.AgentDeploymentSpec{
-		Image: "ghcr.io/ctx-mesh/echo-agent:v1",
+		Image: "ghcr.io/ctxmesh/echo-agent:v1",
 		Port:  8080,
 	}
 	spec2 := agentsv1alpha1.AgentDeploymentSpec{
-		Image: "ghcr.io/ctx-mesh/echo-agent:v2",
+		Image: "ghcr.io/ctxmesh/echo-agent:v2",
 		Port:  8080,
 	}
 
@@ -63,11 +63,11 @@ func TestSpecHash_DifferentSpecs(t *testing.T) {
 
 func TestSpecHash_PortChange(t *testing.T) {
 	base := agentsv1alpha1.AgentDeploymentSpec{
-		Image: "ghcr.io/ctx-mesh/echo-agent:latest",
+		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Port:  8080,
 	}
 	changed := agentsv1alpha1.AgentDeploymentSpec{
-		Image: "ghcr.io/ctx-mesh/echo-agent:latest",
+		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Port:  9090,
 	}
 
@@ -82,7 +82,7 @@ func TestSpecHash_PortChange(t *testing.T) {
 func TestSpecHash_EnvOrder_SameSpec(t *testing.T) {
 	// Same env vars in same order → same hash
 	spec := agentsv1alpha1.AgentDeploymentSpec{
-		Image: "ghcr.io/ctx-mesh/echo-agent:latest",
+		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Env: []corev1.EnvVar{
 			{Name: "A", Value: "1"},
 			{Name: "B", Value: "2"},
