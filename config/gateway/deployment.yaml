@@ -1,0 +1,75 @@
+# LiteLLM gateway Deployment — operator-managed, M2 dev posture (single replica, HA deferred §11.4).
+# Image pinned at v1.91.0 (latest stable as of 2026-07-06; ghcr.io/berriai/litellm).
+# Health endpoints verified for v1.91.0: /health/liveliness (liveness), /health/readiness.
+# The ModelRoute controller owns:
+#   - the config.yaml content via the mounted ConfigMap
+#   - the SB_* env vars and the pod-template annotation agent-engine.ctxmesh.ai/config-hash
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: system
+  labels:
+    control-plane: gateway
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: gateway
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      labels:
+        control-plane: gateway
+        app.kubernetes.io/name: agent-engine
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:v1.91.0
+          args:
+            - --config
+            - /etc/litellm/config.yaml
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          # LiteLLM (Python) can take >75s to come up on throttled CI nodes —
+          # long enough for the liveness probe to kill it mid-start. The
+          # startupProbe gives it up to 5 min; liveness/readiness only run
+          # after it succeeds.
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            periodSeconds: 5
+            failureThreshold: 90   # 7.5 min — CI nodes are heavily shared
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m       # scheduling headroom on ~2-CPU CI nodes
+              memory: 512Mi
+            limits:
+              cpu: "2"         # startup is CPU-bound; 1 CPU starves it on busy nodes
+              memory: 1536Mi   # LiteLLM (Python) OOMs below ~1Gi at startup
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/litellm
+              readOnly: true
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: gateway-config
+      terminationGracePeriodSeconds: 10

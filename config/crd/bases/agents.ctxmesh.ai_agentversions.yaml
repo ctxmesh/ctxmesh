@@ -231,7 +231,7 @@ spec:
                   image:
                     description: |-
                       image is the fully-qualified container image for the agent,
-                      e.g. "ghcr.io/ctx-mesh/echo-agent:latest". Required.
+                      e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
                     minLength: 1
                     type: string
                   port:

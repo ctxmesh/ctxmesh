@@ -1,0 +1,4 @@
+name: route-agent
+image: ghcr.io/ctxmesh/route:latest
+model:
+  route: my-model-alias

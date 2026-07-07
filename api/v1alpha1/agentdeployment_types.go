@@ -56,7 +56,7 @@ type ScalingSpec struct {
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
 type AgentDeploymentSpec struct {
 	// image is the fully-qualified container image for the agent,
-	// e.g. "ghcr.io/ctx-mesh/echo-agent:latest". Required.
+	// e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
