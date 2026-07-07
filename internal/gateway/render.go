@@ -29,7 +29,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctx-mesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
 const (

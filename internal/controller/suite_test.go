@@ -38,7 +38,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctx-mesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
 var (

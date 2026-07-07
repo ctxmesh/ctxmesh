@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctx-mesh/agent-engine/api/v1alpha1"
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
@@ -61,7 +61,7 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	const (
 		name      = "echo-agent"
 		namespace = "default"
-		image     = "ghcr.io/ctx-mesh/example-agent:latest"
+		image     = "ghcr.io/ctxmesh/example-agent:latest"
 		port      = int32(8080)
 	)
 
@@ -185,7 +185,7 @@ func TestReconcile_IdempotentRereconcile(t *testing.T) {
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image:          "ghcr.io/ctx-mesh/example-agent:latest",
+			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 		},
@@ -236,7 +236,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 			Namespace: namespace,
 		},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image:          "ghcr.io/ctx-mesh/example-agent:v1",
+			Image:          "ghcr.io/ctxmesh/example-agent:v1",
 			ExecutionModel: "serving",
 			Port:           8080,
 		},
@@ -262,7 +262,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 
 	// Update spec → new image
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-	deploy.Spec.Image = "ghcr.io/ctx-mesh/example-agent:v2"
+	deploy.Spec.Image = "ghcr.io/ctxmesh/example-agent:v2"
 	require.NoError(t, k8sClient.Update(testCtx, deploy))
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 
@@ -279,7 +279,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: version2Name, Namespace: namespace}, &av2),
 		"new AgentVersion %q must exist after spec update", version2Name)
-	assert.Equal(t, "ghcr.io/ctx-mesh/example-agent:v2", av2.Spec.Snapshot.Image)
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", av2.Spec.Snapshot.Image)
 
 	// Old AgentVersion must still exist (versions are kept)
 	var av1Still agentsv1alpha1.AgentVersion
@@ -292,7 +292,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
 	require.Len(t, ksvc.Spec.Template.Spec.Containers, 1)
-	assert.Equal(t, "ghcr.io/ctx-mesh/example-agent:v2", ksvc.Spec.Template.Spec.Containers[0].Image,
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", ksvc.Spec.Template.Spec.Containers[0].Image,
 		"ksvc container image must be updated to v2")
 	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash2), ksvc.Spec.Template.Name,
 		"revision name must change when spec changes")
@@ -318,7 +318,7 @@ func TestReconcile_ScalingAnnotations(t *testing.T) {
 			Namespace: namespace,
 		},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctx-mesh/example-agent:latest",
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Scaling: &agentsv1alpha1.ScalingSpec{
 				Min: 1,
 				Max: 5,
@@ -356,7 +356,7 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 			Namespace: namespace,
 		},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctx-mesh/example-agent:latest",
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Port:  9090,
 			Env: []corev1.EnvVar{
 				{Name: "LOG_LEVEL", Value: "debug"},

@@ -3,7 +3,7 @@ kind: AgentDeployment
 metadata:
   name: route-agent
 spec:
-  image: ghcr.io/ctx-mesh/route:latest
+  image: ghcr.io/ctxmesh/route:latest
   executionModel: serving
   env:
     - name: MODEL_ROUTE

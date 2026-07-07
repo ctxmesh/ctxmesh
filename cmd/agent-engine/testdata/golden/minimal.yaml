@@ -3,5 +3,5 @@ kind: AgentDeployment
 metadata:
   name: minimal-agent
 spec:
-  image: ghcr.io/ctx-mesh/minimal:latest
+  image: ghcr.io/ctxmesh/minimal:latest
   executionModel: serving
