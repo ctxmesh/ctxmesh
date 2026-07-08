@@ -124,13 +124,8 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	collector := containers[1]
 	assert.Equal(t, telemetry.CollectorContainerName, collector.Name, "collector sidecar name")
 	assert.Equal(t, telemetry.CollectorImage, collector.Image, "collector pinned image")
-	var hasOTLP bool
-	for _, p := range collector.Ports {
-		if p.ContainerPort == 4317 {
-			hasOTLP = true
-		}
-	}
-	assert.True(t, hasOTLP, "collector must expose OTLP grpc 4317")
+	// Knative forbids declared ports on sidecars — the collector must NOT set any.
+	assert.Empty(t, collector.Ports, "collector sidecar must declare no container ports (Knative single-port rule)")
 	require.Len(t, collector.VolumeMounts, 1, "collector mounts its config")
 	// The config ConfigMap must exist in the agent's namespace.
 	var cm corev1.ConfigMap
