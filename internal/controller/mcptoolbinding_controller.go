@@ -215,29 +215,49 @@ func (r *MCPToolBindingReconciler) writeBindingStatuses(
 	return nil
 }
 
-// syncToolsConfigMap CreateOrUpdate's the <agent>-tools ConfigMap holding
-// tools.json. Ownership is set to the AgentDeployment (not the binding): the CM
-// is the agent's durable backing and must survive individual binding deletes,
-// and the AgentDeployment reconciler mounts it. If the AgentDeployment does not
-// exist yet, the CM is written without an owner ref (a later AgentDeployment
-// reconcile re-owns it) so the durable state is never blocked on ordering.
+// syncToolsConfigMap converges the <agent>-tools ConfigMap holding tools.json.
+// Ownership is always the AgentDeployment (not the binding): the CM is the
+// agent's durable backing and must survive individual binding deletes.
+//
+// When the AgentDeployment does NOT exist the CM is DELETED, never created
+// (m4.5 review r2): no agent → no pods → nothing to durably back. Creating
+// here has two failure faces — in a terminating namespace the create is
+// rejected with 403 NamespaceTerminating, which (combined with the
+// sync-error-retains-finalizer rule) would wedge the binding finalizer and the
+// namespace forever; in a live namespace it would resurrect an ownerless CM
+// after the agent's GC already collected the owned one, leaking it. The
+// binding-created-before-agent ordering still converges: the AgentDeployment
+// watch in SetupWithManager requeues the bindings when the agent appears, and
+// this function then creates the CM WITH its owner ref.
+//
+// A CreateOrUpdate failure caused by the namespace terminating is treated as
+// converged (the whole namespace is going away; nothing to back) so the
+// finalizer can release and namespace deletion completes.
 func (r *MCPToolBindingReconciler) syncToolsConfigMap(
 	ctx context.Context,
 	namespace, agentName string,
 	manifest toolmanifest.Manifest,
 ) error {
-	data, err := json.Marshal(manifest)
-	if err != nil {
-		return fmt.Errorf("marshalling tools.json: %w", err)
-	}
-
 	var agent agentsv1alpha1.AgentDeployment
-	haveAgent := true
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr != nil {
 		if !apierrors.IsNotFound(getErr) {
 			return fmt.Errorf("getting AgentDeployment %s for CM ownership: %w", agentName, getErr)
 		}
-		haveAgent = false
+		// Agent gone → remove any leftover CM. Deletes are admitted in
+		// terminating namespaces (NamespaceLifecycle only blocks creates);
+		// NotFound means it is already gone — either way, converged.
+		leftover := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: toolsConfigMapName(agentName), Namespace: namespace},
+		}
+		if delErr := r.Delete(ctx, leftover); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return fmt.Errorf("deleting orphaned %s ConfigMap: %w", toolsConfigMapName(agentName), delErr)
+		}
+		return nil
+	}
+
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("marshalling tools.json: %w", err)
 	}
 
 	cm := &corev1.ConfigMap{
@@ -248,11 +268,11 @@ func (r *MCPToolBindingReconciler) syncToolsConfigMap(
 			cm.Data = map[string]string{}
 		}
 		cm.Data[toolsConfigMapKey] = string(data)
-		if haveAgent {
-			return ctrl.SetControllerReference(&agent, cm, r.Scheme)
-		}
-		return nil
+		return ctrl.SetControllerReference(&agent, cm, r.Scheme)
 	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil // namespace is being deleted — converged by definition
+		}
 		return fmt.Errorf("upserting %s ConfigMap: %w", toolsConfigMapName(agentName), err)
 	}
 	return nil
@@ -305,19 +325,23 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// SetupWithManager registers the reconciler and the secondary ToolRegistry
-// watch. No field index is involved anywhere in this feature: watch map
-// functions read spec fields straight off the event object, and reconcile-time
-// binding lookups are namespace Lists filtered client-side (listAgentBindings)
-// so the same code path serves the cached manager client and the raw envtest
-// client alike.
+// SetupWithManager registers the reconciler and the secondary watches. No
+// field index is involved anywhere in this feature: watch map functions read
+// spec fields straight off the event object, and reconcile-time binding
+// lookups are namespace Lists filtered client-side (listAgentBindings) so the
+// same code path serves the cached manager client and the raw envtest client
+// alike.
 //
 // Watch mapping (annotation-free requeue of the AgentDeployment): a binding
 // event enqueues that binding (delete events included — the finalizer keeps
 // the object readable until the agent has converged); a ToolRegistry event
-// enqueues every binding that references it. Both funnel through Reconcile,
-// which re-syncs the whole agent. The AgentDeployment is separately requeued
-// by the binding watch registered in the AgentDeployment reconciler's setup.
+// enqueues every binding that references it; an AgentDeployment event enqueues
+// every binding that targets it — required by the delete-when-no-agent CM
+// rule: a binding reconciled BEFORE its agent exists writes no CM, so the
+// agent's creation must re-trigger the bindings for the CM to materialize
+// (with its owner ref). All funnel through Reconcile, which re-syncs the whole
+// agent. The pod template is separately requeued by the binding watch in the
+// AgentDeployment reconciler's setup.
 func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// ToolRegistry → requeue every binding that references it (a catalog change
 	// can flip bindings valid/invalid).
@@ -343,9 +367,34 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// AgentDeployment → requeue every binding targeting it (create: the CM can
+	// now be written with its owner ref; delete: the CM must be removed).
+	mapAgentToBindings := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			agent, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			if !ok {
+				return nil
+			}
+			var list agentsv1alpha1.MCPToolBindingList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				if list.Items[i].Spec.AgentRef == agent.Name {
+					reqs = append(reqs, reconcile.Request{
+						NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+					})
+				}
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.MCPToolBinding{}).
 		Watches(&agentsv1alpha1.ToolRegistry{}, mapRegistryToBindings).
+		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToBindings).
 		Named("mcptoolbinding").
 		Complete(r)
 }

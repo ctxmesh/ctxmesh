@@ -503,6 +503,67 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	assert.False(t, hasDisc, "discovery sidecar must be removed with the last binding")
 }
 
+// TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases is the m4.5
+// review-r2 blocking finding: when the AgentDeployment is gone, the binding
+// controller must NEVER (re)create the <agent>-tools CM — in a live namespace
+// that resurrects an ownerless CM after GC collected the owned one (leak); in
+// a terminating namespace the create is rejected 403 NamespaceTerminating,
+// which with the sync-error-retains-finalizer rule would wedge the binding
+// finalizer and the namespace forever. Both faces reduce to the same
+// assertion: agent gone → CM stays gone AND the deletion sync still converges
+// so the finalizer releases cleanly.
+func TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases(t *testing.T) {
+	const ns = "default"
+	agent := mkAgent(t, "orphan-agent", ns)
+	const url = "http://wc.svc/mcp"
+
+	mkRegistry(t, "reg-orphan", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "orphan-binding", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef:    agent.Name,
+		RegistryRef: "reg-orphan",
+		ToolName:    "word-count",
+		Mode:        toolmanifest.ModeRemote,
+		Server:      agentsv1alpha1.ToolServer{URL: url},
+	})
+
+	br := newBindingReconciler()
+	reconcileNN(t, newReconciler(), agent.Name, ns)
+	reconcileBinding(t, br, binding.Name, ns)
+
+	// Baseline: CM exists (owner-ref'd) and the finalizer is on the binding.
+	cmKey := types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}
+	var cm corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx, cmKey, &cm))
+	require.Len(t, cm.OwnerReferences, 1, "CM must be owned by the agent")
+
+	// ── Delete the AGENT first ────────────────────────────────────────────────
+	require.NoError(t, k8sClient.Delete(testCtx, agent))
+	// envtest runs no GC controller, so simulate the cluster GC'ing the
+	// owner-ref'd CM along with its agent.
+	require.NoError(t, k8sClient.Delete(testCtx, &cm))
+
+	// Face 1 (leak): reconcile the still-live binding — the CM must NOT be
+	// recreated ownerless, and the reconcile must not error.
+	reconcileBinding(t, br, binding.Name, ns)
+	err := k8sClient.Get(testCtx, cmKey, &cm)
+	require.True(t, apierrors.IsNotFound(err),
+		"CM must NOT be (re)created while the agent does not exist — that ownerless CM would leak")
+
+	// Face 2 (wedge): delete the binding — the deletion sync must converge
+	// (delete-only CM path, no create to be rejected) and release the finalizer.
+	require.NoError(t, k8sClient.Delete(testCtx, binding))
+	reconcileBinding(t, br, binding.Name, ns)
+
+	var gone agentsv1alpha1.MCPToolBinding
+	err = k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &gone)
+	require.True(t, apierrors.IsNotFound(err),
+		"finalizer must release cleanly with the agent absent — a retained finalizer wedges namespace deletion")
+
+	// And still no resurrection during the deletion sync.
+	err = k8sClient.Get(testCtx, cmKey, &cm)
+	assert.True(t, apierrors.IsNotFound(err), "deletion sync must not recreate the CM either")
+}
+
 // assertBindingReady fetches the binding and asserts its Ready condition.
 func assertBindingReady(t *testing.T, name, ns string, status metav1.ConditionStatus, reason string) {
 	t.Helper()
