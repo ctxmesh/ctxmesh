@@ -48,3 +48,9 @@ jobs:
         # 2-CPU runner); nightly runs the light m3-trace slice — the collector
         # runs, spans flow, asserted via the collector's debug exporter.
         run: make -C agent-brain/harness tier2 SLICE=m3-trace
+      - name: M4 MCP tools e2e (bind, call, hot-swap without restart)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Reuses the same cluster; asserts tool_version v1→v2 on an unchanged
+        # pod UID + the mcp_word_count TOOL span via the collector debug sink.
+        run: make -C agent-brain/harness tier2 SLICE=m4-tools
