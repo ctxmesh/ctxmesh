@@ -1,0 +1,3 @@
+# MCP echo server — pinned minimal dependencies.
+# mcp[cli] pulls in uvicorn + starlette (streamable-http transport deps).
+mcp[cli]==1.9.4
