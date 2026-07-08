@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
@@ -114,10 +115,30 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 		"Knative Service must exist after reconcile")
 
 	containers := ksvc.Spec.Template.Spec.Containers
-	require.Len(t, containers, 1, "ksvc must have exactly one container")
+	require.Len(t, containers, 2, "ksvc must have the user container + the collector sidecar")
 	c := containers[0]
 
 	assert.Equal(t, image, c.Image, "container image")
+
+	// M3: the second container is the injected OTel collector sidecar.
+	collector := containers[1]
+	assert.Equal(t, telemetry.CollectorContainerName, collector.Name, "collector sidecar name")
+	assert.Equal(t, telemetry.CollectorImage, collector.Image, "collector pinned image")
+	var hasOTLP bool
+	for _, p := range collector.Ports {
+		if p.ContainerPort == 4317 {
+			hasOTLP = true
+		}
+	}
+	assert.True(t, hasOTLP, "collector must expose OTLP grpc 4317")
+	require.Len(t, collector.VolumeMounts, 1, "collector mounts its config")
+	// The config ConfigMap must exist in the agent's namespace.
+	var cm corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{
+		Name: telemetry.ConfigMapName(name), Namespace: namespace,
+	}, &cm), "collector-config ConfigMap must exist")
+	assert.Contains(t, cm.Data["config.yaml"], "otlp", "collector config has the otlp receiver")
+	assert.Contains(t, cm.Data["config.yaml"], "debug", "collector config has the debug exporter")
 
 	// Platform env vars — AGENT_PORT and MODEL_GATEWAY_URL are always injected.
 	envMap := make(map[string]string, len(c.Env))
@@ -291,7 +312,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	var ksvc servingv1.Service
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
-	require.Len(t, ksvc.Spec.Template.Spec.Containers, 1)
+	require.Len(t, ksvc.Spec.Template.Spec.Containers, 2) // user + collector sidecar
 	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", ksvc.Spec.Template.Spec.Containers[0].Image,
 		"ksvc container image must be updated to v2")
 	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash2), ksvc.Spec.Template.Name,
@@ -375,7 +396,7 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
 
-	require.Len(t, ksvc.Spec.Template.Spec.Containers, 1)
+	require.Len(t, ksvc.Spec.Template.Spec.Containers, 2) // user + collector sidecar
 	c := ksvc.Spec.Template.Spec.Containers[0]
 
 	envMap := make(map[string]string, len(c.Env))
