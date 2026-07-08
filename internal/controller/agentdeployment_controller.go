@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/gateway"
 	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
@@ -319,8 +320,16 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 	var langfuseEnv []corev1.EnvVar
 	langfuse := false
 
+	// Secret lookup: the agent's own namespace acts as a per-namespace
+	// override; the platform namespace (where dev-up seeds the dev keys) is
+	// the fallback default. Without the fallback, agents outside
+	// agent-engine-system silently ran debug-only and nothing ever reached
+	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
 	var sec corev1.Secret
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
+	if apierrors.IsNotFound(err) && deploy.Namespace != gateway.GatewayNamespace {
+		err = r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
+	}
 	switch {
 	case err == nil:
 		langfuse = true
