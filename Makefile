@@ -127,6 +127,10 @@ docker-build-langchain-example: docker-build-base-python ## Build the LangChain 
 docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.
 	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
 
+.PHONY: docker-build-mcp-echo-server
+docker-build-mcp-echo-server: ## Build the M4 fixture MCP echo server (dev.local/mcp-echo-server:e2e — matches the ToolRegistry pin).
+	$(CONTAINER_TOOL) build -t dev.local/mcp-echo-server:e2e examples/mcp-echo-server
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
