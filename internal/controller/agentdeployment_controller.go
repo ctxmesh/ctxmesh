@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // conditionReady is the condition type name mirrored from the Knative Service
@@ -64,6 +65,8 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile implements the AgentDeployment reconciliation loop.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -210,6 +213,13 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		}
 	}
 
+	// Observability (M3): ensure the collector-config ConfigMap and build the
+	// sidecar to inject alongside the user container.
+	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
+	if err != nil {
+		return nil, err
+	}
+
 	desiredSpec := servingv1.ServiceSpec{
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
@@ -252,7 +262,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 									},
 								},
 							},
+							collector,
 						},
+						Volumes: []corev1.Volume{collectorVol},
 					},
 				},
 			},
@@ -266,7 +278,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		},
 	}
 
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
+	_, err = ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
 		ksvc.Spec = desiredSpec
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})
@@ -275,6 +287,54 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	}
 
 	return ksvc, nil
+}
+
+// reconcileCollector ensures the per-agent collector-config ConfigMap and
+// returns the collector sidecar container + its config volume. Langfuse export
+// is enabled only when a `langfuse-otlp` Secret exists in the agent's namespace
+// (seeded by `dev-up M=3`); otherwise the collector runs debug-only, which is
+// the automated-assertion sink the e2e slice reads via `kubectl logs`.
+func (r *AgentDeploymentReconciler) reconcileCollector(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (corev1.Container, corev1.Volume, error) {
+	var langfuseEnv []corev1.EnvVar
+	langfuse := false
+
+	var sec corev1.Secret
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
+	switch {
+	case err == nil:
+		langfuse = true
+		// Dev keys are deterministic and non-secret; wiring the endpoint + basic
+		// auth as literal env is acceptable for the M3 dev posture (production
+		// would use a mounted secret ref). See specs/observability.md.
+		langfuseEnv = []corev1.EnvVar{
+			{Name: "LANGFUSE_OTLP_ENDPOINT", Value: string(sec.Data["otlp-endpoint"])},
+			{Name: "LANGFUSE_OTLP_AUTH", Value: telemetry.BasicAuthHeader(
+				string(sec.Data["public-key"]), string(sec.Data["secret-key"]))},
+		}
+	case apierrors.IsNotFound(err):
+		// debug-only; not an error.
+	default:
+		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("checking langfuse secret: %w", err)
+	}
+
+	cmName := telemetry.ConfigMapName(deploy.Name)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
+	}
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse)
+		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
+	}); err != nil {
+		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
+	}
+
+	return telemetry.Container(cmName, langfuseEnv), telemetry.Volume(cmName), nil
 }
 
 // syncStatus mirrors the Knative Service's Ready condition and URL into the
