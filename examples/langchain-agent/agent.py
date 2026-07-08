@@ -64,6 +64,29 @@ def run_agent(user_input: str) -> str:
     return result.content
 
 
+def _run_with_incoming_context(headers: dict, user_input: str) -> str:
+    """Run the agent under the caller's W3C trace context.
+
+    The launcher injects ``traceparent`` into the proxied request; stdlib
+    http.server has no auto-instrumentation, so without an explicit extract
+    the LangChain spans would each start their own ROOT trace and the
+    reasoning tree fragments (observed 2026-07-08: six sibling traces in
+    Langfuse instead of one). Best-effort: if OTel isn't available, run
+    without a parent context.
+    """
+    try:
+        from opentelemetry import context as otel_context  # noqa: PLC0415
+        from opentelemetry.propagate import extract  # noqa: PLC0415
+
+        token = otel_context.attach(extract(headers))
+        try:
+            return run_agent(user_input)
+        finally:
+            otel_context.detach(token)
+    except ImportError:
+        return run_agent(user_input)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: dict) -> None:
         payload = json.dumps(body).encode()
@@ -90,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             user_input = raw.decode(errors="replace")
         try:
-            output = run_agent(user_input)
+            output = _run_with_incoming_context(dict(self.headers), user_input)
             self._send(200, {"agent": "langchain-agent", "output": output})
         except Exception as exc:  # noqa: BLE001 — surface upstream errors to caller
             self._send(502, {"agent": "langchain-agent", "error": str(exc)})
