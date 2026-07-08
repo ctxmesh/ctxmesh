@@ -28,8 +28,11 @@ limitations under the License.
 // empty manifest is served instead. The controller will push a fresh manifest
 // via /control once it reconciles.
 //
-// Graceful shutdown on SIGTERM: all SSE subscribers are notified (their
-// connections are closed), the HTTP server drains, and the process exits.
+// Graceful shutdown on SIGTERM: a server-wide done channel signals all SSE
+// handlers to exit. Per-subscriber channels are never closed — an in-flight
+// /control broadcast may still hold references to them, and sending on a
+// closed channel panics. Orphaned channels are garbage-collected once their
+// handler exits and the broadcast snapshot is dropped.
 package main
 
 import (
@@ -49,12 +52,16 @@ const (
 )
 
 // server holds the live manifest and the SSE subscriber registry.
-// All fields are protected by mu except logger (immutable after construction).
+// manifest and subscribers are protected by mu; logger is immutable after
+// construction; done is closed exactly once (via shutdownOnce) to signal all
+// SSE handlers to exit.
 type server struct {
-	mu          sync.RWMutex
-	manifest    toolmanifest.Manifest
-	subscribers map[chan string]struct{}
-	logger      *slog.Logger
+	mu           sync.RWMutex
+	manifest     toolmanifest.Manifest
+	subscribers  map[chan string]struct{}
+	logger       *slog.Logger
+	done         chan struct{}
+	shutdownOnce sync.Once
 }
 
 // newServer constructs a server with an empty initial manifest.
@@ -63,6 +70,7 @@ func newServer(logger *slog.Logger) *server {
 		manifest:    toolmanifest.Normalize(toolmanifest.Manifest{}),
 		subscribers: make(map[chan string]struct{}),
 		logger:      logger,
+		done:        make(chan struct{}),
 	}
 }
 
@@ -128,8 +136,9 @@ func (s *server) handleTools(w http.ResponseWriter, _ *http.Request) {
 // The subscriber channel is buffered (size 8) so a slow reader doesn't block
 // the /control handler. If the buffer is full, the event is dropped for that
 // subscriber (the subscriber receives the next event instead; the manifest is
-// always available via GET /tools). On disconnect or server shutdown the
-// subscriber is removed and the goroutine exits.
+// always available via GET /tools). On disconnect or server shutdown (s.done
+// closed) the subscriber is removed and the goroutine exits. The subscriber
+// channel itself is never closed — see the package comment on shutdown safety.
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -151,7 +160,6 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -160,11 +168,10 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case version, ok := <-ch:
-			if !ok {
-				// Channel closed — server is shutting down.
-				return
-			}
+		case <-s.done:
+			// Server is shutting down.
+			return
+		case version := <-ch:
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", version); err != nil {
 				return
 			}
@@ -224,13 +231,13 @@ func (s *server) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// closeSubscribers closes all SSE subscriber channels, causing their
-// handleEvents goroutines to exit. Called during graceful shutdown.
-func (s *server) closeSubscribers() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for ch := range s.subscribers {
-		close(ch)
-		delete(s.subscribers, ch)
-	}
+// signalShutdown signals all SSE handleEvents goroutines to exit by closing
+// the server-wide done channel. Per-subscriber channels are deliberately NOT
+// closed: an in-flight /control broadcast may hold a snapshot of them, and
+// sending on a closed channel panics. Handlers exit via the done signal, their
+// deferred cleanup removes them from the map, and the channels are
+// garbage-collected. Idempotent — safe to call any number of times, in any
+// order relative to http.Server.Shutdown.
+func (s *server) signalShutdown() {
+	s.shutdownOnce.Do(func() { close(s.done) })
 }

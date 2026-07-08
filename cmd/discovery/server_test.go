@@ -21,12 +21,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -379,6 +382,101 @@ func TestHandleEvents_DisconnectCleansUp(t *testing.T) {
 	s.mu.RUnlock()
 	if after != 0 {
 		t.Errorf("expected 0 subscribers after disconnect, got %d", after)
+	}
+}
+
+// TestHandleControl_ConcurrentWithShutdownDoesNotPanic is the regression test
+// for the send-on-closed-channel panic: /control pushes racing server shutdown
+// must never panic, in any interleaving. The old implementation closed
+// per-subscriber channels in shutdown while handleControl sent on a snapshot
+// of them outside the lock — a push landing in that window crashed the
+// process. Run under -race.
+func TestHandleControl_ConcurrentWithShutdownDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	s := newServer(silentLogger())
+	h := s.handler()
+
+	// Register several SSE subscribers so the broadcast path has real targets.
+	const subscriberCount = 4
+	var sseWG sync.WaitGroup
+	for range subscriberCount {
+		rec := newFakeResponseRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/events", nil)
+		sseWG.Go(func() {
+			h.ServeHTTP(rec, req)
+		})
+		select {
+		case <-rec.flushed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SSE handler did not flush headers within 2s")
+		}
+	}
+
+	// Hammer /control from several goroutines; shutdown fires mid-flight so
+	// broadcasts interleave with the shutdown signal on both sides.
+	const (
+		pushers            = 8
+		pushesPerGoroutine = 300
+	)
+	var pushed atomic.Int64
+	var pushWG sync.WaitGroup
+	for i := range pushers {
+		pushWG.Add(1)
+		go func(id int) {
+			defer pushWG.Done()
+			for n := range pushesPerGoroutine {
+				m := toolmanifest.Manifest{Tools: []toolmanifest.Tool{{
+					Name:      fmt.Sprintf("tool-%d-%d", id, n),
+					Mode:      "remote",
+					Endpoint:  "http://x.svc",
+					Transport: "streamable-http",
+				}}}
+				body, err := json.Marshal(m)
+				if err != nil {
+					t.Errorf("marshal manifest: %v", err)
+					return
+				}
+				req := httptest.NewRequest(http.MethodPost, "/control", bytes.NewReader(body))
+				rr := httptest.NewRecorder()
+				h.ServeHTTP(rr, req) // must not panic, before or after shutdown
+				if rr.Code != http.StatusNoContent {
+					t.Errorf("POST /control during shutdown race: status = %d, want 204", rr.Code)
+					return
+				}
+				pushed.Add(1)
+			}
+		}(i)
+	}
+
+	// Trigger shutdown once pushes are demonstrably in flight, so the bulk of
+	// the broadcasts land after the signal.
+	for pushed.Load() < pushers {
+		time.Sleep(time.Millisecond)
+	}
+	s.signalShutdown()
+	s.signalShutdown() // idempotent — second call must be a no-op
+
+	pushWG.Wait()
+
+	// All SSE handlers must exit via the done signal (bounded wait) and clean
+	// their map entries.
+	handlersDone := make(chan struct{})
+	go func() {
+		sseWG.Wait()
+		close(handlersDone)
+	}()
+	select {
+	case <-handlersDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE handlers did not exit within 2s after shutdown signal")
+	}
+
+	s.mu.RLock()
+	remaining := len(s.subscribers)
+	s.mu.RUnlock()
+	if remaining != 0 {
+		t.Errorf("expected 0 subscribers after shutdown, got %d", remaining)
 	}
 }
 
