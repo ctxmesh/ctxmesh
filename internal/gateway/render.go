@@ -144,10 +144,26 @@ type modelEntry struct {
 //   - rateLimit.tenantRPM → rpm on every provider entry for that route.
 //   - Routes with any unresolved binding or secret are excluded and reported in
 //     Result.Excluded; other routes still render normally.
+//
+// OTelConfig enables LiteLLM's `otel` callback so the gateway emits a
+// completion span (token/cost) that joins the agent's trace via the propagated
+// W3C context. The zero value (empty Endpoint) disables it — e.g. in CI without
+// Langfuse, keeping the gateway config clean (M2 behavior).
+type OTelConfig struct {
+	Endpoint   string // OTLP endpoint (Langfuse /api/public/otel)
+	AuthHeader string // e.g. "Basic <base64(public:secret)>"
+}
+
+// OTelEnvPrefix is the env-var prefix for the gateway's OTel exporter settings.
+// syncGatewayDeployment strips these (like SB_*) before re-adding, so the render
+// result fully owns them each reconcile.
+const OTelEnvPrefix = "OTEL_"
+
 func Render(
 	routes []agentsv1alpha1.ModelRoute,
 	bindings map[string]agentsv1alpha1.SecretBinding,
 	secretRVs map[string]string,
+	otel OTelConfig,
 ) Result {
 	// ── Sort routes deterministically ─────────────────────────────────────────
 	sorted := make([]agentsv1alpha1.ModelRoute, len(routes))
@@ -255,6 +271,12 @@ func Render(
 	// ── Build LiteLLM config.yaml ─────────────────────────────────────────────
 	configYAML := buildConfigYAML(entries)
 
+	// M3: enable the otel callback when a trace endpoint is configured. Part of
+	// configYAML so it is included in the hash (toggling it rolls the gateway).
+	if otel.Endpoint != "" {
+		configYAML += "litellm_settings:\n  callbacks: [\"otel\"]\n"
+	}
+
 	// ── Collect env vars (sorted for determinism) ─────────────────────────────
 	evNames := make([]string, 0, len(evSet))
 	for k := range evSet {
@@ -264,6 +286,15 @@ func Render(
 	envVars := make([]corev1.EnvVar, len(evNames))
 	for i, k := range evNames {
 		envVars[i] = evSet[k]
+	}
+
+	// LiteLLM's otel exporter reads these; only set when tracing is enabled.
+	if otel.Endpoint != "" {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: "OTEL_EXPORTER", Value: "otlp_http"},
+			corev1.EnvVar{Name: "OTEL_ENDPOINT", Value: otel.Endpoint},
+			corev1.EnvVar{Name: "OTEL_HEADERS", Value: "Authorization=" + otel.AuthHeader},
+		)
 	}
 
 	// ── Compute hash ──────────────────────────────────────────────────────────

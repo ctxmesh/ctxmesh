@@ -34,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 const (
@@ -151,7 +152,10 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	}
 
 	// ── 3. Render config ──────────────────────────────────────────────────────
-	renderResult := gateway.Render(mrList.Items, bindings, secretRVs)
+	// Enable gateway trace spans when Langfuse is configured (secret present in
+	// the gateway namespace); otherwise render clean (CI has no Langfuse).
+	otel := r.resolveOTelConfig(ctx)
+	renderResult := gateway.Render(mrList.Items, bindings, secretRVs, otel)
 
 	// ── 4. CreateOrUpdate gateway ConfigMap ───────────────────────────────────
 	cm := &corev1.ConfigMap{
@@ -219,6 +223,23 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	return ctrl.Result{}, nil
 }
 
+// resolveOTelConfig returns the gateway's trace-export settings from the
+// langfuse-otlp Secret in the gateway namespace. Absent secret → zero value,
+// which disables the otel callback (CI / no-Langfuse).
+func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) gateway.OTelConfig {
+	var sec corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{
+		Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName,
+	}, &sec); err != nil {
+		return gateway.OTelConfig{} // not found (or transient) → tracing off
+	}
+	return gateway.OTelConfig{
+		Endpoint: string(sec.Data["otlp-endpoint"]),
+		AuthHeader: telemetry.BasicAuthHeader(
+			string(sec.Data["public-key"]), string(sec.Data["secret-key"])),
+	}
+}
+
 // syncGatewayDeployment patches the gateway Deployment with the config-hash
 // pod-template annotation and SB_* env vars derived from the render result.
 // If the Deployment does not exist yet the function returns nil — it will be
@@ -246,7 +267,7 @@ func (r *ModelRouteReconciler) syncGatewayDeployment(ctx context.Context, result
 		existing := deploy.Spec.Template.Spec.Containers[0].Env
 		merged := make([]corev1.EnvVar, 0, len(existing)+len(result.EnvVars))
 		for _, e := range existing {
-			if !strings.HasPrefix(e.Name, sbEnvPrefix) {
+			if !strings.HasPrefix(e.Name, sbEnvPrefix) && !strings.HasPrefix(e.Name, gateway.OTelEnvPrefix) {
 				merged = append(merged, e)
 			}
 		}
