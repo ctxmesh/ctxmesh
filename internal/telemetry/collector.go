@@ -33,8 +33,12 @@ const (
 	// collector/): the core collector binary on debian:12-slim. We repackage
 	// because upstream distroless arm64 omits the glibc loader (exec failure);
 	// debian provides it, so the same image runs on arm64 (local) + amd64 (CI).
-	// Built + side-loaded by the harness; also built in CI.
-	CollectorImage = "agent-otel-collector:0.116.0"
+	// Built + side-loaded by the harness (never pulled). The `dev.local/`
+	// prefix is in Knative's default registries-skipping-tag-resolving list, so
+	// Knative won't try to resolve its digest against a registry (which would
+	// fail for a local image → ContainerMissing). Publishing a real registry
+	// image is a release-hardening task (tracked for M12).
+	CollectorImage = "dev.local/agent-otel-collector:0.116.0"
 
 	// CollectorContainerName is the sidecar container name in the agent pod.
 	CollectorContainerName = "otel-collector"
