@@ -111,6 +111,14 @@ docker-build-launcher: ## Build the launcher image (launcher:latest) from Docker
 docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
 	$(CONTAINER_TOOL) build -t echo-agent:latest -f examples/echo-agent/Dockerfile .
 
+.PHONY: docker-build-base-python
+docker-build-base-python: ## Build the Python base image (base-python:latest) — launcher + OpenInference/OTel auto-instrumentation.
+	$(CONTAINER_TOOL) build -t base-python:latest -f images/base-python/Dockerfile .
+
+.PHONY: docker-build-langchain-example
+docker-build-langchain-example: docker-build-base-python ## Build the LangChain example agent image (langchain-agent:latest); depends on base-python:latest.
+	$(CONTAINER_TOOL) build -t langchain-agent:latest -f examples/langchain-agent/Dockerfile .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
