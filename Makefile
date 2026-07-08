@@ -120,8 +120,8 @@ docker-build-langchain-example: docker-build-base-python ## Build the LangChain 
 	$(CONTAINER_TOOL) build -t langchain-agent:latest -f examples/langchain-agent/Dockerfile .
 
 .PHONY: docker-build-collector
-docker-build-collector: ## Build the project OTel Collector image (agent-otel-collector:0.116.0) — core collector on a glibc base.
-	$(CONTAINER_TOOL) build -t agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
+docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.
+	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
