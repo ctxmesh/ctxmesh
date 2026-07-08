@@ -239,6 +239,10 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 					PodSpec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
+								// Named explicitly: multi-container Knative pods require
+								// every container to be named, else Knative auto-names it
+								// ("user-container-0") and re-reconcile drifts.
+								Name:  "user-container",
 								Image: deploy.Spec.Image,
 								Ports: []corev1.ContainerPort{
 									{ContainerPort: port},
@@ -246,6 +250,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 								Env:       env,
 								Resources: resources,
 								ReadinessProbe: &corev1.Probe{
+									// SuccessThreshold=1 explicitly: Knative defaults it on
+									// create and rejects a re-applied 0 (must be >= 1).
+									SuccessThreshold: 1,
 									ProbeHandler: corev1.ProbeHandler{
 										HTTPGet: &corev1.HTTPGetAction{
 											Path: "/readyz",
@@ -254,6 +261,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 									},
 								},
 								LivenessProbe: &corev1.Probe{
+									SuccessThreshold: 1,
 									ProbeHandler: corev1.ProbeHandler{
 										HTTPGet: &corev1.HTTPGetAction{
 											Path: "/healthz",
@@ -278,8 +286,18 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		},
 	}
 
+	desiredRev := deploy.Name + "-" + hash
 	_, err = ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		ksvc.Spec = desiredSpec
+		// Only (re)apply the spec when the desired revision differs from what
+		// exists. On an unchanged spec-hash, leave the live ksvc.Spec alone so
+		// Knative's create-time defaults (container names, probe thresholds,
+		// timeouts) are preserved — re-applying our bare spec would reset those
+		// to invalid zero-values and the Knative webhook rejects the update
+		// ("changes without a name change"). A changed spec carries a new
+		// revision name, which Knative requires for pod-spec changes.
+		if ksvc.Spec.Template.Name != desiredRev {
+			ksvc.Spec = desiredSpec
+		}
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})
 	if err != nil {
