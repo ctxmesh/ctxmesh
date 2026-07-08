@@ -28,10 +28,6 @@ import (
 )
 
 const (
-	// bindingAgentRefField is the field-index key on MCPToolBinding.spec.agentRef.
-	// Both controllers use it to list an agent's bindings in one query.
-	bindingAgentRefField = "spec.agentRef"
-
 	// toolsConfigMapSuffix names the per-agent durable-backing ConfigMap
 	// (<agent>-tools) that holds tools.json (specs/mcp-tools.md).
 	toolsConfigMapSuffix = "-tools"
@@ -116,14 +112,18 @@ func validateBinding(b *agentsv1alpha1.MCPToolBinding, registries map[string]age
 	return bindingValidation{Valid: true, Reason: reasonBound, Message: "tool registered, pin-matched, and rendered into the agent manifest"}
 }
 
-// listAgentBindings returns the agent's bindings, sorted by binding name for
-// deterministic port/container assignment. It lists all bindings in the
-// namespace and filters by agentRef IN MEMORY rather than via the field index:
-// the envtest suite drives the reconciler with a raw (uncached) client that has
-// no field indexer, and the apiserver rejects field selectors on arbitrary CRD
-// fields. Client-side filtering works identically for the cached manager client
-// and the raw test client. The field index still backs the manager's watch
-// mapping (SetupWithManager), which is where it earns its keep.
+// listAgentBindings returns the agent's live bindings, sorted by binding name
+// for deterministic port/container assignment. It lists all bindings in the
+// namespace and filters by agentRef IN MEMORY (no field index exists for this
+// — the envtest suite drives the reconcilers with a raw uncached client that
+// has no field indexer, and the apiserver rejects field selectors on arbitrary
+// CRD fields; client-side filtering serves both clients identically).
+//
+// Terminating bindings (deletionTimestamp set, held by bindingFinalizer) are
+// EXCLUDED: from the moment a delete lands, the manifest, the ConfigMap, the
+// push, and the pod template must all converge to the world without that
+// binding — both controllers resolve through here, so the exclusion is
+// consistent everywhere.
 func listAgentBindings(
 	ctx context.Context,
 	c client.Client,
@@ -135,7 +135,7 @@ func listAgentBindings(
 	}
 	out := make([]agentsv1alpha1.MCPToolBinding, 0, len(all.Items))
 	for i := range all.Items {
-		if all.Items[i].Spec.AgentRef == agentName {
+		if all.Items[i].Spec.AgentRef == agentName && all.Items[i].DeletionTimestamp.IsZero() {
 			out = append(out, all.Items[i])
 		}
 	}
@@ -145,7 +145,7 @@ func listAgentBindings(
 	return out, nil
 }
 
-// resolveAgentBindings lists an agent's bindings (client-side filtered by
+// resolveAgentBindings lists an agent's live bindings (client-side filtered by
 // agentRef),
 // loads the referenced registries once each, validates every binding, and
 // returns:

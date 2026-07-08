@@ -291,10 +291,13 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// manifest-ONLY change (remote URL edit) keeps the SAME revision name → no
 	// roll → restart-free hot path (specs/mcp-tools.md — "Hot path vs cold
 	// path"; the LANDMINE in the m4.5 task card). Knative requires the name to
-	// start with "{service}-", which the spec-hash prefix satisfies.
+	// start with "{service}-", which the spec-hash prefix satisfies. The FULL
+	// 8-hex digest is used: a shorter prefix invites silent collisions where a
+	// real structural change maps to the SAME name and the guard skips the
+	// update forever; 8 chars stays comfortably inside the 63-char name budget.
 	revName := deploy.Name + "-" + hash
 	if digest := toolmanifest.StructuralDigest(sidecarTools, hasBindings); digest != "" {
-		revName = revName + "-b" + digest[:4]
+		revName = revName + "-b" + digest
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
@@ -476,9 +479,9 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 // of the referenced agent so this reconciler re-renders the pod template (the
 // STRUCTURAL side of a binding change — discovery sidecar + tool containers).
 // This is the annotation-free requeue mechanism from specs/mcp-tools.md: the
-// map function turns a binding event into a request for its spec.agentRef. The
-// shared spec.agentRef field index is registered once by
-// IndexBindingsByAgentRef (main / test suite), not here.
+// map function reads spec.agentRef straight off the event object (delete
+// events included — the binding finalizer keeps the object readable until the
+// agent converges). No field index is used.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
