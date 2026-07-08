@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -88,7 +89,17 @@ func mkBinding(t *testing.T, name, namespace string, spec agentsv1alpha1.MCPTool
 		Spec:       spec,
 	}
 	require.NoError(t, k8sClient.Create(testCtx, b))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, b) })
+	t.Cleanup(func() {
+		// The reconciler adds bindingFinalizer; with no controller running at
+		// cleanup time a bare Delete would leave the object terminating forever
+		// and leak it into later tests. Strip finalizers after the delete.
+		_ = k8sClient.Delete(testCtx, b)
+		var cur agentsv1alpha1.MCPToolBinding
+		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(b), &cur); err == nil && len(cur.Finalizers) > 0 {
+			cur.Finalizers = nil
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+	})
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(b), b))
 	return b
 }
@@ -386,6 +397,110 @@ func TestBinding_StructuralChange_RevisionNameChanged(t *testing.T) {
 	ksvc := getKsvc(t, agent.Name, ns)
 	_, has := containerByName(ksvc.Spec.Template.Spec.Containers, "tool-"+b2.Name)
 	assert.True(t, has, "the added sidecar tool container must be present in the rolled revision")
+}
+
+// TestBinding_Deletion_ReconvergesAgent is the delete-path proof (m4.5 review
+// blocking finding): deleting a binding must fully re-sync the surviving agent.
+// The finalizer keeps the terminating binding readable so the binding
+// controller can converge the CM (shrink) and push BEFORE the object vanishes;
+// the AgentDeployment re-render then rolls the container set.
+//
+// Asserted, in order:
+//
+//	(a) tools CM shrinks — the deleted binding's tool is gone from the manifest;
+//	(b) the ksvc revision name changes so the container set actually rolls
+//	    (and reverts to the bare spec-hash once the LAST binding is gone);
+//	(c) the sibling binding remains published (manifest + Ready=True) throughout.
+func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
+	const ns = "default"
+	agent := mkAgent(t, "del-agent", ns)
+
+	mkRegistry(t, "reg-del", ns,
+		agentsv1alpha1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"},
+		agentsv1alpha1.ToolEntry{Name: "echo", Image: "dev.local/echo:e2e"},
+	)
+	b1 := mkBinding(t, "del-b1", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef:    agent.Name,
+		RegistryRef: "reg-del",
+		ToolName:    "word-count",
+		Mode:        toolmanifest.ModeRemote,
+		Server:      agentsv1alpha1.ToolServer{URL: "http://wc.svc/mcp"},
+	})
+	b2 := mkBinding(t, "del-b2", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef:    agent.Name,
+		RegistryRef: "reg-del",
+		ToolName:    "echo",
+		Mode:        toolmanifest.ModeSidecar,
+		Server:      agentsv1alpha1.ToolServer{Image: "dev.local/echo:e2e"},
+	})
+
+	br := newBindingReconciler()
+	reconcileNN(t, newReconciler(), agent.Name, ns)
+	reconcileBinding(t, br, b1.Name, ns)
+	reconcileBinding(t, br, b2.Name, ns)
+
+	// Baseline: 2 tools in the CM, two-binding revision name, finalizer present.
+	var cm corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm))
+	var m toolmanifest.Manifest
+	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
+	require.Len(t, m.Tools, 2, "baseline: both tools in the manifest")
+	revTwo := getKsvc(t, agent.Name, ns).Spec.Template.Name
+
+	var b2Live agentsv1alpha1.MCPToolBinding
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(b2), &b2Live))
+	require.Contains(t, b2Live.Finalizers, bindingFinalizer,
+		"reconcile must have added the finalizer (deletion convergence depends on it)")
+
+	// ── Delete the sidecar binding ────────────────────────────────────────────
+	require.NoError(t, k8sClient.Delete(testCtx, b2))
+	// Finalizer holds the object in Terminating; the binding reconcile converges
+	// the agent, then releases it.
+	reconcileBinding(t, br, b2.Name, ns)
+
+	// The binding must now be fully gone (finalizer released).
+	var gone agentsv1alpha1.MCPToolBinding
+	err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(b2), &gone)
+	require.True(t, apierrors.IsNotFound(err), "binding must be deleted once the finalizer is released")
+
+	// (a) CM shrank: only the sibling's tool remains.
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm))
+	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
+	require.Len(t, m.Tools, 1, "deleted binding's tool must be gone from tools.json")
+	assert.Equal(t, "word-count", m.Tools[0].Name, "the sibling's tool remains published")
+
+	// (b) The pod template rolls: revision name changes, tool container gone.
+	reconcileNN(t, newReconciler(), agent.Name, ns)
+	ksvc := getKsvc(t, agent.Name, ns)
+	assert.NotEqual(t, revTwo, ksvc.Spec.Template.Name,
+		"removing a binding (structural change) must change the revision name")
+	_, hasTool := containerByName(ksvc.Spec.Template.Spec.Containers, "tool-"+b2.Name)
+	assert.False(t, hasTool, "the deleted binding's tool container must be gone")
+	_, hasDisc := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
+	assert.True(t, hasDisc, "discovery sidecar stays while the sibling binding remains")
+
+	// (c) The sibling is untouched: still Ready=True/Bound.
+	assertBindingReady(t, b1.Name, ns, metav1.ConditionTrue, reasonBound)
+
+	// ── Delete the LAST binding: everything reverts to the pre-binding shape ──
+	require.NoError(t, k8sClient.Delete(testCtx, b1))
+	reconcileBinding(t, br, b1.Name, ns)
+	reconcileNN(t, newReconciler(), agent.Name, ns)
+
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm))
+	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
+	assert.Empty(t, m.Tools, "manifest must be empty after the last binding is deleted")
+
+	ksvc = getKsvc(t, agent.Name, ns)
+	hash, herr := specHash(agent.Spec)
+	require.NoError(t, herr)
+	assert.Equal(t, agent.Name+"-"+hash, ksvc.Spec.Template.Name,
+		"revision name must revert to the bare spec-hash when no bindings remain")
+	_, hasDisc = containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
+	assert.False(t, hasDisc, "discovery sidecar must be removed with the last binding")
 }
 
 // assertBindingReady fetches the binding and asserts its Ready condition.

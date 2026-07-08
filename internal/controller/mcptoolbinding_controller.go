@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -37,14 +38,23 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/toolpush"
 )
 
+// bindingFinalizer guards binding deletion so the agent's tool state converges
+// BEFORE the object disappears: without it, the delete event reaches Reconcile
+// after the object is gone and the agentRef is unrecoverable — the removed tool
+// would linger in tools.json (which freshly-rolled pods cold-read) and live
+// sidecars would never receive the shrink push. The deletion branch re-syncs
+// the agent (CM + push, with the dying binding excluded), then releases the
+// finalizer.
+const bindingFinalizer = "agents.ctxmesh.ai/tools-sync"
+
 // MCPToolBindingReconciler reconciles MCPToolBinding objects (specs/mcp-tools.md).
 //
 // It owns the COLD (durable) and HOT (push) sides of a binding, but NOT the pod
 // template — the single-writer rule reserves the ksvc for the AgentDeployment
 // reconciler. On any binding or registry event it:
 //
-//  1. resolves the triggering agent's FULL binding set (field-indexed on
-//     spec.agentRef);
+//  1. resolves the triggering agent's FULL binding set (listed in the binding's
+//     namespace and filtered by spec.agentRef client-side);
 //  2. validates each binding against its ToolRegistry (membership + pin match)
 //     and writes the Ready condition (Bound / UnregisteredTool / RegistryMismatch
 //     / RegistryNotFound);
@@ -53,6 +63,10 @@ import (
 //  4. PUSHes the manifest to every ready pod of the agent (best-effort, non-fatal);
 //  5. requeues the AgentDeployment so it re-renders the pod template (the
 //     structural side of the change) — via an owner-less watch map, no annotations.
+//
+// Deletion is handled via bindingFinalizer: the terminating binding is excluded
+// from the render set, the agent re-synced, and only then is the finalizer
+// released.
 type MCPToolBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -79,21 +93,45 @@ func (r *MCPToolBindingReconciler) pusher() *toolpush.Pusher {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile resolves the agent referenced by the triggering binding and syncs
-// the whole agent's tool state (validate → status → ConfigMap → push). The
-// request may name a binding that was deleted; we resolve the agent from the
-// object if present, otherwise there is nothing agent-specific to key on and we
-// return (a sibling binding's event, or the AgentDeployment reconcile, covers
-// the durable state).
+// the whole agent's tool state (validate → status → ConfigMap → push).
+//
+// Lifecycle:
+//   - live binding → ensure bindingFinalizer, then sync the agent.
+//   - terminating binding (deletionTimestamp set) → sync the agent FIRST (the
+//     dying binding is excluded from the render set by listAgentBindings, so
+//     the CM shrinks and live sidecars get the shrink push), THEN release the
+//     finalizer. Sync errors keep the finalizer → the delete retries, so the
+//     agent can never be left with stale tool state.
+//   - NotFound → the finalizer flow already converged the agent before the
+//     object vanished; nothing to key on.
 func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var binding agentsv1alpha1.MCPToolBinding
 	if err := r.Get(ctx, req.NamespacedName, &binding); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Binding deleted: its agent is re-synced by the remaining siblings'
-			// events and by the AgentDeployment reconcile that the delete's
-			// watch-map triggers. Nothing to do keyed on the gone object.
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching MCPToolBinding: %w", err)
+	}
+
+	if !binding.DeletionTimestamp.IsZero() {
+		// Terminating: converge the agent without this binding, then let go.
+		if res, err := r.syncAgent(ctx, binding.Namespace, binding.Spec.AgentRef); err != nil {
+			return res, err // finalizer retained → deletion retries the sync
+		}
+		if controllerutil.ContainsFinalizer(&binding, bindingFinalizer) {
+			controllerutil.RemoveFinalizer(&binding, bindingFinalizer)
+			if err := r.Update(ctx, &binding); err != nil {
+				return ctrl.Result{}, fmt.Errorf("removing binding finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&binding, bindingFinalizer) {
+		controllerutil.AddFinalizer(&binding, bindingFinalizer)
+		if err := r.Update(ctx, &binding); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding binding finalizer: %w", err)
+		}
 	}
 
 	return r.syncAgent(ctx, binding.Namespace, binding.Spec.AgentRef)
@@ -153,13 +191,19 @@ func (r *MCPToolBindingReconciler) writeBindingStatuses(
 		if !v.Valid {
 			status = metav1.ConditionFalse
 		}
-		apimeta.SetStatusCondition(&b.Status.Conditions, metav1.Condition{
+		// Only hit the API when the condition actually changed — SetStatusCondition
+		// reports it; an unconditional Status().Update per binding per reconcile
+		// would churn resourceVersions (and watch events) for no reason.
+		changed := apimeta.SetStatusCondition(&b.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             status,
 			Reason:             v.Reason,
 			Message:            v.Message,
 			ObservedGeneration: b.Generation,
 		})
+		if !changed {
+			continue
+		}
 		if err := r.Status().Update(ctx, b); err != nil {
 			if apierrors.IsConflict(err) {
 				log.Info("conflict updating MCPToolBinding status; will requeue", "binding", b.Name)
@@ -262,16 +306,18 @@ func podReady(pod *corev1.Pod) bool {
 }
 
 // SetupWithManager registers the reconciler and the secondary ToolRegistry
-// watch. The shared spec.agentRef field index is registered ONCE by
-// IndexBindingsByAgentRef (called from main / the test suite BEFORE either
-// controller's setup), because both this controller and the AgentDeployment
-// reconciler query it and controller-runtime panics on double registration.
+// watch. No field index is involved anywhere in this feature: watch map
+// functions read spec fields straight off the event object, and reconcile-time
+// binding lookups are namespace Lists filtered client-side (listAgentBindings)
+// so the same code path serves the cached manager client and the raw envtest
+// client alike.
 //
 // Watch mapping (annotation-free requeue of the AgentDeployment): a binding
-// event enqueues that binding's agentRef; a ToolRegistry event enqueues every
-// binding that references it. Both funnel through Reconcile, which re-syncs the
-// whole agent. The AgentDeployment is separately requeued by the pod-template
-// watch registered in the AgentDeployment reconciler's setup.
+// event enqueues that binding (delete events included — the finalizer keeps
+// the object readable until the agent has converged); a ToolRegistry event
+// enqueues every binding that references it. Both funnel through Reconcile,
+// which re-syncs the whole agent. The AgentDeployment is separately requeued
+// by the binding watch registered in the AgentDeployment reconciler's setup.
 func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// ToolRegistry → requeue every binding that references it (a catalog change
 	// can flip bindings valid/invalid).
@@ -302,24 +348,4 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.ToolRegistry{}, mapRegistryToBindings).
 		Named("mcptoolbinding").
 		Complete(r)
-}
-
-// IndexBindingsByAgentRef registers the spec.agentRef field index on
-// MCPToolBinding exactly once for the manager. Call it from main / the test
-// suite BEFORE setting up either controller: both the MCPToolBinding and
-// AgentDeployment reconcilers query this index, and registering the same field
-// twice panics, so neither SetupWithManager registers it.
-func IndexBindingsByAgentRef(mgr ctrl.Manager) error {
-	return mgr.GetFieldIndexer().IndexField(
-		context.Background(),
-		&agentsv1alpha1.MCPToolBinding{},
-		bindingAgentRefField,
-		func(obj client.Object) []string {
-			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
-			if !ok || b.Spec.AgentRef == "" {
-				return nil
-			}
-			return []string{b.Spec.AgentRef}
-		},
-	)
 }
