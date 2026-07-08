@@ -41,8 +41,10 @@ jobs:
           kind version
       - name: Bring up the harness cluster (Knative Serving + Kourier)
         run: make -C agent-brain/harness dev-up M=1
-      - name: Full milestone acceptance (tier 3)
+      - name: M3 observability e2e (light — collector debug sink, no Langfuse)
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        # M=2: advances after each milestone close (co-evolution rule, harness/README.md)
-        run: make -C agent-brain/harness tier3 M=2
+        # Per ADR 0006 the full Langfuse tier3 M=3 is local-only (won't fit the
+        # 2-CPU runner); nightly runs the light m3-trace slice — the collector
+        # runs, spans flow, asserted via the collector's debug exporter.
+        run: make -C agent-brain/harness tier2 SLICE=m3-trace

@@ -35,6 +35,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/gateway"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // conditionReady is the condition type name mirrored from the Knative Service
@@ -64,6 +66,8 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile implements the AgentDeployment reconciliation loop.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -210,6 +214,13 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		}
 	}
 
+	// Observability (M3): ensure the collector-config ConfigMap and build the
+	// sidecar to inject alongside the user container.
+	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
+	if err != nil {
+		return nil, err
+	}
+
 	desiredSpec := servingv1.ServiceSpec{
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
@@ -229,6 +240,10 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 					PodSpec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
+								// Named explicitly: multi-container Knative pods require
+								// every container to be named, else Knative auto-names it
+								// ("user-container-0") and re-reconcile drifts.
+								Name:  "user-container",
 								Image: deploy.Spec.Image,
 								Ports: []corev1.ContainerPort{
 									{ContainerPort: port},
@@ -236,6 +251,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 								Env:       env,
 								Resources: resources,
 								ReadinessProbe: &corev1.Probe{
+									// SuccessThreshold=1 explicitly: Knative defaults it on
+									// create and rejects a re-applied 0 (must be >= 1).
+									SuccessThreshold: 1,
 									ProbeHandler: corev1.ProbeHandler{
 										HTTPGet: &corev1.HTTPGetAction{
 											Path: "/readyz",
@@ -244,6 +262,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 									},
 								},
 								LivenessProbe: &corev1.Probe{
+									SuccessThreshold: 1,
 									ProbeHandler: corev1.ProbeHandler{
 										HTTPGet: &corev1.HTTPGetAction{
 											Path: "/healthz",
@@ -252,7 +271,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 									},
 								},
 							},
+							collector,
 						},
+						Volumes: []corev1.Volume{collectorVol},
 					},
 				},
 			},
@@ -266,8 +287,18 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		},
 	}
 
-	_, err := ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		ksvc.Spec = desiredSpec
+	desiredRev := deploy.Name + "-" + hash
+	_, err = ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
+		// Only (re)apply the spec when the desired revision differs from what
+		// exists. On an unchanged spec-hash, leave the live ksvc.Spec alone so
+		// Knative's create-time defaults (container names, probe thresholds,
+		// timeouts) are preserved — re-applying our bare spec would reset those
+		// to invalid zero-values and the Knative webhook rejects the update
+		// ("changes without a name change"). A changed spec carries a new
+		// revision name, which Knative requires for pod-spec changes.
+		if ksvc.Spec.Template.Name != desiredRev {
+			ksvc.Spec = desiredSpec
+		}
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})
 	if err != nil {
@@ -275,6 +306,62 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	}
 
 	return ksvc, nil
+}
+
+// reconcileCollector ensures the per-agent collector-config ConfigMap and
+// returns the collector sidecar container + its config volume. Langfuse export
+// is enabled only when a `langfuse-otlp` Secret exists in the agent's namespace
+// (seeded by `dev-up M=3`); otherwise the collector runs debug-only, which is
+// the automated-assertion sink the e2e slice reads via `kubectl logs`.
+func (r *AgentDeploymentReconciler) reconcileCollector(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (corev1.Container, corev1.Volume, error) {
+	var langfuseEnv []corev1.EnvVar
+	langfuse := false
+
+	// Secret lookup: the agent's own namespace acts as a per-namespace
+	// override; the platform namespace (where dev-up seeds the dev keys) is
+	// the fallback default. Without the fallback, agents outside
+	// agent-engine-system silently ran debug-only and nothing ever reached
+	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
+	var sec corev1.Secret
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
+	if apierrors.IsNotFound(err) && deploy.Namespace != gateway.GatewayNamespace {
+		err = r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
+	}
+	switch {
+	case err == nil:
+		langfuse = true
+		// Dev keys are deterministic and non-secret; wiring the endpoint + basic
+		// auth as literal env is acceptable for the M3 dev posture (production
+		// would use a mounted secret ref). See specs/observability.md.
+		langfuseEnv = []corev1.EnvVar{
+			{Name: "LANGFUSE_OTLP_ENDPOINT", Value: string(sec.Data["otlp-endpoint"])},
+			{Name: "LANGFUSE_OTLP_AUTH", Value: telemetry.BasicAuthHeader(
+				string(sec.Data["public-key"]), string(sec.Data["secret-key"]))},
+		}
+	case apierrors.IsNotFound(err):
+		// debug-only; not an error.
+	default:
+		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("checking langfuse secret: %w", err)
+	}
+
+	cmName := telemetry.ConfigMapName(deploy.Name)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
+	}
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse)
+		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
+	}); err != nil {
+		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
+	}
+
+	return telemetry.Container(cmName, langfuseEnv), telemetry.Volume(cmName), nil
 }
 
 // syncStatus mirrors the Knative Service's Ready condition and URL into the
