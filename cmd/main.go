@@ -180,6 +180,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the shared MCPToolBinding spec.agentRef field index ONCE before
+	// any controller that queries it (both AgentDeployment and MCPToolBinding
+	// reconcilers do). Registering the same field twice panics.
+	if err := controller.IndexBindingsByAgentRef(mgr); err != nil {
+		setupLog.Error(err, "Failed to register MCPToolBinding agentRef field index")
+		os.Exit(1)
+	}
+
 	if err := (&controller.AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -191,6 +199,13 @@ func main() {
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "modelroute")
+		os.Exit(1)
+	}
+	if err := (&controller.MCPToolBindingReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
