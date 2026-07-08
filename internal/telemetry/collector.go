@@ -82,7 +82,9 @@ exporters:
 %sservice:
   telemetry:
     logs:
-      level: warn
+      # info so the debug exporter actually prints spans — it is the e2e
+      # assertion sink (ADR 0006). (M11/prod hardening drops the debug exporter.)
+      level: info
   pipelines:
     traces:
       receivers: [otlp]
@@ -107,10 +109,10 @@ func Container(configMapName string, langfuseEnv []corev1.EnvVar) corev1.Contain
 		Image: CollectorImage,
 		Args:  []string{"--config", collectorConfigMountPath + "/config.yaml"},
 		Env:   langfuseEnv,
-		Ports: []corev1.ContainerPort{
-			{Name: "otlp-grpc", ContainerPort: 4317},
-			{Name: "otlp-http", ContainerPort: 4318},
-		},
+		// No ContainerPorts: Knative allows exactly one port across all
+		// containers in a pod (the user container's). The collector still
+		// listens on 4317/4318 inside the shared pod netns; the user container
+		// reaches it via localhost regardless of a declared containerPort.
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
