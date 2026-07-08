@@ -1,0 +1,28 @@
+# images/base-python/requirements.txt
+#
+# Pinned OpenTelemetry SDK + OTLP exporter + OpenInference instrumentors.
+# Versions here are the source of truth for the base-python image;
+# derived images (e.g. langchain-agent) add their own framework packages.
+#
+# OTel release cadence: SDK major.minor tracks instrumentation minor+21
+#   e.g. SDK 1.27.0 → opentelemetry-instrumentation 0.48b0.
+
+# ── Runtime prereq ───────────────────────────────────────────────────────────
+# python:3.12-slim ships no setuptools; opentelemetry-instrumentation 0.48b0
+# still imports pkg_resources (provided by setuptools). Pin it explicitly.
+setuptools==75.6.0
+
+# ── OpenTelemetry SDK + exporter ─────────────────────────────────────────────
+opentelemetry-api==1.27.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp==1.27.0
+opentelemetry-exporter-otlp-proto-grpc==1.27.0
+opentelemetry-instrumentation==0.48b0
+
+# ── OpenInference instrumentation (Arize AI) ──────────────────────────────────
+# Auto-instruments LangChain, OpenAI, and Anthropic without any SDK calls
+# in user code.  The bootstrap is in sitecustomize.py.
+openinference-instrumentation-langchain==0.1.55
+openinference-instrumentation-openai==0.1.49
+openinference-instrumentation-anthropic==1.0.0
+openinference-semantic-conventions==0.1.30

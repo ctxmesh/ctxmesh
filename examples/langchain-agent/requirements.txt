@@ -1,0 +1,5 @@
+# LangChain example agent — pinned, minimal (core + openai provider only,
+# no heavy `langchain` metapackage). Versions chosen for compatibility with
+# the base image's openinference-instrumentation-langchain==0.1.55.
+langchain-core==0.3.29
+langchain-openai==0.2.14

@@ -9,3 +9,11 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include Python base image assets (m3.3: base-python)
+!images/base-python/requirements.txt
+!images/base-python/sitecustomize.py
+
+# Re-include LangChain example agent assets (m3.4: langchain-agent)
+!examples/langchain-agent/requirements.txt
+!examples/langchain-agent/agent.py
