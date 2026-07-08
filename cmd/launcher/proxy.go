@@ -108,6 +108,9 @@ func buildHandler(
 		ctx, span := tracer.Start(ctx, "agent.invoke",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
+		// Deferred so the span is always ended (and exported) even if the
+		// upstream ServeHTTP panics — otherwise the span would be dropped.
+		defer span.End()
 
 		start := time.Now()
 
@@ -134,7 +137,6 @@ func buildHandler(
 		if rw.code >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, http.StatusText(rw.code))
 		}
-		span.End()
 	})
 }
 

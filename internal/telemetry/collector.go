@@ -29,9 +29,12 @@ import (
 )
 
 const (
-	// CollectorImage is the pinned OTel Collector (contrib) image. Bump
-	// deliberately; contrib carries the otlphttp + debug exporters used here.
-	CollectorImage = "otel/opentelemetry-collector-contrib:0.116.0"
+	// CollectorImage is the project-owned OTel Collector image (images/otel-
+	// collector/): the core collector binary on debian:12-slim. We repackage
+	// because upstream distroless arm64 omits the glibc loader (exec failure);
+	// debian provides it, so the same image runs on arm64 (local) + amd64 (CI).
+	// Built + side-loaded by the harness; also built in CI.
+	CollectorImage = "agent-otel-collector:0.116.0"
 
 	// CollectorContainerName is the sidecar container name in the agent pod.
 	CollectorContainerName = "otel-collector"
@@ -117,6 +120,11 @@ func Container(configMapName string, langfuseEnv []corev1.EnvVar) corev1.Contain
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("50m"),
 				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+			// Memory limit caps a runaway/leaking collector so it can't OOM the
+			// node; 256Mi is ample for M3 dev span volume.
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
