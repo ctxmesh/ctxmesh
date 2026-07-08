@@ -6,6 +6,8 @@ resources:
 - bases/agents.ctxmesh.ai_agentversions.yaml
 - bases/agents.ctxmesh.ai_modelroutes.yaml
 - bases/agents.ctxmesh.ai_secretbindings.yaml
+- bases/agents.ctxmesh.ai_mcptoolbindings.yaml
+- bases/agents.ctxmesh.ai_toolregistries.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
