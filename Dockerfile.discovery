@@ -1,0 +1,31 @@
+# Dockerfile.discovery — tool-discovery sidecar image.
+#
+# Builds only the discovery binary (cmd/discovery) as a distroless/static
+# image. The binary is a pure-Go static build (CGO_ENABLED=0) and has no
+# glibc dependency, so the distroless/static (non-root) base is appropriate.
+#
+# The sidecar listens on DISCOVERY_PORT (default 2999) and serves:
+#   GET  /tools    — current tool manifest JSON
+#   GET  /events   — SSE stream of manifest-version change events
+#   POST /control  — full-manifest replace (pushed by the binding controller)
+#   GET  /healthz  — liveness probe
+#
+# See agent-brain specs/mcp-tools.md §"Discovery sidecar" for the full
+# contract.
+
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o discovery ./cmd/discovery
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/discovery /discovery
+USER 65532:65532
+ENTRYPOINT ["/discovery"]

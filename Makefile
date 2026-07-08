@@ -107,6 +107,10 @@ docker-build: ## Build docker image with the manager.
 docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
 	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
 
+.PHONY: docker-build-discovery
+docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
+	$(CONTAINER_TOOL) build -t dev.local/agent-discovery:0.1.0 -f Dockerfile.discovery .
+
 .PHONY: docker-build-example
 docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
 	$(CONTAINER_TOOL) build -t echo-agent:latest -f examples/echo-agent/Dockerfile .
