@@ -107,6 +107,10 @@ docker-build: ## Build docker image with the manager.
 docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
 	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
 
+.PHONY: docker-build-discovery
+docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
+	$(CONTAINER_TOOL) build -t dev.local/agent-discovery:0.1.0 -f Dockerfile.discovery .
+
 .PHONY: docker-build-example
 docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
 	$(CONTAINER_TOOL) build -t echo-agent:latest -f examples/echo-agent/Dockerfile .
@@ -122,6 +126,10 @@ docker-build-langchain-example: docker-build-base-python ## Build the LangChain 
 .PHONY: docker-build-collector
 docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.
 	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
+
+.PHONY: docker-build-mcp-echo-server
+docker-build-mcp-echo-server: ## Build the M4 fixture MCP echo server (dev.local/mcp-echo-server:e2e — matches the ToolRegistry pin).
+	$(CONTAINER_TOOL) build -t dev.local/mcp-echo-server:e2e examples/mcp-echo-server
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
