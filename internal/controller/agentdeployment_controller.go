@@ -32,11 +32,14 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
 	"github.com/ctxmesh/agent-engine/internal/telemetry"
+	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
 
 // conditionReady is the condition type name mirrored from the Knative Service
@@ -221,16 +224,84 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		return nil, err
 	}
 
+	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
+	// the discovery sidecar + tools ConfigMap volume + (sidecar-mode) tool
+	// containers. The binding controller owns the CM CONTENT and the push; this
+	// reconciler is the single writer of the pod template.
+	validBindings, _, err := resolveAgentBindings(ctx, r.Client, deploy.Namespace, deploy.Name)
+	if err != nil {
+		return nil, fmt.Errorf("resolving tool bindings: %w", err)
+	}
+	_, sidecarTools := toolmanifest.Render(validBindings)
+	hasBindings := len(validBindings) > 0
+
+	containers := []corev1.Container{
+		{
+			// Named explicitly: multi-container Knative pods require
+			// every container to be named, else Knative auto-names it
+			// ("user-container-0") and re-reconcile drifts.
+			Name:  "user-container",
+			Image: deploy.Spec.Image,
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: port},
+			},
+			Env:       env,
+			Resources: resources,
+			ReadinessProbe: &corev1.Probe{
+				// SuccessThreshold=1 explicitly: Knative defaults it on
+				// create and rejects a re-applied 0 (must be >= 1).
+				SuccessThreshold: 1,
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/readyz",
+						Port: intstr.FromInt32(port),
+					},
+				},
+			},
+			LivenessProbe: &corev1.Probe{
+				SuccessThreshold: 1,
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/healthz",
+						Port: intstr.FromInt32(port),
+					},
+				},
+			},
+		},
+		collector,
+	}
+	volumes := []corev1.Volume{collectorVol}
+
+	if hasBindings {
+		containers = append(containers, discoverySidecarContainer())
+		// Sidecar-mode tool containers, in the deterministic binding-name order
+		// Render assigned (matches the manifest's localhost ports).
+		for _, st := range sidecarTools {
+			containers = append(containers, sidecarToolContainer(st))
+		}
+		volumes = append(volumes, toolsVolume(deploy.Name))
+	}
+
+	// Revision name: bare spec-hash when there are no bindings (unchanged pre-M4
+	// behaviour). With bindings, suffix a structural digest so ADD/REMOVE of a
+	// binding or a sidecar image change rolls a new revision (the sidecar/tool
+	// containers must actually land — the CreateOrUpdate guard below skips
+	// re-applying the spec when the revision name is unchanged). The digest
+	// deliberately EXCLUDES remote URLs and the manifest version, so a
+	// manifest-ONLY change (remote URL edit) keeps the SAME revision name → no
+	// roll → restart-free hot path (specs/mcp-tools.md — "Hot path vs cold
+	// path"; the LANDMINE in the m4.5 task card). Knative requires the name to
+	// start with "{service}-", which the spec-hash prefix satisfies.
+	revName := deploy.Name + "-" + hash
+	if digest := toolmanifest.StructuralDigest(sidecarTools, hasBindings); digest != "" {
+		revName = revName + "-b" + digest[:4]
+	}
+
 	desiredSpec := servingv1.ServiceSpec{
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					// Stable revision name: {service}-{spec-hash}. Knative creates a
-					// new revision only when spec.template changes; by fixing the name
-					// to the content-addressed hash, re-reconciles of an unchanged spec
-					// are a true no-op (no spurious second revision).
-					// Knative requires the name to start with "{service}-".
-					Name: deploy.Name + "-" + hash,
+					Name: revName,
 					Annotations: map[string]string{
 						"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
 						"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
@@ -238,42 +309,8 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 				},
 				Spec: servingv1.RevisionSpec{
 					PodSpec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								// Named explicitly: multi-container Knative pods require
-								// every container to be named, else Knative auto-names it
-								// ("user-container-0") and re-reconcile drifts.
-								Name:  "user-container",
-								Image: deploy.Spec.Image,
-								Ports: []corev1.ContainerPort{
-									{ContainerPort: port},
-								},
-								Env:       env,
-								Resources: resources,
-								ReadinessProbe: &corev1.Probe{
-									// SuccessThreshold=1 explicitly: Knative defaults it on
-									// create and rejects a re-applied 0 (must be >= 1).
-									SuccessThreshold: 1,
-									ProbeHandler: corev1.ProbeHandler{
-										HTTPGet: &corev1.HTTPGetAction{
-											Path: "/readyz",
-											Port: intstr.FromInt32(port),
-										},
-									},
-								},
-								LivenessProbe: &corev1.Probe{
-									SuccessThreshold: 1,
-									ProbeHandler: corev1.ProbeHandler{
-										HTTPGet: &corev1.HTTPGetAction{
-											Path: "/healthz",
-											Port: intstr.FromInt32(port),
-										},
-									},
-								},
-							},
-							collector,
-						},
-						Volumes: []corev1.Volume{collectorVol},
+						Containers: containers,
+						Volumes:    volumes,
 					},
 				},
 			},
@@ -287,7 +324,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		},
 	}
 
-	desiredRev := deploy.Name + "-" + hash
+	desiredRev := revName
 	_, err = ctrl.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
 		// Only (re)apply the spec when the desired revision differs from what
 		// exists. On an unchanged spec-hash, leave the live ksvc.Spec alone so
@@ -434,11 +471,32 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 // SetupWithManager sets up the controller with the Manager.
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
+//
+// It also watches MCPToolBinding: a binding add/remove/change maps to a requeue
+// of the referenced agent so this reconciler re-renders the pod template (the
+// STRUCTURAL side of a binding change — discovery sidecar + tool containers).
+// This is the annotation-free requeue mechanism from specs/mcp-tools.md: the
+// map function turns a binding event into a request for its spec.agentRef. The
+// shared spec.agentRef field index is registered once by
+// IndexBindingsByAgentRef (main / test suite), not here.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
+			if !ok || b.Spec.AgentRef == "" {
+				return nil
+			}
+			return []reconcile.Request{{
+				NamespacedName: client.ObjectKey{Namespace: b.Namespace, Name: b.Spec.AgentRef},
+			}}
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{}).
+		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Named("agentdeployment").
 		Complete(r)
 }
