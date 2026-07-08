@@ -59,6 +59,12 @@ func main() {
 		Addr:    fmt.Sprintf(":%s", port),
 		Handler: srv.handler(),
 	}
+	// Shutdown drives subscriber signaling: when Shutdown is called it stops
+	// the listeners, runs this callback (unblocking long-lived SSE handlers so
+	// the drain can complete), then waits for in-flight requests. The broadcast
+	// path is structurally safe against any ordering — subscriber channels are
+	// never closed (see server.signalShutdown).
+	httpSrv.RegisterOnShutdown(srv.signalShutdown)
 
 	// Graceful shutdown on SIGTERM (or SIGINT in dev).
 	sigCh := make(chan os.Signal, 1)
@@ -75,9 +81,9 @@ func main() {
 	<-sigCh
 	logger.Info("discovery sidecar shutting down")
 
-	// Close all SSE subscriber channels so their goroutines exit cleanly.
-	srv.closeSubscribers()
-
+	// Shutdown stops the listeners, signals SSE handlers to exit (via the
+	// RegisterOnShutdown callback above), and drains in-flight requests —
+	// including any /control push landing during the window.
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
