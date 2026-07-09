@@ -140,11 +140,16 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 // reconcileQueueDepth CreateOrUpdate's the KEDA ScaledObject for a
 // trigger=queue-depth policy and sets status.backend="keda-scaledobject".
 //
-// ScaleTargetRef names the agent's Deployment (the Knative Serving revision
-// Deployment is named after the ksvc's latest revision; for simplicity in v1
-// we use the agent name as the Deployment name — the m7.8 e2e refines this if
-// needed against the live cluster). The ScaledObject is owner-referenced to the
-// policy so it is garbage-collected when the policy is deleted.
+// ScaleTargetRef names the agent's Deployment `<agent>` (kind=Deployment,
+// apps/v1). Queue-depth scaling is coherent only for an EVENTING-model agent —
+// its workload IS a plain Deployment named `<agent>` (agentdeployment_controller
+// reconcileEventing), so KEDA resolves the HPA cleanly. A serving-model agent has
+// no such Deployment (Knative names its backing Deployment
+// `<ksvc>-<revision>-deployment`), so a queue-depth policy on a serving agent
+// won't resolve and KEDA/KPA would fight — that combination is a user error, not
+// this controller's concern (the m7.8 e2e finding; see specs/eventing-scaling.md
+// "Why eventing is a plain Deployment"). The ScaledObject is owner-referenced to
+// the policy so it is garbage-collected when the policy is deleted.
 //
 // The KEDA trigger is a metrics-api scaler built generically from spec.queueRef
 // and spec.metric, keeping the controller layer generic. The concrete Prometheus
@@ -166,12 +171,12 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	min := policy.Spec.Min
 	max := policy.Spec.Max
 
-	// Build the KEDA ScaledObject. The scaleTargetRef names the agent's
-	// Deployment. In v1 (Knative Serving) the underlying Deployment for a
-	// revision is named <ksvc-name>-<revision>-deployment; for simplicity
-	// we target it via the agent name with kind=Deployment so KEDA resolves
-	// the HPA. The m7.8 e2e can refine this if the revision suffix differs
-	// in the live cluster.
+	// Build the KEDA ScaledObject. The scaleTargetRef names the agent's plain
+	// Deployment `<agent>` (kind=Deployment, apps/v1) — the workload an
+	// eventing-model agent reconciles to. KEDA resolves the HPA from that
+	// Deployment name (m7.8 e2e finding: an eventing agent is a plain
+	// Deployment + Service precisely so this resolves; a ksvc-backed serving
+	// agent has no `<agent>` Deployment).
 	so := &kedatypes.ScaledObject{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      scaledObjectName(policy),
@@ -184,11 +189,10 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, so, func() error {
 		so.Spec = kedatypes.ScaledObjectSpec{
 			ScaleTargetRef: &kedatypes.ScaleTarget{
-				// The agent's Deployment carries the same name as the
-				// AgentDeployment in Knative Serving (the ksvc name matches
-				// the AgentDeployment name, and Knative stamps the Deployment
-				// with a deterministic name from it). KEDA resolves the HPA
-				// from the Deployment name.
+				// The eventing agent's plain Deployment carries the bare
+				// AgentDeployment name (agentdeployment_controller
+				// reconcileEventingDeployment names it deploy.Name), so KEDA
+				// resolves the HPA from this Deployment name.
 				Name:       agent.Name,
 				Kind:       "Deployment",
 				APIVersion: "apps/v1",

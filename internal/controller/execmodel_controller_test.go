@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // createExecAgent creates an AgentDeployment with the given execution model and
@@ -167,10 +169,12 @@ func TestExecModel_Serving_CustomMetricPolicy(t *testing.T) {
 	assert.Equal(t, "cpu", ann["autoscaling.knative.dev/metric"])
 }
 
-// TestExecModel_Eventing_KsvcAndTrigger asserts eventing produces a ksvc AND a
-// Trigger referencing the registry broker, filtered to the agent's CloudEvent
-// type.
-func TestExecModel_Eventing_KsvcAndTrigger(t *testing.T) {
+// TestExecModel_Eventing_DeploymentServiceTrigger asserts eventing produces a
+// plain Deployment (named <agent>, KEDA-resolvable) + a Service + a Trigger
+// referencing the registry broker, filtered to the agent's CloudEvent type, with
+// the subscriber being the Service (NOT a ksvc). This is the m7.8 e2e fix: a ksvc
+// is NOT created for an eventing agent.
+func TestExecModel_Eventing_DeploymentServiceTrigger(t *testing.T) {
 	const (
 		name       = "eventing-agent"
 		namespace  = "default"
@@ -181,9 +185,35 @@ func TestExecModel_Eventing_KsvcAndTrigger(t *testing.T) {
 
 	reconcileNN(t, newReconciler(), name, namespace)
 
-	// The ksvc must exist (the event subscriber) with the membership label.
-	ksvc := getKsvc(t, name, namespace)
-	assert.Equal(t, registryID, ksvc.Spec.Template.Labels[registryIDLabel], "ksvc pods carry the registry label")
+	// A ksvc must NOT exist — eventing is a plain Deployment now.
+	assertNoKsvc(t, name, namespace)
+
+	// The Deployment must exist, named exactly <agent> (KEDA scaleTargetRef
+	// resolves it), carrying the user + collector containers and the membership
+	// label + eventing selector label.
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep),
+		"Deployment must exist for an eventing agent, named <agent> (KEDA-resolvable)")
+	require.Len(t, dep.Spec.Template.Spec.Containers, 2, "user + collector containers")
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:latest", dep.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, name, dep.Spec.Selector.MatchLabels[eventingWorkloadLabel], "selector on the eventing label")
+	assert.Equal(t, name, dep.Spec.Template.Labels[eventingWorkloadLabel], "pods carry the eventing selector label")
+	assert.Equal(t, registryID, dep.Spec.Template.Labels[registryIDLabel], "pods carry the registry membership label")
+	require.NotNil(t, dep.Spec.Replicas)
+	assert.Equal(t, int32(1), *dep.Spec.Replicas, "no scaling policy → default 1 replica")
+	require.Len(t, dep.OwnerReferences, 1, "Deployment owner-ref'd to the AgentDeployment (GC)")
+	assert.Equal(t, name, dep.OwnerReferences[0].Name)
+
+	// The Service must exist (named <agent>-eventing), selecting the Deployment's
+	// pods and exposing the launcher port.
+	var svc corev1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc),
+		"Service must exist for an eventing agent")
+	assert.Equal(t, name, svc.Spec.Selector[eventingWorkloadLabel], "Service selects the eventing pods")
+	require.Len(t, svc.Spec.Ports, 1)
+	assert.Equal(t, int32(8080), svc.Spec.Ports[0].TargetPort.IntVal, "Service targets the launcher port")
+	require.Len(t, svc.OwnerReferences, 1, "Service owner-ref'd to the AgentDeployment (GC)")
+	assert.Equal(t, name, svc.OwnerReferences[0].Name)
 
 	// The Trigger must reference the per-registry broker and filter on this agent.
 	var trigger eventingv1.Trigger
@@ -193,14 +223,21 @@ func TestExecModel_Eventing_KsvcAndTrigger(t *testing.T) {
 	require.NotNil(t, trigger.Spec.Filter, "Trigger must filter events")
 	assert.Equal(t, name, trigger.Spec.Filter.Attributes[ceTypeAttribute], "Trigger filters CloudEvent type == agent name")
 
-	// Subscriber must reference the agent's own ksvc.
-	require.NotNil(t, trigger.Spec.Subscriber.Ref, "Trigger subscriber must ref the ksvc")
-	assert.Equal(t, name, trigger.Spec.Subscriber.Ref.Name, "subscriber is the agent ksvc")
-	assert.Equal(t, knativeServiceKind, trigger.Spec.Subscriber.Ref.Kind)
+	// Subscriber must reference the agent's core/v1 Service — NOT a ksvc.
+	require.NotNil(t, trigger.Spec.Subscriber.Ref, "Trigger subscriber must ref the Service")
+	assert.Equal(t, eventingServiceName(name), trigger.Spec.Subscriber.Ref.Name, "subscriber is the agent Service")
+	assert.Equal(t, coreServiceKind, trigger.Spec.Subscriber.Ref.Kind, "subscriber is a core/v1 Service")
+	assert.Equal(t, coreServiceAPIVersion, trigger.Spec.Subscriber.Ref.APIVersion, "subscriber apiVersion is v1 (core)")
 
 	// Owner ref → the AgentDeployment (GC on delete).
 	require.Len(t, trigger.OwnerReferences, 1)
 	assert.Equal(t, name, trigger.OwnerReferences[0].Name)
+
+	// status.url must point at the real (-eventing) Service, not a bare
+	// <agent> host that has no Service backing it (NXDOMAIN).
+	var updated agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
+	assert.Contains(t, updated.Status.URL, eventingServiceName(name), "status.url must reference the -eventing Service")
 
 	// No batch workloads.
 	assertNoJob(t, name, namespace)
@@ -209,7 +246,8 @@ func TestExecModel_Eventing_KsvcAndTrigger(t *testing.T) {
 
 // TestExecModel_Eventing_NoRegistry_NotReady asserts an eventing agent that is
 // not a registry member is reported Ready=False (eventing needs a broker) and no
-// Trigger is created.
+// Trigger is created — but the Deployment + Service ARE kept (owner-ref'd) so the
+// agent retains a working HTTP endpoint while membership is fixed.
 func TestExecModel_Eventing_NoRegistry_NotReady(t *testing.T) {
 	const (
 		name      = "eventing-orphan"
@@ -226,7 +264,15 @@ func TestExecModel_Eventing_NoRegistry_NotReady(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, cond.Status, "non-member eventing agent is Ready=False")
 	assert.Equal(t, "NotRegistryMember", cond.Reason)
 
+	// No Trigger (no broker to subscribe to), but the Deployment + Service persist.
 	assertNoTrigger(t, name, namespace)
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep),
+		"Deployment kept for a non-member eventing agent (working HTTP endpoint)")
+	var svc corev1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc),
+		"Service kept for a non-member eventing agent")
+	assertNoKsvc(t, name, namespace)
 }
 
 // TestExecModel_Job_BareJob asserts a job-model agent with no schedule policy
@@ -251,6 +297,28 @@ func TestExecModel_Job_BareJob(t *testing.T) {
 	// Batch pods drop the HTTP server probes.
 	assert.Nil(t, job.Spec.Template.Spec.Containers[0].ReadinessProbe, "no readiness probe on a batch pod")
 	assert.Nil(t, job.Spec.Template.Spec.Containers[0].LivenessProbe, "no liveness probe on a batch pod")
+
+	// m7.8 fix: the OTel collector must be a NATIVE SIDECAR (an initContainer with
+	// restartPolicy Always), NOT a regular container — else the Job never
+	// completes (a Job waits for ALL regular containers to exit, and the collector
+	// runs forever). The agent (user) container stays a regular container.
+	regularNames := make([]string, 0, len(job.Spec.Template.Spec.Containers))
+	for _, c := range job.Spec.Template.Spec.Containers {
+		regularNames = append(regularNames, c.Name)
+		assert.NotEqual(t, telemetry.CollectorContainerName, c.Name,
+			"collector must NOT be a regular container (would wedge the Job)")
+	}
+	assert.Contains(t, regularNames, "user-container", "agent stays a regular container")
+	var collectorInit *corev1.Container
+	for i := range job.Spec.Template.Spec.InitContainers {
+		if job.Spec.Template.Spec.InitContainers[i].Name == telemetry.CollectorContainerName {
+			collectorInit = &job.Spec.Template.Spec.InitContainers[i]
+		}
+	}
+	require.NotNil(t, collectorInit, "collector must be a native sidecar (initContainer)")
+	require.NotNil(t, collectorInit.RestartPolicy, "native sidecar sets restartPolicy")
+	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *collectorInit.RestartPolicy,
+		"native sidecar restartPolicy=Always → Job completes when the agent exits")
 
 	// Owner ref → GC on delete.
 	require.Len(t, job.OwnerReferences, 1)
@@ -341,6 +409,58 @@ func TestExecModel_Transition_ServingToJobToServing(t *testing.T) {
 	assertNoJob(t, name, namespace)
 }
 
+// TestExecModel_Transition_ServingToEventingToServing asserts switching an agent
+// between serving and eventing tears down the ksvc and creates the Deployment +
+// Service + Trigger (and back): the m7.8 fix means the two models use DIFFERENT
+// workload kinds, so a transition is a create/delete, not a revision roll.
+func TestExecModel_Transition_ServingToEventingToServing(t *testing.T) {
+	const (
+		name       = "evt-transition"
+		namespace  = "default"
+		registryID = "evt-trans-reg"
+	)
+	createRegistry(t, "evt-trans-registry", namespace, registryID, "registry", registryID)
+	deploy := createExecAgent(t, name, namespace, "serving", map[string]string{"registry": registryID})
+	r := newReconciler()
+
+	// serving → ksvc exists, no Deployment/Service/Trigger.
+	reconcileNN(t, r, name, namespace)
+	getKsvc(t, name, namespace)
+	assertNoEventingDeployment(t, name, namespace)
+	assertNoEventingService(t, name, namespace)
+	assertNoTrigger(t, name, namespace)
+
+	// Switch to eventing.
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+	deploy.Spec.ExecutionModel = "eventing"
+	require.NoError(t, k8sClient.Update(testCtx, deploy))
+	reconcileNN(t, r, name, namespace)
+
+	// ksvc torn down; Deployment + Service + Trigger created.
+	assertNoKsvc(t, name, namespace)
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep),
+		"Deployment must exist after switching to eventing")
+	var svc corev1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc),
+		"Service must exist after switching to eventing")
+	var trigger eventingv1.Trigger
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &trigger),
+		"Trigger must exist after switching to eventing")
+
+	// Switch back to serving.
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+	deploy.Spec.ExecutionModel = "serving"
+	require.NoError(t, k8sClient.Update(testCtx, deploy))
+	reconcileNN(t, r, name, namespace)
+
+	// ksvc recreated; Deployment + Service + Trigger torn down.
+	getKsvc(t, name, namespace)
+	assertNoEventingDeployment(t, name, namespace)
+	assertNoEventingService(t, name, namespace)
+	assertNoTrigger(t, name, namespace)
+}
+
 // ── assertion helpers ────────────────────────────────────────────────────────
 
 func findCondition(conds []metav1.Condition, condType string) *metav1.Condition {
@@ -378,4 +498,18 @@ func assertNoTrigger(t *testing.T, name, namespace string) {
 	var trigger eventingv1.Trigger
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &trigger)
 	assert.True(t, apierrors.IsNotFound(err), "no Trigger expected, got err=%v", err)
+}
+
+func assertNoEventingDeployment(t *testing.T, name, namespace string) {
+	t.Helper()
+	var dep appsv1.Deployment
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep)
+	assert.True(t, apierrors.IsNotFound(err), "no eventing Deployment expected, got err=%v", err)
+}
+
+func assertNoEventingService(t *testing.T, name, namespace string) {
+	t.Helper()
+	var svc corev1.Service
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc)
+	assert.True(t, apierrors.IsNotFound(err), "no eventing Service expected, got err=%v", err)
 }
