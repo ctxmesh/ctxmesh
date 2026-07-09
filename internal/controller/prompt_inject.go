@@ -1,0 +1,228 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
+)
+
+const (
+	// promptConfigMapSuffix names the per-agent ConfigMap that materialises the
+	// resolved prompt (<agent>-prompt). The controller resolves the PromptVersion
+	// git pointer, writes the content here, and mounts it read-only into the user
+	// container. git remains the source of truth; this is a per-revision cache.
+	promptConfigMapSuffix = "-prompt"
+
+	// promptConfigMapKey is the data key inside the <agent>-prompt ConfigMap.
+	promptConfigMapKey = "prompt.txt"
+
+	// promptMountPath is where the resolved prompt is mounted in the user
+	// container. The launcher reads PROMPT_FILE (this path + key) for the content
+	// and surfaces PROMPT_VERSION as the prompt.version trace attribute.
+	promptMountPath = "/etc/agent/prompt"
+
+	// promptVolumeName is the pod volume name for the mounted prompt ConfigMap.
+	promptVolumeName = "agent-prompt"
+
+	// envPromptFile is the in-container path to the resolved prompt file. Static
+	// env (no valueFrom — the Knative ksvc landmine, m5.7).
+	envPromptFile = "PROMPT_FILE"
+
+	// envPromptVersion is the deterministic, display-only prompt identifier the
+	// launcher stamps as the prompt.version span attribute. Static env.
+	envPromptVersion = "PROMPT_VERSION"
+)
+
+// promptConfigMapName returns the per-agent prompt ConfigMap name.
+func promptConfigMapName(agentName string) string {
+	return agentName + promptConfigMapSuffix
+}
+
+// resolvedPrompt is the controller-side result of resolving an agent's promptRef:
+// the resolved content + version and the derived digest component. hasPrompt is
+// false when the agent has no promptRef (the image-bundled prompt is used and the
+// deploy is byte-compatible with the pre-M9 path).
+type resolvedPrompt struct {
+	hasPrompt bool
+	content   string
+	version   string
+	// digest is the prompt COMPONENT of combinedBindingDigest (p=<digest8>): 8 hex
+	// chars over the pointer + resolved version, "" when hasPrompt is false. It
+	// rolls the Knative revision on a prompt swap WITHOUT touching the image.
+	digest string
+}
+
+// promptResolveError wraps a user-facing prompt-resolution failure (missing
+// PromptVersion, bad git ref/path) so the caller sets Ready=False and STOPS
+// cleanly — the old revision keeps serving, no half-applied prompt swap, no noisy
+// requeue on user input. Non-promptResolveError errors from resolvePrompt are
+// genuine infra failures (API read errors) and requeue normally.
+type promptResolveError struct {
+	reason string
+	msg    string
+}
+
+func (e *promptResolveError) Error() string { return e.msg }
+
+// asPromptResolveError extracts a *promptResolveError from an error chain.
+func asPromptResolveError(err error) (*promptResolveError, bool) {
+	var pe *promptResolveError
+	if errors.As(err, &pe) {
+		return pe, true
+	}
+	return nil, false
+}
+
+// promptResolver returns the reconciler's Resolver, defaulting to the offline
+// fixture-backed resolver when unset. Production wires a real (e.g. go-git)
+// Resolver at the construction site; dev / envtest / e2e use the fixture, which
+// resolves deterministically with no network (ADR 0004, mock-first).
+func (r *AgentDeploymentReconciler) promptResolver() prompt.Resolver {
+	if r.PromptResolver != nil {
+		return r.PromptResolver
+	}
+	return prompt.NewFixtureResolver()
+}
+
+// resolvePrompt resolves the agent's spec.promptRef (if any) into prompt content,
+// a display version, and the digest component. It returns:
+//
+//   - hasPrompt=false, no error         → no promptRef (image-bundled prompt path).
+//   - a *promptResolveError             → user error (missing PromptVersion / bad
+//     git ref/path); the caller sets Ready=False and keeps the old revision.
+//   - any other error                   → an infra read failure (requeue).
+//
+// The digest folds the pointer AND the resolved version so a promptRef swap OR a
+// PromptVersion.spec.git.ref swap both roll the revision — the mechanism the
+// prompt-only-deploy invariant relies on. The image is never touched here.
+func (r *AgentDeploymentReconciler) resolvePrompt(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (resolvedPrompt, error) {
+	if deploy.Spec.PromptRef == "" {
+		return resolvedPrompt{}, nil
+	}
+
+	var pv agentsv1alpha1.PromptVersion
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.PromptRef}, &pv)
+	if apierrors.IsNotFound(err) {
+		return resolvedPrompt{}, &promptResolveError{
+			reason: "PromptVersionNotFound",
+			msg:    fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", deploy.Spec.PromptRef, deploy.Namespace),
+		}
+	}
+	if err != nil {
+		return resolvedPrompt{}, fmt.Errorf("fetching PromptVersion %q: %w", deploy.Spec.PromptRef, err)
+	}
+
+	res, err := r.promptResolver().Resolve(ctx, pv.Spec.Git)
+	if errors.Is(err, prompt.ErrNotFound) {
+		// A bad git ref / missing path is USER input, not an infra failure: surface
+		// it on status and keep the old revision serving (no half-applied swap).
+		return resolvedPrompt{}, &promptResolveError{
+			reason: "PromptUnresolvable",
+			msg: fmt.Sprintf("PromptVersion %q git pointer does not resolve (repo=%q ref=%q path=%q): %v",
+				pv.Name, pv.Spec.Git.Repo, pv.Spec.Git.Ref, pv.Spec.Git.Path, err),
+		}
+	}
+	if err != nil {
+		return resolvedPrompt{}, fmt.Errorf("resolving PromptVersion %q: %w", pv.Name, err)
+	}
+
+	return resolvedPrompt{
+		hasPrompt: true,
+		content:   res.Content,
+		version:   res.Version,
+		digest:    promptDigest(pv.Spec.Git, res.Version),
+	}, nil
+}
+
+// promptDigest returns the prompt COMPONENT of combinedBindingDigest: 8 hex chars
+// over the git pointer + resolved version. It folds into the revision-name digest
+// like the M8 budget component (g=<w>), so a prompt swap rolls a NEW Knative
+// revision (the new prompt takes effect on a clean rollout) while the container
+// image — which lives in spec.Image and is never touched by the prompt path —
+// keeps an UNCHANGED digest. Returns "" for the empty inputs (no prompt),
+// symmetric with the tool/memory/registry/budget components.
+func promptDigest(src agentsv1alpha1.GitPromptSource, version string) string {
+	if version == "" {
+		return ""
+	}
+	payload := fmt.Sprintf("repo=%s;ref=%s;path=%s;ver=%s", src.Repo, src.Ref, src.Path, version)
+	h := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// reconcilePromptConfigMap materialises the resolved prompt into the per-agent
+// <agent>-prompt ConfigMap (owner-ref'd so it GCs with the AgentDeployment) and
+// returns the volume + mount + static env the user container needs. It is a
+// no-op returning zero values when the agent has no prompt.
+//
+// The prompt is delivered via a mounted ConfigMap (like the collector config),
+// NOT env, because prompt content can exceed the per-var env limit and a mounted
+// file is the natural launcher read. The env carries only the FILE PATH and the
+// display VERSION — both static (no valueFrom; the m5.7 Knative ksvc landmine).
+func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	rp resolvedPrompt,
+) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
+	if !rp.hasPrompt {
+		return nil, nil, nil, nil
+	}
+
+	cmName := promptConfigMapName(deploy.Name)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
+	}
+	if _, err = ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data[promptConfigMapKey] = rp.content
+		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("upserting prompt ConfigMap: %w", err)
+	}
+
+	v := corev1.Volume{
+		Name: promptVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cmName},
+			},
+		},
+	}
+	m := corev1.VolumeMount{Name: promptVolumeName, MountPath: promptMountPath, ReadOnly: true}
+	e := []corev1.EnvVar{
+		{Name: envPromptFile, Value: promptMountPath + "/" + promptConfigMapKey},
+		{Name: envPromptVersion, Value: rp.version},
+	}
+	return &v, &m, e, nil
+}

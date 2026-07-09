@@ -40,6 +40,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -187,6 +188,11 @@ func main() {
 	if err := (&controller.AgentDeploymentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Prompt-only deploy (M9): the resolve seam. v1 ships the deterministic,
+		// OFFLINE fixture resolver — the dev/CI environment has no live git remote
+		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
+		// impl of prompt.Resolver swapped in HERE; nothing else changes.
+		PromptResolver: prompt.NewFixtureResolver(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
