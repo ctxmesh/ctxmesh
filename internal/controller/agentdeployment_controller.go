@@ -72,6 +72,28 @@ const brokerNameSuffix = "-broker"
 // shared registry broker.
 const ceTypeAttribute = "type"
 
+// Blob-offload object store (m7.6b, specs/eventing-scaling.md §"Blob offload").
+// A registry member's launcher offloads a >256KiB async payload to the dedicated
+// dev MinIO (config/objectstore/) and rehydrates it on consume. The address and
+// the DEV-ONLY deterministic credentials are injected as STATIC env — never
+// valueFrom (Knative's ksvc webhook rejects it; the m5.7 landmine + tier1 guard).
+const (
+	// objectStoreAddr is the cluster address of the dedicated dev MinIO Service
+	// (config/objectstore/, wired into config/default). It mirrors the S3 API
+	// port; the launcher connects to it plain-HTTP in-cluster (dev posture, like
+	// the dev Valkey). One store serves every registry member.
+	objectStoreAddr = "agent-engine-objectstore.agent-engine-system.svc:9000"
+
+	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
+	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
+	// (identical posture to the dev Langfuse / Valkey: NOT a real credential,
+	// never rotated, only ever meaningful against the in-cluster dev MinIO). They
+	// MUST match the values the config/objectstore/ MinIO Deployment is seeded
+	// with. Injected as static env so the launcher authenticates to the dev store.
+	objectStoreDevAccessKey = "agent-engine-dev"
+	objectStoreDevSecretKey = "agent-engine-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+)
+
 // jobBackoffLimit bounds retries for a one-shot job-model agent. Kept small: a
 // job agent runs to completion; a handful of retries covers a transient
 // image-pull / node-eviction failure without wedging a poison run
@@ -498,6 +520,25 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
 			})
 		}
+
+		// Blob offload (m7.6b): a registry member participates in the async A2A
+		// path — as a publisher (offload a >256KiB payload) and/or a consumer
+		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
+		// address + the deterministic DEV-ONLY credentials so the launcher's
+		// publish/consume path can reach MinIO. Scope: EVERY registry member, not
+		// only executionModel=eventing — a member's launcher wires offload on the
+		// same gate the async consumer/publisher use (registry membership /
+		// A2AEnabled), independent of its own workload KIND, so a producer that
+		// publishes and a Trigger-backed consumer both get it. All three are known
+		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
+		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
+		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
+		// async payloads pass through capped.
+		env = append(env,
+			corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
+			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
+			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
+		)
 	}
 
 	containers := []corev1.Container{
@@ -567,6 +608,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
+	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
+	// and its values are package constants (objectStoreAddr + the dev creds,
+	// identical for every member), so it needs no digest component of its own: the
+	// registry-membership digest already rolls the revision on join/leave — exactly
+	// when OBJECT_STORE_ADDR + the creds appear/disappear. If the store address
+	// ever becomes per-agent it must fold into registryMembershipDigest.
 	regDigest := registryMembershipDigest(membership, deploy.Spec.Role, deploy.Spec.AllowedCallers)
 	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest)
 

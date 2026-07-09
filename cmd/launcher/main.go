@@ -81,11 +81,26 @@ func main() {
 		if cfg.MemoryEnabled() {
 			seen = newRedisSeenSet(cfg.Memory.BackendAddr)
 		}
+		// Blob offload (m7.6b): wired when OBJECT_STORE_ADDR is injected. The
+		// offloader rehydrates a $ref payload before the agent is invoked. A
+		// construction error (bad addr) is logged and the consumer runs WITHOUT
+		// offload — a producer without a store never emits a $ref, so a nil
+		// offloader is safe (nothing to rehydrate). nil when disabled.
+		var off *offloader
+		if cfg.ObjectStoreEnabled() {
+			store, oErr := newMinioStore(cfg.ObjectStore.Addr, cfg.ObjectStore.AccessKey, cfg.ObjectStore.SecretKey)
+			if oErr != nil {
+				fmt.Fprintf(os.Stderr, "launcher: object store (offload disabled): %v\n", oErr)
+			} else {
+				off = newOffloader(store)
+			}
+		}
 		consumer = &asyncConsumer{
-			cfg:    asyncConfig{DedupeAddr: cfg.Memory.BackendAddr, SelfName: cfg.AgentName},
-			seen:   seen,
-			tracer: tracer,
-			invoke: newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout}),
+			cfg:     asyncConfig{DedupeAddr: cfg.Memory.BackendAddr, SelfName: cfg.AgentName},
+			seen:    seen,
+			tracer:  tracer,
+			offload: off,
+			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout}),
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)

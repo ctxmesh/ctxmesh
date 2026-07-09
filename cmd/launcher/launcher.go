@@ -82,6 +82,13 @@ type Config struct {
 	// AgentRegistry member); inbound access control is likewise a no-op without
 	// it.
 	A2A a2aConfig
+
+	// ObjectStore holds the blob-offload configuration for the async path. The
+	// offloader is constructed ONLY when ObjectStore.Addr is non-empty (i.e.
+	// OBJECT_STORE_ADDR is injected because the agent participates in the
+	// eventing path); otherwise offload is disabled and async payloads pass
+	// through capped.
+	ObjectStore objectStoreConfig
 }
 
 // loadConfig reads launcher configuration from environment variables.
@@ -138,6 +145,8 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	objStore := loadObjectStoreConfig(lookup)
+
 	return Config{
 		Argv:         argv,
 		ProxyPort:    proxyPort,
@@ -148,7 +157,53 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		AgentRoute:   lookup("AGENT_ROUTE"),
 		Memory:       mem,
 		A2A:          a2a,
+		ObjectStore:  objStore,
 	}, nil
+}
+
+// objectStoreConfig is the blob-offload configuration for the async path
+// (m7.6b). Parsed from env alongside the launcher Config.
+type objectStoreConfig struct {
+	// Addr is OBJECT_STORE_ADDR — the MinIO host:port. Empty ⇒ offload is
+	// DISABLED (no offloader constructed): oversize async payloads are not
+	// offloaded and pass through capped, exactly as before this feature.
+	Addr string
+	// AccessKey / SecretKey are the dev object-store credentials
+	// (OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY). Deterministic dev-only
+	// fixed values injected by the controller as STATIC env (no valueFrom — the
+	// Knative ksvc constraint); NEVER a real credential.
+	AccessKey string
+	SecretKey string
+}
+
+// loadObjectStoreConfig parses the blob-offload configuration from env.
+//
+// Environment variables:
+//
+//	OBJECT_STORE_ADDR (gate): the MinIO host:port. Empty ⇒ offload is disabled
+//	  (no offloader is built); every other object-store env is then irrelevant.
+//	OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY: the dev credentials.
+//
+// Like loadMemoryConfig / loadA2AConfig, it does NOT hard-fail on missing
+// credentials when the gate is set — an empty credential is a
+// visible-but-non-fatal misconfiguration (the first PUT/GET surfaces the auth
+// error) rather than a crash on a best-effort path.
+func loadObjectStoreConfig(lookup func(string) string) objectStoreConfig {
+	addr := lookup("OBJECT_STORE_ADDR")
+	if addr == "" {
+		return objectStoreConfig{}
+	}
+	return objectStoreConfig{
+		Addr:      addr,
+		AccessKey: lookup("OBJECT_STORE_ACCESS_KEY"),
+		SecretKey: lookup("OBJECT_STORE_SECRET_KEY"),
+	}
+}
+
+// ObjectStoreEnabled reports whether blob offload should be wired — true iff an
+// object-store address was injected.
+func (c Config) ObjectStoreEnabled() bool {
+	return c.ObjectStore.Addr != ""
 }
 
 // loadMemoryConfig parses the :2998 memory-endpoint configuration from env.
