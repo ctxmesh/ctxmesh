@@ -1,0 +1,11 @@
+# Pinned Python dev toolchain for the ctxmesh SDK (ruff + pytest).
+#
+# Reproducible on a clean host and in CI: `make py-venv` (repo root) creates a
+# venv from the host python3 and installs EXACTLY these pins, so `make lint` /
+# `make test` never depend on host-global pip installs. Both pins support the
+# 3.9 target (the host is python 3.9.6).
+#
+# Keep in sync with the [project.optional-dependencies].dev extra in
+# pyproject.toml.
+ruff==0.6.9
+pytest==8.3.3

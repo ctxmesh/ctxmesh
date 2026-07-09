@@ -1,0 +1,70 @@
+# ctxmesh — the agent-engine Python SDK.
+#
+# Distribution name: "ctxmesh"; import name: "ctxmesh". Both match so
+# `pip install ctxmesh` gives `import ctxmesh` with zero surprises (spec
+# "Packaging & base-image bundling").
+#
+# Typed sugar over the launcher's language-agnostic localhost platform plane
+# (ADR 0002): memory (:2998), tools/discovery (:2999), feedback (:2995). The
+# SDK is NEVER a hard dependency and adds zero runtime deps — the three m10.2
+# clients are pure stdlib (urllib) so the package installs cleanly into
+# base-python and runs on the 3.9+ target (the OTLP/OpenInference trace + model
+# helpers arrive in m10.3, which is when an OTLP exporter dep is added).
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctxmesh"
+version = "0.1.0"
+description = "Typed Python SDK over the agent-engine launcher localhost plane (memory / tools / feedback)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "agent-engine" }]
+keywords = ["agent-engine", "ctxmesh", "llm", "agents", "observability"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "License :: OSI Approved :: Apache Software License",
+]
+# Zero runtime dependencies: the m10.2 clients are pure stdlib.
+dependencies = []
+
+[project.optional-dependencies]
+# Pinned dev toolchain — reproducible on a clean host / CI (no host-global
+# installs). Bootstrapped into a venv by `make py-venv` (see the repo Makefile).
+# ruff 0.6.9 and pytest 8.3.x both support Python 3.9 (the host is 3.9.6).
+dev = [
+    "ruff==0.6.9",
+    "pytest==8.3.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ctxmesh = ["py.typed"]
+
+# ── ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A pragmatic-but-strict set: pycodestyle/pyflakes (E,F), bugbear (B),
+# isort (I), comprehensions (C4), simplify (SIM). pyupgrade (UP) is deliberately
+# omitted: the SDK targets 3.9 and uses explicit typing.Dict/List/Optional for
+# clarity (all under `from __future__ import annotations`), which UP would
+# rewrite to PEP 585/604 forms — a style change, not a correctness one.
+select = ["E", "F", "B", "I", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts and longer fixture bodies freely.
+"tests/*" = ["B011"]
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
