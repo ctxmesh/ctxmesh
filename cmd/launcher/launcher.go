@@ -89,6 +89,13 @@ type Config struct {
 	// eventing path); otherwise offload is disabled and async payloads pass
 	// through capped.
 	ObjectStore objectStoreConfig
+
+	// Gateway holds the outbound cost-budget gateway-proxy configuration (M8).
+	// The proxy listener is started ONLY when Gateway.UpstreamURL is non-empty
+	// AND a cap is set (i.e. the controller injected spec.budget). Otherwise the
+	// agent's MODEL_GATEWAY_URL points straight at LiteLLM and there is zero
+	// budget overhead.
+	Gateway gatewayConfig
 }
 
 // loadConfig reads launcher configuration from environment variables.
@@ -147,6 +154,11 @@ func loadConfig(lookup func(string) string) (Config, error) {
 
 	objStore := loadObjectStoreConfig(lookup)
 
+	gw, err := loadGatewayConfig(lookup, agentName)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Argv:         argv,
 		ProxyPort:    proxyPort,
@@ -158,6 +170,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		Memory:       mem,
 		A2A:          a2a,
 		ObjectStore:  objStore,
+		Gateway:      gw,
 	}, nil
 }
 
