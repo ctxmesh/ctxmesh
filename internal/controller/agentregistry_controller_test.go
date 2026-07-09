@@ -164,9 +164,13 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	assert.Contains(t, platformNS, kourierSystemNamespace,
 		"platform ingress must allow the kourier ingress namespace (external /invoke)")
 
-	// Egress: DNS must be allowed (UDP+TCP 53) so discovery resolves.
-	assert.True(t, hasDNSEgress(np.Spec.Egress),
-		"egress must allow DNS (UDP+TCP 53) for peer resolution")
+	// Ingress-only (M6, ADR 0007): the policy must NOT restrict egress — a
+	// default-deny egress model silently severs collector→Langfuse / gateway /
+	// memory traffic (m6.4 review). Isolation is ingress-driven.
+	assert.NotContains(t, np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress,
+		"M6 policy must be ingress-only (egress lockdown deferred to M11 zero-trust)")
+	assert.Empty(t, np.Spec.Egress,
+		"M6 policy must declare no egress rules (unrestricted egress)")
 }
 
 // TestRegistry_MemberEnvInjected verifies the AgentDeployment reconciler injects
@@ -457,16 +461,4 @@ func namespaceSelectorValues(peers []networkingv1.NetworkPolicyPeer) []string {
 		}
 	}
 	return out
-}
-
-// hasDNSEgress reports whether any egress rule opens UDP or TCP port 53.
-func hasDNSEgress(rules []networkingv1.NetworkPolicyEgressRule) bool {
-	for _, rule := range rules {
-		for _, p := range rule.Ports {
-			if p.Port != nil && p.Port.IntVal == kubeDNSPort {
-				return true
-			}
-		}
-	}
-	return false
 }
