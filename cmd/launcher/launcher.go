@@ -103,6 +103,12 @@ type Config struct {
 	// agent's MODEL_GATEWAY_URL points straight at LiteLLM and there is zero
 	// budget overhead.
 	Gateway gatewayConfig
+
+	// Feedback holds the :2995 feedback-ingest-hook configuration (M9). The
+	// listener is started ONLY when Feedback.LangfuseHost is non-empty (i.e.
+	// LANGFUSE_HOST was injected by the controller). Otherwise (no feedback
+	// wiring) the agent is unchanged — no extra listener, no overhead.
+	Feedback feedbackConfig
 }
 
 // loadConfig reads launcher configuration from environment variables.
@@ -166,6 +172,11 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	fb, err := loadFeedbackConfig(lookup)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Argv:          argv,
 		ProxyPort:     proxyPort,
@@ -179,6 +190,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		A2A:           a2a,
 		ObjectStore:   objStore,
 		Gateway:       gw,
+		Feedback:      fb,
 	}, nil
 }
 
