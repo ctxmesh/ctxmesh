@@ -260,6 +260,15 @@ spec:
                   - name
                   type: object
                 type: array
+              evalSuiteRef:
+                description: |-
+                  evalSuiteRef optionally names an EvalSuite (same namespace) whose scorers
+                  gate this deployment. When set, the controller runs the suite against the
+                  candidate revision and promotes or blocks based on the result and the suite's
+                  gate policy. When omitted, no eval gate is applied — the deploy proceeds
+                  unchanged (PRD §17).
+                maxLength: 253
+                type: string
               executionModel:
                 default: serving
                 description: |-
@@ -291,6 +300,14 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              promptRef:
+                description: |-
+                  promptRef optionally names a PromptVersion (same namespace) whose git-backed
+                  prompt is injected into the agent. Swapping promptRef rolls a new Knative
+                  revision with the new prompt without an image rebuild. When omitted, the
+                  image-bundled prompt is used (PRD §7).
+                maxLength: 253
+                type: string
               resources:
                 description: |-
                   resources optionally constrains the CPU and memory available to the agent
@@ -415,6 +432,66 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              gate:
+                description: |-
+                  gate reports the deploy-gate state when the AgentDeployment references an
+                  EvalSuite (spec.evalSuiteRef). Nil when no gate is active — a deployment
+                  without an evalSuiteRef is byte-compatible with the pre-M9 status (PRD §17).
+                properties:
+                  decision:
+                    description: |-
+                      decision is the terminal gate decision recorded for the scored revision:
+                      promoted | blocked | warned. Empty while pending/scoring.
+                    enum:
+                    - promoted
+                    - blocked
+                    - warned
+                    type: string
+                  phase:
+                    description: |-
+                      phase is the current gate state: pending | scoring | awaiting-promotion |
+                      promoted | blocked | warned. A passing candidate rests at awaiting-promotion
+                      until a human approval signal (the agents.ctxmesh.ai/promote annotation)
+                      flips it to promoted — v1 does NOT auto-promote (PRD §17.4).
+                    enum:
+                    - pending
+                    - scoring
+                    - awaiting-promotion
+                    - promoted
+                    - blocked
+                    - warned
+                    type: string
+                  reason:
+                    description: |-
+                      reason is a short machine reason for the current phase (e.g. ScorePassed,
+                      ScoreBelowThreshold, LangfuseUnavailable). Human-readable detail lives on the
+                      Ready condition message.
+                    maxLength: 316
+                    type: string
+                  score:
+                    description: |-
+                      score is the candidate's weighted-mean suite score for the scored revision,
+                      as an exact decimal string in [0,1] (e.g. "0.8123"). Empty until scoring has
+                      produced a value. Stored as a string, not a float, so the status round-trips
+                      byte-stably. Empty when the gate failed closed unscored (Langfuse down).
+                    pattern: ^$|^[01](\.[0-9]{1,4})?$
+                    type: string
+                  scoredRevision:
+                    description: |-
+                      scoredRevision is the candidate revision name the gate scored and decided on
+                      (the "-h<digest>" revision the candidate would serve). It pins the decision to
+                      an exact candidate so a later spec/prompt change re-scores rather than reusing
+                      a stale decision, and so a human approval targets the reviewed candidate.
+                    maxLength: 63
+                    type: string
+                  threshold:
+                    description: |-
+                      threshold echoes the EvalSuite threshold the score was compared against, as
+                      an exact decimal string, so the gate decision is self-describing on status
+                      without a second lookup.
+                    pattern: ^$|^[01](\.[0-9]{1,4})?$
+                    type: string
+                type: object
               latestVersion:
                 description: |-
                   latestVersion is the name of the most recently created AgentVersion snapshot

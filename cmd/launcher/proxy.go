@@ -193,6 +193,14 @@ func buildHandler(
 			attribute.Int("http.status_code", rw.code),
 			attribute.Int64("latency_ms", latencyMS),
 		)
+		// prompt.version (M9): the resolved git-pointer prompt identifier, so
+		// Langfuse can display which prompt this run used. DISPLAY ONLY — git stays
+		// the source of truth. Stamped only when the agent has a promptRef (a
+		// PROMPT_VERSION was injected); an image-bundled-prompt agent leaves the span
+		// unchanged (no empty attribute).
+		if cfg.PromptVersion != "" {
+			span.SetAttributes(attribute.String("prompt.version", cfg.PromptVersion))
+		}
 		if rw.code >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, http.StatusText(rw.code))
 		}

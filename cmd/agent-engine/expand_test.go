@@ -356,3 +356,306 @@ func TestExpand_InvalidYAML(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (parse)", xe.code, exitParse)
 	}
 }
+
+// ── Eval expand tests ─────────────────────────────────────────────────────────
+
+// TestExpand_Eval_FullRoundTrip verifies that a full eval block produces an
+// EvalSuite manifest followed by an AgentDeployment with evalSuiteRef set.
+func TestExpand_Eval_FullRoundTrip(t *testing.T) {
+	input := strings.Join([]string{
+		"name: gated-agent",
+		"image: ghcr.io/x/y:latest",
+		"eval:",
+		"  suite: my-eval-suite",
+		"  dataset: my-dataset",
+		"  scorers:",
+		"    - name: mock-scorer",
+		"      type: mock",
+		"      weight: 1",
+		"  threshold: \"0.80\"",
+		"  gate: block",
+		"",
+	}, "\n")
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+
+	// Must contain an EvalSuite document.
+	if !strings.Contains(got, "kind: EvalSuite") {
+		t.Errorf("output should contain kind: EvalSuite, got:\n%s", got)
+	}
+	if !strings.Contains(got, "name: my-eval-suite") {
+		t.Errorf("output should contain EvalSuite name, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ref: my-dataset") {
+		t.Errorf("output should contain dataset ref, got:\n%s", got)
+	}
+	if !strings.Contains(got, "type: mock") {
+		t.Errorf("output should contain scorer type mock, got:\n%s", got)
+	}
+	if !strings.Contains(got, "threshold: \"0.80\"") && !strings.Contains(got, "threshold: 0.80") {
+		if !strings.Contains(got, "0.80") {
+			t.Errorf("output should contain threshold 0.80, got:\n%s", got)
+		}
+	}
+	if !strings.Contains(got, "gate: block") {
+		t.Errorf("output should contain gate: block, got:\n%s", got)
+	}
+
+	// Must contain a document separator.
+	if !strings.Contains(got, "---") {
+		t.Errorf("output should contain YAML document separator ---, got:\n%s", got)
+	}
+
+	// Must contain an AgentDeployment with evalSuiteRef.
+	if !strings.Contains(got, "kind: AgentDeployment") {
+		t.Errorf("output should contain kind: AgentDeployment, got:\n%s", got)
+	}
+	if !strings.Contains(got, "evalSuiteRef: my-eval-suite") {
+		t.Errorf("output should contain evalSuiteRef: my-eval-suite, got:\n%s", got)
+	}
+}
+
+// TestExpand_Eval_AbsentIsNil verifies that when the eval block is absent the
+// output contains no EvalSuite and no evalSuiteRef.
+func TestExpand_Eval_AbsentIsNil(t *testing.T) {
+	input := "name: no-eval-agent\nimage: ghcr.io/x/y:latest\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "EvalSuite") {
+		t.Errorf("output should not contain EvalSuite when eval is absent, got:\n%s", got)
+	}
+	if strings.Contains(got, "evalSuiteRef") {
+		t.Errorf("output should not contain evalSuiteRef when eval is absent, got:\n%s", got)
+	}
+}
+
+// TestExpand_Eval_ThresholdBoundary verifies valid threshold patterns accepted
+// by the eval block (0, 1, and decimal values in range).
+func TestExpand_Eval_ThresholdBoundary(t *testing.T) {
+	cases := []struct {
+		threshold string
+		wantErr   bool
+	}{
+		{"0", false},
+		{"1", false},
+		{"0.80", false},
+		{"0.9999", false},
+		{"1.0", false},
+	}
+	for _, tc := range cases {
+		input := strings.Join([]string{
+			"name: threshold-agent",
+			"image: ghcr.io/x/y:latest",
+			"eval:",
+			"  suite: suite-x",
+			"  dataset: ds-x",
+			"  scorers:",
+			"    - name: m",
+			"      type: mock",
+			"  threshold: \"" + tc.threshold + "\"",
+			"",
+		}, "\n")
+		var buf bytes.Buffer
+		err := expandBytes([]byte(input), &buf)
+		if tc.wantErr && err == nil {
+			t.Errorf("threshold %q: expected error, got nil", tc.threshold)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("threshold %q: unexpected error: %v", tc.threshold, err)
+		}
+	}
+}
+
+// TestExpand_Eval_MissingSuite verifies that an eval block without suite is rejected.
+func TestExpand_Eval_MissingSuite(t *testing.T) {
+	input := strings.Join([]string{
+		"name: x",
+		"image: ghcr.io/x/y:latest",
+		"eval:",
+		"  dataset: ds",
+		"  scorers:",
+		"    - name: m",
+		"      type: mock",
+		"  threshold: \"0.80\"",
+		"",
+	}, "\n")
+	var buf bytes.Buffer
+	err := expandBytes([]byte(input), &buf)
+	if err == nil {
+		t.Fatal("expected error for missing eval.suite, got nil")
+	}
+	if !strings.Contains(err.Error(), "eval.suite") {
+		t.Errorf("error should mention eval.suite, got: %v", err)
+	}
+}
+
+// TestExpand_Eval_ScorerEnum verifies that valid scorer types pass through correctly.
+func TestExpand_Eval_ScorerEnum(t *testing.T) {
+	for _, scorerType := range []string{"mock", "llm-judge", "code"} {
+		input := strings.Join([]string{
+			"name: scorer-agent",
+			"image: ghcr.io/x/y:latest",
+			"eval:",
+			"  suite: suite-s",
+			"  dataset: ds",
+			"  scorers:",
+			"    - name: s1",
+			"      type: " + scorerType,
+			"  threshold: \"0.80\"",
+			"",
+		}, "\n")
+		var buf bytes.Buffer
+		if err := expandBytes([]byte(input), &buf); err != nil {
+			t.Errorf("scorer type %q: unexpected error: %v", scorerType, err)
+			continue
+		}
+		got := buf.String()
+		if !strings.Contains(got, "type: "+scorerType) {
+			t.Errorf("scorer type %q: output missing scorer type, got:\n%s", scorerType, got)
+		}
+	}
+}
+
+// ── Prompt expand tests ───────────────────────────────────────────────────────
+
+// TestExpand_Prompt_FullRoundTrip verifies that a full prompt block produces a
+// PromptVersion manifest followed by an AgentDeployment with promptRef set.
+func TestExpand_Prompt_FullRoundTrip(t *testing.T) {
+	input := strings.Join([]string{
+		"name: prompt-agent",
+		"image: ghcr.io/x/y:latest",
+		"prompt:",
+		"  name: my-prompt-v1",
+		"  git:",
+		"    repo: https://github.com/example/prompts.git",
+		"    ref: abc1234def5678",
+		"    path: prompts/system.txt",
+		"",
+	}, "\n")
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+
+	// Must contain a PromptVersion document.
+	if !strings.Contains(got, "kind: PromptVersion") {
+		t.Errorf("output should contain kind: PromptVersion, got:\n%s", got)
+	}
+	if !strings.Contains(got, "name: my-prompt-v1") {
+		t.Errorf("output should contain PromptVersion name, got:\n%s", got)
+	}
+	if !strings.Contains(got, "repo: https://github.com/example/prompts.git") {
+		t.Errorf("output should contain git.repo, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ref: abc1234def5678") {
+		t.Errorf("output should contain git.ref, got:\n%s", got)
+	}
+	if !strings.Contains(got, "path: prompts/system.txt") {
+		t.Errorf("output should contain git.path, got:\n%s", got)
+	}
+
+	// Must contain a document separator.
+	if !strings.Contains(got, "---") {
+		t.Errorf("output should contain YAML document separator ---, got:\n%s", got)
+	}
+
+	// Must contain an AgentDeployment with promptRef.
+	if !strings.Contains(got, "kind: AgentDeployment") {
+		t.Errorf("output should contain kind: AgentDeployment, got:\n%s", got)
+	}
+	if !strings.Contains(got, "promptRef: my-prompt-v1") {
+		t.Errorf("output should contain promptRef: my-prompt-v1, got:\n%s", got)
+	}
+}
+
+// TestExpand_Prompt_AbsentIsNil verifies that when the prompt block is absent the
+// output contains no PromptVersion and no promptRef.
+func TestExpand_Prompt_AbsentIsNil(t *testing.T) {
+	input := "name: no-prompt-agent\nimage: ghcr.io/x/y:latest\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "PromptVersion") {
+		t.Errorf("output should not contain PromptVersion when prompt is absent, got:\n%s", got)
+	}
+	if strings.Contains(got, "promptRef") {
+		t.Errorf("output should not contain promptRef when prompt is absent, got:\n%s", got)
+	}
+}
+
+// TestExpand_Prompt_MissingGitRef verifies that a prompt block without git.ref
+// is rejected.
+func TestExpand_Prompt_MissingGitRef(t *testing.T) {
+	input := strings.Join([]string{
+		"name: x",
+		"image: ghcr.io/x/y:latest",
+		"prompt:",
+		"  name: my-pv",
+		"  git:",
+		"    repo: https://github.com/x/y.git",
+		"    path: p.txt",
+		"",
+	}, "\n")
+	var buf bytes.Buffer
+	err := expandBytes([]byte(input), &buf)
+	if err == nil {
+		t.Fatal("expected error for missing prompt.git.ref, got nil")
+	}
+	if !strings.Contains(err.Error(), "prompt.git.ref") {
+		t.Errorf("error should mention prompt.git.ref, got: %v", err)
+	}
+}
+
+// TestExpand_EvalAndPrompt_BothPresent verifies that both eval: and prompt: can
+// be present together, producing EvalSuite + PromptVersion + AgentDeployment
+// with both refs set.
+func TestExpand_EvalAndPrompt_BothPresent(t *testing.T) {
+	input := strings.Join([]string{
+		"name: full-m9-agent",
+		"image: ghcr.io/x/y:latest",
+		"eval:",
+		"  suite: my-suite",
+		"  dataset: my-ds",
+		"  scorers:",
+		"    - name: m",
+		"      type: mock",
+		"  threshold: \"0.75\"",
+		"prompt:",
+		"  name: my-pv",
+		"  git:",
+		"    repo: https://github.com/x/prompts.git",
+		"    ref: v1.2.3",
+		"    path: p.txt",
+		"",
+	}, "\n")
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+
+	if !strings.Contains(got, "kind: EvalSuite") {
+		t.Errorf("output should contain EvalSuite, got:\n%s", got)
+	}
+	if !strings.Contains(got, "kind: PromptVersion") {
+		t.Errorf("output should contain PromptVersion, got:\n%s", got)
+	}
+	if !strings.Contains(got, "kind: AgentDeployment") {
+		t.Errorf("output should contain AgentDeployment, got:\n%s", got)
+	}
+	if !strings.Contains(got, "evalSuiteRef: my-suite") {
+		t.Errorf("output should contain evalSuiteRef, got:\n%s", got)
+	}
+	if !strings.Contains(got, "promptRef: my-pv") {
+		t.Errorf("output should contain promptRef, got:\n%s", got)
+	}
+}
