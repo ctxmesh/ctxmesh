@@ -63,6 +63,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,14 +115,27 @@ const (
 // A2A typed error codes (agent-mesh.md §"The A2A call contract",
 // §"Edge cases"). Each is surfaced to the calling agent as a JSON body
 // {"error":<code>,"detail":...} and recorded as a span error — never swallowed,
-// never a bare network hang. m6.6's guard codes (depth_exceeded, cycle_detected,
-// budget_exceeded) join this set when it lands.
+// never a bare network hang.
 const (
 	errUnknownTarget    = "unknown_target"     // DNS NXDOMAIN — target not in the registry namespace.
 	errCallerNotAllowed = "caller_not_allowed" // access control: caller not on the callee's allowlist / role-denied.
 	errBlocked          = "blocked"            // network-layer refusal (cross-registry NetworkPolicy) or dial timeout.
 	errUpstreamFailure  = "upstream_failure"   // peer reachable but returned a transport error mid-request.
 	errBadRequest       = "bad_request"        // malformed /a2a request (bad target, unreadable body, bad envelope).
+
+	// Conversation guard codes (agent-mesh.md §12.7, added in m6.6).
+	errDepthExceeded  = "depth_exceeded"  // depth > maxDepth: call chain is too deep.
+	errCycleDetected  = "cycle_detected"  // receiver already appears in the envelope path.
+	errBudgetExceeded = "budget_exceeded" // hop budget exhausted for this conversation.
+)
+
+// Guard configuration defaults (agent-mesh.md §"AgentRegistry spec", §12.7).
+// These match the CRD-level defaults injected by the m6.4 controller; when the
+// env vars are absent (non-registry agent, or a registry that omits the fields)
+// the launcher falls back to these values so the guards are always active.
+const (
+	defaultMaxDepth  = 8  // reject A2A beyond this hop depth (CRD: guards.maxDepth).
+	defaultHopBudget = 32 // per-conversation hop budget (CRD: guards.hopBudget).
 )
 
 // a2aConfig is the subset of configuration the A2A surface needs, parsed from
@@ -148,6 +162,16 @@ type a2aConfig struct {
 	// (registry membership is already enforced by NetworkPolicy). A non-empty
 	// list rejects any senderAgentId not on it with caller_not_allowed.
 	AllowedCallers []string
+
+	// MaxDepth is the guard limit on envelope depth (A2A_MAX_DEPTH). Injected
+	// by the m6.4 controller from the registry guards.maxDepth CRD field.
+	// Default: defaultMaxDepth (8) when the env is absent or zero.
+	MaxDepth int
+
+	// HopBudget is the per-conversation hop-budget limit (A2A_HOP_BUDGET).
+	// Injected by the m6.4 controller from the registry guards.hopBudget CRD
+	// field. Default: defaultHopBudget (32) when the env is absent or zero.
+	HopBudget int
 }
 
 // A2AEnabled reports whether the outbound /a2a listener should be started —
@@ -171,6 +195,10 @@ func (c Config) A2AEnabled() bool {
 //	  the downward API.
 //	AGENT_ALLOWED_CALLERS (optional): comma-separated sender-name allowlist;
 //	  empty allows any in-registry caller.
+//	A2A_MAX_DEPTH (optional): max hop depth guard (default 8). Injected by the
+//	  m6.4 controller from the registry guards.maxDepth CRD field.
+//	A2A_HOP_BUDGET (optional): per-conversation hop budget (default 32). Injected
+//	  by the m6.4 controller from the registry guards.hopBudget CRD field.
 //
 // Like loadMemoryConfig, it does NOT hard-fail on a missing name/namespace when
 // the feature is on — the controller injects them; an empty segment is a
@@ -187,6 +215,16 @@ func loadA2AConfig(lookup func(string) string, agentName string) (a2aConfig, err
 		return a2aConfig{}, fmt.Errorf("A2A_PORT: %w", err)
 	}
 
+	maxDepth, err := parseGuardInt(lookup("A2A_MAX_DEPTH"), defaultMaxDepth)
+	if err != nil {
+		return a2aConfig{}, fmt.Errorf("A2A_MAX_DEPTH: %w", err)
+	}
+
+	hopBudget, err := parseGuardInt(lookup("A2A_HOP_BUDGET"), defaultHopBudget)
+	if err != nil {
+		return a2aConfig{}, fmt.Errorf("A2A_HOP_BUDGET: %w", err)
+	}
+
 	return a2aConfig{
 		RegistryID:     regID,
 		Port:           port,
@@ -194,6 +232,8 @@ func loadA2AConfig(lookup func(string) string, agentName string) (a2aConfig, err
 		Role:           lookup("AGENT_ROLE"),
 		Namespace:      lookup("POD_NAMESPACE"),
 		AllowedCallers: parseCallerList(lookup("AGENT_ALLOWED_CALLERS")),
+		MaxDepth:       maxDepth,
+		HopBudget:      hopBudget,
 	}, nil
 }
 
@@ -217,8 +257,18 @@ func parseCallerList(raw string) []string {
 }
 
 // envelope is the platform-owned A2A message envelope (agent-mesh.md §12.5).
-// It is stamped by the caller's launcher and immutable downstream EXCEPT depth
-// and path, which each hop extends. payload is the caller's opaque JSON.
+// It is stamped by the caller's launcher and immutable downstream EXCEPT depth,
+// path, and budgetRemaining, which each hop extends/decrements.
+// payload is the caller's opaque JSON.
+//
+// budgetRemaining is a per-branch, per-conversation hop counter (m6.6). It is
+// initialised to hopBudget on the FIRST hop and decremented by 1 on every
+// subsequent chained hop. Because this is a synchronous (sync v1) in-envelope
+// counter, each branch of a fan-out receives its own copy — a branch that calls
+// N agents consumes N from its budget independently of sibling branches. A true
+// cross-branch / cross-conversation aggregate budget (and token + wall-clock
+// cost tracking) is deferred to CostBudget at M8; do NOT add shared cross-pod
+// budget state here.
 type envelope struct {
 	TraceID         string          `json:"traceId"`
 	RegistryID      string          `json:"registryId"`
@@ -229,6 +279,7 @@ type envelope struct {
 	Role            string          `json:"role"`
 	Depth           int             `json:"depth"`
 	Path            []string        `json:"path"`
+	BudgetRemaining int             `json:"budgetRemaining"`
 	Payload         json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -335,14 +386,15 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(
 		attribute.Int("a2a.depth", env.Depth),
+		attribute.Int("a2a.budget_remaining", env.BudgetRemaining),
 		attribute.String("a2a.conversation.id", env.ConversationID),
 		attribute.String("a2a.message.id", env.MessageID),
 	)
 
-	// m6.6 SEAM: conversation guards (max depth / cycle / hop budget) run here
-	// against the OUTGOING envelope, before we forward. checkGuards is a no-op
-	// stub in M6; m6.6 fills it in and maps its typed error to the response.
-	if guardErr := checkGuards(env); guardErr != nil {
+	// m6.6: conversation guards (max depth / cycle / hop budget) run here
+	// against the OUTGOING envelope, before we forward. A non-nil guardError
+	// maps to a typed 403 + a2a.guard_tripped span event.
+	if guardErr := checkGuards(env, s.cfg.MaxDepth); guardErr != nil {
 		span.AddEvent("a2a.guard_tripped", trace.WithAttributes(
 			attribute.String("a2a.guard", guardErr.code),
 		))
@@ -357,10 +409,11 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 // first-hop vs chained-hop rule; the short version:
 //
 //   - No incoming X-A2A-Envelope ⇒ FIRST hop: depth=1, path=[self], traceId
-//     from the active span, conversationId from the X-Conversation-Id header.
+//     from the active span, conversationId from the X-Conversation-Id header,
+//     budgetRemaining=hopBudget (initialised here; decremented by every chained hop).
 //   - An incoming envelope ⇒ CHAINED hop: depth=incoming+1,
-//     path=incoming++[self], and traceId/registryId/conversationId INHERITED
-//     (immutable downstream, §12.5).
+//     path=incoming++[self], budgetRemaining=incoming.budgetRemaining-1, and
+//     traceId/registryId/conversationId INHERITED (immutable downstream, §12.5).
 //
 // messageId is ALWAYS fresh (unique per hop — the M7 idempotency key).
 func (s *a2aServer) buildEnvelope(
@@ -383,15 +436,19 @@ func (s *a2aServer) buildEnvelope(
 	}
 
 	if incoming == nil {
-		// FIRST hop.
+		// FIRST hop: initialise all mutable per-hop fields.
+		// budgetRemaining is set to hopBudget here; each chained hop decrements it
+		// by 1 (see CHAINED hop path below). checkGuards trips when budgetRemaining
+		// goes below zero, so hopBudget=N permits exactly N hops.
 		env.TraceID = traceIDFromContext(ctx)
 		env.ConversationID = conversationIDFromRequest(r)
 		env.Depth = 1
 		env.Path = []string{self}
+		env.BudgetRemaining = s.cfg.HopBudget
 		return env, nil
 	}
 
-	// CHAINED hop — inherit the immutable fields, extend depth/path.
+	// CHAINED hop — inherit the immutable fields, extend depth/path/budget.
 	env.RegistryID = incoming.RegistryID
 	env.TraceID = incoming.TraceID
 	env.ConversationID = incoming.ConversationID
@@ -400,6 +457,11 @@ func (s *a2aServer) buildEnvelope(
 	// (the incoming envelope is immutable; a shared array would be a data race
 	// were it ever retained).
 	env.Path = append(append(make([]string, 0, len(incoming.Path)+1), incoming.Path...), self)
+	// Decrement the per-branch hop budget. checkGuards will reject if this goes
+	// below zero (i.e. < 0 on the OUTGOING envelope means this hop would exceed
+	// the budget). The budget is per-branch for sync v1; cross-branch aggregation
+	// joins CostBudget at M8.
+	env.BudgetRemaining = incoming.BudgetRemaining - 1
 	return env, nil
 }
 
@@ -580,13 +642,61 @@ type guardError struct {
 	detail string
 }
 
-// checkGuards is the m6.6 EXTENSION POINT. In M6 it is a deliberate no-op: the
-// envelope carries depth/path (built above) so the guards are PLUGGABLE, but
-// the guard LOGIC (depth_exceeded / cycle_detected / budget_exceeded,
-// agent-mesh.md §12.7) is a separate task. m6.6 replaces this body; the call
-// site, the outgoing envelope it inspects, and the typed-error plumbing are
-// already in place. Returning nil means "no guard tripped — proceed".
-func checkGuards(_ envelope) *guardError {
+// checkGuards enforces the three conversation guards (agent-mesh.md §12.7)
+// against the OUTGOING envelope, just before the hop is forwarded. It is called
+// by handleCall with the envelope already stamped (depth incremented, path
+// extended, budgetRemaining decremented). Returns nil when all guards pass.
+//
+// Guards (evaluated in order; first trip wins):
+//
+//  1. Max depth — env.Depth > maxDepth → depth_exceeded.
+//     Rejects a call that would push the hop depth past the registry limit.
+//
+//  2. Cycle detection — env.ReceiverAgentID ∈ env.Path → cycle_detected.
+//     The path accumulates the IDs of agents that have already sent in this
+//     chain (senders so far, ending in self). Forwarding to an agent that
+//     appears in the path would revisit it without progress.
+//
+//  3. Hop budget — env.BudgetRemaining < 0 → budget_exceeded.
+//     budgetRemaining was initialised to hopBudget on the first hop and
+//     decremented by 1 on each chained hop in buildEnvelope. A value of -1
+//     means this hop would be the (hopBudget+1)-th hop, exceeding the limit.
+//     This is a per-branch counter for sync v1 (each fan-out branch receives
+//     its own copy of the envelope). A cross-branch / cross-conversation
+//     aggregate budget (and token + wall-clock cost tracking) is deferred to
+//     CostBudget at M8 — do NOT add shared cross-pod budget state here.
+//
+// A tripped guard is a typed best-effort denial: handleCall maps a non-nil
+// return to a 403 + a2a.guard_tripped span event; it never panics or crashes.
+func checkGuards(env envelope, maxDepth int) *guardError {
+	// Guard 1: max depth.
+	if env.Depth > maxDepth {
+		return &guardError{
+			code:   errDepthExceeded,
+			detail: fmt.Sprintf("depth %d exceeds maximum %d", env.Depth, maxDepth),
+		}
+	}
+
+	// Guard 2: cycle detection.
+	// env.Path contains the senders that have already participated in this chain
+	// (up to and including self, appended by buildEnvelope). The outgoing
+	// receiver appears in the path iff we have already visited it.
+	if slices.Contains(env.Path, env.ReceiverAgentID) {
+		return &guardError{
+			code:   errCycleDetected,
+			detail: fmt.Sprintf("receiver %q already in path %v", env.ReceiverAgentID, env.Path),
+		}
+	}
+
+	// Guard 3: hop budget.
+	// budgetRemaining < 0 means this hop was one beyond the allowed budget.
+	if env.BudgetRemaining < 0 {
+		return &guardError{
+			code:   errBudgetExceeded,
+			detail: fmt.Sprintf("hop budget exhausted (budgetRemaining %d)", env.BudgetRemaining),
+		}
+	}
+
 	return nil
 }
 
@@ -730,6 +840,23 @@ func writeA2AError(w http.ResponseWriter, status int, code, detail string) {
 		Error  string `json:"error"`
 		Detail string `json:"detail,omitempty"`
 	}{Error: code, Detail: detail})
+}
+
+// parseGuardInt parses a positive-integer guard value (maxDepth, hopBudget)
+// from an env-var string. An empty or zero value falls back to the default.
+// A negative or non-integer value is an error.
+func parseGuardInt(val string, defaultVal int) (int, error) {
+	if val == "" {
+		return defaultVal, nil
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, fmt.Errorf("invalid guard value %q: must be a positive integer", val)
+	}
+	if n <= 0 {
+		return defaultVal, nil // zero/negative ⇒ fall back to default (controller may omit).
+	}
+	return n, nil
 }
 
 // isTimeout reports whether err is (or wraps) a network timeout.

@@ -87,7 +87,9 @@ func newTestA2AServer(
 	return s, tp, rec, peerCh
 }
 
-// baseCfg is a representative registry-member config.
+// baseCfg is a representative registry-member config. MaxDepth and HopBudget
+// are set to the production defaults so the conversation guards are active but
+// do not trip on normal (non-adversarial) test calls.
 func baseCfg() a2aConfig {
 	return a2aConfig{
 		RegistryID: "research-team",
@@ -95,6 +97,8 @@ func baseCfg() a2aConfig {
 		SelfName:   "orchestrator",
 		Role:       "orchestrator",
 		Namespace:  "team-a",
+		MaxDepth:   defaultMaxDepth,
+		HopBudget:  defaultHopBudget,
 	}
 }
 
@@ -270,14 +274,15 @@ func TestA2AChainedHopEnvelope(t *testing.T) {
 	s, _, _, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
 
 	incoming := envelope{
-		TraceID:        "4bf92f3577b34da6a3ce929d0e0e4736",
-		RegistryID:     "research-team",
-		ConversationID: "conv-77",
-		MessageID:      "msg-upstream",
-		SenderAgentID:  "orchestrator",
-		Role:           "orchestrator",
-		Depth:          1,
-		Path:           []string{"orchestrator"},
+		TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+		RegistryID:      "research-team",
+		ConversationID:  "conv-77",
+		MessageID:       "msg-upstream",
+		SenderAgentID:   "orchestrator",
+		Role:            "orchestrator",
+		Depth:           1,
+		Path:            []string{"orchestrator"},
+		BudgetRemaining: defaultHopBudget, // set by the first hop; each chained hop decrements.
 	}
 	incJSON, _ := json.Marshal(incoming)
 
@@ -310,6 +315,12 @@ func TestA2AChainedHopEnvelope(t *testing.T) {
 	if env.SenderAgentID != "research" || env.ReceiverAgentID != "analyst" || env.Role != "worker" {
 		t.Errorf("this-hop identity = %s→%s (%s), want research→analyst (worker)",
 			env.SenderAgentID, env.ReceiverAgentID, env.Role)
+	}
+	// budgetRemaining is decremented on each chained hop.
+	wantBudget := defaultHopBudget - 1
+	if env.BudgetRemaining != wantBudget {
+		t.Errorf("chained budgetRemaining = %d, want %d (incoming %d - 1)",
+			env.BudgetRemaining, wantBudget, defaultHopBudget)
 	}
 }
 
@@ -670,16 +681,237 @@ func TestA2AEmptyPayloadIsNull(t *testing.T) {
 	}
 }
 
-// ── checkGuards seam (m6.6) ─────────────────────────────────────────────────
+// ── checkGuards (m6.6) ──────────────────────────────────────────────────────
 
-// TestCheckGuardsIsNoOpInM6 documents that the guard seam is present but inert
-// in M6 — m6.6 fills in the logic. It must never trip in M6.
-func TestCheckGuardsIsNoOpInM6(t *testing.T) {
+// TestCheckGuardsDepth verifies the max-depth guard: a chain at exactly
+// maxDepth passes; one beyond trips depth_exceeded with a typed 403 +
+// a2a.guard_tripped span event.
+func TestCheckGuardsDepth(t *testing.T) {
 	t.Parallel()
-	deep := envelope{Depth: 9999, Path: []string{"a", "b", "a"}} // would trip depth+cycle in m6.6.
-	if err := checkGuards(deep); err != nil {
-		t.Errorf("checkGuards must be a no-op in M6, got %+v", err)
+	const maxDepth = 4
+
+	t.Run("at limit passes", func(t *testing.T) {
+		t.Parallel()
+		env := envelope{
+			Depth:           maxDepth,
+			Path:            []string{"a"},
+			ReceiverAgentID: "b",
+			BudgetRemaining: 10,
+		}
+		if err := checkGuards(env, maxDepth); err != nil {
+			t.Errorf("checkGuards at maxDepth=%d: unexpected trip %+v", maxDepth, err)
+		}
+	})
+
+	t.Run("one beyond trips depth_exceeded", func(t *testing.T) {
+		t.Parallel()
+		s, _, rec, _ := newTestA2AServer(t, func() a2aConfig {
+			c := baseCfg()
+			c.MaxDepth = maxDepth
+			return c
+		}(), http.StatusOK, `{}`)
+
+		// Construct a chained incoming envelope already at maxDepth, so the
+		// outgoing envelope will be at maxDepth+1.
+		incoming := envelope{
+			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+			RegistryID:      "research-team",
+			ConversationID:  "conv-depth",
+			MessageID:       "msg-x",
+			SenderAgentID:   "prev",
+			Role:            "orchestrator",
+			Depth:           maxDepth,
+			Path:            pathOf(maxDepth),
+			BudgetRemaining: 10,
+		}
+		incJSON, _ := json.Marshal(incoming)
+
+		rr := callA2A(t, s, context.Background(), "next", `{}`,
+			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("depth_exceeded: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+		}
+		assertA2AError(t, rr.Body.Bytes(), errDepthExceeded)
+
+		// The a2a.guard_tripped span event must be recorded.
+		assertGuardTripped(t, rec, errDepthExceeded)
+	})
+}
+
+// TestCheckGuardsCycle verifies the cycle-detection guard: calling an agent
+// already in the path trips cycle_detected; a non-revisiting call passes.
+func TestCheckGuardsCycle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("non-revisiting call passes", func(t *testing.T) {
+		t.Parallel()
+		// path=[a,b], receiver=c → no cycle.
+		env := envelope{
+			Depth:           2,
+			Path:            []string{"a", "b"},
+			ReceiverAgentID: "c",
+			BudgetRemaining: 10,
+		}
+		if err := checkGuards(env, defaultMaxDepth); err != nil {
+			t.Errorf("no-cycle call: unexpected trip %+v", err)
+		}
+	})
+
+	t.Run("revisiting agent trips cycle_detected", func(t *testing.T) {
+		t.Parallel()
+		s, _, rec, _ := newTestA2AServer(t, baseCfg(), http.StatusOK, `{}`)
+
+		// The outgoing envelope will have path=[orchestrator,research,"orchestrator"] — but
+		// the receiver (orchestrator) is already in the path we send as incoming.
+		// More precisely: buildEnvelope appends self (cfg.SelfName="orchestrator")
+		// to the incoming path, giving path=["prev","orchestrator"]. Then it sets
+		// receiver="prev" — which is already in the path → cycle_detected.
+		cfg := baseCfg()
+		cfg.SelfName = "orchestrator"
+		s2, _, rec2, _ := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+
+		incoming := envelope{
+			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+			RegistryID:      "research-team",
+			ConversationID:  "conv-cycle",
+			MessageID:       "msg-y",
+			SenderAgentID:   "prev",
+			Role:            "worker",
+			Depth:           1,
+			Path:            []string{"prev"},
+			BudgetRemaining: 10,
+		}
+		incJSON, _ := json.Marshal(incoming)
+
+		// Call back to "prev" — "prev" is in the path, triggering cycle_detected.
+		rr := callA2A(t, s2, context.Background(), "prev", `{}`,
+			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("cycle_detected: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+		}
+		assertA2AError(t, rr.Body.Bytes(), errCycleDetected)
+		assertGuardTripped(t, rec2, errCycleDetected)
+		_ = s // suppress unused warning
+		_ = rec
+	})
+}
+
+// TestCheckGuardsBudget verifies the hop-budget guard: hopBudget hops pass;
+// the next trips budget_exceeded. Also asserts first-hop init and per-hop decrement.
+func TestCheckGuardsBudget(t *testing.T) {
+	t.Parallel()
+	const hopBudget = 3
+
+	cfg := baseCfg()
+	cfg.SelfName = "agent"
+	cfg.HopBudget = hopBudget
+
+	t.Run("first hop initialises budget to hopBudget", func(t *testing.T) {
+		t.Parallel()
+		s, _, _, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+		rr := callA2A(t, s, context.Background(), "b", `{}`, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("first hop status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+		}
+		env := <-peerCh
+		if env.envelope.BudgetRemaining != hopBudget {
+			t.Errorf("first-hop budgetRemaining = %d, want %d", env.envelope.BudgetRemaining, hopBudget)
+		}
+	})
+
+	t.Run("each chained hop decrements budget", func(t *testing.T) {
+		t.Parallel()
+		s, _, _, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+
+		incoming := envelope{
+			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+			RegistryID:      "research-team",
+			ConversationID:  "conv-budget",
+			MessageID:       "msg-z",
+			SenderAgentID:   "prev",
+			Role:            "worker",
+			Depth:           1,
+			Path:            []string{"prev"},
+			BudgetRemaining: hopBudget,
+		}
+		incJSON, _ := json.Marshal(incoming)
+
+		rr := callA2A(t, s, context.Background(), "b", `{}`,
+			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("chained hop (budget=%d) status = %d, want 200; body=%s", hopBudget, rr.Code, rr.Body.String())
+		}
+		env := <-peerCh
+		want := hopBudget - 1
+		if env.envelope.BudgetRemaining != want {
+			t.Errorf("chained budgetRemaining = %d, want %d (= incoming %d - 1)",
+				env.envelope.BudgetRemaining, want, hopBudget)
+		}
+	})
+
+	t.Run("budget_exceeded when BudgetRemaining goes below zero", func(t *testing.T) {
+		t.Parallel()
+		s, _, rec, _ := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+
+		// Simulate an incoming envelope at the last-allowed hop (BudgetRemaining=0).
+		// buildEnvelope will set outgoing to -1, which trips budget_exceeded.
+		incoming := envelope{
+			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+			RegistryID:      "research-team",
+			ConversationID:  "conv-budget-ex",
+			MessageID:       "msg-ex",
+			SenderAgentID:   "prev",
+			Role:            "worker",
+			Depth:           hopBudget,
+			Path:            []string{"prev"},
+			BudgetRemaining: 0, // last allowed hop already used; next must trip.
+		}
+		incJSON, _ := json.Marshal(incoming)
+
+		rr := callA2A(t, s, context.Background(), "b", `{}`,
+			map[string]string{a2aEnvelopeHeader: string(incJSON)})
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("budget_exceeded: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+		}
+		assertA2AError(t, rr.Body.Bytes(), errBudgetExceeded)
+		assertGuardTripped(t, rec, errBudgetExceeded)
+	})
+}
+
+// ── guard test helpers ────────────────────────────────────────────────────────
+
+// pathOf returns a path of n distinct agent names for test envelopes.
+func pathOf(n int) []string {
+	path := make([]string, n)
+	for i := range n {
+		path[i] = fmt.Sprintf("agent-%d", i)
 	}
+	return path
+}
+
+// assertGuardTripped asserts that the span recorder captured an a2a.guard_tripped
+// event with the expected guard code on the a2a.call span.
+func assertGuardTripped(t *testing.T, rec *tracetest.SpanRecorder, wantCode string) {
+	t.Helper()
+	for _, sp := range rec.Ended() {
+		if sp.Name() != "a2a.call" {
+			continue
+		}
+		for _, ev := range sp.Events() {
+			if ev.Name != "a2a.guard_tripped" {
+				continue
+			}
+			for _, attr := range ev.Attributes {
+				if string(attr.Key) == "a2a.guard" && attr.Value.AsString() == wantCode {
+					return // found.
+				}
+			}
+		}
+	}
+	t.Errorf("no a2a.guard_tripped event with a2a.guard=%q found on a2a.call span", wantCode)
 }
 
 // ── concurrency (-race) ─────────────────────────────────────────────────────
