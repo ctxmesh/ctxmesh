@@ -1,4 +1,4 @@
-"""LangChain example agent — SDK-free deep-trace demo (M3/M4/M5).
+"""LangChain example agent — SDK-free deep-trace demo (M3/M4/M5/M6).
 
 This agent contains ZERO agent-engine SDK calls and ZERO manual OTel
 instrumentation. The base-python image's OpenInference auto-instrumentation
@@ -31,18 +31,56 @@ When the /invoke request carries "conversation_id":
      "invalid_conversation_id" (documented skip, not a phantom outage).
 When "conversation_id" is absent the agent behaves exactly as before.
 
+M6 addition (m6.7): synchronous A2A (agent-to-agent) call via the launcher's
+:2997 endpoint.  When the /invoke request carries "call_agent": "<targetName>":
+  1. POST localhost:2997/a2a/<targetName>  (A2A_TIMEOUT seconds, default 10s).
+     Body: {"input": <user_input>}.
+     Headers forwarded: ``traceparent`` (from inbound request, for W3C child-
+     span nesting per the spec §8.3 SDK-owns-intra-pod rule) and
+     ``X-Conversation-Id`` (if present, to seed conversationId in the
+     peer's envelope).
+  2. On success (2xx), the caller's response gains:
+       "delegated_to": "<targetName>",
+       "delegate_output": <peer JSON response>
+     The agent still answers normally — the delegation is additive.
+  3. On any failure the response degrades cleanly (never crashes):
+     - Connection refused / no A2A listener (not a registry member):
+         "a2a": "unavailable"
+     - HTTP 403 (caller_not_allowed):
+         "a2a_error": "caller_not_allowed"
+     - HTTP 404 (unknown_target):
+         "a2a_error": "unknown_target"
+     - HTTP 502 (blocked / upstream_failure):
+         "a2a_error": "upstream_failure"
+     - Timeout:
+         "a2a": "timeout"
+     - Other HTTP error (status, body stored for debugging):
+         "a2a_error": "http_<status>"
+  4. The agent is ALSO a valid worker: when "call_agent" is absent the
+     behaviour is identical to M5 — the existing /invoke path IS the worker
+     side.
+
+A2A call contract (as-built, m6.5):
+  - Endpoint: POST http://localhost:2997/a2a/{targetAgent}
+  - Body:     JSON {"input": <user_input>}
+  - Headers:  traceparent (W3C), X-Conversation-Id (if present)
+  - Timeout:  A2A_TIMEOUT env var (default 10 seconds)
+
 Fallback chain (all best-effort, never crash the agent):
   1. GET localhost:2999/tools  (sidecar)        <- live manifest
   2. read /etc/agent/tools.json                  <- cold-start / durable backing
   3. neither reachable -> M3 behaviour (local word_count, no extra fields)
 """
 
+from __future__ import annotations
+
 import json
 import os
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote
 from urllib.request import urlopen, Request
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
@@ -77,6 +115,14 @@ MANIFEST_TIMEOUT = 2
 MEMORY_BASE_URL = os.environ.get("MEMORY_BASE_URL", "http://localhost:2998")
 # Per-op timeout (seconds) — same 2s bound as the launcher's own Valkey ops.
 MEMORY_TIMEOUT = 2
+
+# A2A launcher endpoint (m6.7).  The launcher owns discovery, envelope stamping,
+# access control, and hop guards — the agent only sees this localhost boundary.
+# Port :2997 is the reserved A2A listener port (m6.5 wire contract).
+A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "http://localhost:2997")
+# Outbound A2A call timeout (seconds) — generous enough for a cold-start peer
+# but bounded so a network hang doesn't stall the caller indefinitely.
+A2A_TIMEOUT = int(os.environ.get("A2A_TIMEOUT", "10"))
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +214,75 @@ def _memory_append(conv_id: str, entry: dict) -> bool:
             return 200 <= resp.status < 300
     except Exception:  # noqa: BLE001 — best-effort
         return False
+
+
+# ---------------------------------------------------------------------------
+# A2A call (m6.7) — synchronous, launcher-mediated, best-effort
+# ---------------------------------------------------------------------------
+
+def _a2a_call(target_agent: str, payload: dict, traceparent: str | None, conv_id: str | None) -> dict:
+    """POST localhost:2997/a2a/<targetAgent> and return a typed result dict.
+
+    The result dict always contains exactly one of:
+      {"ok": True,  "body": <parsed peer JSON response>}          — 2xx success
+      {"ok": False, "code": "caller_not_allowed"}                 — 403
+      {"ok": False, "code": "unknown_target"}                     — 404
+      {"ok": False, "code": "upstream_failure"}                   — 502
+      {"ok": False, "code": "unavailable"}                        — conn refused
+      {"ok": False, "code": "timeout"}                            — deadline
+      {"ok": False, "code": "http_<N>"}                          — other HTTP error
+
+    *traceparent* is forwarded on the outbound request per the M6 wire contract
+    (§12 / observability §8.3 SDK-owns-intra-pod): forwarding the inbound W3C
+    header on the localhost A2A call lets the callee's launcher propagate it
+    into the callee's ``agent.invoke`` span, so the child span nests under the
+    caller's trace rather than starting a new root.  If the caller didn't
+    receive a traceparent (e.g. direct invocation), we omit it — the spec
+    guarantees logical continuity via the envelope ``traceId`` regardless.
+
+    *conv_id* seeds ``X-Conversation-Id`` so the launcher can associate both
+    hops with the same conversation (guard accounting, envelope ``conversationId``).
+
+    Never raises — all errors surface through the ``code`` key.
+    """
+    url = f"{A2A_BASE_URL}/a2a/{quote(target_agent, safe='')}"
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if traceparent:
+        headers["traceparent"] = traceparent
+    if conv_id:
+        headers["X-Conversation-Id"] = conv_id
+    req = Request(url, data=body, headers=headers, method="POST")  # noqa: S310
+    try:
+        with urlopen(req, timeout=A2A_TIMEOUT) as resp:  # noqa: S310
+            raw = resp.read()
+            try:
+                peer_body = json.loads(raw)
+            except json.JSONDecodeError:
+                peer_body = raw.decode(errors="replace")
+            return {"ok": True, "body": peer_body}
+    except HTTPError as exc:
+        # Typed HTTP failures from the launcher (m6.5 wire contract).
+        if exc.code == 403:
+            return {"ok": False, "code": "caller_not_allowed"}
+        if exc.code == 404:
+            return {"ok": False, "code": "unknown_target"}
+        if exc.code == 502:
+            return {"ok": False, "code": "upstream_failure"}
+        return {"ok": False, "code": f"http_{exc.code}"}
+    except URLError as exc:
+        # Connection refused: launcher A2A listener not running (agent not a
+        # registry member, or running outside the mesh — degraded gracefully).
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return {"ok": False, "code": "unavailable"}
+        # Timeout: socket.timeout propagates as a URLError reason.
+        if isinstance(exc.reason, TimeoutError) or isinstance(exc.reason, socket.timeout):
+            return {"ok": False, "code": "timeout"}
+        return {"ok": False, "code": "unavailable"}
+    except TimeoutError:
+        return {"ok": False, "code": "timeout"}
+    except Exception:  # noqa: BLE001 — best-effort
+        return {"ok": False, "code": "unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +387,13 @@ _prompt_with_context = ChatPromptTemplate.from_messages(
 # Core agent logic
 # ---------------------------------------------------------------------------
 
-def run_agent(user_input: str, conv_id: str | None = None) -> dict:
-    """Tool step then model step, optionally with session memory.
+def run_agent(
+    user_input: str,
+    conv_id: str | None = None,
+    call_agent: str | None = None,
+    traceparent: str | None = None,
+) -> dict:
+    """Tool step then model step, optionally with session memory and A2A delegation.
 
     When *conv_id* is provided (m5.6):
       - Prior turns are fetched from the launcher's :2998 memory endpoint.
@@ -287,8 +407,18 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
         whitespace) skips memory entirely: "memory": "invalid_conversation_id".
     When *conv_id* is absent the behaviour is identical to M3/M4.
 
+    When *call_agent* is provided (m6.7):
+      - A synchronous A2A call is made to localhost:2997/a2a/<call_agent>.
+      - *traceparent* is forwarded on the outbound call for W3C child-span
+        nesting (SDK-owns-intra-pod, per observability spec §8.3).
+      - On success the response gains "delegated_to" and "delegate_output".
+      - On any failure the response gains "a2a": "unavailable|timeout" or
+        "a2a_error": "<code>" — the agent always answers its own output too.
+    When *call_agent* is absent the behaviour is identical to M5.
+
     Returns a dict with at least ``output``; may also contain ``tool_count``,
-    ``tool_version``, ``tool_error``, ``turns``, and ``memory``.
+    ``tool_version``, ``tool_error``, ``turns``, ``memory``, ``delegated_to``,
+    ``delegate_output``, ``a2a``, and ``a2a_error``.
     """
     extra: dict = {}
 
@@ -366,10 +496,38 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
         else:
             extra["memory"] = "unavailable"
 
+    # --- A2A delegation (m6.7) — orchestrator path ---
+    # Only active when the caller explicitly asks to delegate.  Placed after
+    # memory append so the orchestrator's own turn is persisted first (the
+    # delegation is additive, not a replacement of the local answer).
+    if call_agent is not None:
+        a2a_result = _a2a_call(
+            target_agent=call_agent,
+            payload={"input": user_input},
+            traceparent=traceparent,
+            conv_id=conv_id,
+        )
+        if a2a_result["ok"]:
+            extra["delegated_to"] = call_agent
+            extra["delegate_output"] = a2a_result["body"]
+        else:
+            code = a2a_result["code"]
+            # Mirror the m5.6 "memory": "unavailable" pattern for transient
+            # failures; use "a2a_error" for typed/permanent failures.
+            if code in ("unavailable", "timeout"):
+                extra["a2a"] = code
+            else:
+                extra["a2a_error"] = code
+
     return extra
 
 
-def _run_with_incoming_context(headers: dict, user_input: str, conv_id: str | None = None) -> dict:
+def _run_with_incoming_context(
+    headers: dict,
+    user_input: str,
+    conv_id: str | None = None,
+    call_agent: str | None = None,
+) -> dict:
     """Run the agent under the caller's W3C trace context.
 
     The launcher injects ``traceparent`` into the proxied request; stdlib
@@ -380,18 +538,32 @@ def _run_with_incoming_context(headers: dict, user_input: str, conv_id: str | No
     without a parent context.
 
     *conv_id* is forwarded to run_agent for session memory (m5.6).
+    *call_agent* is forwarded for A2A delegation (m6.7).
+
+    The raw ``traceparent`` header value is also forwarded to run_agent so the
+    A2A helper can propagate it on the outbound localhost call, nesting the
+    callee's span under the caller's trace (SDK-owns-intra-pod, §8.3).
     """
+    # Extract the raw traceparent string for A2A child-span forwarding (m6.7).
+    # Header lookup is case-insensitive in HTTP/1.1; http.server preserves the
+    # original case, so we normalise to lowercase for a reliable lookup.
+    traceparent: str | None = None
+    for k, v in headers.items():
+        if k.lower() == "traceparent":
+            traceparent = v
+            break
+
     try:
         from opentelemetry import context as otel_context  # noqa: PLC0415
         from opentelemetry.propagate import extract  # noqa: PLC0415
 
         token = otel_context.attach(extract(headers))
         try:
-            return run_agent(user_input, conv_id=conv_id)
+            return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent)
         finally:
             otel_context.detach(token)
     except ImportError:
-        return run_agent(user_input, conv_id=conv_id)
+        return run_agent(user_input, conv_id=conv_id, call_agent=call_agent, traceparent=traceparent)
 
 
 # ---------------------------------------------------------------------------
@@ -425,11 +597,20 @@ class Handler(BaseHTTPRequestHandler):
             # m5.6: extract conversation_id for session memory (optional).
             conv_id_raw = body.get("conversation_id")
             conv_id: str | None = str(conv_id_raw) if conv_id_raw is not None else None
+            # m6.7: extract call_agent for A2A delegation (optional).
+            # If present, the agent acts as an orchestrator and delegates one
+            # synchronous A2A call to the named peer via localhost:2997.
+            call_agent_raw = body.get("call_agent")
+            call_agent: str | None = str(call_agent_raw).strip() if call_agent_raw is not None else None
+            # Treat an empty string as absent (no delegation).
+            if not call_agent:
+                call_agent = None
         except json.JSONDecodeError:
             user_input = raw.decode(errors="replace")
             conv_id = None
+            call_agent = None
         try:
-            result = _run_with_incoming_context(dict(self.headers), user_input, conv_id=conv_id)
+            result = _run_with_incoming_context(dict(self.headers), user_input, conv_id=conv_id, call_agent=call_agent)
             self._send(200, {"agent": "langchain-agent", **result})
         except Exception as exc:  # noqa: BLE001 — surface upstream errors to caller
             self._send(502, {"agent": "langchain-agent", "error": str(exc)})
