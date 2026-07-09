@@ -284,7 +284,26 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
+			// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
+			// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
+			// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
+			// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
+			// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Injected
+			// UNCONDITIONALLY for a member: the memory path does NOT set it, so a
+			// registry member without a MemoryBinding would otherwise resolve
+			// {target}..svc.cluster.local (empty namespace → NXDOMAIN → every A2A
+			// call fails unknown_target).
+			corev1.EnvVar{Name: "POD_NAMESPACE", Value: deploy.Namespace},
 		)
+		// AGENT_NAME: the launcher's senderAgentId / envelope path identity. The
+		// memory path (earlier in this function) may have already appended it, and
+		// the user may have overridden it in spec.env — inject exactly ONCE. Check
+		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
+		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
+		// once, and a member without memory still gets it (the A2A path needs it).
+		if !envVarPresent(env, "AGENT_NAME") && !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
+			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		}
 		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
 		// launcher stamps it into the envelope role field.
 		if !envVarPresent(deploy.Spec.Env, "AGENT_ROLE") {
