@@ -95,3 +95,18 @@ jobs:
         # queue-depth scale-up is a documented phase-2 limitation (the in-memory
         # channel exposes no queue_depth metric) — specs/eventing-scaling.md.
         run: make -C agent-brain/harness tier2 SLICE=m7-eventing
+      - name: M8 cost-governance e2e (per-agent budget — soft alert, hard-breach halt, traced)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Needs only M=3 infra (Knative + Langfuse + the gateway) but tolerates
+        # the M=7 stack. Deploys one budgeted agent (spec.budget → the controller
+        # repoints MODEL_GATEWAY_URL to the launcher budget proxy on :2996 and
+        # sets GATEWAY_UPSTREAM_URL → LiteLLM). Asserts: under-budget calls answer
+        # normally; the per-agent cap trips a one-shot budget.alert at the soft
+        # threshold; the hard breach returns a typed budget_exceeded (402) and
+        # HALTS the run (the refused call never reaches LiteLLM — forwarded-call
+        # count stays flat); budget attrs (budget.state ok/soft/exceeded,
+        # budget.agent.spent_usd/cap_usd) ride the gateway.call cost span. Slice
+        # tests the per-agent dimension (the example agent doesn't stamp
+        # X-Conversation-Id on its LLM call) — specs/cost-governance.md.
+        run: make -C agent-brain/harness tier2 SLICE=m8-budget
