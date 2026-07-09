@@ -118,6 +118,33 @@ const (
 	envAgentName = "AGENT_NAME"
 )
 
+// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
+// listener is started by the launcher when these env vars are injected. All
+// values are known at reconcile time → STATIC env, NEVER valueFrom (Knative
+// ksvc webhook rejects valueFrom; the m5.7 landmine + tier1 no-valueFrom guard).
+const (
+	// langfuseHost is the in-cluster Langfuse base URL. The feedback hook POSTs
+	// scores to <langfuseHost>/api/public/scores. Reuses the dev Langfuse wired
+	// by `make -C harness dev-up M=3` (same host as the M3 OTel collector exporter).
+	langfuseHost = "http://langfuse-web.langfuse.svc:3000"
+
+	// langfuseDevPublicKey / langfuseDevSecretKey are the DETERMINISTIC DEV-ONLY
+	// Langfuse API credentials — fixed values committed as such (identical posture
+	// to the dev MinIO OBJECT_STORE_ACCESS_KEY / objectStoreDevAccessKey). They
+	// MUST match the public/secret key seeded by `dev-up M=3` into the
+	// langfuse-otlp Secret (and into the Langfuse Helm chart's initialApiKey
+	// block). NOT a real credential — never rotated, only ever meaningful against
+	// the in-cluster dev Langfuse. Injected as STATIC env (no valueFrom) so the
+	// launcher's feedback hook can authenticate to the dev scores API.
+	langfuseDevPublicKey = "pk-lf-dev-00000000000000000000000000000000"
+	langfuseDevSecretKey = "sk-lf-dev-00000000000000000000000000000000" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+
+	// feedbackPort is the localhost port the launcher's feedback hook binds. Must
+	// match defaultFeedbackPort in cmd/launcher/feedback.go. Reserved per
+	// specs/agent-mesh.md; must NOT be :2996/:2997/:2998/:2999.
+	feedbackPort = "2995"
+)
+
 // jobBackoffLimit bounds retries for a one-shot job-model agent. Kept small: a
 // job agent runs to completion; a handful of retries covers a transient
 // image-pull / node-eviction failure without wedging a poison run
@@ -597,6 +624,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		)
 	}
 	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
+
+	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher
+	// starts the :2995 endpoint when LANGFUSE_HOST is present. The host, dev
+	// credentials, and port are STATIC env (values known at reconcile time — NEVER
+	// valueFrom, the m5.7 Knative ksvc landmine; tier1 no-valueFrom guard asserts
+	// this). The dev creds match those seeded by `dev-up M=3` into the
+	// langfuse-otlp Secret and the Langfuse Helm chart. Injected unconditionally:
+	// feedback is always available to the launcher; it is a thin relay, no CRD
+	// surface in v1 (the FeedbackStore CRD is phase 2).
+	env = append(env,
+		corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
+		corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
+		corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
+		corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
+	)
+
 	env = append(env, deploy.Spec.Env...)
 
 	// AGENT_NAME keys the per-agent spend in the budget proxy. A budgeted agent
