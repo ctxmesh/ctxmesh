@@ -244,6 +244,11 @@ class DiscoveryStub(_BaseStub):
         def tools(state: _StubState, req: RecordedRequest):
             return 200, {"Content-Type": "application/json"}, json.dumps(self._manifest()).encode()
 
+        def mcp_redirect(state: _StubState, req: RecordedRequest):
+            """Mirrors FastMCP/Starlette: POST /mcp (no trailing slash) → 307 /mcp/."""
+            location = f"{self.base_url}/mcp/"
+            return 307, {"Location": location}, b""
+
         def mcp(state: _StubState, req: RecordedRequest):
             msg = json.loads(req.body)
             method = msg.get("method")
@@ -306,7 +311,13 @@ class DiscoveryStub(_BaseStub):
         self.state.routes.update(
             {
                 "GET /tools": tools,
-                "POST /mcp": mcp,
+                # POST /mcp (no trailing slash) → 307 /mcp/, mirroring FastMCP/Starlette.
+                # The manifest carries the endpoint WITHOUT the trailing slash
+                # (as discovered in m4.4), so the SDK's first MCP POST always
+                # hits this redirect; the fix in _http.py must follow it.
+                "POST /mcp": mcp_redirect,
+                # The real MCP handshake lives at /mcp/ (with trailing slash).
+                "POST /mcp/": mcp,
             }
         )
 
