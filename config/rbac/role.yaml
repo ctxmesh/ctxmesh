@@ -30,6 +30,7 @@ rules:
   resources:
   - agentdeployments
   - agentregistries
+  - agentscalingpolicies
   - agentversions
   - mcptoolbindings
   - memorybindings
@@ -47,6 +48,7 @@ rules:
   resources:
   - agentdeployments/finalizers
   - agentregistries/finalizers
+  - agentscalingpolicies/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   verbs:
@@ -56,6 +58,7 @@ rules:
   resources:
   - agentdeployments/status
   - agentregistries/status
+  - agentscalingpolicies/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status
