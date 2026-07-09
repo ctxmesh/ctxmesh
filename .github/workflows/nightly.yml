@@ -110,3 +110,18 @@ jobs:
         # tests the per-agent dimension (the example agent doesn't stamp
         # X-Conversation-Id on its LLM call) — specs/cost-governance.md.
         run: make -C agent-brain/harness tier2 SLICE=m8-budget
+      - name: M9 eval/prompts/feedback e2e (deploy-gate, prompt-only swap, feedback→trace)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
+        # Asserts the full M9 🧪: (a) an EvalSuite gates a deploy — below-threshold
+        # gate:block → candidate ksvc never written (nothing serves / prior
+        # revision keeps serving), passing → awaiting-promotion → promoted on the
+        # agents.ctxmesh.ai/promote annotation (human-gated, mock scorer); (b) a
+        # PromptVersion ref swap rolls a new revision with the container image
+        # @sha256 BYTE-UNCHANGED (prompt folds into the p= digest, not the image);
+        # (c) POST :2995/feedback {value:1} → 202 → a NUMERIC Langfuse score on
+        # the run's exact traceId (bool → 400). The eval.gate span is v1-deferred
+        # (controller injects no EvalTracer) — asserted on status.gate instead.
+        # specs/eval-prompts-feedback.md, ADR 0008.
+        run: make -C agent-brain/harness tier2 SLICE=m9-eval
