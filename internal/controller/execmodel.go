@@ -19,35 +19,52 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // knativeServiceAPIVersion / knativeServiceKind identify a Knative Service as a
-// Trigger subscriber target (a KReference the eventing controller resolves to
-// the ksvc's addressable URL).
+// KReference target. Still used by the AgentRegistry controller's per-registry
+// DLQ sink (a ksvc). The eventing Trigger subscriber, by contrast, references a
+// plain core/v1 Service (coreService* below).
 const (
 	knativeServiceAPIVersion = "serving.knative.dev/v1"
 	knativeServiceKind       = "Service"
 )
 
-// duckv1Destination builds a Trigger subscriber Destination referencing the
-// agent's own Knative Service by name in its namespace.
-func duckv1Destination(name, namespace string) duckv1.Destination {
+// coreServiceAPIVersion / coreServiceKind identify a core/v1 Service as the
+// Trigger subscriber target. An eventing agent is a plain Deployment + Service
+// (NOT a ksvc — the m7.8 e2e proved KEDA cannot resolve a Knative revision
+// Deployment, and KEDA/KPA would fight over replicas; see
+// specs/eventing-scaling.md "Why eventing is a plain Deployment"). The Trigger's
+// KReference points at that Service so Knative Eventing resolves its addressable
+// URL and delivers events to the launcher's port.
+const (
+	coreServiceAPIVersion = "v1"
+	coreServiceKind       = "Service"
+)
+
+// serviceSubscriberDestination builds a Trigger subscriber Destination
+// referencing the agent's own core/v1 Service by name in its namespace.
+func serviceSubscriberDestination(name, namespace string) duckv1.Destination {
 	return duckv1.Destination{
 		Ref: &duckv1.KReference{
-			APIVersion: knativeServiceAPIVersion,
-			Kind:       knativeServiceKind,
+			APIVersion: coreServiceAPIVersion,
+			Kind:       coreServiceKind,
 			Name:       name,
 			Namespace:  namespace,
 		},
@@ -146,12 +163,13 @@ func (r *AgentDeploymentReconciler) scheduleForAgent(
 // ── Eventing (Trigger) ───────────────────────────────────────────────────────
 
 // reconcileTrigger CreateOrUpdate's the Knative Eventing Trigger that subscribes
-// the agent's ksvc to its registry broker. The Trigger references the
+// the agent's Service to its registry broker. The Trigger references the
 // per-registry broker by name (`<registryName>-broker`) — the Broker itself is
 // created by the AgentRegistry controller (m7.6), NOT here. The filter matches
 // the CloudEvent `type` attribute against the agent name so the agent receives
 // only its own async A2A events from the shared registry broker
-// (specs/eventing-scaling.md §12.6).
+// (specs/eventing-scaling.md §12.6). The subscriber is the agent's plain
+// Service (the eventing workload is a Deployment + Service, not a ksvc).
 func (r *AgentDeploymentReconciler) reconcileTrigger(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
@@ -177,9 +195,10 @@ func (r *AgentDeploymentReconciler) reconcileTrigger(
 					ceTypeAttribute: deploy.Name,
 				},
 			},
-			// Subscriber: the agent's own Knative Service (same name/namespace).
-			// A KReference to the ksvc lets Knative resolve its addressable URL.
-			Subscriber: duckv1Destination(deploy.Name, deploy.Namespace),
+			// Subscriber: the agent's own core/v1 Service (<agent>-eventing).
+			// A KReference to the Service lets Knative Eventing resolve its
+			// addressable URL and deliver events to the launcher's port.
+			Subscriber: serviceSubscriberDestination(eventingServiceName(deploy.Name), deploy.Namespace),
 		}
 		return ctrl.SetControllerReference(deploy, trigger, r.Scheme)
 	}); err != nil {
@@ -187,6 +206,143 @@ func (r *AgentDeploymentReconciler) reconcileTrigger(
 			return nil
 		}
 		return fmt.Errorf("upserting Trigger %s: %w", trigger.Name, err)
+	}
+	return nil
+}
+
+// ── Eventing (Deployment + Service) ──────────────────────────────────────────
+
+// eventingWorkloadLabel is the pod-template + selector label an eventing agent's
+// Deployment and Service select on. Keyed on the agent name so it is unique per
+// agent within a namespace. This is DISTINCT from the M6 registry-membership
+// label (registryIDLabel), which the NetworkPolicy selects on and is shared by
+// every member — the Service must route to exactly THIS agent's pods.
+const eventingWorkloadLabel = "agents.ctxmesh.ai/eventing-agent"
+
+// eventingServiceSuffix disambiguates the eventing agent's core/v1 Service from
+// the Knative route Service a serving ksvc creates (both would otherwise be named
+// `<agent>`). The eventing DEPLOYMENT keeps the bare `<agent>` name (KEDA-
+// resolvable, and Knative's own Deployment is `<ksvc>-<rev>-deployment`, so no
+// collision); only the Service is suffixed. The serving/job teardown deletes
+// `<agent>-eventing`, never Knative's route Service.
+const eventingServiceSuffix = "-eventing"
+
+// eventingServiceName returns the eventing agent's core/v1 Service name.
+func eventingServiceName(agentName string) string {
+	return agentName + eventingServiceSuffix
+}
+
+// eventingSelectorLabels returns the immutable selector label set the eventing
+// Deployment and Service match on. A Deployment's spec.selector is immutable
+// post-create, so this must never change for an existing agent — it is derived
+// purely from the agent name.
+func eventingSelectorLabels(agentName string) map[string]string {
+	return map[string]string{eventingWorkloadLabel: agentName}
+}
+
+// reconcileEventingDeployment CreateOrUpdate's the plain apps/v1 Deployment that
+// backs an eventing agent. It is named `<agent>` (KEDA-resolvable — a queue-depth
+// ScaledObject's scaleTargetRef names the AgentDeployment, and this Deployment
+// now carries that exact name, so KEDA resolves the HPA) and wraps the SAME pod
+// template as the serving ksvc (launcher + agent + collector + tool sidecars,
+// the M3-M6 env injection / digest, the no-valueFrom constraint). Unlike a ksvc
+// there is no KPA: without a scaling policy the Deployment runs at a fixed
+// replica count (default 1); a queue-depth KEDA ScaledObject (m7.4) owns the
+// replicas when one targets the agent (min=0 idles it — fine for a consumer).
+//
+// The pod-template labels merge the eventing selector label (Service routing)
+// with any M6 registry-membership label (NetworkPolicy selection).
+func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	pod podTemplate,
+) error {
+	selector := eventingSelectorLabels(deploy.Name)
+
+	// Merge the selector label with the pod template's membership labels so the
+	// pods carry BOTH the Service-routing label and the NetworkPolicy label.
+	podLabels := make(map[string]string, len(pod.labels)+len(selector))
+	maps.Copy(podLabels, pod.labels)
+	maps.Copy(podLabels, selector)
+
+	replicas := eventingReplicas(deploy)
+
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploy.Name,
+			Namespace: deploy.Namespace,
+		},
+	}
+
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Spec.Replicas = &replicas
+		// spec.selector is immutable post-create; set it once. On update
+		// CreateOrUpdate re-applies the same derived value, so it never drifts.
+		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selector}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+			Spec: corev1.PodSpec{
+				Containers: pod.containers,
+				Volumes:    pod.volumes,
+			},
+		}
+		return ctrl.SetControllerReference(deploy, dep, r.Scheme)
+	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil
+		}
+		return fmt.Errorf("upserting Deployment %s: %w", dep.Name, err)
+	}
+	return nil
+}
+
+// eventingReplicas returns the fixed replica count for an eventing Deployment
+// when no KEDA scaling policy drives it: spec.scaling.min if set (and > 0),
+// else 1. A plain Deployment has no KPA, so it must not default to 0 (that would
+// idle a consumer with nothing to wake it); a queue-depth ScaledObject, when
+// present, overrides replicas via the HPA it manages.
+func eventingReplicas(deploy *agentsv1alpha1.AgentDeployment) int32 {
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.Min > 0 {
+		return deploy.Spec.Scaling.Min
+	}
+	return 1
+}
+
+// reconcileEventingService CreateOrUpdate's the core/v1 Service that fronts the
+// eventing Deployment's pods. It is named `<agent>-eventing` (disambiguated from
+// the Knative route Service) and exposes the launcher's port so the Trigger
+// (subscriber = this Service) can deliver events. The selector matches the
+// Deployment's pod label.
+func (r *AgentDeploymentReconciler) reconcileEventingService(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	port int32,
+) error {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      eventingServiceName(deploy.Name),
+			Namespace: deploy.Namespace,
+		},
+	}
+
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Spec.Selector = eventingSelectorLabels(deploy.Name)
+		svc.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "http",
+				Port:       80,
+				TargetPort: intstr.FromInt32(port),
+				Protocol:   corev1.ProtocolTCP,
+			},
+		}
+		// ClusterIP (default) is preserved by CreateOrUpdate on update — leaving
+		// Type unset keeps the apiserver-assigned ClusterIP stable.
+		return ctrl.SetControllerReference(deploy, svc, r.Scheme)
+	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil
+		}
+		return fmt.Errorf("upserting Service %s: %w", svc.Name, err)
 	}
 	return nil
 }
@@ -271,23 +427,46 @@ func (r *AgentDeploymentReconciler) reconcileCronJob(
 // restartPolicy Never (one-shot batch semantics) and the HTTP readiness/liveness
 // probes stripped from the user container — a job pod runs to completion and is
 // not a long-running server, so the /readyz-/healthz probes do not apply.
+//
+// The OTel collector sidecar is moved from a regular container to a NATIVE
+// SIDECAR — an initContainer with restartPolicy Always (Kubernetes 1.28+, the
+// dev cluster is 1.36). A Job is Complete only when ALL of its regular
+// containers exit; a plain collector sidecar runs forever and would wedge the
+// Job permanently (the m7.8 e2e finding). As a native sidecar the collector
+// still starts before and runs alongside the agent (tracing is preserved), but
+// Kubernetes terminates it automatically once the agent (the last regular
+// container) exits, so the Job reaches Complete. serving/eventing pods keep the
+// collector as a plain sidecar (they are long-running servers, never a Job).
 func jobPodTemplateSpec(pod podTemplate) corev1.PodTemplateSpec {
-	containers := make([]corev1.Container, len(pod.containers))
-	copy(containers, pod.containers)
-	if len(containers) > 0 {
+	regular := make([]corev1.Container, 0, len(pod.containers))
+	var initContainers []corev1.Container
+	always := corev1.ContainerRestartPolicyAlways
+	for _, c := range pod.containers {
+		if c.Name == telemetry.CollectorContainerName {
+			// Native sidecar: an initContainer with restartPolicy Always. K8s
+			// keeps it running for the pod's lifetime but does NOT count it toward
+			// Job completion, so the Job completes when the agent container exits.
+			c.RestartPolicy = &always
+			initContainers = append(initContainers, c)
+			continue
+		}
+		regular = append(regular, c)
+	}
+	if len(regular) > 0 {
 		// The user container is always first (buildPodTemplate order). Drop its
 		// server probes for the batch context.
-		containers[0].ReadinessProbe = nil
-		containers[0].LivenessProbe = nil
+		regular[0].ReadinessProbe = nil
+		regular[0].LivenessProbe = nil
 	}
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: pod.labels,
 		},
 		Spec: corev1.PodSpec{
-			Containers:    containers,
-			Volumes:       pod.volumes,
-			RestartPolicy: corev1.RestartPolicyNever,
+			InitContainers: initContainers,
+			Containers:     regular,
+			Volumes:        pod.volumes,
+			RestartPolicy:  corev1.RestartPolicyNever,
 		},
 	}
 }
@@ -307,7 +486,19 @@ func (r *AgentDeploymentReconciler) deleteWorkload(
 	deploy *agentsv1alpha1.AgentDeployment,
 	obj client.Object,
 ) error {
-	obj.SetName(deploy.Name)
+	return r.deleteNamedWorkload(ctx, deploy, obj, deploy.Name)
+}
+
+// deleteNamedWorkload deletes an owned workload object with an EXPLICIT name
+// (used for the eventing Service, whose name is `<agent>-eventing`, not the bare
+// agent name). Otherwise identical to deleteWorkload.
+func (r *AgentDeploymentReconciler) deleteNamedWorkload(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	obj client.Object,
+	name string,
+) error {
+	obj.SetName(name)
 	obj.SetNamespace(deploy.Namespace)
 	// Background propagation: delete the workload AND its dependents (a Job's
 	// pods, a CronJob's Jobs). The apiserver's default (Orphan) stamps an
@@ -323,7 +514,7 @@ func (r *AgentDeploymentReconciler) deleteWorkload(
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			return nil
 		}
-		return fmt.Errorf("deleting stale %T %s: %w", obj, deploy.Name, err)
+		return fmt.Errorf("deleting stale %T %s: %w", obj, name, err)
 	}
 	return nil
 }
@@ -358,5 +549,53 @@ func (r *AgentDeploymentReconciler) setJobReady(
 	// A job-model agent exposes no HTTP URL; clear any stale one from a prior
 	// serving/eventing model.
 	deploy.Status.URL = ""
+	return r.Status().Update(ctx, deploy)
+}
+
+// ── Eventing-model status ────────────────────────────────────────────────────
+
+// setEventingReady mirrors an eventing agent's Deployment readiness into status.
+// An eventing agent is a plain Deployment + Service (no ksvc Ready condition), so
+// this reflects the Deployment's Available condition into the AgentDeployment's
+// Ready condition and stamps the in-cluster Service URL. In envtest (no
+// deployment controller) the Deployment carries no Available condition yet →
+// Ready=Unknown, matching the serving path's AwaitingKnativeController shape.
+func (r *AgentDeploymentReconciler) setEventingReady(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	dep *appsv1.Deployment,
+	latestVersion string,
+) error {
+	readyStatus := metav1.ConditionUnknown
+	readyReason := "AwaitingDeployment"
+	readyMsg := "eventing Deployment not yet Available"
+
+	for _, c := range dep.Status.Conditions {
+		if c.Type == appsv1.DeploymentAvailable {
+			readyStatus = metav1.ConditionStatus(c.Status)
+			if c.Reason != "" {
+				readyReason = c.Reason
+			} else {
+				readyReason = "DeploymentAvailable"
+			}
+			readyMsg = c.Message
+			break
+		}
+	}
+
+	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+		Type:               conditionReady,
+		Status:             readyStatus,
+		Reason:             readyReason,
+		Message:            readyMsg,
+		ObservedGeneration: deploy.Generation,
+	})
+
+	// The eventing agent's HTTP endpoint is its in-cluster Service, which is
+	// named <agent>-eventing (the bare <agent> name is the KEDA-targeted
+	// Deployment, and would collide with a Knative route Service).
+	deploy.Status.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local", eventingServiceName(deploy.Name), deploy.Namespace)
+	deploy.Status.LatestVersion = latestVersion
+	deploy.Status.ObservedGeneration = deploy.Generation
 	return r.Status().Update(ctx, deploy)
 }
