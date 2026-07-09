@@ -17,3 +17,6 @@
 # Re-include LangChain example agent assets (m3.4: langchain-agent)
 !examples/langchain-agent/requirements.txt
 !examples/langchain-agent/agent.py
+
+# Re-include batch-agent example assets (m7.7: batch-agent, job execution model)
+!examples/batch-agent/agent.py
