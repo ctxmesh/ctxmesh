@@ -23,15 +23,42 @@ def test_list_returns_manifest_tools(client, discovery_stub: DiscoveryStub):
     assert discovery_stub.requests[0].path == "/tools"
 
 
+def test_call_follows_307_redirect_to_mcp_slash(client, discovery_stub: DiscoveryStub):
+    """The SDK follows the 307 redirect from /mcp to /mcp/ on every POST.
+
+    FastMCP/Starlette mounts at /mcp/ and 307-redirects /mcp (no trailing
+    slash).  The discovery manifest carries /mcp verbatim (m4.4 convention).
+    This test proves the SDK follows the redirect so tools.call succeeds.
+    """
+    result = client.tools.call("word-count", text="a b c")
+    assert result == {"count": 3, "server_version": "v1"}
+
+    # The MCP handshake requests land at /mcp/ (after the redirect), not /mcp.
+    # Each of the 4 POSTs goes through: POST /mcp (307) → POST /mcp/ (200/202).
+    redirected_reqs = [r for r in discovery_stub.requests if r.path == "/mcp/"]
+    methods = [r.json().get("method") for r in redirected_reqs]
+    assert methods == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ]
+
+    # The redirect hops are recorded at /mcp (the no-slash path).
+    redirect_reqs = [r for r in discovery_stub.requests if r.path == "/mcp"]
+    assert len(redirect_reqs) == 4  # one redirect trigger per MCP POST
+
+
 def test_call_full_mcp_handshake_and_parsed_result(client, discovery_stub: DiscoveryStub):
     result = client.tools.call("word-count", text="a b c")
     assert result == {"count": 3, "server_version": "v1"}
 
     # The MCP endpoint saw initialize + initialized + tools/list + tools/call.
+    # After the 307 redirect, all MCP POSTs land at /mcp/ (trailing slash).
     methods = [
         r.json().get("method")
         for r in discovery_stub.requests
-        if r.path == "/mcp"
+        if r.path == "/mcp/"
     ]
     assert methods == [
         "initialize",
@@ -92,9 +119,36 @@ def test_call_sole_tool_fallback(client, discovery_stub: DiscoveryStub):
 def test_call_propagates_session_id_header(client, discovery_stub: DiscoveryStub):
     client.tools.call("word-count", text="x")
     # initialize returns Mcp-Session-Id; subsequent calls must carry it back.
-    mcp_reqs = [r for r in discovery_stub.requests if r.path == "/mcp"]
+    # After the 307 redirect, all MCP POSTs land at /mcp/ (trailing slash).
+    mcp_reqs = [r for r in discovery_stub.requests if r.path == "/mcp/"]
     initialized = mcp_reqs[1]
     assert initialized.headers.get("mcp-session-id") == "sess-1"
+
+
+def test_redirect_cross_origin_refused(discovery_stub: DiscoveryStub):
+    """A 307 redirect to a different host is refused — never re-POST body cross-origin.
+
+    This is the security boundary: a malicious or misconfigured redirect that
+    points to a different host must not cause the SDK to re-POST a request body
+    (which may carry secrets/tokens) to an arbitrary destination.
+    """
+    # Patch the mcp_redirect route to return a cross-origin Location.
+    original_mcp_redirect = discovery_stub.state.routes["POST /mcp"]
+
+    def cross_origin_redirect(state, req):  # type: ignore[no-untyped-def]
+        return 307, {"Location": "http://evil.example.com:9999/mcp/"}, b""
+
+    discovery_stub.state.routes["POST /mcp"] = cross_origin_redirect
+
+    cfg = PlaneConfig.for_test(discovery_base_url=discovery_stub.base_url)
+    c = agent.from_config(cfg)
+    with pytest.raises(EndpointError) as exc_info:
+        c.tools.call("word-count", text="x")
+
+    # The error message must be explicit about the cross-origin refusal.
+    assert "cross-origin" in str(exc_info.value).lower()
+    # Restore the original route so the stub is usable in subsequent tests.
+    discovery_stub.state.routes["POST /mcp"] = original_mcp_redirect
 
 
 def test_call_unknown_tool_raises(client):
