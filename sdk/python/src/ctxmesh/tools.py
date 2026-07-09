@@ -6,11 +6,20 @@
 raw agent uses (mcp-tools.md "Agent consumption").
 
 ``call(name, **args)`` looks the tool up in the live manifest, then invokes it
-over its MCP ``streamable-http`` endpoint (a JSON-RPC ``tools/call``). The
-endpoint is taken verbatim from the manifest (it already ends in ``/mcp`` per
-the m4.4 finding). We speak the MCP wire directly over stdlib rather than
-pulling the heavyweight ``mcp`` package in as a runtime dep — the SDK stays lean
-and 3.9-compatible.
+over its MCP ``streamable-http`` endpoint. The endpoint is taken verbatim from
+the manifest (it already ends in ``/mcp`` per the m4.4 finding). We speak the
+MCP wire directly over stdlib rather than pulling the heavyweight ``mcp``
+package in as a runtime dep — the SDK stays lean and 3.9-compatible.
+
+**Catalog name vs MCP tool name.** The discovery manifest name is the
+*ToolRegistry catalog key* (e.g. ``word-count``, hyphen), which is NOT
+necessarily the name the MCP server exposes the tool under (e.g. ``word_count``,
+underscore — a FastMCP function name). ``toolmanifest.Tool`` carries only the
+catalog name/endpoint, so ``call`` must discover the real MCP name from the
+server: it does the handshake, runs ``tools/list``, resolves the catalog name to
+a server tool name (exact → hyphen/underscore-normalized → sole-tool fallback),
+and only then calls with the *resolved* name. (Carrying the MCP name in the
+manifest is a phase-2 M4 item; the SDK resolves it at call time for now.)
 """
 
 from __future__ import annotations
@@ -101,12 +110,14 @@ class ToolsClient:
 
     # ── invocation ───────────────────────────────────────────────────────────
     def call(self, name: str, **args: Any) -> Any:
-        """Invoke a bound MCP tool by name; return its parsed result.
+        """Invoke a bound MCP tool by its *catalog* name; return its result.
 
-        Looks the tool up in the live manifest and performs an MCP
-        ``tools/call`` over its ``streamable-http`` endpoint. The tool's text
-        result is returned parsed as JSON when it is a JSON document, else as
-        the raw string.
+        *name* is the discovery-manifest catalog key. The client resolves the
+        endpoint from the manifest, then resolves the real MCP tool name via the
+        server's ``tools/list`` (catalog names may differ from MCP names — e.g.
+        ``word-count`` vs ``word_count``) before issuing ``tools/call``. The
+        tool's text result is returned parsed as JSON when it is a JSON document,
+        else as the raw string.
         """
         tool = self._find(name)
         if not tool.endpoint:
@@ -122,11 +133,13 @@ class ToolsClient:
 #
 # streamable-http transport (mcp-tools.md): the client POSTs JSON-RPC to the
 # endpoint. The server responds either application/json or a text/event-stream
-# SSE frame ("data: <json>"). The handshake is:
+# SSE frame ("data: <json>"). The sequence is:
 #   1. POST initialize        -> result + an Mcp-Session-Id response header
 #   2. POST notifications/initialized (notification; no id, no response body)
-#   3. POST tools/call        -> the tool result
-# We keep this deliberately small — just enough to invoke a bound tool.
+#   3. POST tools/list        -> the server's real tool names (to resolve the
+#                                catalog name -> the MCP name)
+#   4. POST tools/call        -> the tool result (with the resolved MCP name)
+# We keep this deliberately small — just enough to discover + invoke a tool.
 
 
 def _mcp_headers(session_id: Optional[str]) -> Dict[str, str]:
@@ -188,8 +201,13 @@ def _parse_jsonrpc(resp: _http.Response) -> Dict[str, Any]:
         raise EndpointError(f"MCP response was not valid JSON: {exc}") from exc
 
 
-def _mcp_call_tool(endpoint: str, tool_name: str, arguments: Dict[str, Any]) -> str:
-    """Full MCP handshake + tools/call; return the first text content item."""
+def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) -> str:
+    """Full MCP session: handshake -> tools/list -> resolve name -> tools/call.
+
+    *catalog_name* is the discovery-manifest key; the actual MCP tool name is
+    discovered from the server and may differ (see the module docstring). Returns
+    the first text content item of the tool result.
+    """
     # 1. initialize.
     init_result, session_id = _mcp_post(
         endpoint,
@@ -216,20 +234,75 @@ def _mcp_call_tool(endpoint: str, tool_name: str, arguments: Dict[str, Any]) -> 
         expect_body=False,
     )
 
-    # 3. tools/call.
+    # 3. tools/list -> discover the server's real tool names.
+    list_result, _ = _mcp_post(
+        endpoint,
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        session_id=session_id,
+        expect_body=True,
+    )
+    server_names = _server_tool_names(list_result, endpoint)
+    mcp_name = _resolve_tool_name(catalog_name, server_names, endpoint)
+
+    # 4. tools/call with the RESOLVED MCP name.
     result, _ = _mcp_post(
         endpoint,
         {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": 3,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
+            "params": {"name": mcp_name, "arguments": arguments},
         },
         session_id=session_id,
         expect_body=True,
     )
 
     return _first_text_content(result, endpoint)
+
+
+def _server_tool_names(list_result: Optional[Dict[str, Any]], endpoint: str) -> List[str]:
+    """Extract the tool-name list from an MCP tools/list result."""
+    if not isinstance(list_result, dict):
+        raise EndpointError(f"MCP tools/list at {endpoint} returned no result object")
+    tools = list_result.get("tools")
+    if not isinstance(tools, list):
+        raise EndpointError(f"MCP tools/list at {endpoint} returned no tools array")
+    names = [t.get("name", "") for t in tools if isinstance(t, dict) and t.get("name")]
+    if not names:
+        raise EndpointError(f"MCP server at {endpoint} advertises no tools")
+    return names
+
+
+def _normalize(name: str) -> str:
+    """Fold hyphen/underscore so catalog `word-count` matches MCP `word_count`."""
+    return name.replace("-", "_")
+
+
+def _resolve_tool_name(catalog_name: str, server_names: List[str], endpoint: str) -> str:
+    """Map a catalog name to a server MCP tool name.
+
+    Precedence: exact match -> hyphen/underscore-normalized match -> if the
+    server advertises exactly one tool, use it -> otherwise raise a clear error
+    listing what the server actually exposes.
+    """
+    # 1. Exact.
+    if catalog_name in server_names:
+        return catalog_name
+    # 2. Normalized (hyphen<->underscore). Only accept an unambiguous match.
+    target = _normalize(catalog_name)
+    normalized_matches = [n for n in server_names if _normalize(n) == target]
+    if len(normalized_matches) == 1:
+        return normalized_matches[0]
+    # 3. Sole-tool fallback.
+    if len(server_names) == 1:
+        return server_names[0]
+    # 4. Give up with an actionable error.
+    raise ConfigError(
+        f"tool {catalog_name!r} could not be resolved to an MCP tool at "
+        f"{endpoint}: the server exposes {server_names!r}. "
+        f"(The discovery-catalog name may differ from the MCP tool name; a "
+        f"normalized match was ambiguous or absent.)"
+    )
 
 
 def _first_text_content(result: Optional[Dict[str, Any]], endpoint: str) -> str:

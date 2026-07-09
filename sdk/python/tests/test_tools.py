@@ -27,16 +27,66 @@ def test_call_full_mcp_handshake_and_parsed_result(client, discovery_stub: Disco
     result = client.tools.call("word-count", text="a b c")
     assert result == {"count": 3, "server_version": "v1"}
 
-    # The MCP endpoint saw initialize + initialized + tools/call in order.
+    # The MCP endpoint saw initialize + initialized + tools/list + tools/call.
     methods = [
         r.json().get("method")
         for r in discovery_stub.requests
         if r.path == "/mcp"
     ]
-    assert methods == ["initialize", "notifications/initialized", "tools/call"]
+    assert methods == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ]
 
-    # The tool was called with the right name + arguments.
-    assert discovery_stub.mcp_calls == [{"name": "word-count", "arguments": {"text": "a b c"}}]
+    # Discovery ran (tools/list was consulted to resolve the name).
+    assert discovery_stub.list_calls == 1
+
+
+def test_call_resolves_catalog_name_to_mcp_name(client, discovery_stub: DiscoveryStub):
+    """The catalog name (`word-count`) resolves to the MCP name (`word_count`).
+
+    This is the regression guard: the stub REJECTS a tools/call whose name is
+    not the server's real MCP name, so a client that forwarded the catalog name
+    verbatim would raise here instead of succeeding.
+    """
+    result = client.tools.call("word-count", text="a b c")
+    assert result == {"count": 3, "server_version": "v1"}
+
+    # The accepted tools/call carried the RESOLVED underscore name, not the
+    # hyphenated catalog name.
+    assert discovery_stub.mcp_calls == [
+        {"name": "word_count", "arguments": {"text": "a b c"}}
+    ]
+    assert discovery_stub.mcp_calls[0]["name"] == DiscoveryStub.MCP_TOOL_NAME
+    assert DiscoveryStub.MCP_TOOL_NAME != DiscoveryStub.CATALOG_NAME  # they differ
+
+
+def test_call_unresolvable_name_raises_clear_error(client, discovery_stub: DiscoveryStub):
+    """A catalog name that maps to no server tool raises a clear ConfigError.
+
+    The server advertises multiple tools (none normalizing to the catalog name),
+    so neither the exact/normalized match nor the sole-tool fallback applies.
+    """
+    discovery_stub._server_tools = lambda: [  # type: ignore[method-assign]
+        {"name": "alpha", "inputSchema": {}},
+        {"name": "beta", "inputSchema": {}},
+    ]
+    with pytest.raises(ConfigError) as exc:
+        client.tools.call("word-count", text="x")
+    # The error names the tools the server actually exposes.
+    assert "alpha" in str(exc.value) and "beta" in str(exc.value)
+
+
+def test_call_sole_tool_fallback(client, discovery_stub: DiscoveryStub):
+    """When the server exposes exactly one tool, an odd catalog name still binds."""
+    discovery_stub._server_tools = lambda: [  # type: ignore[method-assign]
+        {"name": "only_thing", "inputSchema": {}}
+    ]
+    result = client.tools.call("word-count", text="x")
+    assert result == {"count": 3, "server_version": "v1"}
+    assert discovery_stub.mcp_calls[0]["name"] == "only_thing"
 
 
 def test_call_propagates_session_id_header(client, discovery_stub: DiscoveryStub):
