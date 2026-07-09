@@ -509,3 +509,84 @@ func TestProxyRouting(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadConfig_PromptVersion: PROMPT_VERSION is parsed into cfg.PromptVersion
+// (the M9 prompt-only-deploy display identifier); absent → empty.
+func TestLoadConfig_PromptVersion(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(envMap(map[string]string{
+		"AGENT_ENTRYPOINT": "/bin/agent",
+		"PROMPT_VERSION":   "abc123def456",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PromptVersion != "abc123def456" {
+		t.Errorf("PromptVersion = %q, want %q", cfg.PromptVersion, "abc123def456")
+	}
+
+	cfg, err = loadConfig(envMap(map[string]string{"AGENT_ENTRYPOINT": "/bin/agent"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.PromptVersion != "" {
+		t.Errorf("PromptVersion = %q, want empty when PROMPT_VERSION unset", cfg.PromptVersion)
+	}
+}
+
+// TestProxy_PromptVersionSpanAttribute: the agent.invoke span carries the
+// prompt.version attribute (display-only; git is the source of truth) exactly
+// when the agent has a resolved prompt (cfg.PromptVersion set), and NOT when it
+// has none (image-bundled prompt — no empty attribute).
+func TestProxy_PromptVersionSpanAttribute(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prop := propagation.TraceContext{}
+
+	promptVersionOf := func(cfg Config) (string, bool) {
+		t.Helper()
+		rec, tp := newTestTracer(t)
+		handler := buildHandler(tp.Tracer(tracerName), prop, upstreamURL, cfg, nil, nil)
+		req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+
+		var invoke sdktrace.ReadOnlySpan
+		for _, s := range rec.Ended() {
+			if s.Name() == "agent.invoke" {
+				invoke = s
+			}
+		}
+		if invoke == nil {
+			t.Fatal("no agent.invoke span recorded")
+		}
+		for _, kv := range invoke.Attributes() {
+			if string(kv.Key) == "prompt.version" {
+				return kv.Value.AsString(), true
+			}
+		}
+		return "", false
+	}
+
+	// With a resolved prompt → the attribute is present and carries the version.
+	got, present := promptVersionOf(Config{AgentName: "a", PromptVersion: "deadbeef1234"})
+	if !present {
+		t.Fatal("prompt.version attribute missing when PromptVersion is set")
+	}
+	if got != "deadbeef1234" {
+		t.Errorf("prompt.version = %q, want %q", got, "deadbeef1234")
+	}
+
+	// Without a prompt (image-bundled) → no prompt.version attribute at all.
+	if _, present := promptVersionOf(Config{AgentName: "a"}); present {
+		t.Error("prompt.version attribute present when the agent has no promptRef")
+	}
+}
