@@ -16,6 +16,21 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
+# Python SDK toolchain (sdk/python — the ctxmesh SDK, m10.2). ruff+pytest are
+# wired into `make lint`/`make test` below so the harness tier0 covers Python.
+# The toolchain is self-bootstrapping and deterministic: `make py-venv` creates
+# a venv from the host python3 and installs PINNED ruff+pytest from
+# sdk/python/requirements-dev.txt, so lint/test work on a clean host and in CI
+# with no host-global installs. Host python3 is 3.9.x; the SDK targets 3.9+.
+PYTHON ?= python3
+SDK_DIR ?= sdk/python
+SDK_VENV ?= $(SDK_DIR)/.venv
+SDK_VENV_PY = $(SDK_VENV)/bin/python
+SDK_REQS = $(SDK_DIR)/requirements-dev.txt
+# Sentinel: touched after a successful install so the venv is only rebuilt when
+# the pinned requirements change (make dependency tracking).
+SDK_VENV_STAMP = $(SDK_VENV)/.deps-installed
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -65,7 +80,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet ## Run unit tests. Envtest suites are tagged 'integration' and run via test-integration.
+test: manifests generate fmt vet py-test ## Run unit tests (Go + Python SDK). Envtest suites are tagged 'integration' and run via test-integration.
 	go test ./... -coverprofile cover.out
 
 .PHONY: test-integration
@@ -76,12 +91,47 @@ test-integration: manifests generate fmt vet setup-envtest ## Run envtest-backed
 # (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: golangci-lint py-lint ## Run linters (Go golangci-lint + Python ruff on the SDK)
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix
+
+##@ Python SDK (sdk/python — ctxmesh, m10.2)
+
+# The venv is created from the host python3 and gets EXACTLY the pinned deps.
+# It depends on the requirements file so a pin change rebuilds it; the stamp
+# lets a warm venv be reused without reinstalling on every make invocation.
+$(SDK_VENV_STAMP): $(SDK_REQS) $(SDK_DIR)/pyproject.toml
+	@echo "Bootstrapping SDK dev venv ($(SDK_VENV)) from $$($(PYTHON) --version 2>&1)…"
+	"$(PYTHON)" -m venv "$(SDK_VENV)"
+	"$(SDK_VENV_PY)" -m pip install --upgrade --quiet pip
+	"$(SDK_VENV_PY)" -m pip install --quiet -r "$(SDK_REQS)"
+	# Install the SDK itself so `import ctxmesh` resolves regardless of cwd.
+	"$(SDK_VENV_PY)" -m pip install --quiet -e "$(SDK_DIR)"
+	@touch "$(SDK_VENV_STAMP)"
+
+.PHONY: py-venv
+py-venv: $(SDK_VENV_STAMP) ## Create/refresh the SDK dev venv with pinned ruff+pytest.
+
+.PHONY: py-lint
+py-lint: py-venv ## Lint the Python SDK with ruff (fails the target on any finding).
+	"$(SDK_VENV)/bin/ruff" check "$(SDK_DIR)"
+
+.PHONY: py-lint-fix
+py-lint-fix: py-venv ## ruff --fix the Python SDK.
+	"$(SDK_VENV)/bin/ruff" check --fix "$(SDK_DIR)"
+
+.PHONY: py-test
+py-test: py-venv ## Run the Python SDK unit + contract tests with pytest.
+	cd "$(SDK_DIR)" && "$(abspath $(SDK_VENV))/bin/pytest"
+
+.PHONY: py-clean
+py-clean: ## Remove the SDK dev venv and Python caches.
+	rm -rf "$(SDK_VENV)"
+	find "$(SDK_DIR)" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+	rm -rf "$(SDK_DIR)/.pytest_cache" "$(SDK_DIR)/.ruff_cache"
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
