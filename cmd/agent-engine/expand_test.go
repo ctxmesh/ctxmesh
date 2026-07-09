@@ -171,31 +171,110 @@ func TestExpand_UnknownField(t *testing.T) {
 	}
 }
 
-// TestExpand_FutureField_Budget verifies that a recognised-but-not-yet-supported
-// field (budget) causes a "not yet supported" validation error with the milestone.
-func TestExpand_FutureField_Budget(t *testing.T) {
-	input := "name: err-agent\nimage: ghcr.io/x/y:latest\nbudget: {monthly: 10}\n"
+// TestExpand_Budget_FullRoundTrip verifies that a budget block with both USD caps
+// and an explicit softThresholdPct maps correctly to spec.budget with
+// exact-decimal strings.
+func TestExpand_Budget_FullRoundTrip(t *testing.T) {
+	input := strings.Join([]string{
+		"name: budget-agent",
+		"image: ghcr.io/x/y:latest",
+		"budget:",
+		"  perConversationUSD: 0.50",
+		"  perAgentUSD: 10.00",
+		"  softThresholdPct: 75",
+		"",
+	}, "\n")
 	var buf bytes.Buffer
-	err := expandBytes([]byte(input), &buf)
-	if err == nil {
-		t.Fatal("expected error for future field, got nil")
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	xe, ok := err.(*expandError)
-	if !ok {
-		t.Fatalf("expected *expandError, got %T: %v", err, err)
+	got := buf.String()
+	if !strings.Contains(got, "perConversationUSD: \"0.50\"") && !strings.Contains(got, "perConversationUSD: 0.50") {
+		// YAML may or may not quote numeric-looking strings; check the value
+		if !strings.Contains(got, "0.50") {
+			t.Errorf("output should contain perConversationUSD 0.50, got:\n%s", got)
+		}
 	}
-	if xe.code != exitValidation {
-		t.Errorf("exit code = %d, want %d (validation)", xe.code, exitValidation)
+	if !strings.Contains(got, "10.00") {
+		t.Errorf("output should contain perAgentUSD 10.00, got:\n%s", got)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "budget") {
-		t.Errorf("error should name the future field, got: %v", msg)
+	if !strings.Contains(got, "softThresholdPct: 75") {
+		t.Errorf("output should contain softThresholdPct 75, got:\n%s", got)
 	}
-	if !strings.Contains(msg, "not yet supported") {
-		t.Errorf("error should say 'not yet supported', got: %v", msg)
+	if !strings.Contains(got, "budget:") {
+		t.Errorf("output should contain budget: block, got:\n%s", got)
 	}
-	if !strings.Contains(msg, "M8") {
-		t.Errorf("error should reference the target milestone M8, got: %v", msg)
+}
+
+// TestExpand_Budget_AbsentIsNil verifies that when budget is absent from agent.yaml
+// the output contains no budget block.
+func TestExpand_Budget_AbsentIsNil(t *testing.T) {
+	input := "name: no-budget-agent\nimage: ghcr.io/x/y:latest\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "budget:") {
+		t.Errorf("output should not contain budget: block when budget is absent, got:\n%s", got)
+	}
+}
+
+// TestExpand_Budget_OnlyConversationCap verifies that a budget with only
+// perConversationUSD set omits perAgentUSD and uses CRD-default softThresholdPct.
+func TestExpand_Budget_OnlyConversationCap(t *testing.T) {
+	input := "name: conv-cap-agent\nimage: ghcr.io/x/y:latest\nbudget:\n  perConversationUSD: 1.5\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "1.50") {
+		t.Errorf("output should contain 1.50 for perConversationUSD, got:\n%s", got)
+	}
+	if strings.Contains(got, "perAgentUSD") {
+		t.Errorf("output should not contain perAgentUSD when not set, got:\n%s", got)
+	}
+	// softThresholdPct 0 → omitted (CRD default 80 applies)
+	if strings.Contains(got, "softThresholdPct") {
+		t.Errorf("softThresholdPct should be omitted when not explicitly set, got:\n%s", got)
+	}
+}
+
+// TestExpand_Budget_IntegerUSD verifies that integer USD values (e.g. 10) are
+// converted to the two-decimal-place string form "10.00".
+func TestExpand_Budget_IntegerUSD(t *testing.T) {
+	input := "name: int-budget-agent\nimage: ghcr.io/x/y:latest\nbudget:\n  perAgentUSD: 10\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "10.00") {
+		t.Errorf("integer 10 should expand to 10.00, got:\n%s", got)
+	}
+}
+
+// TestFloatToDecimalString verifies the conversion rule for USD values.
+func TestFloatToDecimalString(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{0.5, "0.50"},
+		{10.0, "10.00"},
+		{0.50, "0.50"},
+		{10.00, "10.00"},
+		{1.5, "1.50"},
+		{0.123456, "0.123456"},
+		{100.0, "100.00"},
+		{0.1, "0.10"},
+	}
+	for _, tc := range cases {
+		got := floatToDecimalString(tc.in)
+		if got != tc.want {
+			t.Errorf("floatToDecimalString(%v) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

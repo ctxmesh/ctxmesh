@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
-// knownFields is the set of top-level agent.yaml fields supported in M2.
+// knownFields is the set of top-level agent.yaml fields supported in M2+M8.
 var knownFields = map[string]bool{
 	"name":           true,
 	"image":          true,
@@ -36,6 +38,7 @@ var knownFields = map[string]bool{
 	"resources":      true,
 	"scaling":        true,
 	"model":          true,
+	"budget":         true,
 }
 
 // futureField describes a top-level field not yet supported, with the milestone
@@ -50,13 +53,12 @@ var futureFields = map[string]futureField{
 	"prompt":   {milestone: "M9"},
 	"tools":    {milestone: "M4"},
 	"memory":   {milestone: "M5"},
-	"budget":   {milestone: "M8"},
 	"registry": {milestone: "M6"},
 }
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
-// agentYAML is the M2 subset of the simplified PRD §8.5 agent.yaml format.
+// agentYAML is the M2+M8 subset of the simplified PRD §8.5 agent.yaml format.
 type agentYAML struct {
 	Name           string         `yaml:"name"`
 	Image          string         `yaml:"image"`
@@ -64,6 +66,16 @@ type agentYAML struct {
 	Resources      *resourcesYAML `yaml:"resources"`
 	Scaling        *scalingYAML   `yaml:"scaling"`
 	Model          *modelYAML     `yaml:"model"`
+	Budget         *budgetYAML    `yaml:"budget"`
+}
+
+// budgetYAML holds optional cost-governance caps from the agent.yaml budget block.
+// USD values may be numbers (float/int) in YAML and are converted to exact-decimal
+// strings for the CRD field (see floatToDecimalString for the conversion rule).
+type budgetYAML struct {
+	PerConversationUSD *float64 `yaml:"perConversationUSD"`
+	PerAgentUSD        *float64 `yaml:"perAgentUSD"`
+	SoftThresholdPct   *int32   `yaml:"softThresholdPct"`
 }
 
 // resourcesYAML holds optional resource requests for the agent container.
@@ -107,6 +119,16 @@ type specOut struct {
 	Resources      *resourcesOut `yaml:"resources,omitempty"`
 	Scaling        *scalingOut   `yaml:"scaling,omitempty"`
 	Env            []envVarOut   `yaml:"env,omitempty"`
+	Budget         *budgetOut    `yaml:"budget,omitempty"`
+}
+
+// budgetOut mirrors BudgetSpec for YAML marshalling.
+// USD values are exact-decimal strings; softThresholdPct is omitted when 0
+// (the CRD default of 80 applies).
+type budgetOut struct {
+	PerConversationUSD string `yaml:"perConversationUSD,omitempty"`
+	PerAgentUSD        string `yaml:"perAgentUSD,omitempty"`
+	SoftThresholdPct   int32  `yaml:"softThresholdPct,omitempty"`
 }
 
 // resourcesOut holds resource request strings (e.g. "500m", "256Mi").
@@ -159,12 +181,12 @@ func newExpandCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "expand <file>",
 		Short: "Expand a simplified agent.yaml to an AgentDeployment CRD manifest",
-		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2 subset) and prints
+		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2+M8 subset) and prints
 the fully-expanded AgentDeployment YAML to stdout.
 
-Supported fields: name, image, executionModel, resources, scaling, model.route
+Supported fields: name, image, executionModel, resources, scaling, model.route, budget
 Unknown fields cause a hard error. Fields that land in later milestones
-(prompt, tools, memory, budget, registry) are rejected with an informative message.
+(prompt, tools, memory, registry) are rejected with an informative message.
 
 Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error`,
 		Args: cobra.ExactArgs(1),
@@ -245,6 +267,32 @@ func checkFields(raw map[string]any) error {
 	return nil
 }
 
+// floatToDecimalString converts a float64 budget value from agent.yaml to the
+// exact-decimal string form required by the CRD BudgetSpec fields.
+//
+// Conversion rule (lossless and deterministic):
+//   - Format with the minimum digits needed to represent the value exactly
+//     (strconv.FormatFloat with bitSize=64 and format 'f', prec=-1).
+//   - If the result contains no decimal point, append ".00" so the output
+//     is always in decimal form (e.g. 10 → "10.00").
+//   - If the result has exactly one decimal digit, append "0" (e.g. 0.5 → "0.50").
+//
+// Examples: 0.5 → "0.50", 10.0 → "10.00", 0.123456 → "0.123456".
+// This rule is stable: the same float always produces the same string, and no
+// information is lost (Go's float64 round-trip through FormatFloat is exact).
+func floatToDecimalString(f float64) string {
+	s := strconv.FormatFloat(f, 'f', -1, 64)
+	if !strings.Contains(s, ".") {
+		return s + ".00"
+	}
+	// Ensure at least two decimal places.
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts[1]) == 1 {
+		return s + "0"
+	}
+	return s
+}
+
 // buildOutput converts a parsed agentYAML into the output struct.
 func buildOutput(ay *agentYAML) *agentDeploymentOut {
 	execModel := ay.ExecutionModel
@@ -278,6 +326,24 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 			Name:  "MODEL_ROUTE",
 			Value: ay.Model.Route,
 		})
+	}
+
+	// budget → spec.budget: map float/int USD values to exact-decimal strings.
+	// Absent budget block → spec.budget stays nil (unenforced).
+	if ay.Budget != nil {
+		bo := &budgetOut{}
+		if ay.Budget.PerConversationUSD != nil {
+			bo.PerConversationUSD = floatToDecimalString(*ay.Budget.PerConversationUSD)
+		}
+		if ay.Budget.PerAgentUSD != nil {
+			bo.PerAgentUSD = floatToDecimalString(*ay.Budget.PerAgentUSD)
+		}
+		if ay.Budget.SoftThresholdPct != nil {
+			bo.SoftThresholdPct = *ay.Budget.SoftThresholdPct
+		}
+		// When all sub-fields are zero/empty (e.g. budget: {} with no caps),
+		// still emit the block so downstream readers see the explicit intent.
+		spec.Budget = bo
 	}
 
 	return &agentDeploymentOut{
