@@ -45,7 +45,12 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# internal/kedatypes provides wire-compatible KEDA types without importing the
+	# upstream package (controller-runtime API version conflict). Exclude it from
+	# CRD/webhook generation — the KEDA CRD comes from keda-crds.yaml, not here.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook \
+		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...,./internal/toolpush/...}" \
+		output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
