@@ -20,6 +20,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -231,8 +232,9 @@ func TestMemoryBinding_CustomAddr(t *testing.T) {
 
 // TestMemoryBinding_UnbindDropsEnvAndRollsRevision verifies both directions
 // of the bind→unbind cycle:
-//  1. After bind: env vars present, revision name contains "-m" suffix.
-//  2. After unbind: env vars gone, revision name changed (no "-m" suffix).
+//  1. After bind: env vars present, revision name carries the combined "-h" suffix.
+//  2. After unbind: ALL FOUR env vars gone (incl. AGENT_NAME), revision name
+//     rolled back to the bare spec-hash form.
 func TestMemoryBinding_UnbindDropsEnvAndRollsRevision(t *testing.T) {
 	const (
 		namespace = "default"
@@ -253,8 +255,8 @@ func TestMemoryBinding_UnbindDropsEnvAndRollsRevision(t *testing.T) {
 		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvcBound))
 
 	revNameBound := ksvcBound.Spec.Template.Name
-	assert.Contains(t, revNameBound, "-m",
-		"revision name must contain '-m' suffix when a MemoryBinding exists")
+	assert.Contains(t, revNameBound, "-h",
+		"revision name must carry the combined '-h' digest suffix when a MemoryBinding exists")
 
 	// MEMORY_BACKEND_ADDR must be present.
 	envMapBound := envByName(ksvcBound.Spec.Template.Spec.Containers[0].Env)
@@ -279,11 +281,15 @@ func TestMemoryBinding_UnbindDropsEnvAndRollsRevision(t *testing.T) {
 	assert.NotEqual(t, revNameBound, revNameUnbound,
 		"revision name must change on unbind (env drop is structural)")
 
-	// MEMORY_* env vars must be gone.
+	// ALL memory-related env vars must be gone — including the controller-injected
+	// AGENT_NAME (it exists only to serve the memory key layout; the operator did
+	// not set it in spec.env).
 	envMapUnbound := envByName(ksvcUnbound.Spec.Template.Spec.Containers[0].Env)
 	assert.NotContains(t, envMapUnbound, "MEMORY_BACKEND_ADDR")
 	assert.NotContains(t, envMapUnbound, "MEMORY_PORT")
 	assert.NotContains(t, envMapUnbound, "MEMORY_KEY_NAMESPACE")
+	assert.NotContains(t, envMapUnbound, "AGENT_NAME",
+		"controller-injected AGENT_NAME must be dropped on unbind")
 }
 
 // TestMemoryBinding_AddrChangeRollsRevision verifies that changing the backend
@@ -350,9 +356,14 @@ func TestMemoryBinding_NoBindingNoEnv(t *testing.T) {
 	assert.NotContains(t, envMap, "MEMORY_PORT", "no binding → no MEMORY_PORT")
 	assert.NotContains(t, envMap, "MEMORY_KEY_NAMESPACE", "no binding → no MEMORY_KEY_NAMESPACE")
 
-	// Revision name must NOT contain "-m".
-	assert.NotContains(t, ksvc.Spec.Template.Name, "-m",
-		"no binding → no memory digest in revision name")
+	// Revision name must be the BARE spec-hash form — no "-h" digest suffix.
+	var deploy agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &deploy))
+	hash, err := specHash(deploy.Spec)
+	require.NoError(t, err)
+	assert.Equal(t, agentName+"-"+hash, ksvc.Spec.Template.Name,
+		"no binding → bare spec-hash revision name (no combined digest suffix)")
 }
 
 // TestMemoryBinding_RevisionNameIdempotent verifies that re-reconciling with an
@@ -387,33 +398,89 @@ func TestMemoryBinding_RevisionNameIdempotent(t *testing.T) {
 	assert.Equal(t, rv1, ksvc2.ResourceVersion, "ksvc ResourceVersion must be unchanged — no spurious update")
 }
 
-// TestMemoryBinding_DigestChangesOnBindUnbind is a pure unit test for
-// memoryBindingDigest verifying the structural contract:
-//   - no binding → empty digest
-//   - binding with default addr → non-empty digest
-//   - binding with custom addr → different digest
-//   - same call → same digest (deterministic)
-func TestMemoryBinding_DigestChangesOnBindUnbind(t *testing.T) {
-	// No binding → empty digest (pre-M5 revision name unaffected).
-	d0 := memoryBindingDigest(false, "")
-	assert.Equal(t, "", d0, "no binding → empty digest")
+// TestMemoryBinding_AgentNameUserOverride verifies the AGENT_NAME injection
+// guard: when the operator sets AGENT_NAME in spec.env, the controller must NOT
+// inject a duplicate — the user's value is the only AGENT_NAME in the container
+// (and, being the sole entry, it wins).
+func TestMemoryBinding_AgentNameUserOverride(t *testing.T) {
+	const (
+		namespace = "default"
+		agentName = "mem-override-agent"
+		bindName  = "mem-override-binding"
+		userValue = "my-custom-agent-name"
+	)
 
-	// Binding with default addr → non-empty.
-	d1 := memoryBindingDigest(true, memoryDefaultAddr)
-	assert.NotEmpty(t, d1, "binding with default addr → non-empty digest")
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:          "ghcr.io/ctxmesh/example-agent:latest",
+			ExecutionModel: "serving",
+			Port:           8080,
+			Env: []corev1.EnvVar{
+				{Name: "AGENT_NAME", Value: userValue},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 
-	// Binding with custom addr → different digest.
-	d2 := memoryBindingDigest(true, "my-valkey.ns.svc:6380")
-	assert.NotEqual(t, d1, d2, "different addrs → different digests")
+	_ = mkMemoryBinding(t, bindName, namespace, agentName, "")
 
-	// Deterministic: same inputs → same output.
-	d1b := memoryBindingDigest(true, memoryDefaultAddr)
-	assert.Equal(t, d1, d1b, "digest must be deterministic")
+	r := newReconciler()
+	reconcileNN(t, r, agentName, namespace)
 
-	// Bind→unbind mimicry: with binding true → non-empty; false same addr → empty.
-	assert.NotEqual(t, memoryBindingDigest(true, memoryDefaultAddr),
-		memoryBindingDigest(false, memoryDefaultAddr),
-		"bind vs unbind must differ (hasBinding is the gate)")
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+
+	// Exactly ONE AGENT_NAME entry, holding the user's value.
+	var agentNameEntries []corev1.EnvVar
+	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "AGENT_NAME" {
+			agentNameEntries = append(agentNameEntries, e)
+		}
+	}
+	require.Len(t, agentNameEntries, 1, "controller must not inject a duplicate AGENT_NAME")
+	assert.Equal(t, userValue, agentNameEntries[0].Value, "user-set AGENT_NAME must win")
+
+	// The memory injection itself must still have happened.
+	envMap := envByName(ksvc.Spec.Template.Spec.Containers[0].Env)
+	assert.Contains(t, envMap, "MEMORY_BACKEND_ADDR")
+}
+
+// TestAgentDeployment_NameLengthCELGuard verifies the admission-time CEL rule
+// guarding the revision-name budget: metadata.name is capped at 44 characters
+// (63 DNS-1035 max minus the bounded 19-char "-<specHash8>-h<digest8>" suffix).
+// envtest applies full CRD validation, so a 45-char name must be rejected at
+// create and a 44-char name admitted.
+func TestAgentDeployment_NameLengthCELGuard(t *testing.T) {
+	const namespace = "default"
+
+	mk := func(name string) *agentsv1alpha1.AgentDeployment {
+		return &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: agentsv1alpha1.AgentDeploymentSpec{
+				Image:          "ghcr.io/ctxmesh/example-agent:latest",
+				ExecutionModel: "serving",
+				Port:           8080,
+			},
+		}
+	}
+
+	// 45 chars → rejected with the budget message.
+	longName := strings.Repeat("a", 45)
+	err := k8sClient.Create(testCtx, mk(longName))
+	require.Error(t, err, "45-char name must be rejected at admission")
+	assert.Contains(t, err.Error(), "44 characters",
+		"rejection must carry the revision-name budget message")
+
+	// 44 chars → admitted.
+	okName := strings.Repeat("a", 44)
+	okDeploy := mk(okName)
+	require.NoError(t, k8sClient.Create(testCtx, okDeploy),
+		"44-char name must be admitted")
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, okDeploy) })
 }
 
 // envByName converts a container env slice to a map of name → value for assertions.
