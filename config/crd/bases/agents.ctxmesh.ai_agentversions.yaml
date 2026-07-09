@@ -74,6 +74,40 @@ spec:
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
+                  budget:
+                    description: |-
+                      budget optionally sets USD cost-governance caps for this agent (PRD §14).
+                      When set, the gateway enforces the caps per conversation and/or per agent and
+                      emits a soft alert at softThresholdPct% of each cap. When omitted, no cost
+                      enforcement is applied. See BudgetSpec for field details.
+                    properties:
+                      perAgentUSD:
+                        description: |-
+                          perAgentUSD is the hard USD cost cap across all conversations for this agent.
+                          Expressed as an exact decimal string, e.g. "10.00". Optional; omit to leave
+                          this dimension unenforced.
+                        pattern: ^[0-9]+(\.[0-9]{1,6})?$
+                        type: string
+                      perConversationUSD:
+                        description: |-
+                          perConversationUSD is the hard USD cost cap per conversation ID.
+                          When a conversation's total spend reaches this value the gateway returns a
+                          typed budget_exceeded error and refuses further calls for that conversation.
+                          Expressed as an exact decimal string, e.g. "0.50". Optional; omit to leave
+                          this dimension unenforced.
+                        pattern: ^[0-9]+(\.[0-9]{1,6})?$
+                        type: string
+                      softThresholdPct:
+                        default: 80
+                        description: |-
+                          softThresholdPct is the percentage of a hard cap at which the gateway emits
+                          a one-shot budget.alert event and log line, but continues processing.
+                          Applied to whichever caps are set. Defaults to 80.
+                        format: int32
+                        maximum: 99
+                        minimum: 1
+                        type: integer
+                    type: object
                   env:
                     description: |-
                       env is an optional list of environment variables injected directly into
