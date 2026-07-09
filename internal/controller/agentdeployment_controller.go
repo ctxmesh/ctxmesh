@@ -248,17 +248,15 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		env = append(env,
 			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
 			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
-			// MEMORY_KEY_NAMESPACE: downward API — pod's own namespace so the
-			// Valkey key prefix stays correct even when the controller-default
-			// addr is overridden to a cross-namespace backend.
-			corev1.EnvVar{
-				Name: "MEMORY_KEY_NAMESPACE",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
-					},
-				},
-			},
+			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
+			// prefix. Set as a STATIC value (the pod always runs in the
+			// AgentDeployment's namespace, known here at reconcile time) — a
+			// downward-API fieldRef is rejected by Knative Serving's webhook,
+			// which forbids valueFrom in a ksvc pod template unless the
+			// non-default kubernetes.podspec-fieldref feature flag is enabled.
+			// The key prefix is the agent's own namespace regardless of where
+			// the backend lives, so no downward reference is needed.
+			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
 		)
 		// AGENT_NAME: inject only if not already present in spec.env (user
 		// override must win). The launcher uses AGENT_NAME for Valkey key
