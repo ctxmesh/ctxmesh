@@ -28,7 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -36,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/gateway"
 )
 
 const (
@@ -70,11 +68,6 @@ const (
 	// kourierSystemNamespace hosts the kourier ingress gateway, the entry point
 	// for external /invoke traffic. Must be allowed alongside the activator.
 	kourierSystemNamespace = "kourier-system"
-
-	// kubeDNSPort is the standard cluster DNS port (kube-dns / CoreDNS). Member
-	// pods need DNS egress so the launcher can resolve peer agents by name
-	// (specs/agent-mesh.md — DNS discovery).
-	kubeDNSPort = 53
 
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
@@ -217,16 +210,13 @@ func (r *AgentRegistryReconciler) resolveMembers(
 //     A2A);
 //   - Ingress allow from the knative-serving (activator) and kourier-system
 //     (ingress) namespaces — REQUIRED or scale-from-zero A2A and external
-//     /invoke break (ADR 0007 consequences);
-//   - Egress allow to DNS (kube-dns, UDP+TCP 53) so the launcher resolves peers.
+//     /invoke break (ADR 0007 consequences).
 //
-// Adding an Egress section makes the policy default-deny EGRESS for member pods
-// too, so the rules must not silently sever the platform traffic M2–M5 rely on.
-// Egress is therefore scoped, not locked to DNS only: DNS (discovery) + all
-// same-namespace pods (same-namespace A2A peers, and any in-namespace platform
-// service) + the platform namespaces by name (the model gateway and state layer
-// live in agent-engine-system; knative-serving/kourier are included so replies
-// on member-initiated connections and the activator handshake are not dropped).
+// Ingress-only (M6): egress is intentionally NOT restricted. The cross-registry
+// isolation 🧪 is ingress-driven — the callee's ingress default-deny admits only
+// same-registry pods. A default-deny egress model needs a complete backend
+// inventory (it silently severed the collector→Langfuse OTLP export in review)
+// and belongs with the M11 zero-trust work (ADR 0007 defers mTLS/zero-trust).
 func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 	ctx context.Context,
 	registry *agentsv1alpha1.AgentRegistry,
@@ -239,9 +229,6 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 	}
 
 	registryID := registry.Spec.RegistryId
-	dnsProtoUDP := corev1.ProtocolUDP
-	dnsProtoTCP := corev1.ProtocolTCP
-	dnsPort := intstr.FromInt32(kubeDNSPort)
 
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, np, func() error {
 		np.Spec = networkingv1.NetworkPolicySpec{
@@ -249,11 +236,14 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 			PodSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{registryIDLabel: registryID},
 			},
-			// Listing BOTH types makes this a default-deny for ingress AND egress
-			// to member pods, allowing only the explicit rules below.
+			// Listing Ingress makes this default-deny for INGRESS to member pods,
+			// allowing only the explicit rules below. Egress is intentionally NOT
+			// restricted in M6 (ingress-only isolation per ADR 0007 — the
+			// cross-registry block is ingress-driven; a default-deny egress model
+			// needs a complete backend inventory, silently severed collector→Langfuse
+			// in review, and belongs with M11 zero-trust).
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
-				networkingv1.PolicyTypeEgress,
 			},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
@@ -274,43 +264,6 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					// well-known namespace-name label so we do not depend on the
 					// operator labelling those namespaces themselves.
 					From: []networkingv1.NetworkPolicyPeer{
-						{NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{namespaceNameLabel: knativeServingNamespace},
-						}},
-						{NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{namespaceNameLabel: kourierSystemNamespace},
-						}},
-					},
-				},
-			},
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				{
-					// DNS egress (kube-dns / CoreDNS), UDP and TCP 53 — required for
-					// the launcher to resolve peer agents by name.
-					Ports: []networkingv1.NetworkPolicyPort{
-						{Protocol: &dnsProtoUDP, Port: &dnsPort},
-						{Protocol: &dnsProtoTCP, Port: &dnsPort},
-					},
-				},
-				{
-					// Intra-namespace egress: allow members to reach same-namespace
-					// peers (A2A) and any in-namespace platform service. Combined with
-					// the platform-namespace egress below, this keeps M2–M5 traffic
-					// (model gateway, state layer in agent-engine-system) working under
-					// the default-deny egress this policy imposes.
-					To: []networkingv1.NetworkPolicyPeer{
-						{PodSelector: &metav1.LabelSelector{}},
-					},
-				},
-				{
-					// Platform-namespace egress: the model gateway and state layer
-					// live in agent-engine-system; kourier/activator responses come
-					// back on established connections but egress to platform
-					// namespaces must be allowed explicitly under default-deny egress.
-					To: []networkingv1.NetworkPolicyPeer{
-						{NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{namespaceNameLabel: gateway.GatewayNamespace},
-						}},
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: knativeServingNamespace},
 						}},
