@@ -498,14 +498,20 @@ func TestAgentDeployment_NameLengthCELGuard(t *testing.T) {
 
 // envByName converts a container env slice to a map of name → value for assertions.
 // Only plain-value entries are included; ValueFrom entries are keyed by name with
-// a sentinel "<fieldRef>" so the caller can assert presence or specific type.
+// a sentinel so the caller can assert presence or specific type. Handles every
+// valueFrom shape (fieldRef/secretKeyRef/configMapKeyRef/resourceFieldRef)
+// without assuming a specific one is set — agent ksvcs carry no valueFrom today,
+// but a future non-fieldRef source must not nil-panic this helper.
 func envByName(env []corev1.EnvVar) map[string]string {
 	m := make(map[string]string, len(env))
 	for _, e := range env {
-		if e.ValueFrom != nil {
-			m[e.Name] = fmt.Sprintf("<fieldRef:%s>", e.ValueFrom.FieldRef.FieldPath)
-		} else {
+		switch {
+		case e.ValueFrom == nil:
 			m[e.Name] = e.Value
+		case e.ValueFrom.FieldRef != nil:
+			m[e.Name] = fmt.Sprintf("<fieldRef:%s>", e.ValueFrom.FieldRef.FieldPath)
+		default:
+			m[e.Name] = "<valueFrom>"
 		}
 	}
 	return m
