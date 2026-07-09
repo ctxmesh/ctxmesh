@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -55,7 +56,11 @@ var (
 // CRD directories loaded:
 //   - config/crd/bases — our AgentDeployment and AgentVersion CRDs
 //   - test/integration/testdata/crds — Knative Serving CRDs (serving-crds.yaml,
-//     pinned to knative-v1.22.1 / knative.dev/serving v0.49.1)
+//     pinned to knative-v1.22.1 / knative.dev/serving v0.49.1) AND Knative
+//     Eventing Broker + Trigger CRDs (eventing-crds.yaml, knative.dev/eventing
+//     v0.49.1) for the AgentDeployment eventing-model tests. envtest loads every
+//     yaml in the directory, so a new fixture (e.g. m7.4's KEDA CRDs) drops in
+//     without touching CRDDirectoryPaths.
 func TestMain(m *testing.M) {
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
@@ -88,6 +93,9 @@ func TestMain(m *testing.M) {
 	}
 	if err = servingv1.AddToScheme(testScheme); err != nil {
 		panic("failed to add Knative serving/v1 scheme: " + err.Error())
+	}
+	if err = eventingv1.AddToScheme(testScheme); err != nil {
+		panic("failed to add Knative eventing/v1 scheme: " + err.Error())
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})

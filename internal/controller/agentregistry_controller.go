@@ -325,10 +325,15 @@ func (r *AgentRegistryReconciler) setStatus(
 // and to roll the revision when membership changes. The zero value (IsMember
 // false) means the agent belongs to no registry.
 type registryMembership struct {
-	IsMember   bool
-	RegistryID string
-	MaxDepth   int32
-	HopBudget  int32
+	IsMember bool
+	// RegistryName is the AgentRegistry object's metadata.name. It (not the
+	// RegistryID) names the per-registry Knative Eventing Broker
+	// (`<RegistryName>-broker`) an eventing-model agent's Trigger subscribes to
+	// (specs/eventing-scaling.md "Broker per registry").
+	RegistryName string
+	RegistryID   string
+	MaxDepth     int32
+	HopBudget    int32
 }
 
 // resolveAgentRegistry determines which AgentRegistry (if any) an agent belongs
@@ -385,10 +390,11 @@ func resolveAgentRegistry(
 	}
 
 	m := registryMembership{
-		IsMember:   true,
-		RegistryID: best.Spec.RegistryId,
-		MaxDepth:   registryDefaultMaxDepth,
-		HopBudget:  registryDefaultHopBudget,
+		IsMember:     true,
+		RegistryName: best.Name,
+		RegistryID:   best.Spec.RegistryId,
+		MaxDepth:     registryDefaultMaxDepth,
+		HopBudget:    registryDefaultHopBudget,
 	}
 	if best.Spec.Guards != nil {
 		if best.Spec.Guards.MaxDepth > 0 {
