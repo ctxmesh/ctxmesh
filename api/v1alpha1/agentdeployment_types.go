@@ -91,6 +91,32 @@ type AgentDeploymentSpec struct {
 	// When omitted, defaults to min=0 (scale-to-zero) and max=3.
 	// +optional
 	Scaling *ScalingSpec `json:"scaling,omitempty"`
+
+	// role is the agent's role within its AgentRegistry (PRD §12.4 role-based
+	// access control). The three built-in roles always exist: "orchestrator",
+	// "worker", and "reviewer"; a registry may also declare custom roles via
+	// AgentRegistry.spec.roles. When set on a registry member, the controller
+	// injects it as the static AGENT_ROLE env var, which the launcher stamps
+	// into the A2A message envelope and checks against the callee's role policy.
+	// Bounded at 63 characters (the AGENT_ROLE value is a short label, never a
+	// free-form string). Ignored for non-members.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	Role string `json:"role,omitempty"`
+
+	// allowedCallers is the per-agent inbound allowlist (PRD §12.4 layer 3):
+	// the names of peer agents permitted to call this agent over A2A. The
+	// controller comma-joins it into the static AGENT_ALLOWED_CALLERS env var;
+	// the callee's launcher rejects a caller not on the list with a typed
+	// caller_not_allowed error. An empty/omitted list means the launcher applies
+	// its default policy (registry-membership check only). Bounded at 64 entries
+	// of at most 63 characters each (DNS-label-sized agent names).
+	// +listType=atomic
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	AllowedCallers []string `json:"allowedCallers,omitempty"`
 }
 
 // AgentDeploymentStatus defines the observed state of AgentDeployment.

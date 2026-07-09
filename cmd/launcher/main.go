@@ -59,7 +59,15 @@ func main() {
 	// defaults if OTel init failed).
 	tracer := otel.Tracer(tracerName)
 	prop := otel.GetTextMapPropagator()
-	handler := buildHandler(tracer, prop, upstreamURL, cfg)
+
+	// A2A inbound access control (callee side): only wired when the agent is a
+	// registry member (AGENT_REGISTRY_ID injected). nil otherwise, so a
+	// non-mesh agent's /invoke path is unchanged.
+	var guard inboundGuard
+	if cfg.A2AEnabled() {
+		guard = newA2AGuard(cfg.A2A, tracer)
+	}
+	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.ProxyPort),
@@ -77,6 +85,20 @@ func main() {
 		memSrv = &http.Server{
 			Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
 			Handler: newMemoryServer(newRedisStore(cfg.Memory.BackendAddr), cfg.Memory, tracer).handler(),
+		}
+	}
+
+	// ── A2A outbound endpoint (:2997) ─────────────────────────────────────
+	// Started ONLY when the agent is a resolved AgentRegistry member
+	// (AGENT_REGISTRY_ID injected). Same lifecycle discipline as the memory
+	// listener: a goroutine ListenAndServe, graceful Shutdown on child exit,
+	// and it NEVER overrides the child-driven process exit code. nil when the
+	// agent is not in a registry.
+	var a2aSrv *http.Server
+	if cfg.A2AEnabled() {
+		a2aSrv = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.A2A.Port),
+			Handler: newA2AServer(cfg.A2A, tracer, prop).handler(),
 		}
 	}
 
@@ -119,6 +141,16 @@ func main() {
 		}()
 	}
 
+	// Start the A2A outbound listener (best-effort; a bind failure must not take
+	// the agent down — A2A is a best-effort mesh path like memory).
+	if a2aSrv != nil {
+		go func() {
+			if err := a2aSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "launcher: a2a: %v\n", err)
+			}
+		}()
+	}
+
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
 
@@ -128,6 +160,9 @@ func main() {
 	_ = srv.Shutdown(shutCtx)
 	if memSrv != nil {
 		_ = memSrv.Shutdown(shutCtx)
+	}
+	if a2aSrv != nil {
+		_ = a2aSrv.Shutdown(shutCtx)
 	}
 	_ = otelShutdown(shutCtx)
 

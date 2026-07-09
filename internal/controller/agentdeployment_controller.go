@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -266,6 +267,59 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		}
 	}
 
+	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
+	// member, inject the STATIC mesh env the launcher's /a2a server reads
+	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
+	// feed the L7 access-control checks; A2A_MAX_DEPTH / A2A_HOP_BUDGET seed the
+	// conversation guards) and stamp the membership pod label the generated
+	// NetworkPolicy selects on. All values are known at reconcile time → plain
+	// static env, NEVER valueFrom (the Knative webhook rejects valueFrom in a
+	// ksvc — the m5.7 landmine; a tier1 guard asserts no ksvc env uses it).
+	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
+	if err != nil {
+		return nil, fmt.Errorf("resolving registry membership: %w", err)
+	}
+	if membership.IsMember {
+		env = append(env,
+			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
+			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
+			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
+			// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
+			// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
+			// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
+			// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
+			// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Injected
+			// UNCONDITIONALLY for a member: the memory path does NOT set it, so a
+			// registry member without a MemoryBinding would otherwise resolve
+			// {target}..svc.cluster.local (empty namespace → NXDOMAIN → every A2A
+			// call fails unknown_target).
+			corev1.EnvVar{Name: "POD_NAMESPACE", Value: deploy.Namespace},
+		)
+		// AGENT_NAME: the launcher's senderAgentId / envelope path identity. The
+		// memory path (earlier in this function) may have already appended it, and
+		// the user may have overridden it in spec.env — inject exactly ONCE. Check
+		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
+		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
+		// once, and a member without memory still gets it (the A2A path needs it).
+		if !envVarPresent(env, "AGENT_NAME") && !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
+			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		}
+		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
+		// launcher stamps it into the envelope role field.
+		if !envVarPresent(deploy.Spec.Env, "AGENT_ROLE") {
+			env = append(env, corev1.EnvVar{Name: "AGENT_ROLE", Value: deploy.Spec.Role})
+		}
+		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers (user-override-
+		// wins). Empty when the list is unset → the launcher applies its default
+		// (registry-membership) policy.
+		if !envVarPresent(deploy.Spec.Env, "AGENT_ALLOWED_CALLERS") {
+			env = append(env, corev1.EnvVar{
+				Name:  "AGENT_ALLOWED_CALLERS",
+				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
+			})
+		}
+	}
+
 	containers := []corev1.Container{
 		{
 			// Named explicitly: multi-container Knative pods require
@@ -337,15 +391,27 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	revName := deploy.Name + "-" + hash
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
-	if combined := combinedBindingDigest(toolDigest, memDigest); combined != "" {
+	regDigest := registryMembershipDigest(membership, deploy.Spec.Role, deploy.Spec.AllowedCallers)
+	if combined := combinedBindingDigest(toolDigest, memDigest, regDigest); combined != "" {
 		revName = revName + "-h" + combined
+	}
+
+	// Membership pod label: when the agent is a registry member, stamp the
+	// controller-owned registry-id label on the revision template so the pods
+	// Knative creates carry it — the generated NetworkPolicy's podSelector and
+	// intra-registry from-selector match on exactly this label. Set on the
+	// TEMPLATE metadata (not the ksvc/route metadata) so it lands on pods.
+	var templateLabels map[string]string
+	if membership.IsMember {
+		templateLabels = map[string]string{registryIDLabel: membership.RegistryID}
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: revName,
+					Name:   revName,
+					Labels: templateLabels,
 					Annotations: map[string]string{
 						"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
 						"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
@@ -530,24 +596,53 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // combinedBindingDigest folds the per-binding-type structural digests into the
 // SINGLE 8-hex digest used as the revision-name suffix ("-h<digest8>").
 //
-// Rationale: stacking one suffix per binding type ("-b<8>-m<8>") grows the
+// Rationale: stacking one suffix per binding type ("-b<8>-m<8>-r<8>") grows the
 // revision name 10 chars per type and blows the 63-char DNS-1035 label limit
 // for admission-valid agent names; one combined digest bounds the total suffix
 // at 19 chars forever (see the revision-name comment in reconcileKnativeService).
+// New structural inputs (M6 registry membership) fold in HERE, extending the
+// hashed framing — they never add a new suffix.
 //
 // Properties:
-//   - "" when NO binding of any type resolves (bare pre-M4 revision name).
-//   - Changes when EITHER component changes (each component is embedded whole).
+//   - "" when NO structural input of any type resolves (bare pre-M4 revision name).
+//   - Changes when ANY component changes (each component is embedded whole).
 //   - Cannot collide across presence combinations: components are hex-only
-//     (never contain '=' or ';'), so the "b=<x>;m=<y>" framing is unambiguous —
-//     tools-only, memory-only, and both always hash different strings.
+//     (never contain '=' or ';'), so the "b=<x>;m=<y>;r=<z>" framing is
+//     unambiguous — every presence combination hashes a distinct string.
 //   - Deterministic: fixed field order, deterministic component derivations
-//     (tool digest sorts by binding name; memory digest hashes the resolved addr).
-func combinedBindingDigest(toolDigest, memDigest string) string {
-	if toolDigest == "" && memDigest == "" {
+//     (tool digest sorts by binding name; memory digest hashes the resolved addr;
+//     registry digest hashes the resolved registryId + role + allowedCallers).
+func combinedBindingDigest(toolDigest, memDigest, regDigest string) string {
+	if toolDigest == "" && memDigest == "" && regDigest == "" {
 		return ""
 	}
-	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest))
+	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// registryMembershipDigest returns a short hash capturing the agent's M6
+// registry membership as it affects the pod template: whether it is a member,
+// the registryId (→ AGENT_REGISTRY_ID + the membership pod label), the injected
+// guard defaults, the role (→ AGENT_ROLE), and the allowedCallers (→
+// AGENT_ALLOWED_CALLERS). It is one COMPONENT of combinedBindingDigest so
+// join/leave, a registryId change, a guard change, or a role/allowlist edit each
+// roll a new revision — the env/label must actually land, and the CreateOrUpdate
+// guard skips re-applying the spec when the revision name is unchanged (the M4
+// silent-loss landmine).
+//
+// Returns "" when the agent is NOT a member (no mesh state → the component
+// contributes the empty string, symmetric with the tool/memory paths). Role and
+// allowedCallers are included even though they come from the AgentDeployment
+// spec (already in the spec-hash) so that a role/allowlist edit rolls the SAME
+// combined "-h" suffix rather than only the spec-hash prefix — keeping the
+// membership-driven env changes bundled in one place is harmless and explicit.
+func registryMembershipDigest(m registryMembership, role string, allowedCallers []string) string {
+	if !m.IsMember {
+		return ""
+	}
+	payload := fmt.Sprintf("id=%s;depth=%d;budget=%d;role=%s;callers=%s",
+		m.RegistryID, m.MaxDepth, m.HopBudget, role, strings.Join(allowedCallers, ","))
+	h := sha256.Sum256([]byte(payload))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -601,12 +696,41 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// AgentRegistry → requeue every AgentDeployment in the registry's namespace
+	// (M6): a registry create/delete, a memberSelector change, a registryId
+	// change, or a guard edit alters which agents are members and what mesh env
+	// they carry. The selector could match any agent's labels, and a delete event
+	// carries the last-known selector, so the cheap correct move is to re-resolve
+	// every agent in the namespace — this reconciler recomputes membership and
+	// re-renders (env + membership label + revision roll) or drops it. Bounded:
+	// registries are few and this only fires on registry events, not steady state.
+	mapRegistryToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			reg, ok := obj.(*agentsv1alpha1.AgentRegistry)
+			if !ok {
+				return nil
+			}
+			var list agentsv1alpha1.AgentDeploymentList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(reg.Namespace)); err != nil {
+				return nil
+			}
+			reqs := make([]reconcile.Request, 0, len(list.Items))
+			for i := range list.Items {
+				reqs = append(reqs, reconcile.Request{
+					NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+				})
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
+		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }
