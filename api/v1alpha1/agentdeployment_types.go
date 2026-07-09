@@ -162,6 +162,23 @@ type AgentDeploymentSpec struct {
 	// enforcement is applied. See BudgetSpec for field details.
 	// +optional
 	Budget *BudgetSpec `json:"budget,omitempty"`
+
+	// evalSuiteRef optionally names an EvalSuite (same namespace) whose scorers
+	// gate this deployment. When set, the controller runs the suite against the
+	// candidate revision and promotes or blocks based on the result and the suite's
+	// gate policy. When omitted, no eval gate is applied — the deploy proceeds
+	// unchanged (PRD §17).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	EvalSuiteRef string `json:"evalSuiteRef,omitempty"`
+
+	// promptRef optionally names a PromptVersion (same namespace) whose git-backed
+	// prompt is injected into the agent. Swapping promptRef rolls a new Knative
+	// revision with the new prompt without an image rebuild. When omitted, the
+	// image-bundled prompt is used (PRD §7).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	PromptRef string `json:"promptRef,omitempty"`
 }
 
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
