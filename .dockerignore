@@ -14,9 +14,19 @@
 !images/base-python/requirements.txt
 !images/base-python/sitecustomize.py
 
+# Re-include the ctxmesh SDK source so base-python/Dockerfile can bundle it
+# (m10.4: pip install sdk/python/ during the base image build).
+!sdk/python/pyproject.toml
+!sdk/python/README.md
+!sdk/python/src/
+!sdk/python/src/**
+
 # Re-include LangChain example agent assets (m3.4: langchain-agent)
 !examples/langchain-agent/requirements.txt
 !examples/langchain-agent/agent.py
 
 # Re-include batch-agent example assets (m7.7: batch-agent, job execution model)
 !examples/batch-agent/agent.py
+
+# Re-include sdk-custom-agent example assets (m10.4)
+!examples/sdk-custom-agent/agent.py

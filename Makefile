@@ -182,6 +182,10 @@ docker-build-langchain-example: docker-build-base-python ## Build the LangChain 
 docker-build-batch-example: docker-build-base-python ## Build the batch-agent example image (batch-agent:latest — job/CronJob model); depends on base-python:latest.
 	$(CONTAINER_TOOL) build -t batch-agent:latest -f examples/batch-agent/Dockerfile .
 
+.PHONY: docker-build-sdk-custom-agent
+docker-build-sdk-custom-agent: docker-build-base-python ## Build the M10 no-framework SDK example (sdk-custom-agent:latest); depends on base-python:latest (which bundles ctxmesh).
+	$(CONTAINER_TOOL) build -t sdk-custom-agent:latest -f examples/sdk-custom-agent/Dockerfile .
+
 .PHONY: docker-build-collector
 docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.
 	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
