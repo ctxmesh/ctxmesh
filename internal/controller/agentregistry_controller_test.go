@@ -29,6 +29,9 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -518,6 +521,128 @@ func TestRegistry_NotFound(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+// getBroker fetches the per-registry Broker (<registry>-broker).
+func getBroker(t *testing.T, registryName, namespace string) eventingv1.Broker {
+	t.Helper()
+	var b eventingv1.Broker
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{
+		Name: registryName + brokerNameSuffix, Namespace: namespace,
+	}, &b), "per-registry Broker must exist after reconcile")
+	return b
+}
+
+// getDLQSink fetches the per-registry DLQ Knative Service (<registry>-dlq).
+func getDLQSink(t *testing.T, registryName, namespace string) servingv1.Service {
+	t.Helper()
+	var s servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{
+		Name: registryName + dlqNameSuffix, Namespace: namespace,
+	}, &s), "per-registry DLQ sink must exist after reconcile")
+	return s
+}
+
+// TestRegistry_BrokerAndDLQ is the primary m7.6 async-plane scenario: an
+// AgentRegistry reconcile creates the per-registry Broker (named
+// <registryName>-broker to MATCH the m7.5 Trigger) with an at-least-once
+// delivery spec (retry + exponential backoff + a deadLetterSink) and the
+// per-registry DLQ sink the Broker's deadLetterSink points at. Both are owned by
+// the registry so they GC on delete.
+func TestRegistry_BrokerAndDLQ(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "evt-mesh"
+		registryID = "evt-mesh"
+	)
+
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	mkLabeledAgent(t, "evt-member", namespace, map[string]string{"registry": registryID})
+
+	r := newRegistryReconciler()
+	reconcileRegistry(t, r, regName, namespace)
+
+	// ── Broker ────────────────────────────────────────────────────────────────
+	broker := getBroker(t, regName, namespace)
+
+	// Name MUST equal <registryName>-broker — the m7.5 Trigger references exactly
+	// this name (a mismatch means no delivery).
+	assert.Equal(t, regName+brokerNameSuffix, broker.Name,
+		"Broker name must be <registryName>-broker (matches the m7.5 Trigger's spec.broker)")
+
+	// Owned by the registry (GC on delete → no finalizer).
+	require.Len(t, broker.OwnerReferences, 1, "Broker must be owned by the registry")
+	assert.Equal(t, regName, broker.OwnerReferences[0].Name)
+	require.NotNil(t, broker.OwnerReferences[0].Controller)
+	assert.True(t, *broker.OwnerReferences[0].Controller)
+
+	// Delivery spec: retry N + exponential backoff + a deadLetterSink (the DLQ).
+	require.NotNil(t, broker.Spec.Delivery, "Broker must configure spec.delivery")
+	require.NotNil(t, broker.Spec.Delivery.Retry, "delivery must set retry")
+	assert.Equal(t, brokerRetry, *broker.Spec.Delivery.Retry, "retry must be the bounded budget")
+	require.NotNil(t, broker.Spec.Delivery.BackoffPolicy, "delivery must set a backoff policy")
+	assert.Equal(t, eventingduckv1.BackoffPolicyExponential, *broker.Spec.Delivery.BackoffPolicy,
+		"backoff policy must be exponential")
+
+	// deadLetterSink → the per-registry DLQ ksvc by KReference.
+	require.NotNil(t, broker.Spec.Delivery.DeadLetterSink, "delivery must set a deadLetterSink (DLQ)")
+	dls := broker.Spec.Delivery.DeadLetterSink
+	require.NotNil(t, dls.Ref, "deadLetterSink must reference the DLQ by KReference")
+	assert.Equal(t, regName+dlqNameSuffix, dls.Ref.Name,
+		"deadLetterSink must point at the per-registry DLQ sink")
+	assert.Equal(t, knativeServiceKind, dls.Ref.Kind, "DLQ ref must be a Knative Service")
+
+	// ── DLQ sink ──────────────────────────────────────────────────────────────
+	dlq := getDLQSink(t, regName, namespace)
+	require.Len(t, dlq.OwnerReferences, 1, "DLQ sink must be owned by the registry")
+	assert.Equal(t, regName, dlq.OwnerReferences[0].Name)
+	require.NotEmpty(t, dlq.Spec.Template.Spec.Containers, "DLQ sink must run a receiver container")
+	assert.Equal(t, dlqImage, dlq.Spec.Template.Spec.Containers[0].Image,
+		"DLQ sink must run the event-display receiver image")
+}
+
+// TestRegistry_BrokerMatchesTriggerName pins the invariant that the Broker the
+// registry controller creates and the broker name the m7.5 AgentDeployment
+// reconciler stamps on an eventing agent's Trigger are the SAME string. Computed
+// from the same registryName + brokerNameSuffix, so a future rename of either
+// side is caught here.
+func TestRegistry_BrokerMatchesTriggerName(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "match-mesh"
+		registryID = "match-mesh"
+	)
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+
+	r := newRegistryReconciler()
+	reconcileRegistry(t, r, regName, namespace)
+
+	broker := getBroker(t, regName, namespace)
+	// The m7.5 Trigger sets spec.broker = membership.RegistryName + brokerNameSuffix.
+	// registryMembership.RegistryName is the AgentRegistry metadata.name.
+	wantTriggerBroker := (registryMembership{RegistryName: regName}).RegistryName + brokerNameSuffix
+	assert.Equal(t, wantTriggerBroker, broker.Name,
+		"Broker name must equal the m7.5 Trigger's spec.broker (<registryName>-broker)")
+}
+
+// TestRegistry_BrokerIdempotent verifies a re-reconcile does not churn the
+// Broker (stable ResourceVersion) — the delivery spec is deterministic.
+func TestRegistry_BrokerIdempotent(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "brk-idem"
+		registryID = "brk-idem"
+	)
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+
+	r := newRegistryReconciler()
+	reconcileRegistry(t, r, regName, namespace)
+	b1 := getBroker(t, regName, namespace)
+
+	reconcileRegistry(t, r, regName, namespace)
+	b2 := getBroker(t, regName, namespace)
+	assert.Equal(t, b1.ResourceVersion, b2.ResourceVersion,
+		"Broker ResourceVersion must be unchanged on re-reconcile (no churn)")
 }
 
 // namespaceSelectorValues extracts the kubernetes.io/metadata.name values from a

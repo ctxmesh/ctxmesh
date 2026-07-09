@@ -410,7 +410,7 @@ func TestProxyRouting(t *testing.T) {
 		AgentVersion: "v0.0.1",
 		AgentRoute:   "/invoke",
 	}
-	handler := buildHandler(tracer, prop, upstreamURL, cfg, nil)
+	handler := buildHandler(tracer, prop, upstreamURL, cfg, nil, nil)
 
 	// ── /invoke: request is forwarded and traceparent is injected ─────────
 	t.Run("/invoke forwarded with traceparent injected", func(t *testing.T) {
