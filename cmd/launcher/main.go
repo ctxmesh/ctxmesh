@@ -88,7 +88,7 @@ func main() {
 		}
 	}
 
-	// ── A2A outbound endpoint (:2999) ─────────────────────────────────────
+	// ── A2A outbound endpoint (:2997) ─────────────────────────────────────
 	// Started ONLY when the agent is a resolved AgentRegistry member
 	// (AGENT_REGISTRY_ID injected). Same lifecycle discipline as the memory
 	// listener: a goroutine ListenAndServe, graceful Shutdown on child exit,
