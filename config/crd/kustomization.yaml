@@ -10,6 +10,7 @@ resources:
 - bases/agents.ctxmesh.ai_toolregistries.yaml
 - bases/agents.ctxmesh.ai_memorybindings.yaml
 - bases/agents.ctxmesh.ai_agentregistries.yaml
+- bases/agents.ctxmesh.ai_agentscalingpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
