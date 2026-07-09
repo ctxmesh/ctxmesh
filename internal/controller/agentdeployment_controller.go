@@ -24,12 +24,15 @@ import (
 	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +50,57 @@ import (
 // into AgentDeployment.status.conditions. Kept as a named constant to satisfy
 // the goconst linter and to make the value easy to grep.
 const conditionReady = "Ready"
+
+// executionModel values (mirror the CRD enum on AgentDeployment.spec.executionModel).
+const (
+	execModelServing  = "serving"
+	execModelEventing = "eventing"
+	execModelJob      = "job"
+)
+
+// brokerNameSuffix is appended to the agent's registry name to reference the
+// per-registry Knative Eventing Broker (specs/eventing-scaling.md "Broker per
+// registry"). The Broker itself is created by the AgentRegistry controller
+// (m7.6); the eventing-model AgentDeployment only references it by name from its
+// Trigger.
+const brokerNameSuffix = "-broker"
+
+// ceTypeAttribute is the CloudEvent context attribute the eventing Trigger
+// filters on. An async A2A CloudEvent carries the target agent name as its
+// `type` (specs/eventing-scaling.md §12.6: CloudEvent attributes mirror
+// routing, `type` = the target/topic), so a Trigger filtered to
+// `type == <agentName>` subscribes exactly this agent's events from the
+// shared registry broker.
+const ceTypeAttribute = "type"
+
+// Blob-offload object store (m7.6b, specs/eventing-scaling.md §"Blob offload").
+// A registry member's launcher offloads a >256KiB async payload to the dedicated
+// dev MinIO (config/objectstore/) and rehydrates it on consume. The address and
+// the DEV-ONLY deterministic credentials are injected as STATIC env — never
+// valueFrom (Knative's ksvc webhook rejects it; the m5.7 landmine + tier1 guard).
+const (
+	// objectStoreAddr is the cluster address of the dedicated dev MinIO Service
+	// (config/objectstore/, wired into config/default). It mirrors the S3 API
+	// port; the launcher connects to it plain-HTTP in-cluster (dev posture, like
+	// the dev Valkey). One store serves every registry member.
+	objectStoreAddr = "agent-engine-objectstore.agent-engine-system.svc:9000"
+
+	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
+	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
+	// (identical posture to the dev Langfuse / Valkey: NOT a real credential,
+	// never rotated, only ever meaningful against the in-cluster dev MinIO). They
+	// MUST match the values the config/objectstore/ MinIO Deployment is seeded
+	// with. Injected as static env so the launcher authenticates to the dev store.
+	objectStoreDevAccessKey = "agent-engine-dev"
+	objectStoreDevSecretKey = "agent-engine-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+)
+
+// jobBackoffLimit bounds retries for a one-shot job-model agent. Kept small: a
+// job agent runs to completion; a handful of retries covers a transient
+// image-pull / node-eviction failure without wedging a poison run
+// (specs/eventing-scaling.md — the launcher fronts the container; the pod exits
+// when the agent completes).
+const jobBackoffLimit int32 = 2
 
 // AgentDeploymentReconciler reconciles a AgentDeployment object.
 // The reconcile loop implements a four-step flow (agent-brain specs/agent-serving.md):
@@ -69,7 +123,13 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
@@ -86,13 +146,13 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
 	}
 
-	// Belt-and-braces guard: the CRD enum already prevents non-"serving" values
-	// from being admitted, but we handle it defensively here as well.
-	if deploy.Spec.ExecutionModel != "serving" {
-		log.Info("Unsupported executionModel; setting Ready=False",
-			"executionModel", deploy.Spec.ExecutionModel)
-		return r.setReadyFalse(ctx, &deploy, "UnsupportedExecutionModel",
-			fmt.Sprintf("executionModel %q is not supported in v1alpha1; only 'serving' is valid", deploy.Spec.ExecutionModel))
+	// Normalise the execution model. The CRD default fills "serving" for omitted
+	// values; a belt-and-braces default here covers a client that submits the
+	// raw object without defaulting (e.g. the raw envtest client on an older
+	// stored object). The CRD enum already rejects any value outside the set.
+	model := deploy.Spec.ExecutionModel
+	if model == "" {
+		model = execModelServing
 	}
 
 	// ── Step 2: Spec hash → AgentVersion ─────────────────────────────────────
@@ -107,18 +167,191 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("ensuring AgentVersion %s: %w", versionName, err)
 	}
 
-	// ── Step 3: Knative Service ───────────────────────────────────────────────
-	log.Info("Reconciling Knative Service", "name", deploy.Name)
-	ksvc, err := r.reconcileKnativeService(ctx, &deploy, hash)
+	// ── Step 3: Reconcile the workload by execution model ─────────────────────
+	// The pod template (env injection, container digest, sidecars) is built the
+	// same way for every model; the model only decides the WORKLOAD KIND that
+	// wraps it. Switching models is a CREATE of the new kind + a DELETE of the
+	// other kinds — a different object, not a ksvc revision roll — so each branch
+	// tears down the workloads the other branches own before writing its own.
+	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
+	switch model {
+	case execModelEventing:
+		return r.reconcileEventing(ctx, &deploy, hash, versionName)
+	case execModelJob:
+		return r.reconcileJob(ctx, &deploy, versionName)
+	default: // execModelServing
+		return r.reconcileServing(ctx, &deploy, hash, versionName)
+	}
+}
+
+// reconcileServing wraps the pod template in a Knative Service (the M1-M6 path,
+// unchanged for non-eventing/non-job agents) and mirrors status. It also applies
+// request-rate / custom-metric Knative autoscaling annotations onto the ksvc
+// template when an AgentScalingPolicy targets the agent (m7.5 single-writer: the
+// AgentDeployment reconciler owns the ksvc and its autoscaling annotations; the
+// AgentScalingPolicy controller owns only the KEDA ScaledObject).
+func (r *AgentDeploymentReconciler) reconcileServing(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	hash, versionName string,
+) (ctrl.Result, error) {
+	// Tear down the workloads owned by the other models (transition handling):
+	// the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
 	}
-
-	// ── Step 4: Mirror status ─────────────────────────────────────────────────
-	if err = r.syncStatus(ctx, &deploy, ksvc, versionName); err != nil {
+	if err = r.syncStatus(ctx, deploy, ksvc, versionName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
 	}
+	return ctrl.Result{}, nil
+}
 
+// reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
+// core/v1 Service (NOT a ksvc — the m7.8 e2e proved KEDA cannot resolve a Knative
+// revision Deployment and KEDA/KPA would fight over replicas; see
+// specs/eventing-scaling.md "Why eventing is a plain Deployment, not a ksvc").
+// The Deployment is named `<agent>` so a queue-depth KEDA ScaledObject
+// (scaleTargetRef = the AgentDeployment name, kind Deployment) resolves it. A
+// Knative Eventing Trigger subscribes the Service to the agent's registry broker.
+//
+// Eventing REQUIRES registry membership (the broker is per-registry); a non-member
+// agent set to eventing is a user error reported as Ready=False, with the Trigger
+// torn down but the Deployment + Service KEPT (owner-ref'd, GCs with the
+// AgentDeployment) — a misconfigured eventing agent keeps a working HTTP endpoint
+// while membership is fixed.
+func (r *AgentDeploymentReconciler) reconcileEventing(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	_ /* hash */, versionName string,
+) (ctrl.Result, error) {
+	// Tear down the workloads owned by the OTHER models (transition handling):
+	// the serving ksvc and the job-model Job/CronJob. The eventing Deployment +
+	// Service replace them.
+	if err := r.deleteWorkload(ctx, deploy, &servingv1.Service{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Build the model-independent pod template once (same launcher + agent +
+	// collector + tool sidecars, env injection, digest as the serving ksvc).
+	pod, err := r.buildPodTemplate(ctx, deploy)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
+	}
+
+	// The Deployment + Service are always reconciled (member or not) so a
+	// non-member eventing agent keeps a working HTTP endpoint while membership is
+	// fixed. Only the Trigger (the broker subscription) is gated on membership.
+	if err = r.reconcileEventingDeployment(ctx, deploy, pod); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling eventing Deployment: %w", err)
+	}
+	if err = r.reconcileEventingService(ctx, deploy, pod.port); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling eventing Service: %w", err)
+	}
+
+	if !pod.membership.IsMember {
+		// Eventing needs a per-registry broker; without membership there is no
+		// broker to subscribe to. Report the error and drop any stale Trigger so
+		// no orphaned subscription lingers — but keep the Deployment + Service.
+		if err = r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.setReadyFalse(ctx, deploy, "NotRegistryMember",
+			"executionModel 'eventing' requires the agent to be a member of an AgentRegistry (the Trigger subscribes to the registry broker); no membership resolved")
+	}
+
+	if err = r.reconcileTrigger(ctx, deploy, pod.membership); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling Trigger: %w", err)
+	}
+
+	// Mirror the Deployment's readiness into status (no ksvc Ready condition).
+	var dep appsv1.Deployment
+	if err = r.Get(ctx, client.ObjectKey{Name: deploy.Name, Namespace: deploy.Namespace}, &dep); err != nil {
+		return ctrl.Result{}, fmt.Errorf("fetching eventing Deployment for status: %w", err)
+	}
+	if err = r.setEventingReady(ctx, deploy, &dep, versionName); err != nil {
+		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// reconcileJob wraps the pod template in a batch workload: a bare one-shot Job by
+// default, or a CronJob when a `schedule` AgentScalingPolicy targets the agent.
+// No ksvc / Trigger is emitted; any left over from a previous model is deleted.
+func (r *AgentDeploymentReconciler) reconcileJob(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	versionName string,
+) (ctrl.Result, error) {
+	// Tear down the serving/eventing workloads (transition handling): the serving
+	// ksvc and the eventing Deployment + Service + Trigger.
+	if err := r.deleteWorkload(ctx, deploy, &servingv1.Service{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	pod, err := r.buildPodTemplate(ctx, deploy)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
+	}
+
+	schedule, err := r.scheduleForAgent(ctx, deploy)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving schedule policy: %w", err)
+	}
+
+	if schedule != "" {
+		// A schedule policy targets this agent → CronJob (Job would be torn down).
+		if err = r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err = r.reconcileCronJob(ctx, deploy, pod, schedule); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling CronJob: %w", err)
+		}
+	} else {
+		if err = r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err = r.reconcileBatchJob(ctx, deploy, pod); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling Job: %w", err)
+		}
+	}
+
+	// A job-model agent has no ksvc Ready condition to mirror; report Ready=True
+	// once the workload is converged (the launcher runs to completion in-pod).
+	if err = r.setJobReady(ctx, deploy, versionName, schedule != ""); err != nil {
+		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -167,33 +400,44 @@ func (r *AgentDeploymentReconciler) ensureAgentVersion(
 	return r.Create(ctx, &av)
 }
 
-// reconcileKnativeService creates or updates the Knative Service whose name and
-// namespace match the AgentDeployment. It returns the ksvc as it stands on the
-// API server after the operation (including any pre-existing status from the
-// Knative controller).
+// podTemplate is the fully-built, model-independent pod spec for an agent: the
+// container list (user container + collector + tool sidecars), the volumes, the
+// membership pod label, and the structural digest suffix (the "-h<digest8>"
+// component that rolls the workload when a binding/membership changes). It is
+// built once by buildPodTemplate and wrapped by the per-model reconcilers into a
+// ksvc revision template (serving/eventing) or a batch Job pod template (job).
+type podTemplate struct {
+	// containers is the ordered container list (user container first).
+	containers []corev1.Container
+	// volumes are the pod volumes (collector config, tools).
+	volumes []corev1.Volume
+	// labels are the pod-template labels (registry membership) or nil.
+	labels map[string]string
+	// digest is the combined structural digest ("" when no binding/membership
+	// resolves), used as the "-h<digest>" revision/name suffix.
+	digest string
+	// membership is the resolved M6 registry context (used by the eventing
+	// Trigger for the broker name and the CloudEvent filter).
+	membership registryMembership
+	// port is the resolved container port.
+	port int32
+}
+
+// buildPodTemplate resolves all M3-M6 injection (collector sidecar, MCP tool
+// sidecars, memory env, registry membership env + label) and assembles the
+// model-independent pod spec plus its combined structural digest. Every
+// execution model reuses this so the container contract (env, digest,
+// no-valueFrom Knative constraint) is identical whether the workload is a ksvc,
+// a Trigger-backed ksvc, or a Job/CronJob.
 //
-// hash is the spec-hash used as the stable RevisionTemplate name suffix. Setting
-// a deterministic name makes CreateOrUpdate idempotent across reconcile cycles:
-// the same hash → same revision name → Knative sees no template change → no new
-// revision is created on re-reconcile. A changed spec produces a new hash and
-// therefore a new revision, which is the desired behaviour.
-func (r *AgentDeploymentReconciler) reconcileKnativeService(
+//nolint:gocyclo // sequential injection steps (collector/tools/memory/registry) kept in one auditable place
+func (r *AgentDeploymentReconciler) buildPodTemplate(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
-	hash string,
-) (*servingv1.Service, error) {
+) (podTemplate, error) {
 	port := deploy.Spec.Port
 	if port == 0 {
 		port = 8080
-	}
-
-	minScale := int32(0)
-	maxScale := int32(3)
-	if deploy.Spec.Scaling != nil {
-		minScale = deploy.Spec.Scaling.Min
-		if deploy.Spec.Scaling.Max > 0 {
-			maxScale = deploy.Spec.Scaling.Max
-		}
 	}
 
 	// Platform env vars come first so they are always present; user env is appended
@@ -222,7 +466,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// sidecar to inject alongside the user container.
 	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
 	if err != nil {
-		return nil, err
+		return podTemplate{}, err
 	}
 
 	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
@@ -231,7 +475,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// reconciler is the single writer of the pod template.
 	validBindings, _, err := resolveAgentBindings(ctx, r.Client, deploy.Namespace, deploy.Name)
 	if err != nil {
-		return nil, fmt.Errorf("resolving tool bindings: %w", err)
+		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
 	}
 	_, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
@@ -243,7 +487,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// template; the MemoryBinding controller only sets the binding's status.
 	memAddr, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
 	if err != nil {
-		return nil, fmt.Errorf("resolving memory binding: %w", err)
+		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
 	if hasMemoryBinding {
 		env = append(env,
@@ -277,7 +521,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// ksvc — the m5.7 landmine; a tier1 guard asserts no ksvc env uses it).
 	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
 	if err != nil {
-		return nil, fmt.Errorf("resolving registry membership: %w", err)
+		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
 	}
 	if membership.IsMember {
 		env = append(env,
@@ -318,6 +562,25 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
 			})
 		}
+
+		// Blob offload (m7.6b): a registry member participates in the async A2A
+		// path — as a publisher (offload a >256KiB payload) and/or a consumer
+		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
+		// address + the deterministic DEV-ONLY credentials so the launcher's
+		// publish/consume path can reach MinIO. Scope: EVERY registry member, not
+		// only executionModel=eventing — a member's launcher wires offload on the
+		// same gate the async consumer/publisher use (registry membership /
+		// A2AEnabled), independent of its own workload KIND, so a producer that
+		// publishes and a Trigger-backed consumer both get it. All three are known
+		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
+		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
+		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
+		// async payloads pass through capped.
+		env = append(env,
+			corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
+			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
+			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
+		)
 	}
 
 	containers := []corev1.Container{
@@ -367,60 +630,102 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		volumes = append(volumes, toolsVolume(deploy.Name))
 	}
 
-	// Revision name: bare spec-hash when there are no bindings (unchanged pre-M4
-	// behaviour). With ANY binding (tool and/or memory), suffix ONE combined
-	// structural digest ("-h<digest8>") so that ADD/REMOVE of a binding, a
-	// sidecar image change, or a memory addr change each roll a new revision
-	// (the containers/env must actually land — the CreateOrUpdate guard below
-	// skips re-applying the spec when the revision name is unchanged; a stale
-	// name means the injection is SILENTLY LOST, the M4 landmine). The tool
-	// component deliberately EXCLUDES remote URLs and the manifest version, so
-	// a manifest-ONLY change (remote URL edit) keeps the SAME revision name →
-	// no roll → restart-free hot path (specs/mcp-tools.md — "Hot path vs cold
-	// path"). Knative requires the name to start with "{service}-", which the
-	// spec-hash prefix satisfies.
+	// Combined structural digest: "" when no binding/membership resolves (bare
+	// pre-M4 name). With ANY binding (tool and/or memory) or membership, one
+	// combined digest ("-h<digest8>") rolls the workload when a binding is
+	// added/removed, a sidecar image changes, a memory addr changes, or
+	// membership changes (the containers/env must actually land — the
+	// CreateOrUpdate guard in reconcileKnativeService skips re-applying the spec
+	// when the revision name is unchanged; a stale name means the injection is
+	// SILENTLY LOST, the M4 landmine). The tool component EXCLUDES remote URLs
+	// and the manifest version so a manifest-ONLY change keeps the SAME name →
+	// no roll (specs/mcp-tools.md "Hot path vs cold path").
 	//
-	// Name budget (why ONE combined suffix, not stacked per-binding suffixes):
-	// Knative revision names are DNS-1035 labels, max 63 chars. The suffix is
-	// bounded at 19 chars — "-" + 8 (spec hash) + "-h" + 8 (combined digest) —
-	// NO MATTER how many binding types future milestones add, leaving 44 chars
-	// of agent-name budget, which the CRD enforces via a root CEL rule on
-	// metadata.name (size <= 44). Stacked suffixes (the pre-fix "-b<8>-m<8>"
-	// form) grew 10 chars per binding type and silently wedged reconcile for
-	// admission-valid 35+-char names.
-	revName := deploy.Name + "-" + hash
+	// Name budget: Knative revision names are DNS-1035 labels, max 63 chars. The
+	// suffix is bounded at 19 chars — "-" + 8 (spec hash) + "-h" + 8 (combined
+	// digest) — NO MATTER how many binding types future milestones add, leaving
+	// 44 chars of agent-name budget, enforced by a root CEL rule on metadata.name
+	// (size <= 44). executionModel does NOT feed the digest: switching model is a
+	// create/delete of a different workload KIND (handled by the per-model
+	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
+	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
+	// and its values are package constants (objectStoreAddr + the dev creds,
+	// identical for every member), so it needs no digest component of its own: the
+	// registry-membership digest already rolls the revision on join/leave — exactly
+	// when OBJECT_STORE_ADDR + the creds appear/disappear. If the store address
+	// ever becomes per-agent it must fold into registryMembershipDigest.
 	regDigest := registryMembershipDigest(membership, deploy.Spec.Role, deploy.Spec.AllowedCallers)
-	if combined := combinedBindingDigest(toolDigest, memDigest, regDigest); combined != "" {
-		revName = revName + "-h" + combined
-	}
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest)
 
 	// Membership pod label: when the agent is a registry member, stamp the
-	// controller-owned registry-id label on the revision template so the pods
-	// Knative creates carry it — the generated NetworkPolicy's podSelector and
-	// intra-registry from-selector match on exactly this label. Set on the
-	// TEMPLATE metadata (not the ksvc/route metadata) so it lands on pods.
+	// controller-owned registry-id label on the pod template so the pods carry
+	// it — the generated NetworkPolicy's podSelector and intra-registry
+	// from-selector match on exactly this label.
 	var templateLabels map[string]string
 	if membership.IsMember {
 		templateLabels = map[string]string{registryIDLabel: membership.RegistryID}
+	}
+
+	return podTemplate{
+		containers: containers,
+		volumes:    volumes,
+		labels:     templateLabels,
+		digest:     combinedDigest,
+		membership: membership,
+		port:       port,
+	}, nil
+}
+
+// reconcileKnativeService builds the pod template and wraps it in a Knative
+// Service whose name and namespace match the AgentDeployment. It returns the
+// ksvc as it stands on the API server after the operation (including any
+// pre-existing status from the Knative controller).
+//
+// The stable revision name ("{service}-{specHash}" plus, when a binding/
+// membership resolves, "-h<digest8>") makes CreateOrUpdate idempotent: the same
+// inputs → same revision name → Knative sees no template change → no new
+// revision. A changed spec/binding produces a new name → a new revision.
+//
+// Autoscaling annotations: the base min/max come from spec.scaling
+// (scale-to-zero default). When a request-rate / custom-metric AgentScalingPolicy
+// targets the agent, its class/metric/min/max annotations are applied HERE
+// (m7.5: the AgentDeployment reconciler is the single writer of the ksvc and its
+// autoscaling annotations; the AgentScalingPolicy controller owns only the
+// separate KEDA ScaledObject).
+func (r *AgentDeploymentReconciler) reconcileKnativeService(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	hash string,
+) (*servingv1.Service, error) {
+	pod, err := r.buildPodTemplate(ctx, deploy)
+	if err != nil {
+		return nil, fmt.Errorf("building pod template: %w", err)
+	}
+
+	revName := deploy.Name + "-" + hash
+	if pod.digest != "" {
+		revName = revName + "-h" + pod.digest
+	}
+
+	annotations, err := r.autoscalingAnnotations(ctx, deploy)
+	if err != nil {
+		return nil, fmt.Errorf("resolving autoscaling annotations: %w", err)
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
 		ConfigurationSpec: servingv1.ConfigurationSpec{
 			Template: servingv1.RevisionTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:   revName,
-					Labels: templateLabels,
-					Annotations: map[string]string{
-						"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
-						"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
-					},
+					Name:        revName,
+					Labels:      pod.labels,
+					Annotations: annotations,
 				},
 				Spec: servingv1.RevisionSpec{
 					PodSpec: corev1.PodSpec{
-						Containers: containers,
-						Volumes:    volumes,
+						Containers: pod.containers,
+						Volumes:    pod.volumes,
 					},
 				},
 			},
@@ -453,6 +758,60 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	}
 
 	return ksvc, nil
+}
+
+// autoscalingAnnotations returns the Knative autoscaling annotations for the
+// ksvc revision template. The min/max scale defaults come from spec.scaling; a
+// request-rate / custom-metric AgentScalingPolicy that targets the agent
+// overrides them and adds the class/metric annotations.
+func (r *AgentDeploymentReconciler) autoscalingAnnotations(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (map[string]string, error) {
+	minScale := int32(0)
+	maxScale := int32(3)
+	if deploy.Spec.Scaling != nil {
+		minScale = deploy.Spec.Scaling.Min
+		if deploy.Spec.Scaling.Max > 0 {
+			maxScale = deploy.Spec.Scaling.Max
+		}
+	}
+
+	annotations := map[string]string{
+		"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
+		"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
+	}
+
+	policy, err := r.knativeScalingPolicy(ctx, deploy)
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		return annotations, nil
+	}
+
+	// A request-rate / custom-metric policy drives the Knative autoscaler: its
+	// min/max bound the revision, and the class/metric annotations select the
+	// autoscaling behaviour. The policy min/max override spec.scaling (the policy
+	// is the explicit scaling intent).
+	annotations["autoscaling.knative.dev/min-scale"] = strconv.Itoa(int(policy.Spec.Min))
+	annotations["autoscaling.knative.dev/max-scale"] = strconv.Itoa(int(policy.Spec.Max))
+
+	switch policy.Spec.Trigger {
+	case triggerRequestRate:
+		// Request-rate → concurrency-based KPA autoscaling (the Knative default
+		// class). Making the class/metric explicit keeps the annotation set
+		// self-describing and stable across Knative default changes.
+		annotations["autoscaling.knative.dev/class"] = "kpa.autoscaling.knative.dev"
+		annotations["autoscaling.knative.dev/metric"] = "concurrency"
+	case triggerCustomMetric:
+		// Custom-metric → pass the policy's class/metric straight through.
+		if policy.Spec.Metric != nil {
+			annotations["autoscaling.knative.dev/class"] = policy.Spec.Metric.Class
+			annotations["autoscaling.knative.dev/metric"] = policy.Spec.Metric.Metric
+		}
+	}
+	return annotations, nil
 }
 
 // reconcileCollector ensures the per-agent collector-config ConfigMap and
@@ -724,13 +1083,38 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// AgentScalingPolicy → requeue the referenced AgentDeployment (m7.5). A
+	// request-rate / custom-metric policy changes the ksvc's autoscaling
+	// annotations; a schedule policy toggles the job-model agent between a bare
+	// Job and a CronJob. Reads spec.agentRef straight off the event object (delete
+	// events retain it), matching the binding→agent maps. queue-depth policies are
+	// harmless here — the ksvc/job re-render is a no-op for them (that trigger is
+	// the AgentScalingPolicy controller's KEDA path).
+	mapScalingPolicyToAgent := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			p, ok := obj.(*agentsv1alpha1.AgentScalingPolicy)
+			if !ok || p.Spec.AgentRef == "" {
+				return nil
+			}
+			return []reconcile.Request{{
+				NamespacedName: client.ObjectKey{Namespace: p.Namespace, Name: p.Spec.AgentRef},
+			}}
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{}).
+		Owns(&eventingv1.Trigger{}).
+		Owns(&batchv1.Job{}).
+		Owns(&batchv1.CronJob{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
+		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Named("agentdeployment").
 		Complete(r)
 }

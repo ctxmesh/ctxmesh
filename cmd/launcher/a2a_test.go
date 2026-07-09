@@ -467,7 +467,7 @@ func newTestProxyWithGuardRec(t *testing.T, cfg a2aConfig) (http.Handler, chan b
 	}
 
 	guard := newA2AGuard(cfg, tracer)
-	handler := buildHandler(tracer, propagation.TraceContext{}, upstreamURL, Config{AgentName: cfg.SelfName}, guard)
+	handler := buildHandler(tracer, propagation.TraceContext{}, upstreamURL, Config{AgentName: cfg.SelfName}, guard, nil)
 	return handler, reachedCh, rec
 }
 
