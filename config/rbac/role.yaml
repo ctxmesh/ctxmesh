@@ -101,6 +101,7 @@ rules:
 - apiGroups:
   - eventing.knative.dev
   resources:
+  - brokers
   - triggers
   verbs:
   - create

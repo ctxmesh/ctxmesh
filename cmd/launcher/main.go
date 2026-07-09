@@ -67,7 +67,28 @@ func main() {
 	if cfg.A2AEnabled() {
 		guard = newA2AGuard(cfg.A2A, tracer)
 	}
-	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard)
+
+	// Async A2A consumer (eventing path): wired when the agent is a registry
+	// member (a Trigger can deliver CloudEvents to it). The seen-set reuses the
+	// M5 Valkey (MEMORY_BACKEND_ADDR); when that is absent the consumer still
+	// runs but dedupe is fail-open by construction (no store to consult). The
+	// production invoker POSTs the decoded payload back through the launcher's own
+	// proxy port so the agent.invoke span + user container see it as a call. nil
+	// when the agent is not a registry member — its request path is unchanged.
+	var consumer asyncHandler
+	if cfg.A2AEnabled() {
+		var seen SeenSet
+		if cfg.MemoryEnabled() {
+			seen = newRedisSeenSet(cfg.Memory.BackendAddr)
+		}
+		consumer = &asyncConsumer{
+			cfg:    asyncConfig{DedupeAddr: cfg.Memory.BackendAddr, SelfName: cfg.AgentName},
+			seen:   seen,
+			tracer: tracer,
+			invoke: newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout}),
+		}
+	}
+	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.ProxyPort),
