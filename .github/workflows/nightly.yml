@@ -14,7 +14,9 @@ jobs:
   full-e2e:
     name: nightly-full-e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Bumped 45→60 when the m5-memory slice landed: it adds uncached image
+    # builds + an ~90s scale-to-zero drain wait on top of m3/m4.
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -54,3 +56,14 @@ jobs:
         # Reuses the same cluster; asserts tool_version v1→v2 on an unchanged
         # pod UID + the mcp_word_count TOOL span via the collector debug sink.
         run: make -C agent-brain/harness tier2 SLICE=m4-tools
+      - name: M5 session-memory e2e (context survives scale-to-zero)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Reuses the same cluster; the State-Layer Valkey is deployed by the
+        # engine's `make deploy` inside the slice (config/statelayer is wired
+        # into config/default), so no extra dev-up step. Asserts turns 2→4
+        # across a real zero-pod window (min-scale 0) plus the memory.append
+        # (turn-1 write) and memory.get (turn-2 cold read) spans via the
+        # collector debug sink. Langfuse not needed on the M=1 cluster, same
+        # as the m3-trace / m4-tools slices.
+        run: make -C agent-brain/harness tier2 SLICE=m5-memory

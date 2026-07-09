@@ -66,6 +66,20 @@ func main() {
 		Handler: handler,
 	}
 
+	// ── Memory endpoint (:2998) ───────────────────────────────────────────
+	// Started ONLY when a backend was injected (the agent has a MemoryBinding).
+	// It runs as a second listener beside the proxy with the SAME lifecycle
+	// discipline (goroutine ListenAndServe; graceful Shutdown on child exit;
+	// the child-exit still decides the process exit code — the memory listener
+	// never overrides it). nil when disabled.
+	var memSrv *http.Server
+	if cfg.MemoryEnabled() {
+		memSrv = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
+			Handler: newMemoryServer(newRedisStore(cfg.Memory.BackendAddr), cfg.Memory, tracer).handler(),
+		}
+	}
+
 	// ── Child process ─────────────────────────────────────────────────────
 	child, err := startChild(cfg)
 	if err != nil {
@@ -95,6 +109,16 @@ func main() {
 		}
 	}()
 
+	// Start the memory listener (best-effort; a bind failure here must not take
+	// the agent down — the agent's memory path is already best-effort).
+	if memSrv != nil {
+		go func() {
+			if err := memSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "launcher: memory: %v\n", err)
+			}
+		}()
+	}
+
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
 
@@ -102,6 +126,9 @@ func main() {
 	defer cancel()
 
 	_ = srv.Shutdown(shutCtx)
+	if memSrv != nil {
+		_ = memSrv.Shutdown(shutCtx)
+	}
 	_ = otelShutdown(shutCtx)
 
 	os.Exit(exitCode)
