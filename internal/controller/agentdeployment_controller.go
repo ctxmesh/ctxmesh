@@ -235,6 +235,37 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	_, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
+	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
+	// inject MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (downward
+	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
+	// The single-writer rule applies: only this reconciler writes the pod
+	// template; the MemoryBinding controller only sets the binding's status.
+	memAddr, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
+	if err != nil {
+		return nil, fmt.Errorf("resolving memory binding: %w", err)
+	}
+	if hasMemoryBinding {
+		env = append(env,
+			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
+			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
+			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
+			// prefix. Set as a STATIC value (the pod always runs in the
+			// AgentDeployment's namespace, known here at reconcile time) — a
+			// downward-API fieldRef is rejected by Knative Serving's webhook,
+			// which forbids valueFrom in a ksvc pod template unless the
+			// non-default kubernetes.podspec-fieldref feature flag is enabled.
+			// The key prefix is the agent's own namespace regardless of where
+			// the backend lives, so no downward reference is needed.
+			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
+		)
+		// AGENT_NAME: inject only if not already present in spec.env (user
+		// override must win). The launcher uses AGENT_NAME for Valkey key
+		// composition and as the agent.invoke span attribute.
+		if !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
+			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		}
+	}
+
 	containers := []corev1.Container{
 		{
 			// Named explicitly: multi-container Knative pods require
@@ -283,21 +314,31 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	}
 
 	// Revision name: bare spec-hash when there are no bindings (unchanged pre-M4
-	// behaviour). With bindings, suffix a structural digest so ADD/REMOVE of a
-	// binding or a sidecar image change rolls a new revision (the sidecar/tool
-	// containers must actually land — the CreateOrUpdate guard below skips
-	// re-applying the spec when the revision name is unchanged). The digest
-	// deliberately EXCLUDES remote URLs and the manifest version, so a
-	// manifest-ONLY change (remote URL edit) keeps the SAME revision name → no
-	// roll → restart-free hot path (specs/mcp-tools.md — "Hot path vs cold
-	// path"; the LANDMINE in the m4.5 task card). Knative requires the name to
-	// start with "{service}-", which the spec-hash prefix satisfies. The FULL
-	// 8-hex digest is used: a shorter prefix invites silent collisions where a
-	// real structural change maps to the SAME name and the guard skips the
-	// update forever; 8 chars stays comfortably inside the 63-char name budget.
+	// behaviour). With ANY binding (tool and/or memory), suffix ONE combined
+	// structural digest ("-h<digest8>") so that ADD/REMOVE of a binding, a
+	// sidecar image change, or a memory addr change each roll a new revision
+	// (the containers/env must actually land — the CreateOrUpdate guard below
+	// skips re-applying the spec when the revision name is unchanged; a stale
+	// name means the injection is SILENTLY LOST, the M4 landmine). The tool
+	// component deliberately EXCLUDES remote URLs and the manifest version, so
+	// a manifest-ONLY change (remote URL edit) keeps the SAME revision name →
+	// no roll → restart-free hot path (specs/mcp-tools.md — "Hot path vs cold
+	// path"). Knative requires the name to start with "{service}-", which the
+	// spec-hash prefix satisfies.
+	//
+	// Name budget (why ONE combined suffix, not stacked per-binding suffixes):
+	// Knative revision names are DNS-1035 labels, max 63 chars. The suffix is
+	// bounded at 19 chars — "-" + 8 (spec hash) + "-h" + 8 (combined digest) —
+	// NO MATTER how many binding types future milestones add, leaving 44 chars
+	// of agent-name budget, which the CRD enforces via a root CEL rule on
+	// metadata.name (size <= 44). Stacked suffixes (the pre-fix "-b<8>-m<8>"
+	// form) grew 10 chars per binding type and silently wedged reconcile for
+	// admission-valid 35+-char names.
 	revName := deploy.Name + "-" + hash
-	if digest := toolmanifest.StructuralDigest(sidecarTools, hasBindings); digest != "" {
-		revName = revName + "-b" + digest
+	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
+	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
+	if combined := combinedBindingDigest(toolDigest, memDigest); combined != "" {
+		revName = revName + "-h" + combined
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
@@ -471,21 +512,86 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 	return ctrl.Result{}, nil
 }
 
+// memoryBindingDigest returns a short hash capturing whether a MemoryBinding
+// exists and what addr it resolves to. It is one COMPONENT of the combined
+// revision-name digest (combinedBindingDigest) so bind/unbind/addr-change each
+// roll a new revision.
+//
+// Returns "" when hasBinding is false (no memory state → the component
+// contributes the empty string, symmetric with the tool-binding path).
+func memoryBindingDigest(hasBinding bool, addr string) string {
+	if !hasBinding {
+		return ""
+	}
+	h := sha256.Sum256([]byte(addr))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// combinedBindingDigest folds the per-binding-type structural digests into the
+// SINGLE 8-hex digest used as the revision-name suffix ("-h<digest8>").
+//
+// Rationale: stacking one suffix per binding type ("-b<8>-m<8>") grows the
+// revision name 10 chars per type and blows the 63-char DNS-1035 label limit
+// for admission-valid agent names; one combined digest bounds the total suffix
+// at 19 chars forever (see the revision-name comment in reconcileKnativeService).
+//
+// Properties:
+//   - "" when NO binding of any type resolves (bare pre-M4 revision name).
+//   - Changes when EITHER component changes (each component is embedded whole).
+//   - Cannot collide across presence combinations: components are hex-only
+//     (never contain '=' or ';'), so the "b=<x>;m=<y>" framing is unambiguous —
+//     tools-only, memory-only, and both always hash different strings.
+//   - Deterministic: fixed field order, deterministic component derivations
+//     (tool digest sorts by binding name; memory digest hashes the resolved addr).
+func combinedBindingDigest(toolDigest, memDigest string) string {
+	if toolDigest == "" && memDigest == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// envVarPresent reports whether name appears in the given env slice.
+// Used to avoid double-injecting AGENT_NAME when the operator has already set it.
+func envVarPresent(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
 //
-// It also watches MCPToolBinding: a binding add/remove/change maps to a requeue
-// of the referenced agent so this reconciler re-renders the pod template (the
-// STRUCTURAL side of a binding change — discovery sidecar + tool containers).
-// This is the annotation-free requeue mechanism from specs/mcp-tools.md: the
-// map function reads spec.agentRef straight off the event object (delete
-// events included — the binding finalizer keeps the object readable until the
-// agent converges). No field index is used.
+// It also watches MCPToolBinding and MemoryBinding: add/remove/change events map
+// to a requeue of the referenced agent so this reconciler re-renders the pod
+// template (the STRUCTURAL side of a binding change — sidecar containers and
+// env injection). The annotation-free requeue mechanism reads spec.agentRef
+// straight off the event object; no field index is used.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
 			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
+			if !ok || b.Spec.AgentRef == "" {
+				return nil
+			}
+			return []reconcile.Request{{
+				NamespacedName: client.ObjectKey{Namespace: b.Namespace, Name: b.Spec.AgentRef},
+			}}
+		},
+	)
+
+	// MemoryBinding → requeue the referenced AgentDeployment so this reconciler
+	// re-resolves memory bindings and re-renders the pod template (env injection).
+	// Delete events are included: the binding object remains readable until
+	// DeletionTimestamp is set, and listAgentMemoryBindings excludes it so the
+	// env drops on the re-render.
+	mapMemoryBindingToAgent := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			b, ok := obj.(*agentsv1alpha1.MemoryBinding)
 			if !ok || b.Spec.AgentRef == "" {
 				return nil
 			}
@@ -500,6 +606,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
+		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Named("agentdeployment").
 		Complete(r)
 }

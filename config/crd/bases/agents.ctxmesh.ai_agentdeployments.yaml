@@ -22,6 +22,13 @@ spec:
           It describes a long-running AI agent deployed as a Knative Service.
           The controller reconciles each AgentDeployment into an immutable AgentVersion
           snapshot and a Knative Service that serves HTTP traffic on /invoke.
+
+          The name-length CEL rule above guards the revision-name budget: the
+          controller derives Knative revision names as "<name>-<specHash8>" plus, when
+          any binding resolves, "-h<digest8>" — a suffix bounded at 19 characters.
+          63 (DNS-1035 label max) - 19 = 44 chars of name budget. Without the guard an
+          admission-valid 45+-char name would silently wedge reconcile at the Knative
+          webhook.
         properties:
           apiVersion:
             description: |-
@@ -359,6 +366,11 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 44 characters: the controller appends
+            a 19-character revision-name suffix and Knative revision names are DNS-1035
+            labels capped at 63 characters'
+          rule: size(self.metadata.name) <= 44
     served: true
     storage: true
     subresources:

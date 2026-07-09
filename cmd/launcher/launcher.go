@@ -70,6 +70,11 @@ type Config struct {
 	AgentName    string
 	AgentVersion string
 	AgentRoute   string
+
+	// Memory holds the :2998 memory-endpoint configuration. The listener is
+	// started ONLY when Memory.BackendAddr is non-empty (i.e. MEMORY_BACKEND_ADDR
+	// is injected by the controller for an agent with a MemoryBinding).
+	Memory memoryConfig
 }
 
 // loadConfig reads launcher configuration from environment variables.
@@ -114,15 +119,71 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		otlpEndpoint = defaultOTLPEndpoint
 	}
 
+	agentName := lookup("AGENT_NAME")
+
+	mem, err := loadMemoryConfig(lookup, agentName)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Argv:         argv,
 		ProxyPort:    proxyPort,
 		UpstreamPort: upstreamPort,
 		OTLPEndpoint: otlpEndpoint,
-		AgentName:    lookup("AGENT_NAME"),
+		AgentName:    agentName,
 		AgentVersion: lookup("AGENT_VERSION"),
 		AgentRoute:   lookup("AGENT_ROUTE"),
+		Memory:       mem,
 	}, nil
+}
+
+// loadMemoryConfig parses the :2998 memory-endpoint configuration from env.
+//
+// Environment variables:
+//
+//	MEMORY_BACKEND_ADDR (gate): Valkey host:port. Empty ⇒ the listener is NOT
+//	  started at all (the agent has no MemoryBinding); every other memory env is
+//	  then irrelevant.
+//	MEMORY_PORT (optional): memory listener port (default 2998).
+//	MEMORY_KEY_NAMESPACE (optional): key-prefix namespace; falls back to
+//	  POD_NAMESPACE (the pod's namespace, injected via the downward API by the
+//	  controller). The agent portion of the key reuses AGENT_NAME.
+//
+// The key layout is mem:{namespace}/{agent}:{conversationId}. When
+// MEMORY_BACKEND_ADDR is set, the function does NOT hard-fail on a missing
+// namespace/agent (it degrades to empty segments) — the controller is
+// responsible for injecting them; an empty segment is a visible-but-non-fatal
+// misconfiguration rather than a crash on a best-effort path.
+func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfig, error) {
+	addr := lookup("MEMORY_BACKEND_ADDR")
+	if addr == "" {
+		// Not gated on: the listener is skipped entirely.
+		return memoryConfig{}, nil
+	}
+
+	port, err := parsePort(lookup("MEMORY_PORT"), defaultMemoryPort)
+	if err != nil {
+		return memoryConfig{}, fmt.Errorf("MEMORY_PORT: %w", err)
+	}
+
+	ns := lookup("MEMORY_KEY_NAMESPACE")
+	if ns == "" {
+		ns = lookup("POD_NAMESPACE")
+	}
+
+	return memoryConfig{
+		BackendAddr: addr,
+		Port:        port,
+		Namespace:   ns,
+		Agent:       agentName,
+	}, nil
+}
+
+// MemoryEnabled reports whether the :2998 memory listener should be started —
+// true iff a backend address was injected.
+func (c Config) MemoryEnabled() bool {
+	return c.Memory.BackendAddr != ""
 }
 
 // parsePort parses a port string (may be empty) and returns the result.
