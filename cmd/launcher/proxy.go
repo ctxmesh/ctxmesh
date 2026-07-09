@@ -78,10 +78,26 @@ func setupOTel(ctx context.Context, endpoint string) (func(context.Context) erro
 	}, nil
 }
 
+// inboundGuard is the callee-side access-control hook the proxy runs on the
+// inbound path, INSIDE the agent.invoke span, before forwarding to the user
+// container. It returns true when the request may proceed; on a denial it has
+// already written the typed error response and returns false. nil ⇒ no guard
+// (the agent is not a registry member), and every request proceeds.
+//
+// It is an interface (not a concrete *a2aGuard) so buildHandler stays decoupled
+// from the A2A surface and unit tests can inject a stub.
+type inboundGuard interface {
+	enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool
+}
+
 // buildHandler returns an HTTP handler that reverse-proxies all requests to
 // upstreamURL. Requests to paths for which shouldSpan returns true are wrapped
 // in an agent.invoke server span with W3C context propagation; all other
 // requests pass through without any tracing overhead.
+//
+// guard, when non-nil, enforces A2A access control on the inbound path inside
+// the span (a denied caller is rejected before the request reaches the user
+// container). nil disables it.
 //
 // tracer and prop are explicit parameters (rather than read from the global
 // otel package) so the function can be exercised in unit tests without global
@@ -91,6 +107,7 @@ func buildHandler(
 	prop propagation.TextMapPropagator,
 	upstreamURL *url.URL,
 	cfg Config,
+	guard inboundGuard,
 ) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
 
@@ -116,6 +133,20 @@ func buildHandler(
 
 		// Capture the HTTP status code written by the upstream.
 		rw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+
+		// A2A inbound access control (callee side): if this /invoke carries an
+		// A2A envelope, enforce the callee's allowlist/role rules INSIDE the
+		// span before the request reaches the user container. A denial is
+		// written here and short-circuits — but the span still records the
+		// (denied) status and latency via the deferred End + attribute block.
+		if guard != nil && !guard.enforceInbound(ctx, rw, r) {
+			span.SetAttributes(
+				attribute.String("agent.name", cfg.AgentName),
+				attribute.Int("http.status_code", rw.code),
+				attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
+			)
+			return
+		}
 
 		// Clone the request with the new context so the ReverseProxy sees it,
 		// then inject the span context into the outbound headers so upstream
