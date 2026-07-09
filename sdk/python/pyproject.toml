@@ -5,11 +5,13 @@
 # "Packaging & base-image bundling").
 #
 # Typed sugar over the launcher's language-agnostic localhost platform plane
-# (ADR 0002): memory (:2998), tools/discovery (:2999), feedback (:2995). The
-# SDK is NEVER a hard dependency and adds zero runtime deps — the three m10.2
-# clients are pure stdlib (urllib) so the package installs cleanly into
-# base-python and runs on the 3.9+ target (the OTLP/OpenInference trace + model
-# helpers arrive in m10.3, which is when an OTLP exporter dep is added).
+# (ADR 0002): memory (:2998), tools/discovery (:2999), feedback (:2995), the
+# model gateway ($MODEL_GATEWAY_URL), and the step-tracing helpers (OTLP :4317).
+# The SDK is NEVER a hard dependency. The plane clients are pure stdlib (urllib);
+# the m10.3 model + trace helpers add a MINIMAL OTLP/gRPC exporter + OpenInference
+# semantic-convention constants — pinned to the EXACT versions already bundled in
+# images/base-python (opentelemetry 1.27.0 + openinference-semantic-conventions
+# 0.1.30), so the SDK adds ZERO net footprint to base-python and stays 3.9-compatible.
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -28,8 +30,19 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "License :: OSI Approved :: Apache Software License",
 ]
-# Zero runtime dependencies: the m10.2 clients are pure stdlib.
-dependencies = []
+# Runtime deps for the m10.3 model + step-tracing helpers. Pinned to the exact
+# versions images/base-python already bundles, so `import ctxmesh` adds nothing
+# net to the base image (the plane clients themselves remain pure stdlib):
+#   * opentelemetry-sdk + the OTLP/gRPC exporter — export step spans to the
+#     collector (:4317) over the SAME path as auto-instrumentation → Langfuse.
+#   * openinference-semantic-conventions — the CHAIN/TOOL/LLM span kinds + attr
+#     keys, so a custom-loop tree is byte-for-byte a framework tree.
+# All three install cleanly and run on the 3.9 target (host python 3.9.6).
+dependencies = [
+    "opentelemetry-sdk==1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.27.0",
+    "openinference-semantic-conventions==0.1.30",
+]
 
 [project.optional-dependencies]
 # Pinned dev toolchain — reproducible on a clean host / CI (no host-global
@@ -61,8 +74,12 @@ src = ["src", "tests"]
 select = ["E", "F", "B", "I", "C4", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests may use asserts and longer fixture bodies freely.
-"tests/*" = ["B011"]
+# Tests may use asserts and longer fixture bodies freely. SIM117 (combine nested
+# `with`) is ignored in tests because the step-tracing tests deliberately NEST
+# `with` blocks (request_context → step → tool/llm) to express — and assert — the
+# span-tree topology; flattening them into one `with` would obscure the very
+# parent/child nesting under test.
+"tests/*" = ["B011", "SIM117"]
 
 # ── pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
