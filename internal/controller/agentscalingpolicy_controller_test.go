@@ -171,8 +171,10 @@ func TestScalingPolicy_QueueDepth_DefaultsBrokerFromAgentRef(t *testing.T) {
 	require.NotEmpty(t, so.Spec.Triggers)
 	url, ok := so.Spec.Triggers[0].Metadata["url"]
 	require.True(t, ok, "trigger metadata must contain 'url'")
-	// The default broker name convention: <agentRef>-broker.<namespace>.svc...
-	assert.Contains(t, url, agentName+brokerNameSuffix, "default URL must use <agentRef>-broker naming")
+	// The metric source defaults to the eventing agent's own Service
+	// (<agentRef>-eventing) — a resolvable placeholder; the real queue-depth
+	// metric is a phase-2 concern (Knative in-memory channel exposes none).
+	assert.Contains(t, url, eventingServiceName(agentName), "default URL must use the <agentRef>-eventing Service")
 }
 
 // TestScalingPolicy_QueueDepth_ExplicitQueueRef verifies that an explicit

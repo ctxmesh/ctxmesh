@@ -235,31 +235,34 @@ func scaledObjectName(policy *agentsv1alpha1.AgentScalingPolicy) string {
 // Prometheus exporter or HTTP metrics endpoint is wired by the cluster operator
 // (m7.8 e2e).
 func buildMetricsAPITrigger(policy *agentsv1alpha1.AgentScalingPolicy) kedatypes.ScaleTriggers {
-	// Broker reference: prefer explicit queueRef, fall back to the registry
-	// broker naming convention (<agentRef>-broker).
-	brokerName := policy.Spec.AgentRef + brokerNameSuffix
-	brokerNS := policy.Namespace
+	// Metric source: prefer explicit queueRef, else default to the eventing
+	// agent's own Service (<agentRef>-eventing) — a RESOLVABLE placeholder. The
+	// Knative in-memory channel exposes no queue-depth/backlog metric (m7.8 e2e
+	// finding, specs/eventing-scaling.md "Known limitations"), so in v1 no
+	// endpoint actually serves this metric and KEDA stays scale-inactive by
+	// design; real queue-depth scaling needs a phase-2 queue backend
+	// (Kafka/NATS — native KEDA scalers) or a Prometheus pipeline.
+	metricSvc := eventingServiceName(policy.Spec.AgentRef)
+	metricNS := policy.Namespace
 	if policy.Spec.QueueRef != nil {
-		brokerName = policy.Spec.QueueRef.Name
+		metricSvc = policy.Spec.QueueRef.Name
 		if policy.Spec.QueueRef.Namespace != "" {
-			brokerNS = policy.Spec.QueueRef.Namespace
+			metricNS = policy.Spec.QueueRef.Namespace
 		}
 	}
 
-	// Metric name: prefer explicit spec.metric.Metric, fall back to a
-	// conventional name based on the broker.
+	// Metric name: prefer explicit spec.metric.Metric, else the conventional
+	// queue_depth.
 	metricName := "queue_depth"
 	if policy.Spec.Metric != nil && policy.Spec.Metric.Metric != "" {
 		metricName = policy.Spec.Metric.Metric
 	}
 
 	// The metrics-api scaler reads a JSON numeric value from an HTTP endpoint.
-	// The URL template points at the Knative broker's metrics endpoint; the
-	// cluster operator wires the actual Prometheus exporter URL here.
-	// Format: http://<broker>.<ns>.svc.cluster.local/metrics?metric=<name>
+	// Format: http://<svc>.<ns>.svc.cluster.local/metrics
 	targetURL := fmt.Sprintf(
 		"http://%s.%s.svc.cluster.local/metrics",
-		brokerName, brokerNS,
+		metricSvc, metricNS,
 	)
 
 	return kedatypes.ScaleTriggers{
