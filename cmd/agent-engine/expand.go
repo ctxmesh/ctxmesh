@@ -270,27 +270,31 @@ func checkFields(raw map[string]any) error {
 // floatToDecimalString converts a float64 budget value from agent.yaml to the
 // exact-decimal string form required by the CRD BudgetSpec fields.
 //
-// Conversion rule (lossless and deterministic):
-//   - Format with the minimum digits needed to represent the value exactly
-//     (strconv.FormatFloat with bitSize=64 and format 'f', prec=-1).
-//   - If the result contains no decimal point, append ".00" so the output
-//     is always in decimal form (e.g. 10 → "10.00").
-//   - If the result has exactly one decimal digit, append "0" (e.g. 0.5 → "0.50").
+// The CRD validation pattern is ^[0-9]+(\.[0-9]{1,6})?$ — at most 6 fractional
+// digits — so the output must be bounded to [2, 6] decimal places. USD budgets
+// never need finer than a millionth of a dollar, so capping at 6 is lossless in
+// practice; inputs with more precision are rounded to 6 decimals rather than
+// producing a manifest the API server would reject at admission.
 //
-// Examples: 0.5 → "0.50", 10.0 → "10.00", 0.123456 → "0.123456".
-// This rule is stable: the same float always produces the same string, and no
-// information is lost (Go's float64 round-trip through FormatFloat is exact).
+// Conversion rule (deterministic):
+//   - Format with exactly 6 fractional digits (strconv.FormatFloat, prec=6),
+//     which rounds any excess precision (e.g. 0.1234567 → "0.123457").
+//   - Trim trailing zeros, but keep a minimum of 2 fractional digits
+//     (e.g. 0.5 → "0.500000" → "0.50"; 10 → "10.000000" → "10.00";
+//     0.123456 → "0.123456").
+//
+// The output always matches the CRD pattern (2–6 fractional digits, no more).
 func floatToDecimalString(f float64) string {
-	s := strconv.FormatFloat(f, 'f', -1, 64)
-	if !strings.Contains(s, ".") {
-		return s + ".00"
+	s := strconv.FormatFloat(f, 'f', 6, 64)
+	// s always contains a decimal point and exactly 6 fractional digits here.
+	dot := strings.IndexByte(s, '.')
+	intPart, fracPart := s[:dot], s[dot+1:]
+	// Trim trailing zeros down to a minimum of 2 fractional digits.
+	trimmed := strings.TrimRight(fracPart, "0")
+	for len(trimmed) < 2 {
+		trimmed += "0"
 	}
-	// Ensure at least two decimal places.
-	parts := strings.SplitN(s, ".", 2)
-	if len(parts[1]) == 1 {
-		return s + "0"
-	}
-	return s
+	return intPart + "." + trimmed
 }
 
 // buildOutput converts a parsed agentYAML into the output struct.
