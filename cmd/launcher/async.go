@@ -187,6 +187,10 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	}()
 	span.SetAttributes(attribute.String("a2a.async.agent", c.cfg.SelfName))
 
+	// Cap the inbound CloudEvent body before decoding — every other launcher
+	// inbound path (readA2ABody, readCappedBody) enforces this. Blob offload
+	// keeps event bodies small (a $ref, not the payload), so 1MiB is ample.
+	r.Body = http.MaxBytesReader(w, r.Body, maxAsyncBody)
 	// Decode the CloudEvent from the HTTP request (handles both content modes).
 	evt, err := cloudevents.NewEventFromHTTPRequest(r)
 	if err != nil {
