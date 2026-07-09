@@ -166,6 +166,8 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 		"platform ingress must allow the Knative activator namespace (scale-from-zero)")
 	assert.Contains(t, platformNS, kourierSystemNamespace,
 		"platform ingress must allow the kourier ingress namespace (external /invoke)")
+	assert.Contains(t, platformNS, knativeEventingNamespace,
+		"platform ingress must allow knative-eventing (broker dispatcher → eventing agents)")
 
 	// Ingress-only (M6, ADR 0007): the policy must NOT restrict egress — a
 	// default-deny egress model silently severs collector→Langfuse / gateway /

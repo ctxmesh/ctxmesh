@@ -73,6 +73,11 @@ const (
 	// for external /invoke traffic. Must be allowed alongside the activator.
 	kourierSystemNamespace = "kourier-system"
 
+	// knativeEventingNamespace hosts the broker/InMemoryChannel dispatcher that
+	// delivers CloudEvents to plain-Deployment `eventing` agents. Must be allowed
+	// or async event delivery is dropped by the registry NetworkPolicy (m7.8).
+	knativeEventingNamespace = "knative-eventing"
+
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
 	// applied when spec.guards is nil (the whole struct omitted) so the injected
@@ -307,15 +312,21 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform ingress: allow the Knative activator (scale-from-zero
-					// buffer) and the kourier ingress gateway. Selected by the
-					// well-known namespace-name label so we do not depend on the
-					// operator labelling those namespaces themselves.
+					// buffer), the kourier ingress gateway, and the Knative Eventing
+					// broker dispatcher (which delivers CloudEvents to plain-Deployment
+					// `eventing` agents from the knative-eventing namespace — omitting
+					// it silently drops async event delivery, m7.8 e2e finding).
+					// Selected by the well-known namespace-name label so we do not
+					// depend on the operator labelling those namespaces themselves.
 					From: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: knativeServingNamespace},
 						}},
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: kourierSystemNamespace},
+						}},
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: knativeEventingNamespace},
 						}},
 					},
 				},
