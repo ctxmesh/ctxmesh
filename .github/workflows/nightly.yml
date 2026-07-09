@@ -14,9 +14,9 @@ jobs:
   full-e2e:
     name: nightly-full-e2e
     runs-on: ubuntu-latest
-    # Bumped 45→60 (m5-memory), then 60→75 (m6-mesh: 3 agents + 2 registries
-    # + uncached image builds on top of m3/m4/m5).
-    timeout-minutes: 75
+    # Bumped 45→60 (m5-memory), 60→75 (m6-mesh), 75→120 (m7-eventing + the
+    # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6).
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -41,8 +41,12 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           kind version
-      - name: Bring up the harness cluster (Knative Serving + Kourier)
-        run: make -C agent-brain/harness dev-up M=1
+      - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + MinIO + Langfuse)
+        # M=7 ⊇ M=1..M6: the m7-eventing slice needs KEDA + Knative Eventing +
+        # MinIO, so the whole nightly runs on the M=7 stack. The earlier slices
+        # tolerate it (Calico enforces the m6 NetworkPolicy as a bonus). Heavy
+        # for one CI job — split at the CI-revisit pass if the runner can't fit it.
+        run: make -C agent-brain/harness dev-up M=7
       - name: M3 observability e2e (light — collector debug sink, no Langfuse)
         env:
           AGENT_ENGINE: ${{ github.workspace }}
@@ -76,6 +80,18 @@ jobs:
         # BLOCKED, a cycle guard trip, and the a2a.call child span. NOTE: the
         # cross-registry block is enforced APP-LAYER (the callee launcher's
         # registryId check — ADR 0007 addendum), which is CNI-agnostic, so this
-        # runs on kindnet (M=1). The NetworkPolicy *defense-in-depth* layer
-        # needs Calico and is exercised only in local tier3 (accept-m6, M=6).
+        # registryId check — ADR 0007 addendum). On the M=7 stack Calico also
+        # enforces the NetworkPolicy defense-in-depth layer (bonus vs the M=1 run).
         run: make -C agent-brain/harness tier2 SLICE=m6-mesh
+      - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, scaling mechanism)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Needs the M=7 stack (KEDA + Knative Eventing + MinIO). Deploys an
+        # eventing agent (plain Deployment + Trigger), a job + a CronJob batch
+        # agent, and a queue-depth AgentScalingPolicy. Asserts: CloudEvent →
+        # trigger (agent.invoke span), poison → per-registry DLQ, CronJob/Job
+        # complete (native-sidecar collector), and the KEDA scaling MECHANISM
+        # (ScaledObject accepted + HPA created + target resolves). Live
+        # queue-depth scale-up is a documented phase-2 limitation (the in-memory
+        # channel exposes no queue_depth metric) — specs/eventing-scaling.md.
+        run: make -C agent-brain/harness tier2 SLICE=m7-eventing
