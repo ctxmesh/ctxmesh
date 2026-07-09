@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/eval"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/telemetry"
@@ -145,6 +147,21 @@ type AgentDeploymentReconciler struct {
 	// leave it nil and the reconciler defaults to the deterministic, OFFLINE
 	// fixture resolver (prompt.NewFixtureResolver) — no network in CI (ADR 0004).
 	PromptResolver prompt.Resolver
+
+	// EvalTracer emits the eval.gate span for the deploy-gate decision (M9). Left
+	// nil in dev / envtest / e2e (the controller has no live OTel export wired —
+	// the launcher owns runtime spans), where the gate defaults to a no-op tracer
+	// so the decision path is exercised OFFLINE; a production build injects a real
+	// tracer here to land eval.gate in the trace tree. Mirrors the PromptResolver
+	// seam.
+	EvalTracer trace.Tracer
+
+	// ScorerFactory builds the Scorer for an EvalSuite scorer (type, name) — the
+	// mock⇄Langfuse seam for the deploy gate (M9). Left nil in production and dev
+	// (it defaults to eval.ScorerFor: the deterministic mock, Langfuse-unavailable
+	// for llm-judge/code offline); envtest/e2e inject a seeded factory to drive a
+	// candidate deliberately above/below threshold and exercise the state machine.
+	ScorerFactory func(scorerType, name string) (eval.Scorer, error)
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -153,6 +170,7 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=promptversions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -264,6 +282,37 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return ctrl.Result{}, err
 	}
 
+	// Deploy gate (M9): when the agent references an EvalSuite, score the CANDIDATE
+	// revision and decide before any ksvc write. The gate HOLDS the rollout by
+	// gating the ksvc apply: on `blocked` (below threshold, gate:block) or
+	// `awaiting-promotion` (passing but not yet human-approved) the candidate is NOT
+	// applied — on a FIRST deploy nothing goes live; on an UPDATE the existing ksvc
+	// (the previous revision) is left untouched, so the previous revision keeps
+	// serving. Only `promoted`/`warned` proceed to the ksvc CreateOrUpdate. This is
+	// the scorer-agnostic mechanism: block-then-promote never overbuilds Knative
+	// traffic-splitting — a held candidate is simply never written.
+	candidateRev, err := r.candidateRevisionName(ctx, deploy, hash)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
+	if err != nil {
+		// A missing/invalid EvalSuite is USER input (surfaced from evaluateGate as an
+		// evalGateError): report Ready=False and STOP cleanly (the old revision keeps
+		// serving), rather than returning a hard reconcile error that log-spams.
+		if ge, ok := asEvalGateError(err); ok {
+			return r.setGateBlockedStatus(ctx, deploy, ge.reason, ge.Error())
+		}
+		return ctrl.Result{}, fmt.Errorf("evaluating deploy gate: %w", err)
+	}
+	if outcome != nil && !outcome.promote {
+		// Gate held the rollout (blocked or awaiting-promotion): do NOT apply the
+		// candidate ksvc. Record the gate status and stop — the previous revision (if
+		// any) keeps serving. A later re-reconcile (spec change, or the human-approval
+		// annotation) re-evaluates and promotes.
+		return r.recordHeldGate(ctx, deploy, versionName, outcome)
+	}
+
 	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
@@ -271,7 +320,36 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	if err = r.syncStatus(ctx, deploy, ksvc, versionName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
 	}
+	// Promoted/warned: record the terminal gate status (+ annotations) alongside the
+	// applied workload. A gated agent that reaches here has an outcome; an ungated
+	// agent (outcome == nil) leaves status.gate nil, byte-compatible with pre-M9.
+	if outcome != nil {
+		if err = r.recordPromotedGate(ctx, deploy, outcome); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording gate status: %w", err)
+		}
+	}
 	return ctrl.Result{}, nil
+}
+
+// candidateRevisionName computes the Knative revision name the candidate WOULD
+// serve — "<name>-<specHash>" plus, when a binding/membership/prompt resolves,
+// "-h<digest8>". It builds the pod template (idempotent — the same call
+// reconcileKnativeService makes) to derive the digest so the gate scores and pins
+// the EXACT candidate the ksvc would create.
+func (r *AgentDeploymentReconciler) candidateRevisionName(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	hash string,
+) (string, error) {
+	pod, err := r.buildPodTemplate(ctx, deploy)
+	if err != nil {
+		return "", fmt.Errorf("building pod template for candidate revision: %w", err)
+	}
+	revName := deploy.Name + "-" + hash
+	if pod.digest != "" {
+		revName = revName + "-h" + pod.digest
+	}
+	return revName, nil
 }
 
 // reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
