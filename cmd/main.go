@@ -39,6 +39,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controller"
+	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -53,6 +54,7 @@ func init() {
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
 	utilruntime.Must(eventingv1.AddToScheme(scheme))
+	utilruntime.Must(kedatypes.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
