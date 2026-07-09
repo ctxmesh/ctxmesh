@@ -21,9 +21,14 @@ When the /invoke request carries "conversation_id":
   3. After answering, POST .../append the user turn then POST .../append the
      assistant turn (two appends, 2s timeouts each).
   4. Response gains "turns": <total entries after this exchange> (retention
-     proof: turn1 → 2, turn2 on cold pod → 4).
-  5. Memory is best-effort: any failure → response carries "memory":
-     "unavailable" and the agent still answers normally.
+     proof: turn1 → 2, turn2 on cold pod → 4).  "turns" is only reported
+     when the GET *and both appends* succeeded — never for unpersisted state.
+  5. Memory is best-effort: any GET/append failure → response carries
+     "memory": "unavailable" and the agent still answers normally.
+  6. conversation_id is validated client-side against the :2998 contract
+     (non-empty, ≤128 chars, no '/', ':' or whitespace); an invalid id skips
+     memory entirely and the response carries "memory":
+     "invalid_conversation_id" (documented skip, not a phantom outage).
 When "conversation_id" is absent the agent behaves exactly as before.
 
 Fallback chain (all best-effort, never crash the agent):
@@ -35,6 +40,7 @@ Fallback chain (all best-effort, never crash the agent):
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
@@ -113,13 +119,28 @@ def _find_remote_tool(manifest: dict, name: str) -> dict | None:
 # Session memory helpers (m5.6) — all best-effort, never raise
 # ---------------------------------------------------------------------------
 
+def _valid_conversation_id(conv_id: str) -> bool:
+    """Client-side mirror of the :2998 contract's conversationId constraints.
+
+    Valid: non-empty, ≤128 chars, and contains no '/', ':' or whitespace.
+    Mirroring the server-side rules here means a bad id surfaces as a clear
+    client-side skip ("memory": "invalid_conversation_id") instead of a
+    phantom outage (e.g. a slash-containing id 404ing on a mangled URL path).
+    """
+    if not conv_id or len(conv_id) > 128:
+        return False
+    return not any(c in "/:" or c.isspace() for c in conv_id)
+
+
 def _memory_get(conv_id: str) -> list | None:
     """GET /memory/{conv_id} → list of {"role","content"} entries, or None.
 
     Returns None on any error (connection refused, timeout, bad JSON, non-200).
     An empty list from the endpoint means first turn — that is a valid result.
     """
-    url = f"{MEMORY_BASE_URL}/memory/{conv_id}"
+    # quote(..., safe="") is defence-in-depth on top of _valid_conversation_id:
+    # no validated id needs escaping, but the URL must never be corruptible.
+    url = f"{MEMORY_BASE_URL}/memory/{quote(conv_id, safe='')}"
     try:
         with urlopen(url, timeout=MEMORY_TIMEOUT) as resp:  # noqa: S310
             if resp.status != 200:
@@ -132,20 +153,21 @@ def _memory_get(conv_id: str) -> list | None:
         return None
 
 
-def _memory_append(conv_id: str, entry: dict) -> None:
+def _memory_append(conv_id: str, entry: dict) -> bool:
     """POST /memory/{conv_id}/append with one {"role","content"} entry.
 
-    Fire-and-forget: any error is silently swallowed (best-effort).
+    Returns True only when the endpoint acknowledged the append with a 2xx;
+    False on any error (connection refused, timeout, non-2xx). Never raises.
     Uses compacted JSON (no extra whitespace) per the m5.4 contract.
     """
-    url = f"{MEMORY_BASE_URL}/memory/{conv_id}/append"
+    url = f"{MEMORY_BASE_URL}/memory/{quote(conv_id, safe='')}/append"
     payload = json.dumps(entry, separators=(",", ":")).encode()
     req = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")  # noqa: S310
     try:
-        with urlopen(req, timeout=MEMORY_TIMEOUT):  # noqa: S310
-            pass
+        with urlopen(req, timeout=MEMORY_TIMEOUT) as resp:  # noqa: S310
+            return 200 <= resp.status < 300
     except Exception:  # noqa: BLE001 — best-effort
-        pass
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +279,12 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
       - Prior turns are fetched from the launcher's :2998 memory endpoint.
       - The model is called with a prior-context system message.
       - User and assistant turns are appended after the response.
-      - The response gains "turns": <total entries after this exchange>.
+      - The response gains "turns": <total entries after this exchange>,
+        reported ONLY when the GET and both appends all succeeded.
       - Memory failures are non-fatal: response gains "memory": "unavailable"
         but the agent still answers using current input only.
+      - An invalid conv_id (empty, >128 chars, or containing '/', ':' or
+        whitespace) skips memory entirely: "memory": "invalid_conversation_id".
     When *conv_id* is absent the behaviour is identical to M3/M4.
 
     Returns a dict with at least ``output``; may also contain ``tool_count``,
@@ -267,9 +292,14 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
     """
     extra: dict = {}
 
-    # --- Session memory: fetch prior context (m5.6) ---
+    # --- Session memory: validate id + fetch prior context (m5.6) ---
     prior_turns: list | None = None
     memory_ok = False
+    if conv_id is not None and not _valid_conversation_id(conv_id):
+        # Documented client-side skip (see _valid_conversation_id) — memory is
+        # never contacted with an id the contract would reject.
+        extra["memory"] = "invalid_conversation_id"
+        conv_id = None
     if conv_id is not None:
         prior_turns = _memory_get(conv_id)
         memory_ok = prior_turns is not None  # None == fetch failed
@@ -304,6 +334,8 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
     if conv_id is not None and memory_ok and prior_turns:
         # Build a deterministic plain-text summary of prior turns.
         # Format: "role: content" lines, one per turn.
+        # v1: the injected prior-context is deliberately unbounded — no
+        # windowing/truncation; context-window management is deferred.
         prior_lines = "\n".join(
             f"{t.get('role', 'unknown')}: {t.get('content', '')}"
             for t in prior_turns
@@ -319,11 +351,18 @@ def run_agent(user_input: str, conv_id: str | None = None) -> dict:
     # --- Session memory: append turns (m5.6) ---
     if conv_id is not None:
         if memory_ok:
-            _memory_append(conv_id, {"role": "user", "content": user_input})
-            _memory_append(conv_id, {"role": "assistant", "content": result.content})
-            # "turns" = prior entries + 2 new ones (deterministic retention proof).
-            prior_count = len(prior_turns) if prior_turns else 0
-            extra["turns"] = prior_count + 2
+            # The user/assistant append pair is NOT atomic: if the first lands
+            # and the second fails, the partial pair is visible on the next
+            # GET by design — surfaced as "unavailable" here, never masked.
+            user_ok = _memory_append(conv_id, {"role": "user", "content": user_input})
+            asst_ok = _memory_append(conv_id, {"role": "assistant", "content": result.content})
+            if user_ok and asst_ok:
+                # "turns" = prior entries + 2 new ones (deterministic retention
+                # proof) — only reported for state actually persisted.
+                prior_count = len(prior_turns) if prior_turns else 0
+                extra["turns"] = prior_count + 2
+            else:
+                extra["memory"] = "unavailable"
         else:
             extra["memory"] = "unavailable"
 
