@@ -1,0 +1,65 @@
+# Valkey State-Layer Deployment — dedicated session-memory backend (specs/state-layer.md, PRD §10).
+# Deliberately NOT Langfuse's Redis: no product-to-observability coupling.
+# Image pinned at valkey/valkey:8.1.3 (newest 8.1.x stable as of 2026-07-09;
+# verified multi-arch amd64/arm64 via docker manifest inspect).
+# Dev posture: emptyDir + appendonly no — agent scale-to-zero never touches
+# Valkey; losing dev sessions on a Valkey restart is accepted (spec: Not in M5).
+# Probes: tcpSocket on 6379 — valkey-cli ping via exec would fork a process per
+# probe period for no extra signal (an unauthenticated dev Valkey accepts TCP
+# only once it can serve commands; there is no separate "loading" window with
+# appendonly off and no RDB to restore from emptyDir). tcpSocket is cheaper and
+# equally accurate here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statelayer
+  namespace: system
+  labels:
+    control-plane: statelayer
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: statelayer
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      labels:
+        control-plane: statelayer
+        app.kubernetes.io/name: agent-engine
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1.3
+          args:
+            - --appendonly
+            - "no"
+          ports:
+            - name: valkey
+              containerPort: 6379
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi   # leak policy: a runaway keyspace OOMs the pod, not the node
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+      terminationGracePeriodSeconds: 10
