@@ -48,6 +48,14 @@ RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt
 
+# Bundle the ctxmesh SDK so every Python agent can `import ctxmesh` with zero
+# setup.  The SDK's runtime deps (opentelemetry-sdk, opentelemetry-exporter-
+# otlp-proto-grpc, openinference-semantic-conventions) are already pinned in
+# requirements.txt above — pip install . adds ZERO net footprint to the image.
+COPY sdk/python/ /tmp/ctxmesh-sdk/
+RUN pip install --no-cache-dir /tmp/ctxmesh-sdk/ \
+ && rm -rf /tmp/ctxmesh-sdk/
+
 # Auto-instrumentation bootstrap: the site module imports sitecustomize.py
 # automatically before any user code.  Placement in site-packages ensures
 # it is found regardless of PYTHONPATH overrides.
