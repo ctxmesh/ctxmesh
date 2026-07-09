@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -127,6 +128,8 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
@@ -192,7 +195,8 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	deploy *agentsv1alpha1.AgentDeployment,
 	hash, versionName string,
 ) (ctrl.Result, error) {
-	// Tear down the workloads owned by the other models (transition handling).
+	// Tear down the workloads owned by the other models (transition handling):
+	// the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
 	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -200,6 +204,12 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -213,17 +223,30 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	return ctrl.Result{}, nil
 }
 
-// reconcileEventing wraps the pod template in a Knative Service AND subscribes it
-// to the agent's registry broker via a Knative Eventing Trigger. Eventing
-// REQUIRES registry membership (the broker is per-registry); a non-member agent
-// set to eventing is a user error reported as Ready=False, with any previously
-// created Trigger torn down.
+// reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
+// core/v1 Service (NOT a ksvc — the m7.8 e2e proved KEDA cannot resolve a Knative
+// revision Deployment and KEDA/KPA would fight over replicas; see
+// specs/eventing-scaling.md "Why eventing is a plain Deployment, not a ksvc").
+// The Deployment is named `<agent>` so a queue-depth KEDA ScaledObject
+// (scaleTargetRef = the AgentDeployment name, kind Deployment) resolves it. A
+// Knative Eventing Trigger subscribes the Service to the agent's registry broker.
+//
+// Eventing REQUIRES registry membership (the broker is per-registry); a non-member
+// agent set to eventing is a user error reported as Ready=False, with the Trigger
+// torn down but the Deployment + Service KEPT (owner-ref'd, GCs with the
+// AgentDeployment) — a misconfigured eventing agent keeps a working HTTP endpoint
+// while membership is fixed.
 func (r *AgentDeploymentReconciler) reconcileEventing(
 	ctx context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
-	hash, versionName string,
+	_ /* hash */, versionName string,
 ) (ctrl.Result, error) {
-	// Tear down the job-model workloads (transition handling).
+	// Tear down the workloads owned by the OTHER models (transition handling):
+	// the serving ksvc and the job-model Job/CronJob. The eventing Deployment +
+	// Service replace them.
+	if err := r.deleteWorkload(ctx, deploy, &servingv1.Service{}); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -231,14 +254,27 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 		return ctrl.Result{}, err
 	}
 
-	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
+	// Build the model-independent pod template once (same launcher + agent +
+	// collector + tool sidecars, env injection, digest as the serving ksvc).
+	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("resolving registry membership: %w", err)
+		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
 	}
-	if !membership.IsMember {
+
+	// The Deployment + Service are always reconciled (member or not) so a
+	// non-member eventing agent keeps a working HTTP endpoint while membership is
+	// fixed. Only the Trigger (the broker subscription) is gated on membership.
+	if err = r.reconcileEventingDeployment(ctx, deploy, pod); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling eventing Deployment: %w", err)
+	}
+	if err = r.reconcileEventingService(ctx, deploy, pod.port); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling eventing Service: %w", err)
+	}
+
+	if !pod.membership.IsMember {
 		// Eventing needs a per-registry broker; without membership there is no
 		// broker to subscribe to. Report the error and drop any stale Trigger so
-		// no orphaned subscription lingers.
+		// no orphaned subscription lingers — but keep the Deployment + Service.
 		if err = r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -246,17 +282,16 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 			"executionModel 'eventing' requires the agent to be a member of an AgentRegistry (the Trigger subscribes to the registry broker); no membership resolved")
 	}
 
-	// The ksvc is the event subscriber. Build it exactly as the serving path.
-	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
-	}
-
-	if err = r.reconcileTrigger(ctx, deploy, membership); err != nil {
+	if err = r.reconcileTrigger(ctx, deploy, pod.membership); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Trigger: %w", err)
 	}
 
-	if err = r.syncStatus(ctx, deploy, ksvc, versionName); err != nil {
+	// Mirror the Deployment's readiness into status (no ksvc Ready condition).
+	var dep appsv1.Deployment
+	if err = r.Get(ctx, client.ObjectKey{Name: deploy.Name, Namespace: deploy.Namespace}, &dep); err != nil {
+		return ctrl.Result{}, fmt.Errorf("fetching eventing Deployment for status: %w", err)
+	}
+	if err = r.setEventingReady(ctx, deploy, &dep, versionName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
 	}
 	return ctrl.Result{}, nil
@@ -270,11 +305,18 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 	deploy *agentsv1alpha1.AgentDeployment,
 	versionName string,
 ) (ctrl.Result, error) {
-	// Tear down the serving/eventing workloads (transition handling).
+	// Tear down the serving/eventing workloads (transition handling): the serving
+	// ksvc and the eventing Deployment + Service + Trigger.
 	if err := r.deleteWorkload(ctx, deploy, &servingv1.Service{}); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteWorkload(ctx, deploy, &eventingv1.Trigger{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1067,6 +1109,8 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&eventingv1.Trigger{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
 		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
