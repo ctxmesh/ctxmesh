@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 )
 
 var (
@@ -96,6 +97,9 @@ func TestMain(m *testing.M) {
 	}
 	if err = eventingv1.AddToScheme(testScheme); err != nil {
 		panic("failed to add Knative eventing/v1 scheme: " + err.Error())
+	}
+	if err = kedatypes.AddToScheme(testScheme); err != nil {
+		panic("failed to add KEDA keda.sh/v1alpha1 scheme: " + err.Error())
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: testScheme})
