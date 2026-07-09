@@ -183,16 +183,29 @@ class MemoryStub(_BaseStub):
 class DiscoveryStub(_BaseStub):
     """Fake of the M4 :2999 /tools manifest and an inline MCP tool endpoint.
 
-    ``mcp_endpoint`` serves a minimal streamable-http MCP server: it answers
+    ``mcp_endpoint`` serves a faithful streamable-http MCP server: it answers
     ``initialize`` (with an Mcp-Session-Id header), the ``initialized``
-    notification, and ``tools/call`` (echoing a JSON result). The manifest points
-    a single tool ("word-count") at that endpoint.
+    notification, ``tools/list`` (advertising the server's REAL tool names), and
+    ``tools/call`` — which, like the real FastMCP echo server, VALIDATES
+    ``params.name`` against the advertised tools and returns a JSON-RPC error for
+    an unknown name. This is the guard against a false-green: the discovery
+    catalog name (``word-count``, hyphen) deliberately differs from the MCP tool
+    name (``word_count``, underscore), so a client that fails to resolve the real
+    name gets rejected here, exactly as it would in the real deployment.
     """
+
+    #: The catalog (ToolRegistry) key advertised in the discovery manifest.
+    CATALOG_NAME = "word-count"
+    #: The name the MCP server actually exposes the tool under (FastMCP fn name).
+    MCP_TOOL_NAME = "word_count"
 
     def __init__(self, tool_result: Optional[Dict[str, Any]] = None) -> None:
         default_result = {"count": 3, "server_version": "v1"}
         self.tool_result = tool_result if tool_result is not None else default_result
+        #: params of every ACCEPTED tools/call (unknown names are rejected).
         self.mcp_calls: List[Dict[str, Any]] = []
+        #: names of tools/list responses served (proof the client discovered).
+        self.list_calls = 0
         self._session_counter = 0
         super().__init__()
 
@@ -205,13 +218,27 @@ class DiscoveryStub(_BaseStub):
             "version": "stub0001",
             "tools": [
                 {
-                    "name": "word-count",
+                    "name": self.CATALOG_NAME,
                     "mode": "remote",
                     "endpoint": self.mcp_endpoint,
                     "transport": "streamable-http",
                 }
             ],
         }
+
+    def _server_tools(self) -> List[Dict[str, Any]]:
+        """The MCP server's advertised tools (underscore name, unlike the catalog)."""
+        return [
+            {
+                "name": self.MCP_TOOL_NAME,
+                "description": "Count whitespace-separated words.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            }
+        ]
 
     def _install_routes(self) -> None:
         def tools(state: _StubState, req: RecordedRequest):
@@ -235,8 +262,33 @@ class DiscoveryStub(_BaseStub):
                 )
             if method == "notifications/initialized":
                 return 202, {}, b""
+            if method == "tools/list":
+                self.list_calls += 1
+                result = {
+                    "jsonrpc": "2.0",
+                    "id": msg.get("id"),
+                    "result": {"tools": self._server_tools()},
+                }
+                return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
             if method == "tools/call":
-                self.mcp_calls.append(msg["params"])
+                params = msg["params"]
+                # Validate the name like the real server: an unknown tool is a
+                # JSON-RPC error, NOT a silent success. This is what makes a
+                # client that sends the wrong (catalog) name fail the test. We
+                # check against the tools this server currently advertises (so a
+                # test that overrides _server_tools stays consistent).
+                advertised = {t["name"] for t in self._server_tools()}
+                if params.get("name") not in advertised:
+                    err = {
+                        "jsonrpc": "2.0",
+                        "id": msg.get("id"),
+                        "error": {
+                            "code": -32602,
+                            "message": f"Unknown tool: {params.get('name')!r}",
+                        },
+                    }
+                    return 200, {"Content-Type": "application/json"}, json.dumps(err).encode()
+                self.mcp_calls.append(params)
                 result = {
                     "jsonrpc": "2.0",
                     "id": msg.get("id"),
