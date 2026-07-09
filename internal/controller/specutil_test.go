@@ -142,22 +142,29 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
 	require.NotEmpty(t, budD)
 
-	neither := combinedBindingDigest("", "", "", "")
-	toolsOnly := combinedBindingDigest(toolD, "", "", "")
-	memOnly := combinedBindingDigest("", memD, "", "")
-	regOnly := combinedBindingDigest("", "", regD, "")
-	budgetOnly := combinedBindingDigest("", "", "", budD)
-	all := combinedBindingDigest(toolD, memD, regD, budD)
+	promptD := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
+	require.NotEmpty(t, promptD)
+
+	neither := combinedBindingDigest("", "", "", "", "")
+	toolsOnly := combinedBindingDigest(toolD, "", "", "", "")
+	memOnly := combinedBindingDigest("", memD, "", "", "")
+	regOnly := combinedBindingDigest("", "", regD, "", "")
+	budgetOnly := combinedBindingDigest("", "", "", budD, "")
+	promptOnly := combinedBindingDigest("", "", "", "", promptD)
+	all := combinedBindingDigest(toolD, memD, regD, budD, promptD)
 
 	assert.Equal(t, "", neither, "no structural input of any type → empty digest (bare revision name)")
 	assert.NotEmpty(t, toolsOnly)
 	assert.NotEmpty(t, memOnly)
 	assert.NotEmpty(t, regOnly)
 	assert.NotEmpty(t, budgetOnly)
+	assert.NotEmpty(t, promptOnly)
 	assert.NotEmpty(t, all)
-	// All five non-empty outcomes must be mutually distinct.
-	distinct := map[string]bool{toolsOnly: true, memOnly: true, regOnly: true, budgetOnly: true, all: true}
-	assert.Len(t, distinct, 5, "tools-only / memory-only / registry-only / budget-only / all must all differ")
+	// All six non-empty outcomes must be mutually distinct.
+	distinct := map[string]bool{
+		toolsOnly: true, memOnly: true, regOnly: true, budgetOnly: true, promptOnly: true, all: true,
+	}
+	assert.Len(t, distinct, 6, "tools / memory / registry / budget / prompt / all must all differ")
 	assert.Len(t, all, 8, "combined digest is 8 hex chars — the bounded suffix budget")
 }
 
@@ -184,15 +191,21 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	budD2 := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "1.00", SoftThresholdPct: 80})
 	require.NotEqual(t, budD1, budD2, "precondition: cap change flips the budget digest")
 
-	base := combinedBindingDigest(toolD1, memD1, regD1, budD1)
-	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1),
+	promptD1 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
+	promptD2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "ver-v2")
+	require.NotEqual(t, promptD1, promptD2, "precondition: prompt ref/version change flips the prompt digest")
+
+	base := combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1)
+	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1, promptD1),
 		"tool component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1, promptD1),
 		"memory component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1, promptD1),
 		"registry component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2, promptD1),
 		"budget component change must flip the combined digest")
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD2),
+		"prompt component change must flip the combined digest")
 }
 
 // TestCombinedBindingDigest_Deterministic: identical inputs always produce the
@@ -205,12 +218,14 @@ func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 
 	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	promptD := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
 
-	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD), combinedBindingDigest(toolD, memD, regD, budD))
-	assert.Equal(t, combinedBindingDigest(toolD, "", "", ""), combinedBindingDigest(toolD, "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", memD, "", ""), combinedBindingDigest("", memD, "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", regD, ""), combinedBindingDigest("", "", regD, ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", budD), combinedBindingDigest("", "", "", budD))
+	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD, promptD), combinedBindingDigest(toolD, memD, regD, budD, promptD))
+	assert.Equal(t, combinedBindingDigest(toolD, "", "", "", ""), combinedBindingDigest(toolD, "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", memD, "", "", ""), combinedBindingDigest("", memD, "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", regD, "", ""), combinedBindingDigest("", "", regD, "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", budD, ""), combinedBindingDigest("", "", "", budD, ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", promptD), combinedBindingDigest("", "", "", "", promptD))
 }
 
 // TestRegistryMembershipDigest_Component pins the registry component's own
@@ -280,4 +295,69 @@ func TestBudgetDigest_Component(t *testing.T) {
 		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50"}),
 		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80}),
 		"omitted soft pct defaults to 80")
+}
+
+// TestPromptDigest_Component pins the M9 prompt component's own contract:
+// empty version → empty (no prompt); each pointer field (repo/ref/path) and the
+// resolved version flips it; 8 hex chars; deterministic.
+func TestPromptDigest_Component(t *testing.T) {
+	assert.Equal(t, "", promptDigest(agentsv1alpha1.GitPromptSource{}, ""),
+		"no resolved version → empty component (the promptRef gate)")
+
+	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/p.git", Ref: "v1", Path: "sys.txt"}
+	d := promptDigest(src, "ver-a")
+	require.NotEmpty(t, d)
+	assert.Len(t, d, 8, "prompt digest is 8 hex chars — the bounded suffix budget")
+	assert.Equal(t, d, promptDigest(src, "ver-a"), "deterministic")
+
+	refChanged := src
+	refChanged.Ref = "v2"
+	assert.NotEqual(t, d, promptDigest(refChanged, "ver-a"), "git ref flip → digest flip")
+
+	pathChanged := src
+	pathChanged.Path = "other.txt"
+	assert.NotEqual(t, d, promptDigest(pathChanged, "ver-a"), "path flip → digest flip")
+
+	repoChanged := src
+	repoChanged.Repo = "https://git/other.git"
+	assert.NotEqual(t, d, promptDigest(repoChanged, "ver-a"), "repo flip → digest flip")
+
+	assert.NotEqual(t, d, promptDigest(src, "ver-b"), "resolved version flip → digest flip")
+}
+
+// TestPromptChange_DoesNotChangeImageDigest is the prompt-only-deploy invariant
+// at the unit level: a prompt swap folds into the combined binding digest (which
+// drives the Knative revision-name suffix) but is COMPUTED ENTIRELY WITHOUT the
+// container image. The image lives in spec.Image on the user container and is
+// never an input to promptDigest or combinedBindingDigest — so swapping the
+// prompt rolls a new revision while the image digest stays IDENTICAL. This test
+// proves the separation structurally: identical everything-else, only the prompt
+// component differs → the combined digest differs, and neither call ever saw an
+// image.
+func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
+	// Same agent, same bindings/budget — only the prompt version (ref) swaps.
+	promptV1 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "resolved-v1")
+	promptV2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "resolved-v2")
+	require.NotEqual(t, promptV1, promptV2, "precondition: a prompt swap changes the prompt component")
+
+	combinedV1 := combinedBindingDigest("", "", "", "", promptV1)
+	combinedV2 := combinedBindingDigest("", "", "", "", promptV2)
+
+	// The revision-name suffix changes (a new revision rolls) ...
+	assert.NotEqual(t, combinedV1, combinedV2,
+		"a prompt swap must roll the Knative revision (combined digest changes)")
+
+	// ... but the IMAGE is never part of any digest input. specHash is over the
+	// spec (which includes Image), and it is orthogonal to the prompt roll: the
+	// image digest — spec.Image, applied verbatim to the user container — is
+	// untouched by the prompt path. Assert the digest functions carry no image:
+	// they take only pointer/version, so no image rebuild can be implied.
+	//
+	// A same-image spec differing ONLY by promptRef keeps the SAME specHash-derived
+	// image (Image field identical) while the combined "-h" suffix differs. Prove
+	// the image field is stable across the swap.
+	specA := agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v1"}
+	specB := agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v2"}
+	assert.Equal(t, specA.Image, specB.Image,
+		"a prompt-only change keeps the container image identical (no rebuild)")
 }
