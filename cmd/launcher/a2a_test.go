@@ -760,16 +760,13 @@ func TestCheckGuardsCycle(t *testing.T) {
 
 	t.Run("revisiting agent trips cycle_detected", func(t *testing.T) {
 		t.Parallel()
-		s, _, rec, _ := newTestA2AServer(t, baseCfg(), http.StatusOK, `{}`)
-
-		// The outgoing envelope will have path=[orchestrator,research,"orchestrator"] — but
-		// the receiver (orchestrator) is already in the path we send as incoming.
-		// More precisely: buildEnvelope appends self (cfg.SelfName="orchestrator")
-		// to the incoming path, giving path=["prev","orchestrator"]. Then it sets
-		// receiver="prev" — which is already in the path → cycle_detected.
+		// buildEnvelope appends self (cfg.SelfName="orchestrator") to the incoming
+		// path ["prev"], giving the outgoing path ["prev","orchestrator"]. Calling
+		// back to "prev" makes the receiver already present in the path →
+		// cycle_detected.
 		cfg := baseCfg()
 		cfg.SelfName = "orchestrator"
-		s2, _, rec2, _ := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+		s, _, rec, _ := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
 
 		incoming := envelope{
 			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -785,100 +782,121 @@ func TestCheckGuardsCycle(t *testing.T) {
 		incJSON, _ := json.Marshal(incoming)
 
 		// Call back to "prev" — "prev" is in the path, triggering cycle_detected.
-		rr := callA2A(t, s2, context.Background(), "prev", `{}`,
+		rr := callA2A(t, s, context.Background(), "prev", `{}`,
 			map[string]string{a2aEnvelopeHeader: string(incJSON)})
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("cycle_detected: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
 		}
 		assertA2AError(t, rr.Body.Bytes(), errCycleDetected)
-		assertGuardTripped(t, rec2, errCycleDetected)
-		_ = s // suppress unused warning
-		_ = rec
+		assertGuardTripped(t, rec, errCycleDetected)
 	})
 }
 
-// TestCheckGuardsBudget verifies the hop-budget guard: hopBudget hops pass;
-// the next trips budget_exceeded. Also asserts first-hop init and per-hop decrement.
+// TestCheckGuardsBudget verifies the hop-budget guard. The trip condition is
+// BudgetRemaining <= 0 on the OUTGOING envelope, with first-hop init = hopBudget
+// and each chained hop decrementing by 1, so hopBudget=N permits EXACTLY N hops
+// (the (N+1)-th trips), hopBudget=1 permits 1 hop, and hopBudget=0 trips on the
+// first hop (0 hops). It asserts first-hop init, per-hop decrement, and the
+// exact boundary end-to-end by chaining each hop's outgoing envelope into the
+// next hop's incoming envelope.
 func TestCheckGuardsBudget(t *testing.T) {
 	t.Parallel()
-	const hopBudget = 3
-
-	cfg := baseCfg()
-	cfg.SelfName = "agent"
-	cfg.HopBudget = hopBudget
 
 	t.Run("first hop initialises budget to hopBudget", func(t *testing.T) {
 		t.Parallel()
+		cfg := baseCfg()
+		cfg.SelfName = "agent"
+		cfg.HopBudget = 3
 		s, _, _, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
 		rr := callA2A(t, s, context.Background(), "b", `{}`, nil)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("first hop status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 		}
 		env := <-peerCh
-		if env.envelope.BudgetRemaining != hopBudget {
-			t.Errorf("first-hop budgetRemaining = %d, want %d", env.envelope.BudgetRemaining, hopBudget)
+		if env.envelope.BudgetRemaining != 3 {
+			t.Errorf("first-hop budgetRemaining = %d, want 3", env.envelope.BudgetRemaining)
 		}
 	})
 
 	t.Run("each chained hop decrements budget", func(t *testing.T) {
 		t.Parallel()
+		cfg := baseCfg()
+		cfg.SelfName = "agent"
+		cfg.HopBudget = 3
 		s, _, _, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
 
-		incoming := envelope{
-			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
-			RegistryID:      "research-team",
-			ConversationID:  "conv-budget",
-			MessageID:       "msg-z",
-			SenderAgentID:   "prev",
-			Role:            "worker",
-			Depth:           1,
-			Path:            []string{"prev"},
-			BudgetRemaining: hopBudget,
-		}
+		incoming := budgetIncoming(3)
 		incJSON, _ := json.Marshal(incoming)
 
 		rr := callA2A(t, s, context.Background(), "b", `{}`,
 			map[string]string{a2aEnvelopeHeader: string(incJSON)})
 		if rr.Code != http.StatusOK {
-			t.Fatalf("chained hop (budget=%d) status = %d, want 200; body=%s", hopBudget, rr.Code, rr.Body.String())
+			t.Fatalf("chained hop status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 		}
 		env := <-peerCh
-		want := hopBudget - 1
-		if env.envelope.BudgetRemaining != want {
-			t.Errorf("chained budgetRemaining = %d, want %d (= incoming %d - 1)",
-				env.envelope.BudgetRemaining, want, hopBudget)
+		if env.envelope.BudgetRemaining != 2 {
+			t.Errorf("chained budgetRemaining = %d, want 2 (= incoming 3 - 1)", env.envelope.BudgetRemaining)
 		}
 	})
 
-	t.Run("budget_exceeded when BudgetRemaining goes below zero", func(t *testing.T) {
-		t.Parallel()
-		s, _, rec, _ := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
+	// The boundary: hopBudget=N ⇒ exactly N hops succeed, the (N+1)-th trips.
+	// Drive a real chain: the first /a2a call has no incoming envelope (the first
+	// hop), then each subsequent call feeds the previous hop's outgoing envelope
+	// back in as the incoming envelope, exactly as a chained hop would on the
+	// wire. Assert the count of hops that reach the peer and that the next trips.
+	for _, hopBudget := range []int{0, 1, 3} {
+		t.Run(fmt.Sprintf("hopBudget=%d permits exactly %d hops", hopBudget, hopBudget), func(t *testing.T) {
+			t.Parallel()
+			cfg := baseCfg()
+			cfg.SelfName = "agent"
+			cfg.HopBudget = hopBudget
+			// MaxDepth must not trip before the budget does across the chain, so
+			// raise it well above the hop count we drive.
+			cfg.MaxDepth = 1000
+			s, _, rec, peerCh := newTestA2AServer(t, cfg, http.StatusOK, `{}`)
 
-		// Simulate an incoming envelope at the last-allowed hop (BudgetRemaining=0).
-		// buildEnvelope will set outgoing to -1, which trips budget_exceeded.
-		incoming := envelope{
-			TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
-			RegistryID:      "research-team",
-			ConversationID:  "conv-budget-ex",
-			MessageID:       "msg-ex",
-			SenderAgentID:   "prev",
-			Role:            "worker",
-			Depth:           hopBudget,
-			Path:            []string{"prev"},
-			BudgetRemaining: 0, // last allowed hop already used; next must trip.
-		}
-		incJSON, _ := json.Marshal(incoming)
+			var incomingHeader map[string]string // nil ⇒ first hop.
+			passed := 0
+			for hop := 0; hop <= hopBudget; hop++ { // one extra iteration to hit the trip.
+				rr := callA2A(t, s, context.Background(), "b", `{}`, incomingHeader)
+				if rr.Code == http.StatusOK {
+					passed++
+					out := (<-peerCh).envelope
+					// Feed this hop's outgoing envelope in as the next hop's incoming.
+					outJSON, _ := json.Marshal(out)
+					incomingHeader = map[string]string{a2aEnvelopeHeader: string(outJSON)}
+					continue
+				}
+				// The trip: must be a typed 403 budget_exceeded with a span event.
+				if rr.Code != http.StatusForbidden {
+					t.Fatalf("hop %d: status = %d, want 403 (budget_exceeded); body=%s", hop, rr.Code, rr.Body.String())
+				}
+				assertA2AError(t, rr.Body.Bytes(), errBudgetExceeded)
+				assertGuardTripped(t, rec, errBudgetExceeded)
+				break
+			}
+			if passed != hopBudget {
+				t.Errorf("hopBudget=%d permitted %d hops, want exactly %d", hopBudget, passed, hopBudget)
+			}
+		})
+	}
+}
 
-		rr := callA2A(t, s, context.Background(), "b", `{}`,
-			map[string]string{a2aEnvelopeHeader: string(incJSON)})
-
-		if rr.Code != http.StatusForbidden {
-			t.Fatalf("budget_exceeded: status = %d, want 403; body=%s", rr.Code, rr.Body.String())
-		}
-		assertA2AError(t, rr.Body.Bytes(), errBudgetExceeded)
-		assertGuardTripped(t, rec, errBudgetExceeded)
-	})
+// budgetIncoming builds a representative chained incoming envelope carrying the
+// given remaining hop budget.
+func budgetIncoming(budgetRemaining int) envelope {
+	return envelope{
+		TraceID:         "4bf92f3577b34da6a3ce929d0e0e4736",
+		RegistryID:      "research-team",
+		ConversationID:  "conv-budget",
+		MessageID:       "msg-z",
+		SenderAgentID:   "prev",
+		Role:            "worker",
+		Depth:           1,
+		Path:            []string{"prev"},
+		BudgetRemaining: budgetRemaining,
+	}
 }
 
 // ── guard test helpers ────────────────────────────────────────────────────────
