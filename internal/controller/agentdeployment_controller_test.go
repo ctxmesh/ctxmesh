@@ -408,6 +408,156 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 	assert.Equal(t, int32(9090), c.Ports[0].ContainerPort)
 }
 
+// TestReconcile_BudgetInjection verifies the M8 cost-budget env injection: when
+// spec.budget is set, the reconciler injects the three STATIC budget env vars,
+// repoints MODEL_GATEWAY_URL at the launcher's local budget proxy, passes the
+// real LiteLLM address through as GATEWAY_UPSTREAM_URL, injects AGENT_NAME, and —
+// crucially — NONE of the ksvc container env uses valueFrom (the m5.7 Knative
+// landmine; a valueFrom here wedges reconcile against a real Knative webhook
+// while passing envtest, so this guard encodes the class of bug at tier1).
+func TestReconcile_BudgetInjection(t *testing.T) {
+	const (
+		name      = "budget-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+			Budget: &agentsv1alpha1.BudgetSpec{
+				PerConversationUSD: "0.50",
+				PerAgentUSD:        "10.00",
+				SoftThresholdPct:   75,
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	require.GreaterOrEqual(t, len(ksvc.Spec.Template.Spec.Containers), 2)
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	envMap := make(map[string]corev1.EnvVar, len(userContainer.Env))
+	for _, e := range userContainer.Env {
+		envMap[e.Name] = e
+	}
+
+	// MODEL_GATEWAY_URL repointed at the in-pod budget proxy; the real LiteLLM
+	// address travels as GATEWAY_UPSTREAM_URL.
+	assert.Equal(t, "http://localhost:2996", envMap["MODEL_GATEWAY_URL"].Value,
+		"MODEL_GATEWAY_URL must point at the launcher budget proxy when a budget is set")
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["GATEWAY_UPSTREAM_URL"].Value, "the real LiteLLM address is GATEWAY_UPSTREAM_URL")
+
+	// The three budget knobs, injected as STATIC env.
+	require.Contains(t, envMap, "BUDGET_PER_CONVERSATION_USD")
+	assert.Equal(t, "0.50", envMap["BUDGET_PER_CONVERSATION_USD"].Value)
+	require.Contains(t, envMap, "BUDGET_PER_AGENT_USD")
+	assert.Equal(t, "10.00", envMap["BUDGET_PER_AGENT_USD"].Value)
+	require.Contains(t, envMap, "BUDGET_SOFT_PCT")
+	assert.Equal(t, "75", envMap["BUDGET_SOFT_PCT"].Value)
+
+	// AGENT_NAME (keys the per-agent spend) must be injected even without a
+	// MemoryBinding or registry membership.
+	assert.Equal(t, name, envMap["AGENT_NAME"].Value, "AGENT_NAME must be injected for a budgeted agent")
+
+	// Knative no-valueFrom guard: EVERY user-container env var must be a static
+	// value, never valueFrom.
+	for _, e := range userContainer.Env {
+		assert.Nil(t, e.ValueFrom,
+			"ksvc container env %q must be a static value, not valueFrom (Knative webhook rejects it)", e.Name)
+	}
+}
+
+// TestReconcile_BudgetPlusMemoryAgentNameOnce guards the inject-once contract:
+// a budgeted agent that ALSO has a MemoryBinding must get AGENT_NAME exactly once
+// (both the M8 budget path and the M5 memory path inject it — a duplicate
+// container env var is invalid).
+func TestReconcile_BudgetPlusMemoryAgentNameOnce(t *testing.T) {
+	const (
+		name      = "budget-mem-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:  "ghcr.io/ctxmesh/example-agent:latest",
+			Budget: &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	// A MemoryBinding for the same agent — its reconcile is not needed; the
+	// AgentDeployment reconciler resolves the binding itself when building the pod.
+	_ = mkMemoryBinding(t, "mem-for-budget", namespace, name, "")
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	var agentNameCount int
+	for _, e := range userContainer.Env {
+		if e.Name == "AGENT_NAME" {
+			agentNameCount++
+			assert.Equal(t, name, e.Value)
+		}
+		assert.Nil(t, e.ValueFrom, "no ksvc env may use valueFrom")
+	}
+	assert.Equal(t, 1, agentNameCount, "AGENT_NAME must be injected exactly once (budget + memory)")
+}
+
+// TestReconcile_NoBudgetNoInjection verifies the passthrough: with spec.budget
+// unset, NONE of the budget env vars are injected and MODEL_GATEWAY_URL still
+// points straight at LiteLLM — the M2 path is byte-for-byte unchanged.
+func TestReconcile_NoBudgetNoInjection(t *testing.T) {
+	const (
+		name      = "nobudget-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	envMap := make(map[string]string, len(userContainer.Env))
+	for _, e := range userContainer.Env {
+		envMap[e.Name] = e.Value
+	}
+
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["MODEL_GATEWAY_URL"], "unbudgeted agent talks to LiteLLM directly")
+	for _, k := range []string{"GATEWAY_UPSTREAM_URL", "BUDGET_PER_CONVERSATION_USD", "BUDGET_PER_AGENT_USD", "BUDGET_SOFT_PCT"} {
+		_, present := envMap[k]
+		assert.False(t, present, "unbudgeted agent must not have %s injected", k)
+	}
+}
+
 // TestReconcile_NotFound verifies that a reconcile for a missing AgentDeployment
 // returns cleanly without error (object may have been deleted).
 func TestReconcile_NotFound(t *testing.T) {
