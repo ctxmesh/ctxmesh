@@ -127,34 +127,39 @@ func digestTools() string {
 	}, true)
 }
 
-// TestCombinedBindingDigest_PresenceCombinations: neither / tools-only /
-// memory-only / both must produce four DISTINCT outcomes (empty for neither,
-// three distinct non-empty digests otherwise). The "b=<x>;m=<y>" framing with
-// hex-only components makes cross-presence collisions impossible.
+// TestCombinedBindingDigest_PresenceCombinations: the empty (no structural input
+// of any type) case yields the empty digest, and every distinct single-component
+// presence yields a distinct non-empty digest. The "b=<x>;m=<y>;r=<z>" framing
+// with hex-only components makes cross-presence collisions impossible.
 func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	toolD := digestTools()
 	memD := memoryBindingDigest(true, memoryDefaultAddr)
+	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 	require.NotEmpty(t, toolD)
 	require.NotEmpty(t, memD)
+	require.NotEmpty(t, regD)
 
-	neither := combinedBindingDigest("", "")
-	toolsOnly := combinedBindingDigest(toolD, "")
-	memOnly := combinedBindingDigest("", memD)
-	both := combinedBindingDigest(toolD, memD)
+	neither := combinedBindingDigest("", "", "")
+	toolsOnly := combinedBindingDigest(toolD, "", "")
+	memOnly := combinedBindingDigest("", memD, "")
+	regOnly := combinedBindingDigest("", "", regD)
+	all := combinedBindingDigest(toolD, memD, regD)
 
-	assert.Equal(t, "", neither, "no bindings of any type → empty digest (bare revision name)")
+	assert.Equal(t, "", neither, "no structural input of any type → empty digest (bare revision name)")
 	assert.NotEmpty(t, toolsOnly)
 	assert.NotEmpty(t, memOnly)
-	assert.NotEmpty(t, both)
-	assert.NotEqual(t, toolsOnly, memOnly, "tools-only vs memory-only must differ")
-	assert.NotEqual(t, toolsOnly, both, "tools-only vs both must differ")
-	assert.NotEqual(t, memOnly, both, "memory-only vs both must differ")
-	assert.Len(t, both, 8, "combined digest is 8 hex chars — the bounded suffix budget")
+	assert.NotEmpty(t, regOnly)
+	assert.NotEmpty(t, all)
+	// All four non-empty outcomes must be mutually distinct.
+	distinct := map[string]bool{toolsOnly: true, memOnly: true, regOnly: true, all: true}
+	assert.Len(t, distinct, 4, "tools-only / memory-only / registry-only / all must all differ")
+	assert.Len(t, all, 8, "combined digest is 8 hex chars — the bounded suffix budget")
 }
 
-// TestCombinedBindingDigest_EitherComponentFlips: changing EITHER component
-// (tool set or memory addr) must flip the combined digest — otherwise the
-// CreateOrUpdate revision-name guard would silently skip the re-apply.
+// TestCombinedBindingDigest_EitherComponentFlips: changing ANY component (tool
+// set, memory addr, or registry membership) must flip the combined digest —
+// otherwise the CreateOrUpdate revision-name guard would silently skip the
+// re-apply.
 func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	toolD1 := digestTools()
 	toolD2 := toolmanifest.StructuralDigest([]toolmanifest.SidecarTool{
@@ -166,24 +171,60 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	memD2 := memoryBindingDigest(true, "other-valkey.ns.svc:6380")
 	require.NotEqual(t, memD1, memD2, "precondition: addr change flips the memory digest")
 
-	base := combinedBindingDigest(toolD1, memD1)
-	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1),
+	regD1 := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
+	regD2 := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "orchestrator", nil)
+	require.NotEqual(t, regD1, regD2, "precondition: role change flips the registry digest")
+
+	base := combinedBindingDigest(toolD1, memD1, regD1)
+	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1),
 		"tool component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1),
 		"memory component change must flip the combined digest")
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2),
+		"registry component change must flip the combined digest")
 }
 
 // TestCombinedBindingDigest_Deterministic: identical inputs always produce the
 // identical digest (fixed field order; component derivations are themselves
 // deterministic — tool digest sorts by binding name, memory digest hashes the
-// resolved addr).
+// resolved addr, registry digest hashes the resolved membership).
 func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	toolD := digestTools()
 	memD := memoryBindingDigest(true, memoryDefaultAddr)
+	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 
-	assert.Equal(t, combinedBindingDigest(toolD, memD), combinedBindingDigest(toolD, memD))
-	assert.Equal(t, combinedBindingDigest(toolD, ""), combinedBindingDigest(toolD, ""))
-	assert.Equal(t, combinedBindingDigest("", memD), combinedBindingDigest("", memD))
+	assert.Equal(t, combinedBindingDigest(toolD, memD, regD), combinedBindingDigest(toolD, memD, regD))
+	assert.Equal(t, combinedBindingDigest(toolD, "", ""), combinedBindingDigest(toolD, "", ""))
+	assert.Equal(t, combinedBindingDigest("", memD, ""), combinedBindingDigest("", memD, ""))
+	assert.Equal(t, combinedBindingDigest("", "", regD), combinedBindingDigest("", "", regD))
+}
+
+// TestRegistryMembershipDigest_Component pins the registry component's own
+// contract: non-member → empty; membership fields (id/depth/budget/role/callers)
+// each flip it; deterministic.
+func TestRegistryMembershipDigest_Component(t *testing.T) {
+	assert.Equal(t, "", registryMembershipDigest(registryMembership{}, "worker", []string{"a"}),
+		"non-member → empty component (IsMember is the gate)")
+
+	base := registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}
+	d := registryMembershipDigest(base, "worker", []string{"a"})
+	require.NotEmpty(t, d)
+	assert.Equal(t, d, registryMembershipDigest(base, "worker", []string{"a"}), "deterministic")
+
+	idChanged := base
+	idChanged.RegistryID = "team-2"
+	assert.NotEqual(t, d, registryMembershipDigest(idChanged, "worker", []string{"a"}), "registryId flip")
+
+	depthChanged := base
+	depthChanged.MaxDepth = 3
+	assert.NotEqual(t, d, registryMembershipDigest(depthChanged, "worker", []string{"a"}), "maxDepth flip")
+
+	budgetChanged := base
+	budgetChanged.HopBudget = 5
+	assert.NotEqual(t, d, registryMembershipDigest(budgetChanged, "worker", []string{"a"}), "hopBudget flip")
+
+	assert.NotEqual(t, d, registryMembershipDigest(base, "orchestrator", []string{"a"}), "role flip")
+	assert.NotEqual(t, d, registryMembershipDigest(base, "worker", []string{"a", "b"}), "allowedCallers flip")
 }
 
 // TestMemoryBindingDigest_Component pins the memory component's own contract:
