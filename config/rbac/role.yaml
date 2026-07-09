@@ -29,6 +29,7 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments
+  - agentregistries
   - agentversions
   - mcptoolbindings
   - memorybindings
@@ -45,6 +46,7 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/finalizers
+  - agentregistries/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   verbs:
@@ -53,6 +55,7 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
+  - agentregistries/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status
