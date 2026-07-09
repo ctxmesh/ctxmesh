@@ -46,6 +46,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -188,6 +189,27 @@ type gatewayProxy struct {
 	convCap  *budget.Money
 	agentCap *budget.Money
 	logf     func(string, ...any)
+}
+
+// buildGatewayServer constructs the :2996 http.Server when the budget proxy is
+// enabled, or returns nil when it is not. Factored out of main() to keep its
+// cyclomatic complexity within the project lint limit. A construction error (bad
+// upstream URL / cap) is logged and nil is returned — the agent's
+// MODEL_GATEWAY_URL then 502s, a visible misconfig, not a silent budget bypass.
+func buildGatewayServer(cfg Config, tracer trace.Tracer) *http.Server {
+	if !cfg.GatewayProxyEnabled() {
+		return nil
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+	gp, err := newGatewayProxy(cfg.Gateway, tracer, logf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "launcher: gateway proxy disabled: %v\n", err)
+		return nil
+	}
+	return &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
+		Handler: gp.handler(),
+	}
 }
 
 // newGatewayProxy builds the proxy from config. A malformed cap string is a

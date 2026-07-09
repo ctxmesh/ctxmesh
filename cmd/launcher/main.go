@@ -147,19 +147,16 @@ func main() {
 	// construction error (bad upstream URL / cap) is logged and the listener is
 	// skipped — the agent's MODEL_GATEWAY_URL then 502s, a visible misconfig, not
 	// a silent budget bypass. nil when disabled → unbudgeted agents are unchanged.
-	var gwSrv *http.Server
-	if cfg.GatewayProxyEnabled() {
-		logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
-		gp, gErr := newGatewayProxy(cfg.Gateway, tracer, logf)
-		if gErr != nil {
-			fmt.Fprintf(os.Stderr, "launcher: gateway proxy disabled: %v\n", gErr)
-		} else {
-			gwSrv = &http.Server{
-				Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
-				Handler: gp.handler(),
-			}
-		}
-	}
+	gwSrv := buildGatewayServer(cfg, tracer)
+
+	// ── Feedback ingest hook (:2995) ──────────────────────────────────────────
+	// Started ONLY when the controller injected LANGFUSE_HOST (the agent has
+	// been wired for feedback). Same lifecycle discipline as the other listeners:
+	// goroutine ListenAndServe, graceful Shutdown on child exit, never overrides
+	// the child exit code. A bind failure is logged; the /feedback endpoint then
+	// returns ECONNREFUSED, a visible misconfig, not a silent drop. nil when
+	// disabled → agents without feedback wiring are unchanged.
+	fbSrv := buildFeedbackServer(cfg)
 
 	// ── Child process ─────────────────────────────────────────────────────
 	child, err := startChild(cfg)
@@ -221,6 +218,17 @@ func main() {
 		}()
 	}
 
+	// Start the feedback ingest hook (best-effort like the others). A bind
+	// failure is logged; /feedback calls then return ECONNREFUSED (visible
+	// misconfig) rather than silently dropping feedback.
+	if fbSrv != nil {
+		go func() {
+			if err := fbSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "launcher: feedback: %v\n", err)
+			}
+		}()
+	}
+
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
 
@@ -236,6 +244,9 @@ func main() {
 	}
 	if gwSrv != nil {
 		_ = gwSrv.Shutdown(shutCtx)
+	}
+	if fbSrv != nil {
+		_ = fbSrv.Shutdown(shutCtx)
 	}
 	_ = otelShutdown(shutCtx)
 
