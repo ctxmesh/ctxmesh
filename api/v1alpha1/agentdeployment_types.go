@@ -37,6 +37,39 @@ type AgentResources struct {
 	Memory resource.Quantity `json:"memory,omitempty"`
 }
 
+// BudgetSpec defines optional cost-governance caps for an AgentDeployment.
+// Either or both USD caps may be set; omitting a cap means that dimension is
+// unenforced. softThresholdPct controls the alert percentage for whichever
+// caps are set. Values are exact-decimal strings (e.g. "0.50") to avoid
+// floating-point drift. The gateway reads these caps via injected env vars and
+// enforces them per PRD §14.
+type BudgetSpec struct {
+	// perConversationUSD is the hard USD cost cap per conversation ID.
+	// When a conversation's total spend reaches this value the gateway returns a
+	// typed budget_exceeded error and refuses further calls for that conversation.
+	// Expressed as an exact decimal string, e.g. "0.50". Optional; omit to leave
+	// this dimension unenforced.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
+	PerConversationUSD string `json:"perConversationUSD,omitempty"`
+
+	// perAgentUSD is the hard USD cost cap across all conversations for this agent.
+	// Expressed as an exact decimal string, e.g. "10.00". Optional; omit to leave
+	// this dimension unenforced.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]{1,6})?$`
+	PerAgentUSD string `json:"perAgentUSD,omitempty"`
+
+	// softThresholdPct is the percentage of a hard cap at which the gateway emits
+	// a one-shot budget.alert event and log line, but continues processing.
+	// Applied to whichever caps are set. Defaults to 80.
+	// +optional
+	// +kubebuilder:default=80
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	SoftThresholdPct int32 `json:"softThresholdPct,omitempty"`
+}
+
 // ScalingSpec controls the Knative autoscaler bounds for a serving agent.
 // min and max map to the knative.dev/serving min-scale and max-scale annotations.
 type ScalingSpec struct {
@@ -122,6 +155,13 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=63
 	AllowedCallers []string `json:"allowedCallers,omitempty"`
+
+	// budget optionally sets USD cost-governance caps for this agent (PRD §14).
+	// When set, the gateway enforces the caps per conversation and/or per agent and
+	// emits a soft alert at softThresholdPct% of each cap. When omitted, no cost
+	// enforcement is applied. See BudgetSpec for field details.
+	// +optional
+	Budget *BudgetSpec `json:"budget,omitempty"`
 }
 
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
