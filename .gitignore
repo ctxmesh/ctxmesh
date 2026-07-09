@@ -36,3 +36,13 @@ go.work
 /agent-engine
 /discovery
 /launcher
+
+# Python SDK (sdk/python) — dev venv, caches, build/egg metadata
+sdk/python/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+sdk/python/build/
+sdk/python/dist/

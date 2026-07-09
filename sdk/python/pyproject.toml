@@ -1,0 +1,87 @@
+# ctxmesh — the agent-engine Python SDK.
+#
+# Distribution name: "ctxmesh"; import name: "ctxmesh". Both match so
+# `pip install ctxmesh` gives `import ctxmesh` with zero surprises (spec
+# "Packaging & base-image bundling").
+#
+# Typed sugar over the launcher's language-agnostic localhost platform plane
+# (ADR 0002): memory (:2998), tools/discovery (:2999), feedback (:2995), the
+# model gateway ($MODEL_GATEWAY_URL), and the step-tracing helpers (OTLP :4317).
+# The SDK is NEVER a hard dependency. The plane clients are pure stdlib (urllib);
+# the m10.3 model + trace helpers add a MINIMAL OTLP/gRPC exporter + OpenInference
+# semantic-convention constants — pinned to the EXACT versions already bundled in
+# images/base-python (opentelemetry 1.27.0 + openinference-semantic-conventions
+# 0.1.30), so the SDK adds ZERO net footprint to base-python and stays 3.9-compatible.
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctxmesh"
+version = "0.1.0"
+description = "Typed Python SDK over the agent-engine launcher localhost plane (memory / tools / feedback)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "agent-engine" }]
+keywords = ["agent-engine", "ctxmesh", "llm", "agents", "observability"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "License :: OSI Approved :: Apache Software License",
+]
+# Runtime deps for the m10.3 model + step-tracing helpers. Pinned to the exact
+# versions images/base-python already bundles, so `import ctxmesh` adds nothing
+# net to the base image (the plane clients themselves remain pure stdlib):
+#   * opentelemetry-sdk + the OTLP/gRPC exporter — export step spans to the
+#     collector (:4317) over the SAME path as auto-instrumentation → Langfuse.
+#   * openinference-semantic-conventions — the CHAIN/TOOL/LLM span kinds + attr
+#     keys, so a custom-loop tree is byte-for-byte a framework tree.
+# All three install cleanly and run on the 3.9 target (host python 3.9.6).
+dependencies = [
+    "opentelemetry-sdk==1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.27.0",
+    "openinference-semantic-conventions==0.1.30",
+]
+
+[project.optional-dependencies]
+# Pinned dev toolchain — reproducible on a clean host / CI (no host-global
+# installs). Bootstrapped into a venv by `make py-venv` (see the repo Makefile).
+# ruff 0.6.9 and pytest 8.3.x both support Python 3.9 (the host is 3.9.6).
+dev = [
+    "ruff==0.6.9",
+    "pytest==8.3.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ctxmesh = ["py.typed"]
+
+# ── ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A pragmatic-but-strict set: pycodestyle/pyflakes (E,F), bugbear (B),
+# isort (I), comprehensions (C4), simplify (SIM). pyupgrade (UP) is deliberately
+# omitted: the SDK targets 3.9 and uses explicit typing.Dict/List/Optional for
+# clarity (all under `from __future__ import annotations`), which UP would
+# rewrite to PEP 585/604 forms — a style change, not a correctness one.
+select = ["E", "F", "B", "I", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts and longer fixture bodies freely. SIM117 (combine nested
+# `with`) is ignored in tests because the step-tracing tests deliberately NEST
+# `with` blocks (request_context → step → tool/llm) to express — and assert — the
+# span-tree topology; flattening them into one `with` would obscure the very
+# parent/child nesting under test.
+"tests/*" = ["B011", "SIM117"]
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
