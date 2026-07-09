@@ -233,6 +233,12 @@ func TestExecModel_Eventing_DeploymentServiceTrigger(t *testing.T) {
 	require.Len(t, trigger.OwnerReferences, 1)
 	assert.Equal(t, name, trigger.OwnerReferences[0].Name)
 
+	// status.url must point at the real (-eventing) Service, not a bare
+	// <agent> host that has no Service backing it (NXDOMAIN).
+	var updated agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
+	assert.Contains(t, updated.Status.URL, eventingServiceName(name), "status.url must reference the -eventing Service")
+
 	// No batch workloads.
 	assertNoJob(t, name, namespace)
 	assertNoCronJob(t, name, namespace)
