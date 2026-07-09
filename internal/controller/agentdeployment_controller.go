@@ -235,6 +235,39 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	_, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
+	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
+	// inject MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (downward
+	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
+	// The single-writer rule applies: only this reconciler writes the pod
+	// template; the MemoryBinding controller only sets the binding's status.
+	memAddr, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
+	if err != nil {
+		return nil, fmt.Errorf("resolving memory binding: %w", err)
+	}
+	if hasMemoryBinding {
+		env = append(env,
+			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
+			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
+			// MEMORY_KEY_NAMESPACE: downward API — pod's own namespace so the
+			// Valkey key prefix stays correct even when the controller-default
+			// addr is overridden to a cross-namespace backend.
+			corev1.EnvVar{
+				Name: "MEMORY_KEY_NAMESPACE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.namespace",
+					},
+				},
+			},
+		)
+		// AGENT_NAME: inject only if not already present in spec.env (user
+		// override must win). The launcher uses AGENT_NAME for Valkey key
+		// composition and as the agent.invoke span attribute.
+		if !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
+			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		}
+	}
+
 	containers := []corev1.Container{
 		{
 			// Named explicitly: multi-container Knative pods require
@@ -283,7 +316,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	}
 
 	// Revision name: bare spec-hash when there are no bindings (unchanged pre-M4
-	// behaviour). With bindings, suffix a structural digest so ADD/REMOVE of a
+	// behaviour). With tool bindings, suffix a structural digest so ADD/REMOVE of a
 	// binding or a sidecar image change rolls a new revision (the sidecar/tool
 	// containers must actually land — the CreateOrUpdate guard below skips
 	// re-applying the spec when the revision name is unchanged). The digest
@@ -295,9 +328,18 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	// 8-hex digest is used: a shorter prefix invites silent collisions where a
 	// real structural change maps to the SAME name and the guard skips the
 	// update forever; 8 chars stays comfortably inside the 63-char name budget.
+	//
+	// Memory binding (M5): fold hasMemoryBinding + memAddr into the revision name
+	// so that bind/unbind/addr-change each produce a different name and therefore
+	// roll a new revision. This avoids the M4 landmine: if memory state is NOT in
+	// the digest, the CreateOrUpdate guard (ksvc.Spec.Template.Name != desiredRev)
+	// would SKIP re-applying the spec and the env injection would be silently lost.
 	revName := deploy.Name + "-" + hash
 	if digest := toolmanifest.StructuralDigest(sidecarTools, hasBindings); digest != "" {
 		revName = revName + "-b" + digest
+	}
+	if memDigest := memoryBindingDigest(hasMemoryBinding, memAddr); memDigest != "" {
+		revName = revName + "-m" + memDigest
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
@@ -471,21 +513,61 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 	return ctrl.Result{}, nil
 }
 
+// memoryBindingDigest returns a short hash capturing whether a MemoryBinding
+// exists and what addr it resolves to. The digest is included in the Knative
+// revision name so bind/unbind/addr-change each roll a new revision.
+//
+// Returns "" when hasBinding is false (no memory state → revision name is
+// unchanged from pre-M5 behaviour, symmetric with the tool-binding path).
+func memoryBindingDigest(hasBinding bool, addr string) string {
+	if !hasBinding {
+		return ""
+	}
+	h := sha256.Sum256([]byte(addr))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// envVarPresent reports whether name appears in the given env slice.
+// Used to avoid double-injecting AGENT_NAME when the operator has already set it.
+func envVarPresent(env []corev1.EnvVar, name string) bool {
+	for _, e := range env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
 //
-// It also watches MCPToolBinding: a binding add/remove/change maps to a requeue
-// of the referenced agent so this reconciler re-renders the pod template (the
-// STRUCTURAL side of a binding change — discovery sidecar + tool containers).
-// This is the annotation-free requeue mechanism from specs/mcp-tools.md: the
-// map function reads spec.agentRef straight off the event object (delete
-// events included — the binding finalizer keeps the object readable until the
-// agent converges). No field index is used.
+// It also watches MCPToolBinding and MemoryBinding: add/remove/change events map
+// to a requeue of the referenced agent so this reconciler re-renders the pod
+// template (the STRUCTURAL side of a binding change — sidecar containers and
+// env injection). The annotation-free requeue mechanism reads spec.agentRef
+// straight off the event object; no field index is used.
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
 			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
+			if !ok || b.Spec.AgentRef == "" {
+				return nil
+			}
+			return []reconcile.Request{{
+				NamespacedName: client.ObjectKey{Namespace: b.Namespace, Name: b.Spec.AgentRef},
+			}}
+		},
+	)
+
+	// MemoryBinding → requeue the referenced AgentDeployment so this reconciler
+	// re-resolves memory bindings and re-renders the pod template (env injection).
+	// Delete events are included: the binding object remains readable until
+	// DeletionTimestamp is set, and listAgentMemoryBindings excludes it so the
+	// env drops on the re-render.
+	mapMemoryBindingToAgent := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			b, ok := obj.(*agentsv1alpha1.MemoryBinding)
 			if !ok || b.Spec.AgentRef == "" {
 				return nil
 			}
@@ -500,6 +582,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&agentsv1alpha1.AgentVersion{}).
 		Owns(&servingv1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
+		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Named("agentdeployment").
 		Complete(r)
 }
