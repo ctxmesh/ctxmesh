@@ -228,6 +228,15 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	// robust regardless).
 	assert.Equal(t, 1, countEnv(userContainer.Env, "AGENT_NAME"), "AGENT_NAME must appear exactly once")
 
+	// Blob offload (m7.6b): a member gets the dedicated dev object-store address +
+	// the deterministic DEV-ONLY credentials as STATIC env so its launcher can
+	// offload/rehydrate >256KiB async payloads. All three are constants, never
+	// valueFrom (asserted by the no-valueFrom loop below).
+	assert.Equal(t, "agent-engine-objectstore.agent-engine-system.svc:9000", envMap["OBJECT_STORE_ADDR"],
+		"OBJECT_STORE_ADDR must point at the dedicated dev MinIO Service")
+	assert.NotEmpty(t, envMap["OBJECT_STORE_ACCESS_KEY"], "OBJECT_STORE_ACCESS_KEY (dev cred) must be injected")
+	assert.NotEmpty(t, envMap["OBJECT_STORE_SECRET_KEY"], "OBJECT_STORE_SECRET_KEY (dev cred) must be injected")
+
 	// Membership pod label on the revision template (the NetworkPolicy selects it).
 	assert.Equal(t, registryID, ksvc.Spec.Template.Labels[registryIDLabel],
 		"revision template must carry the registry-id membership label")
@@ -330,6 +339,9 @@ func TestRegistry_NonMemberUnaffected(t *testing.T) {
 	envMap := envByName(ksvc.Spec.Template.Spec.Containers[0].Env)
 	assert.NotContains(t, envMap, "AGENT_REGISTRY_ID", "non-member must not get AGENT_REGISTRY_ID")
 	assert.NotContains(t, envMap, "A2A_MAX_DEPTH", "non-member must not get guard env")
+	// Blob offload is a member-only concern: without OBJECT_STORE_ADDR the
+	// launcher disables offload (payloads pass through capped).
+	assert.NotContains(t, envMap, "OBJECT_STORE_ADDR", "non-member must not get OBJECT_STORE_ADDR (offload disabled)")
 	assert.NotContains(t, ksvc.Spec.Template.Labels, registryIDLabel,
 		"non-member revision template must not carry the membership label")
 

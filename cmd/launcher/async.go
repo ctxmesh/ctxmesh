@@ -135,12 +135,19 @@ type asyncConfig struct {
 }
 
 // asyncConsumer holds the async-consume dependencies. Every field is read-only
-// after construction; the SeenSet and http.Client are concurrency-safe, so the
-// whole struct is safe to share across the ksvc's request goroutines.
+// after construction; the SeenSet, offloader, and http.Client are
+// concurrency-safe, so the whole struct is safe to share across the ksvc's
+// request goroutines.
 type asyncConsumer struct {
 	cfg    asyncConfig
 	seen   SeenSet // nil ⇒ dedupe disabled (fail-open: always first-seen).
 	tracer trace.Tracer
+	// offload rehydrates a $ref payload (blob offload, objectstore.go) BEFORE the
+	// agent is invoked, so the agent sees the original payload. nil ⇒ offload
+	// disabled (OBJECT_STORE_ADDR absent): a payload is passed through as-is (a
+	// producer without a store never emits a $ref, so there is nothing to
+	// rehydrate).
+	offload *offloader
 	// invoke delivers the decoded envelope's payload to the user container and
 	// returns its response status. Injectable so unit tests drive the consumer
 	// without a real upstream. In production it POSTs to the launcher's own proxy
@@ -225,6 +232,32 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	span.SetAttributes(attribute.Bool("a2a.dedup_hit", false))
+
+	// Blob rehydrate (m7.6b): if the payload is a $ref (offloaded on publish
+	// because it was >256KiB), GET the original bytes from the object store BEFORE
+	// invoking the agent so the agent sees the real payload — never a $ref. A
+	// dangling / failed GET is a NACK (502): the message DLQs rather than
+	// delivering a broken payload (specs/eventing-scaling.md §"Edge cases:
+	// Oversize payload"). Runs AFTER dedupe (a duplicate is acked without a
+	// needless GET) and BEFORE invoke (the X-A2A-Envelope the invoker stamps
+	// carries the rehydrated payload).
+	if c.offload != nil {
+		rehydrated, wasRef, rErr := c.offload.rehydrate(ctx, env.Payload)
+		if rErr != nil {
+			span.SetStatus(codes.Error, "rehydrate payload: "+rErr.Error())
+			span.SetAttributes(attribute.String("a2a.async.error", "rehydrate_failed"))
+			// NACK (502): a $ref we cannot resolve must DLQ, not reach the agent.
+			writeJSONError(w, http.StatusBadGateway, "rehydrate payload failed: "+rErr.Error())
+			return
+		}
+		if wasRef {
+			span.SetAttributes(
+				attribute.Bool("a2a.blob.rehydrated", true),
+				attribute.Int("a2a.blob.size", len(rehydrated)),
+			)
+			env.Payload = rehydrated
+		}
+	}
 
 	// First sighting: invoke the agent with the envelope payload.
 	status, err := c.invoke(ctx, env)
@@ -325,12 +358,33 @@ func newProxyInvoker(proxyPort int, client *http.Client) func(context.Context, e
 // path: enough for the e2e (and a producer example, m7.7) to emit an async A2A
 // event that the broker routes to the target agent's Trigger.
 //
+// Blob offload (m7.6b): when off is non-nil and env's serialized payload exceeds
+// offloadThreshold (256KiB), the payload is PUT to the object store under a
+// content-addressed key and REPLACED with a {"$ref":...,"$size":n} object BEFORE
+// the CloudEvent is encoded — so the event body carried to the broker stays
+// small (a tiny $ref, well within maxAsyncBody). A store PUT failure is a typed
+// error and the event is NOT emitted (best-effort, like memory/tools —
+// specs/eventing-scaling.md §"Edge cases: Oversize payload"). A nil off (no
+// OBJECT_STORE_ADDR) or a sub-threshold payload passes through inline unchanged.
+//
 // It uses the CloudEvents HTTP binding (binary content mode) so the broker sees a
 // well-formed event with the ce-id/ce-type/ce-source headers a Trigger filters
 // on. A non-2xx broker response is an error (the event was not accepted); a
 // transport failure likewise — the caller treats publish as best-effort and
 // surfaces the typed error, never a bare hang.
-func publishEnvelope(ctx context.Context, client *http.Client, brokerURL string, env envelope) error {
+func publishEnvelope(ctx context.Context, client *http.Client, brokerURL string, env envelope, off *offloader) error {
+	if off != nil {
+		offloaded, wasOffloaded, err := off.maybeOffload(ctx, env.Payload)
+		if err != nil {
+			// MinIO down / refused on publish: best-effort typed error, no
+			// half-offloaded event emitted.
+			return fmt.Errorf("offload oversize payload: %w", err)
+		}
+		if wasOffloaded {
+			env.Payload = offloaded
+		}
+	}
+
 	evt, err := envelopeToCloudEvent(env)
 	if err != nil {
 		return fmt.Errorf("encode CloudEvent: %w", err)
