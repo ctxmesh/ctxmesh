@@ -1,4 +1,4 @@
-"""LangChain example agent — SDK-free deep-trace demo (M3/M4).
+"""LangChain example agent — SDK-free deep-trace demo (M3/M4/M5).
 
 This agent contains ZERO agent-engine SDK calls and ZERO manual OTel
 instrumentation. The base-python image's OpenInference auto-instrumentation
@@ -13,6 +13,19 @@ as a LangChain @tool so OpenInference still emits the TOOL span.  The /invoke
 response gains two extra fields: ``tool_count`` and ``tool_version`` (the
 hot-swap marker asserted by m4.7 e2e).
 
+M5 addition (m5.6): session memory via the launcher's :2998 endpoint.
+When the /invoke request carries "conversation_id":
+  1. GET localhost:2998/memory/{id}  (2s timeout) → prior turns as JSON array
+     of {"role","content"} entries.  An empty array (first turn) is fine.
+  2. Prior turns are prepended to the LangChain prompt as a system message.
+  3. After answering, POST .../append the user turn then POST .../append the
+     assistant turn (two appends, 2s timeouts each).
+  4. Response gains "turns": <total entries after this exchange> (retention
+     proof: turn1 → 2, turn2 on cold pod → 4).
+  5. Memory is best-effort: any failure → response carries "memory":
+     "unavailable" and the agent still answers normally.
+When "conversation_id" is absent the agent behaves exactly as before.
+
 Fallback chain (all best-effort, never crash the agent):
   1. GET localhost:2999/tools  (sidecar)        <- live manifest
   2. read /etc/agent/tools.json                  <- cold-start / durable backing
@@ -22,7 +35,7 @@ Fallback chain (all best-effort, never crash the agent):
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -50,6 +63,14 @@ TOOLS_JSON_PATH = os.environ.get("TOOLS_JSON_PATH", "/etc/agent/tools.json")
 # Manifest fetch timeout (seconds) — cheap localhost GET; generous enough for
 # a waking pod but small enough not to stall the agent under invoke latency.
 MANIFEST_TIMEOUT = 2
+
+# Launcher memory endpoint (m5.6).  Only active when MEMORY_BACKEND_ADDR is
+# injected by the controller (MemoryBinding).  Agents that have no binding
+# will get connection-refused, handled in the best-effort memory helpers below.
+# Override via MEMORY_BASE_URL env var for test/local validation.
+MEMORY_BASE_URL = os.environ.get("MEMORY_BASE_URL", "http://localhost:2998")
+# Per-op timeout (seconds) — same 2s bound as the launcher's own Valkey ops.
+MEMORY_TIMEOUT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +107,45 @@ def _find_remote_tool(manifest: dict, name: str) -> dict | None:
         if entry.get("name") == name:
             return entry
     return None
+
+
+# ---------------------------------------------------------------------------
+# Session memory helpers (m5.6) — all best-effort, never raise
+# ---------------------------------------------------------------------------
+
+def _memory_get(conv_id: str) -> list | None:
+    """GET /memory/{conv_id} → list of {"role","content"} entries, or None.
+
+    Returns None on any error (connection refused, timeout, bad JSON, non-200).
+    An empty list from the endpoint means first turn — that is a valid result.
+    """
+    url = f"{MEMORY_BASE_URL}/memory/{conv_id}"
+    try:
+        with urlopen(url, timeout=MEMORY_TIMEOUT) as resp:  # noqa: S310
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read())
+            if isinstance(data, list):
+                return data
+            return None
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
+
+
+def _memory_append(conv_id: str, entry: dict) -> None:
+    """POST /memory/{conv_id}/append with one {"role","content"} entry.
+
+    Fire-and-forget: any error is silently swallowed (best-effort).
+    Uses compacted JSON (no extra whitespace) per the m5.4 contract.
+    """
+    url = f"{MEMORY_BASE_URL}/memory/{conv_id}/append"
+    payload = json.dumps(entry, separators=(",", ":")).encode()
+    req = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")  # noqa: S310
+    try:
+        with urlopen(req, timeout=MEMORY_TIMEOUT):  # noqa: S310
+            pass
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +226,21 @@ _llm = ChatOpenAI(
     max_retries=0,
 )
 
+# Base prompt (no prior context).
 _prompt = ChatPromptTemplate.from_messages(
     [
         ("system", "You are a concise assistant."),
+        ("human", "User said: {input} (word count: {wc}). Reply in one sentence."),
+    ]
+)
+
+# Prompt used when prior conversation context is available (m5.6).
+# {prior_context} is a plain-text summary of previous turns injected as a
+# second system message — deterministic, no extra parsing, not lossy.
+_prompt_with_context = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a concise assistant."),
+        ("system", "Prior conversation context:\n{prior_context}"),
         ("human", "User said: {input} (word count: {wc}). Reply in one sentence."),
     ]
 )
@@ -178,13 +250,29 @@ _prompt = ChatPromptTemplate.from_messages(
 # Core agent logic
 # ---------------------------------------------------------------------------
 
-def run_agent(user_input: str) -> dict:
-    """Tool step then model step.
+def run_agent(user_input: str, conv_id: str | None = None) -> dict:
+    """Tool step then model step, optionally with session memory.
+
+    When *conv_id* is provided (m5.6):
+      - Prior turns are fetched from the launcher's :2998 memory endpoint.
+      - The model is called with a prior-context system message.
+      - User and assistant turns are appended after the response.
+      - The response gains "turns": <total entries after this exchange>.
+      - Memory failures are non-fatal: response gains "memory": "unavailable"
+        but the agent still answers using current input only.
+    When *conv_id* is absent the behaviour is identical to M3/M4.
 
     Returns a dict with at least ``output``; may also contain ``tool_count``,
-    ``tool_version``, and ``tool_error``.
+    ``tool_version``, ``tool_error``, ``turns``, and ``memory``.
     """
     extra: dict = {}
+
+    # --- Session memory: fetch prior context (m5.6) ---
+    prior_turns: list | None = None
+    memory_ok = False
+    if conv_id is not None:
+        prior_turns = _memory_get(conv_id)
+        memory_ok = prior_turns is not None  # None == fetch failed
 
     # --- Manifest discovery ---
     manifest = _fetch_manifest()
@@ -213,13 +301,36 @@ def run_agent(user_input: str) -> dict:
         wc = word_count.invoke({"text": user_input})
 
     # --- Model call ---
-    chain = _prompt | _llm
-    result = chain.invoke({"input": user_input, "wc": wc})
+    if conv_id is not None and memory_ok and prior_turns:
+        # Build a deterministic plain-text summary of prior turns.
+        # Format: "role: content" lines, one per turn.
+        prior_lines = "\n".join(
+            f"{t.get('role', 'unknown')}: {t.get('content', '')}"
+            for t in prior_turns
+        )
+        chain = _prompt_with_context | _llm
+        result = chain.invoke({"input": user_input, "wc": wc, "prior_context": prior_lines})
+    else:
+        chain = _prompt | _llm
+        result = chain.invoke({"input": user_input, "wc": wc})
+
     extra["output"] = result.content
+
+    # --- Session memory: append turns (m5.6) ---
+    if conv_id is not None:
+        if memory_ok:
+            _memory_append(conv_id, {"role": "user", "content": user_input})
+            _memory_append(conv_id, {"role": "assistant", "content": result.content})
+            # "turns" = prior entries + 2 new ones (deterministic retention proof).
+            prior_count = len(prior_turns) if prior_turns else 0
+            extra["turns"] = prior_count + 2
+        else:
+            extra["memory"] = "unavailable"
+
     return extra
 
 
-def _run_with_incoming_context(headers: dict, user_input: str) -> dict:
+def _run_with_incoming_context(headers: dict, user_input: str, conv_id: str | None = None) -> dict:
     """Run the agent under the caller's W3C trace context.
 
     The launcher injects ``traceparent`` into the proxied request; stdlib
@@ -228,6 +339,8 @@ def _run_with_incoming_context(headers: dict, user_input: str) -> dict:
     reasoning tree fragments (observed 2026-07-08: six sibling traces in
     Langfuse instead of one). Best-effort: if OTel isn't available, run
     without a parent context.
+
+    *conv_id* is forwarded to run_agent for session memory (m5.6).
     """
     try:
         from opentelemetry import context as otel_context  # noqa: PLC0415
@@ -235,11 +348,11 @@ def _run_with_incoming_context(headers: dict, user_input: str) -> dict:
 
         token = otel_context.attach(extract(headers))
         try:
-            return run_agent(user_input)
+            return run_agent(user_input, conv_id=conv_id)
         finally:
             otel_context.detach(token)
     except ImportError:
-        return run_agent(user_input)
+        return run_agent(user_input, conv_id=conv_id)
 
 
 # ---------------------------------------------------------------------------
@@ -268,11 +381,16 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         try:
-            user_input = json.loads(raw or b"{}").get("input", "")
+            body = json.loads(raw or b"{}")
+            user_input = body.get("input", "")
+            # m5.6: extract conversation_id for session memory (optional).
+            conv_id_raw = body.get("conversation_id")
+            conv_id: str | None = str(conv_id_raw) if conv_id_raw is not None else None
         except json.JSONDecodeError:
             user_input = raw.decode(errors="replace")
+            conv_id = None
         try:
-            result = _run_with_incoming_context(dict(self.headers), user_input)
+            result = _run_with_incoming_context(dict(self.headers), user_input, conv_id=conv_id)
             self._send(200, {"agent": "langchain-agent", **result})
         except Exception as exc:  # noqa: BLE001 — surface upstream errors to caller
             self._send(502, {"agent": "langchain-agent", "error": str(exc)})
