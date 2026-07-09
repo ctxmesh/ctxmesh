@@ -60,12 +60,17 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
-	// executionModel determines how the agent runtime is hosted. Only "serving"
-	// (Knative Service, request-driven) is supported in v1alpha1. Additional models
-	// (eventing, job) are planned for a later milestone.
+	// executionModel determines how the agent runtime is hosted:
+	//   - serving (default): a Knative Service (request-driven), unchanged from M1.
+	//   - eventing: a Knative Service PLUS a Knative Eventing Trigger subscribing it
+	//     to the agent's registry broker (the agent must be a registry member).
+	//   - job: a one-shot Kubernetes Job (restartPolicy Never), or a CronJob when a
+	//     schedule AgentScalingPolicy targets the agent.
+	// The reconciler branches on this value; serving stays the default so every
+	// M1-M6 agent is unaffected.
 	// +optional
 	// +kubebuilder:default=serving
-	// +kubebuilder:validation:Enum=serving
+	// +kubebuilder:validation:Enum=serving;eventing;job
 	ExecutionModel string `json:"executionModel,omitempty"`
 
 	// port is the TCP port the agent HTTP server listens on. Passed to the
