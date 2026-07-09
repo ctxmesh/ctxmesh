@@ -21,9 +21,15 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// crdBudgetUSDPattern mirrors the kubebuilder validation pattern on the CRD
+// BudgetSpec USD fields (^[0-9]+(\.[0-9]{1,6})?$). Every string floatToDecimalString
+// produces must match it, or the resulting manifest would be rejected at admission.
+var crdBudgetUSDPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,6})?$`)
 
 // update controls whether golden files are regenerated on this run.
 // Run: go test ./cmd/agent-engine/... -update
@@ -255,7 +261,10 @@ func TestExpand_Budget_IntegerUSD(t *testing.T) {
 	}
 }
 
-// TestFloatToDecimalString verifies the conversion rule for USD values.
+// TestFloatToDecimalString verifies the conversion rule for USD values, including
+// the >6-decimal boundary (must round to 6, never emit more), and asserts every
+// output matches the CRD validation pattern so expand can never bless a manifest
+// the API server would reject.
 func TestFloatToDecimalString(t *testing.T) {
 	cases := []struct {
 		in   float64
@@ -269,11 +278,20 @@ func TestFloatToDecimalString(t *testing.T) {
 		{0.123456, "0.123456"},
 		{100.0, "100.00"},
 		{0.1, "0.10"},
+		// Boundary: >6 fractional digits must round to 6, never exceed the pattern.
+		{0.1234567, "0.123457"}, // 7 dec → rounds up to 6
+		{0.10000001, "0.10"},    // 8 dec → rounds to 0.100000 → trimmed to 0.10
+		{0.1234564, "0.123456"}, // 7 dec → rounds down to 6
+		{0.9999999, "1.00"},     // rounds up across the integer boundary
 	}
 	for _, tc := range cases {
 		got := floatToDecimalString(tc.in)
 		if got != tc.want {
 			t.Errorf("floatToDecimalString(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+		if !crdBudgetUSDPattern.MatchString(got) {
+			t.Errorf("floatToDecimalString(%v) = %q does not match CRD pattern %s",
+				tc.in, got, crdBudgetUSDPattern.String())
 		}
 	}
 }
