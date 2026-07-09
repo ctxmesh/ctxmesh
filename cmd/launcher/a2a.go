@@ -439,7 +439,7 @@ func (s *a2aServer) buildEnvelope(
 		// FIRST hop: initialise all mutable per-hop fields.
 		// budgetRemaining is set to hopBudget here; each chained hop decrements it
 		// by 1 (see CHAINED hop path below). checkGuards trips when budgetRemaining
-		// goes below zero, so hopBudget=N permits exactly N hops.
+		// reaches zero (<=0), so hopBudget=N permits exactly N hops.
 		env.TraceID = traceIDFromContext(ctx)
 		env.ConversationID = conversationIDFromRequest(r)
 		env.Depth = 1
@@ -457,10 +457,10 @@ func (s *a2aServer) buildEnvelope(
 	// (the incoming envelope is immutable; a shared array would be a data race
 	// were it ever retained).
 	env.Path = append(append(make([]string, 0, len(incoming.Path)+1), incoming.Path...), self)
-	// Decrement the per-branch hop budget. checkGuards will reject if this goes
-	// below zero (i.e. < 0 on the OUTGOING envelope means this hop would exceed
-	// the budget). The budget is per-branch for sync v1; cross-branch aggregation
-	// joins CostBudget at M8.
+	// Decrement the per-branch hop budget. checkGuards rejects when this reaches
+	// zero (<=0 on the OUTGOING envelope means the budget is exhausted and this
+	// hop must not proceed). The budget is per-branch for sync v1; cross-branch
+	// aggregation joins CostBudget at M8.
 	env.BudgetRemaining = incoming.BudgetRemaining - 1
 	return env, nil
 }
@@ -657,10 +657,14 @@ type guardError struct {
 //     chain (senders so far, ending in self). Forwarding to an agent that
 //     appears in the path would revisit it without progress.
 //
-//  3. Hop budget — env.BudgetRemaining < 0 → budget_exceeded.
+//  3. Hop budget — env.BudgetRemaining <= 0 → budget_exceeded.
 //     budgetRemaining was initialised to hopBudget on the first hop and
-//     decremented by 1 on each chained hop in buildEnvelope. A value of -1
-//     means this hop would be the (hopBudget+1)-th hop, exceeding the limit.
+//     decremented by 1 on each chained hop in buildEnvelope, so on the k-th hop
+//     of a branch the OUTGOING value is hopBudget-(k-1). It reaches 0 on the
+//     (hopBudget+1)-th hop, which is the first hop that must be rejected — hence
+//     the <=0 trip ("reject at zero", agent-mesh.md §12.7). This makes
+//     hopBudget=N permit exactly N hops (the (N+1)-th trips), hopBudget=1 permit
+//     1 hop, and hopBudget=0 trip on the first hop (0 hops).
 //     This is a per-branch counter for sync v1 (each fan-out branch receives
 //     its own copy of the envelope). A cross-branch / cross-conversation
 //     aggregate budget (and token + wall-clock cost tracking) is deferred to
@@ -689,8 +693,10 @@ func checkGuards(env envelope, maxDepth int) *guardError {
 	}
 
 	// Guard 3: hop budget.
-	// budgetRemaining < 0 means this hop was one beyond the allowed budget.
-	if env.BudgetRemaining < 0 {
+	// budgetRemaining <= 0 means this hop has exhausted the branch's budget:
+	// the (hopBudget+1)-th hop lands here with an OUTGOING value of 0. hopBudget=N
+	// permits exactly N hops; hopBudget=0 trips on the first hop.
+	if env.BudgetRemaining <= 0 {
 		return &guardError{
 			code:   errBudgetExceeded,
 			detail: fmt.Sprintf("hop budget exhausted (budgetRemaining %d)", env.BudgetRemaining),
