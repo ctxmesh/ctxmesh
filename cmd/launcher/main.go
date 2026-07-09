@@ -138,6 +138,29 @@ func main() {
 		}
 	}
 
+	// ── Outbound gateway proxy (:2996) ────────────────────────────────────
+	// Started ONLY when spec.budget is set (GATEWAY_UPSTREAM_URL injected AND a
+	// cap present). It sits between the agent and LiteLLM to enforce the cost
+	// budget; MODEL_GATEWAY_URL is repointed here by the controller. Same
+	// lifecycle discipline as the memory/A2A listeners: goroutine ListenAndServe,
+	// graceful Shutdown on child exit, never overrides the child exit code. A
+	// construction error (bad upstream URL / cap) is logged and the listener is
+	// skipped — the agent's MODEL_GATEWAY_URL then 502s, a visible misconfig, not
+	// a silent budget bypass. nil when disabled → unbudgeted agents are unchanged.
+	var gwSrv *http.Server
+	if cfg.GatewayProxyEnabled() {
+		logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+		gp, gErr := newGatewayProxy(cfg.Gateway, tracer, logf)
+		if gErr != nil {
+			fmt.Fprintf(os.Stderr, "launcher: gateway proxy disabled: %v\n", gErr)
+		} else {
+			gwSrv = &http.Server{
+				Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
+				Handler: gp.handler(),
+			}
+		}
+	}
+
 	// ── Child process ─────────────────────────────────────────────────────
 	child, err := startChild(cfg)
 	if err != nil {
@@ -187,6 +210,17 @@ func main() {
 		}()
 	}
 
+	// Start the outbound gateway proxy (best-effort like the others). A bind
+	// failure is logged; the agent's gateway calls then fail loudly rather than
+	// bypassing the budget.
+	if gwSrv != nil {
+		go func() {
+			if err := gwSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "launcher: gateway: %v\n", err)
+			}
+		}()
+	}
+
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
 
@@ -199,6 +233,9 @@ func main() {
 	}
 	if a2aSrv != nil {
 		_ = a2aSrv.Shutdown(shutCtx)
+	}
+	if gwSrv != nil {
+		_ = gwSrv.Shutdown(shutCtx)
 	}
 	_ = otelShutdown(shutCtx)
 
