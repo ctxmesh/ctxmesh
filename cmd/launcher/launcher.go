@@ -75,6 +75,13 @@ type Config struct {
 	// started ONLY when Memory.BackendAddr is non-empty (i.e. MEMORY_BACKEND_ADDR
 	// is injected by the controller for an agent with a MemoryBinding).
 	Memory memoryConfig
+
+	// A2A holds the agent-to-agent mesh configuration. The outbound /a2a
+	// listener is started ONLY when A2A.RegistryID is non-empty (i.e.
+	// AGENT_REGISTRY_ID is injected because the agent is a resolved
+	// AgentRegistry member); inbound access control is likewise a no-op without
+	// it.
+	A2A a2aConfig
 }
 
 // loadConfig reads launcher configuration from environment variables.
@@ -126,6 +133,11 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	a2a, err := loadA2AConfig(lookup, agentName)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Argv:         argv,
 		ProxyPort:    proxyPort,
@@ -135,6 +147,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		AgentVersion: lookup("AGENT_VERSION"),
 		AgentRoute:   lookup("AGENT_ROUTE"),
 		Memory:       mem,
+		A2A:          a2a,
 	}, nil
 }
 

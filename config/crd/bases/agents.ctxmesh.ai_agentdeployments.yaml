@@ -50,6 +50,22 @@ spec:
           spec:
             description: spec defines the desired state of the AgentDeployment.
             properties:
+              allowedCallers:
+                description: |-
+                  allowedCallers is the per-agent inbound allowlist (PRD §12.4 layer 3):
+                  the names of peer agents permitted to call this agent over A2A. The
+                  controller comma-joins it into the static AGENT_ALLOWED_CALLERS env var;
+                  the callee's launcher rejects a caller not on the list with a typed
+                  caller_not_allowed error. An empty/omitted list means the launcher applies
+                  its default policy (registry-membership check only). Bounded at 64 entries
+                  of at most 63 characters each (DNS-label-sized agent names).
+                items:
+                  maxLength: 63
+                  minLength: 1
+                  type: string
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: atomic
               env:
                 description: |-
                   env is an optional list of environment variables injected directly into
@@ -258,6 +274,18 @@ spec:
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
+              role:
+                description: |-
+                  role is the agent's role within its AgentRegistry (PRD §12.4 role-based
+                  access control). The three built-in roles always exist: "orchestrator",
+                  "worker", and "reviewer"; a registry may also declare custom roles via
+                  AgentRegistry.spec.roles. When set on a registry member, the controller
+                  injects it as the static AGENT_ROLE env var, which the launcher stamps
+                  into the A2A message envelope and checks against the callee's role policy.
+                  Bounded at 63 characters (the AGENT_ROLE value is a short label, never a
+                  free-form string). Ignored for non-members.
+                maxLength: 63
+                type: string
               scaling:
                 description: |-
                   scaling configures the Knative autoscaler bounds for this agent.
