@@ -311,6 +311,52 @@ class DiscoveryStub(_BaseStub):
         )
 
 
+# ── model gateway ($MODEL_GATEWAY_URL) ─────────────────────────────────────────
+class GatewayStub(_BaseStub):
+    """Fake of the OpenAI-compatible model gateway (POST /chat/completions).
+
+    Returns a canned OpenAI-style completion with a ``usage`` block so the model
+    client can extract the completion text and stamp token counts on the LLM
+    span. ``force_status`` drives the error paths (a budget 402 / upstream 502).
+    Records each request so a test can assert the body ({model, messages, ...opts})
+    and the Authorization header.
+    """
+
+    def __init__(
+        self,
+        *,
+        content: str = "the answer is 42",
+        usage: Optional[Dict[str, int]] = None,
+        model: str = "gpt-4o-mini",
+        force_status: Optional[int] = None,
+    ) -> None:
+        self.content = content
+        self.usage = usage if usage is not None else {
+            "prompt_tokens": 11,
+            "completion_tokens": 5,
+            "total_tokens": 16,
+        }
+        self.model = model
+        self.force_status = force_status
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def completions(state: _StubState, req: RecordedRequest):
+            if self.force_status is not None:
+                return self.force_status, {}, b"gateway error\n"
+            body = {
+                "id": "chatcmpl-stub",
+                "model": self.model,
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": self.content}}
+                ],
+                "usage": self.usage,
+            }
+            return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
+
+        self.state.routes.update({"POST /chat/completions": completions})
+
+
 # ── feedback (:2995) ───────────────────────────────────────────────────────────
 class FeedbackStub(_BaseStub):
     """Fake of the M9 :2995 feedback hook (202 on valid, 400/502 configurable)."""
