@@ -90,6 +90,18 @@ type inboundGuard interface {
 	enforceInbound(ctx context.Context, w http.ResponseWriter, r *http.Request) bool
 }
 
+// asyncHandler is the async A2A consumer hook the proxy runs when an inbound
+// request is a CloudEvent (an eventing agent's Trigger delivery). It decodes the
+// envelope, dedupes on messageId, and invokes the agent — acking or NACKing the
+// event. nil ⇒ the agent is not an eventing consumer, and a CloudEvent-shaped
+// request (there won't be one) would fall through to the ordinary proxy path.
+//
+// It is an interface (not a concrete *asyncConsumer) so buildHandler stays
+// decoupled from the async surface and unit tests can inject a stub.
+type asyncHandler interface {
+	consume(w http.ResponseWriter, r *http.Request)
+}
+
 // buildHandler returns an HTTP handler that reverse-proxies all requests to
 // upstreamURL. Requests to paths for which shouldSpan returns true are wrapped
 // in an agent.invoke server span with W3C context propagation; all other
@@ -98,6 +110,12 @@ type inboundGuard interface {
 // guard, when non-nil, enforces A2A access control on the inbound path inside
 // the span (a denied caller is rejected before the request reaches the user
 // container). nil disables it.
+//
+// consumer, when non-nil, handles a CloudEvent-shaped inbound POST (a Trigger
+// delivery to an eventing agent): it is dispatched to the async consumer BEFORE
+// the ordinary /invoke span/proxy path, so an async A2A event is deduped and
+// invoked through its own a2a.async.consume span. An ordinary /invoke (no
+// CloudEvent headers) is unaffected. nil disables the async path.
 //
 // tracer and prop are explicit parameters (rather than read from the global
 // otel package) so the function can be exercised in unit tests without global
@@ -108,6 +126,7 @@ func buildHandler(
 	upstreamURL *url.URL,
 	cfg Config,
 	guard inboundGuard,
+	consumer asyncHandler,
 ) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
 
@@ -115,6 +134,15 @@ func buildHandler(
 		if !shouldSpan(r.URL.Path) {
 			// Health probes: pass through with no span.
 			proxy.ServeHTTP(w, r)
+			return
+		}
+
+		// Async A2A: a CloudEvent-shaped POST (Trigger delivery) is handled by the
+		// async consumer — decode → dedupe → invoke — on its own span, not the
+		// sync /invoke path. Checked before the agent.invoke span so a redelivered
+		// duplicate is acked without ever opening an invoke span.
+		if consumer != nil && isCloudEventRequest(r) {
+			consumer.consume(w, r)
 			return
 		}
 
