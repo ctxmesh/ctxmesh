@@ -5,7 +5,7 @@ plane (ADR 0002). Every capability the SDK exposes is *also* a raw launcher
 endpoint; the SDK never adds a capability the plane does not have — it only
 removes the raw-HTTP boilerplate and applies the run context.
 
-m10.2 surface (this package):
+Surface:
 
     from ctxmesh import agent
 
@@ -19,8 +19,16 @@ m10.2 surface (this package):
 
     client.feedback.score(trace_id, name, value, comment=None)   # :2995
 
-The ``model`` client and the ``trace.*`` step-tracing helpers are m10.3 and are
-deliberately NOT part of this package yet.
+    client.model.chat(model, messages, **opts)  # $MODEL_GATEWAY_URL; emits LLM span
+
+    # step-tracing helpers for a custom loop (the M10 core). Bind the inbound
+    # request so the tree roots under the launcher's agent.invoke span:
+    with client.trace.request_context(request.headers):
+        with client.trace.step("plan") as step:            # CHAIN span
+            plan = client.model.chat(model, messages)       # nested LLM span
+            with client.trace.tool("search", args) as t:    # TOOL span (child)
+                t.set_output(client.tools.call("search", **args))
+            step.set_output(plan)
 """
 
 from ctxmesh import agent
@@ -32,6 +40,8 @@ from ctxmesh.errors import (
     EndpointError,
     NotInPodError,
 )
+from ctxmesh.model import ChatResponse, ModelClient
+from ctxmesh.trace import SpanHandle, TraceClient
 
 __all__ = [
     "agent",
@@ -41,6 +51,10 @@ __all__ = [
     "ConfigError",
     "NotInPodError",
     "EndpointError",
+    "ModelClient",
+    "ChatResponse",
+    "TraceClient",
+    "SpanHandle",
 ]
 
 __version__ = "0.1.0"

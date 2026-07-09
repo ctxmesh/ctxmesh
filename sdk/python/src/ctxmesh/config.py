@@ -86,6 +86,16 @@ class PlaneConfig:
     #: an unwired capability raises ConfigError rather than hitting a dead port.
     memory_wired: bool = False
     feedback_wired: bool = False
+    #: Model gateway base URL ($MODEL_GATEWAY_URL) — LiteLLM directly, or the
+    #: launcher's in-pod budget proxy when the agent is budgeted (transparent).
+    #: Empty when unwired (not in a pod); model.chat then raises ConfigError.
+    model_gateway_url: str = ""
+    #: Bearer token the gateway expects; the launcher injects the master key
+    #: in-pod. Empty offline (the mock gateway ignores auth).
+    model_gateway_key: str = ""
+    #: OTLP/gRPC collector endpoint ($OTEL_EXPORTER_OTLP_ENDPOINT, :4317). Empty
+    #: offline → the trace client runs in no-op/in-memory export mode.
+    otlp_endpoint: str = ""
 
     @classmethod
     def from_env(
@@ -136,6 +146,13 @@ class PlaneConfig:
             conversation_id=env("CONVERSATION_ID") or "",
         )
 
+        # Model gateway ($MODEL_GATEWAY_URL): LiteLLM directly, or the launcher's
+        # budget proxy when budgeted — the SDK does not care which, same wire. The
+        # gateway bearer token is a dummy in dev mode (LiteLLM holds real keys);
+        # honour an explicit MODEL_GATEWAY_KEY/OPENAI_API_KEY if the operator set one.
+        model_gateway_url = (env("MODEL_GATEWAY_URL") or "").rstrip("/")
+        model_gateway_key = env("MODEL_GATEWAY_KEY") or env("OPENAI_API_KEY") or ""
+
         return cls(
             memory_base_url=f"http://localhost:{memory_port}",
             discovery_base_url=f"http://localhost:{DISCOVERY_PORT}",
@@ -144,6 +161,9 @@ class PlaneConfig:
             run=run,
             memory_wired=memory_wired,
             feedback_wired=feedback_wired,
+            model_gateway_url=model_gateway_url,
+            model_gateway_key=model_gateway_key,
+            otlp_endpoint=env("OTEL_EXPORTER_OTLP_ENDPOINT") or "",
         )
 
     @classmethod
@@ -153,13 +173,18 @@ class PlaneConfig:
         memory_base_url: str = "http://localhost:2998",
         discovery_base_url: str = "http://localhost:2999",
         feedback_base_url: str = "http://localhost:2995",
+        model_gateway_url: str = "http://localhost:2996",
+        model_gateway_key: str = "",
+        otlp_endpoint: str = "",
         run: Optional[RunContext] = None,
         tools_json_path: str = DEFAULT_TOOLS_JSON_PATH,
     ) -> PlaneConfig:
         """Build a fully-wired config pointing at explicit URLs (the launcher stub).
 
-        The documented offline/test mode: point the three base URLs at a fake
-        localhost plane so the clients can be exercised without a live launcher.
+        The documented offline/test mode: point the base URLs at a fake localhost
+        plane so the clients can be exercised without a live launcher.
+        ``otlp_endpoint`` defaults empty so the trace client runs in offline/no-op
+        export mode unless a test opts into a live/in-memory processor.
         """
         return cls(
             memory_base_url=memory_base_url.rstrip("/"),
@@ -169,4 +194,7 @@ class PlaneConfig:
             run=run or RunContext(agent_name="test-agent"),
             memory_wired=True,
             feedback_wired=True,
+            model_gateway_url=model_gateway_url.rstrip("/"),
+            model_gateway_key=model_gateway_key,
+            otlp_endpoint=otlp_endpoint,
         )
