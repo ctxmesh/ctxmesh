@@ -181,6 +181,61 @@ type AgentDeploymentSpec struct {
 	PromptRef string `json:"promptRef,omitempty"`
 }
 
+// GateStatus reports the deploy-gate state for an AgentDeployment that references
+// an EvalSuite (spec.evalSuiteRef). It is set only when a gate is active; a
+// deployment without an evalSuiteRef leaves it nil (byte-compatible with the
+// pre-M9 status). The phase drives the human-gated promotion state machine
+// (specs/eval-prompts-feedback.md §1):
+//
+//	pending → scoring → awaiting-promotion → promoted   (pass, then human approval)
+//	                 → blocked                            (fail, gate:block)
+//	                 → warned                             (fail, gate:warn → promote anyway)
+type GateStatus struct {
+	// phase is the current gate state: pending | scoring | awaiting-promotion |
+	// promoted | blocked | warned. A passing candidate rests at awaiting-promotion
+	// until a human approval signal (the agents.ctxmesh.ai/promote annotation)
+	// flips it to promoted — v1 does NOT auto-promote (PRD §17.4).
+	// +optional
+	// +kubebuilder:validation:Enum=pending;scoring;awaiting-promotion;promoted;blocked;warned
+	Phase string `json:"phase,omitempty"`
+
+	// score is the candidate's weighted-mean suite score for the scored revision,
+	// as an exact decimal string in [0,1] (e.g. "0.8123"). Empty until scoring has
+	// produced a value. Stored as a string, not a float, so the status round-trips
+	// byte-stably. Empty when the gate failed closed unscored (Langfuse down).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^$|^[01](\.[0-9]{1,4})?$`
+	Score string `json:"score,omitempty"`
+
+	// threshold echoes the EvalSuite threshold the score was compared against, as
+	// an exact decimal string, so the gate decision is self-describing on status
+	// without a second lookup.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^$|^[01](\.[0-9]{1,4})?$`
+	Threshold string `json:"threshold,omitempty"`
+
+	// decision is the terminal gate decision recorded for the scored revision:
+	// promoted | blocked | warned. Empty while pending/scoring.
+	// +optional
+	// +kubebuilder:validation:Enum=promoted;blocked;warned
+	Decision string `json:"decision,omitempty"`
+
+	// scoredRevision is the candidate revision name the gate scored and decided on
+	// (the "-h<digest>" revision the candidate would serve). It pins the decision to
+	// an exact candidate so a later spec/prompt change re-scores rather than reusing
+	// a stale decision, and so a human approval targets the reviewed candidate.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	ScoredRevision string `json:"scoredRevision,omitempty"`
+
+	// reason is a short machine reason for the current phase (e.g. ScorePassed,
+	// ScoreBelowThreshold, LangfuseUnavailable). Human-readable detail lives on the
+	// Ready condition message.
+	// +optional
+	// +kubebuilder:validation:MaxLength=316
+	Reason string `json:"reason,omitempty"`
+}
+
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
 type AgentDeploymentStatus struct {
 	// conditions reflect the current reconciliation state of the AgentDeployment.
@@ -189,6 +244,12 @@ type AgentDeploymentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// gate reports the deploy-gate state when the AgentDeployment references an
+	// EvalSuite (spec.evalSuiteRef). Nil when no gate is active — a deployment
+	// without an evalSuiteRef is byte-compatible with the pre-M9 status (PRD §17).
+	// +optional
+	Gate *GateStatus `json:"gate,omitempty"`
 
 	// url is the public HTTP endpoint assigned to the agent, copied verbatim from
 	// the Knative Service status once it becomes ready.
