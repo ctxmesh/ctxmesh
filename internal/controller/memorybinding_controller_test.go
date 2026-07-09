@@ -516,3 +516,16 @@ func envByName(env []corev1.EnvVar) map[string]string {
 	}
 	return m
 }
+
+// countEnv returns how many times name appears in the env slice — used to assert
+// an env var (e.g. AGENT_NAME, which both the memory and registry paths may
+// inject) lands EXACTLY once (no double-injection).
+func countEnv(env []corev1.EnvVar, name string) int {
+	n := 0
+	for _, e := range env {
+		if e.Name == name {
+			n++
+		}
+	}
+	return n
+}

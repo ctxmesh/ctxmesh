@@ -443,7 +443,16 @@ func TestA2ARelaysPeerResponse(t *testing.T) {
 // receives true iff the upstream was reached (i.e. the request was allowed).
 func newTestProxyWithGuard(t *testing.T, cfg a2aConfig) (http.Handler, chan bool) {
 	t.Helper()
-	_, tp := newTestTracer(t)
+	h, reached, _ := newTestProxyWithGuardRec(t, cfg)
+	return h, reached
+}
+
+// newTestProxyWithGuardRec is newTestProxyWithGuard plus the span recorder, so a
+// test can assert the deny span event (e.g. a2a.cross_registry_denied) the guard
+// records on the agent.invoke span.
+func newTestProxyWithGuardRec(t *testing.T, cfg a2aConfig) (http.Handler, chan bool, *tracetest.SpanRecorder) {
+	t.Helper()
+	rec, tp := newTestTracer(t)
 	tracer := tp.Tracer(tracerName)
 
 	reachedCh := make(chan bool, 4)
@@ -459,13 +468,38 @@ func newTestProxyWithGuard(t *testing.T, cfg a2aConfig) (http.Handler, chan bool
 
 	guard := newA2AGuard(cfg, tracer)
 	handler := buildHandler(tracer, propagation.TraceContext{}, upstreamURL, Config{AgentName: cfg.SelfName}, guard)
-	return handler, reachedCh
+	return handler, reachedCh, rec
 }
 
-// inboundEnvelope marshals an envelope for the X-A2A-Envelope header.
+// assertSpanEvent asserts the span recorder captured an event with the given
+// name on the agent.invoke span (the callee-side inbound span).
+func assertSpanEvent(t *testing.T, rec *tracetest.SpanRecorder, spanName, eventName string) {
+	t.Helper()
+	for _, sp := range rec.Ended() {
+		if sp.Name() != spanName {
+			continue
+		}
+		for _, ev := range sp.Events() {
+			if ev.Name == eventName {
+				return
+			}
+		}
+	}
+	t.Errorf("no %q event found on %q span", eventName, spanName)
+}
+
+// inboundEnvelope marshals an envelope for the X-A2A-Envelope header, stamped
+// with the callee's own registry ("research-team", matching baseCfg) so the
+// cross-registry check passes and the allowedCallers/role checks are exercised.
 func inboundEnvelope(sender, role string) string {
+	return inboundEnvelopeIn("research-team", sender, role)
+}
+
+// inboundEnvelopeIn marshals an envelope carrying an explicit registryId, so a
+// test can drive the cross-registry (foreign registryId) deny path.
+func inboundEnvelopeIn(registryID, sender, role string) string {
 	e := envelope{
-		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", RegistryID: "research-team",
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", RegistryID: registryID,
 		ConversationID: "c1", MessageID: "m1", SenderAgentID: sender,
 		ReceiverAgentID: "research", Role: role, Depth: 1, Path: []string{sender},
 	}
@@ -591,6 +625,89 @@ func TestA2AInboundDeniesMalformedEnvelope(t *testing.T) {
 	case <-reached:
 		t.Error("upstream reached despite a malformed envelope")
 	default:
+	}
+}
+
+// ── cross-registry isolation (app-layer, m6.8) ──────────────────────────────
+
+// TestA2AInboundDeniesCrossRegistry verifies the app-layer registry-isolation
+// check: an inbound envelope whose registryId does NOT match the callee's own
+// registry is a hard deny with a typed cross_registry_denied (403), the upstream
+// (user container) is NOT reached, and the a2a.cross_registry_denied span event
+// is recorded. This is layer 1 enforced app-layer — NetworkPolicy cannot isolate
+// Knative-routed A2A (kourier fronts every hop), which the m6.8 live e2e proved.
+func TestA2AInboundDeniesCrossRegistry(t *testing.T) {
+	t.Parallel()
+	cfg := baseCfg() // this agent is in "research-team".
+	handler, reached, rec := newTestProxyWithGuardRec(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
+	// Foreign registry: a valid orchestrator caller, but from "other-team".
+	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-registry status = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	}
+	assertA2AError(t, rr.Body.Bytes(), errCrossRegistry)
+	assertSpanEvent(t, rec, "agent.invoke", "a2a.cross_registry_denied")
+
+	// The upstream (user container) must NOT have been reached.
+	select {
+	case <-reached:
+		t.Error("upstream reached despite a cross-registry caller")
+	default:
+	}
+}
+
+// TestA2ACrossRegistryCheckedBeforeAllowlist proves the ordering: a foreign
+// registryId is a HARD deny even when the caller WOULD be on the allowlist — the
+// registry check runs before allowedCallers/role, so the failure is
+// cross_registry_denied (not caller_not_allowed) and the upstream is never hit.
+func TestA2ACrossRegistryCheckedBeforeAllowlist(t *testing.T) {
+	t.Parallel()
+	cfg := baseCfg()
+	cfg.AllowedCallers = []string{"orchestrator"} // caller IS on the allowlist...
+	handler, reached, rec := newTestProxyWithGuardRec(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
+	// ...but names a foreign registry → cross-registry deny wins.
+	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("other-team", "orchestrator", "orchestrator"))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rr.Code)
+	}
+	assertA2AError(t, rr.Body.Bytes(), errCrossRegistry)
+	assertSpanEvent(t, rec, "agent.invoke", "a2a.cross_registry_denied")
+	select {
+	case <-reached:
+		t.Error("upstream reached despite a cross-registry caller on the allowlist")
+	default:
+	}
+}
+
+// TestA2AInboundAllowsSameRegistry verifies a same-registry envelope passes the
+// registry check and proceeds to the allowedCallers/role checks (here: empty
+// allowlist + valid role ⇒ allowed, upstream reached). This is the positive
+// counterpart to the cross-registry deny.
+func TestA2AInboundAllowsSameRegistry(t *testing.T) {
+	t.Parallel()
+	cfg := baseCfg() // registry "research-team", empty allowlist.
+	handler, reached := newTestProxyWithGuard(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{}`))
+	req.Header.Set(a2aEnvelopeHeader, inboundEnvelopeIn("research-team", "orchestrator", "orchestrator"))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("same-registry status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if !<-reached {
+		t.Error("upstream not reached for a same-registry caller")
 	}
 }
 
