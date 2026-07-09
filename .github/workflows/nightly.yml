@@ -14,9 +14,9 @@ jobs:
   full-e2e:
     name: nightly-full-e2e
     runs-on: ubuntu-latest
-    # Bumped 45→60 when the m5-memory slice landed: it adds uncached image
-    # builds + an ~90s scale-to-zero drain wait on top of m3/m4.
-    timeout-minutes: 60
+    # Bumped 45→60 (m5-memory), then 60→75 (m6-mesh: 3 agents + 2 registries
+    # + uncached image builds on top of m3/m4/m5).
+    timeout-minutes: 75
     permissions:
       contents: read
     steps:
@@ -67,3 +67,15 @@ jobs:
         # collector debug sink. Langfuse not needed on the M=1 cluster, same
         # as the m3-trace / m4-tools slices.
         run: make -C agent-brain/harness tier2 SLICE=m5-memory
+      - name: M6 mesh e2e (A2A, cross-registry isolation, guards, child span)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Reuses the same M=1 cluster. Deploys two AgentRegistries + three
+        # agents (orchestrator-a, worker-a in team-a; outsider-b in team-b) via
+        # the slice. Asserts intra-registry A2A delegation, cross-registry
+        # BLOCKED, a cycle guard trip, and the a2a.call child span. NOTE: the
+        # cross-registry block is enforced APP-LAYER (the callee launcher's
+        # registryId check — ADR 0007 addendum), which is CNI-agnostic, so this
+        # runs on kindnet (M=1). The NetworkPolicy *defense-in-depth* layer
+        # needs Calico and is exercised only in local tier3 (accept-m6, M=6).
+        run: make -C agent-brain/harness tier2 SLICE=m6-mesh
