@@ -151,7 +151,8 @@ func TestMemoryBinding_AgentCreatedAfterBinding(t *testing.T) {
 // TestMemoryBinding_BindInjectsEnv verifies the full bind path:
 // create AgentDeployment + MemoryBinding → AgentDeployment reconcile →
 // ksvc contains all four expected env vars (MEMORY_BACKEND_ADDR with the default
-// addr, MEMORY_PORT=2998, MEMORY_KEY_NAMESPACE via downward API, AGENT_NAME).
+// addr, MEMORY_PORT=2998, MEMORY_KEY_NAMESPACE as the static namespace value,
+// AGENT_NAME).
 func TestMemoryBinding_BindInjectsEnv(t *testing.T) {
 	const (
 		namespace = "default"
@@ -185,17 +186,29 @@ func TestMemoryBinding_BindInjectsEnv(t *testing.T) {
 	require.True(t, ok, "MEMORY_PORT must be injected")
 	assert.Equal(t, "2998", portEnv.Value)
 
-	// MEMORY_KEY_NAMESPACE must be a downward API field ref for metadata.namespace.
+	// MEMORY_KEY_NAMESPACE must be the STATIC namespace value, never a
+	// downward-API fieldRef: Knative Serving's webhook rejects valueFrom in a
+	// ksvc pod template (kubernetes.podspec-fieldref is off by default), so any
+	// valueFrom here wedges reconcile in a real cluster while passing envtest.
 	nsEnv, ok := envMap["MEMORY_KEY_NAMESPACE"]
 	require.True(t, ok, "MEMORY_KEY_NAMESPACE must be injected")
-	require.NotNil(t, nsEnv.ValueFrom, "MEMORY_KEY_NAMESPACE must use ValueFrom")
-	require.NotNil(t, nsEnv.ValueFrom.FieldRef, "MEMORY_KEY_NAMESPACE must use FieldRef")
-	assert.Equal(t, "metadata.namespace", nsEnv.ValueFrom.FieldRef.FieldPath)
+	assert.Nil(t, nsEnv.ValueFrom, "MEMORY_KEY_NAMESPACE must not use valueFrom (Knative forbids it in a ksvc)")
+	assert.Equal(t, namespace, nsEnv.Value, "MEMORY_KEY_NAMESPACE must be the agent's own namespace")
 
 	// AGENT_NAME must equal the AgentDeployment name.
 	agentNameEnv, ok := envMap["AGENT_NAME"]
 	require.True(t, ok, "AGENT_NAME must be injected")
 	assert.Equal(t, agent.Name, agentNameEnv.Value)
+
+	// Knative constraint guard: NO env var on the ksvc user container may use
+	// valueFrom (fieldRef/resourceFieldRef/secretKeyRef/configMapKeyRef are all
+	// rejected unless the corresponding non-default feature flag is enabled).
+	// This encodes at tier1 the class of bug that only surfaces against a real
+	// Knative admission webhook (envtest has none) — see m5.7 e2e finding.
+	for _, e := range userContainer.Env {
+		assert.Nil(t, e.ValueFrom,
+			"ksvc container env %q must be a static value, not valueFrom (Knative webhook rejects it)", e.Name)
+	}
 }
 
 // TestMemoryBinding_CustomAddr verifies that spec.backend.addr overrides the
