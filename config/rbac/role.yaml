@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - services
   verbs:
   - create
   - delete
@@ -30,6 +31,7 @@ rules:
   resources:
   - agentdeployments
   - agentregistries
+  - agentscalingpolicies
   - agentversions
   - mcptoolbindings
   - memorybindings
@@ -47,6 +49,7 @@ rules:
   resources:
   - agentdeployments/finalizers
   - agentregistries/finalizers
+  - agentscalingpolicies/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   verbs:
@@ -56,6 +59,7 @@ rules:
   resources:
   - agentdeployments/status
   - agentregistries/status
+  - agentscalingpolicies/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status
@@ -77,6 +81,46 @@ rules:
   resources:
   - deployments
   verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - eventing.knative.dev
+  resources:
+  - brokers
+  - triggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  verbs:
+  - create
+  - delete
   - get
   - list
   - patch

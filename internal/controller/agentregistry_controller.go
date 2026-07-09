@@ -28,6 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -69,6 +73,11 @@ const (
 	// for external /invoke traffic. Must be allowed alongside the activator.
 	kourierSystemNamespace = "kourier-system"
 
+	// knativeEventingNamespace hosts the broker/InMemoryChannel dispatcher that
+	// delivers CloudEvents to plain-Deployment `eventing` agents. Must be allowed
+	// or async event delivery is dropped by the registry NetworkPolicy (m7.8).
+	knativeEventingNamespace = "knative-eventing"
+
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
 	// applied when spec.guards is nil (the whole struct omitted) so the injected
@@ -81,6 +90,34 @@ const (
 	reasonRegistryReady   = "Ready"
 	reasonMultiRegistry   = "MultiRegistryConflict"
 	reasonInvalidSelector = "InvalidSelector"
+
+	// dlqNameSuffix names the per-registry dead-letter-queue sink
+	// (<registry>-dlq). It is a Knative Service the registry's Broker points its
+	// deadLetterSink at; a poison message that fails the delivery retries lands
+	// here where an e2e can observe it (its container logs the dead CloudEvent).
+	// Owned by the AgentRegistry so it GCs on delete alongside the Broker.
+	dlqNameSuffix = "-dlq"
+
+	// brokerRetry is the minimum number of delivery attempts the Broker makes
+	// before moving an event to the deadLetterSink. Kept small so a poison
+	// message reaches the DLQ promptly (the 🧪 observes it) without an unbounded
+	// retry storm (specs/eventing-scaling.md §"DLQ": "never infinitely retried").
+	brokerRetry = int32(3)
+
+	// brokerBackoffDelay is the ISO-8601 base delay between delivery retries.
+	// With backoffPolicy=exponential the effective delay is
+	// backoffDelay*2^<attempt> (PT0.2S → 0.2s, 0.4s, 0.8s), so three retries
+	// complete quickly enough for the DLQ 🧪 while still spacing out a flapping
+	// receiver.
+	brokerBackoffDelay = "PT0.2S"
+
+	// dlqImage is the receiver image the per-registry DLQ sink runs. The Knative
+	// event-display image simply logs every CloudEvent it receives — the
+	// canonical, dependency-free dead-letter observation sink for an e2e (the
+	// harness eventing smoke test uses the same pinned digest). It is the sink;
+	// the engine records nothing else about a dead event beyond what the broker's
+	// DLQ delivery carries.
+	dlqImage = "gcr.io/knative-releases/knative.dev/eventing/cmd/event_display@sha256:dad3a055c4179948f8ec5d9330b0f207598065371a335f25e66d70b5a53a2281"
 )
 
 // AgentRegistryReconciler reconciles an AgentRegistry object (specs/agent-mesh.md).
@@ -121,6 +158,8 @@ type AgentRegistryReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentregistries/finalizers,verbs=update
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=eventing.knative.dev,resources=brokers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile resolves registry membership, writes status, and converges the
 // per-registry NetworkPolicy.
@@ -158,8 +197,21 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("reconciling NetworkPolicy: %w", err)
 	}
 
-	// ── Step 3: status ────────────────────────────────────────────────────────
-	msg := fmt.Sprintf("registry %q resolved %d member(s); NetworkPolicy converged", registry.Spec.RegistryId, len(memberNames))
+	// ── Step 3: converge the async-eventing plane (DLQ sink + Broker) ─────────
+	// The per-registry Broker is the async A2A transport (specs/eventing-scaling.md
+	// §"Broker per registry"); an eventing-model agent's Trigger (m7.5) subscribes
+	// its ksvc to `<registryName>-broker`. The Broker's deadLetterSink points at
+	// the per-registry DLQ ksvc created here — the DLQ must exist BEFORE the Broker
+	// references it, so it is reconciled first.
+	if err := r.reconcileDLQSink(ctx, &registry); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling DLQ sink: %w", err)
+	}
+	if err := r.reconcileBroker(ctx, &registry); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling Broker: %w", err)
+	}
+
+	// ── Step 4: status ────────────────────────────────────────────────────────
+	msg := fmt.Sprintf("registry %q resolved %d member(s); NetworkPolicy + Broker converged", registry.Spec.RegistryId, len(memberNames))
 	return ctrl.Result{}, r.setStatus(ctx, &registry, memberNames, metav1.ConditionTrue, reasonRegistryReady, msg)
 }
 
@@ -260,15 +312,21 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform ingress: allow the Knative activator (scale-from-zero
-					// buffer) and the kourier ingress gateway. Selected by the
-					// well-known namespace-name label so we do not depend on the
-					// operator labelling those namespaces themselves.
+					// buffer), the kourier ingress gateway, and the Knative Eventing
+					// broker dispatcher (which delivers CloudEvents to plain-Deployment
+					// `eventing` agents from the knative-eventing namespace — omitting
+					// it silently drops async event delivery, m7.8 e2e finding).
+					// Selected by the well-known namespace-name label so we do not
+					// depend on the operator labelling those namespaces themselves.
 					From: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: knativeServingNamespace},
 						}},
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: kourierSystemNamespace},
+						}},
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: knativeEventingNamespace},
 						}},
 					},
 				},
@@ -282,6 +340,108 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 			return nil
 		}
 		return fmt.Errorf("upserting NetworkPolicy %s: %w", np.Name, err)
+	}
+	return nil
+}
+
+// reconcileDLQSink CreateOrUpdate's the per-registry dead-letter-queue sink
+// (<registry>-dlq), a minimal Knative Service running the event-display receiver.
+// The registry's Broker points its deadLetterSink at it, so a poison message that
+// exhausts the delivery retries lands here — observable in the sink's logs
+// (specs/eventing-scaling.md §"DLQ"). Owned by the registry so it GCs on delete
+// alongside the Broker; a single set-once spec (the image never changes) keeps
+// Knative's create-time revision defaults intact on re-reconcile.
+func (r *AgentRegistryReconciler) reconcileDLQSink(
+	ctx context.Context,
+	registry *agentsv1alpha1.AgentRegistry,
+) error {
+	dlq := &servingv1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      registry.Name + dlqNameSuffix,
+			Namespace: registry.Namespace,
+		},
+	}
+
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, dlq, func() error {
+		// Set the pod spec only on create (empty containers ⇒ fresh object). The
+		// image is static, so re-applying our bare spec on update would reset
+		// Knative's create-time defaults (container name, probe thresholds) to
+		// zero-values the webhook rejects — the same set-once discipline the agent
+		// ksvc uses. The revision name is left to Knative's default so it stays a
+		// single stable revision.
+		if len(dlq.Spec.Template.Spec.Containers) == 0 {
+			dlq.Spec = servingv1.ServiceSpec{
+				ConfigurationSpec: servingv1.ConfigurationSpec{
+					Template: servingv1.RevisionTemplateSpec{
+						Spec: servingv1.RevisionSpec{
+							PodSpec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Image: dlqImage,
+								}},
+							},
+						},
+					},
+				},
+			}
+		}
+		return ctrl.SetControllerReference(registry, dlq, r.Scheme)
+	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil
+		}
+		return fmt.Errorf("upserting DLQ sink %s: %w", dlq.Name, err)
+	}
+	return nil
+}
+
+// reconcileBroker CreateOrUpdate's the per-registry Knative Eventing Broker
+// (<registryName>-broker) — the async A2A transport for the registry's mesh
+// (specs/eventing-scaling.md §"Broker per registry"). Its name MUST match the
+// one the m7.5 AgentDeployment reconciler stamps on an eventing agent's Trigger
+// (`membership.RegistryName + brokerNameSuffix`) or delivery silently breaks.
+//
+// spec.delivery configures at-least-once delivery with a bounded retry budget and
+// a dead-letter fallback (§"DLQ"): `retry` attempts with `backoffPolicy:
+// exponential`, then the event is moved to `deadLetterSink` — the per-registry
+// DLQ ksvc (reconcileDLQSink), referenced by KReference so Knative resolves its
+// addressable URL. Owned by the registry so it GCs on delete.
+func (r *AgentRegistryReconciler) reconcileBroker(
+	ctx context.Context,
+	registry *agentsv1alpha1.AgentRegistry,
+) error {
+	retry := brokerRetry
+	backoffDelay := brokerBackoffDelay
+	backoffPolicy := eventingduckv1.BackoffPolicyExponential
+
+	broker := &eventingv1.Broker{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      registry.Name + brokerNameSuffix,
+			Namespace: registry.Namespace,
+		},
+	}
+
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, broker, func() error {
+		broker.Spec = eventingv1.BrokerSpec{
+			Delivery: &eventingduckv1.DeliverySpec{
+				Retry:         &retry,
+				BackoffPolicy: &backoffPolicy,
+				BackoffDelay:  &backoffDelay,
+				DeadLetterSink: &duckv1.Destination{
+					Ref: &duckv1.KReference{
+						APIVersion: knativeServiceAPIVersion,
+						Kind:       knativeServiceKind,
+						Name:       registry.Name + dlqNameSuffix,
+						Namespace:  registry.Namespace,
+					},
+				},
+			},
+		}
+		return ctrl.SetControllerReference(registry, broker, r.Scheme)
+	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil
+		}
+		return fmt.Errorf("upserting Broker %s: %w", broker.Name, err)
 	}
 	return nil
 }
@@ -325,10 +485,15 @@ func (r *AgentRegistryReconciler) setStatus(
 // and to roll the revision when membership changes. The zero value (IsMember
 // false) means the agent belongs to no registry.
 type registryMembership struct {
-	IsMember   bool
-	RegistryID string
-	MaxDepth   int32
-	HopBudget  int32
+	IsMember bool
+	// RegistryName is the AgentRegistry object's metadata.name. It (not the
+	// RegistryID) names the per-registry Knative Eventing Broker
+	// (`<RegistryName>-broker`) an eventing-model agent's Trigger subscribes to
+	// (specs/eventing-scaling.md "Broker per registry").
+	RegistryName string
+	RegistryID   string
+	MaxDepth     int32
+	HopBudget    int32
 }
 
 // resolveAgentRegistry determines which AgentRegistry (if any) an agent belongs
@@ -385,10 +550,11 @@ func resolveAgentRegistry(
 	}
 
 	m := registryMembership{
-		IsMember:   true,
-		RegistryID: best.Spec.RegistryId,
-		MaxDepth:   registryDefaultMaxDepth,
-		HopBudget:  registryDefaultHopBudget,
+		IsMember:     true,
+		RegistryName: best.Name,
+		RegistryID:   best.Spec.RegistryId,
+		MaxDepth:     registryDefaultMaxDepth,
+		HopBudget:    registryDefaultHopBudget,
 	}
 	if best.Spec.Guards != nil {
 		if best.Spec.Guards.MaxDepth > 0 {
@@ -437,6 +603,8 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentRegistry{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&eventingv1.Broker{}).
+		Owns(&servingv1.Service{}).
 		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToRegistries).
 		Named("agentregistry").
 		Complete(r)

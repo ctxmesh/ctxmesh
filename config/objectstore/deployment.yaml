@@ -1,0 +1,98 @@
+# MinIO Object Store — dedicated blob-offload backend for the async A2A path
+# (specs/eventing-scaling.md §"Blob offload"; PRD §12.6 "Large payloads"). A
+# registry member's launcher offloads a >256KiB async payload here under a
+# content-addressed key and rehydrates it on consume.
+#
+# Deliberately NOT Langfuse's MinIO: no product-to-observability coupling — this
+# is a product workload the engine deploys, exactly like the dedicated dev Valkey
+# state layer (config/statelayer/).
+#
+# Image pinned by digest at minio/minio:RELEASE.2025-09-07T16-13-09Z (newest
+# stable as of 2026-07-09; verified multi-arch amd64/arm64 via
+# `docker manifest inspect`). The tag is retained alongside the digest for
+# human readability; the digest is what actually pins the pull.
+#
+# Dev posture: emptyDir (blobs are dev-ephemeral — an async payload lives only
+# for its delivery window; losing offloaded blobs on a MinIO restart is accepted,
+# same as losing dev Valkey sessions). Memory limit per the leak policy: a
+# runaway object set OOMs the pod, not the node. Credentials are the dev-only
+# fixed values from the objectstore-dev Secret (secret.yaml) — the ONE place
+# valueFrom is fine, because MinIO is a plain Deployment, NOT a Knative ksvc, so
+# the m5.7 no-valueFrom constraint does not apply here.
+#
+# Probes: MinIO exposes /minio/health/live (liveness) and /minio/health/ready
+# (readiness) on the S3 API port — cheap HTTP health endpoints, no auth.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: objectstore
+  namespace: system
+  labels:
+    control-plane: objectstore
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: objectstore
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      labels:
+        control-plane: objectstore
+        app.kubernetes.io/name: agent-engine
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          args:
+            - server
+            - /data
+            # Console on 9001 is dev-only convenience; the launcher uses the S3
+            # API on 9000 exclusively.
+            - --console-address
+            - ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: objectstore-dev
+                  key: rootUser
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: objectstore-dev
+                  key: rootPassword
+          ports:
+            - name: s3
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi   # leak policy: a runaway object set OOMs the pod, not the node
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+      terminationGracePeriodSeconds: 10

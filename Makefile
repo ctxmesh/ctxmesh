@@ -45,7 +45,12 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# internal/kedatypes provides wire-compatible KEDA types without importing the
+	# upstream package (controller-runtime API version conflict). Exclude it from
+	# CRD/webhook generation — the KEDA CRD comes from keda-crds.yaml, not here.
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook \
+		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...,./internal/toolpush/...}" \
+		output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -122,6 +127,10 @@ docker-build-base-python: ## Build the Python base image (base-python:latest) �
 .PHONY: docker-build-langchain-example
 docker-build-langchain-example: docker-build-base-python ## Build the LangChain example agent image (langchain-agent:latest); depends on base-python:latest.
 	$(CONTAINER_TOOL) build -t langchain-agent:latest -f examples/langchain-agent/Dockerfile .
+
+.PHONY: docker-build-batch-example
+docker-build-batch-example: docker-build-base-python ## Build the batch-agent example image (batch-agent:latest — job/CronJob model); depends on base-python:latest.
+	$(CONTAINER_TOOL) build -t batch-agent:latest -f examples/batch-agent/Dockerfile .
 
 .PHONY: docker-build-collector
 docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.

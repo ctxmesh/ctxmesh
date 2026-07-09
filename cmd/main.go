@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -38,6 +39,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controller"
+	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -51,6 +53,8 @@ func init() {
 
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
+	utilruntime.Must(eventingv1.AddToScheme(scheme))
+	utilruntime.Must(kedatypes.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -212,6 +216,13 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentregistry")
+		os.Exit(1)
+	}
+	if err := (&controller.AgentScalingPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "agentscalingpolicy")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
