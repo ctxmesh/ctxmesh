@@ -32,7 +32,7 @@ type RegistryGuards struct {
 	// +kubebuilder:default=8
 	// +kubebuilder:validation:Minimum=1
 	// +optional
-	MaxDepth int `json:"maxDepth,omitempty"`
+	MaxDepth int32 `json:"maxDepth,omitempty"`
 
 	// hopBudget is the per-conversation hop allowance. The caller's launcher
 	// decrements this for each A2A call in the conversation; when exhausted it
@@ -42,7 +42,7 @@ type RegistryGuards struct {
 	// +kubebuilder:default=32
 	// +kubebuilder:validation:Minimum=1
 	// +optional
-	HopBudget int `json:"hopBudget,omitempty"`
+	HopBudget int32 `json:"hopBudget,omitempty"`
 }
 
 // AgentRegistrySpec defines the desired state of an AgentRegistry.
@@ -77,6 +77,8 @@ type AgentRegistrySpec struct {
 	// +listType=atomic
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
 	Roles []string `json:"roles,omitempty"`
 }
 
@@ -86,6 +88,7 @@ type AgentRegistryStatus struct {
 	// of this registry. Populated by the controller on each reconcile.
 	// +listType=atomic
 	// +optional
+	// +kubebuilder:validation:MaxItems=256
 	Members []string `json:"members,omitempty"`
 
 	// conditions reflect the registry's reconciliation state.
@@ -103,7 +106,7 @@ type AgentRegistryStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=ar
 // +kubebuilder:printcolumn:name="RegistryID",type="string",JSONPath=".spec.registryId"
-// +kubebuilder:printcolumn:name="Members",type="integer",JSONPath=".status.members"
+// +kubebuilder:printcolumn:name="Members",type="string",JSONPath=".status.members"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // AgentRegistry groups a set of AgentDeployments into a closed A2A mesh

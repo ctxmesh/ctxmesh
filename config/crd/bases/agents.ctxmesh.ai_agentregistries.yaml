@@ -22,7 +22,7 @@ spec:
       type: string
     - jsonPath: .status.members
       name: Members
-      type: integer
+      type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
@@ -70,6 +70,7 @@ spec:
                       returns a budget_exceeded typed error. Hop budget only in M6; token and
                       wall-clock budgets join at M8 (CostBudget).
                       Must be at least 1. Defaults to 32.
+                    format: int32
                     minimum: 1
                     type: integer
                   maxDepth:
@@ -79,6 +80,7 @@ spec:
                       The caller's launcher rejects any call that would push depth+1 beyond
                       this value with a depth_exceeded typed error and a span event.
                       Must be at least 1. Defaults to 8.
+                    format: int32
                     minimum: 1
                     type: integer
                 type: object
@@ -150,6 +152,8 @@ spec:
                   are available for role-based access control at the launcher layer (§12.4).
                   Each entry must be between 1 and 63 characters.
                 items:
+                  maxLength: 63
+                  minLength: 1
                   type: string
                 maxItems: 64
                 type: array
@@ -235,6 +239,7 @@ spec:
                   of this registry. Populated by the controller on each reconcile.
                 items:
                   type: string
+                maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
             type: object
