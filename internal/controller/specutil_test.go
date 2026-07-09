@@ -139,20 +139,25 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	require.NotEmpty(t, memD)
 	require.NotEmpty(t, regD)
 
-	neither := combinedBindingDigest("", "", "")
-	toolsOnly := combinedBindingDigest(toolD, "", "")
-	memOnly := combinedBindingDigest("", memD, "")
-	regOnly := combinedBindingDigest("", "", regD)
-	all := combinedBindingDigest(toolD, memD, regD)
+	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	require.NotEmpty(t, budD)
+
+	neither := combinedBindingDigest("", "", "", "")
+	toolsOnly := combinedBindingDigest(toolD, "", "", "")
+	memOnly := combinedBindingDigest("", memD, "", "")
+	regOnly := combinedBindingDigest("", "", regD, "")
+	budgetOnly := combinedBindingDigest("", "", "", budD)
+	all := combinedBindingDigest(toolD, memD, regD, budD)
 
 	assert.Equal(t, "", neither, "no structural input of any type → empty digest (bare revision name)")
 	assert.NotEmpty(t, toolsOnly)
 	assert.NotEmpty(t, memOnly)
 	assert.NotEmpty(t, regOnly)
+	assert.NotEmpty(t, budgetOnly)
 	assert.NotEmpty(t, all)
-	// All four non-empty outcomes must be mutually distinct.
-	distinct := map[string]bool{toolsOnly: true, memOnly: true, regOnly: true, all: true}
-	assert.Len(t, distinct, 4, "tools-only / memory-only / registry-only / all must all differ")
+	// All five non-empty outcomes must be mutually distinct.
+	distinct := map[string]bool{toolsOnly: true, memOnly: true, regOnly: true, budgetOnly: true, all: true}
+	assert.Len(t, distinct, 5, "tools-only / memory-only / registry-only / budget-only / all must all differ")
 	assert.Len(t, all, 8, "combined digest is 8 hex chars — the bounded suffix budget")
 }
 
@@ -175,13 +180,19 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	regD2 := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "orchestrator", nil)
 	require.NotEqual(t, regD1, regD2, "precondition: role change flips the registry digest")
 
-	base := combinedBindingDigest(toolD1, memD1, regD1)
-	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1),
+	budD1 := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	budD2 := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "1.00", SoftThresholdPct: 80})
+	require.NotEqual(t, budD1, budD2, "precondition: cap change flips the budget digest")
+
+	base := combinedBindingDigest(toolD1, memD1, regD1, budD1)
+	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1),
 		"tool component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1),
 		"memory component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1),
 		"registry component change must flip the combined digest")
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2),
+		"budget component change must flip the combined digest")
 }
 
 // TestCombinedBindingDigest_Deterministic: identical inputs always produce the
@@ -193,10 +204,13 @@ func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	memD := memoryBindingDigest(true, memoryDefaultAddr)
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 
-	assert.Equal(t, combinedBindingDigest(toolD, memD, regD), combinedBindingDigest(toolD, memD, regD))
-	assert.Equal(t, combinedBindingDigest(toolD, "", ""), combinedBindingDigest(toolD, "", ""))
-	assert.Equal(t, combinedBindingDigest("", memD, ""), combinedBindingDigest("", memD, ""))
-	assert.Equal(t, combinedBindingDigest("", "", regD), combinedBindingDigest("", "", regD))
+	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+
+	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD), combinedBindingDigest(toolD, memD, regD, budD))
+	assert.Equal(t, combinedBindingDigest(toolD, "", "", ""), combinedBindingDigest(toolD, "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", memD, "", ""), combinedBindingDigest("", memD, "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", regD, ""), combinedBindingDigest("", "", regD, ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", budD), combinedBindingDigest("", "", "", budD))
 }
 
 // TestRegistryMembershipDigest_Component pins the registry component's own
@@ -239,4 +253,31 @@ func TestMemoryBindingDigest_Component(t *testing.T) {
 	assert.NotEmpty(t, d1)
 	assert.NotEqual(t, d1, d2, "different addrs → different components")
 	assert.Equal(t, d1, memoryBindingDigest(true, memoryDefaultAddr), "deterministic")
+}
+
+// TestBudgetDigest_Component pins the M8 budget component's own contract:
+// nil budget → empty; each budget field (conv cap / agent cap / soft pct) flips
+// it; deterministic; the soft-pct default (80) is applied so an explicit 80 and
+// an omitted value hash the same (they inject the same env).
+func TestBudgetDigest_Component(t *testing.T) {
+	assert.Equal(t, "", budgetDigest(nil), "nil budget → empty component")
+
+	base := &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 80}
+	d := budgetDigest(base)
+	require.NotEmpty(t, d)
+	assert.Len(t, d, 8, "budget digest is 8 hex chars")
+	assert.Equal(t, d, budgetDigest(base), "deterministic")
+
+	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "1.00", PerAgentUSD: "10.00", SoftThresholdPct: 80}),
+		"conversation cap flip")
+	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "20.00", SoftThresholdPct: 80}),
+		"agent cap flip")
+	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 90}),
+		"soft pct flip")
+
+	// Soft-pct default: an omitted (0) value hashes identically to an explicit 80.
+	assert.Equal(t,
+		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50"}),
+		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80}),
+		"omitted soft pct defaults to 80")
 }
