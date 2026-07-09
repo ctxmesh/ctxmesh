@@ -216,6 +216,14 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	assert.Equal(t, "worker-a,worker-b", envMap["AGENT_ALLOWED_CALLERS"], "comma-joined allowedCallers")
 	assert.Equal(t, "8", envMap["A2A_MAX_DEPTH"], "guard default maxDepth=8")
 	assert.Equal(t, "32", envMap["A2A_HOP_BUDGET"], "guard default hopBudget=32")
+	// A2A DNS discovery needs POD_NAMESPACE + AGENT_NAME on EVERY member (a member
+	// without a MemoryBinding gets them here, not via the memory path). Without
+	// POD_NAMESPACE the launcher builds {target}..svc.cluster.local → NXDOMAIN.
+	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be the agent's namespace (A2A DNS)")
+	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME must be the agent name (A2A senderAgentId)")
+	// AGENT_NAME injected exactly once (no memory here, but assert the count is
+	// robust regardless).
+	assert.Equal(t, 1, countEnv(userContainer.Env, "AGENT_NAME"), "AGENT_NAME must appear exactly once")
 
 	// Membership pod label on the revision template (the NetworkPolicy selects it).
 	assert.Equal(t, registryID, ksvc.Spec.Template.Labels[registryIDLabel],
@@ -232,6 +240,69 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	for _, e := range userContainer.Env {
 		assert.Nil(t, e.ValueFrom,
 			"ksvc container env %q must be static, not valueFrom (Knative webhook rejects it)", e.Name)
+	}
+}
+
+// TestRegistry_MemberWithMemory_AgentNameOnce verifies that an agent that is
+// BOTH a registry member AND has a MemoryBinding gets AGENT_NAME injected exactly
+// ONCE (the memory path injects it first; the registry path must not duplicate
+// it) and still gets POD_NAMESPACE (the memory path does NOT set POD_NAMESPACE,
+// so the registry path must add it for A2A DNS discovery).
+func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "mem-mesh"
+		registryID = "mem-mesh"
+		agentName  = "mem-mesh-member"
+	)
+
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      agentName,
+			Namespace: namespace,
+			Labels:    map[string]string{"registry": registryID},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:          "ghcr.io/ctxmesh/example-agent:latest",
+			ExecutionModel: "serving",
+			Port:           8080,
+			Role:           "worker",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	// Give the agent a MemoryBinding — the memory path injects AGENT_NAME (but not
+	// POD_NAMESPACE); the registry path must then dedupe AGENT_NAME and add
+	// POD_NAMESPACE.
+	mkMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	ksvc := getKsvc(t, agentName, namespace)
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+	envMap := envByName(userContainer.Env)
+
+	// Both binding paths are active.
+	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"], "member must have AGENT_REGISTRY_ID")
+	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory path must be active")
+
+	// AGENT_NAME injected EXACTLY once despite both paths wanting it.
+	assert.Equal(t, 1, countEnv(userContainer.Env, "AGENT_NAME"),
+		"AGENT_NAME must be injected exactly once when the agent has BOTH memory and registry")
+	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME must be the agent name")
+
+	// POD_NAMESPACE comes from the registry path (memory path does NOT set it) —
+	// exactly once, and static.
+	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be set for A2A DNS")
+	assert.Equal(t, 1, countEnv(userContainer.Env, "POD_NAMESPACE"), "POD_NAMESPACE exactly once")
+
+	// The no-valueFrom Knative-webhook guard still holds for the combined path.
+	for _, e := range userContainer.Env {
+		assert.Nil(t, e.ValueFrom,
+			"ksvc container env %q must be static, not valueFrom", e.Name)
 	}
 }
 

@@ -32,12 +32,16 @@ package main
 //
 //  2. INBOUND access control — a middleware the /invoke proxy runs on the
 //     CALLEE side. When a request carries an A2A envelope (header
-//     X-A2A-Envelope, stamped by the caller's launcher), the callee enforces
-//     its allowedCallers allowlist and role rules BEFORE forwarding to the user
-//     container, rejecting a disallowed caller with a typed caller_not_allowed
+//     X-A2A-Envelope, stamped by the caller's launcher), the callee enforces —
+//     in order — cross-registry isolation (the envelope's registryId must match
+//     this agent's), then its allowedCallers allowlist and role rules, BEFORE
+//     forwarding to the user container: a foreign registry is a hard deny with
+//     cross_registry_denied (403), a disallowed caller with caller_not_allowed
 //     (403). A request with no envelope (an ordinary external /invoke) passes
-//     through untouched. (agent-mesh.md §"Design": layers 2–3 are L7, enforced
-//     by the callee's launcher on inbound /invoke; layer 1 is NetworkPolicy.)
+//     through untouched. (agent-mesh.md §"Design": layers 2–3 are L7; layer 1,
+//     registry isolation, is ALSO enforced here app-layer — NetworkPolicy cannot
+//     isolate Knative-routed A2A because kourier fronts every hop, so it is
+//     defense-in-depth only.)
 //
 // Trace shape (the crux): caller's agent.invoke → a2a.call span (this file) →
 // callee's agent.invoke → callee's tools/memory. The a2a.call span is the
@@ -119,9 +123,12 @@ const (
 const (
 	errUnknownTarget    = "unknown_target"     // DNS NXDOMAIN — target not in the registry namespace.
 	errCallerNotAllowed = "caller_not_allowed" // access control: caller not on the callee's allowlist / role-denied.
-	errBlocked          = "blocked"            // network-layer refusal (cross-registry NetworkPolicy) or dial timeout.
-	errUpstreamFailure  = "upstream_failure"   // peer reachable but returned a transport error mid-request.
-	errBadRequest       = "bad_request"        // malformed /a2a request (bad target, unreadable body, bad envelope).
+	// errCrossRegistry: access control — the inbound envelope names a foreign
+	// registryId; a hard app-layer deny (NetworkPolicy cannot isolate Knative A2A).
+	errCrossRegistry   = "cross_registry_denied"
+	errBlocked         = "blocked"          // network-layer refusal (cross-registry NetworkPolicy) or dial timeout.
+	errUpstreamFailure = "upstream_failure" // peer reachable but returned a transport error mid-request.
+	errBadRequest      = "bad_request"      // malformed /a2a request (bad target, unreadable body, bad envelope).
 
 	// Conversation guard codes (agent-mesh.md §12.7, added in m6.6).
 	errDepthExceeded  = "depth_exceeded"  // depth > maxDepth: call chain is too deep.
@@ -158,9 +165,11 @@ type a2aConfig struct {
 	// in: http://{target}.{namespace}.svc.cluster.local.
 	Namespace string
 	// AllowedCallers is the callee-side allowlist (AGENT_ALLOWED_CALLERS,
-	// comma-list of sender agent names). Empty ⇒ allow any in-registry caller
-	// (registry membership is already enforced by NetworkPolicy). A non-empty
-	// list rejects any senderAgentId not on it with caller_not_allowed.
+	// comma-list of sender agent names). Empty ⇒ allow any SAME-registry caller
+	// (cross-registry isolation is enforced app-layer by enforceInbound's
+	// registryId check — NetworkPolicy cannot isolate Knative-routed A2A because
+	// kourier fronts every hop; it is defense-in-depth only). A non-empty list
+	// rejects any senderAgentId not on it with caller_not_allowed.
 	AllowedCallers []string
 
 	// MaxDepth is the guard limit on envelope depth (A2A_MAX_DEPTH). Injected
@@ -569,13 +578,25 @@ func newA2AGuard(cfg a2aConfig, tracer trace.Tracer) *a2aGuard {
 
 // enforceInbound is the callee-side access-control check the /invoke proxy runs
 // BEFORE forwarding to the user container. It returns true when the request may
-// proceed. If the request carries an A2A envelope, it enforces the allowlist +
-// role rules; a disallowed caller is rejected here (403 caller_not_allowed,
-// traced) and the function returns false, having already written the response.
+// proceed. If the request carries an A2A envelope, it enforces (in order)
+// cross-registry isolation, then the allowlist + role rules; a rejected caller
+// is denied here (typed 403, traced) and the function returns false, having
+// already written the response.
 //
 // A request WITHOUT an envelope is an ordinary external /invoke — access
 // control does not apply (registry isolation is a mesh-internal concern) — so it
 // passes through untouched.
+//
+// Cross-registry isolation is enforced HERE, at the app layer, NOT by
+// NetworkPolicy: agents are Knative Services, so an A2A call routes
+// caller → kourier → callee, and at the callee's pod the source appears as
+// kourier-system — which the generated per-registry NetworkPolicy ALLOWS as
+// platform ingress. The per-registry podSelector therefore cannot isolate
+// Knative-routed A2A traffic; kourier defeats it. NetworkPolicy remains as
+// defense-in-depth for any DIRECT pod-to-pod traffic, but the ACTUAL
+// cross-registry deny is this app-layer check on the envelope's registryId
+// (agent-mesh.md §"Design" layer 1; the live-cluster m6.8 e2e proved a
+// cross-registry call is not blocked at the network layer).
 //
 // It is wired as a wrapper INSIDE the agent.invoke span (ctx already carries the
 // server span) so a denial is a child event of the invoke, not an orphan.
@@ -593,6 +614,17 @@ func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r 
 		return false
 	}
 
+	// Layer 1 (registry isolation), app-layer: a hard deny BEFORE the
+	// allowedCallers/role checks. An envelope whose registryId does not match this
+	// agent's own registry is a cross-registry call — reject it. NetworkPolicy
+	// cannot enforce this under Knative (kourier fronts every A2A hop), so this is
+	// the authoritative check. A same-registry envelope falls through to the
+	// allowedCallers/role checks unchanged.
+	if env.RegistryID != g.cfg.RegistryID {
+		g.denyCrossRegistry(ctx, w, env.SenderAgentID, env.RegistryID)
+		return false
+	}
+
 	if allowed, reason := g.allowCaller(env); !allowed {
 		g.deny(ctx, w, env.SenderAgentID, reason)
 		return false
@@ -604,13 +636,16 @@ func (g *a2aGuard) enforceInbound(ctx context.Context, w http.ResponseWriter, r 
 // against an inbound envelope: (2) role — the sender's role must be a known
 // registry role; (3) per-agent allowedCallers — the sender must be on this
 // agent's allowlist when the allowlist is non-empty. It returns (false, reason)
-// on denial. Layer 1 (registry isolation) is NetworkPolicy, enforced below us.
+// on denial. Layer 1 (registry isolation) is enforced by enforceInbound BEFORE
+// this (app-layer registryId check — kourier defeats the per-registry
+// NetworkPolicy podSelector under Knative), so any envelope reaching here is
+// already known to be same-registry.
 func (g *a2aGuard) allowCaller(env *envelope) (bool, string) {
 	if !isKnownRole(env.Role) {
 		return false, fmt.Sprintf("sender role %q is not a valid registry role", env.Role)
 	}
-	// Empty allowlist ⇒ allow any in-registry caller (NetworkPolicy already
-	// scoped it to the registry).
+	// Empty allowlist ⇒ allow any same-registry caller (enforceInbound already
+	// rejected any cross-registry envelope app-layer before reaching here).
 	if len(g.cfg.AllowedCallers) == 0 {
 		return true, ""
 	}
@@ -630,6 +665,23 @@ func (g *a2aGuard) deny(ctx context.Context, w http.ResponseWriter, caller, reas
 	))
 	span.SetAttributes(attribute.String("a2a.error", errCallerNotAllowed))
 	writeA2AError(w, http.StatusForbidden, errCallerNotAllowed, reason)
+}
+
+// denyCrossRegistry writes the typed 403 cross_registry_denied (layer-1 isolation
+// enforced app-layer, not by NetworkPolicy — kourier defeats the per-registry
+// podSelector under Knative) and records a span event under the active
+// agent.invoke span, so the cross-registry deny is visible in the trace tree.
+// gotRegistryID is the foreign registryId the caller's envelope named.
+func (g *a2aGuard) denyCrossRegistry(ctx context.Context, w http.ResponseWriter, caller, gotRegistryID string) {
+	reason := fmt.Sprintf("caller %q is in registry %q, not %q", caller, gotRegistryID, g.cfg.RegistryID)
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("a2a.cross_registry_denied", trace.WithAttributes(
+		attribute.String("a2a.sender", caller),
+		attribute.String("a2a.caller.registry.id", gotRegistryID),
+		attribute.String("a2a.registry.id", g.cfg.RegistryID),
+	))
+	span.SetAttributes(attribute.String("a2a.error", errCrossRegistry))
+	writeA2AError(w, http.StatusForbidden, errCrossRegistry, reason)
 }
 
 // ── conversation-guard seam (m6.6) ──────────────────────────────────────────
