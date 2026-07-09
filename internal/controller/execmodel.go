@@ -591,8 +591,10 @@ func (r *AgentDeploymentReconciler) setEventingReady(
 		ObservedGeneration: deploy.Generation,
 	})
 
-	// The eventing agent's HTTP endpoint is its in-cluster Service.
-	deploy.Status.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local", deploy.Name, deploy.Namespace)
+	// The eventing agent's HTTP endpoint is its in-cluster Service, which is
+	// named <agent>-eventing (the bare <agent> name is the KEDA-targeted
+	// Deployment, and would collide with a Knative route Service).
+	deploy.Status.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local", eventingServiceName(deploy.Name), deploy.Namespace)
 	deploy.Status.LatestVersion = latestVersion
 	deploy.Status.ObservedGeneration = deploy.Generation
 	return r.Status().Update(ctx, deploy)
