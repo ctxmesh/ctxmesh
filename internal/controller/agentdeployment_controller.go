@@ -95,6 +95,26 @@ const (
 	objectStoreDevSecretKey = "agent-engine-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
 )
 
+const (
+	// litellmGatewayURL is the in-cluster address of the LiteLLM model gateway.
+	// It is the DEFAULT MODEL_GATEWAY_URL for an unbudgeted agent (the agent calls
+	// LiteLLM directly, the M2 path). For a BUDGETED agent (spec.budget set) the
+	// controller repoints MODEL_GATEWAY_URL at the launcher's local budget proxy
+	// (budgetProxyURL) and passes this address through as GATEWAY_UPSTREAM_URL so
+	// the proxy still forwards to LiteLLM after enforcing the cost cap.
+	litellmGatewayURL = "http://agent-engine-gateway.agent-engine-system.svc:4000"
+
+	// budgetProxyURL is where MODEL_GATEWAY_URL points when a budget is set: the
+	// launcher's OWN outbound gateway proxy (:2996, cmd/launcher/gateway.go). The
+	// proxy runs inside the same pod, so localhost. Its port must match
+	// defaultGatewayProxyPort in the launcher.
+	budgetProxyURL = "http://localhost:2996"
+
+	// envAgentName is the AGENT_NAME env var — the agent's identity, injected by
+	// the memory, registry, and budget paths (each guards against double-inject).
+	envAgentName = "AGENT_NAME"
+)
+
 // jobBackoffLimit bounds retries for a one-shot job-model agent. Kept small: a
 // job agent runs to completion; a handful of retries covers a transient
 // image-pull / node-eviction failure without wedging a poison run
@@ -445,11 +465,38 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// same name (consistent with the treatment of AGENT_PORT).
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
 	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
-	env = append(env, corev1.EnvVar{
-		Name:  "MODEL_GATEWAY_URL",
-		Value: "http://agent-engine-gateway.agent-engine-system.svc:4000",
-	})
+
+	// Cost budget (M8, specs/cost-governance.md): when spec.budget is set, the
+	// agent's LLM calls must flow through the launcher's in-pod budget proxy so it
+	// can enforce the cap BEFORE the provider is hit. So MODEL_GATEWAY_URL points
+	// at the proxy (localhost:2996), the real LiteLLM address travels as
+	// GATEWAY_UPSTREAM_URL, and the three budget knobs are injected as STATIC env
+	// (values known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine
+	// / tier1 no-valueFrom guard). Unbudgeted agents get the plain LiteLLM URL and
+	// no budget env, so their path is byte-for-byte the M2 behavior.
+	gatewayURL := litellmGatewayURL
+	if deploy.Spec.Budget != nil {
+		gatewayURL = budgetProxyURL
+		env = append(env,
+			corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL},
+			// Either cap may be empty (that dimension unenforced); softThreshold
+			// carries the CRD default (80) when unset because the field defaults
+			// server-side, but guard against a zero value defensively.
+			corev1.EnvVar{Name: "BUDGET_PER_CONVERSATION_USD", Value: deploy.Spec.Budget.PerConversationUSD},
+			corev1.EnvVar{Name: "BUDGET_PER_AGENT_USD", Value: deploy.Spec.Budget.PerAgentUSD},
+			corev1.EnvVar{Name: "BUDGET_SOFT_PCT", Value: strconv.Itoa(int(budgetSoftPct(deploy.Spec.Budget)))},
+		)
+	}
+	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
 	env = append(env, deploy.Spec.Env...)
+
+	// AGENT_NAME keys the per-agent spend in the budget proxy. A budgeted agent
+	// needs it even without a MemoryBinding or registry membership (those paths
+	// also inject it, guarded against double-injection). Inject once, user-
+	// override-wins, BEFORE the memory/registry blocks so they see it present.
+	if deploy.Spec.Budget != nil && !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
+		env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+	}
 
 	var resources corev1.ResourceRequirements
 	if deploy.Spec.Resources != nil {
@@ -503,11 +550,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// the backend lives, so no downward reference is needed.
 			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
 		)
-		// AGENT_NAME: inject only if not already present in spec.env (user
-		// override must win). The launcher uses AGENT_NAME for Valkey key
-		// composition and as the agent.invoke span attribute.
-		if !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
-			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		// AGENT_NAME: inject only if not already present. The launcher uses
+		// AGENT_NAME for Valkey key composition and as the agent.invoke span
+		// attribute. Check the ACCUMULATED env (the M8 budget block earlier may
+		// have already injected it for a budgeted agent) AND spec.env (user
+		// override must win) so a memory+budget agent gets AGENT_NAME exactly once
+		// — a duplicate container env var is invalid.
+		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
+			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
 		}
 	}
 
@@ -545,8 +595,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
 		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
 		// once, and a member without memory still gets it (the A2A path needs it).
-		if !envVarPresent(env, "AGENT_NAME") && !envVarPresent(deploy.Spec.Env, "AGENT_NAME") {
-			env = append(env, corev1.EnvVar{Name: "AGENT_NAME", Value: deploy.Name})
+		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
+			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
 		}
 		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
 		// launcher stamps it into the envelope role field.
@@ -657,7 +707,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// when OBJECT_STORE_ADDR + the creds appear/disappear. If the store address
 	// ever becomes per-agent it must fold into registryMembershipDigest.
 	regDigest := registryMembershipDigest(membership, deploy.Spec.Role, deploy.Spec.AllowedCallers)
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest)
+	// Cost budget (M8): a budget add/remove/change repoints MODEL_GATEWAY_URL and
+	// injects/removes the BUDGET_* env — a STRUCTURAL change that must roll the
+	// revision, so it folds into the combined digest like the other components.
+	budgetDig := budgetDigest(deploy.Spec.Budget)
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -959,23 +1013,24 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // revision name 10 chars per type and blows the 63-char DNS-1035 label limit
 // for admission-valid agent names; one combined digest bounds the total suffix
 // at 19 chars forever (see the revision-name comment in reconcileKnativeService).
-// New structural inputs (M6 registry membership) fold in HERE, extending the
-// hashed framing — they never add a new suffix.
+// New structural inputs (M6 registry membership, M8 cost budget) fold in HERE,
+// extending the hashed framing — they never add a new suffix.
 //
 // Properties:
 //   - "" when NO structural input of any type resolves (bare pre-M4 revision name).
 //   - Changes when ANY component changes (each component is embedded whole).
 //   - Cannot collide across presence combinations: components are hex-only
-//     (never contain '=' or ';'), so the "b=<x>;m=<y>;r=<z>" framing is
+//     (never contain '=' or ';'), so the "b=<x>;m=<y>;r=<z>;g=<w>" framing is
 //     unambiguous — every presence combination hashes a distinct string.
 //   - Deterministic: fixed field order, deterministic component derivations
 //     (tool digest sorts by binding name; memory digest hashes the resolved addr;
-//     registry digest hashes the resolved registryId + role + allowedCallers).
-func combinedBindingDigest(toolDigest, memDigest, regDigest string) string {
-	if toolDigest == "" && memDigest == "" && regDigest == "" {
+//     registry digest hashes the resolved registryId + role + allowedCallers;
+//     budget digest hashes the caps + soft percentage).
+func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest string) string {
+	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" {
 		return ""
 	}
-	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest))
+	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest + ";g=" + budgetDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -1001,6 +1056,36 @@ func registryMembershipDigest(m registryMembership, role string, allowedCallers 
 	}
 	payload := fmt.Sprintf("id=%s;depth=%d;budget=%d;role=%s;callers=%s",
 		m.RegistryID, m.MaxDepth, m.HopBudget, role, strings.Join(allowedCallers, ","))
+	h := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// budgetSoftPct returns the soft-threshold percentage to inject, defaulting to
+// 80 (the CRD default) when the field is zero. The CRD applies the default
+// server-side on create, but a client-side build (envtest, direct construction)
+// may leave it 0; defaulting here keeps the injected BUDGET_SOFT_PCT sane in
+// every path.
+func budgetSoftPct(b *agentsv1alpha1.BudgetSpec) int32 {
+	if b == nil || b.SoftThresholdPct == 0 {
+		return 80
+	}
+	return b.SoftThresholdPct
+}
+
+// budgetDigest returns a short hash capturing the agent's cost budget as it
+// affects the pod template: whether a budget is set, the two caps, and the soft
+// percentage (all → injected env + MODEL_GATEWAY_URL repointing). It is one
+// COMPONENT of combinedBindingDigest so a budget add/remove/change rolls a new
+// revision — the env/URL change must actually land, and the CreateOrUpdate guard
+// skips re-applying the spec when the revision name is unchanged (the M4
+// silent-loss landmine). Returns "" when no budget is set (symmetric with the
+// tool/memory/registry components).
+func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
+	if b == nil {
+		return ""
+	}
+	payload := fmt.Sprintf("conv=%s;agent=%s;soft=%d",
+		b.PerConversationUSD, b.PerAgentUSD, budgetSoftPct(b))
 	h := sha256.Sum256([]byte(payload))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
