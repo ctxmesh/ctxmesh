@@ -269,6 +269,15 @@ spec:
                       - name
                       type: object
                     type: array
+                  evalSuiteRef:
+                    description: |-
+                      evalSuiteRef optionally names an EvalSuite (same namespace) whose scorers
+                      gate this deployment. When set, the controller runs the suite against the
+                      candidate revision and promotes or blocks based on the result and the suite's
+                      gate policy. When omitted, no eval gate is applied — the deploy proceeds
+                      unchanged (PRD §17).
+                    maxLength: 253
+                    type: string
                   executionModel:
                     default: serving
                     description: |-
@@ -300,6 +309,14 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  promptRef:
+                    description: |-
+                      promptRef optionally names a PromptVersion (same namespace) whose git-backed
+                      prompt is injected into the agent. Swapping promptRef rolls a new Knative
+                      revision with the new prompt without an image rebuild. When omitted, the
+                      image-bundled prompt is used (PRD §7).
+                    maxLength: 253
+                    type: string
                   resources:
                     description: |-
                       resources optionally constrains the CPU and memory available to the agent

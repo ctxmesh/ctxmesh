@@ -30,7 +30,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// knownFields is the set of top-level agent.yaml fields supported in M2+M8.
+// knownFields is the set of top-level agent.yaml fields supported in M2+M8+M9.
 var knownFields = map[string]bool{
 	"name":           true,
 	"image":          true,
@@ -39,6 +39,8 @@ var knownFields = map[string]bool{
 	"scaling":        true,
 	"model":          true,
 	"budget":         true,
+	"eval":           true,
+	"prompt":         true,
 }
 
 // futureField describes a top-level field not yet supported, with the milestone
@@ -50,7 +52,6 @@ type futureField struct {
 // futureFields is the set of recognised-but-not-yet-supported top-level fields.
 // Fields not in knownFields and not in futureFields are fully unknown → hard error.
 var futureFields = map[string]futureField{
-	"prompt":   {milestone: "M9"},
 	"tools":    {milestone: "M4"},
 	"memory":   {milestone: "M5"},
 	"registry": {milestone: "M6"},
@@ -58,7 +59,7 @@ var futureFields = map[string]futureField{
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
-// agentYAML is the M2+M8 subset of the simplified PRD §8.5 agent.yaml format.
+// agentYAML is the M2+M8+M9 subset of the simplified PRD §8.5 agent.yaml format.
 type agentYAML struct {
 	Name           string         `yaml:"name"`
 	Image          string         `yaml:"image"`
@@ -67,6 +68,8 @@ type agentYAML struct {
 	Scaling        *scalingYAML   `yaml:"scaling"`
 	Model          *modelYAML     `yaml:"model"`
 	Budget         *budgetYAML    `yaml:"budget"`
+	Eval           *evalYAML      `yaml:"eval"`
+	Prompt         *promptYAML    `yaml:"prompt"`
 }
 
 // budgetYAML holds optional cost-governance caps from the agent.yaml budget block.
@@ -76,6 +79,44 @@ type budgetYAML struct {
 	PerConversationUSD *float64 `yaml:"perConversationUSD"`
 	PerAgentUSD        *float64 `yaml:"perAgentUSD"`
 	SoftThresholdPct   *int32   `yaml:"softThresholdPct"`
+}
+
+// evalYAML holds the optional eval gate configuration from the agent.yaml eval
+// block. It maps to an EvalSuite CRD + AgentDeployment.spec.evalSuiteRef.
+type evalYAML struct {
+	// suite is the name of the EvalSuite resource in the same namespace.
+	Suite string `yaml:"suite"`
+	// dataset is the named dataset ref (maps to EvalSuite.spec.dataset.ref).
+	Dataset string `yaml:"dataset"`
+	// scorers is the list of scorers to include in the generated EvalSuite.
+	Scorers []scorerYAML `yaml:"scorers"`
+	// threshold is the pass threshold (0..1 decimal string).
+	Threshold string `yaml:"threshold"`
+	// gate is "block" or "warn". Defaults to "block" when absent.
+	Gate string `yaml:"gate"`
+}
+
+// scorerYAML is one scorer entry in the agent.yaml eval.scorers list.
+type scorerYAML struct {
+	Name   string `yaml:"name"`
+	Type   string `yaml:"type"`
+	Weight *int32 `yaml:"weight"`
+}
+
+// promptYAML holds the optional prompt-version configuration from the agent.yaml
+// prompt block. It maps to a PromptVersion CRD + AgentDeployment.spec.promptRef.
+type promptYAML struct {
+	// name is the name of the PromptVersion resource to create/reference.
+	Name string `yaml:"name"`
+	// git holds the git-backed prompt source fields.
+	Git gitPromptYAML `yaml:"git"`
+}
+
+// gitPromptYAML mirrors PromptVersion.spec.git for agent.yaml parsing.
+type gitPromptYAML struct {
+	Repo string `yaml:"repo"`
+	Ref  string `yaml:"ref"`
+	Path string `yaml:"path"`
 }
 
 // resourcesYAML holds optional resource requests for the agent container.
@@ -107,7 +148,57 @@ type agentDeploymentOut struct {
 	Spec       specOut `yaml:"spec"`
 }
 
-// metaOut holds the name for the expanded AgentDeployment.
+// evalSuiteOut is a lightweight representation of an EvalSuite manifest for
+// YAML output.
+type evalSuiteOut struct {
+	APIVersion string        `yaml:"apiVersion"`
+	Kind       string        `yaml:"kind"`
+	Metadata   metaOut       `yaml:"metadata"`
+	Spec       evalSuiteSpec `yaml:"spec"`
+}
+
+// evalSuiteSpec mirrors EvalSuiteSpec for YAML marshalling.
+type evalSuiteSpec struct {
+	Dataset   datasetRefOut `yaml:"dataset"`
+	Scorers   []scorerOut   `yaml:"scorers"`
+	Threshold string        `yaml:"threshold"`
+	Gate      string        `yaml:"gate,omitempty"`
+}
+
+// datasetRefOut mirrors DatasetRef for YAML marshalling.
+type datasetRefOut struct {
+	Ref string `yaml:"ref"`
+}
+
+// scorerOut mirrors ScorerSpec for YAML marshalling.
+type scorerOut struct {
+	Name   string `yaml:"name"`
+	Type   string `yaml:"type"`
+	Weight int32  `yaml:"weight,omitempty"`
+}
+
+// promptVersionOut is a lightweight representation of a PromptVersion manifest
+// for YAML output.
+type promptVersionOut struct {
+	APIVersion string            `yaml:"apiVersion"`
+	Kind       string            `yaml:"kind"`
+	Metadata   metaOut           `yaml:"metadata"`
+	Spec       promptVersionSpec `yaml:"spec"`
+}
+
+// promptVersionSpec mirrors PromptVersionSpec for YAML marshalling.
+type promptVersionSpec struct {
+	Git gitPromptOut `yaml:"git"`
+}
+
+// gitPromptOut mirrors GitPromptSource for YAML marshalling.
+type gitPromptOut struct {
+	Repo string `yaml:"repo"`
+	Ref  string `yaml:"ref"`
+	Path string `yaml:"path"`
+}
+
+// metaOut holds the name for an expanded manifest.
 type metaOut struct {
 	Name string `yaml:"name"`
 }
@@ -120,6 +211,8 @@ type specOut struct {
 	Scaling        *scalingOut   `yaml:"scaling,omitempty"`
 	Env            []envVarOut   `yaml:"env,omitempty"`
 	Budget         *budgetOut    `yaml:"budget,omitempty"`
+	EvalSuiteRef   string        `yaml:"evalSuiteRef,omitempty"`
+	PromptRef      string        `yaml:"promptRef,omitempty"`
 }
 
 // budgetOut mirrors BudgetSpec for YAML marshalling.
@@ -158,6 +251,9 @@ const (
 	exitParse      = 2 // file-not-found or YAML syntax error
 )
 
+// apiVersion is the group/version for all agent-engine CRD manifests.
+const apiVersion = "agents.ctxmesh.ai/v1alpha1"
+
 // expandError wraps an error with a suggested exit code.
 type expandError struct {
 	code int
@@ -181,12 +277,16 @@ func newExpandCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "expand <file>",
 		Short: "Expand a simplified agent.yaml to an AgentDeployment CRD manifest",
-		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2+M8 subset) and prints
-the fully-expanded AgentDeployment YAML to stdout.
+		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2+M8+M9 subset) and prints
+the fully-expanded YAML manifests to stdout.
 
-Supported fields: name, image, executionModel, resources, scaling, model.route, budget
+Supported fields: name, image, executionModel, resources, scaling, model.route, budget, eval, prompt
+When eval: is present an EvalSuite manifest is emitted first, followed by the
+AgentDeployment with spec.evalSuiteRef set. When prompt: is present a PromptVersion
+manifest is emitted, followed by the AgentDeployment with spec.promptRef set.
+Multiple documents are separated by "---".
 Unknown fields cause a hard error. Fields that land in later milestones
-(prompt, tools, memory, registry) are rejected with an informative message.
+(tools, memory, registry) are rejected with an informative message.
 
 Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error`,
 		Args: cobra.ExactArgs(1),
@@ -222,8 +322,10 @@ func runExpand(path string, w io.Writer) error {
 	return expandBytes(data, w)
 }
 
-// expandBytes parses rawYAML and writes the expanded AgentDeployment to w.
-// It is split out for testability.
+// expandBytes parses rawYAML and writes the expanded manifests to w.
+// When eval: and/or prompt: are present, additional EvalSuite/PromptVersion
+// manifests are emitted as YAML documents separated by "---" before the
+// AgentDeployment. It is split out for testability.
 func expandBytes(rawYAML []byte, w io.Writer) error {
 	// Phase 1: parse into a raw map to validate field names before type coercion.
 	var raw map[string]any
@@ -248,8 +350,71 @@ func expandBytes(rawYAML []byte, w io.Writer) error {
 		return validationErr("required field missing: image")
 	}
 
-	// Phase 4: build and emit the AgentDeployment manifest.
+	// Phase 4: validate eval/prompt sub-fields when present.
+	if ay.Eval != nil {
+		if err := validateEvalYAML(ay.Eval); err != nil {
+			return err
+		}
+	}
+	if ay.Prompt != nil {
+		if err := validatePromptYAML(ay.Prompt); err != nil {
+			return err
+		}
+	}
+
+	// Phase 5: build and emit manifests. Additional CRD manifests come first,
+	// then the AgentDeployment. Each document is separated by "---\n".
+	if ay.Eval != nil {
+		if err := marshalYAML(w, buildEvalSuiteOutput(ay.Eval)); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprint(w, "---\n"); err != nil {
+			return fmt.Errorf("writing YAML separator: %w", err)
+		}
+	}
+	if ay.Prompt != nil {
+		if err := marshalYAML(w, buildPromptVersionOutput(ay.Prompt)); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprint(w, "---\n"); err != nil {
+			return fmt.Errorf("writing YAML separator: %w", err)
+		}
+	}
 	return marshalYAML(w, buildOutput(&ay))
+}
+
+// validateEvalYAML checks that required sub-fields of the eval block are present.
+func validateEvalYAML(e *evalYAML) error {
+	if e.Suite == "" {
+		return validationErr("eval.suite is required when eval block is present")
+	}
+	if e.Dataset == "" {
+		return validationErr("eval.dataset is required when eval block is present")
+	}
+	if len(e.Scorers) == 0 {
+		return validationErr("eval.scorers must have at least one entry")
+	}
+	if e.Threshold == "" {
+		return validationErr("eval.threshold is required when eval block is present")
+	}
+	return nil
+}
+
+// validatePromptYAML checks that required sub-fields of the prompt block are present.
+func validatePromptYAML(p *promptYAML) error {
+	if p.Name == "" {
+		return validationErr("prompt.name is required when prompt block is present")
+	}
+	if p.Git.Repo == "" {
+		return validationErr("prompt.git.repo is required when prompt block is present")
+	}
+	if p.Git.Ref == "" {
+		return validationErr("prompt.git.ref is required when prompt block is present")
+	}
+	if p.Git.Path == "" {
+		return validationErr("prompt.git.path is required when prompt block is present")
+	}
+	return nil
 }
 
 // checkFields validates that every top-level key in raw is either a known
@@ -350,11 +515,72 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 		spec.Budget = bo
 	}
 
+	// eval → spec.evalSuiteRef: the EvalSuite resource name (same namespace).
+	// Absent eval block → evalSuiteRef stays empty (no gate).
+	if ay.Eval != nil {
+		spec.EvalSuiteRef = ay.Eval.Suite
+	}
+
+	// prompt → spec.promptRef: the PromptVersion resource name (same namespace).
+	// Absent prompt block → promptRef stays empty (image-bundled prompt).
+	if ay.Prompt != nil {
+		spec.PromptRef = ay.Prompt.Name
+	}
+
 	return &agentDeploymentOut{
-		APIVersion: "agents.ctxmesh.ai/v1alpha1",
+		APIVersion: apiVersion,
 		Kind:       "AgentDeployment",
 		Metadata:   metaOut{Name: ay.Name},
 		Spec:       spec,
+	}
+}
+
+// buildEvalSuiteOutput converts a parsed evalYAML into an EvalSuite manifest.
+func buildEvalSuiteOutput(e *evalYAML) *evalSuiteOut {
+	scorers := make([]scorerOut, 0, len(e.Scorers))
+	for _, s := range e.Scorers {
+		so := scorerOut{
+			Name: s.Name,
+			Type: s.Type,
+		}
+		if s.Weight != nil {
+			so.Weight = *s.Weight
+		}
+		// Weight 0 → omitted (CRD default 1 applies via +kubebuilder:default=1).
+		scorers = append(scorers, so)
+	}
+
+	gate := e.Gate
+	if gate == "" {
+		gate = "block" // CRD default
+	}
+
+	return &evalSuiteOut{
+		APIVersion: apiVersion,
+		Kind:       "EvalSuite",
+		Metadata:   metaOut{Name: e.Suite},
+		Spec: evalSuiteSpec{
+			Dataset:   datasetRefOut{Ref: e.Dataset},
+			Scorers:   scorers,
+			Threshold: e.Threshold,
+			Gate:      gate,
+		},
+	}
+}
+
+// buildPromptVersionOutput converts a parsed promptYAML into a PromptVersion manifest.
+func buildPromptVersionOutput(p *promptYAML) *promptVersionOut {
+	return &promptVersionOut{
+		APIVersion: apiVersion,
+		Kind:       "PromptVersion",
+		Metadata:   metaOut{Name: p.Name},
+		Spec: promptVersionSpec{
+			Git: gitPromptOut{
+				Repo: p.Git.Repo,
+				Ref:  p.Git.Ref,
+				Path: p.Git.Path,
+			},
+		},
 	}
 }
 
