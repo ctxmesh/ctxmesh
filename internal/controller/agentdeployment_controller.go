@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/eval"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/telemetry"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
@@ -115,6 +118,33 @@ const (
 	envAgentName = "AGENT_NAME"
 )
 
+// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
+// listener is started by the launcher when these env vars are injected. All
+// values are known at reconcile time → STATIC env, NEVER valueFrom (Knative
+// ksvc webhook rejects valueFrom; the m5.7 landmine + tier1 no-valueFrom guard).
+const (
+	// langfuseHost is the in-cluster Langfuse base URL. The feedback hook POSTs
+	// scores to <langfuseHost>/api/public/scores. Reuses the dev Langfuse wired
+	// by `make -C harness dev-up M=3` (same host as the M3 OTel collector exporter).
+	langfuseHost = "http://langfuse-web.langfuse.svc:3000"
+
+	// langfuseDevPublicKey / langfuseDevSecretKey are the DETERMINISTIC DEV-ONLY
+	// Langfuse API credentials — fixed values committed as such (identical posture
+	// to the dev MinIO OBJECT_STORE_ACCESS_KEY / objectStoreDevAccessKey). They
+	// MUST match the public/secret key seeded by `dev-up M=3` into the
+	// langfuse-otlp Secret (and into the Langfuse Helm chart's initialApiKey
+	// block). NOT a real credential — never rotated, only ever meaningful against
+	// the in-cluster dev Langfuse. Injected as STATIC env (no valueFrom) so the
+	// launcher's feedback hook can authenticate to the dev scores API.
+	langfuseDevPublicKey = "pk-lf-dev-00000000000000000000000000000000"
+	langfuseDevSecretKey = "sk-lf-dev-00000000000000000000000000000000" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+
+	// feedbackPort is the localhost port the launcher's feedback hook binds. Must
+	// match defaultFeedbackPort in cmd/launcher/feedback.go. Reserved per
+	// specs/agent-mesh.md; must NOT be :2996/:2997/:2998/:2999.
+	feedbackPort = "2995"
+)
+
 // jobBackoffLimit bounds retries for a one-shot job-model agent. Kept small: a
 // job agent runs to completion; a handful of retries covers a transient
 // image-pull / node-eviction failure without wedging a poison run
@@ -137,6 +167,28 @@ const jobBackoffLimit int32 = 2
 type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// PromptResolver resolves a PromptVersion git pointer (repo, ref, path) into
+	// prompt content for the prompt-only-deploy path (M9). It is the mock⇄real
+	// seam: production wires a real (e.g. go-git) resolver; dev / envtest / e2e
+	// leave it nil and the reconciler defaults to the deterministic, OFFLINE
+	// fixture resolver (prompt.NewFixtureResolver) — no network in CI (ADR 0004).
+	PromptResolver prompt.Resolver
+
+	// EvalTracer emits the eval.gate span for the deploy-gate decision (M9). Left
+	// nil in dev / envtest / e2e (the controller has no live OTel export wired —
+	// the launcher owns runtime spans), where the gate defaults to a no-op tracer
+	// so the decision path is exercised OFFLINE; a production build injects a real
+	// tracer here to land eval.gate in the trace tree. Mirrors the PromptResolver
+	// seam.
+	EvalTracer trace.Tracer
+
+	// ScorerFactory builds the Scorer for an EvalSuite scorer (type, name) — the
+	// mock⇄Langfuse seam for the deploy gate (M9). Left nil in production and dev
+	// (it defaults to eval.ScorerFor: the deterministic mock, Langfuse-unavailable
+	// for llm-judge/code offline); envtest/e2e inject a seeded factory to drive a
+	// candidate deliberately above/below threshold and exercise the state machine.
+	ScorerFactory func(scorerType, name string) (eval.Scorer, error)
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -144,6 +196,8 @@ type AgentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=promptversions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -194,13 +248,35 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// other kinds — a different object, not a ksvc revision roll — so each branch
 	// tears down the workloads the other branches own before writing its own.
 	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
+	result, err := r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
+
+	// Prompt-only deploy (M9): a promptResolveError is USER input (missing
+	// PromptVersion / unresolvable git ref/path), surfaced from buildPodTemplate
+	// BEFORE any workload write (the ksvc CreateOrUpdate is never reached, so the
+	// OLD revision keeps serving — no half-applied prompt swap). Report it on
+	// status as Ready=False and STOP cleanly (no requeue on user input), rather
+	// than returning a hard reconcile error that would log-spam and back off.
+	if pe, ok := asPromptResolveError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, pe.reason, pe.msg)
+	}
+	return result, err
+}
+
+// reconcileWorkload dispatches to the per-execution-model reconciler. It exists
+// so Reconcile can intercept a prompt-resolution user error (M9) uniformly across
+// all three models before returning.
+func (r *AgentDeploymentReconciler) reconcileWorkload(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	model, hash, versionName string,
+) (ctrl.Result, error) {
 	switch model {
 	case execModelEventing:
-		return r.reconcileEventing(ctx, &deploy, hash, versionName)
+		return r.reconcileEventing(ctx, deploy, hash, versionName)
 	case execModelJob:
-		return r.reconcileJob(ctx, &deploy, versionName)
+		return r.reconcileJob(ctx, deploy, versionName)
 	default: // execModelServing
-		return r.reconcileServing(ctx, &deploy, hash, versionName)
+		return r.reconcileServing(ctx, deploy, hash, versionName)
 	}
 }
 
@@ -233,6 +309,37 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return ctrl.Result{}, err
 	}
 
+	// Deploy gate (M9): when the agent references an EvalSuite, score the CANDIDATE
+	// revision and decide before any ksvc write. The gate HOLDS the rollout by
+	// gating the ksvc apply: on `blocked` (below threshold, gate:block) or
+	// `awaiting-promotion` (passing but not yet human-approved) the candidate is NOT
+	// applied — on a FIRST deploy nothing goes live; on an UPDATE the existing ksvc
+	// (the previous revision) is left untouched, so the previous revision keeps
+	// serving. Only `promoted`/`warned` proceed to the ksvc CreateOrUpdate. This is
+	// the scorer-agnostic mechanism: block-then-promote never overbuilds Knative
+	// traffic-splitting — a held candidate is simply never written.
+	candidateRev, err := r.candidateRevisionName(ctx, deploy, hash)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
+	if err != nil {
+		// A missing/invalid EvalSuite is USER input (surfaced from evaluateGate as an
+		// evalGateError): report Ready=False and STOP cleanly (the old revision keeps
+		// serving), rather than returning a hard reconcile error that log-spams.
+		if ge, ok := asEvalGateError(err); ok {
+			return r.setGateBlockedStatus(ctx, deploy, ge.reason, ge.Error())
+		}
+		return ctrl.Result{}, fmt.Errorf("evaluating deploy gate: %w", err)
+	}
+	if outcome != nil && !outcome.promote {
+		// Gate held the rollout (blocked or awaiting-promotion): do NOT apply the
+		// candidate ksvc. Record the gate status and stop — the previous revision (if
+		// any) keeps serving. A later re-reconcile (spec change, or the human-approval
+		// annotation) re-evaluates and promotes.
+		return r.recordHeldGate(ctx, deploy, versionName, outcome)
+	}
+
 	ksvc, err := r.reconcileKnativeService(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
@@ -240,7 +347,36 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	if err = r.syncStatus(ctx, deploy, ksvc, versionName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
 	}
+	// Promoted/warned: record the terminal gate status (+ annotations) alongside the
+	// applied workload. A gated agent that reaches here has an outcome; an ungated
+	// agent (outcome == nil) leaves status.gate nil, byte-compatible with pre-M9.
+	if outcome != nil {
+		if err = r.recordPromotedGate(ctx, deploy, outcome); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording gate status: %w", err)
+		}
+	}
 	return ctrl.Result{}, nil
+}
+
+// candidateRevisionName computes the Knative revision name the candidate WOULD
+// serve — "<name>-<specHash>" plus, when a binding/membership/prompt resolves,
+// "-h<digest8>". It builds the pod template (idempotent — the same call
+// reconcileKnativeService makes) to derive the digest so the gate scores and pins
+// the EXACT candidate the ksvc would create.
+func (r *AgentDeploymentReconciler) candidateRevisionName(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	hash string,
+) (string, error) {
+	pod, err := r.buildPodTemplate(ctx, deploy)
+	if err != nil {
+		return "", fmt.Errorf("building pod template for candidate revision: %w", err)
+	}
+	revName := deploy.Name + "-" + hash
+	if pod.digest != "" {
+		revName = revName + "-h" + pod.digest
+	}
+	return revName, nil
 }
 
 // reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
@@ -488,6 +624,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		)
 	}
 	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
+
+	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher
+	// starts the :2995 endpoint when LANGFUSE_HOST is present. The host, dev
+	// credentials, and port are STATIC env (values known at reconcile time — NEVER
+	// valueFrom, the m5.7 Knative ksvc landmine; tier1 no-valueFrom guard asserts
+	// this). The dev creds match those seeded by `dev-up M=3` into the
+	// langfuse-otlp Secret and the Langfuse Helm chart. Injected unconditionally:
+	// feedback is always available to the launcher; it is a thin relay, no CRD
+	// surface in v1 (the FeedbackStore CRD is phase 2).
+	env = append(env,
+		corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
+		corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
+		corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
+		corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
+	)
+
 	env = append(env, deploy.Spec.Env...)
 
 	// AGENT_NAME keys the per-agent spend in the budget proxy. A budgeted agent
@@ -514,6 +666,36 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
 	if err != nil {
 		return podTemplate{}, err
+	}
+
+	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
+	// PromptVersion's git pointer → prompt content, materialise it into the
+	// <agent>-prompt ConfigMap, mount it read-only into the user container, and
+	// inject PROMPT_FILE + PROMPT_VERSION as STATIC env (no valueFrom — the m5.7
+	// Knative ksvc landmine). The prompt folds into the combined binding digest
+	// (promptDig below) so a prompt swap rolls a NEW revision while the container
+	// IMAGE (spec.Image, set on the user container, never touched here) keeps an
+	// UNCHANGED digest — the prompt-only-deploy invariant. A missing PromptVersion
+	// or an unresolvable git ref/path is USER input: resolvePrompt returns a
+	// promptResolveError, propagated so the caller sets Ready=False and the old
+	// revision keeps serving (no half-applied swap). Absent promptRef → the
+	// image-bundled prompt is used and this is byte-compatible with the pre-M9 path.
+	rp, err := r.resolvePrompt(ctx, deploy)
+	if err != nil {
+		return podTemplate{}, err
+	}
+	promptVol, promptMount, promptEnv, err := r.reconcilePromptConfigMap(ctx, deploy, rp)
+	if err != nil {
+		return podTemplate{}, err
+	}
+	// Append the platform prompt env (PROMPT_FILE / PROMPT_VERSION) only for names
+	// the operator has NOT already set in spec.env — a duplicate container env var
+	// name is invalid, and a deliberate user override must win (consistent with the
+	// AGENT_PORT / AGENT_NAME treatment).
+	for _, e := range promptEnv {
+		if !envVarPresent(deploy.Spec.Env, e.Name) {
+			env = append(env, e)
+		}
 	}
 
 	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
@@ -633,6 +815,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		)
 	}
 
+	// The user container's volume mounts: the resolved-prompt file (M9) when the
+	// agent has a promptRef, else none. nil is a valid empty mount list.
+	var userMounts []corev1.VolumeMount
+	if promptMount != nil {
+		userMounts = append(userMounts, *promptMount)
+	}
+
 	containers := []corev1.Container{
 		{
 			// Named explicitly: multi-container Knative pods require
@@ -643,8 +832,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			Ports: []corev1.ContainerPort{
 				{ContainerPort: port},
 			},
-			Env:       env,
-			Resources: resources,
+			Env:          env,
+			Resources:    resources,
+			VolumeMounts: userMounts,
 			ReadinessProbe: &corev1.Probe{
 				// SuccessThreshold=1 explicitly: Knative defaults it on
 				// create and rejects a re-applied 0 (must be >= 1).
@@ -669,6 +859,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		collector,
 	}
 	volumes := []corev1.Volume{collectorVol}
+	if promptVol != nil {
+		// Prompt-only deploy (M9): the resolved-prompt ConfigMap volume, mounted
+		// read-only into the user container above. Added to the pod's volumes so the
+		// mount resolves. No image change — this is a pod-VOLUME + config-revision
+		// change only.
+		volumes = append(volumes, *promptVol)
+	}
 
 	if hasBindings {
 		containers = append(containers, discoverySidecarContainer())
@@ -711,7 +908,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// injects/removes the BUDGET_* env — a STRUCTURAL change that must roll the
 	// revision, so it folds into the combined digest like the other components.
 	budgetDig := budgetDigest(deploy.Spec.Budget)
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig)
+	// Prompt-only deploy (M9): the resolved prompt (pointer + content, via its
+	// version) folds in as a new component like the budget (g=<w>). A promptRef
+	// swap OR a PromptVersion.spec.git.ref swap changes rp.digest → a new combined
+	// "-h" suffix → a NEW Knative revision (clean rollout, new prompt takes effect),
+	// while the container IMAGE (spec.Image on the user container) is untouched — so
+	// the image digest stays IDENTICAL across a prompt swap. "" when no promptRef,
+	// symmetric with the other components (byte-compatible pre-M9 revision name).
+	promptDig := rp.digest
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1013,24 +1218,31 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // revision name 10 chars per type and blows the 63-char DNS-1035 label limit
 // for admission-valid agent names; one combined digest bounds the total suffix
 // at 19 chars forever (see the revision-name comment in reconcileKnativeService).
-// New structural inputs (M6 registry membership, M8 cost budget) fold in HERE,
-// extending the hashed framing — they never add a new suffix.
+// New structural inputs (M6 registry membership, M8 cost budget, M9 prompt) fold
+// in HERE, extending the hashed framing — they never add a new suffix.
 //
 // Properties:
 //   - "" when NO structural input of any type resolves (bare pre-M4 revision name).
 //   - Changes when ANY component changes (each component is embedded whole).
 //   - Cannot collide across presence combinations: components are hex-only
-//     (never contain '=' or ';'), so the "b=<x>;m=<y>;r=<z>;g=<w>" framing is
+//     (never contain '=' or ';'), so the "b=<x>;m=<y>;r=<z>;g=<w>;p=<v>" framing is
 //     unambiguous — every presence combination hashes a distinct string.
 //   - Deterministic: fixed field order, deterministic component derivations
 //     (tool digest sorts by binding name; memory digest hashes the resolved addr;
 //     registry digest hashes the resolved registryId + role + allowedCallers;
-//     budget digest hashes the caps + soft percentage).
-func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest string) string {
-	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" {
+//     budget digest hashes the caps + soft percentage; prompt digest hashes the
+//     git pointer + the resolved prompt version).
+//
+// The prompt component (M9) is what makes a prompt-only deploy roll a new Knative
+// revision WITHOUT an image rebuild: a promptRef/ref swap changes promptDigest →
+// a new combined suffix → a new revision, while spec.Image (the user container's
+// image) is untouched → the image digest is unchanged.
+func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest string) string {
+	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" {
 		return ""
 	}
-	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest + ";g=" + budgetDigest))
+	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
+		";g=" + budgetDigest + ";p=" + promptDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
