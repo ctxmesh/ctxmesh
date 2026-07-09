@@ -75,9 +75,14 @@ import (
 
 const (
 	// defaultA2APort is the localhost port the outbound A2A listener binds when
-	// A2A_PORT is unset. Injected by the controller as A2A_PORT=2999 (sibling of
-	// the :2998 memory endpoint).
-	defaultA2APort = 2999
+	// A2A_PORT is unset. The launcher-local ports are :2998 memory, :2999 the
+	// MCP discovery sidecar (internal/controller/toolinject.go discoveryPort;
+	// injected whenever the agent has tool bindings, orthogonal to registry
+	// membership) — so A2A takes :2997. A registry member that ALSO has tool
+	// bindings (a mesh orchestrator with tools) shares one pod netns with the
+	// sidecar; binding :2999 would EADDRINUSE and fail silently on the
+	// best-effort listener path, so A2A must not collide with the sidecar.
+	defaultA2APort = 2997
 
 	// a2aDialTimeout bounds the TCP dial to a peer. A cross-registry target is
 	// refused at the NetworkPolicy layer (connection refused / timeout); this
@@ -127,7 +132,7 @@ type a2aConfig struct {
 	// envelope. Empty ⇒ the outbound listener is not started at all (the agent
 	// is not a registry member) and inbound access control is a no-op.
 	RegistryID string
-	// Port is A2A_PORT (default 2999).
+	// Port is A2A_PORT (default 2997).
 	Port int
 	// SelfName is this agent's name (AGENT_NAME) — the senderAgentId it stamps
 	// and the identity it appends to the envelope path.
@@ -158,7 +163,7 @@ func (c Config) A2AEnabled() bool {
 //	AGENT_REGISTRY_ID (gate): the resolved registry id. Empty ⇒ the /a2a
 //	  listener is NOT started and inbound access control is inert — every other
 //	  A2A env is then irrelevant.
-//	A2A_PORT (optional): outbound listener port (default 2999).
+//	A2A_PORT (optional): outbound listener port (default 2997).
 //	AGENT_NAME: this agent's name (senderAgentId / path identity). Reused from
 //	  the shared launcher config.
 //	AGENT_ROLE (optional): this agent's registry role.
