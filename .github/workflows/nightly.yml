@@ -125,3 +125,16 @@ jobs:
         # (controller injects no EvalTracer) — asserted on status.gate instead.
         # specs/eval-prompts-feedback.md, ADR 0008.
         run: make -C agent-brain/harness tier2 SLICE=m9-eval
+      - name: M10 Python SDK e2e (no-framework loop → step→tool→model tree in Langfuse)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
+        # Deploys the no-framework sdk-custom-agent (uses the ctxmesh SDK's
+        # step-tracing helpers) + the word-count MCP tool + mock gateway. Asserts
+        # the full M10 🧪 in Langfuse: one trace rooted at agent.invoke →
+        # sdk-custom-agent (AGENT) → plan (CHAIN)→chat (GENERATION), word-count
+        # (TOOL, real MCP word_count result), answer (CHAIN)→chat (GENERATION) —
+        # a custom loop getting the SAME deep tree a framework agent gets SDK-free.
+        # Guard 0 rebuilds base-python from tip so the pod runs the SDK with the
+        # 307-follow fix (tools.call reaches FastMCP /mcp/). specs/python-sdk.md.
+        run: make -C agent-brain/harness tier2 SLICE=m10-sdk
