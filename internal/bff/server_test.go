@@ -31,6 +31,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
@@ -43,13 +44,18 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func newTestServer(t *testing.T, reader AgentReader) *Server {
+// newTestServer builds a Server whose CRD routes run through a caller-scoped
+// client backed by the given client.Client (ADR 0011). The fake factory returns
+// this client for any authenticated request, so the read handlers exercise the
+// same list path they would with a real per-request client.
+func newTestServer(t *testing.T, c client.Client) *Server {
 	t.Helper()
 	return NewServer(Options{
-		Reader:  reader,
-		Auth:    AllowAll{}, // auth is exercised separately; here we test handlers.
-		Version: "test-1.2.3",
-		Log:     logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{}, // auth is exercised separately; here we test handlers.
+		Version:       "test-1.2.3",
+		Log:           logr.Discard(),
 	})
 }
 
@@ -133,15 +139,19 @@ func TestListAgentsProjection(t *testing.T) {
 	assert.False(t, byName["broken"].Ready)
 }
 
-// erroringReader forces the List seam to fail so we exercise the 500 path.
-type erroringReader struct{ err error }
-
-func (e erroringReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
-	return e.err
-}
-
 func TestListAgentsClientError(t *testing.T) {
-	s := newTestServer(t, erroringReader{err: assert.AnError})
+	// A non-RBAC List failure from the caller-scoped client surfaces as 500 (a
+	// generic API fault, not an authz denial). Injected via a fake-client
+	// interceptor so the caller-scoped read path is what fails.
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return assert.AnError
+			},
+		}).
+		Build()
+	s := newTestServer(t, c)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

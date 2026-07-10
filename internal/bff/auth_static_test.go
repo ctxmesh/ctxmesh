@@ -33,10 +33,11 @@ import (
 func newAuthServer(t *testing.T, static fstest.MapFS) *Server {
 	t.Helper()
 	s := NewServer(Options{
-		Reader:  fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
-		Auth:    BearerAuthenticator{},
-		Version: "auth-test",
-		Log:     logr.Discard(),
+		CallerClients: newFakeFactory(fake.NewClientBuilder().WithScheme(testScheme(t)).Build()),
+		Scheme:        testScheme(t),
+		Auth:          BearerAuthenticator{},
+		Version:       "auth-test",
+		Log:           logr.Discard(),
 	})
 	if static != nil {
 		s.static = static

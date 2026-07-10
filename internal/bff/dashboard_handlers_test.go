@@ -77,11 +77,12 @@ func serverWithAdapters(t *testing.T, a Adapters) *Server {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	return NewServer(Options{
-		Reader:   c,
-		Auth:     AllowAll{},
-		Adapters: a,
-		Version:  "test",
-		Log:      logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      a,
+		Version:       "test",
+		Log:           logr.Discard(),
 	})
 }
 
