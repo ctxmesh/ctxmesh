@@ -1,9 +1,22 @@
 # PR/branch pipeline per ADR 0003 (agent-brain/decisions/0003):
 # lint -> unit -> envtest -> build -> { e2e, security }
-# e2e is owned by the agent-brain harness (ADR 0004): this job checks out the
+#
+# Polyglot split (m12.9): agent-engine is Go + Python SDK (M10) + a Vite/React
+# UI (M12). `make lint` = golangci-lint + py-lint + ui-lint and `make test`
+# = go test + py-test + ui-test — i.e. the umbrella targets fan into three
+# toolchains. Rather than let one Go-only runner silently bootstrap Python
+# (venv) and Node (nvm) — slow and fragile — each language gets its OWN job
+# that PROVISIONS its toolchain deterministically:
+#   lint / unit  — Go   (setup-go): golangci-lint + go test (Go halves only)
+#   py           — Py   (setup-python 3.9): make py-lint py-test
+#   ui           — Node (setup-node via ui/.nvmrc + corepack pnpm): eslint/tsc/vitest/build
+#   helm         — helm (no cluster): make helm-verify (no-drift) + helm-lint
+# e2e is owned by the agent-brain harness (ADR 0004): it checks out the
 # (private) brain with the fine-grained BRAIN_CHECKOUT_TOKEN secret and drives
 # `make -C harness tier2 SLICE=m2-gateway` on a kind cluster with Knative Serving.
 # m2-gateway supersets the m1 deploy path; m1-specific coverage stays in envtest.
+# The M12 UI/Helm e2e slices (m12-ui, m12-helm) run in nightly.yml (need a full
+# kind cluster); this PR pipeline gets the cheap UI + Helm gates above.
 name: CI
 
 on:
@@ -34,8 +47,12 @@ jobs:
           go-version-file: go.mod
       - name: Verify linter configuration
         run: make lint-config
+      # Go half of `make lint` only (golangci-lint incl. gofumpt). py-lint /
+      # ui-lint run in the py / ui jobs so no toolchain is bootstrapped here.
+      - name: Install golangci-lint (pinned via Makefile)
+        run: make golangci-lint
       - name: golangci-lint (incl. gofumpt)
-        run: make lint
+        run: ./bin/golangci-lint run
 
   unit:
     name: unit
@@ -51,8 +68,103 @@ jobs:
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
-      - name: Unit tests
-        run: make test
+      # Go half of `make test` only (the py-test / ui-test halves are the py /
+      # ui jobs). Reproduces the umbrella recipe: manifests+generate+fmt+vet,
+      # then `go test ./... -coverprofile cover.out`.
+      - name: Go unit tests (manifests/generate/fmt/vet + go test)
+        run: |
+          make manifests generate fmt vet
+          go test ./... -coverprofile cover.out
+
+  py:
+    name: py
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # The SDK targets Python 3.9 (sdk/python/pyproject.toml requires-python
+      # >=3.9; the pinned ruff 0.6.9 / pytest 8.3.3 support 3.9). Pin the CI
+      # interpreter to 3.9 so the venv `make py-venv` builds matches the target.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      # py-lint (ruff) + py-test (pytest) each depend on py-venv, which builds
+      # the pinned venv from the provisioned python3 — deterministic in CI.
+      - name: Python SDK lint + tests (ruff + pytest, pinned venv)
+        run: make py-lint py-test
+
+  ui:
+    name: ui
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # Real Node toolchain PINNED to ui/.nvmrc (Node 22) — no in-job nvm
+      # bootstrap. corepack activates the pnpm version pinned by ui/package.json
+      # "packageManager" (pnpm@9.15.0), so both Node and pnpm are deterministic.
+      # We run the pnpm scripts DIRECTLY in ui/ (not `make ui-lint`, which routes
+      # through hack/ui-node.sh's nvm bootstrap) so this job owns the toolchain.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: ui/.nvmrc
+      - name: Activate pnpm (corepack, pinned by package.json)
+        run: corepack enable && corepack prepare --activate
+      - name: Install UI deps (frozen lockfile)
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Lint (eslint)
+        working-directory: ui
+        run: pnpm run lint
+      - name: Typecheck (tsc)
+        working-directory: ui
+        run: pnpm run typecheck
+      - name: Unit/component tests (vitest)
+        working-directory: ui
+        run: pnpm run test
+      - name: Build the SPA (tsc -b + vite build)
+        working-directory: ui
+        run: pnpm run build
+
+  helm:
+    name: helm
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # helm-verify runs `kustomize build` + `helm template` and diffs them, so
+      # it needs Go (kustomize is a Makefile tool) + python3 (helm_nodrift_diff.py).
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      # Pin helm explicitly (no floating latest) so the no-drift gate is stable.
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      # No-drift gate: the committed chart == generated from config/, AND
+      # `helm template` (default values) == `kustomize build config/default`.
+      # Catches chart drift on every PR — cheap, no cluster.
+      - name: Helm no-drift gate (chart == kustomize build)
+        run: make helm-verify
+      - name: helm lint
+        run: make helm-lint
 
   envtest:
     name: envtest

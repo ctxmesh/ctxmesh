@@ -15,8 +15,10 @@ jobs:
     name: nightly-full-e2e
     runs-on: ubuntu-latest
     # Bumped 45→60 (m5-memory), 60→75 (m6-mesh), 75→120 (m7-eventing + the
-    # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6).
-    timeout-minutes: 120
+    # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6),
+    # 120→150 (m12-helm + m12-ui: helm install + kind-load bff/echo + a headless
+    # Playwright browser run + a live Playground agent invocation).
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -154,3 +156,40 @@ jobs:
         # collector→Langfuse export stays alive. Dedupe fail-closed is unit-proven,
         # not e2e'd. specs/trace-governance-security.md, ADR 0009.
         run: make -C agent-brain/harness tier2 SLICE=m11-security
+      - name: M12 helm install e2e (helm lint + install brings the platform + UI Ready)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Pure install-smoke, no browser: `helm lint` + `helm install` the chart
+        # (ui.enabled=true) onto the M=7 cluster → controller + BFF Deployments
+        # Ready, /api/health 200, the SPA shell served, and the auth floor rejects
+        # an anonymous /api call (401). The slice builds + `kind load`s bff:latest
+        # itself (IfNotPresent, no registry — a forgotten load = ImagePullBackOff).
+        # FRESH CI cluster: the namespace is NOT kustomize-owned, so `helm install`
+        # adopts nothing — the m12.8b control-plane-conflict deferral is closed and
+        # this runs WITHOUT UIE2E_RESET_CONTROL_PLANE. specs/ui.md, ADR 0010/0011.
+        run: make -C agent-brain/harness tier2 SLICE=m12-helm
+      # The m12-ui slice drives the DEPLOYED UI headless via Playwright; its
+      # toolchain is nvm-pinned to harness/ui-e2e/.nvmrc (Node 22), sourced by
+      # e2e-m12.sh. setup-node puts Node on PATH but the harness sources nvm
+      # explicitly (non-interactive make shell), so install nvm into $NVM_DIR.
+      - name: Install nvm for the Playwright UI toolchain (harness ui-e2e/.nvmrc)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
+            | PROFILE=/dev/null bash
+          test -s "$HOME/.nvm/nvm.sh"
+      - name: M12 deployed-UI e2e (topology / config-builder / Playground + caller-scoped 403)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Drives the helm-installed UI headless (Playwright/chromium) over the BFF
+        # port-forward: the 3 🧪 (topology renders live agents, the config-builder
+        # form creates a real AgentDeployment, the Playground streams a live run
+        # against the Knative URL) + the caller-scoped 403 (viewer create blocked).
+        # The slice builds + `kind load`s bff:latest AND the echo-agent image
+        # itself, then bootstraps the nvm-pinned Playwright toolchain (chromium).
+        # FRESH CI cluster: (1) no kustomize-owned control plane → real `helm
+        # install` (no UIE2E_RESET_CONTROL_PLANE), and (2) the in-cluster BFF
+        # reaches the Knative URL → the Playground LIVE run works with NO
+        # UI_E2E_SKIP_PLAYGROUND_RUN escape hatch — both m12.8b deferrals close on
+        # a clean cluster. Runs LAST (heaviest: helm install + browser + a live
+        # agent run). specs/ui.md, ADR 0010/0011.
+        run: make -C agent-brain/harness tier2 SLICE=m12-ui
