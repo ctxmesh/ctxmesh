@@ -117,6 +117,14 @@ func (s *Server) Handler() http.Handler {
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
+		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
+		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
+		// is a caller-scoped list. Gated on the same factor as the CRD routes: nil
+		// factory → 501, never a fallback to the BFF SA.
+		authed.HandleFunc("GET /api/whoami", s.handleWhoAmI)
+		authed.HandleFunc("GET /api/capabilities", s.handleCapabilities)
+		authed.HandleFunc("GET /api/namespaces", s.handleNamespaces)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
 		} else {
@@ -125,6 +133,9 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
+		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
+		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
+		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 	}
 
