@@ -42,6 +42,15 @@ type Tool struct {
 	Endpoint string `json:"endpoint"`
 	// Transport is the MCP transport (always streamable-http in M4).
 	Transport string `json:"transport"`
+	// InputSchema is the tool's argument JSON Schema, carried VERBATIM from the
+	// ToolRegistry entry (ToolEntry.InputSchema, captured from the MCP server's
+	// tools/list). It is raw JSON so the managed loop (m14.6b) can hand a real
+	// model exact tool-call parameter schemas without re-probing the server.
+	// Absent (omitempty → the key is dropped) for a curated/legacy entry that
+	// pre-dates schema capture; the SDK then falls back to a permissive schema.
+	// Because it is part of the marshaled tool, it participates in the
+	// content-addressed Version — a schema change rolls a new manifest version.
+	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 }
 
 // Manifest is the document served at /tools, pushed to /control, and stored

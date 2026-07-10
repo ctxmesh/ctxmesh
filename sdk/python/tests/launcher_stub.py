@@ -199,9 +199,17 @@ class DiscoveryStub(_BaseStub):
     #: The name the MCP server actually exposes the tool under (FastMCP fn name).
     MCP_TOOL_NAME = "word_count"
 
-    def __init__(self, tool_result: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        tool_result: Optional[Dict[str, Any]] = None,
+        manifest_input_schema: Optional[Dict[str, Any]] = None,
+    ) -> None:
         default_result = {"count": 3, "server_version": "v1"}
         self.tool_result = tool_result if tool_result is not None else default_result
+        #: When set, the discovery manifest advertises this inputSchema on the
+        #: tool entry (the m14.6b propagation the managed loop consumes). None →
+        #: the manifest omits inputSchema (the schema-less / permissive path).
+        self.manifest_input_schema = manifest_input_schema
         #: params of every ACCEPTED tools/call (unknown names are rejected).
         self.mcp_calls: List[Dict[str, Any]] = []
         #: names of tools/list responses served (proof the client discovered).
@@ -214,17 +222,15 @@ class DiscoveryStub(_BaseStub):
         return f"{self.base_url}/mcp"
 
     def _manifest(self) -> Dict[str, Any]:
-        return {
-            "version": "stub0001",
-            "tools": [
-                {
-                    "name": self.CATALOG_NAME,
-                    "mode": "remote",
-                    "endpoint": self.mcp_endpoint,
-                    "transport": "streamable-http",
-                }
-            ],
+        tool: Dict[str, Any] = {
+            "name": self.CATALOG_NAME,
+            "mode": "remote",
+            "endpoint": self.mcp_endpoint,
+            "transport": "streamable-http",
         }
+        if self.manifest_input_schema is not None:
+            tool["inputSchema"] = self.manifest_input_schema
+        return {"version": "stub0001", "tools": [tool]}
 
     def _server_tools(self) -> List[Dict[str, Any]]:
         """The MCP server's advertised tools (underscore name, unlike the catalog)."""
