@@ -115,6 +115,25 @@ export interface CreateAgentResponse {
   created: CreatedObject[];
 }
 
+// --- Playground invoke (POST /api/invoke) -----------------------------------
+// Run a deployed agent, traced. The BFF resolves the agent's endpoint through the
+// CALLER-SCOPED client (the run acts as the caller, ADR 0011), opens a trace, and
+// POSTs /invoke. The response carries the run's traceId — the hand-off the SPA
+// feeds to /api/traces/{id} for the native trace-tree summary + embedded deep-view.
+
+export interface InvokeRequest {
+  agent: string;
+  namespace: string;
+  // input is the raw JSON body forwarded verbatim to the agent's /invoke.
+  input: unknown;
+}
+
+export interface InvokeResponse {
+  traceId: string;
+  // response is the agent's raw response body as a string.
+  response: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -205,5 +224,28 @@ export const api = {
       );
     }
     return (await res.json()) as CreateAgentResponse;
+  },
+
+  // invoke runs a deployed agent (the Playground). The BFF resolves the agent
+  // endpoint caller-scoped, traces the run, and returns its traceId + response. A
+  // 403 (viewer can't invoke), 404 (no such agent), 409 (not ready) or 502
+  // (upstream failure) surfaces the BFF message via ApiError.
+  invoke: async (
+    req: InvokeRequest,
+    signal?: AbortSignal,
+  ): Promise<InvokeResponse> => {
+    const res = await fetch("/api/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `invoke failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as InvokeResponse;
   },
 };
