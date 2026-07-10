@@ -1,0 +1,142 @@
+import { describe, expect, it } from "vitest";
+
+import { emptyForm, toAgentYAML, validate, type ConfigForm } from "@/lib/config-form";
+
+// Fill only the fields a test cares about on top of the empty form.
+function form(overrides: Partial<ConfigForm>): ConfigForm {
+  return { ...emptyForm(), ...overrides };
+}
+
+describe("config-form validate", () => {
+  it("requires name and image", () => {
+    const errors = validate(emptyForm());
+    expect(errors.name).toBeTruthy();
+    expect(errors.image).toBeTruthy();
+  });
+
+  it("rejects a non-DNS name", () => {
+    const errors = validate(form({ name: "Echo Agent", image: "x:1" }));
+    expect(errors.name).toBeTruthy();
+  });
+
+  it("accepts a minimal valid form", () => {
+    const errors = validate(form({ name: "echo-agent", image: "ghcr.io/x/echo:v1" }));
+    expect(Object.keys(errors)).toHaveLength(0);
+  });
+
+  it("requires all prompt git fields when the prompt block is on", () => {
+    const errors = validate(
+      form({ name: "a", image: "b", promptEnabled: true, promptName: "p" }),
+    );
+    expect(errors.promptRepo).toBeTruthy();
+    expect(errors.promptRef).toBeTruthy();
+    expect(errors.promptPath).toBeTruthy();
+  });
+
+  it("requires an eval threshold in 0..1 and at least one scorer", () => {
+    const errors = validate(
+      form({
+        name: "a",
+        image: "b",
+        evalEnabled: true,
+        evalSuite: "q",
+        evalDataset: "d",
+        evalThreshold: "9", // out of range
+        scorers: [{ name: "", type: "", weight: "" }],
+      }),
+    );
+    expect(errors.evalThreshold).toBeTruthy();
+    expect(errors.scorers).toBeTruthy();
+  });
+
+  it("rejects a bad budget USD amount", () => {
+    const errors = validate(
+      form({ name: "a", image: "b", budgetEnabled: true, budgetPerAgentUSD: "ten" }),
+    );
+    expect(errors.budgetPerAgentUSD).toBeTruthy();
+  });
+});
+
+describe("config-form toAgentYAML", () => {
+  it("emits only name+image for a minimal form", () => {
+    const yaml = toAgentYAML(form({ name: "echo-agent", image: "ghcr.io/x/echo:v1" }));
+    expect(yaml).toBe("name: echo-agent\nimage: ghcr.io/x/echo:v1\n");
+  });
+
+  it("emits resources, scaling and model.route", () => {
+    const yaml = toAgentYAML(
+      form({
+        name: "full-agent",
+        image: "ghcr.io/x/full:v1",
+        resourcesCpu: "500m",
+        resourcesMemory: "256Mi",
+        scalingMin: "1",
+        scalingMax: "5",
+        modelRoute: "default-model",
+      }),
+    );
+    expect(yaml).toContain("resources:");
+    expect(yaml).toContain("cpu: 500m");
+    expect(yaml).toContain("memory: 256Mi");
+    expect(yaml).toContain("scaling:");
+    expect(yaml).toContain("min: 1");
+    expect(yaml).toContain("max: 5");
+    expect(yaml).toContain("model:");
+    expect(yaml).toContain("route: default-model");
+  });
+
+  it("omits the serving default execution model but emits others", () => {
+    expect(toAgentYAML(form({ name: "a", image: "b", executionModel: "serving" }))).not.toContain(
+      "executionModel",
+    );
+    expect(toAgentYAML(form({ name: "a", image: "b", executionModel: "job" }))).toContain(
+      "executionModel: job",
+    );
+  });
+
+  it("emits the budget block as numeric YAML", () => {
+    const yaml = toAgentYAML(
+      form({
+        name: "a",
+        image: "b",
+        budgetEnabled: true,
+        budgetPerConversationUSD: "0.50",
+        budgetPerAgentUSD: "10",
+        budgetSoftThresholdPct: "90",
+      }),
+    );
+    expect(yaml).toContain("budget:");
+    expect(yaml).toContain("perConversationUSD: 0.5");
+    expect(yaml).toContain("perAgentUSD: 10");
+    expect(yaml).toContain("softThresholdPct: 90");
+  });
+
+  it("emits eval scorers and prompt.git blocks", () => {
+    const yaml = toAgentYAML(
+      form({
+        name: "a",
+        image: "b",
+        evalEnabled: true,
+        evalSuite: "quality",
+        evalDataset: "golden-set",
+        evalThreshold: "0.8",
+        evalGate: "warn",
+        scorers: [{ name: "exact-match", type: "heuristic", weight: "2" }],
+        promptEnabled: true,
+        promptName: "system-prompt",
+        promptRepo: "https://github.com/acme/prompts",
+        promptRef: "main",
+        promptPath: "prompts/system.txt",
+      }),
+    );
+    expect(yaml).toContain("eval:");
+    expect(yaml).toContain("suite: quality");
+    expect(yaml).toContain("gate: warn");
+    expect(yaml).toContain("- name: exact-match");
+    expect(yaml).toContain("weight: 2");
+    expect(yaml).toContain("prompt:");
+    expect(yaml).toContain("name: system-prompt");
+    expect(yaml).toContain("repo: https://github.com/acme/prompts");
+    expect(yaml).toContain("path: prompts/system.txt");
+  });
+});
