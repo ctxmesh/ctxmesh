@@ -57,3 +57,18 @@ networkPolicy:
 # platform (spec §6); set false for a headless control-plane-only install.
 ui:
   enabled: true
+
+# --- BFF feature flags (m14.4) -----------------------------------------------
+# The Go BFF's connect-a-provider flow (ADR 0015): paste a provider API key once
+# and get a working model route, validated + stored server-side (the key never
+# touches the browser). Enabled by default for dev/trial so the console's first
+# step is a paste, not a terminal. Set `enabled: false` on a HARDENED install:
+# the connect endpoints (POST/GET /api/providers, GET /api/providers/{name}/
+# models) then 404 and the UI falls back to referencing an out-of-band-created
+# SecretBinding. This templates the BFF deployment's PROVIDER_CONNECT_ENABLED
+# env: with this default the render is "true" == kustomize (helm-verify no-drift);
+# `helm install --set bff.providerConnect.enabled=false` renders "false" to
+# disable it — the ADR 0015 hardened-install path.
+bff:
+  providerConnect:
+    enabled: true
