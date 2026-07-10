@@ -37,6 +37,15 @@ go.work
 /discovery
 /launcher
 
+# UI (ui/ — Vite React SPA, m12.4). Build output + installed deps + tool caches
+# are never committed; the pinned pnpm-lock.yaml + .nvmrc ARE tracked.
+ui/node_modules/
+ui/dist/
+ui/coverage/
+ui/.vite/
+ui/vite.config.ts.timestamp-*
+ui/*.tsbuildinfo
+
 # Python SDK (sdk/python) — dev venv, caches, build/egg metadata
 sdk/python/.venv/
 **/__pycache__/
