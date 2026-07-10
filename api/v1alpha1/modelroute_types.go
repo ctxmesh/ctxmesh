@@ -43,10 +43,25 @@ type ProviderRef struct {
 
 	// secretBindingRef names a SecretBinding resource in the same namespace
 	// whose resolved secret is injected into the gateway as
-	// SB_<binding-name>. Required for every non-mock provider; ignored (and
-	// should be omitted) when provider == "mock".
+	// SB_<binding-name>. Required for every non-mock provider unless apiBase is
+	// set (a keyless OpenAI-compatible upstream); ignored (and should be
+	// omitted) when provider == "mock".
 	// +optional
 	SecretBindingRef string `json:"secretBindingRef,omitempty"`
+
+	// apiBase optionally points this provider at an arbitrary OpenAI-compatible
+	// upstream base URL (e.g. "http://tool-mock.ns.svc.cluster.local:9099/v1").
+	// When set, the gateway proxies to that base with a dummy key and no
+	// SecretBinding is required — the seam that lets an in-cluster route target
+	// the deterministic tool-call mock, so a managed-agent run produces a
+	// provable tool span in CI (mock-first, no real key). It combines with
+	// provider (the LiteLLM client prefix, typically "openai") and model (an
+	// arbitrary id after the slash, since the real target is apiBase). Leave
+	// unset for a normal provider (real key via secretBindingRef) or mock.
+	// Must be an http(s) URL when set. Ignored when provider == "mock".
+	// +optional
+	// +kubebuilder:validation:Pattern=`^https?://.+`
+	APIBase string `json:"apiBase,omitempty"`
 }
 
 // RateLimit configures optional per-tenant rate limiting forwarded to LiteLLM.
@@ -76,7 +91,7 @@ type ModelRouteSpec struct {
 	// secretBindingRef validation).
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
-	// +kubebuilder:validation:XValidation:rule="self.all(p, p.provider == 'mock' || (has(p.secretBindingRef) && p.secretBindingRef != ''))",message="secretBindingRef is required for every non-mock provider"
+	// +kubebuilder:validation:XValidation:rule="self.all(p, p.provider == 'mock' || (has(p.apiBase) && p.apiBase != '') || (has(p.secretBindingRef) && p.secretBindingRef != ''))",message="secretBindingRef is required for every non-mock provider unless apiBase is set"
 	Providers []ProviderRef `json:"providers"`
 
 	// rateLimit optionally caps the per-tenant request rate forwarded to
