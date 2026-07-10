@@ -53,6 +53,14 @@ spec:
             - name: http
               containerPort: 9090
               protocol: TCP
+          # Non-secret feature flags. PROVIDER_CONNECT_ENABLED is the ADR 0015
+          # connect-a-provider kill-switch: "true" (the default) exposes the
+          # POST/GET /api/providers endpoints; set "false" on a hardened install so
+          # they 404 and the UI falls back to reference-existing. Plain literal (no
+          # secret) so it is an operator-visible seam in the chart.
+          env:
+            - name: PROVIDER_CONNECT_ENABLED
+              value: "true"
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:

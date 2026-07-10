@@ -52,6 +52,16 @@ type Server struct {
 	version       string
 	log           logr.Logger
 
+	// providerConnect is the ADR 0015 kill-switch. When false the connect
+	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
+	// NOT registered and serve 404 — the UI falls back to reference-existing.
+	// Default true (dev/trial); an operator sets it false on hardened installs.
+	providerConnect bool
+	// providerHTTP is the HTTP client the connect flow uses to validate a key +
+	// fetch a provider's model list server-side. Nil → a bounded default client;
+	// tests point it at an httptest fake provider.
+	providerHTTP *http.Client
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -79,6 +89,15 @@ type Options struct {
 	// StaticDir is the directory of the built SPA (dist/). Empty disables static
 	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
 	StaticDir string
+	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
+	// (the default for dev/trial) the connect endpoints are registered; when
+	// false (a hardened install) they serve 404 and the UI falls back to
+	// reference-existing. Wired from PROVIDER_CONNECT_ENABLED in cmd/bff/main.go.
+	ProviderConnect bool
+	// ProviderHTTP overrides the HTTP client the connect flow uses to reach the
+	// provider (validation + model list). Nil uses a bounded default; tests inject
+	// a client pointed at an httptest fake provider.
+	ProviderHTTP *http.Client
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -87,12 +106,14 @@ type Options struct {
 // caller mounts Handler() on an http.Server.
 func NewServer(opts Options) *Server {
 	s := &Server{
-		callerClients: opts.CallerClients,
-		scheme:        opts.Scheme,
-		auth:          opts.Auth,
-		adapters:      opts.Adapters,
-		version:       opts.Version,
-		log:           opts.Log,
+		callerClients:   opts.CallerClients,
+		scheme:          opts.Scheme,
+		auth:            opts.Auth,
+		adapters:        opts.Adapters,
+		version:         opts.Version,
+		providerConnect: opts.ProviderConnect,
+		providerHTTP:    opts.ProviderHTTP,
+		log:             opts.Log,
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -179,6 +200,30 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("POST /api/expand", s.handleExpand)
 	} else {
 		authed.Handle("POST /api/expand", notImplemented("config expand"))
+	}
+
+	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
+	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by
+	// TWO factors, in order:
+	//
+	//  1. the Helm KILL-SWITCH (providerConnect). OFF → the routes are NOT
+	//     registered, so they fall through to the SPA handler and 404 (feature-off);
+	//     the UI then falls back to reference-existing. This is checked FIRST so a
+	//     hardened install makes the endpoints genuinely absent.
+	//  2. the CALLER-CLIENT factory (like every user-facing CRD route): nil → 501,
+	//     never a BFF-SA fallback (ADR 0011).
+	//
+	// When both are satisfied the three connect endpoints run caller-scoped.
+	if s.providerConnect {
+		if s.callerClients != nil {
+			authed.HandleFunc("POST /api/providers", s.handleConnectProvider)
+			authed.HandleFunc("GET /api/providers", s.handleListProviders)
+			authed.HandleFunc("GET /api/providers/{name}/models", s.handleProviderModels)
+		} else {
+			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
+			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
+			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
+		}
 	}
 
 	api.Handle("/api/", s.requireAuth(authed))
