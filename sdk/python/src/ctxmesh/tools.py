@@ -42,23 +42,47 @@ _TOOL_CALL_TIMEOUT = 30.0
 
 
 class Tool:
-    """One entry of the discovery manifest (mcp-tools.md manifest shape)."""
+    """One entry of the discovery manifest (mcp-tools.md manifest shape).
 
-    __slots__ = ("name", "mode", "endpoint", "transport")
+    ``input_schema`` is the tool's argument JSON Schema as the manifest carries it
+    (the ``inputSchema`` key), captured from the MCP server's ``tools/list`` and
+    stored on the ToolRegistry entry (m14.6, plumbed through in m14.6b). It is the
+    parsed JSON object *verbatim* — the managed loop advertises it to the model as
+    the tool's ``parameters`` so the model produces correct ``arguments``. It is
+    ``None`` when the manifest omits it (a curated/legacy entry with no captured
+    schema); the loop then falls back to a permissive object-parameters schema.
+    """
 
-    def __init__(self, name: str, mode: str, endpoint: str, transport: str):
+    __slots__ = ("name", "mode", "endpoint", "transport", "input_schema")
+
+    def __init__(
+        self,
+        name: str,
+        mode: str,
+        endpoint: str,
+        transport: str,
+        input_schema: Optional[Dict[str, Any]] = None,
+    ):
         self.name = name
         self.mode = mode
         self.endpoint = endpoint
         self.transport = transport
+        self.input_schema = input_schema
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> Tool:
+        # The manifest carries inputSchema verbatim as a JSON object. Anything
+        # that is not a JSON object (absent, null, or a malformed non-object) is
+        # treated as "no schema" so the loop takes the permissive fallback rather
+        # than handing the model a schema it can't use.
+        raw_schema = d.get("inputSchema")
+        input_schema = raw_schema if isinstance(raw_schema, dict) else None
         return cls(
             name=d.get("name", ""),
             mode=d.get("mode", ""),
             endpoint=d.get("endpoint", ""),
             transport=d.get("transport", ""),
+            input_schema=input_schema,
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
