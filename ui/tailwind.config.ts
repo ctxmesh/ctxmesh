@@ -19,10 +19,15 @@ const config: Config = {
     extend: {
       colors: {
         border: "hsl(var(--border))",
+        "border-strong": "hsl(var(--border-strong))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        // Plane hierarchy — raised rows / inset wells above the base bg.
+        "surface-2": "hsl(var(--surface-2))",
+        "surface-3": "hsl(var(--surface-3))",
+        "brand-2": "hsl(var(--brand-2))",
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
@@ -60,19 +65,41 @@ const config: Config = {
           DEFAULT: "hsl(var(--warning))",
           foreground: "hsl(var(--warning-foreground))",
         },
+        info: {
+          DEFAULT: "hsl(var(--info))",
+          foreground: "hsl(var(--info-foreground))",
+        },
       },
       borderRadius: {
+        xl: "calc(var(--radius) + 4px)",
         lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        md: "calc(var(--radius) - 3px)",
+        sm: "calc(var(--radius) - 6px)",
       },
       fontFamily: {
         sans: "var(--font-sans)",
         mono: "var(--font-mono)",
       },
+      // Modular type scale — surfaces size text by role via these tokens.
+      fontSize: {
+        xs: ["var(--text-xs)", { lineHeight: "1rem" }],
+        sm: ["var(--text-sm)", { lineHeight: "1.1875rem" }],
+        base: ["var(--text-base)", { lineHeight: "1.375rem" }],
+        md: ["var(--text-md)", { lineHeight: "1.4375rem" }],
+        lg: ["var(--text-lg)", { lineHeight: "1.5rem" }],
+        xl: ["var(--text-xl)", { lineHeight: "1.75rem", letterSpacing: "var(--tracking-snug)" }],
+        "2xl": ["var(--text-2xl)", { lineHeight: "2rem", letterSpacing: "var(--tracking-tight)" }],
+        "3xl": ["var(--text-3xl)", { lineHeight: "2.5rem", letterSpacing: "var(--tracking-tight)" }],
+      },
+      letterSpacing: {
+        tight: "var(--tracking-tight)",
+        snug: "var(--tracking-snug)",
+        wide: "var(--tracking-wide)",
+      },
       boxShadow: {
         card: "var(--shadow-card)",
         elevated: "var(--shadow-elevated)",
+        overlay: "var(--shadow-overlay)",
       },
       keyframes: {
         "accordion-down": {
