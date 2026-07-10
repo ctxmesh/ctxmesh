@@ -1,0 +1,54 @@
+# values.yaml — agent-engine Helm chart.
+#
+# The control-plane + CRD manifests are generated from `kustomize build
+# config/default`; these values are the knobs an operator overrides. With the
+# defaults below unchanged, `helm template` renders byte-for-byte the same
+# resources as `make deploy` (proven by `make helm-verify`).
+
+# Namespace the platform installs into. MUST match the namespace baked into
+# config/default (agent-engine-system) for the no-drift default to hold. Change
+# it for a custom install; `--create-namespace` (or crds.install) still applies.
+namespace: agent-engine-system
+
+controllerManager:
+  image:
+    # The controller-manager image. Override repository+tag for a real registry
+    # (air-gapped installs point this at the internal registry, spec §6).
+    repository: controller
+    # Empty tag falls back to Chart.appVersion ("latest"), matching
+    # `controller:latest` in config/default. Set an immutable tag in production.
+    tag: ""
+
+# CRDs are installed with the chart by default. Set false to manage CRD
+# lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
+crds:
+  install: true
+
+# --- Bundled dev data plane (Valkey statelayer + MinIO objectstore) ----------
+# DEV / TRIAL ONLY (PRD §23). These run an in-cluster Valkey + MinIO with
+# DETERMINISTIC dev credentials (never real secrets). In production set
+# `enabled: false` and point the controller at an externally-managed data plane.
+devDataPlane:
+  enabled: true
+
+# --- Prometheus wiring -------------------------------------------------------
+# The controller-manager exposes HTTPS metrics on :8443 (already in the
+# control-plane manifests). A ServiceMonitor + a metrics-ingress NetworkPolicy
+# are opt-in: they require the Prometheus Operator CRD / a NetworkPolicy-
+# enforcing CNI (ADR 0007) respectively, so they are OFF by default to keep
+# `helm install` clean on a vanilla cluster. Enable on a monitored cluster.
+prometheus:
+  # Install the ServiceMonitor (requires the Prometheus Operator CRDs).
+  serviceMonitor:
+    enabled: false
+networkPolicy:
+  # Install the NetworkPolicy that restricts /metrics ingress to namespaces
+  # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).
+  metricsIngress:
+    enabled: false
+
+# --- UI + Go BFF (built in m12.4+) -------------------------------------------
+# Clean values seam for the operator/engineer UI + Go BFF folded in by a later
+# task. No UI templates ship in this chart yet (m12.2 scope = control plane).
+ui:
+  enabled: false
