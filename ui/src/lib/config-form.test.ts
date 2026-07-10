@@ -111,6 +111,43 @@ describe("config-form toAgentYAML", () => {
     expect(yaml).toContain("softThresholdPct: 90");
   });
 
+  it("managed runtime: image is optional and emits runtime + systemPrompt + tools (ADR 0013)", () => {
+    // A managed agent needs no image (expand resolves the pinned managed ref).
+    const errors = validate(form({ name: "support-agent", runtime: "managed" }));
+    expect(Object.keys(errors)).toHaveLength(0);
+
+    const yaml = toAgentYAML(
+      form({
+        name: "support-agent",
+        runtime: "managed",
+        systemPrompt: "You are a support agent for Acme.",
+        tools: ["get_order", "search_docs"],
+      }),
+    );
+    expect(yaml).toContain("runtime: managed");
+    // No image emitted when none pinned.
+    expect(yaml).not.toContain("\nimage:");
+    // System prompt as a literal block scalar.
+    expect(yaml).toContain("systemPrompt: |");
+    expect(yaml).toContain("You are a support agent for Acme.");
+    // Tools as a YAML list — the SAME field expand + generation consume.
+    expect(yaml).toContain("tools:");
+    expect(yaml).toContain("- get_order");
+    expect(yaml).toContain("- search_docs");
+  });
+
+  it("custom runtime: image stays required and managed-only fields are omitted", () => {
+    // A custom agent (the default) still requires an image.
+    expect(validate(form({ name: "a", runtime: "custom" })).image).toBeTruthy();
+    // Managed-only fields are NOT serialized on a custom agent (expand rejects
+    // them), even if set on the form.
+    const yaml = toAgentYAML(
+      form({ name: "a", image: "b", runtime: "custom", systemPrompt: "x", tools: ["t"] }),
+    );
+    expect(yaml).not.toContain("systemPrompt");
+    expect(yaml).not.toContain("tools:");
+  });
+
   it("emits eval scorers and prompt.git blocks", () => {
     const yaml = toAgentYAML(
       form({
