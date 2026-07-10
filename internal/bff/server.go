@@ -62,6 +62,13 @@ type Server struct {
 	// tests point it at an httptest fake provider.
 	providerHTTP *http.Client
 
+	// platformGenerationModels is the operator-pinned list of models the
+	// create-from-prompt generation endpoint (ADR 0014) may use — the UI's model
+	// dropdown source. Empty (the default) → generation uses the caller's connected
+	// provider model with no pin. A values seam like the connect kill-switch (wired
+	// from PLATFORM_GENERATION_MODELS in cmd/bff/main.go).
+	platformGenerationModels []string
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -95,9 +102,14 @@ type Options struct {
 	// reference-existing. Wired from PROVIDER_CONNECT_ENABLED in cmd/bff/main.go.
 	ProviderConnect bool
 	// ProviderHTTP overrides the HTTP client the connect flow uses to reach the
-	// provider (validation + model list). Nil uses a bounded default; tests inject
-	// a client pointed at an httptest fake provider.
+	// provider (validation + model list + generation chat). Nil uses a bounded
+	// default; tests inject a client pointed at an httptest fake provider.
 	ProviderHTTP *http.Client
+	// PlatformGenerationModels is the operator-pinned generation-model list (ADR
+	// 0014) — the UI's model dropdown source. Empty (default) → generation uses the
+	// caller's connected-provider model unpinned. Wired from
+	// PLATFORM_GENERATION_MODELS in cmd/bff/main.go.
+	PlatformGenerationModels []string
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -106,14 +118,15 @@ type Options struct {
 // caller mounts Handler() on an http.Server.
 func NewServer(opts Options) *Server {
 	s := &Server{
-		callerClients:   opts.CallerClients,
-		scheme:          opts.Scheme,
-		auth:            opts.Auth,
-		adapters:        opts.Adapters,
-		version:         opts.Version,
-		providerConnect: opts.ProviderConnect,
-		providerHTTP:    opts.ProviderHTTP,
-		log:             opts.Log,
+		callerClients:            opts.CallerClients,
+		scheme:                   opts.Scheme,
+		auth:                     opts.Auth,
+		adapters:                 opts.Adapters,
+		version:                  opts.Version,
+		providerConnect:          opts.ProviderConnect,
+		providerHTTP:             opts.ProviderHTTP,
+		platformGenerationModels: opts.PlatformGenerationModels,
+		log:                      opts.Log,
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -200,6 +213,23 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("POST /api/expand", s.handleExpand)
 	} else {
 		authed.Handle("POST /api/expand", notImplemented("config expand"))
+	}
+
+	// Create-from-prompt generation (m14.5, ADR 0014): a natural-language
+	// description → a server-side chat/completions call through the CALLER'S
+	// connected provider → the emitted simplified agent.yaml validated by the SAME
+	// expand core → returned for REVIEW (never auto-applied). It needs BOTH seams:
+	//   - the CALLER-CLIENT factory — the generation key is resolved caller-scoped
+	//     (route → SecretBinding → Secret), so a viewer denied the Secret is a 403
+	//     and the BFF never falls back to its own SA (ADR 0011); AND
+	//   - the EXPAND adapter — the emitted YAML is validated through the one mapping
+	//     (no divergent generator schema, ADR 0014).
+	// Either missing → an honest 501. The generation chat reuses providerHTTP (nil
+	// → a bounded default client).
+	if s.callerClients != nil && s.adapters.Expand != nil {
+		authed.HandleFunc("POST /api/agents/generate", s.handleGenerate)
+	} else {
+		authed.Handle("POST /api/agents/generate", notImplemented("create-from-prompt generation"))
 	}
 
 	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and

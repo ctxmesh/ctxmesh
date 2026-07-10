@@ -45,6 +45,14 @@ const (
 // hostile provider endpoint cannot hang a BFF request.
 const defaultProviderTimeout = 10 * time.Second
 
+// Shared client-safe messages for the provider client + generation client. Kept
+// as constants so the model-list probe and the chat call speak the same words
+// (and to satisfy goconst — these literals recur across both provider paths).
+const (
+	msgAPIKeyRequired   = "apiKey is required"
+	msgBuildProviderReq = "failed to build provider request"
+)
+
 // provider base URLs. A caller may override baseURL (e.g. an OpenAI-compatible
 // gateway or an Azure endpoint); when empty the public default is used.
 const (
@@ -78,7 +86,7 @@ func providerModels(ctx context.Context, httpClient *http.Client, provider, apiK
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
-		return nil, &providerError{status: http.StatusBadRequest, msg: "apiKey is required"}
+		return nil, &providerError{status: http.StatusBadRequest, msg: msgAPIKeyRequired}
 	}
 
 	c := httpClient
@@ -114,7 +122,7 @@ func anthropicModels(ctx context.Context, c *http.Client, apiKey, baseURL string
 	base := providerBaseURL(baseURL, anthropicDefaultBaseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
-		return nil, &providerError{status: http.StatusBadGateway, msg: "failed to build provider request"}
+		return nil, &providerError{status: http.StatusBadGateway, msg: msgBuildProviderReq}
 	}
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", anthropicVersion)
@@ -128,7 +136,7 @@ func openaiModels(ctx context.Context, c *http.Client, apiKey, baseURL string) (
 	base := providerBaseURL(baseURL, openaiDefaultBaseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
-		return nil, &providerError{status: http.StatusBadGateway, msg: "failed to build provider request"}
+		return nil, &providerError{status: http.StatusBadGateway, msg: msgBuildProviderReq}
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")

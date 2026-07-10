@@ -93,6 +93,8 @@ spec:
       - env:
         - name: PROVIDER_CONNECT_ENABLED
           value: {{ .Values.bff.providerConnect.enabled | quote }}
+        - name: PLATFORM_GENERATION_MODELS
+          value: {{ .Values.bff.generation.platformModels | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters

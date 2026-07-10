@@ -52,6 +52,20 @@ PROVIDER_CONNECT_ENV_HELM = (
     "          value: {{ .Values.bff.providerConnect.enabled | quote }}"
 )
 
+# The BFF's create-from-prompt platform generation-model pin (ADR 0014). config/bff
+# hardcodes the env value "" (unpinned — the default; so `kustomize build`/`make
+# deploy` stay valid); the chart templates it from a Helm value so an operator can
+# pin a governed generation-model list with `--set bff.generation.platformModels=…`.
+# values.yaml ships the default "" so with DEFAULT values the render is the quoted
+# empty string == the kustomize literal → no drift.
+PLATFORM_GEN_MODELS_ENV_KUSTOMIZE = (
+    '        - name: PLATFORM_GENERATION_MODELS\n' '          value: ""'
+)
+PLATFORM_GEN_MODELS_ENV_HELM = (
+    "        - name: PLATFORM_GENERATION_MODELS\n"
+    "          value: {{ .Values.bff.generation.platformModels | quote }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -110,6 +124,13 @@ def substitute(doc: str) -> str:
     doc = doc.replace(
         PROVIDER_CONNECT_ENV_KUSTOMIZE,
         PROVIDER_CONNECT_ENV_HELM,
+    )
+    # BFF create-from-prompt platform generation-model pin -> Helm value (ADR 0014).
+    # Default renders the quoted empty string == kustomize (no drift); an operator's
+    # `--set …=<list>` pins the generation models.
+    doc = doc.replace(
+        PLATFORM_GEN_MODELS_ENV_KUSTOMIZE,
+        PLATFORM_GEN_MODELS_ENV_HELM,
     )
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
