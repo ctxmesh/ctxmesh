@@ -13,8 +13,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { api, ApiError, type CreatedObject } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_AGENTS } from "@/lib/nav";
 import {
   emptyForm,
   toAgentYAML,
@@ -35,12 +38,18 @@ type Submit =
   | { kind: "preview"; yaml: string; manifest: string }
   | { kind: "applying"; yaml: string; manifest: string }
   | { kind: "applied"; created: CreatedObject[] }
-  | { kind: "error"; message: string; status?: number };
+  | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 export function ConfigBuilderPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submit, setSubmit] = useState<Submit>({ kind: "idle" });
+  // RBAC-aware chrome (§3): whether the caller may create AgentDeployments. The
+  // Apply affordance is gated on this (hidden for a viewer). DISPLAY-ONLY — the
+  // API server still enforces, so the 403 path below must also work when this is
+  // wrong/optimistic (probe unavailable). reprobe() corrects a stale "yes".
+  const { can, reprobe } = useCapabilities();
+  const canApply = can(RES_AGENTS, "create");
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -90,6 +99,9 @@ export function ConfigBuilderPage() {
       const res = await api.createAgent(yaml, "");
       setSubmit({ kind: "applied", created: res.created });
     } catch (err) {
+      // A 403 DESPITE a "yes" capability means the cached map was stale — correct
+      // it (reprobe → honest banner) AND surface the real 403 (ForbiddenInline).
+      if (err instanceof ApiError && err.isForbidden) reprobe();
       setSubmit(errorState(err));
     }
   }
@@ -462,20 +474,42 @@ export function ConfigBuilderPage() {
                   }
                   placeholder="Fill the form and press “Preview CRD” to see the generated manifest."
                 />
-                {submit.kind === "error" && (
-                  <p className="text-sm text-destructive" role="alert">
-                    {submit.message}
-                    {submit.status ? ` (${submit.status})` : ""}
+                {submit.kind === "error" && submit.forbidden ? (
+                  // A surface-level 403 → the explain-and-suggest primitive, not a
+                  // terse line (ADR 0012; the ForbiddenInline seam).
+                  <ForbiddenInline
+                    title="Not allowed to apply"
+                    description="Your account can preview the manifest but can't create AgentDeployments in this cluster."
+                    detail={submit.message}
+                  />
+                ) : (
+                  submit.kind === "error" && (
+                    <p className="text-sm text-destructive" role="alert">
+                      {submit.message}
+                      {submit.status ? ` (${submit.status})` : ""}
+                    </p>
+                  )
+                )}
+                {canApply ? (
+                  <Button
+                    onClick={onApply}
+                    disabled={submit.kind !== "preview"}
+                    className="w-full"
+                  >
+                    <Rocket className="h-4 w-4" />
+                    {submit.kind === "applying" ? "Applying…" : "Apply to cluster"}
+                  </Button>
+                ) : (
+                  // RBAC-aware chrome: a viewer sees no Apply affordance — the
+                  // preview stays available (read-only console by construction).
+                  <p
+                    className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-center text-xs text-muted-foreground"
+                    data-testid="apply-readonly-note"
+                  >
+                    You have read-only access — applying to the cluster requires
+                    create permission on AgentDeployments.
                   </p>
                 )}
-                <Button
-                  onClick={onApply}
-                  disabled={submit.kind !== "preview"}
-                  className="w-full"
-                >
-                  <Rocket className="h-4 w-4" />
-                  {submit.kind === "applying" ? "Applying…" : "Apply to cluster"}
-                </Button>
               </>
             )}
           </CardContent>
@@ -520,9 +554,16 @@ function ToggleSection({
 
 // errorState maps a thrown error to the Submit error state, preserving the HTTP
 // status when it's an ApiError so the user sees, e.g., a 403 RBAC denial reason.
+// A 403 is flagged `forbidden` so the surface renders ForbiddenInline (the
+// explain-and-suggest 403 primitive) rather than a terse red line.
 function errorState(err: unknown): Submit {
   if (err instanceof ApiError) {
-    return { kind: "error", message: err.message, status: err.status };
+    return {
+      kind: "error",
+      message: err.message,
+      status: err.status,
+      forbidden: err.isForbidden,
+    };
   }
   return {
     kind: "error",

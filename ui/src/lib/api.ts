@@ -33,8 +33,53 @@ export interface AgentSummary {
   ready: boolean;
 }
 
+// AgentListResponse mirrors the BFF's list-contract DTO (internal/bff/dto.go).
+// The v2 console reads `items` + `nextCursor` (NOT the legacy `agents` key the
+// M12 surfaces used): `items` is one page window, `nextCursor` is the opaque K8s
+// `continue` token for the NEXT page ("" = list exhausted). Both slices are
+// non-null on the wire ([] not null). `agents` is retained only for the M12
+// Playwright suite — the DataTable never reads it.
 export interface AgentListResponse {
   agents: AgentSummary[];
+  items: AgentSummary[];
+  nextCursor: string;
+}
+
+// AgentListParams are the list-contract query params (ui-foundation §4):
+//   limit  — page size (BFF defaults + caps it)
+//   cursor — the opaque continue token from a prior page's nextCursor
+//   q      — a page-WINDOWED substring filter on the name (labelled "filter"; not
+//            a cluster-wide search — K8s has no server-side substring search)
+//   namespace — scope to one namespace; empty = every namespace RBAC permits
+export interface AgentListParams {
+  limit?: number;
+  cursor?: string;
+  q?: string;
+  namespace?: string;
+}
+
+// --- Capabilities (GET /api/capabilities?namespace=) ------------------------
+// The flat RBAC capability map for the golden CRD kinds × verbs, computed by the
+// BFF via batched SelfSubjectAccessReviews with the CALLER'S token (ADR 0011).
+// DISPLAY-ONLY: the UI hides/disables what is false; the API server still
+// enforces (ADR 0011). Read `allowed[resource][verb]` directly (e.g.
+// `allowed["agentdeployments"]["create"]`). A 500/network error is a PROBE
+// FAILURE, never "denied" — the chrome shows an honest banner, not all-disabled.
+export interface CapabilitiesResponse {
+  namespace: string;
+  allowed: Record<string, Record<string, boolean>>;
+}
+
+// --- Namespaces (GET /api/namespaces) ---------------------------------------
+// The namespaces the caller's own RBAC lets them list. A 403 is an honest
+// "can't list namespaces", NEVER a silent empty list (which would masquerade as
+// "no namespaces exist"). Namespaces is non-null on the wire ([] not null).
+export interface NamespaceSummary {
+  name: string;
+}
+
+export interface NamespaceListResponse {
+  namespaces: NamespaceSummary[];
 }
 
 // --- Topology (GET /api/topology) -------------------------------------------
@@ -284,12 +329,43 @@ export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
   });
 }
 
+// agentsQuery builds the /api/agents query string from the list-contract params,
+// omitting empty values so the URL stays clean (and the K8s `continue`/namespace
+// defaults apply BFF-side). Every value is URL-encoded.
+function agentsQuery(params: AgentListParams = {}): string {
+  const qs = new URLSearchParams();
+  if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  if (params.q) qs.set("q", params.q);
+  if (params.namespace) qs.set("namespace", params.namespace);
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
 export const api = {
   health: (signal?: AbortSignal) =>
     getJSON<HealthResponse>("/api/health", signal),
   whoami: (signal?: AbortSignal) => whoami({ signal }),
-  listAgents: (signal?: AbortSignal) =>
-    getJSON<AgentListResponse>("/api/agents", signal),
+
+  // listAgents reads one page window through the list contract (§4): it returns
+  // { items, nextCursor } — the DataTable keys "more pages" off nextCursor, never
+  // row count. Pass cursor/namespace/q to page + scope + filter.
+  listAgents: (params?: AgentListParams, signal?: AbortSignal) =>
+    getJSON<AgentListResponse>(`/api/agents${agentsQuery(params)}`, signal),
+
+  // capabilities probes the caller's RBAC for the golden kinds in one namespace
+  // (empty = cluster-wide). DISPLAY-ONLY (ADR 0011). A 500/network error must be
+  // treated as a probe failure (honest banner), NOT as "everything denied".
+  capabilities: (namespace: string, signal?: AbortSignal) =>
+    getJSON<CapabilitiesResponse>(
+      `/api/capabilities${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ""}`,
+      signal,
+    ),
+
+  // namespaces lists the namespaces the caller can see (for the shell's picker).
+  // A 403 is an honest "can't list namespaces", never a silent empty list.
+  namespaces: (signal?: AbortSignal) =>
+    getJSON<NamespaceListResponse>("/api/namespaces", signal),
   topology: (signal?: AbortSignal) =>
     getJSON<TopologyResponse>("/api/topology", signal),
   cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),

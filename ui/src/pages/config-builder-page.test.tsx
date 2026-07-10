@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
+import { CapabilitiesProvider } from "@/lib/capabilities";
+import { NamespaceProvider } from "@/lib/namespace";
 
 // A recording fetch mock: it captures every request (url, method, body) and
 // answers /api/expand (YAML text) + /api/agents (JSON created list). The tests
@@ -166,6 +168,69 @@ describe("ConfigBuilderPage", () => {
     await screen.findByLabelText("Expanded CRD preview");
     fireEvent.click(screen.getByRole("button", { name: /Apply to cluster/ }));
 
+    // A 403 now renders the ForbiddenInline explain-and-suggest primitive (the
+    // BFF's reason is shown), not a terse red line.
     expect(await screen.findByText(/forbidden: not allowed to create/)).toBeInTheDocument();
+    expect(screen.getByText("Not allowed to apply")).toBeInTheDocument();
+  });
+});
+
+// RBAC-aware chrome: rendered inside the capability providers so the Apply
+// affordance is gated (§3, DISPLAY-ONLY). A denied caller sees no Apply button
+// but can still Preview (read-only console by construction).
+describe("ConfigBuilderPage — RBAC-gated Apply", () => {
+  function installFetch(canCreate: boolean) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.startsWith("/api/namespaces")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ namespaces: [] }) } as Response);
+        }
+        if (url.startsWith("/api/capabilities")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ namespace: "", allowed: { agentdeployments: { create: canCreate } } }),
+          } as Response);
+        }
+        if (url === "/api/expand") {
+          return Promise.resolve({ ok: true, status: 200, text: async () => "kind: AgentDeployment\n", json: async () => ({}) } as Response);
+        }
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+      }),
+    );
+  }
+
+  function renderGated() {
+    return render(
+      <NamespaceProvider>
+        <CapabilitiesProvider>
+          <ConfigBuilderPage />
+        </CapabilitiesProvider>
+      </NamespaceProvider>,
+    );
+  }
+
+  it("hides the Apply affordance for a viewer (no create) but keeps Preview", async () => {
+    installFetch(false);
+    renderGated();
+    // The read-only note appears; there is NO Apply button.
+    expect(await screen.findByTestId("apply-readonly-note")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Apply to cluster/ })).toBeNull();
+    // Preview stays available.
+    expect(screen.getByRole("button", { name: /Preview CRD/ })).toBeInTheDocument();
+  });
+
+  it("shows the Apply affordance for an operator (create allowed)", async () => {
+    installFetch(true);
+    renderGated();
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+    await screen.findByLabelText("Expanded CRD preview");
+    // With create allowed the Apply button is present (enabled after a preview).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Apply to cluster/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("apply-readonly-note")).toBeNull();
   });
 });

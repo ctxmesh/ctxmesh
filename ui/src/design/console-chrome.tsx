@@ -1,92 +1,20 @@
 import * as React from "react";
-import {
-  Boxes,
-  ChevronRight,
-  Command,
-  Coins,
-  FlaskConical,
-  GitBranch,
-  KeyRound,
-  LayoutDashboard,
-  ListTree,
-  MessagesSquare,
-  Network,
-  PlugZap,
-  Search,
-  Settings,
-  Users,
-  Wrench,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { Boxes, ChevronRight, Command, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { Milestone } from "@/design/scaffold";
+import { NAV_SECTIONS } from "@/lib/nav";
+import type { NavItem, NavSection } from "@/lib/nav";
 
 // ConsoleChrome — the canonical console SHELL used by every content wireframe so
 // the reviewer sees each surface in its real home (sidebar IA + who-am-I header
-// + cmd-K affordance). This encodes the PROPOSED information architecture for
-// the whole arc; the IA-map page reads from the same NAV_SECTIONS source so the
-// map and the wireframes can never drift.
+// + cmd-K affordance). It renders the PROPOSED information architecture — the
+// SAME NAV_SECTIONS the REAL app shell (components/app-shell) consumes, imported
+// from lib/nav so the map, the wireframes, and the shipped shell can never drift
+// (m13.5 re-housing).
 
-export interface NavItem {
-  id: string;
-  label: string;
-  icon: LucideIcon;
-  milestone: Milestone;
-  /** Shown only for editors — hidden in the viewer chrome variant. */
-  writeOnly?: boolean;
-}
-
-export interface NavSection {
-  heading: string;
-  items: NavItem[];
-}
-
-// THE PROPOSED IA — one flat, grouped sidebar. Grouping tells a first-run story:
-// Overview → Build → Operate → Observe → Platform → Settings.
-export const NAV_SECTIONS: NavSection[] = [
-  {
-    heading: "Overview",
-    items: [
-      { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, milestone: "M13" },
-      { id: "topology", label: "Topology", icon: Network, milestone: "M15" },
-    ],
-  },
-  {
-    heading: "Build",
-    items: [
-      { id: "agents", label: "Agents", icon: Boxes, milestone: "M13" },
-      { id: "tools", label: "Tool catalog", icon: Wrench, milestone: "M14" },
-      { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
-      { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
-    ],
-  },
-  {
-    heading: "Observe",
-    items: [
-      { id: "traces", label: "Traces", icon: ListTree, milestone: "M16" },
-      { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16" },
-      { id: "feedback", label: "Feedback", icon: MessagesSquare, milestone: "M16" },
-      { id: "cost", label: "Cost", icon: Coins, milestone: "M16" },
-    ],
-  },
-  {
-    heading: "Platform",
-    items: [
-      { id: "providers", label: "Providers", icon: PlugZap, milestone: "M14" },
-      { id: "registries", label: "Registries", icon: Users, milestone: "M15" },
-      { id: "routes", label: "Model routes", icon: GitBranch, milestone: "M15", writeOnly: false },
-      { id: "secrets", label: "Secret bindings", icon: KeyRound, milestone: "M15" },
-    ],
-  },
-  {
-    heading: "Settings",
-    items: [
-      { id: "settings", label: "Settings", icon: Settings, milestone: "M13" },
-    ],
-  },
-];
+export { NAV_SECTIONS };
+export type { NavItem, NavSection };
 
 export interface ConsoleChromeProps {
   /** The nav item id to render active. */
@@ -158,7 +86,7 @@ export function ConsoleChrome({
         <nav className="flex-1 overflow-y-auto px-3 pb-3">
           {NAV_SECTIONS.map((section) => {
             const items = section.items.filter((it) => {
-              if (viewer && it.writeOnly) return false;
+              if (viewer && it.requiresWrite) return false;
               if (devMode && !DEV_ALLOWED.has(it.id)) return false;
               return true;
             });
