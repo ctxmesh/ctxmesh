@@ -18,6 +18,7 @@ limitations under the License.
 // Commands:
 //
 //	expand <file>   — convert a simplified agent.yaml to an AgentDeployment CRD manifest
+//	dev             — run the agent locally (launcher + full contract + mock gateway)
 package main
 
 import (
@@ -34,6 +35,7 @@ func main() {
 		// No default run; subcommand required.
 	}
 	root.AddCommand(newExpandCmd())
+	root.AddCommand(newDevCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
