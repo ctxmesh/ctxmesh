@@ -173,8 +173,17 @@ func TestExpand_Managed(t *testing.T) {
 	if strings.Count(got, "kind: MCPToolBinding") != 2 {
 		t.Errorf("expected 2 MCPToolBinding docs, got:\n%s", got)
 	}
+	// spec.toolName keeps the REAL catalog name (incl. the underscore).
 	if !strings.Contains(got, "toolName: echo_tool") || !strings.Contains(got, "toolName: word-count") {
-		t.Error("output missing an MCPToolBinding toolName")
+		t.Error("output missing an MCPToolBinding toolName (real catalog name)")
+	}
+	// metadata.name is DNS-sanitized (echo_tool → echo-tool), so a bare apply is
+	// admitted; the raw underscored object name must NOT appear.
+	if !strings.Contains(got, "name: managed-agent-echo-tool") {
+		t.Error("output missing the DNS-sanitized binding name managed-agent-echo-tool")
+	}
+	if strings.Contains(got, "name: managed-agent-echo_tool") {
+		t.Error("binding metadata.name must be DNS-sanitized (no underscore)")
 	}
 	if strings.Index(got, "kind: MCPToolBinding") > strings.Index(got, "kind: AgentDeployment") {
 		t.Error("MCPToolBinding docs must precede the AgentDeployment")

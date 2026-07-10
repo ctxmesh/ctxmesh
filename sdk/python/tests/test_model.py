@@ -21,7 +21,7 @@ from ctxmesh import agent
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
 
-from .launcher_stub import GatewayStub
+from .launcher_stub import GatewayStub, RecordedRequest, _BaseStub, _StubState
 
 
 def _client(gateway_stub: GatewayStub):
@@ -111,3 +111,66 @@ def test_timeout_opt_does_not_leak_into_request_body(gateway_stub: GatewayStub):
     body = json.loads(gateway_stub.requests[-1].body)
     assert "timeout" not in body
     assert body["temperature"] == 0.1  # other opts still pass through
+
+
+# ── the empty-response raise (m14.3 review C1) ─────────────────────────────────
+#
+# The m14.3 SDK fix made a tool_calls turn (content:null + tool_calls) NOT raise.
+# The guard these tests protect: a response with NEITHER content NOR tool_calls
+# (or an EMPTY tool_calls:[] + content:null) is still a MALFORMED body and MUST
+# raise — so a future refactor can't silently start swallowing broken responses.
+
+
+class _RawBodyGatewayStub(_BaseStub):
+    """A gateway stub returning an ARBITRARY raw JSON body (to forge bad shapes)."""
+
+    def __init__(self, body: dict) -> None:
+        self._body = body
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def completions(state: _StubState, req: RecordedRequest):
+            payload = json.dumps(self._body).encode()
+            return 200, {"Content-Type": "application/json"}, payload
+
+        self.state.routes.update({"POST /chat/completions": completions})
+
+
+def _client_for_body(body: dict):
+    stub = _RawBodyGatewayStub(body)
+    stub.__enter__()
+    cfg = PlaneConfig.for_test(model_gateway_url=stub.base_url)
+    return stub, agent.from_config(cfg)
+
+
+def test_content_null_no_tool_calls_raises():
+    # content:null and NO tool_calls → not a tool turn, no text: a malformed body.
+    body = {
+        "id": "x",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": None}}],
+    }
+    stub, client = _client_for_body(body)
+    try:
+        with pytest.raises(EndpointError):
+            client.model.chat("m", [{"role": "user", "content": "q"}])
+    finally:
+        stub.__exit__(None, None, None)
+
+
+def test_content_null_empty_tool_calls_raises():
+    # content:null AND tool_calls:[] (an EMPTY array) → still no callable intent
+    # and no text: a malformed body that must raise, not return "".
+    body = {
+        "id": "x",
+        "model": "m",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": []}}
+        ],
+    }
+    stub, client = _client_for_body(body)
+    try:
+        with pytest.raises(EndpointError):
+            client.model.chat("m", [{"role": "user", "content": "q"}])
+    finally:
+        stub.__exit__(None, None, None)
