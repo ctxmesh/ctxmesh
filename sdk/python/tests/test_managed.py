@@ -36,6 +36,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from ctxmesh import ManagedConfig, agent, run_managed_loop
 from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.errors import ConfigError
+from ctxmesh.managed import _PERMISSIVE_PARAMETERS, _tool_schema
+from ctxmesh.tools import Tool
 
 from .launcher_stub import DiscoveryStub, RecordedRequest, _BaseStub, _StubState
 
@@ -316,3 +318,115 @@ def test_managed_loop_no_tools_bound_plain_chat(gateway_stub):
     # No tools advertised → no `tools` field sent to the gateway.
     first_req = json.loads(gateway_stub.requests[0].body)
     assert "tools" not in first_req
+
+
+# ── _tool_schema: discovered inputSchema verbatim, else permissive fallback ─────
+
+# A schema requiring a real parameter — the whole point of m14.6b: the model must
+# see THIS as the tool's `parameters`, not a permissive empty object.
+SCHEMA_BEARING = {
+    "type": "object",
+    "properties": {"text": {"type": "string", "description": "text to echo"}},
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+
+def test_tool_schema_uses_discovered_input_schema_verbatim():
+    """When the discovered Tool carries an inputSchema, it becomes `parameters` verbatim."""
+    tool = Tool(
+        name="echo_tool",
+        mode="remote",
+        endpoint="http://x/mcp",
+        transport="streamable-http",
+        input_schema=SCHEMA_BEARING,
+    )
+    fn = _tool_schema(tool)["function"]
+    assert fn["name"] == "echo_tool"
+    # The exact discovered schema, not a re-derived/permissive one.
+    assert fn["parameters"] == SCHEMA_BEARING
+    assert fn["parameters"]["required"] == ["text"]
+
+
+def test_tool_schema_falls_back_to_permissive_when_absent():
+    """A Tool without an inputSchema → the permissive empty-object fallback."""
+    tool = Tool(
+        name="echo_tool", mode="remote", endpoint="http://x/mcp", transport="streamable-http"
+    )
+    fn = _tool_schema(tool)["function"]
+    assert fn["parameters"] == _PERMISSIVE_PARAMETERS
+    # Empty/degenerate schemas also take the fallback (never advertise an
+    # unusable empty-properties-required schema as-is).
+    empty_schema_tool = Tool(
+        name="echo_tool",
+        mode="remote",
+        endpoint="http://x/mcp",
+        transport="streamable-http",
+        input_schema={},
+    )
+    assert _tool_schema(empty_schema_tool)["function"]["parameters"] == _PERMISSIVE_PARAMETERS
+
+
+# ── end-to-end: a schema-bearing tool rides the model's tools[].parameters ─────
+
+
+class SchemaEchoDiscoveryStub(EchoDiscoveryStub):
+    """The echo tool, but the discovery manifest now carries a real inputSchema.
+
+    Proves the m14.6b chain end-to-end at the SDK boundary: the schema stored on
+    the manifest (what the controller renders from the ToolRegistry entry) rides
+    through ``tools.list()`` → ``_tool_schema`` → the model.chat request's
+    ``tools[].function.parameters``, verbatim.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.manifest_input_schema = SCHEMA_BEARING
+
+
+@pytest.fixture
+def schema_echo_discovery():
+    with SchemaEchoDiscoveryStub() as stub:
+        yield stub
+
+
+def test_managed_loop_advertises_schema_bearing_tool_parameters(
+    tool_gateway, schema_echo_discovery
+):
+    """The discovered inputSchema is the tool's `parameters` in the chat request."""
+    client = agent.from_config(_plane(tool_gateway, schema_echo_discovery))
+    config = ManagedConfig(system_prompt="sys", model_route="tool-mock")
+
+    result = run_managed_loop(client, config, "please echo ping")
+
+    # The loop still completes the two-turn round-trip and dispatches the tool.
+    assert result.steps == 2
+    assert result.tools_called == [TOOL_NAME]
+    assert result.output.startswith(FINAL_MARKER)
+
+    # The load-bearing assertion: turn 1's request advertised the REAL schema as
+    # the tool's parameters — the model gets exact parameters, not permissive.
+    first_req = json.loads(tool_gateway.requests[0].body)
+    advertised = first_req["tools"]
+    assert len(advertised) == 1
+    fn = advertised[0]["function"]
+    assert fn["name"] == TOOL_NAME
+    assert fn["parameters"] == SCHEMA_BEARING
+    # Concretely: a required param the permissive fallback would never carry.
+    assert fn["parameters"]["required"] == ["text"]
+    assert fn["parameters"]["additionalProperties"] is False
+
+
+def test_managed_loop_echo_fallback_still_permissive(tool_gateway, echo_discovery):
+    """The schema-less echo mock still works — turn 1 advertises the permissive schema."""
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="sys", model_route="tool-mock")
+
+    result = run_managed_loop(client, config, "please echo ping")
+    assert result.output.startswith(FINAL_MARKER)
+
+    # No inputSchema on the manifest → the permissive fallback rides the request.
+    first_req = json.loads(tool_gateway.requests[0].body)
+    fn = first_req["tools"][0]["function"]
+    assert fn["name"] == TOOL_NAME
+    assert fn["parameters"] == _PERMISSIVE_PARAMETERS

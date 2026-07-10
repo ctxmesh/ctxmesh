@@ -16,7 +16,11 @@ limitations under the License.
 
 package toolmanifest
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
 
 // TestRenderRemoteEndpointVerbatim: a remote binding's URL is carried into the
 // manifest endpoint unchanged (it must already carry /mcp).
@@ -112,6 +116,128 @@ func TestRenderMixedModeDeterministic(t *testing.T) {
 	}
 	if s1[0].BindingName != "side-a" || s1[0].Port != 3001 {
 		t.Errorf("side-a should get 3001; got {%s,%d}", s1[0].BindingName, s1[0].Port)
+	}
+}
+
+// TestRenderCarriesInputSchemaVerbatim: a binding whose registry entry has an
+// inputSchema renders it VERBATIM into the manifest tool entry (raw JSON, not
+// re-serialized), for both remote and sidecar modes (m14.6b).
+func TestRenderCarriesInputSchemaVerbatim(t *testing.T) {
+	t.Parallel()
+
+	// A non-trivial, unusually-spaced schema: verbatim means the exact bytes
+	// survive (no re-indent, no key reorder).
+	schema := json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`)
+
+	m, _ := Render([]Binding{
+		{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: schema},
+		{BindingName: "sc", ToolName: "s-tool", Mode: ModeSidecar, Image: "img-s", InputSchema: schema},
+	})
+
+	byName := map[string]Tool{}
+	for _, tl := range m.Tools {
+		byName[tl.Name] = tl
+	}
+	for _, name := range []string{"word-count", "s-tool"} {
+		got := byName[name].InputSchema
+		if !bytes.Equal(got, schema) {
+			t.Errorf("%s inputSchema = %s, want verbatim %s", name, got, schema)
+		}
+	}
+
+	// It round-trips through JSON as an object under the "inputSchema" key.
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	var decoded struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	for _, tl := range decoded.Tools {
+		if !bytes.Equal(bytes.TrimSpace(tl.InputSchema), schema) {
+			t.Errorf("marshaled %s inputSchema = %s, want %s", tl.Name, tl.InputSchema, schema)
+		}
+	}
+}
+
+// TestRenderOmitsAbsentInputSchema: a binding without an inputSchema (or with an
+// empty/whitespace/null one) renders NO inputSchema key — the graceful-absence
+// path that keeps schema-less/curated tools working (SDK permissive fallback).
+func TestRenderOmitsAbsentInputSchema(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]json.RawMessage{
+		"nil":        nil,
+		"empty":      json.RawMessage(``),
+		"whitespace": json.RawMessage("  \n\t"),
+		"null":       json.RawMessage(`null`),
+	}
+	for label, schema := range cases {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			m, _ := Render([]Binding{
+				{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: schema},
+			})
+			if got := m.Tools[0].InputSchema; got != nil {
+				t.Errorf("%s: inputSchema = %s, want nil (absent)", label, got)
+			}
+			// omitempty must drop the key entirely from the JSON.
+			raw, err := json.Marshal(m.Tools[0])
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if bytes.Contains(raw, []byte("inputSchema")) {
+				t.Errorf("%s: manifest JSON still carries inputSchema key: %s", label, raw)
+			}
+		})
+	}
+}
+
+// TestRenderInputSchemaAffectsVersion: two identical tool sets that differ ONLY
+// in inputSchema produce different manifest versions (a schema change is content
+// → a new content-addressed version → the SDK re-reads it). Absent-schema
+// variants (nil vs empty vs null) are byte-stable — same version.
+func TestRenderInputSchemaAffectsVersion(t *testing.T) {
+	t.Parallel()
+
+	base := []Binding{{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp"}}
+	withA := []Binding{{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: json.RawMessage(`{"type":"object","required":["a"]}`)}}
+	withB := []Binding{{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: json.RawMessage(`{"type":"object","required":["b"]}`)}}
+
+	mBase, _ := Render(base)
+	mA, _ := Render(withA)
+	mB, _ := Render(withB)
+
+	if mBase.Version == mA.Version {
+		t.Error("adding an inputSchema did not change the manifest version")
+	}
+	if mA.Version == mB.Version {
+		t.Error("a different inputSchema produced the same manifest version")
+	}
+
+	// A schema change is a manifest-only (hot-path) edit like a remote URL: it
+	// must NOT roll a new Knative revision. The structural digest — computed
+	// from the sidecar pod-template shape only — stays identical.
+	_, scA := Render(withA)
+	_, scB := Render(withB)
+	if StructuralDigest(scA, true) != StructuralDigest(scB, true) {
+		t.Error("an inputSchema change altered the structural digest (must be hot-path, no roll)")
+	}
+
+	// Absent variants are byte-stable: nil, empty, and null all render to the
+	// same (schema-less) version as base.
+	empty := []Binding{{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: json.RawMessage(``)}}
+	null := []Binding{{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp", InputSchema: json.RawMessage(`null`)}}
+	mEmpty, _ := Render(empty)
+	mNull, _ := Render(null)
+	if mBase.Version != mEmpty.Version || mBase.Version != mNull.Version {
+		t.Errorf("absent-schema variants are not byte-stable: base=%s empty=%s null=%s", mBase.Version, mEmpty.Version, mNull.Version)
 	}
 }
 
