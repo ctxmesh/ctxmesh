@@ -136,11 +136,15 @@ func IsSensitive(key string) bool {
 // detector's stable marker. Non-sensitive attributes and non-matching text are
 // returned unchanged, and the input slice order is preserved.
 //
-// This is the in-process form of the SAME policy the collector enforces at the
-// before-persistence seam (see RenderConfig): the collector is authoritative
-// for spans crossing the export boundary, and this function makes the policy
-// callable/testable in Go and available to any Go-side span producer. Both
-// derive from defaultDetectors, so they cannot diverge.
+// This is a Go-side substring redactor derived from the SAME defaultDetectors
+// the collector uses, so the detector regexes and markers can never drift from
+// the enforcement point. NOTE: the collector (RenderConfig) is authoritative for
+// spans crossing the export boundary and applies its detectors VALUE-WIDE across
+// ALL attribute values — because the payload-bearing OpenInference attributes are
+// INDEXED sub-keys (llm.input_messages.<N>.message.content) that a flat key set
+// cannot enumerate. This Go form scopes to the known flat SensitiveAttributeKeys
+// and is used for in-process testing / any Go-side producer that sets those flat
+// keys; it is not the persistence seam.
 func Redact(attrs []attribute.KeyValue) []attribute.KeyValue {
 	return RedactWith(attrs, defaultDetectors)
 }

@@ -159,6 +159,12 @@ func TestBasicAuthHeader(t *testing.T) {
 // TestRenderConfigWiresRedactionProcessor is the unit-level proof that the
 // collector config the reconciler renders WIRES redaction into the traces
 // pipeline before the exporters — the load-bearing before-persistence seam.
+//
+// The redaction is VALUE-WIDE (replace_all_patterns over attributes, "value"),
+// NOT per-flat-key (replace_pattern). This is the m11.6 fix: OpenInference emits
+// INDEXED sub-keys (llm.input_messages.<N>.message.content) that a per-key
+// statement can never glob, so the message body leaked; value-wide matching
+// covers every attribute value regardless of key shape.
 func TestRenderConfigWiresRedactionProcessor(t *testing.T) {
 	cfg := RenderConfig(false, DefaultDetectors())
 
@@ -168,11 +174,10 @@ func TestRenderConfigWiresRedactionProcessor(t *testing.T) {
 	assert.Contains(t, cfg, "processors: [batch, transform/redaction]",
 		"redaction runs in the traces pipeline before the exporters")
 
-	// A real replace_pattern statement per sensitive key + detector.
-	assert.Contains(t, cfg, `replace_pattern(attributes["llm.input_messages"]`,
-		"redaction acts on the llm.input_messages payload attr")
-	assert.Contains(t, cfg, `replace_pattern(attributes["output.value"]`,
-		"redaction acts on the output.value payload attr")
+	// One VALUE-WIDE replace_all_patterns statement per detector, applied across
+	// ALL attribute values (so indexed OpenInference keys are covered).
+	assert.Contains(t, cfg, `replace_all_patterns(attributes, "value",`,
+		"redaction acts value-wide across all attribute values")
 	assert.Contains(t, cfg, "[REDACTED:email]", "email marker present")
 	assert.Contains(t, cfg, "[REDACTED:ssn]", "ssn marker present")
 	assert.Contains(t, cfg, "[REDACTED:key]", "key marker present")
@@ -180,19 +185,55 @@ func TestRenderConfigWiresRedactionProcessor(t *testing.T) {
 	// The regex source is escaped as an OTTL/Go string literal (\d not a literal d).
 	assert.Contains(t, cfg, `\\d{3}-\\d{2}-\\d{4}`, "ssn regex is escaped in the YAML literal")
 
-	// A statement is rendered for every sensitive attribute × every detector.
-	wantStatements := len(SensitiveAttributeKeys) * len(DefaultDetectors())
-	gotStatements := strings.Count(cfg, "replace_pattern(")
+	// Exactly one value-wide statement per detector (no per-key fan-out).
+	wantStatements := len(DefaultDetectors())
+	gotStatements := strings.Count(cfg, "replace_all_patterns(")
 	assert.Equal(t, wantStatements, gotStatements,
-		"one replace_pattern per sensitive attr per detector")
+		"one value-wide replace_all_patterns per detector")
 
-	// Redaction must never touch span structure or non-payload attrs: the config
-	// only ever targets attributes[<sensitive key>], never span name/id.
-	for _, key := range SensitiveAttributeKeys {
-		assert.Contains(t, cfg, "attributes[\""+key+"\"]")
-	}
+	// Redaction must never touch span structure or attribute KEYS: it targets
+	// attribute VALUES only ("value" mode), never keys/names/ids.
+	assert.NotContains(t, cfg, `replace_all_patterns(attributes, "key"`,
+		"must not rewrite attribute keys")
 	assert.NotContains(t, cfg, "replace_pattern(name", "must not rewrite span names")
-	assert.NotContains(t, cfg, `attributes["agent.name"]`, "must not target non-payload metadata")
+	assert.NotContains(t, cfg, "replace_all_patterns(name", "must not rewrite span names")
+}
+
+// TestRenderConfigRedactsIndexedOpenInferenceKeys is the m11.6 regression guard.
+// The old per-flat-key config rendered replace_pattern(attributes["llm.input_
+// messages"], ...), but OpenInference NEVER emits that flat key — it emits
+// INDEXED sub-keys llm.input_messages.<N>.message.content, so the message body
+// (the most sensitive payload) reached Langfuse UNREDACTED. The value-wide
+// replace_all_patterns(attributes, "value", ...) statement matches every
+// attribute value regardless of key shape, so the indexed content is covered.
+//
+// The rendered config is fed to the real /otelcol-contrib binary in the m11
+// review + e2e; this test locks the config SHAPE that makes that work, and
+// separately proves the detector regexes themselves match the indexed content.
+func TestRenderConfigRedactsIndexedOpenInferenceKeys(t *testing.T) {
+	cfg := RenderConfig(false, DefaultDetectors())
+
+	// The statements must be VALUE-WIDE, not bound to a flat key. A statement
+	// bound to attributes["llm.input_messages"] would never touch the indexed
+	// llm.input_messages.<N>.message.content the agent actually emits.
+	assert.NotContains(t, cfg, `attributes["llm.input_messages"]`,
+		"must NOT bind to the flat key — OpenInference emits indexed sub-keys, so a flat-key statement leaks the body (m11.6)")
+	assert.Contains(t, cfg, `replace_all_patterns(attributes, "value",`,
+		"value-wide statement covers indexed llm.input_messages.<N>.message.content")
+
+	// Prove the detector regexes catch PII inside the REAL indexed OpenInference
+	// shape (the value that flows through attributes["llm.input_messages.1.message
+	// .content"]). This is the exact sentinel shape the m11.6 e2e seeds.
+	const indexedKey = "llm.input_messages.1.message.content"
+	require.False(t, IsSensitive(indexedKey),
+		"the indexed key is NOT in the flat SensitiveAttributeKeys set — which is exactly why per-key redaction missed it")
+	sentinel := "contact pii-abc123@example.com ssn 123-45-6789 key sk-abc123abcdefghijklmnopqrstuvwxyz012345"
+	redacted := redactString(sentinel, defaultDetectors)
+	assert.Equal(t, "contact [REDACTED:email] ssn [REDACTED:ssn] key [REDACTED:key]", redacted,
+		"the indexed message content value is fully redacted by the value-wide detectors — no raw PII reaches persistence")
+	assert.NotContains(t, redacted, "pii-abc123@example.com", "raw email sentinel gone")
+	assert.NotContains(t, redacted, "123-45-6789", "raw ssn sentinel gone")
+	assert.NotContains(t, redacted, "sk-abc123", "raw key sentinel gone")
 }
 
 func TestRenderConfigLangfuseExporterStillRedacts(t *testing.T) {
