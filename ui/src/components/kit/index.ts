@@ -27,6 +27,9 @@ export type { EmptyStateProps, EmptyStateAction } from "./empty-state";
 export { ErrorState } from "./error-state";
 export type { ErrorStateProps } from "./error-state";
 
+export { ForbiddenInline } from "./forbidden-inline";
+export type { ForbiddenInlineProps } from "./forbidden-inline";
+
 export {
   Skeleton,
   SkeletonText,
