@@ -64,6 +64,20 @@ spec:
                     ProviderRef describes one LiteLLM provider entry in a ModelRoute's provider
                     list. Providers are tried in ascending priority order (1 = first choice).
                   properties:
+                    apiBase:
+                      description: |-
+                        apiBase optionally points this provider at an arbitrary OpenAI-compatible
+                        upstream base URL (e.g. "http://tool-mock.ns.svc.cluster.local:9099/v1").
+                        When set, the gateway proxies to that base with a dummy key and no
+                        SecretBinding is required — the seam that lets an in-cluster route target
+                        the deterministic tool-call mock, so a managed-agent run produces a
+                        provable tool span in CI (mock-first, no real key). It combines with
+                        provider (the LiteLLM client prefix, typically "openai") and model (an
+                        arbitrary id after the slash, since the real target is apiBase). Leave
+                        unset for a normal provider (real key via secretBindingRef) or mock.
+                        Must be an http(s) URL when set. Ignored when provider == "mock".
+                      pattern: ^https?://.+
+                      type: string
                     model:
                       description: |-
                         model is the provider-specific model name, e.g. "claude-sonnet-4-6" for
@@ -89,8 +103,9 @@ spec:
                       description: |-
                         secretBindingRef names a SecretBinding resource in the same namespace
                         whose resolved secret is injected into the gateway as
-                        SB_<binding-name>. Required for every non-mock provider; ignored (and
-                        should be omitted) when provider == "mock".
+                        SB_<binding-name>. Required for every non-mock provider unless apiBase is
+                        set (a keyless OpenAI-compatible upstream); ignored (and should be
+                        omitted) when provider == "mock".
                       type: string
                   required:
                   - model
@@ -102,8 +117,9 @@ spec:
                 type: array
                 x-kubernetes-validations:
                 - message: secretBindingRef is required for every non-mock provider
-                  rule: self.all(p, p.provider == 'mock' || (has(p.secretBindingRef)
-                    && p.secretBindingRef != ''))
+                    unless apiBase is set
+                  rule: self.all(p, p.provider == 'mock' || (has(p.apiBase) && p.apiBase
+                    != '') || (has(p.secretBindingRef) && p.secretBindingRef != ''))
               rateLimit:
                 description: |-
                   rateLimit optionally caps the per-tenant request rate forwarded to
