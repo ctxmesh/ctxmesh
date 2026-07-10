@@ -45,6 +45,10 @@ export function EmptyState({
 }: EmptyStateProps) {
   return (
     <div
+      // Announce the empty surface as a labelled region so a screen-reader user
+      // lands on "what this is for + the next action", not silent whitespace.
+      role="region"
+      aria-label={title}
       className={cn(
         "flex flex-col items-center justify-center rounded-lg border border-dashed bg-card/40 px-6 py-14 text-center",
         className,
