@@ -32,17 +32,21 @@ import (
 const defaultVersion = "dev"
 
 // Server is the BFF HTTP server: it serves the static SPA build and the /api
-// surface (behind the M11 auth). It composes narrow seams (an AgentReader for
-// client-go, an Authenticator for M11 auth, optional Adapters for m12.5+) so
-// each is independently testable.
+// surface (behind the M11 auth). It composes narrow seams (a CallerClientFactory
+// that mints a per-request caller-scoped client-go client, an Authenticator for
+// the M11 edge, optional Adapters for m12.5+) so each is independently testable.
+//
+// ADR 0011: every user-facing CRD read/write runs through a client the
+// callerClients factory builds from the CALLER'S bearer token, so the K8s API
+// server enforces the caller's own RBAC. The BFF holds no static SA client for
+// user CRD ops — the confused-deputy gap is closed by construction.
 type Server struct {
-	reader   AgentReader
-	writer   AgentWriter
-	scheme   *runtime.Scheme
-	auth     Authenticator
-	adapters Adapters
-	version  string
-	log      logr.Logger
+	callerClients CallerClientFactory
+	scheme        *runtime.Scheme
+	auth          Authenticator
+	adapters      Adapters
+	version       string
+	log           logr.Logger
 
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
@@ -51,15 +55,15 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	// Reader is the client-go-backed reader for the agent CRDs (required for the
-	// GET /api/agents + /api/topology routes). Typically the manager's client.Client.
-	Reader AgentReader
-	// Writer is the client-go-backed create client for the config-builder apply
-	// path (POST /api/agents, m12.6). Typically the SAME client.Client as Reader.
-	// Nil leaves POST /api/agents serving 501 (the create seam is not wired).
-	Writer AgentWriter
+	// CallerClients mints a per-request client.Client scoped to the caller's
+	// bearer token (ADR 0011). Required for the CRD routes (GET/POST /api/agents,
+	// GET /api/topology): they run as the caller so K8s RBAC enforces the M11
+	// personas. Nil leaves those routes serving 501 (the caller-scoped seam is not
+	// wired) — the BFF never falls back to its own SA for user CRD ops.
+	CallerClients CallerClientFactory
 	// Scheme decodes the expand-emitted CRD manifests into typed objects for the
-	// apply path. Required when Writer is set (the agent CRDs must be registered).
+	// apply path. Required when CallerClients is set (the agent CRDs must be
+	// registered so the caller-scoped client can encode them).
 	Scheme *runtime.Scheme
 	// Auth gates /api requests (the M11 control-plane auth seam). Required.
 	Auth Authenticator
@@ -79,13 +83,12 @@ type Options struct {
 // caller mounts Handler() on an http.Server.
 func NewServer(opts Options) *Server {
 	s := &Server{
-		reader:   opts.Reader,
-		writer:   opts.Writer,
-		scheme:   opts.Scheme,
-		auth:     opts.Auth,
-		adapters: opts.Adapters,
-		version:  opts.Version,
-		log:      opts.Log,
+		callerClients: opts.CallerClients,
+		scheme:        opts.Scheme,
+		auth:          opts.Auth,
+		adapters:      opts.Adapters,
+		version:       opts.Version,
+		log:           opts.Log,
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -104,22 +107,26 @@ func (s *Server) Handler() http.Handler {
 	// Health is unauthenticated (liveness/version probe; no cluster access).
 	api.HandleFunc("GET /api/health", s.handleHealth)
 
-	// Authenticated surface. /api/agents is the foundation proof (client-go).
+	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
+	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
+	// permits, enforced by the K8s API server. They are wired only when the
+	// caller-client factory is configured; honest 501 otherwise (the BFF never
+	// falls back to its own SA for user CRD ops — that is the confused-deputy gap
+	// this task closes). Create additionally needs the scheme to decode manifests.
 	authed := http.NewServeMux()
-	authed.HandleFunc("GET /api/agents", s.handleListAgents)
-
-	// Config-builder apply path (m12.6): create the AgentDeployment (+ related
-	// EvalSuite/PromptVersion) via client-go, RBAC-scoped by the K8s API server.
-	// Wired only when the write seam is configured; honest 501 otherwise so the
-	// route stays discoverable.
-	if s.writer != nil && s.scheme != nil {
-		authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
+	if s.callerClients != nil {
+		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
+		} else {
+			authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
+		}
 	} else {
+		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
+		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 	}
-
-	// Topology is client-go only (no external adapter) → always available.
-	authed.HandleFunc("GET /api/topology", s.handleTopology)
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
 	// Wired when the Langfuse adapter is present; honest 501 otherwise so the

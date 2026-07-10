@@ -37,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -68,9 +67,8 @@ func main() {
 }
 
 func run(addr, staticDir, version string, log logr.Logger) error {
-	// Build the client-go-backed read client, reusing the controllers' scheme so
-	// the agent CRDs are decodable. Credentials come from in-cluster config or
-	// the local kubeconfig — server-side only.
+	// Build the platform scheme (control-plane CRDs) so the caller-scoped client
+	// can encode/decode the agent CRDs.
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return err
@@ -79,14 +77,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return err
 	}
 
+	// The in-cluster rest.Config supplies the API-server host + cluster CA/TLS.
+	// The BFF does NOT build a static client from it for user CRD ops: instead the
+	// CallerClientFactory copies this config per request and swaps in the CALLER'S
+	// bearer token (ADR 0011), so the K8s API server enforces the caller's own
+	// RBAC (M11 personas). The BFF's own SA credential is never used to act on the
+	// user's CRDs — closing the confused-deputy gap by construction.
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return err
 	}
-	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return err
-	}
+	callerClients := bff.NewCallerClientFactory(cfg, scheme)
 
 	// Build the optional server-side adapters from the injected environment. The
 	// Langfuse/Prometheus credentials stay in THIS process — they are never sent
@@ -95,19 +96,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// a half-configured client.
 	adapters := buildAdapters(log)
 	// The config-builder expand adapter (m12.6) is a pure transform reusing the
-	// CLI expand core — always available, no external creds. The write seam for
-	// the apply path is the same client-go client as the read seam.
+	// CLI expand core — always available, no external creds.
 	adapters.Expand = bff.NewExpandAdapter()
 
 	srv := bff.NewServer(bff.Options{
-		Reader:    k8s,
-		Writer:    k8s,
-		Scheme:    scheme,
-		Auth:      bff.BearerAuthenticator{},
-		Adapters:  adapters,
-		Version:   version,
-		StaticDir: staticDir,
-		Log:       ctrl.Log.WithName("bff.server"),
+		CallerClients: callerClients,
+		Scheme:        scheme,
+		Auth:          bff.BearerAuthenticator{},
+		Adapters:      adapters,
+		Version:       version,
+		StaticDir:     staticDir,
+		Log:           ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{

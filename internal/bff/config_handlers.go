@@ -89,13 +89,19 @@ type CreateAgentResponse struct {
 
 // handleCreateAgent serves POST /api/agents — the config-builder apply path. It
 // expands the submitted agent.yaml through the SAME mapping as the preview,
-// decodes the result into typed CRD objects, and creates each via client-go
-// (RBAC-scoped by the M11 auth: the K8s API makes the persona decision, so a
-// viewer's create surfaces as 403). It returns the created objects' identities.
-// Errors surface cleanly: bad agent.yaml → 400, already-exists → 409, RBAC
-// denial → 403, other API failure → 502. A failed apply is never reported as
-// success.
+// decodes the result into typed CRD objects, and creates each through the
+// CALLER-SCOPED client (ADR 0011): the K8s API server makes the persona decision
+// on the CALLER'S identity, so a viewer's create surfaces as 403 — the BFF's own
+// SA is never used here. It returns the created objects' identities. Errors
+// surface cleanly: missing token → 401 (before any K8s call), bad agent.yaml →
+// 400, already-exists → 409, RBAC denial → 403, other API failure → 502. A
+// failed apply is never reported as success.
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxAgentYAMLBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -112,7 +118,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := createAgentFromYAML(r.Context(), s.writer, s.scheme, []byte(req.AgentYAML), req.Namespace)
+	created, err := createAgentFromYAML(r.Context(), caller, s.scheme, []byte(req.AgentYAML), req.Namespace)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {

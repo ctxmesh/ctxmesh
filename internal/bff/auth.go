@@ -18,7 +18,6 @@ package bff
 
 import (
 	"net/http"
-	"strings"
 )
 
 // Authenticator gates every /api request. It is the seam for the M11
@@ -30,9 +29,10 @@ import (
 // an unauthenticated caller is rejected (spec "Edge cases: Auth"). The precise
 // per-persona RBAC decision is made by the Kubernetes API server when the BFF
 // performs the CRD operation on the caller's behalf (K8s RBAC is the
-// authorization source of truth; the BFF does not re-implement it). Wiring the
-// caller's token into a per-request client-go client is the m12.5+ step; this
-// interface is the stable seam for it.
+// authorization source of truth; the BFF does not re-implement it). The caller's
+// token is wired into a per-request client-go client by CallerClientFactory
+// (ADR 0011), so this authenticator gates the edge (presence) and the factory
+// carries the same token into every user-facing CRD op.
 type Authenticator interface {
 	// Authenticate returns nil if the request carries an acceptable credential,
 	// or an error describing why it was rejected (surfaced as 401).
@@ -48,9 +48,7 @@ type BearerAuthenticator struct{}
 
 // Authenticate implements Authenticator.
 func (BearerAuthenticator) Authenticate(r *http.Request) error {
-	h := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(h, prefix) || strings.TrimSpace(h[len(prefix):]) == "" {
+	if bearerToken(r) == "" {
 		return errUnauthenticated
 	}
 	return nil

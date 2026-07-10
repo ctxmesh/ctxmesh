@@ -32,24 +32,18 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
-// newConfigServer builds a Server with the expand adapter + a write seam so the
-// config-builder routes are live. The reader/writer is the SAME fake client-go
-// client (mirrors production, where both are the manager's client.Client).
+// newConfigServer builds a Server with the expand adapter live and the CRD
+// routes running through a caller-scoped client backed by the given fake client
+// (ADR 0011): the create/list happen as the caller, so the fake client is what
+// the K8s ops land on.
 func newConfigServer(t *testing.T, c client.Client) *Server {
 	t.Helper()
-	return NewServer(Options{
-		Reader:   c,
-		Writer:   c,
-		Scheme:   testScheme(t),
-		Auth:     AllowAll{},
-		Adapters: Adapters{Expand: NewExpandAdapter()},
-		Version:  "test",
-		Log:      logr.Discard(),
-	})
+	return newCallerServer(t, newFakeFactory(c))
 }
 
 // sampleAgentYAML is a full-surface form submission (name/image/execModel +
@@ -195,32 +189,42 @@ func TestCreateAgentHandlerMissingBodyIs400(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// forbiddenWriter makes Create fail with a Kubernetes Forbidden error — the
-// shape the API server returns for an M11 viewer persona. It proves the BFF
-// surfaces the RBAC denial as a 403 instead of swallowing it or reporting 500.
-type forbiddenWriter struct{}
-
-func (forbiddenWriter) Create(_ context.Context, obj client.Object, _ ...client.CreateOption) error {
-	gvr := schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}
-	return apierrors.NewForbidden(gvr, obj.GetName(), errors.New("user cannot create agentdeployments"))
+// forbiddenClient is a caller-scoped client whose Create fails with a Kubernetes
+// Forbidden error — the shape the API server returns for an M11 viewer persona
+// whose token the BFF passed through. It proves the BFF surfaces the RBAC denial
+// (from the CALLER-SCOPED client, not the BFF SA) as a 403, never swallowed or
+// reported as 500. NOTE: this is a fake-client stand-in for the API server's
+// decision; TRUE per-persona enforcement (a real viewer token → 403) is a tier2
+// e2e assertion in m12.8 — a real API server, not a fake, makes that call.
+func forbiddenClient(t *testing.T) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+				gvr := schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}
+				return apierrors.NewForbidden(gvr, obj.GetName(), errors.New("user cannot create agentdeployments"))
+			},
+		}).
+		Build()
 }
 
 func TestCreateAgentHandlerRBACForbiddenIs403(t *testing.T) {
-	s := NewServer(Options{
-		Reader:   fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
-		Writer:   forbiddenWriter{},
-		Scheme:   testScheme(t),
-		Auth:     AllowAll{},
-		Adapters: Adapters{Expand: NewExpandAdapter()},
-		Log:      logr.Discard(),
-	})
+	// The Forbidden comes from the CALLER-SCOPED client the factory hands back —
+	// driven through the factory, exactly as a real viewer token would be.
+	factory := &fakeCallerClientFactory{client: forbiddenClient(t)}
+	s := newCallerServer(t, factory)
 
 	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: sampleAgentYAML, Namespace: "prod"})
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer viewer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "forbidden")
+	// The viewer's token — not the BFF SA — is what the factory was asked to scope.
+	assert.Equal(t, "viewer-persona-token", factory.gotToken)
 }
 
 func TestCreateAgentHandlerAlreadyExistsIs409(t *testing.T) {
@@ -241,16 +245,16 @@ func TestCreateAgentHandlerAlreadyExistsIs409(t *testing.T) {
 // --- Auth + seam discipline -------------------------------------------------
 
 func TestConfigRoutesRequireAuth(t *testing.T) {
-	// With the real bearer authenticator, an anonymous caller is rejected before
-	// the handler runs (M11 edge case).
+	// With the real bearer authenticator, an anonymous caller is rejected at the
+	// edge (401) before the handler — and so before any caller-client is built or
+	// any K8s call is made (M11 edge case).
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s := NewServer(Options{
-		Reader:   c,
-		Writer:   c,
-		Scheme:   testScheme(t),
-		Auth:     BearerAuthenticator{},
-		Adapters: Adapters{Expand: NewExpandAdapter()},
-		Log:      logr.Discard(),
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          BearerAuthenticator{},
+		Adapters:      Adapters{Expand: NewExpandAdapter()},
+		Log:           logr.Discard(),
 	})
 
 	for _, path := range []string{"/api/expand", "/api/agents"} {
@@ -261,12 +265,11 @@ func TestConfigRoutesRequireAuth(t *testing.T) {
 }
 
 func TestExpandSeamNotWiredServes501(t *testing.T) {
-	// No Expand adapter + no writer → both config routes honestly report 501.
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	// No Expand adapter + no caller-client factory → both config routes honestly
+	// report 501 (the BFF never falls back to an SA client for user CRD ops).
 	s := NewServer(Options{
-		Reader: c,
-		Auth:   AllowAll{},
-		Log:    logr.Discard(),
+		Auth: AllowAll{},
+		Log:  logr.Discard(),
 	})
 
 	rec := httptest.NewRecorder()
