@@ -19,7 +19,23 @@ package bff
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 )
+
+// PromQL the dashboard cost/usage view runs through the Prometheus adapter. The
+// exact series are the engine's request-scale / latency signals; kept here (not
+// in the SPA) so the browser never composes a raw query and the metric contract
+// stays server-side.
+const (
+	// promScaleQuery — current replica count per agent (Knative-served scale).
+	promScaleQuery = `sum by (agent) (agent_engine_agent_replicas)`
+	// promLatencyQuery — p95 invoke latency (ms) per agent over 5m.
+	promLatencyQuery = `histogram_quantile(0.95, sum by (agent, le) (rate(agent_engine_invoke_latency_ms_bucket[5m])))`
+)
+
+// defaultRunLimit bounds GET /api/runs when the caller passes no ?limit.
+const defaultRunLimit = 20
 
 // handleHealth serves GET /api/health — a liveness + version probe. It needs no
 // cluster access, so it works even before the SPA is authenticated (the SPA
@@ -50,6 +66,101 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		summaries = append(summaries, newAgentSummary(&list.Items[i]))
 	}
 	writeJSON(w, http.StatusOK, AgentListResponse{Agents: summaries})
+}
+
+// handleTopology serves GET /api/topology — the live graph the dashboard's
+// React Flow view renders. It reads AgentRegistry + AgentDeployment +
+// MCPToolBinding via the client-go seam (creds server-side) and returns the flat
+// nodes+edges DTO. An empty cluster yields {"nodes":[],"edges":[]}.
+func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
+	graph, err := buildTopology(r.Context(), s.reader)
+	if err != nil {
+		s.log.Error(err, "build topology failed")
+		writeError(w, http.StatusInternalServerError, "failed to build topology")
+		return
+	}
+	writeJSON(w, http.StatusOK, graph)
+}
+
+// handleRuns serves GET /api/runs — the dashboard's recent-runs list, sourced
+// from the Langfuse public API (server-side creds). Each run links to its trace
+// (via GET /api/traces/{id}). Only registered when the Langfuse adapter is wired
+// (otherwise the route serves 501).
+func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	limit := defaultRunLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	runs, err := s.adapters.Langfuse.RecentRuns(r.Context(), limit)
+	if err != nil {
+		s.log.Error(err, "fetch recent runs failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch recent runs")
+		return
+	}
+	if runs == nil {
+		runs = []RunSummary{}
+	}
+	writeJSON(w, http.StatusOK, RunListResponse{Runs: runs})
+}
+
+// handleCost serves GET /api/cost — the dashboard's cost/usage view. It folds
+// the Langfuse cost rollup with the Prometheus latency/scale series (both
+// server-side). If the Prometheus adapter is not wired, the metric series come
+// back empty ([]) and only the Langfuse rollup renders — a partial dashboard is
+// better than a hard failure.
+func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	summary, err := s.adapters.Langfuse.CostUsage(ctx)
+	if err != nil {
+		s.log.Error(err, "fetch cost usage failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch cost usage")
+		return
+	}
+
+	latency := []MetricPoint{}
+	scale := []MetricPoint{}
+	if s.adapters.Prometheus != nil {
+		if pts, qErr := s.adapters.Prometheus.Query(ctx, promLatencyQuery); qErr != nil {
+			// A metrics-source hiccup must not sink the whole cost view; log and
+			// degrade to an empty latency series.
+			s.log.Error(qErr, "prometheus latency query failed")
+		} else {
+			latency = pts
+		}
+		if pts, qErr := s.adapters.Prometheus.Query(ctx, promScaleQuery); qErr != nil {
+			s.log.Error(qErr, "prometheus scale query failed")
+		} else {
+			scale = pts
+		}
+	}
+
+	writeJSON(w, http.StatusOK, CostResponse{
+		Summary: summary,
+		Latency: latency,
+		Scale:   scale,
+	})
+}
+
+// handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one
+// Langfuse target URL (the embedded iframe src AND the link-out href). The SPA
+// never hardcodes a Langfuse URL; swapping the backend is a server-side config
+// change (ADR 0005). Only registered when the Langfuse adapter is wired.
+func (s *Server) handleTraceLink(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing trace id")
+		return
+	}
+	u, err := s.adapters.Langfuse.TraceURL(id)
+	if err != nil {
+		s.log.Error(err, "resolve trace URL failed", "traceID", id)
+		writeError(w, http.StatusBadGateway, "failed to resolve trace URL")
+		return
+	}
+	writeJSON(w, http.StatusOK, TraceLinkResponse{TraceID: id, URL: u})
 }
 
 // notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/
