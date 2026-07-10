@@ -28,4 +28,11 @@ resources:
 - agentdeployment_admin_role.yaml
 - agentdeployment_editor_role.yaml
 - agentdeployment_viewer_role.yaml
-
+# Built-in platform-persona ClusterRoles (M11.4, PRD §20): operator/developer/
+# viewer aggregate over ALL agent.ctxmesh.ai CRDs (not one CRD like the
+# scaffolds above). Bound to users/groups/ServiceAccounts by the cluster admin;
+# they make the RBAC authz story meaningful — a subject without the role is
+# denied, an anonymous request is rejected by the K8s API server's authn.
+- agent_engine_operator_role.yaml
+- agent_engine_developer_role.yaml
+- agent_engine_viewer_role.yaml

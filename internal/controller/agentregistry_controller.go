@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
@@ -77,6 +78,52 @@ const (
 	// delivers CloudEvents to plain-Deployment `eventing` agents. Must be allowed
 	// or async event delivery is dropped by the registry NetworkPolicy (m7.8).
 	knativeEventingNamespace = "knative-eventing"
+
+	// ─── Egress allowlist peers (m11.3, spec §3 "Egress lockdown") ──────────────
+	// The egress direction is default-deny + this allowlist. Each namespace below
+	// is the REAL destination an agent-pod (its user container, its OTel collector
+	// sidecar, and its launcher) actually talks to; anything else is denied to
+	// prevent exfiltration. Namespaces are selected by the well-known
+	// namespace-name label (namespaceNameLabel) so we do not depend on the
+	// operator labelling those namespaces themselves — the same discipline the
+	// ingress platform rule uses.
+
+	// kubeSystemNamespace hosts kube-dns/CoreDNS. DNS egress (:53 UDP AND TCP) is
+	// the FIRST allowlist entry — without it every name resolution fails and the
+	// pod cannot reach ANY service by DNS (gateway, Langfuse, memory all die).
+	kubeSystemNamespace = "kube-system"
+
+	// dnsAppLabel / dnsAppLabelValue select the CoreDNS/kube-dns pods within
+	// kube-system (they carry k8s-app=kube-dns). Narrowing DNS egress to the DNS
+	// pods (not all of kube-system) keeps the allowlist tight while Calico still
+	// resolves the peer.
+	dnsAppLabel      = "k8s-app"
+	dnsAppLabelValue = "kube-dns"
+	dnsPort          = 53
+
+	// langfuseNamespace hosts langfuse-web — the OTLP trace sink the agent's OTel
+	// collector sidecar exports to (LANGFUSE_OTLP_ENDPOINT →
+	// http://langfuse-web.langfuse.svc:3000/api/public/otel). THIS IS THE M6.4
+	// LANDMINE: default-deny egress without this entry silently severs the
+	// collector→Langfuse export (it did in the m6.4 review — the reason M6 shipped
+	// ingress-only). It MUST stay open. The port is the langfuse-web http port.
+	langfuseNamespace = "langfuse"
+	langfusePort      = 3000
+
+	// agentEngineSystemNamespace hosts the platform backends the agent pod's
+	// launcher reaches on the model/memory/object-store paths:
+	//   - the LiteLLM model gateway (agent-engine-gateway :4000) — MODEL_GATEWAY_URL;
+	//     breaking it breaks every LLM call.
+	//   - the Valkey state layer (agent-engine-statelayer :6379) —
+	//     MEMORY_BACKEND_ADDR; breaking it breaks M5 memory + M7 async dedupe.
+	//   - the MinIO object store (agent-engine-objectstore :9000) —
+	//     OBJECT_STORE_ADDR; breaking it breaks m7.6b blob offload.
+	// All three live in this one namespace, so a single namespace-scoped egress
+	// peer (restricted to their three ports) covers them.
+	agentEngineSystemNamespace = "agent-engine-system"
+	modelGatewayPort           = 4000
+	memoryBackendPort          = 6379
+	objectStorePort            = 9000
 
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
@@ -130,8 +177,12 @@ const (
 //  2. CreateOrUpdate's a single NetworkPolicy (owned by the registry) that
 //     enforces registry isolation at L3/L4 (ADR 0007): default-deny ingress for
 //     member pods, allow intra-registry ingress, allow the Knative activator +
-//     kourier ingress (so scale-from-zero A2A and external /invoke work), and
-//     allow DNS egress (so discovery resolves).
+//     kourier ingress (so scale-from-zero A2A and external /invoke work); PLUS
+//     (m11.3) default-deny EGRESS with a backend allowlist — DNS, the
+//     collector→Langfuse export, the model gateway / memory / object store, and
+//     the intra-registry A2A route path — everything else denied (exfiltration
+//     lockdown, spec §3), without re-severing the Langfuse export (the M6.4
+//     landmine).
 //
 // NO FINALIZER: the NetworkPolicy is owned by the registry (owner ref) so
 // Kubernetes garbage-collects it on delete; the member label + injected env are
@@ -264,11 +315,28 @@ func (r *AgentRegistryReconciler) resolveMembers(
 //     (ingress) namespaces — REQUIRED or scale-from-zero A2A and external
 //     /invoke break (ADR 0007 consequences).
 //
-// Ingress-only (M6): egress is intentionally NOT restricted. The cross-registry
-// isolation 🧪 is ingress-driven — the callee's ingress default-deny admits only
-// same-registry pods. A default-deny egress model needs a complete backend
-// inventory (it silently severed the collector→Langfuse OTLP export in review)
-// and belongs with the M11 zero-trust work (ADR 0007 defers mTLS/zero-trust).
+// Egress (m11.3, spec §3 "Egress lockdown"): the policy now ALSO lists Egress,
+// making it default-deny for EGRESS from member pods with an explicit allowlist
+// (exfiltration prevention — an agent cannot reach an arbitrary internet host).
+// The allowlist is the complete backend inventory the M6.4 review demanded,
+// derived peer-by-peer from what the pod actually talks to (the injected
+// LANGFUSE_OTLP_ENDPOINT / MODEL_GATEWAY_URL / MEMORY_BACKEND_ADDR /
+// OBJECT_STORE_ADDR and the A2A Knative-route path):
+//
+//   - DNS (:53 UDP+TCP → kube-dns in kube-system) — FIRST, or all name
+//     resolution dies and every other peer becomes unreachable by name;
+//   - collector→Langfuse (langfuse-web :3000 in the langfuse namespace) — the
+//     OTLP export is egress from the agent pod; THE M6.4 LANDMINE, must stay open;
+//   - model gateway / memory backend / object store (agent-engine-system :4000 /
+//     :6379 / :9000) — the launcher's LLM, M5 memory, and blob-offload paths;
+//   - intra-registry A2A (pods carrying the same registry-id label) AND the
+//     Knative data plane (activator in knative-serving, kourier ingress in
+//     kourier-system): A2A resolves to a Knative route
+//     (http://{target}.{ns}.svc.cluster.local), so the outbound hop egresses to
+//     kourier/activator, NOT pod-to-pod — omitting them severs A2A (M6/M7).
+//
+// Everything else is denied. This satisfies the M11 zero-trust backlog (ADR 0007)
+// WITHOUT re-severing the collector→Langfuse export that made M6 ship ingress-only.
 func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 	ctx context.Context,
 	registry *agentsv1alpha1.AgentRegistry,
@@ -288,14 +356,15 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 			PodSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{registryIDLabel: registryID},
 			},
-			// Listing Ingress makes this default-deny for INGRESS to member pods,
-			// allowing only the explicit rules below. Egress is intentionally NOT
-			// restricted in M6 (ingress-only isolation per ADR 0007 — the
-			// cross-registry block is ingress-driven; a default-deny egress model
-			// needs a complete backend inventory, silently severed collector→Langfuse
-			// in review, and belongs with M11 zero-trust).
+			// Listing Ingress AND Egress makes this default-deny in BOTH
+			// directions for member pods, allowing only the explicit rules below.
+			// Ingress is the M6 cross-registry isolation; Egress is the m11.3
+			// exfiltration lockdown (spec §3) — default-deny egress with the
+			// backend allowlist built above, keeping the collector→Langfuse export
+			// alive (the M6.4 landmine).
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
 			},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
@@ -331,6 +400,89 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					},
 				},
 			},
+			// Egress default-deny + allowlist (m11.3, spec §3). Each rule pairs a
+			// destination peer with the exact port(s) it serves, so a member pod
+			// can reach ONLY these backends and nothing else on the network.
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					// DNS (:53 UDP AND TCP) → the CoreDNS/kube-dns pods in
+					// kube-system. Both protocols: TCP is used for large responses
+					// / zone transfers and by some resolvers, so UDP-only would
+					// intermittently break resolution. Narrowed to the DNS pods by
+					// their k8s-app=kube-dns label. WITHOUT this, no name resolves
+					// and every other peer below is unreachable by DNS.
+					To: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{namespaceNameLabel: kubeSystemNamespace},
+							},
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{dnsAppLabel: dnsAppLabelValue},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: protoPtr(corev1.ProtocolUDP), Port: intstrPtr(dnsPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(dnsPort)},
+					},
+				},
+				{
+					// collector → Langfuse (langfuse-web :3000). THE M6.4 LANDMINE:
+					// the OTLP export is egress from the agent pod's collector
+					// sidecar; default-deny without this severed it in the m6.4
+					// review. MUST stay open.
+					To: []networkingv1.NetworkPolicyPeer{
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: langfuseNamespace},
+						}},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)},
+					},
+				},
+				{
+					// Platform backends in agent-engine-system: the LiteLLM model
+					// gateway (:4000, MODEL_GATEWAY_URL — every LLM call), the
+					// Valkey state layer (:6379, MEMORY_BACKEND_ADDR — M5 memory +
+					// M7 async dedupe), and the MinIO object store (:9000,
+					// OBJECT_STORE_ADDR — m7.6b blob offload). One namespace peer,
+					// scoped to their three ports.
+					To: []networkingv1.NetworkPolicyPeer{
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: agentEngineSystemNamespace},
+						}},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
+					},
+				},
+				{
+					// Intra-registry A2A. Two peer shapes, both required:
+					//   - same-registry pods (pod-to-pod, if a target is addressed
+					//     directly), selected by the registry-id label;
+					//   - the Knative data plane — the activator (knative-serving,
+					//     scale-from-zero buffer) and the kourier ingress
+					//     (kourier-system): A2A resolves to a Knative route
+					//     (http://{target}.{ns}.svc.cluster.local), so the outbound
+					//     hop egresses THROUGH kourier/activator, not straight to the
+					//     callee pod. Omitting them severs A2A (M6/M7) even though the
+					//     intra-registry pod peer is present. No port restriction:
+					//     A2A/HTTP hits arbitrary ksvc ports via the route.
+					To: []networkingv1.NetworkPolicyPeer{
+						{PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{registryIDLabel: registryID},
+						}},
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: knativeServingNamespace},
+						}},
+						{NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{namespaceNameLabel: kourierSystemNamespace},
+						}},
+					},
+				},
+			},
 		}
 		return ctrl.SetControllerReference(registry, np, r.Scheme)
 	}); err != nil {
@@ -342,6 +494,16 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 		return fmt.Errorf("upserting NetworkPolicy %s: %w", np.Name, err)
 	}
 	return nil
+}
+
+// protoPtr / intstrPtr are small constructors for the NetworkPolicy port fields,
+// which take pointers. Kept local to this file (the only user) — a NetworkPolicy
+// port entry needs a *Protocol and an *intstr.IntOrString.
+func protoPtr(p corev1.Protocol) *corev1.Protocol { return &p }
+
+func intstrPtr(port int) *intstr.IntOrString {
+	v := intstr.FromInt32(int32(port))
+	return &v
 }
 
 // reconcileDLQSink CreateOrUpdate's the per-registry dead-letter-queue sink

@@ -138,3 +138,19 @@ jobs:
         # Guard 0 rebuilds base-python from tip so the pod runs the SDK with the
         # 307-follow fix (tools.call reaches FastMCP /mcp/). specs/python-sdk.md.
         run: make -C agent-brain/harness tier2 SLICE=m10-sdk
+      - name: M11 trace-governance + security e2e (redaction / authz / audit / egress)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # Needs M=6+ (Calico for the egress NetworkPolicy) — the M=7 nightly stack
+        # covers it. Guard 0 rebuilds the CONTRIB collector from tip (a core image
+        # no-ops the transform/redaction OTTL → PII leaks). Asserts the full M11 🧪:
+        # (1) redaction before persistence on BOTH export paths — the agent
+        # OpenInference indexed message keys (value-wide replace_all_patterns) AND
+        # the LiteLLM gateway's own trace (turn_off_message_logging; cost span
+        # survives) — raw PII absent from the persisted Langfuse trace, tree intact;
+        # (2) authz — unbound/anonymous rejected, agent-engine-developer can create,
+        # viewer read-only; (3) audit — a CRD create+delete in the manager audit
+        # log; (4) egress lockdown — non-allowlisted host denied (Calico) while the
+        # collector→Langfuse export stays alive. Dedupe fail-closed is unit-proven,
+        # not e2e'd. specs/trace-governance-security.md, ADR 0009.
+        run: make -C agent-brain/harness tier2 SLICE=m11-security
