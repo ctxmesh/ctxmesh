@@ -1,0 +1,22 @@
+# ClusterIP Service for the BFF — the UI's in-cluster entry point. A browser
+# reaches the UI + /api through this Service (via an ingress/port-forward). Port
+# 9090 matches the BFF listen addr (cmd/bff/main.go --addr default).
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  namespace: system
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      protocol: TCP

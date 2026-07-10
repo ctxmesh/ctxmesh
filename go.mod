@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/cloudevents/sdk-go/v2 v2.16.1
+	github.com/go-logr/logr v1.4.3
 	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/redis/go-redis/v9 v9.21.0
@@ -23,6 +24,7 @@ require (
 	knative.dev/pkg v0.0.0-20260531000007-52dbd5ece63f
 	knative.dev/serving v0.49.1
 	sigs.k8s.io/controller-runtime v0.24.1
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -42,7 +44,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
@@ -121,5 +122,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )

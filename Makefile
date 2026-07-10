@@ -31,6 +31,19 @@ SDK_REQS = $(SDK_DIR)/requirements-dev.txt
 # the pinned requirements change (make dependency tracking).
 SDK_VENV_STAMP = $(SDK_VENV)/.deps-installed
 
+# UI toolchain (ui/ — the Vite React SPA, m12.4). Node is a BUILD-TIME-ONLY
+# dependency (ADR 0010: no Node runtime — the BFF serves the static build).
+# Node is managed by nvm + a PINNED ui/.nvmrc (user requirement); pnpm + a
+# committed pnpm-lock.yaml pin the deps. hack/ui-node.sh bootstraps the whole
+# chain deterministically on a CLEAN host (installs nvm if absent, `nvm install`
+# the .nvmrc version, corepack-activates pnpm, `pnpm install --frozen-lockfile`),
+# then runs the requested pnpm script. eslint + vitest below are wired into
+# `make lint`/`make test` so the harness tier0 covers the UI (Go + Python + TS);
+# the Vite build feeds the image build. This is the M10 pinned-venv analogue via
+# nvm.
+UI_DIR ?= ui
+UI_NODE ?= ./hack/ui-node.sh
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -80,7 +93,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet py-test ## Run unit tests (Go + Python SDK). Envtest suites are tagged 'integration' and run via test-integration.
+test: manifests generate fmt vet py-test ui-test ## Run unit tests (Go + Python SDK + UI vitest). Envtest suites are tagged 'integration' and run via test-integration.
 	go test ./... -coverprofile cover.out
 
 .PHONY: test-integration
@@ -91,7 +104,7 @@ test-integration: manifests generate fmt vet setup-envtest ## Run envtest-backed
 # (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
 .PHONY: lint
-lint: golangci-lint py-lint ## Run linters (Go golangci-lint + Python ruff on the SDK)
+lint: golangci-lint py-lint ui-lint ## Run linters (Go golangci-lint + Python ruff + UI eslint + tsc)
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
@@ -133,6 +146,40 @@ py-clean: ## Remove the SDK dev venv and Python caches.
 	find "$(SDK_DIR)" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 	rm -rf "$(SDK_DIR)/.pytest_cache" "$(SDK_DIR)/.ruff_cache"
 
+##@ UI (ui/ — Vite React SPA; nvm + pnpm, build-time only, m12.4)
+
+.PHONY: ui-deps
+ui-deps: ## Bootstrap the UI toolchain on a clean host (nvm+node from .nvmrc, pnpm, frozen install).
+	$(UI_NODE) install
+
+.PHONY: ui-lint
+ui-lint: ## Lint the UI (eslint) + typecheck (tsc). Bootstraps the toolchain first. Wired into `make lint`.
+	$(UI_NODE) install
+	$(UI_NODE) run lint
+	$(UI_NODE) run typecheck
+
+.PHONY: ui-test
+ui-test: ## Run the UI unit/component tests (vitest run). Bootstraps the toolchain first. Wired into `make test`.
+	$(UI_NODE) install
+	$(UI_NODE) run test
+
+.PHONY: ui-build
+ui-build: ## Build the SPA to static assets (ui/dist). The BFF/image serves this output.
+	$(UI_NODE) install
+	$(UI_NODE) run build
+
+.PHONY: ui-versions
+ui-versions: ## Print the pinned node+pnpm the UI toolchain resolves (from .nvmrc).
+	$(UI_NODE) print-versions
+
+.PHONY: ui-clean
+ui-clean: ## Remove UI build output and installed node_modules.
+	rm -rf "$(UI_DIR)/dist" "$(UI_DIR)/node_modules"
+
+.PHONY: build-bff
+build-bff: fmt vet ## Build the BFF binary (bin/bff) — serves the static UI + /api behind M11 auth.
+	go build -o bin/bff ./cmd/bff
+
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
@@ -161,6 +208,10 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-build-launcher
 docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
 	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
+
+.PHONY: docker-build-bff
+docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (build-time Node) + Go BFF; serves static assets, NO Node runtime.
+	$(CONTAINER_TOOL) build -t bff:latest -f Dockerfile.bff .
 
 .PHONY: docker-build-discovery
 docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
@@ -245,6 +296,40 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
+##@ Helm chart (deploy/helm/agent-engine — GENERATED from config/, m12.2)
+
+# The Helm chart's control-plane + CRD templates are GENERATED from
+# `kustomize build config/default` — NEVER hand-maintained — so `helm install`
+# cannot drift from `make deploy`. `helm-generate` regenerates them;
+# `helm-verify` fails if the committed chart drifts from config/ OR if
+# `helm template` (default values) stops matching `kustomize build config/default`.
+HELM ?= helm
+HELM_CHART ?= deploy/helm/agent-engine
+
+.PHONY: helm-generate
+helm-generate: manifests kustomize ## Regenerate the Helm chart templates from config/default. Run after any config/ change.
+	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh
+
+.PHONY: helm-verify
+helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).
+	@set -e; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	echo ">> regenerating chart templates into a scratch dir and diffing vs committed"; \
+	mkdir -p "$$tmp/gen"; \
+	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh "$$tmp/gen" >/dev/null; \
+	for f in crds.yaml control-plane.yaml dev-data-plane.yaml bff.yaml; do \
+	  diff -u "$(HELM_CHART)/templates/$$f" "$$tmp/gen/$$f" \
+	    || { echo "DRIFT: $(HELM_CHART)/templates/$$f is stale — run 'make helm-generate'"; exit 1; }; \
+	done; \
+	echo ">> checking helm template (default values) == kustomize build config/default"; \
+	"$(KUSTOMIZE)" build config/default > "$$tmp/kustomize.yaml"; \
+	"$(HELM)" template agent-engine "$(HELM_CHART)" > "$$tmp/helm.yaml"; \
+	python3 ./hack/helm_nodrift_diff.py "$$tmp/kustomize.yaml" "$$tmp/helm.yaml"
+
+.PHONY: helm-lint
+helm-lint: ## helm lint the chart.
+	"$(HELM)" lint "$(HELM_CHART)"
 
 ##@ Dependencies
 
