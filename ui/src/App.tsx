@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentsPage } from "@/pages/agents-page";
@@ -10,7 +10,23 @@ import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
+import { NAV_ITEMS } from "@/lib/nav";
 import { designGalleryEnabled } from "@/design/flag";
+
+// SoonPage resolves the /soon/:id placeholder for a nav destination the approved
+// IA lists but a later milestone ships (m13.5 keeps the full IA walkable without
+// pulling those surfaces forward). It reads the owning milestone + label from the
+// shared nav source so the "arrives in M<n>" copy is always correct.
+function SoonPage() {
+  const { id } = useParams();
+  const item = NAV_ITEMS.find((n) => n.id === id);
+  return (
+    <PlaceholderPage
+      title={item?.label ?? "Coming soon"}
+      milestone={item?.milestone ?? "a later milestone"}
+    />
+  );
+}
 
 // The design gallery is a REVIEW-only surface (m13.1 design gate). It's loaded
 // lazily and ONLY when the flag is on, so a normal production build splits it
@@ -61,6 +77,10 @@ export function App() {
             <Route path="agents" element={<AgentsPage />} />
             <Route path="config" element={<ConfigBuilderPage />} />
             <Route path="playground" element={<PlaygroundPage />} />
+            {/* Not-yet-built IA destinations (Topology, Tools, Traces, … ,
+                Settings) render their milestone placeholder — the full approved
+                nav is walkable without pulling later features forward. */}
+            <Route path="soon/:id" element={<SoonPage />} />
             <Route
               path="*"
               element={
