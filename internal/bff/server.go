@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -36,6 +37,8 @@ const defaultVersion = "dev"
 // each is independently testable.
 type Server struct {
 	reader   AgentReader
+	writer   AgentWriter
+	scheme   *runtime.Scheme
 	auth     Authenticator
 	adapters Adapters
 	version  string
@@ -49,8 +52,15 @@ type Server struct {
 // Options configures a Server.
 type Options struct {
 	// Reader is the client-go-backed reader for the agent CRDs (required for the
-	// /api/agents route). Typically the manager's client.Client.
+	// GET /api/agents + /api/topology routes). Typically the manager's client.Client.
 	Reader AgentReader
+	// Writer is the client-go-backed create client for the config-builder apply
+	// path (POST /api/agents, m12.6). Typically the SAME client.Client as Reader.
+	// Nil leaves POST /api/agents serving 501 (the create seam is not wired).
+	Writer AgentWriter
+	// Scheme decodes the expand-emitted CRD manifests into typed objects for the
+	// apply path. Required when Writer is set (the agent CRDs must be registered).
+	Scheme *runtime.Scheme
 	// Auth gates /api requests (the M11 control-plane auth seam). Required.
 	Auth Authenticator
 	// Adapters are the optional server-side adapters (Langfuse/Prometheus/invoke/
@@ -70,6 +80,8 @@ type Options struct {
 func NewServer(opts Options) *Server {
 	s := &Server{
 		reader:   opts.Reader,
+		writer:   opts.Writer,
+		scheme:   opts.Scheme,
 		auth:     opts.Auth,
 		adapters: opts.Adapters,
 		version:  opts.Version,
@@ -96,6 +108,16 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	authed.HandleFunc("GET /api/agents", s.handleListAgents)
 
+	// Config-builder apply path (m12.6): create the AgentDeployment (+ related
+	// EvalSuite/PromptVersion) via client-go, RBAC-scoped by the K8s API server.
+	// Wired only when the write seam is configured; honest 501 otherwise so the
+	// route stays discoverable.
+	if s.writer != nil && s.scheme != nil {
+		authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
+	} else {
+		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
+	}
+
 	// Topology is client-go only (no external adapter) → always available.
 	authed.HandleFunc("GET /api/topology", s.handleTopology)
 
@@ -121,7 +143,12 @@ func (s *Server) Handler() http.Handler {
 	if s.adapters.Invoke == nil {
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
-	if s.adapters.Expand == nil {
+	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
+	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
+	// honest 501 otherwise.
+	if s.adapters.Expand != nil {
+		authed.HandleFunc("POST /api/expand", s.handleExpand)
+	} else {
 		authed.Handle("POST /api/expand", notImplemented("config expand"))
 	}
 

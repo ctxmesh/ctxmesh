@@ -94,9 +94,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// nil, and the server serves an honest 501 for its routes rather than wiring
 	// a half-configured client.
 	adapters := buildAdapters(log)
+	// The config-builder expand adapter (m12.6) is a pure transform reusing the
+	// CLI expand core — always available, no external creds. The write seam for
+	// the apply path is the same client-go client as the read seam.
+	adapters.Expand = bff.NewExpandAdapter()
 
 	srv := bff.NewServer(bff.Options{
 		Reader:    k8s,
+		Writer:    k8s,
+		Scheme:    scheme,
 		Auth:      bff.BearerAuthenticator{},
 		Adapters:  adapters,
 		Version:   version,
