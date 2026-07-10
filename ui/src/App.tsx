@@ -5,46 +5,71 @@ import { AppShell } from "@/components/app-shell";
 import { AgentsPage } from "@/pages/agents-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { DashboardPage } from "@/pages/dashboard-page";
+import { LoginPage } from "@/pages/login-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
+import { RequireAuth, SessionProvider } from "@/lib/session-provider";
+import { ToastProvider } from "@/components/kit";
 import { designGalleryEnabled } from "@/design/flag";
 
 // The design gallery is a REVIEW-only surface (m13.1 design gate). It's loaded
 // lazily and ONLY when the flag is on, so a normal production build splits it
 // into a separate chunk that is never requested (the route isn't mounted) —
 // invisible by construction. VITE_DESIGN_GALLERY=1 (build) or ?design (runtime)
-// enables it.
+// enables it. It is STATIC wireframes and is reachable WITHOUT auth (it renders
+// OUTSIDE the SessionProvider guard) — the design gate must not require a login.
 const DesignGallery = lazy(() =>
   import("@/design/gallery").then((m) => ({ default: m.DesignGallery })),
 );
 
-// App — the SPA route table. The AppShell wraps every product surface; the
-// flag-gated /design gallery mounts OUTSIDE the shell with its own review chrome.
+// App — the SPA route table (ADR 0012 auth routing):
+//   • /design (flag-gated)  — static wireframes, NO auth (outside RequireAuth).
+//   • /login                — the token login; public. RedirectIfAuthed handled
+//                             inside LoginPage (an authed visit bounces to /).
+//   • everything else       — the console, behind RequireAuth (→ /login with the
+//                             return path preserved when signed out).
+//
+// SessionProvider wraps everything: it registers the api.ts token/401 seams and
+// restores a persisted token before the guards run. The design gallery still
+// mounts under it (so restore() runs) but is NOT wrapped in RequireAuth.
 export function App() {
   const designOn = designGalleryEnabled();
 
   return (
-    <Routes>
-      {designOn && (
-        <Route
-          path="design/*"
-          element={
-            <Suspense fallback={null}>
-              <DesignGallery />
-            </Suspense>
-          }
-        />
-      )}
-      <Route element={<AppShell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="agents" element={<AgentsPage />} />
-        <Route path="config" element={<ConfigBuilderPage />} />
-        <Route path="playground" element={<PlaygroundPage />} />
-        <Route
-          path="*"
-          element={<PlaceholderPage title="Not found" milestone="this build" />}
-        />
-      </Route>
-    </Routes>
+    <SessionProvider>
+      <ToastProvider>
+        <Routes>
+          {designOn && (
+            <Route
+              path="design/*"
+              element={
+                <Suspense fallback={null}>
+                  <DesignGallery />
+                </Suspense>
+              }
+            />
+          )}
+          <Route path="login" element={<LoginPage />} />
+          <Route
+            element={
+              <RequireAuth>
+                <AppShell />
+              </RequireAuth>
+            }
+          >
+            <Route index element={<DashboardPage />} />
+            <Route path="agents" element={<AgentsPage />} />
+            <Route path="config" element={<ConfigBuilderPage />} />
+            <Route path="playground" element={<PlaygroundPage />} />
+            <Route
+              path="*"
+              element={
+                <PlaceholderPage title="Not found" milestone="this build" />
+              }
+            />
+          </Route>
+        </Routes>
+      </ToastProvider>
+    </SessionProvider>
   );
 }
