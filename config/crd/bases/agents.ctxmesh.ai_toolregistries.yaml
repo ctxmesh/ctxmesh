@@ -59,12 +59,39 @@ spec:
                     server image/url matches whatever the entry pins (empty pin = any value
                     allowed for that field).
                   properties:
+                    approvalStatus:
+                      description: |-
+                        approvalStatus is the trust state (ADR 0016): "approved" (self-serve default
+                        — immediately bindable) or "pending" (a BYO tool on a hardened cluster
+                        awaiting operator approval; the approval queue is M17). Empty is treated as
+                        "approved" for backward compatibility with pre-M14 curated registries.
+                      enum:
+                      - approved
+                      - pending
+                      type: string
+                    description:
+                      description: |-
+                        description is the tool's human-readable description as advertised by the
+                        MCP server's tools/list (or authored by the operator for a curated entry).
+                        Surfaced in the catalog UI; not load-bearing for binding.
+                      maxLength: 1024
+                      type: string
                     image:
                       description: |-
                         image optionally pins the container image a sidecar-mode binding for
                         this tool must use. Empty = sidecar bindings may use any image.
                       maxLength: 512
                       type: string
+                    inputSchema:
+                      description: |-
+                        inputSchema is the tool's argument JSON Schema, captured verbatim from the
+                        MCP server's tools/list (the object under each tool's "inputSchema"). It is
+                        stored as raw JSON so the managed loop (m14.6b) can hand the model exact
+                        tool-call schemas without re-probing the server. Empty for a curated entry
+                        that pre-dates schema capture. Preserved unknown-fields so a schema addition
+                        never breaks the projection.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     name:
                       description: |-
                         name is the catalog key that MCPToolBinding.spec.toolName must
@@ -72,6 +99,15 @@ spec:
                         CEL cost estimate for the uniqueness rule.
                       maxLength: 63
                       minLength: 1
+                      type: string
+                    source:
+                      description: |-
+                        source records the tool's provenance: "curated" (operator-authored) or
+                        "user-added" (discovered by the BYO-MCP register flow, ADR 0016). Empty is
+                        treated as "curated" for backward compatibility with pre-M14 registries.
+                      enum:
+                      - curated
+                      - user-added
                       type: string
                     url:
                       description: |-

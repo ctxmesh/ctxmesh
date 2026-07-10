@@ -1,0 +1,606 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+)
+
+// The BYO-MCP register + tool-catalog handlers (ADR 0016). All are CALLER-SCOPED
+// (ADR 0011): the Secret / SecretBinding / ToolRegistry / NetworkPolicy are
+// created and read with the CALLER'S own client, so the K8s API server enforces
+// the caller's RBAC — a viewer with no create on those kinds is denied by the API
+// server and the 403 surfaces (never a BFF-SA fallback). The optional bearer key
+// is validated once by the probe, then written ONLY into the Secret — it is never
+// returned in a DTO and never logged (the m14.4 discipline, repeated).
+//
+// Structurally this mirrors the connect-a-provider flow (providers.go): probe an
+// external thing with a key → store the key as a Secret → create CRDs
+// caller-scoped. The MCP-specific parts are the discovery handshake (mcp_client.go
+// captures inputSchema), the ToolRegistry (one user-added entry per tool, storing
+// inputSchema), the trust policy (self-serve vs pending-approval), and per-server
+// egress.
+
+// Labels/annotations stamped on every object the MCP register flow creates so
+// GET /api/mcpservers can list exactly the register-managed ToolRegistries and
+// the server is discoverable. Kept as constants so create + list agree.
+const (
+	// managedByMCP marks an object as created by the BYO-MCP register flow. It is
+	// the value of labelManagedBy (shared with the connect flow's constant).
+	managedByMCP = "agent-engine-mcp"
+	// annMCPURL persists the registered server's URL on the ToolRegistry so the
+	// list projection can surface it (non-secret).
+	annMCPURL = "agents.ctxmesh.ai/mcp-url"
+	// annMCPStatus persists the trust status ("approved"/"pending") so the list
+	// projection can surface it without re-deriving from the entries.
+	annMCPStatus = "agents.ctxmesh.ai/mcp-status"
+	// annMCPSecret persists the Secret NAME (a reference, never the key) when the
+	// server was registered with a key.
+	annMCPSecret = "agents.ctxmesh.ai/mcp-secret"
+)
+
+// networkPolicyMCPSuffix names the per-server egress NetworkPolicy derived from
+// the server name (deterministic, so a re-register collides cleanly).
+const networkPolicyMCPSuffix = "-mcp-egress"
+
+// handleRegisterMCPServer serves POST /api/mcpservers (ADR 0016). It:
+//  1. reads + validates the request body;
+//  2. PROBES the MCP server (initialize + tools/list) → the tools with their
+//     inputSchema. A bad URL / non-MCP endpoint → an honest 4xx, never a 500;
+//  3. if apiKey given → creates a Secret + SecretBinding (the key server-side
+//     only — never in a DTO/log);
+//  4. creates a user-added ToolRegistry entry per discovered tool, STORING each
+//     tool's inputSchema. Trust: self-serve (default) → approved (bindable);
+//     hardened (mcp.requireApproval) → pending-approval;
+//  5. opens PER-SERVER egress (a NetworkPolicy allowing the agent registry to
+//     reach that server's host/port) — self-serve opens it now.
+//
+// All creates use the CALLER'S client. A viewer denied a create surfaces a 403.
+func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxConnectRequestBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	req, perr := parseRegisterMCPRequest(raw)
+	if perr != nil {
+		writeError(w, perr.status, perr.msg)
+		return
+	}
+
+	ns := strings.TrimSpace(req.Namespace)
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	name := mcpServerName(req.Name)
+
+	// (2) Probe the server. A bad URL / non-MCP endpoint → an honest 4xx with a
+	// teaching message; an unreachable host → 502. The optional key is used only
+	// for the probe here; it is neither returned nor logged.
+	tools, err := probeMCPServer(r.Context(), s.providerHTTP, req.URL, req.APIKey)
+	if err != nil {
+		if me, isME := isMCPError(err); isME {
+			writeError(w, me.status, me.msg)
+			return
+		}
+		writeError(w, http.StatusBadGateway, "MCP discovery failed")
+		return
+	}
+
+	// (3)+(4)+(5) Create the objects with the CALLER'S client. The key goes ONLY
+	// into the Secret. A partial create (K8s is not transactional) leaves the
+	// earlier objects and the error names the one that failed; the deterministic
+	// names make a re-register a clean AlreadyExists → 409 (documented idempotency,
+	// like the m14.4 provider orphan note).
+	status := s.mcpApprovalStatus()
+	created, cErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
+		name:      name,
+		namespace: ns,
+		url:       strings.TrimSpace(req.URL),
+		apiKey:    req.APIKey,
+		tools:     tools,
+		status:    status,
+	})
+	if cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
+
+	secretName := ""
+	if strings.TrimSpace(req.APIKey) != "" {
+		secretName = name
+	}
+	writeJSON(w, http.StatusCreated, RegisterMCPServerResponse{
+		Server: MCPServerSummary{
+			Name:       name,
+			Namespace:  ns,
+			URL:        strings.TrimSpace(req.URL),
+			ToolCount:  len(tools),
+			Status:     status,
+			SecretName: secretName,
+		},
+		Tools:   toolCatalogEntriesFromDiscovered(name, ns, tools, status),
+		Created: created,
+	})
+}
+
+// mcpApprovalStatus returns the trust status a freshly-registered server's tools
+// get: ApprovalPending on a HARDENED cluster (the values-gated mcpRequireApproval
+// kill-switch pattern — the M17 approval queue is out of scope; here we only mark
+// the state), else ApprovalApproved (self-serve default — immediately bindable).
+func (s *Server) mcpApprovalStatus() string {
+	if s.mcpRequireApproval {
+		return agentsv1alpha1.ApprovalPending
+	}
+	return agentsv1alpha1.ApprovalApproved
+}
+
+// parseRegisterMCPRequest decodes + validates the register body. It returns a
+// typed *createError (status + client-safe message) on a bad request. The error
+// NEVER contains the key.
+func parseRegisterMCPRequest(raw []byte) (RegisterMCPServerRequest, *createError) {
+	var req RegisterMCPServerRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return req, &createError{status: http.StatusBadRequest, msg: "invalid JSON body"}
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return req, &createError{status: http.StatusBadRequest, msg: "name is required"}
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		return req, &createError{status: http.StatusBadRequest, msg: "url is required (remote MCP server endpoint)"}
+	}
+	return req, nil
+}
+
+// mcpServerName derives a deterministic RFC-1123 object name from the server's
+// display name, reusing the provider-flow sanitizer's intent (lowercase,
+// [a-z0-9-], capped). Deterministic so re-registering the same server collides on
+// create → a clean 409.
+func mcpServerName(display string) string {
+	base := strings.ToLower(strings.TrimSpace(display))
+	base = rfc1123Invalid.ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-")
+	if base == "" {
+		base = "mcp-server"
+	}
+	if len(base) > 40 {
+		base = strings.Trim(base[:40], "-")
+	}
+	return base
+}
+
+// mcpCreateSpec bundles the inputs for the MCP object-create so the creation
+// logic is one testable unit.
+type mcpCreateSpec struct {
+	name      string
+	namespace string
+	url       string
+	apiKey    string
+	tools     []discoveredTool
+	status    string
+}
+
+// createMCPObjects creates, with the caller's client and in dependency order:
+//   - a Secret + SecretBinding holding the bearer key (ONLY when a key was given —
+//     the key lands in the Secret and nowhere else);
+//   - a ToolRegistry with one user-added entry per discovered tool, each storing
+//     the tool's inputSchema (the m14.3-review requirement) and the trust status;
+//   - a per-server egress NetworkPolicy allowing the agent registry to reach the
+//     server's host/port (self-serve opens it now; pending-approval would open it
+//     on approval — an M17 step — but M14 self-serve opens it here).
+//
+// It returns the flat identity of every created object, or a typed *createError
+// with the right HTTP status on the first failure (a viewer's denied create → an
+// honest 403).
+func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme, spec mcpCreateSpec) ([]createdObject, *createError) {
+	labels := map[string]string{
+		labelManagedBy: managedByMCP,
+	}
+	hasKey := strings.TrimSpace(spec.apiKey) != ""
+
+	annotations := map[string]string{
+		annMCPURL:    spec.url,
+		annMCPStatus: spec.status,
+	}
+	if hasKey {
+		annotations[annMCPSecret] = spec.name
+	}
+
+	// Build the ToolRegistry entries, storing each tool's inputSchema verbatim so
+	// m14.6b can plumb it to the loop. Names are DNS-1123-sanitized by the CRD's
+	// own MaxLength; here we only trim.
+	entries := make([]agentsv1alpha1.ToolEntry, 0, len(spec.tools))
+	for _, t := range spec.tools {
+		entry := agentsv1alpha1.ToolEntry{
+			Name:           truncateToolName(t.Name),
+			URL:            spec.url,
+			Description:    t.Description,
+			Source:         agentsv1alpha1.SourceUserAdded,
+			ApprovalStatus: spec.status,
+		}
+		if len(t.InputSchema) > 0 {
+			// Store the schema verbatim (RawExtension.Raw) — never re-marshaled.
+			entry.InputSchema = &runtime.RawExtension{Raw: append([]byte(nil), t.InputSchema...)}
+		}
+		entries = append(entries, entry)
+	}
+
+	registry := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        spec.name,
+			Namespace:   spec.namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: entries},
+	}
+
+	// Assemble the create list in dependency order. The Secret/SecretBinding come
+	// first (the key store), then the ToolRegistry (the catalog), then the egress
+	// NetworkPolicy (the connectivity).
+	type kindObj struct {
+		kind string
+		o    client.Object
+	}
+	objs := make([]kindObj, 0, 4)
+
+	if hasKey {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        spec.name,
+				Namespace:   spec.namespace,
+				Labels:      labels,
+				Annotations: annotations,
+			},
+			Type: corev1.SecretTypeOpaque,
+			// The bearer key lands in the SAME data key the provider flow uses.
+			Data: map[string][]byte{secretKeyAPIKey: []byte(spec.apiKey)},
+		}
+		binding := &agentsv1alpha1.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        spec.name,
+				Namespace:   spec.namespace,
+				Labels:      labels,
+				Annotations: annotations,
+			},
+			Spec: agentsv1alpha1.SecretBindingSpec{
+				Backend:   secretBackendKubernetes,
+				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: secretKeyAPIKey},
+			},
+		}
+		objs = append(objs, kindObj{"Secret", secret}, kindObj{"SecretBinding", binding})
+	}
+
+	objs = append(objs, kindObj{"ToolRegistry", registry})
+
+	// The per-server egress NetworkPolicy. Skipped only when the URL host cannot be
+	// resolved to a peer (a malformed URL would have failed the probe already, so
+	// this is defensive). Self-serve opens egress now; a hardened cluster would
+	// open it on approval (M17) — noted, not implemented here.
+	np, npErr := mcpEgressNetworkPolicy(spec.name, spec.namespace, spec.url, labels)
+	if npErr != nil {
+		return nil, npErr
+	}
+	objs = append(objs, kindObj{"NetworkPolicy", np})
+
+	created := make([]createdObject, 0, len(objs))
+	for _, ko := range objs {
+		if err := w.Create(ctx, ko.o); err != nil {
+			return created, classifyCreateError(err, ko.kind, ko.o.GetName())
+		}
+		created = append(created, createdObject{
+			Kind:      ko.kind,
+			Name:      ko.o.GetName(),
+			Namespace: ko.o.GetNamespace(),
+		})
+	}
+	_ = scheme // scheme reserved for future decode paths; kept for signature parity
+	return created, nil
+}
+
+// truncateToolName bounds a discovered tool name to the ToolEntry.Name CRD
+// MaxLength (63). The real catalog name is what the loop matches on; MCP tool
+// names are short, so truncation is defensive.
+func truncateToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) > 63 {
+		return name[:63]
+	}
+	return name
+}
+
+// mcpEgressNetworkPolicy builds a per-server egress NetworkPolicy: it allows
+// egress from agent-registry member pods (selected by the presence of the
+// registry-id label) to the MCP server's host/port ONLY — never a blanket open,
+// preserving the M6 whitelist + M11 default-deny (ADR 0007/0016). The host is
+// parsed from the URL; a resolvable IP is expressed as an ipBlock peer, a DNS
+// host as a same-namespace/cluster egress rule scoped to the port (DNS resolution
+// itself stays governed by the registry's own policy). Kept caller-scoped: this
+// object is created with the caller's client alongside the ToolRegistry.
+func mcpEgressNetworkPolicy(name, namespace, rawURL string, labels map[string]string) (*networkingv1.NetworkPolicy, *createError) {
+	host, port, err := hostPortFromURL(rawURL)
+	if err != nil {
+		return nil, &createError{status: http.StatusBadRequest, msg: "the MCP server URL has no resolvable host:port for egress"}
+	}
+
+	// The peer: an IP literal → an ipBlock CIDR (a /32 or /128 host route); a DNS
+	// name → a namespaceSelector-less peer scoped to the port (the agent's DNS
+	// egress is already allowed by the registry policy, so the host resolves and
+	// this rule opens the port to it). We express the DNS case as an empty-peer
+	// egress rule bounded to the port — the tightest a NetworkPolicy can express
+	// for a name (CNI DNS-aware policies are out of scope).
+	var peers []networkingv1.NetworkPolicyPeer
+	if ip := net.ParseIP(host); ip != nil {
+		cidr := host + "/32"
+		if ip.To4() == nil {
+			cidr = host + "/128"
+		}
+		peers = []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: cidr}}}
+	}
+
+	protoTCP := corev1.ProtocolTCP
+	portVal := intstr.FromInt32(int32(port)) //nolint:gosec // port is bounded 1..65535 by hostPortFromURL
+	egressRule := networkingv1.NetworkPolicyEgressRule{
+		To: peers, // empty peers (DNS host) = allow to the port anywhere; IP = the /32
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: &protoTCP, Port: &portVal},
+		},
+	}
+
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name + networkPolicyMCPSuffix,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: map[string]string{annMCPURL: rawURL},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			// Select agent-registry member pods (they carry the registry-id label).
+			// Additive to the registry's own default-deny policy: this opens ONE more
+			// egress destination (the MCP server's port) without touching anything
+			// else — the whitelist grows by exactly this server.
+			PodSelector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key:      registryIDLabelKey,
+					Operator: metav1.LabelSelectorOpExists,
+				}},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress:      []networkingv1.NetworkPolicyEgressRule{egressRule},
+		},
+	}
+	return np, nil
+}
+
+// registryIDLabelKey is the agent-registry membership label the controller stamps
+// on member pods (the same key internal/controller uses as registryIDLabel). An
+// additive per-server egress policy selects member pods by its PRESENCE so the
+// opened destination applies to every agent in the namespace's registries. Kept
+// as a local constant so the BFF does not import the controller package.
+const registryIDLabelKey = "agents.ctxmesh.ai/registry-id"
+
+// hostPortFromURL parses a URL into its host and port, defaulting the port from
+// the scheme (http→80, https→443). It returns an error for a URL with no host or
+// an out-of-range port so the egress peer is always well-formed.
+func hostPortFromURL(rawURL string) (string, int, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return "", 0, fmt.Errorf("no host in URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", 0, fmt.Errorf("no host in URL")
+	}
+	portStr := u.Port()
+	if portStr == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			return host, 443, nil
+		case "http", "":
+			return host, 80, nil
+		default:
+			return "", 0, fmt.Errorf("unknown scheme %q", u.Scheme)
+		}
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("invalid port %q", portStr)
+	}
+	return host, port, nil
+}
+
+// toolCatalogEntriesFromDiscovered projects freshly-discovered tools onto the
+// flat catalog DTO (used in the register response). InputSchema is passed through
+// verbatim; no secret material is present.
+func toolCatalogEntriesFromDiscovered(registry, namespace string, tools []discoveredTool, status string) []ToolCatalogEntry {
+	out := make([]ToolCatalogEntry, 0, len(tools))
+	for _, t := range tools {
+		var schema json.RawMessage
+		if len(t.InputSchema) > 0 {
+			schema = append(json.RawMessage(nil), t.InputSchema...)
+		}
+		out = append(out, ToolCatalogEntry{
+			Name:           truncateToolName(t.Name),
+			Registry:       registry,
+			Namespace:      namespace,
+			Description:    t.Description,
+			InputSchema:    schema,
+			Source:         agentsv1alpha1.SourceUserAdded,
+			ApprovalStatus: status,
+		})
+	}
+	return out
+}
+
+// handleListMCPServers serves GET /api/mcpservers — the registered servers, read
+// through the CALLER-SCOPED client. It lists register-managed ToolRegistries
+// (labelled managed-by=agent-engine-mcp) and projects each onto the flat
+// MCPServerSummary — NO secret material, only the Secret NAME as a reference.
+// Servers is [] (not null) for the empty case; a Forbidden on the list surfaces
+// as 403, never a swallowed empty list.
+func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	namespace := r.URL.Query().Get("namespace")
+
+	opts := []client.ListOption{client.MatchingLabels{labelManagedBy: managedByMCP}}
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+
+	var registries agentsv1alpha1.ToolRegistryList
+	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "list MCP servers failed")
+		writeError(w, http.StatusInternalServerError, "failed to list MCP servers")
+		return
+	}
+
+	summaries := make([]MCPServerSummary, 0, len(registries.Items))
+	for i := range registries.Items {
+		summaries = append(summaries, mcpServerSummaryFromRegistry(&registries.Items[i]))
+	}
+	slices.SortFunc(summaries, func(a, b MCPServerSummary) int { return strings.Compare(a.Name, b.Name) })
+
+	writeJSON(w, http.StatusOK, MCPServerListResponse{Servers: summaries, Items: summaries})
+}
+
+// mcpServerSummaryFromRegistry projects a register-managed ToolRegistry onto the
+// flat MCPServerSummary. It carries only NON-secret material: the server/registry
+// name, the URL, the tool count, the trust status, and the Secret NAME (a
+// reference). No key is ever touched here.
+func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSummary {
+	status := tr.Annotations[annMCPStatus]
+	if status == "" {
+		status = agentsv1alpha1.ApprovalApproved
+	}
+	return MCPServerSummary{
+		Name:       tr.Name,
+		Namespace:  tr.Namespace,
+		URL:        tr.Annotations[annMCPURL],
+		ToolCount:  len(tr.Spec.Tools),
+		Status:     status,
+		SecretName: tr.Annotations[annMCPSecret],
+	}
+}
+
+// handleListTools serves GET /api/tools — the MERGED catalog: every ToolRegistry
+// the caller can read (operator-curated + user-added), each tool projected onto
+// the flat catalog DTO with its inputSchema, source, and approval status. Read
+// through the CALLER-SCOPED client. Tools is [] (not null) for the empty case; a
+// Forbidden on the list surfaces as 403. No entry carries secret material.
+func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	namespace := r.URL.Query().Get("namespace")
+
+	var opts []client.ListOption
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+
+	var registries agentsv1alpha1.ToolRegistryList
+	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "list tools failed")
+		writeError(w, http.StatusInternalServerError, "failed to list tools")
+		return
+	}
+
+	tools := make([]ToolCatalogEntry, 0)
+	for ri := range registries.Items {
+		tr := &registries.Items[ri]
+		tools = append(tools, toolCatalogEntriesFromRegistry(tr)...)
+	}
+	// Deterministic order for stable rendering + tests: by registry then tool name.
+	slices.SortFunc(tools, func(a, b ToolCatalogEntry) int {
+		if c := strings.Compare(a.Registry, b.Registry); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	writeJSON(w, http.StatusOK, ToolCatalogResponse{Tools: tools, Items: tools})
+}
+
+// toolCatalogEntriesFromRegistry projects a ToolRegistry's entries onto the flat
+// catalog DTO, carrying each tool's inputSchema verbatim + its source/approval.
+// A legacy entry with no explicit source/status defaults to curated/approved (so
+// pre-M14 operator registries render correctly). No secret material is present —
+// the registry itself carries none; the key lives in a Secret this read never
+// opens.
+func toolCatalogEntriesFromRegistry(tr *agentsv1alpha1.ToolRegistry) []ToolCatalogEntry {
+	out := make([]ToolCatalogEntry, 0, len(tr.Spec.Tools))
+	for i := range tr.Spec.Tools {
+		e := &tr.Spec.Tools[i]
+		source := e.Source
+		if source == "" {
+			source = agentsv1alpha1.SourceCurated
+		}
+		status := e.ApprovalStatus
+		if status == "" {
+			status = agentsv1alpha1.ApprovalApproved
+		}
+		var schema json.RawMessage
+		if e.InputSchema != nil && len(e.InputSchema.Raw) > 0 {
+			schema = append(json.RawMessage(nil), e.InputSchema.Raw...)
+		}
+		out = append(out, ToolCatalogEntry{
+			Name:           e.Name,
+			Registry:       tr.Name,
+			Namespace:      tr.Namespace,
+			Description:    e.Description,
+			InputSchema:    schema,
+			Source:         source,
+			ApprovalStatus: status,
+		})
+	}
+	return out
+}
