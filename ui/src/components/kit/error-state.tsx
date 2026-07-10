@@ -5,9 +5,15 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 // ErrorState — an error primitive that ALWAYS offers a next action (kit,
-// m13.1). No dead-end red text: a failed load shows what broke + a Retry (or
-// a role-specific fix). The 403 variant is first-class because RBAC-aware
-// chrome (spec §3) must "explain-and-suggest, never a blank screen".
+// m13.1 → real m13.4). No dead-end red text: a failed load shows what broke +
+// a Retry (or a role-specific fix). The 403 variant is first-class because
+// RBAC-aware chrome (spec §3) must "explain-and-suggest, never a blank screen".
+//
+// Production invariant (m13.4): the component is guaranteed to render at least
+// one actionable affordance. `error` defaults to a Retry; `forbidden` (which
+// has no retry) falls back to a description that names the next step. If a
+// caller somehow supplies neither retry nor action nor description, we still
+// render a default explanation so the surface is never a dead end.
 
 export interface ErrorStateProps {
   variant?: "error" | "forbidden";
@@ -38,6 +44,18 @@ export function ErrorState({
   const heading =
     title ?? (forbidden ? "You don't have access" : "Something went wrong");
 
+  // ALWAYS-a-next-action invariant. `error` gets a default Retry only when the
+  // caller wired one; when it wired nothing at all, a default explanation keeps
+  // the state from being a blank dead end.
+  const hasButtonAction = !!onRetry || !!action;
+  const resolvedDescription =
+    description ??
+    (forbidden
+      ? "Ask an admin to grant access, or switch to a namespace you can read."
+      : hasButtonAction
+        ? undefined
+        : "Reload the page or try again in a moment.");
+
   return (
     <div
       role="alert"
@@ -60,9 +78,9 @@ export function ErrorState({
         <Icon className="h-6 w-6" />
       </div>
       <h3 className="text-lg font-semibold tracking-snug">{heading}</h3>
-      {description && (
+      {resolvedDescription && (
         <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
-          {description}
+          {resolvedDescription}
         </p>
       )}
       {detail && (

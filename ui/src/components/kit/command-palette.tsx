@@ -3,15 +3,20 @@ import { CornerDownLeft, Search } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { useFocusTrap } from "@/components/kit/use-focus-trap";
 
-// CommandPalette — the cmd-K navigator (kit, m13.1; spec §5). Open with ⌘K /
-// Ctrl-K, type to fuzzy-filter across navigation targets, recent agents, and
-// quick actions ("Connect a provider", "Describe an agent"); Enter runs the
-// selected item. This is the fast path power users expect and a strong
+// CommandPalette — the cmd-K navigator (kit, m13.1 → real m13.4; spec §5). Open
+// with ⌘K / Ctrl-K, type to fuzzy-filter across navigation targets, recent
+// agents, and quick actions ("Connect a provider", "Describe an agent"); Enter
+// runs the selected item. This is the fast path power users expect and a strong
 // anti-"rudimentary" signal.
 //
 // Controlled `open`; the parent wires the ⌘K listener (via `useCommandK`) and
-// supplies grouped `commands`. Keyboard: ↑/↓ move, Enter runs, Esc closes.
+// supplies grouped `commands` (navigation-ready — the parent passes command
+// groups). Keyboard-first: ↑/↓ move the active item (wrapping + scroll-into-
+// view), Enter runs it, Esc closes. Productionized in m13.4: subsequence fuzzy
+// matching, a labelled active option (aria-activedescendant), focus-return to
+// the opener on close, and the active row scrolled into view on keyboard move.
 
 export interface CommandItem {
   id: string;
@@ -23,6 +28,17 @@ export interface CommandItem {
   keywords?: string;
   hint?: string;
   onRun: () => void;
+}
+
+// Subsequence fuzzy match: every needle char appears in order in the haystack
+// (e.g. "gta" → "Go to Agents"). Falls back naturally to substring matches.
+function fuzzyMatch(needle: string, haystack: string): boolean {
+  if (!needle) return true;
+  let i = 0;
+  for (let j = 0; j < haystack.length && i < needle.length; j++) {
+    if (haystack[j] === needle[i]) i++;
+  }
+  return i === needle.length;
 }
 
 export interface CommandPaletteProps {
@@ -57,13 +73,15 @@ export function CommandPalette({
   const [q, setQ] = React.useState("");
   const [active, setActive] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const listRef = React.useRef<HTMLDivElement>(null);
+  // Focus trap: keeps Tab inside the palette, returns focus to the opener on
+  // close, and owns Esc. Focus lands on the input (first focusable) on open.
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: open, onEscape: onClose });
 
   React.useEffect(() => {
     if (open) {
       setQ("");
       setActive(0);
-      // Focus the input on open without a lint-flagged autoFocus attribute.
-      inputRef.current?.focus();
     }
   }, [open]);
 
@@ -71,11 +89,21 @@ export function CommandPalette({
     const needle = q.trim().toLowerCase();
     if (!needle) return commands;
     return commands.filter((c) =>
-      `${c.label} ${c.group ?? ""} ${c.keywords ?? ""}`
-        .toLowerCase()
-        .includes(needle),
+      fuzzyMatch(
+        needle,
+        `${c.label} ${c.group ?? ""} ${c.keywords ?? ""}`.toLowerCase(),
+      ),
     );
   }, [commands, q]);
+
+  // Keep the active row visible as ↑/↓ moves it past the scroll viewport.
+  React.useEffect(() => {
+    const el = listRef.current?.querySelector<HTMLElement>(
+      '[data-active="true"]',
+    );
+    // scrollIntoView is a browser nicety (jsdom lacks it) — guard the call.
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [active, filtered]);
 
   // Group in stable order, preserving first-seen group sequence.
   const groups = React.useMemo(() => {
@@ -88,13 +116,15 @@ export function CommandPalette({
     return Array.from(map.entries());
   }, [filtered]);
 
+  // Esc is owned by the focus trap; here we handle only list navigation + run.
   function onKeyDown(e: React.KeyboardEvent) {
+    if (filtered.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((a) => Math.min(a + 1, filtered.length - 1));
+      setActive((a) => (a + 1) % filtered.length); // wrap to top
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((a) => Math.max(a - 1, 0));
+      setActive((a) => (a - 1 + filtered.length) % filtered.length); // wrap to bottom
     } else if (e.key === "Enter") {
       e.preventDefault();
       const item = filtered[active];
@@ -102,17 +132,17 @@ export function CommandPalette({
         item.onRun();
         onClose();
       }
-    } else if (e.key === "Escape") {
-      onClose();
     }
   }
 
   if (!open) return null;
 
+  const activeId = filtered[active] ? `cmd-${filtered[active].id}` : undefined;
   let flatIndex = -1;
 
   return (
     <div
+      ref={panelRef}
       className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]"
       role="dialog"
       aria-modal="true"
@@ -136,6 +166,10 @@ export function CommandPalette({
             onKeyDown={onKeyDown}
             placeholder={placeholder}
             aria-label="Command"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="cmdk-list"
+            aria-activedescendant={activeId}
             className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
           <kbd className="hidden rounded border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline">
@@ -143,7 +177,13 @@ export function CommandPalette({
           </kbd>
         </div>
 
-        <div className="max-h-[22rem] overflow-y-auto p-2">
+        <div
+          id="cmdk-list"
+          ref={listRef}
+          role="listbox"
+          aria-label="Commands"
+          className="max-h-[22rem] overflow-y-auto p-2"
+        >
           {filtered.length === 0 && (
             <p className="px-3 py-8 text-center text-sm text-muted-foreground">
               No commands match “{q}”.
@@ -163,7 +203,12 @@ export function CommandPalette({
                 return (
                   <button
                     key={item.id}
+                    id={`cmd-${item.id}`}
+                    role="option"
+                    aria-selected={isActive}
+                    data-active={isActive}
                     type="button"
+                    tabIndex={-1}
                     onMouseEnter={() => setActive(flatIndex)}
                     onClick={() => {
                       item.onRun();
