@@ -64,6 +64,15 @@ spec:
           env:
             - name: PROVIDER_CONNECT_ENABLED
               value: "true"
+            # PLATFORM_GENERATION_MODELS is the ADR 0014 create-from-prompt
+            # generation-model pin (comma-separated). "" (the default) leaves
+            # generation using the caller's connected-provider model unpinned; an
+            # operator sets a list to govern which model generation uses (the UI
+            # dropdown source). This literal keeps `kustomize build`/`make deploy`
+            # valid; the Helm chart templates THIS value from
+            # `bff.generation.platformModels` (values.yaml), default renders "" (no drift).
+            - name: PLATFORM_GENERATION_MODELS
+              value: ""
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:
