@@ -5,101 +5,144 @@
  *
  *  This file IS the brand. Every color / radius / shadow / typography value the
  *  UI renders resolves to a custom property defined here (mapped into Tailwind
- *  by tailwind.config.ts). Surfaces (dashboard / config-builder / Playground)
- *  and shadcn/ui components consume the SEMANTIC tokens only — they never
- *  hardcode a color.
+ *  by tailwind.config.ts). Surfaces and shadcn/ui components consume the
+ *  SEMANTIC tokens only — they never hardcode a color.
  *
  *  >>> TO RE-BRAND THE WHOLE UI: change the VALUES below. <<<
  *  Nothing else needs to change — a token edit here re-themes every surface by
  *  construction (ADR 0010). Colors are HSL channels (no hsl() wrapper) so
  *  Tailwind can compose them with opacity, e.g. `hsl(var(--primary) / 0.5)`.
  *
- *  The DEFAULT values below are a neutral, professional slate + indigo system.
- *  They are placeholders for the real brand, which the user refines HERE.
+ *  ── v2 refinement (m13.1 design gate) ────────────────────────────────────
+ *  The M12 system read as "rudimentary" in review. This v2 pass sharpens the
+ *  visual language WITHOUT breaking the token contract:
+ *    • Cooler, deeper brand indigo→violet with a real hierarchy of accents.
+ *    • A tighter neutral ramp (--surface-2 / --surface-3) so panels, rows and
+ *      chrome read as distinct planes instead of one flat gray.
+ *    • A modular type scale (--text-xs … --text-3xl) + tracking tokens so
+ *      headings and data feel intentional, not browser-default.
+ *    • A spacing rhythm token (--space-unit) and a denser radius set.
+ *    • Softer, layered elevation (ambient + key light) instead of a single box.
+ *  Every value stays a semantic token; both themes are kept in lockstep.
  */
 
 @layer base {
   :root {
     /* --- Typography -------------------------------------------------------- */
-    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-      "Helvetica Neue", Arial, sans-serif;
-    --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Menlo",
+    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+      Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", "Menlo",
       "Consolas", monospace;
 
+    /* Modular type scale (1.20 minor-third) — surfaces size text by role,
+       not by ad-hoc pixel guesses. Mapped into Tailwind fontSize. */
+    --text-xs: 0.75rem; /* 12 — captions, meta */
+    --text-sm: 0.8125rem; /* 13 — body-dense, table cells */
+    --text-base: 0.875rem; /* 14 — default body */
+    --text-md: 0.9375rem; /* 15 — emphasized body */
+    --text-lg: 1.0625rem; /* 17 — card titles */
+    --text-xl: 1.3125rem; /* 21 — page headings */
+    --text-2xl: 1.625rem; /* 26 — hero-lite */
+    --text-3xl: 2.125rem; /* 34 — prompt-first hero */
+
+    /* Tracking (letter-spacing) — tight for display, open for micro-labels. */
+    --tracking-tight: -0.02em;
+    --tracking-snug: -0.011em;
+    --tracking-wide: 0.04em; /* eyebrow / kicker labels */
+
+    /* --- Spacing rhythm ---------------------------------------------------- */
+    --space-unit: 0.25rem; /* the 4px grid every gap/pad derives from */
+
     /* --- Radius (single knob; sm/md derive from it in Tailwind) ------------ */
-    --radius: 0.625rem;
+    --radius: 0.75rem;
 
-    /* --- Surface / text ---------------------------------------------------- */
-    --background: 210 20% 98%;
-    --foreground: 222 47% 11%;
+    /* --- Surface / text — a real plane hierarchy --------------------------- */
+    --background: 220 24% 97%;
+    --foreground: 224 40% 12%;
+    --surface-2: 220 22% 94%; /* subtle raised rows / hovered rails */
+    --surface-3: 222 20% 90%; /* wells, inset code blocks */
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 224 40% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    --popover-foreground: 224 40% 12%;
 
-    /* --- Brand: primary (indigo) ------------------------------------------- */
-    --primary: 243 75% 59%;
+    /* --- Brand: primary (indigo→violet) ------------------------------------ */
+    --primary: 250 84% 60%;
     --primary-foreground: 0 0% 100%;
+    --brand-2: 268 78% 62%; /* gradient partner for hero / logo */
 
     /* --- Neutrals ---------------------------------------------------------- */
-    --secondary: 215 25% 95%;
-    --secondary-foreground: 222 47% 20%;
-    --muted: 215 25% 95%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 243 75% 96%;
-    --accent-foreground: 243 60% 30%;
+    --secondary: 220 20% 94%;
+    --secondary-foreground: 224 36% 22%;
+    --muted: 220 20% 94%;
+    --muted-foreground: 220 12% 46%;
+    --accent: 250 84% 96%;
+    --accent-foreground: 250 62% 34%;
 
     /* --- Status ------------------------------------------------------------ */
-    --destructive: 0 72% 51%;
+    --destructive: 356 72% 52%;
     --destructive-foreground: 0 0% 100%;
-    --success: 142 71% 40%;
+    --success: 152 62% 40%;
     --success-foreground: 0 0% 100%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 222 47% 11%;
+    --warning: 34 92% 50%;
+    --warning-foreground: 28 60% 12%;
+    --info: 205 85% 48%;
+    --info-foreground: 0 0% 100%;
 
     /* --- Lines / focus ----------------------------------------------------- */
-    --border: 215 20% 88%;
-    --input: 215 20% 88%;
-    --ring: 243 75% 59%;
+    --border: 220 18% 88%;
+    --border-strong: 220 16% 80%;
+    --input: 220 18% 86%;
+    --ring: 250 84% 60%;
 
-    /* --- Elevation --------------------------------------------------------- */
-    --shadow-card: 0 1px 2px 0 hsl(222 47% 11% / 0.05),
-      0 1px 3px 0 hsl(222 47% 11% / 0.08);
-    --shadow-elevated: 0 4px 6px -1px hsl(222 47% 11% / 0.08),
-      0 10px 15px -3px hsl(222 47% 11% / 0.1);
+    /* --- Elevation — layered ambient + key light -------------------------- */
+    --shadow-card: 0 1px 2px 0 hsl(224 40% 12% / 0.04),
+      0 2px 6px -1px hsl(224 40% 12% / 0.06);
+    --shadow-elevated: 0 2px 4px -1px hsl(224 40% 12% / 0.07),
+      0 12px 28px -6px hsl(224 40% 12% / 0.14);
+    --shadow-overlay: 0 8px 10px -6px hsl(224 40% 12% / 0.1),
+      0 24px 48px -12px hsl(224 40% 12% / 0.28);
   }
 
   .dark {
-    --background: 222 47% 8%;
-    --foreground: 210 20% 96%;
-    --card: 222 44% 11%;
-    --card-foreground: 210 20% 96%;
-    --popover: 222 44% 11%;
-    --popover-foreground: 210 20% 96%;
+    --background: 224 38% 7%;
+    --foreground: 216 28% 94%;
+    --surface-2: 223 32% 12%;
+    --surface-3: 223 30% 16%;
+    --card: 223 34% 10%;
+    --card-foreground: 216 28% 94%;
+    --popover: 223 34% 11%;
+    --popover-foreground: 216 28% 94%;
 
-    --primary: 243 75% 66%;
-    --primary-foreground: 222 47% 11%;
+    --primary: 250 90% 70%;
+    --primary-foreground: 224 44% 10%;
+    --brand-2: 268 84% 72%;
 
-    --secondary: 217 33% 18%;
-    --secondary-foreground: 210 20% 96%;
-    --muted: 217 33% 18%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 217 33% 20%;
-    --accent-foreground: 210 20% 96%;
+    --secondary: 222 26% 17%;
+    --secondary-foreground: 216 28% 94%;
+    --muted: 222 26% 17%;
+    --muted-foreground: 218 16% 64%;
+    --accent: 222 30% 20%;
+    --accent-foreground: 216 28% 94%;
 
-    --destructive: 0 63% 45%;
-    --destructive-foreground: 210 20% 96%;
-    --success: 142 60% 45%;
-    --success-foreground: 210 20% 96%;
-    --warning: 38 92% 55%;
-    --warning-foreground: 222 47% 11%;
+    --destructive: 356 66% 55%;
+    --destructive-foreground: 216 28% 96%;
+    --success: 152 56% 48%;
+    --success-foreground: 224 44% 10%;
+    --warning: 34 92% 58%;
+    --warning-foreground: 28 60% 12%;
+    --info: 205 80% 60%;
+    --info-foreground: 224 44% 10%;
 
-    --border: 217 33% 22%;
-    --input: 217 33% 22%;
-    --ring: 243 75% 66%;
+    --border: 222 24% 22%;
+    --border-strong: 222 20% 30%;
+    --input: 222 24% 24%;
+    --ring: 250 90% 70%;
 
-    --shadow-card: 0 1px 2px 0 hsl(0 0% 0% / 0.3), 0 1px 3px 0 hsl(0 0% 0% / 0.4);
-    --shadow-elevated: 0 4px 6px -1px hsl(0 0% 0% / 0.4),
-      0 10px 15px -3px hsl(0 0% 0% / 0.5);
+    --shadow-card: 0 1px 2px 0 hsl(0 0% 0% / 0.4), 0 2px 6px -1px hsl(0 0% 0% / 0.5);
+    --shadow-elevated: 0 2px 4px -1px hsl(0 0% 0% / 0.5),
+      0 12px 28px -6px hsl(0 0% 0% / 0.6);
+    --shadow-overlay: 0 8px 10px -6px hsl(0 0% 0% / 0.5),
+      0 24px 48px -12px hsl(0 0% 0% / 0.7);
   }
 }
