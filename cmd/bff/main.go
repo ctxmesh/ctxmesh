@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,14 +105,24 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// ADR 0011). Always available.
 	adapters.Invoke = bff.NewInvokeAdapter(bff.InvokeAdapterConfig{})
 
+	// The connect-a-provider kill-switch (ADR 0015). Default TRUE (dev/trial); a
+	// hardened install sets PROVIDER_CONNECT_ENABLED=false via the chart so the
+	// connect endpoints 404 and the UI falls back to reference-existing. Read from
+	// env with the same "flag-from-env" pattern the adapters use.
+	providerConnect := providerConnectEnabled(os.Getenv("PROVIDER_CONNECT_ENABLED"))
+	if !providerConnect {
+		log.Info("provider-connect disabled by PROVIDER_CONNECT_ENABLED=false; /api/providers routes serve 404")
+	}
+
 	srv := bff.NewServer(bff.Options{
-		CallerClients: callerClients,
-		Scheme:        scheme,
-		Auth:          bff.BearerAuthenticator{},
-		Adapters:      adapters,
-		Version:       version,
-		StaticDir:     staticDir,
-		Log:           ctrl.Log.WithName("bff.server"),
+		CallerClients:   callerClients,
+		Scheme:          scheme,
+		Auth:            bff.BearerAuthenticator{},
+		Adapters:        adapters,
+		Version:         version,
+		StaticDir:       staticDir,
+		ProviderConnect: providerConnect,
+		Log:             ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{
@@ -140,6 +151,21 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return httpSrv.Shutdown(shutdownCtx)
 	case serveErr := <-errCh:
 		return serveErr
+	}
+}
+
+// providerConnectEnabled resolves the connect-a-provider kill-switch from its
+// env value. The feature defaults to ENABLED (dev/trial, ADR 0015): an empty or
+// unrecognized value → true. Only an explicit falsey value ("false"/"0"/"no",
+// case-insensitive) disables it — the way a hardened install opts out. Kept
+// permissive-by-default so a fresh `helm install` gives the console the connect
+// flow with no extra config.
+func providerConnectEnabled(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
 	}
 }
 

@@ -36,6 +36,22 @@ import sys
 NS_KUSTOMIZE = "agent-engine-system"
 IMG_KUSTOMIZE = "controller:latest"
 
+# The BFF's connect-a-provider kill-switch (ADR 0015). config/bff hardcodes the
+# env value "true" (so `kustomize build` and `make deploy` stay valid); the chart
+# templates that ONE value from a Helm value so a hardened install can disable it
+# with `--set bff.providerConnect.enabled=false`. values.yaml ships the default
+# `true`, so with DEFAULT values the render is quoted "true" == the kustomize
+# literal → no drift; an operator's `--set …=false` renders "false". We quote the
+# value directly (no `| default true`) because Helm's `default` treats the boolean
+# `false` as empty and would silently override a real `--set …=false` back to true.
+PROVIDER_CONNECT_ENV_KUSTOMIZE = (
+    '        - name: PROVIDER_CONNECT_ENABLED\n' '          value: "true"'
+)
+PROVIDER_CONNECT_ENV_HELM = (
+    "        - name: PROVIDER_CONNECT_ENABLED\n"
+    "          value: {{ .Values.bff.providerConnect.enabled | quote }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -87,6 +103,13 @@ def substitute(doc: str) -> str:
         rf"(\bnamespace:\s*){re.escape(NS_KUSTOMIZE)}\b",
         r"\1{{ .Values.namespace }}",
         doc,
+    )
+    # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
+    # deployment carries this exact env block; the default keeps the render at
+    # "true" == kustomize (no drift), while `--set …=false` disables it.
+    doc = doc.replace(
+        PROVIDER_CONNECT_ENV_KUSTOMIZE,
+        PROVIDER_CONNECT_ENV_HELM,
     )
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
