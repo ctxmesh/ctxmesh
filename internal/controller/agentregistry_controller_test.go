@@ -169,13 +169,86 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	assert.Contains(t, platformNS, knativeEventingNamespace,
 		"platform ingress must allow knative-eventing (broker dispatcher → eventing agents)")
 
-	// Ingress-only (M6, ADR 0007): the policy must NOT restrict egress — a
-	// default-deny egress model silently severs collector→Langfuse / gateway /
-	// memory traffic (m6.4 review). Isolation is ingress-driven.
-	assert.NotContains(t, np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress,
-		"M6 policy must be ingress-only (egress lockdown deferred to M11 zero-trust)")
-	assert.Empty(t, np.Spec.Egress,
-		"M6 policy must declare no egress rules (unrestricted egress)")
+	// ── Egress lockdown (m11.3, spec §3) ──────────────────────────────────────
+	// The policy now ALSO lists Egress → default-deny egress + the backend
+	// allowlist. This is the M11 zero-trust backlog WITHOUT re-severing the
+	// collector→Langfuse export (the M6.4 landmine).
+	assert.Contains(t, np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress,
+		"policy must apply to Egress (default-deny egress + allowlist)")
+	require.NotEmpty(t, np.Spec.Egress, "egress allowlist must be present")
+
+	// Collect the destination namespaces and pod-selector labels across all
+	// egress rules, plus the allowed ports, so we can assert each required peer.
+	egressNS := map[string]bool{}
+	egressPodLabel := map[string]string{}
+	egressUDPPorts := map[int32]bool{}
+	egressTCPPorts := map[int32]bool{}
+	for _, rule := range np.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.NamespaceSelector != nil {
+				if v, ok := peer.NamespaceSelector.MatchLabels[namespaceNameLabel]; ok {
+					egressNS[v] = true
+				}
+			}
+			if peer.PodSelector != nil {
+				for k, v := range peer.PodSelector.MatchLabels {
+					egressPodLabel[k] = v
+				}
+			}
+		}
+		for _, port := range rule.Ports {
+			if port.Port == nil || port.Protocol == nil {
+				continue
+			}
+			p := port.Port.IntVal
+			switch *port.Protocol {
+			case corev1.ProtocolUDP:
+				egressUDPPorts[p] = true
+			case corev1.ProtocolTCP:
+				egressTCPPorts[p] = true
+			}
+		}
+	}
+
+	// DNS: kube-system + :53 UDP AND TCP — else all name resolution dies.
+	assert.True(t, egressNS[kubeSystemNamespace],
+		"egress must allow DNS (kube-system) — else no name resolution")
+	assert.True(t, egressUDPPorts[dnsPort], "egress must allow DNS on :53/UDP")
+	assert.True(t, egressTCPPorts[dnsPort], "egress must allow DNS on :53/TCP")
+	assert.Equal(t, dnsAppLabelValue, egressPodLabel[dnsAppLabel],
+		"DNS egress must be narrowed to the kube-dns pods")
+
+	// Langfuse: the collector→Langfuse OTLP export — THE M6.4 LANDMINE. Must
+	// stay open (langfuse namespace, :3000).
+	assert.True(t, egressNS[langfuseNamespace],
+		"egress MUST allow collector→Langfuse (the m6.4 landmine — do not re-sever)")
+	assert.True(t, egressTCPPorts[langfusePort],
+		"Langfuse egress must allow the langfuse-web :3000 port")
+
+	// Platform backends: model gateway / memory / object store all live in
+	// agent-engine-system, on :4000 / :6379 / :9000.
+	assert.True(t, egressNS[agentEngineSystemNamespace],
+		"egress must allow the platform backends (gateway/memory/object-store)")
+	assert.True(t, egressTCPPorts[modelGatewayPort], "egress must allow the model gateway :4000")
+	assert.True(t, egressTCPPorts[memoryBackendPort], "egress must allow the memory backend :6379")
+	assert.True(t, egressTCPPorts[objectStorePort], "egress must allow the object store :9000")
+
+	// Intra-registry A2A: same-registry pods (pod-to-pod) AND the Knative data
+	// plane (activator + kourier) the A2A route egresses through.
+	assert.Equal(t, registryID, egressPodLabel[registryIDLabel],
+		"egress must allow intra-registry A2A (same registry-id pods)")
+	assert.True(t, egressNS[knativeServingNamespace],
+		"egress must allow the Knative activator (A2A route path)")
+	assert.True(t, egressNS[kourierSystemNamespace],
+		"egress must allow the kourier ingress (A2A route path)")
+
+	// Lockdown: NO catch-all egress rule (an empty To with no ports = allow-all,
+	// which would defeat the exfiltration guard). Every rule must scope its
+	// destination.
+	for i, rule := range np.Spec.Egress {
+		assert.NotEmpty(t, rule.To,
+			"egress rule %d must scope a destination (no allow-all catch-all)", i)
+	}
 }
 
 // TestRegistry_MemberEnvInjected verifies the AgentDeployment reconciler injects
