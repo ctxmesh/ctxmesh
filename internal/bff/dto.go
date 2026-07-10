@@ -27,6 +27,8 @@ limitations under the License.
 package bff
 
 import (
+	"encoding/json"
+
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -300,6 +302,107 @@ type ProviderListResponse struct {
 type ProviderModelsResponse struct {
 	Provider string   `json:"provider"`
 	Models   []string `json:"models"`
+}
+
+// --- BYO-MCP register + tool catalog (ADR 0016) ------------------------------
+//
+// The BYO-MCP flow lets a user register their OWN MCP server, discover its tools
+// (with inputSchema), and catalog them — all server-side. The handler probes the
+// server (initialize + tools/list), stores an optional bearer key ONLY in a
+// Kubernetes Secret (never browser-side, never logged — the m14.4 discipline),
+// writes a user-added ToolRegistry entry per discovered tool (capturing each
+// tool's inputSchema), and opens per-server egress. These DTOs are the flat
+// projection the console's add-MCP wizard + tool picker read; none carries secret
+// material.
+
+// RegisterMCPServerRequest is the POST /api/mcpservers body. apiKey is the ONLY
+// place the MCP bearer key crosses into the BFF; after the probe it is written to
+// a Secret and dropped — it is never echoed back in a response, never logged.
+type RegisterMCPServerRequest struct {
+	// Name is a human label for the server; it also seeds the deterministic object
+	// name (Secret / SecretBinding / ToolRegistry / NetworkPolicy). Required.
+	Name string `json:"name"`
+	// URL is the remote MCP server endpoint to probe (streamable-http). Required
+	// for M14 — sidecar/image-mode BYO servers are a later tier.
+	URL string `json:"url"`
+	// APIKey is the optional MCP bearer key. When present it is validated by the
+	// probe, stored in a Secret + SecretBinding, and NEVER returned or logged
+	// (ADR 0016). Omit for an unauthenticated server.
+	APIKey string `json:"apiKey"`
+	// Namespace scopes the created objects; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// MCPServerSummary is the flat projection of one registered MCP server. It
+// carries the server identity + tool count + trust status, and DELIBERATELY no
+// secret material — no key, only the Secret's NAME as a reference (empty when the
+// server needs no key).
+type MCPServerSummary struct {
+	// Name is the server's registry/object name (the {name} the console keys off).
+	Name string `json:"name"`
+	// Namespace the ToolRegistry + Secret live in.
+	Namespace string `json:"namespace"`
+	// URL is the remote MCP endpoint (non-secret).
+	URL string `json:"url"`
+	// ToolCount is how many tools the server advertised at register time.
+	ToolCount int `json:"toolCount"`
+	// Status is the trust state of the server's tools: "approved" (self-serve —
+	// immediately bindable) or "pending" (hardened cluster, awaiting operator
+	// approval, ADR 0016).
+	Status string `json:"status"`
+	// SecretName references the Secret holding the key — a NAME only, never the
+	// key material. Empty when the server was registered without a key.
+	SecretName string `json:"secretName"`
+}
+
+// RegisterMCPServerResponse is returned by POST /api/mcpservers on success: the
+// server summary, the discovered tools (with inputSchema), and the flat
+// identities of the created objects (Secret/SecretBinding/ToolRegistry/
+// NetworkPolicy). The key is ABSENT by construction.
+type RegisterMCPServerResponse struct {
+	Server  MCPServerSummary   `json:"server"`
+	Tools   []ToolCatalogEntry `json:"tools"`
+	Created []createdObject    `json:"created"`
+}
+
+// MCPServerListResponse is returned by GET /api/mcpservers. Servers is non-nil on
+// the wire ([] not null). No entry carries secret material.
+type MCPServerListResponse struct {
+	Servers []MCPServerSummary `json:"servers"`
+	Items   []MCPServerSummary `json:"items"`
+}
+
+// ToolCatalogEntry is one tool in the merged catalog (GET /api/tools): the
+// operator-curated ToolRegistry entries + the user-added BYO tools, each with its
+// inputSchema, provenance, and approval status. InputSchema is raw JSON (the JSON
+// Schema the managed loop hands the model); it is passed through verbatim and is
+// never secret. No entry carries key material.
+type ToolCatalogEntry struct {
+	// Name is the catalog key (the toolName a binding references).
+	Name string `json:"name"`
+	// Registry is the ToolRegistry the entry lives in (so the picker can build a
+	// binding's registryRef).
+	Registry string `json:"registry"`
+	// Namespace the registry lives in.
+	Namespace string `json:"namespace"`
+	// Description is the tool's human description (advisory; may be "").
+	Description string `json:"description"`
+	// InputSchema is the tool's argument JSON Schema, verbatim. null when the entry
+	// pre-dates schema capture (a legacy curated entry). This is the m14.3-review
+	// requirement: real tool-calling (m14.6b) reads it from here.
+	InputSchema json.RawMessage `json:"inputSchema"`
+	// Source is "curated" (operator-authored) or "user-added" (BYO, ADR 0016).
+	Source string `json:"source"`
+	// ApprovalStatus is "approved" (bindable) or "pending" (hardened, awaiting
+	// operator approval).
+	ApprovalStatus string `json:"approvalStatus"`
+}
+
+// ToolCatalogResponse is returned by GET /api/tools — the merged tool catalog.
+// Tools is non-nil on the wire ([] not null); no entry carries secret material.
+type ToolCatalogResponse struct {
+	Tools []ToolCatalogEntry `json:"tools"`
+	Items []ToolCatalogEntry `json:"items"`
 }
 
 // --- Create-from-prompt generation (ADR 0014) --------------------------------

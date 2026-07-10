@@ -73,6 +73,21 @@ spec:
             # `bff.generation.platformModels` (values.yaml), default renders "" (no drift).
             - name: PLATFORM_GENERATION_MODELS
               value: ""
+            # MCP_ENABLED is the ADR 0016 BYO-MCP kill-switch: "true" (the default)
+            # exposes the POST/GET /api/mcpservers + GET /api/tools endpoints;
+            # "false" on a hardened install makes them 404 (BYO MCP forbidden). This
+            # literal keeps `kustomize build`/`make deploy` valid; the Helm chart
+            # templates it from `bff.mcp.enabled`, default renders "true" (no drift).
+            - name: MCP_ENABLED
+              value: "true"
+            # MCP_REQUIRE_APPROVAL is the ADR 0016 trust policy: "false" (the
+            # default) is self-serve — a registered MCP server's tools are
+            # immediately bindable; "true" (hardened) marks newly registered tools
+            # pending-approval (the approval queue is M17). This literal keeps
+            # `kustomize build`/`make deploy` valid; the Helm chart templates it from
+            # `bff.mcp.requireApproval`, default renders "false" (no drift).
+            - name: MCP_REQUIRE_APPROVAL
+              value: "false"
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:

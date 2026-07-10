@@ -82,3 +82,16 @@ bff:
   # (helm-verify no-drift).
   generation:
     platformModels: ""
+  # The BYO-MCP flow (ADR 0016): register your OWN MCP server, discover its tools
+  # (with inputSchema), and catalog them — all server-side (the optional bearer key
+  # never touches the browser). Enabled by default for dev/trial so the console's
+  # add-MCP wizard works out of the box. Set `enabled: false` on a HARDENED install
+  # to forbid BYO MCP: the register/catalog endpoints (POST/GET /api/mcpservers,
+  # GET /api/tools) then 404. `requireApproval: true` (hardened) marks newly
+  # registered MCP tools pending-approval instead of self-serve (the approval queue
+  # itself is M17). This templates the BFF deployment's MCP_ENABLED /
+  # MCP_REQUIRE_APPROVAL envs; with these defaults the render is "true"/"false" ==
+  # kustomize (helm-verify no-drift).
+  mcp:
+    enabled: true
+    requireApproval: false
