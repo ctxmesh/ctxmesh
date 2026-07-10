@@ -11,6 +11,7 @@ import {
   PlugZap,
   Settings,
   SlidersHorizontal,
+  Sparkles,
   Users,
   Wrench,
 } from "lucide-react";
@@ -99,6 +100,18 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Boxes,
         milestone: "M13",
         route: "/agents",
+      },
+      {
+        // The create-agent wizard (m14.10) — the aha's heart: Describe it /
+        // Configure it → one review + tool picker → Create. A WRITE surface
+        // (it creates AgentDeployments), hidden from a viewer's nav; gates on
+        // create agentdeployments. This is the primary "new agent" entry point.
+        id: "new-agent",
+        label: "New agent",
+        icon: Sparkles,
+        milestone: "M14",
+        route: "/agents/new",
+        requiresWrite: { resource: RES_AGENTS, verb: "create" },
       },
       {
         // The re-housed config-builder — a WRITE surface (it applies CRDs), so

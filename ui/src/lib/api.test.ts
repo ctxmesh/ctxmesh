@@ -161,4 +161,42 @@ describe("api client", () => {
     expect(who.username).toBe("alex");
     expect(authHeader(fetchMock)).toBe("Bearer paste-me");
   });
+
+  it("listTools reads the merged catalog from GET /api/tools", async () => {
+    const fetchMock = mockFetch({
+      tools: [{ name: "get_order", source: "acme-mcp", approvalStatus: "approved" }],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await api.listTools();
+    expect(res.tools).toHaveLength(1);
+    expect(res.tools[0].name).toBe("get_order");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tools");
+  });
+
+  it("generateAgent returns the valid config on 200", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({ agentYAML: "name: x\nruntime: managed\n", expanded: "kind: AgentDeployment\n", model: "m" }),
+    );
+    const res = await api.generateAgent({ description: "a bot" });
+    expect(res.agentYAML).toContain("runtime: managed");
+    expect(res.regenerate).toBeUndefined();
+  });
+
+  it("generateAgent does NOT throw on 422 — it returns the regenerate body (keyed on the flag)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({ reason: "invalid", agentYAML: "name: bad\n", regenerate: true }, false, 422),
+    );
+    // A 422 is the regenerate outcome, NOT an error — the raw YAML is preserved.
+    const res = await api.generateAgent({ description: "x" });
+    expect(res.regenerate).toBe(true);
+    expect(res.reason).toBe("invalid");
+    expect(res.agentYAML).toContain("bad");
+  });
+
+  it("generateAgent DOES throw on a genuine failure (403/500)", async () => {
+    vi.stubGlobal("fetch", mockFetch({ error: "forbidden" }, false, 403));
+    await expect(api.generateAgent({ description: "x" })).rejects.toBeInstanceOf(ApiError);
+  });
 });

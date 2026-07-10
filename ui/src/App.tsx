@@ -6,6 +6,7 @@ import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
+import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
@@ -77,6 +78,11 @@ export function App() {
           >
             <Route index element={<DashboardPage />} />
             <Route path="agents" element={<AgentsPage />} />
+            {/* The create-agent wizard (m14.10) — the heart of the aha: two
+                entrances (Describe it / Configure it) → one review + tool
+                picker → Create. Placed under /agents/new (the agents surface's
+                primary create action). */}
+            <Route path="agents/new" element={<CreateAgentPage />} />
             <Route path="config" element={<ConfigBuilderPage />} />
             <Route path="playground" element={<PlaygroundPage />} />
             {/* The M14 first-agent wizards (m14.9) — these nav destinations were
