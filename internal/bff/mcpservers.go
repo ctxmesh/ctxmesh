@@ -310,15 +310,20 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 
 	objs = append(objs, kindObj{"ToolRegistry", registry})
 
-	// The per-server egress NetworkPolicy. Skipped only when the URL host cannot be
-	// resolved to a peer (a malformed URL would have failed the probe already, so
-	// this is defensive). Self-serve opens egress now; a hardened cluster would
-	// open it on approval (M17) — noted, not implemented here.
-	np, npErr := mcpEgressNetworkPolicy(spec.name, spec.namespace, spec.url, labels)
-	if npErr != nil {
-		return nil, npErr
+	// The per-server egress NetworkPolicy — opened for an APPROVED server ONLY
+	// (ADR 0016 §4: "egress opens per approved server only"). Self-serve (default →
+	// approved) opens egress now. In HARDENED mode a freshly-registered server is
+	// pending-approval, so its egress hole is NOT opened here — the M17 approval
+	// step opens it when an operator approves (that is the seam; the queue itself is
+	// M17). Opening egress for a pending server would be a hole before any approval,
+	// so we gate strictly on the status.
+	if spec.status == agentsv1alpha1.ApprovalApproved {
+		np, npErr := mcpEgressNetworkPolicy(spec.name, spec.namespace, spec.url, labels)
+		if npErr != nil {
+			return nil, npErr
+		}
+		objs = append(objs, kindObj{"NetworkPolicy", np})
 	}
-	objs = append(objs, kindObj{"NetworkPolicy", np})
 
 	created := make([]createdObject, 0, len(objs))
 	for _, ko := range objs {
@@ -346,39 +351,49 @@ func truncateToolName(name string) string {
 	return name
 }
 
+// resolveHostIPs looks up a hostname to its IP addresses. It is a package var so
+// tests can stub DNS deterministically (an httptest fixture resolves to 127.0.0.1;
+// an external host needs a real lookup). Production uses net.LookupIP.
+var resolveHostIPs = net.LookupIP
+
 // mcpEgressNetworkPolicy builds a per-server egress NetworkPolicy: it allows
 // egress from agent-registry member pods (selected by the presence of the
-// registry-id label) to the MCP server's host/port ONLY — never a blanket open,
-// preserving the M6 whitelist + M11 default-deny (ADR 0007/0016). The host is
-// parsed from the URL; a resolvable IP is expressed as an ipBlock peer, a DNS
-// host as a same-namespace/cluster egress rule scoped to the port (DNS resolution
-// itself stays governed by the registry's own policy). Kept caller-scoped: this
-// object is created with the caller's client alongside the ToolRegistry.
+// registry-id label) to the MCP server's IP(s)/port ONLY — never a blanket open,
+// preserving the M6 whitelist + M11 default-deny (ADR 0007/0016).
+//
+// The `to` peers are ALWAYS bounded ipBlock CIDRs scoped to the server:
+//   - an IP-literal host → its /32 (v4) or /128 (v6) host route;
+//   - a DNS host → RESOLVED to IP(s) at register time (net.LookupIP), one ipBlock
+//     per resolved address. This is the crux: a NetworkPolicy with empty `to`
+//     peers means "allow to ANY destination on that port" — a blanket-port hole
+//     that would silently undo default-deny. We NEVER emit an empty-peers rule; a
+//     host that resolves to nothing → a teaching 4xx (the caller must give an
+//     IP/CIDR-addressable server).
+//
+// Staleness caveat: the ipBlock is pinned at register time. If the server's DNS
+// record later changes IPs, the policy goes stale and the caller must re-register
+// (acceptable for M14 — an operator-level BYO action, not a hot path). A CNI with
+// DNS-aware policies (Cilium FQDN) would remove this caveat; out of scope here.
+//
+// Kept caller-scoped: this object is created with the caller's client alongside
+// the ToolRegistry.
 func mcpEgressNetworkPolicy(name, namespace, rawURL string, labels map[string]string) (*networkingv1.NetworkPolicy, *createError) {
 	host, port, err := hostPortFromURL(rawURL)
 	if err != nil {
 		return nil, &createError{status: http.StatusBadRequest, msg: "the MCP server URL has no resolvable host:port for egress"}
 	}
 
-	// The peer: an IP literal → an ipBlock CIDR (a /32 or /128 host route); a DNS
-	// name → a namespaceSelector-less peer scoped to the port (the agent's DNS
-	// egress is already allowed by the registry policy, so the host resolves and
-	// this rule opens the port to it). We express the DNS case as an empty-peer
-	// egress rule bounded to the port — the tightest a NetworkPolicy can express
-	// for a name (CNI DNS-aware policies are out of scope).
-	var peers []networkingv1.NetworkPolicyPeer
-	if ip := net.ParseIP(host); ip != nil {
-		cidr := host + "/32"
-		if ip.To4() == nil {
-			cidr = host + "/128"
-		}
-		peers = []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: cidr}}}
+	peers, cErr := egressPeersForHost(host)
+	if cErr != nil {
+		return nil, cErr
 	}
 
 	protoTCP := corev1.ProtocolTCP
 	portVal := intstr.FromInt32(int32(port)) //nolint:gosec // port is bounded 1..65535 by hostPortFromURL
 	egressRule := networkingv1.NetworkPolicyEgressRule{
-		To: peers, // empty peers (DNS host) = allow to the port anywhere; IP = the /32
+		// INVARIANT: peers is non-empty and every entry is an ipBlock scoped to the
+		// server — never an empty `to` (which would allow the port to anywhere).
+		To: peers,
 		Ports: []networkingv1.NetworkPolicyPort{
 			{Protocol: &protoTCP, Port: &portVal},
 		},
@@ -407,6 +422,55 @@ func mcpEgressNetworkPolicy(name, namespace, rawURL string, labels map[string]st
 		},
 	}
 	return np, nil
+}
+
+// egressPeersForHost turns an MCP server host into BOUNDED ipBlock egress peers —
+// the single choke point that enforces "never an empty-peers rule":
+//   - an IP literal → its /32 (v4) or /128 (v6) host route;
+//   - a DNS name → resolved via net.LookupIP (stubbable) to one ipBlock per IP.
+//
+// A DNS host that resolves to NOTHING (or fails) → a teaching 4xx, so the caller
+// gets an honest "could not resolve <host>" instead of a silent blanket-port hole.
+// The returned slice is guaranteed non-empty on success.
+func egressPeersForHost(host string) ([]networkingv1.NetworkPolicyPeer, *createError) {
+	if ip := net.ParseIP(host); ip != nil {
+		return []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: ipToHostCIDR(ip)}}}, nil
+	}
+
+	// A DNS host: resolve it to IP(s) at register time and pin each as an ipBlock.
+	ips, err := resolveHostIPs(host)
+	if err != nil || len(ips) == 0 {
+		return nil, &createError{
+			status: http.StatusBadRequest,
+			msg: fmt.Sprintf(
+				"could not resolve MCP server host %q for per-server egress; provide an IP- or CIDR-addressable MCP server",
+				host,
+			),
+		}
+	}
+	// Dedupe (LookupIP can return the same address across families/records) and
+	// emit one ipBlock per distinct host route so egress is bounded to exactly the
+	// resolved addresses.
+	seen := map[string]struct{}{}
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(ips))
+	for _, ip := range ips {
+		cidr := ipToHostCIDR(ip)
+		if _, dup := seen[cidr]; dup {
+			continue
+		}
+		seen[cidr] = struct{}{}
+		peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+	}
+	return peers, nil
+}
+
+// ipToHostCIDR renders an IP as a single-host CIDR (/32 for IPv4, /128 for IPv6),
+// using the canonical string form so an IPv4-in-IPv6 address is expressed as v4.
+func ipToHostCIDR(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String() + "/32"
+	}
+	return ip.String() + "/128"
 }
 
 // registryIDLabelKey is the agent-registry membership label the controller stamps
