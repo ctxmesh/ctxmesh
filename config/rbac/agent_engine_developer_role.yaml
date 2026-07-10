@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/name: agent-engine
     app.kubernetes.io/managed-by: kustomize
     rbac.ctxmesh.ai/persona: developer
-  name: agent-engine-developer
+  name: developer
 rules:
 - apiGroups:
   - agents.ctxmesh.ai
