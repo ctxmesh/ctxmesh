@@ -112,9 +112,22 @@ type PrometheusAdapter interface {
 
 // InvokeAdapter proxies /invoke to a deployed agent (or the warm pool) for the
 // Playground and returns the run's traceId (m12.7).
+//
+// It is a PURE HTTP invoker: it holds NO Kubernetes client and never resolves an
+// agent's address itself. The address is resolved by the handler through the
+// CALLER-SCOPED client (the AgentDeployment's status.url), so the Playground run
+// stays caller-scoped (ADR 0011) — the adapter cannot reach for the BFF SA. The
+// adapter's only job is to open the trace (mint a W3C traceparent so the run's
+// traceId is known up front) and POST /invoke to the resolved endpoint.
 type InvokeAdapter interface {
-	// Invoke calls a deployed agent and returns the raw response + traceId.
-	Invoke(ctx context.Context, agent, namespace string, body []byte) (resp []byte, traceID string, err error)
+	// Invoke POSTs body to the resolved agent endpoint's /invoke and returns the
+	// raw response together with the run's traceId. The traceId is the W3C trace
+	// id the adapter injects as `traceparent` on the request, which the launcher's
+	// span continues (prop.Extract), so the exported trace lands under exactly this
+	// id in Langfuse — the hand-off the Playground feeds to /api/traces/{id}.
+	// endpoint is the agent's base URL (AgentDeployment status.url), resolved by
+	// the caller-scoped handler; the adapter never touches Kubernetes.
+	Invoke(ctx context.Context, endpoint string, body []byte) (resp []byte, traceID string, err error)
 }
 
 // ExpandAdapter reuses the `agent-engine expand` logic server-side (agent.yaml →
