@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { PlaygroundPage } from "@/pages/playground-page";
+import { CapabilitiesProvider } from "@/lib/capabilities";
+import { NamespaceProvider } from "@/lib/namespace";
 
 // A recording fetch mock: it captures every request (url, method, body) and
 // answers /api/invoke, /api/traces/{id}, /api/expand, /api/agents. The tests
@@ -198,7 +200,9 @@ describe("PlaygroundPage", () => {
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
+    // A 403 renders the ForbiddenInline explain-and-suggest primitive.
     expect(await screen.findByText(/forbidden: not allowed to read the requested agent/)).toBeInTheDocument();
+    expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument();
     // No trace panel mounts for a failed run.
     expect(screen.queryByTitle("Langfuse trace deep-view")).toBeNull();
   });
@@ -213,5 +217,68 @@ describe("PlaygroundPage", () => {
 
     expect(await screen.findByText(/Input must be valid JSON/)).toBeInTheDocument();
     expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
+  });
+});
+
+// RBAC-aware chrome: inside the capability providers, Run + Export-Apply are
+// write affordances gated on create agentdeployments (§3, DISPLAY-ONLY). A
+// viewer sees neither, but keeps Preview/Export (read-only console).
+describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
+  function installFetch(canCreate: boolean) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.startsWith("/api/namespaces")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ namespaces: [] }) } as Response);
+        }
+        if (url.startsWith("/api/capabilities")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ namespace: "", allowed: { agentdeployments: { create: canCreate } } }),
+          } as Response);
+        }
+        if (url.split("?")[0] === "/api/expand") {
+          return Promise.resolve({ ok: true, status: 200, text: async () => "kind: AgentDeployment\n", json: async () => ({}) } as Response);
+        }
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+      }),
+    );
+  }
+
+  function renderGated() {
+    return render(
+      <NamespaceProvider>
+        <CapabilitiesProvider>
+          <PlaygroundPage />
+        </CapabilitiesProvider>
+      </NamespaceProvider>,
+    );
+  }
+
+  it("hides Run + Apply for a viewer (no create) but keeps Preview/Export", async () => {
+    installFetch(false);
+    renderGated();
+    // Read-only notes for both write affordances; no Run button.
+    expect(await screen.findByTestId("run-readonly-note")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Run agent/ })).toBeNull();
+    // Preview stays available; Apply is hidden until a preview + create right.
+    expect(screen.getByRole("button", { name: /Preview CRD/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Apply to cluster/ })).toBeNull();
+  });
+
+  it("shows Run + Apply for an operator (create allowed)", async () => {
+    installFetch(true);
+    renderGated();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Run agent/ })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+    await screen.findByLabelText("Exported CRD preview");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Apply to cluster/ })).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("run-readonly-note")).toBeNull();
   });
 });
