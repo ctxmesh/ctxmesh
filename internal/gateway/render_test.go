@@ -365,6 +365,12 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 
 	enabled := gateway.Render([]agentsv1alpha1.ModelRoute{route}, nil, nil, otel)
 	assert.Contains(t, enabled.ConfigYAML, `callbacks: ["otel"]`, "otel callback enabled")
+	// M11.6 PII-leak fix: with otel enabled, the gateway exports its own trace
+	// straight to Langfuse (bypassing the redaction collector). Message logging
+	// MUST be turned off so the raw prompt/response never leaves the gateway,
+	// while the cost/model/token metadata survives (M3/M8 signal preserved).
+	assert.Contains(t, enabled.ConfigYAML, "turn_off_message_logging: true",
+		"message content logging must be off when otel export is enabled (no raw PII to Langfuse)")
 	envNames := map[string]string{}
 	for _, e := range enabled.EnvVars {
 		envNames[e.Name] = e.Value

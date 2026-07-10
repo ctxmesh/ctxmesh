@@ -273,8 +273,18 @@ func Render(
 
 	// M3: enable the otel callback when a trace endpoint is configured. Part of
 	// configYAML so it is included in the hash (toggling it rolls the gateway).
+	//
+	// M11.6 PII-leak fix: the gateway exports its OWN otel trace directly to
+	// Langfuse, bypassing the per-agent collector sidecar where the redaction
+	// OTTL runs. Without turn_off_message_logging, LiteLLM's `litellm_request`
+	// GENERATION span carries the raw prompt/response verbatim, leaking PII to
+	// persistence. `turn_off_message_logging: true` strips message CONTENT
+	// (prompt/response) from LiteLLM's logging + callbacks (incl. otel) while
+	// PRESERVING the request/cost/model/token/latency metadata — so the M3 cost
+	// span and the M8 budget signal survive, but the raw messages never reach
+	// Langfuse. This is the gateway analogue of the agent-side redaction seam.
 	if otel.Endpoint != "" {
-		configYAML += "litellm_settings:\n  callbacks: [\"otel\"]\n"
+		configYAML += "litellm_settings:\n  callbacks: [\"otel\"]\n  turn_off_message_logging: true\n"
 	}
 
 	// ── Collect env vars (sorted for determinism) ─────────────────────────────
