@@ -3,16 +3,28 @@ import { Check } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ConfirmDialog } from "@/components/kit/confirm-dialog";
 
-// Wizard — the multi-step primitive that kills the M12 giant form (kit, m13.1;
-// spec §5). Every creation flow (connect-provider, add-MCP, create-agent) is a
-// Wizard: a labelled step rail with progress, a body slot per step, and a
-// footer with Back / Next / Finish. The LAST step is conventionally a review.
+// Wizard — the multi-step primitive that kills the M12 giant form (kit, m13.1 →
+// real m13.4; spec §5). Every creation flow (connect-provider, add-MCP,
+// create-agent) is a Wizard: a labelled step rail with progress, a body slot
+// per step, and a footer with Back / Next / Finish. The LAST step is
+// conventionally a review.
 //
 // Controlled: the parent owns `current` and validation (`canProceed`) so it can
 // gate a step until inputs are valid, run async work on Next (probe a provider,
 // generate a config), and render the review from collected state. The Wizard
-// only renders chrome + the active step's `content`.
+// renders chrome + the active step's `content`.
+//
+// Productionized in m13.4:
+//   • Per-step gating — Next/Finish disabled unless `canProceed` (unchanged
+//     API); tested explicitly.
+//   • Focus management — on step change, focus moves to the step panel (which
+//     is labelled by the step title) so keyboard/AT users follow the flow.
+//   • aria-current="step" on the active rail item; the panel is a labelled
+//     region wired to the step heading.
+//   • Esc-guard on dirty state — when `dirty`, Esc (and Cancel) route through a
+//     discard-confirm instead of dropping unsaved input on the floor.
 
 export interface WizardStep {
   id: string;
@@ -37,6 +49,8 @@ export interface WizardProps {
   nextLabel?: string;
   /** Cancel out of the whole flow (closes a dialog / returns to the list). */
   onCancel?: () => void;
+  /** When true, Cancel/Esc route through a discard-confirmation guard. */
+  dirty?: boolean;
   className?: string;
 }
 
@@ -50,10 +64,39 @@ export function Wizard({
   finishLabel = "Create",
   nextLabel = "Continue",
   onCancel,
+  dirty = false,
   className,
 }: WizardProps) {
   const isLast = current === steps.length - 1;
   const step = steps[current];
+  const panelRef = React.useRef<HTMLDivElement>(null);
+  const headingId = React.useId();
+  const [confirmDiscard, setConfirmDiscard] = React.useState(false);
+
+  // Focus the step panel on step change so AT/keyboard users follow the flow.
+  // The panel is tabIndex=-1 + aria-labelledby the step heading.
+  React.useEffect(() => {
+    panelRef.current?.focus();
+  }, [current]);
+
+  // Esc-guard: if dirty, ask before discarding; otherwise cancel straight out.
+  const requestCancel = React.useCallback(() => {
+    if (!onCancel) return;
+    if (dirty) setConfirmDiscard(true);
+    else onCancel();
+  }, [dirty, onCancel]);
+
+  React.useEffect(() => {
+    if (!onCancel) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !confirmDiscard) {
+        e.preventDefault();
+        requestCancel();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, confirmDiscard, requestCancel]);
 
   return (
     <div className={cn("grid gap-8 md:grid-cols-[15rem_1fr]", className)}>
@@ -66,6 +109,7 @@ export function Wizard({
             <li key={s.id}>
               <button
                 type="button"
+                aria-current={active ? "step" : undefined}
                 disabled={i > current}
                 onClick={() => i < current && onStepChange(i)}
                 className={cn(
@@ -124,11 +168,23 @@ export function Wizard({
 
       {/* Body + footer. */}
       <div className="flex min-h-[20rem] flex-col">
-        <div className="flex-1">{step.content}</div>
+        <div
+          ref={panelRef}
+          role="group"
+          aria-labelledby={headingId}
+          tabIndex={-1}
+          className="flex-1 outline-none"
+        >
+          {/* Screen-reader step heading (visual title lives in the rail). */}
+          <h3 id={headingId} className="sr-only">
+            {step.title} — step {current + 1} of {steps.length}
+          </h3>
+          {step.content}
+        </div>
         <div className="mt-8 flex items-center justify-between border-t pt-5">
           <div>
             {onCancel && (
-              <Button variant="ghost" onClick={onCancel} disabled={busy}>
+              <Button variant="ghost" onClick={requestCancel} disabled={busy}>
                 Cancel
               </Button>
             )}
@@ -158,6 +214,19 @@ export function Wizard({
           </div>
         </div>
       </div>
+
+      {/* Dirty-state discard guard. */}
+      <ConfirmDialog
+        open={confirmDiscard}
+        onCancel={() => setConfirmDiscard(false)}
+        onConfirm={() => {
+          setConfirmDiscard(false);
+          onCancel?.();
+        }}
+        title="Discard your changes?"
+        description="You have unsaved input in this wizard. Leaving now discards it."
+        confirmLabel="Discard"
+      />
     </div>
   );
 }
