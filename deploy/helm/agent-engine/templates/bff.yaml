@@ -90,7 +90,10 @@ spec:
         control-plane: bff
     spec:
       containers:
-      - envFrom:
+      - env:
+        - name: PROVIDER_CONNECT_ENABLED
+          value: {{ .Values.bff.providerConnect.enabled | quote }}
+        envFrom:
         - secretRef:
             name: bff-adapters
             optional: true

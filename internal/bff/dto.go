@@ -228,6 +228,80 @@ type TraceLinkResponse struct {
 	URL     string `json:"url"`
 }
 
+// --- Connect a provider (ADR 0015) ------------------------------------------
+//
+// The connect flow lets a user paste a provider API key once and get a working
+// model route, all server-side. The key is validated (a live model-list probe),
+// stored ONLY in a Kubernetes Secret, and NEVER returned in any of these DTOs or
+// logged. These DTOs are the flat projection the console's connect wizard reads.
+
+// ConnectProviderRequest is the POST /api/providers body. apiKey is the ONLY
+// place the key crosses into the BFF; after validation it is written to a Secret
+// and dropped — it is never echoed back in a response. baseURL optionally points
+// at an OpenAI-compatible / self-hosted endpoint (empty → the provider default).
+type ConnectProviderRequest struct {
+	// Provider is the LiteLLM provider prefix, e.g. "anthropic" or "openai".
+	Provider string `json:"provider"`
+	// DisplayName is a human label for the connected provider (optional; defaults
+	// to Provider). It is stored as a label/annotation, never as a secret.
+	DisplayName string `json:"displayName"`
+	// APIKey is the pasted provider key. Used ONCE to validate + stored in a
+	// Secret; never returned in a DTO, never logged (ADR 0015).
+	APIKey string `json:"apiKey"`
+	// BaseURL optionally overrides the provider's API base URL.
+	BaseURL string `json:"baseURL"`
+	// Namespace scopes the created objects; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// ProviderSummary is the flat projection of one connected provider. It carries
+// the route identity + the discovered models, and DELIBERATELY no secret
+// material — no key, no Secret data, only the Secret's NAME as a reference. Models
+// is non-nil on the wire ([] not null).
+type ProviderSummary struct {
+	// Name is the connected provider's route name (the ModelRoute / provider
+	// resource name), used as the {name} path segment for the models endpoint.
+	Name string `json:"name"`
+	// Namespace the route + Secret live in.
+	Namespace string `json:"namespace"`
+	// Provider is the LiteLLM provider prefix (e.g. "anthropic").
+	Provider string `json:"provider"`
+	// DisplayName is the human label.
+	DisplayName string `json:"displayName"`
+	// Models is the model list on the route (from the connect-time probe). Never
+	// nil on the wire.
+	Models []string `json:"models"`
+	// SecretName references the Secret holding the key — a NAME only, never the
+	// key material.
+	SecretName string `json:"secretName"`
+	// Ready mirrors the ModelRoute "Ready" condition (rendered into the gateway).
+	Ready bool `json:"ready"`
+}
+
+// ConnectProviderResponse is returned by POST /api/providers on success: the
+// connected provider summary plus the flat identities of the created objects
+// (Secret / SecretBinding / ModelRoute), so the wizard can confirm exactly what
+// landed. The key is ABSENT here by construction.
+type ConnectProviderResponse struct {
+	Provider ProviderSummary `json:"provider"`
+	Created  []createdObject `json:"created"`
+}
+
+// ProviderListResponse is returned by GET /api/providers. Providers is non-nil on
+// the wire ([] not null). No entry carries secret material.
+type ProviderListResponse struct {
+	Providers []ProviderSummary `json:"providers"`
+	Items     []ProviderSummary `json:"items"`
+}
+
+// ProviderModelsResponse is returned by GET /api/providers/{name}/models — the
+// provider's live model list, proxied server-side using the stored key. Models is
+// non-nil on the wire; no secret material is present.
+type ProviderModelsResponse struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil
