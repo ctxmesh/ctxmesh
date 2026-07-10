@@ -55,9 +55,12 @@ spec:
               protocol: TCP
           # Non-secret feature flags. PROVIDER_CONNECT_ENABLED is the ADR 0015
           # connect-a-provider kill-switch: "true" (the default) exposes the
-          # POST/GET /api/providers endpoints; set "false" on a hardened install so
-          # they 404 and the UI falls back to reference-existing. Plain literal (no
-          # secret) so it is an operator-visible seam in the chart.
+          # POST/GET /api/providers endpoints; "false" on a hardened install makes
+          # them 404 and the UI falls back to reference-existing. This literal keeps
+          # `kustomize build`/`make deploy` valid; the Helm chart templates THIS env
+          # value from `bff.providerConnect.enabled` (values.yaml) so an operator can
+          # `helm install --set bff.providerConnect.enabled=false` — the generator
+          # (hack/gen_helm_chart.py) substitutes it, default renders "true" (no drift).
           env:
             - name: PROVIDER_CONNECT_ENABLED
               value: "true"

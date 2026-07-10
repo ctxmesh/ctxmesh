@@ -92,7 +92,7 @@ spec:
       containers:
       - env:
         - name: PROVIDER_CONNECT_ENABLED
-          value: "true"
+          value: {{ .Values.bff.providerConnect.enabled | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters
