@@ -1112,6 +1112,17 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("checking langfuse secret: %w", err)
 	}
 
+	// Redaction policy (§13.3): the built-in email/SSN/key detectors are always
+	// on; spec.tracePolicy may append per-agent custom detectors. A custom
+	// pattern that fails RE2 compilation is a fatal reconcile error — we do NOT
+	// silently drop it and ship a weaker policy than the operator declared;
+	// admission-level validation (the Pattern length/charset) is best-effort, so
+	// the reconciler is the backstop that refuses an un-compilable policy.
+	detectors, err := telemetry.DetectorsWithCustom(customDetectors(deploy))
+	if err != nil {
+		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("building trace-redaction policy: %w", err)
+	}
+
 	cmName := telemetry.ConfigMapName(deploy.Name)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
@@ -1120,13 +1131,27 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		if cm.Data == nil {
 			cm.Data = map[string]string{}
 		}
-		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse)
+		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse, detectors)
 		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
 	}); err != nil {
 		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
 	}
 
 	return telemetry.Container(cmName, langfuseEnv), telemetry.Volume(cmName), nil
+}
+
+// customDetectors adapts the AgentDeployment's optional spec.tracePolicy into
+// the telemetry package's detector-spec shape. Returns nil when no tracePolicy
+// (or no custom detectors) is set, so only the built-in defaults apply.
+func customDetectors(deploy *agentsv1alpha1.AgentDeployment) []telemetry.CustomDetectorSpec {
+	if deploy.Spec.TracePolicy == nil || len(deploy.Spec.TracePolicy.CustomDetectors) == 0 {
+		return nil
+	}
+	out := make([]telemetry.CustomDetectorSpec, 0, len(deploy.Spec.TracePolicy.CustomDetectors))
+	for _, d := range deploy.Spec.TracePolicy.CustomDetectors {
+		out = append(out, telemetry.CustomDetectorSpec{Name: d.Name, Pattern: d.Pattern})
+	}
+	return out
 }
 
 // syncStatus mirrors the Knative Service's Ready condition and URL into the

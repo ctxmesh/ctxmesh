@@ -135,6 +135,21 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	assert.Contains(t, cm.Data["config.yaml"], "otlp", "collector config has the otlp receiver")
 	assert.Contains(t, cm.Data["config.yaml"], "debug", "collector config has the debug exporter")
 
+	// M11 (§13.3) — the redaction seam must be WIRED INTO THE PIPELINE, not just
+	// defined. Prove the rendered collector config the reconciler wrote to the
+	// ConfigMap (a) declares the transform/redaction processor with a real
+	// replace_pattern statement over a sensitive payload attribute, and (b)
+	// includes it in the traces pipeline's processor list before the exporters.
+	// This is the envtest-level proof that PII redaction runs on the actual
+	// before-persistence export path (not merely that Redact() works in isolation).
+	cfg := cm.Data["config.yaml"]
+	assert.Contains(t, cfg, "transform/redaction:", "collector config declares the redaction processor")
+	assert.Contains(t, cfg, `replace_pattern(attributes["llm.input_messages"]`,
+		"redaction acts on a sensitive payload attribute")
+	assert.Contains(t, cfg, "[REDACTED:email]", "redaction uses a stable email marker")
+	assert.Contains(t, cfg, "processors: [batch, transform/redaction]",
+		"the traces pipeline runs the redaction processor before the exporters")
+
 	// Platform env vars — AGENT_PORT and MODEL_GATEWAY_URL are always injected.
 	envMap := make(map[string]string, len(c.Env))
 	for _, e := range c.Env {

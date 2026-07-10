@@ -187,7 +187,7 @@ docker-build-sdk-custom-agent: docker-build-base-python ## Build the M10 no-fram
 	$(CONTAINER_TOOL) build -t sdk-custom-agent:latest -f examples/sdk-custom-agent/Dockerfile .
 
 .PHONY: docker-build-collector
-docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — core collector on a glibc base.
+docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — contrib collector (M11 redaction transform) on a glibc base.
 	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .
 
 .PHONY: docker-build-mcp-echo-server
