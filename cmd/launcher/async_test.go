@@ -24,9 +24,11 @@ package main
 //     envelope, with the routing attributes mirroring the fields the m7.5 Trigger
 //     filters on.
 //
-//  2. the consumer dedupe (messageId idempotency): first-seen invokes the agent,
-//     a duplicate within the TTL is acked WITHOUT re-invoking, and an unreachable
-//     seen-set FAILS OPEN (processes — at-least-once beats dropping).
+//  2. the consumer dedupe (messageId idempotency, M11 fail-closed): first-seen
+//     invokes the agent; a duplicate within the TTL is acked WITHOUT re-invoking;
+//     an unreachable seen-set FAILS CLOSED (NACK — not processed, broker retries);
+//     a transient error followed by a successful MarkSeen → the message is
+//     processed exactly once (no double-process).
 //
 // Run with -race. No real Valkey / broker: the SeenSet and the invoker are stubs.
 
@@ -189,24 +191,34 @@ func TestCloudEventToEnvelope_Errors(t *testing.T) {
 // ── dedupe / consume ──────────────────────────────────────────────────────────
 
 // fakeSeenSet is an in-memory SeenSet stub. When failWith is set, every MarkSeen
-// returns it (to exercise fail-open); otherwise it tracks seen ids like Valkey
-// SetNX (first sighting → true, subsequent → false).
+// returns it (to exercise fail-closed NACK behaviour); otherwise it tracks seen
+// ids like Valkey SetNX (first sighting → true, subsequent → false). failAfter,
+// when positive, injects failWith for that many calls and then clears it so
+// subsequent calls succeed — used to simulate a transient store error.
 type fakeSeenSet struct {
-	mu       sync.Mutex
-	seen     map[string]bool
-	failWith error
-	calls    atomic.Int32
+	mu        sync.Mutex
+	seen      map[string]bool
+	failWith  error
+	failAfter int // if > 0: fail this many calls, then clear failWith
+	calls     atomic.Int32
 }
 
 func newFakeSeenSet() *fakeSeenSet { return &fakeSeenSet{seen: map[string]bool{}} }
 
 func (f *fakeSeenSet) MarkSeen(_ context.Context, id string, _ time.Duration) (bool, error) {
 	f.calls.Add(1)
-	if f.failWith != nil {
-		return false, f.failWith
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failWith != nil {
+		err := f.failWith
+		if f.failAfter > 0 {
+			f.failAfter--
+			if f.failAfter == 0 {
+				f.failWith = nil // transient: clear after exhausting the fail budget
+			}
+		}
+		return false, err
+	}
 	if f.seen[id] {
 		return false, nil // duplicate
 	}
@@ -284,24 +296,70 @@ func TestConsume_Duplicate_AckedNotReinvoked(t *testing.T) {
 	}
 }
 
-func TestConsume_FailOpen_WhenSeenSetErrors(t *testing.T) {
+func TestConsume_FailClosed_WhenSeenSetErrors(t *testing.T) {
 	t.Parallel()
-	// A seen-set that always errors (Valkey unreachable): every message must be
-	// PROCESSED (fail-open) — at-least-once beats dropping.
+	// A seen-set that always errors (Valkey persistently unreachable): the
+	// consumer must NACK (503) and NOT invoke the agent — fail-closed (M11).
+	// The broker retries; after the retry budget it DLQs (M7 machinery).
 	seen := &fakeSeenSet{seen: map[string]bool{}, failWith: errors.New("valkey down")}
 	c, invokeCount := newTestConsumer(seen, http.StatusOK, nil)
 
-	// Even the "same" messageId twice is invoked twice under fail-open.
-	env := sampleEnvelope("msg-failopen", "worker-agent")
+	env := sampleEnvelope("msg-failclosed", "worker-agent")
 	for i := range 2 {
 		rr := httptest.NewRecorder()
 		c.consume(rr, cloudEventRequest(t, env))
-		if rr.Code != http.StatusNoContent {
-			t.Errorf("fail-open delivery %d: status = %d, want 204", i, rr.Code)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("fail-closed delivery %d: status = %d, want 503 (NACK)", i, rr.Code)
 		}
 	}
-	if got := atomic.LoadInt32(invokeCount); got != 2 {
-		t.Errorf("fail-open: agent invoked %d times, want 2 (process on store error)", got)
+	if got := atomic.LoadInt32(invokeCount); got != 0 {
+		t.Errorf("fail-closed: agent invoked %d times, want 0 (must NOT process on store error)", got)
+	}
+}
+
+func TestConsume_TransientSeenSetError_ExactlyOnce(t *testing.T) {
+	t.Parallel()
+	// Simulates a transient dedupe-store blip: the first delivery fails (NACK),
+	// the broker retries, and the second delivery succeeds → agent is invoked
+	// exactly once (no double-process). This is the key fail-closed invariant:
+	// transient blip → broker retry → dedupe succeeds → exactly-once.
+	seen := &fakeSeenSet{
+		seen:      map[string]bool{},
+		failWith:  errors.New("valkey transient"),
+		failAfter: 1, // fail once, then succeed
+	}
+	c, invokeCount := newTestConsumer(seen, http.StatusOK, nil)
+	env := sampleEnvelope("msg-transient", "worker-agent")
+
+	// First attempt: store errors → NACK (fail-closed, no invoke).
+	rr1 := httptest.NewRecorder()
+	c.consume(rr1, cloudEventRequest(t, env))
+	if rr1.Code != http.StatusServiceUnavailable {
+		t.Errorf("first (transient error) delivery: status = %d, want 503 (NACK)", rr1.Code)
+	}
+	if got := atomic.LoadInt32(invokeCount); got != 0 {
+		t.Errorf("after transient error: agent invoked %d times, want 0", got)
+	}
+
+	// Second attempt (broker retry): store is healthy → first-seen → invoke.
+	rr2 := httptest.NewRecorder()
+	c.consume(rr2, cloudEventRequest(t, env))
+	if rr2.Code != http.StatusNoContent {
+		t.Errorf("second (retry) delivery: status = %d, want 204 (acked)", rr2.Code)
+	}
+	if got := atomic.LoadInt32(invokeCount); got != 1 {
+		t.Errorf("after retry: agent invoked %d times, want exactly 1", got)
+	}
+
+	// Third attempt (another broker retry of the same message id): store is
+	// healthy, id is now seen → duplicate → acked, NOT re-invoked.
+	rr3 := httptest.NewRecorder()
+	c.consume(rr3, cloudEventRequest(t, env))
+	if rr3.Code != http.StatusNoContent {
+		t.Errorf("third (duplicate) delivery: status = %d, want 204 (acked, no re-invoke)", rr3.Code)
+	}
+	if got := atomic.LoadInt32(invokeCount); got != 1 {
+		t.Errorf("after duplicate: agent invoked %d times, want still 1 (no double-process)", got)
 	}
 }
 
@@ -417,8 +475,8 @@ func TestRedisSeenSet_SetNXSemantics(t *testing.T) {
 }
 
 // TestRedisSeenSet_BackendDown_Errors confirms an unreachable Valkey surfaces an
-// error from MarkSeen (which the consumer then fails OPEN on — covered by
-// TestConsume_FailOpen_WhenSeenSetErrors with the stub; here we prove the real
+// error from MarkSeen (which the consumer then fails CLOSED on — covered by
+// TestConsume_FailClosed_WhenSeenSetErrors with the stub; here we prove the real
 // store reports the error rather than hanging).
 func TestRedisSeenSet_BackendDown_Errors(t *testing.T) {
 	t.Parallel()
