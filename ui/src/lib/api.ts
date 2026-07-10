@@ -193,6 +193,91 @@ export interface InvokeResponse {
   response: string;
 }
 
+// --- Provider connect (POST/GET /api/providers, GET .../models) -------------
+// The connect-a-provider flow (ADR 0015). The BFF validates the pasted key
+// against the provider, then creates a Secret + SecretBinding + ModelRoute with
+// the CALLER'S client (RBAC-scoped). The key is used ONCE (validate) and stored
+// server-side — it is NEVER returned in any DTO, never logged, never re-sent to
+// the browser. The POST RESPONSE carries the live model list (no 2nd round-trip)
+// so the review step renders it inline. A hardened install disables the flow via
+// the Helm kill-switch → the endpoints 404 and the UI falls back to
+// "reference an existing SecretBinding".
+
+// ProviderModel is one model the provider serves (from the live model list). The
+// modality (chat/embedding/…) is display-only; `id` is the model id used as a
+// ModelRoute target.
+export interface ProviderModel {
+  id: string;
+  modality?: string;
+}
+
+// ConnectProviderRequest is the POST /api/providers body. `apiKey` is the pasted
+// key — it lives ONLY in this request body (built at submit, cleared on success),
+// never in a store/localStorage/sessionStorage/URL (ADR 0015).
+export interface ConnectProviderRequest {
+  provider: string;
+  displayName: string;
+  apiKey: string;
+  baseURL?: string;
+}
+
+// ConnectProviderResponse mirrors the BFF DTO: the created resources' identities
+// + the live model list (pre-create, from the just-validated key). It carries NO
+// secret material — only the `secretName` REFERENCE.
+export interface ConnectProviderResponse {
+  provider: string;
+  models: ProviderModel[];
+  secretName: string;
+  ready: boolean;
+}
+
+// ConnectedProvider is one already-connected provider (GET /api/providers). No
+// secrets — names/models only.
+export interface ConnectedProvider {
+  provider: string;
+  displayName: string;
+  models: ProviderModel[];
+}
+
+export interface ProviderListResponse {
+  providers: ConnectedProvider[];
+}
+
+// --- BYO-MCP (POST/GET /api/mcpservers, GET /api/tools) ----------------------
+// The add-an-MCP flow (ADR 0016). The BFF probes the server + runs tools/list
+// discovery, stores an optional bearer key as a Secret (attached at the egress
+// hop, never browser-side), and adds the discovered tools to the merged catalog —
+// immediately bindable (self-serve) or pending operator approval (hardened). Like
+// providers, the key lives only in the POST body; the kill-switch 404s the flow.
+
+// DiscoveredTool is one tool from tools/list discovery. `approvalStatus` is
+// "approved" (self-serve, immediately bindable) or "pending" (hardened install,
+// queued for operator approval before binding). `source` names the server.
+export interface DiscoveredTool {
+  name: string;
+  description?: string;
+  source?: string;
+  approvalStatus?: "approved" | "pending";
+  inputSchema?: unknown;
+}
+
+// AddMcpRequest is the POST /api/mcpservers body — a remote URL OR an image, plus
+// an optional bearer key (held only until submit, per ADR 0016).
+export interface AddMcpRequest {
+  name: string;
+  url?: string;
+  image?: string;
+  apiKey?: string;
+}
+
+// AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're
+// immediately bindable or pending approval. No secret material.
+export interface AddMcpResponse {
+  name: string;
+  tools: DiscoveredTool[];
+  approvalStatus?: "approved" | "pending";
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -213,6 +298,13 @@ export class ApiError extends Error {
    *  validation 401 is surfaced to the login page instead. */
   get isUnauthorized(): boolean {
     return this.status === 401;
+  }
+
+  /** True for a 404 — for the connect/MCP flows this is the Helm KILL-SWITCH
+   *  (the endpoint is disabled on a hardened install), which the wizards render
+   *  as the "reference an existing SecretBinding" fallback (ADR 0015/0016). */
+  get isNotFound(): boolean {
+    return this.status === 404;
   }
 }
 
@@ -307,6 +399,32 @@ async function getJSON<T>(
     );
   }
   return (await res.json()) as T;
+}
+
+// postJSON is the write analogue of getJSON: POST a JSON body, parse a JSON
+// response, and surface the BFF's {"error"} on a non-2xx as a typed ApiError so
+// callers branch on isForbidden (403) / isNotFound (kill-switch 404) / status.
+// The request body may carry a pasted key (provider/MCP) — it is written straight
+// into the request and never logged (api.ts never reads the header/body back into
+// a logged string).
+async function postJSON<TReq, TRes>(
+  path: string,
+  body: TReq,
+  signal?: AbortSignal,
+): Promise<TRes> {
+  const res = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    throw new ApiError(
+      await errorMessage(res, `${path} failed (${res.status})`),
+      res.status,
+    );
+  }
+  return (await res.json()) as TRes;
 }
 
 // WhoAmIOptions covers the two whoami callers: the session module validating a
@@ -442,4 +560,39 @@ export const api = {
     }
     return (await res.json()) as InvokeResponse;
   },
+
+  // listProviders lists the already-connected providers (names/models, NO
+  // secrets). Drives the dashboard empty-state decision ([] ⇒ show the CTA) and
+  // the connect wizard's "already connected" awareness. A 404 = the kill-switch.
+  listProviders: (signal?: AbortSignal) =>
+    getJSON<ProviderListResponse>("/api/providers", signal),
+
+  // connectProvider validates the pasted key server-side and creates the
+  // Secret + SecretBinding + ModelRoute (caller-scoped, ADR 0015). The response
+  // carries the LIVE model list (pre-create, no 2nd round-trip). A 400/401 =
+  // bad key (honest inline error), 403 = viewer-can't-create (ForbiddenInline),
+  // 404 = the kill-switch (reference-existing fallback).
+  connectProvider: (req: ConnectProviderRequest, signal?: AbortSignal) =>
+    postJSON<ConnectProviderRequest, ConnectProviderResponse>(
+      "/api/providers",
+      req,
+      signal,
+    ),
+
+  // providerModels re-fetches a connected provider's live model list (proxied
+  // server-side via the stored Secret). Not on the connect happy path (the POST
+  // response already carries them) — kept for a re-connect / refresh.
+  providerModels: (name: string, signal?: AbortSignal) =>
+    getJSON<{ models: ProviderModel[] }>(
+      `/api/providers/${encodeURIComponent(name)}/models`,
+      signal,
+    ),
+
+  // addMcpServer probes the MCP server + runs tools/list discovery, storing an
+  // optional bearer key server-side (ADR 0016). The response carries the
+  // discovered tools + whether they're immediately bindable or pending approval.
+  // A 422/502 = probe failure (teaching error + retry), 403 = viewer-can't-create
+  // (ForbiddenInline), 404 = the kill-switch.
+  addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
+    postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
 };
