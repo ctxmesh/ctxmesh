@@ -220,6 +220,12 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/runs", s.handleRuns)
 		authed.HandleFunc("GET /api/cost", s.handleCost)
 		authed.HandleFunc("GET /api/traces/{id}", s.handleTraceLink)
+		// Run inspector (m14.8, first-agent-flow.md §3/§5): the flat span summary for
+		// one trace (trace + observations). The Go 1.22 ServeMux treats
+		// "GET /api/traces/{id}" and "GET /api/traces/{id}/detail" as DISTINCT
+		// patterns (the more specific "/detail" wins), so this is additive and never
+		// shadows the embed-URL route above.
+		authed.HandleFunc("GET /api/traces/{id}/detail", s.handleTraceDetail)
 	} else {
 		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
