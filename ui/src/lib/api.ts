@@ -278,6 +278,73 @@ export interface AddMcpResponse {
   approvalStatus?: "approved" | "pending";
 }
 
+// --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
+// The merged tool catalog — curated ToolRegistry entries + the user's own
+// BYO-MCP discoveries (ADR 0016). It's the create-agent tool picker's source:
+// the review step lists every bindable tool with its source + approval state,
+// and the selected names become the agent's `tools` field (the SAME field the
+// form serializer + generation emit → MCPToolBindings via `expand`, ADR 0013).
+
+// CatalogTool is one tool in the merged catalog. `source` names its origin (a
+// curated registry or a user MCP server); `approvalStatus` is "approved"
+// (immediately bindable) or "pending" (hardened install — queued for operator
+// approval). `inputSchema` is the JSON-schema the managed loop passes to the
+// model (display-only in the picker — its presence shows a "schema" badge).
+export interface CatalogTool {
+  name: string;
+  description?: string;
+  source?: string;
+  approvalStatus?: "approved" | "pending";
+  inputSchema?: unknown;
+}
+
+export interface ToolListResponse {
+  tools: CatalogTool[];
+}
+
+// --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
+// The "Describe it" magic step: a natural-language description → a server-side
+// LLM (the caller's connected provider, or an operator-pinned model) → the
+// SIMPLIFIED agent.yaml, VALIDATED through the same `expand` core the CLI + form
+// use (no divergent schema). It is NEVER auto-applied — it returns for a review
+// step; Create is a separate explicit POST /api/agents. Generation burns the
+// caller's key and is cost-tagged (surfaced in the review header).
+//
+// TWO outcomes, distinguished by the `regenerate` FLAG (not the status code):
+//   • 200 → a valid generation: { agentYAML, expanded, model, warnings }.
+//   • 422 → an INVALID generation (the LLM produced something `expand` rejected):
+//     { error, reason, agentYAML (the raw attempt — PRESERVED so nothing is
+//     lost), regenerate: true }. The UI shows the reason + a Regenerate button;
+//     the raw YAML is kept visible. The client keys off `regenerate`, so a BFF
+//     that returns the flag on any status is handled uniformly.
+
+// GenerateAgentRequest is the POST body: the description + an optional model /
+// provider override (the review's model dropdown when the operator pins models
+// or multiple providers are connected).
+export interface GenerateAgentRequest {
+  description: string;
+  model?: string;
+  provider?: string;
+}
+
+// GenerateAgentResponse is the unified generation outcome. `regenerate` is the
+// discriminator: absent/false ⇒ a valid config (agentYAML + expanded preview +
+// the model used + any non-fatal warnings); true ⇒ the generation failed
+// validation — `reason` explains why and `agentYAML` is the raw attempt (kept so
+// the user sees what was produced and can regenerate without losing context).
+export interface GenerateAgentResponse {
+  agentYAML: string;
+  // expanded is the CRD preview (the `expand` output) — shown behind Advanced.
+  // Present only on a valid generation.
+  expanded?: string;
+  model?: string;
+  warnings?: string[];
+  // The failure path (422): a human reason + the flag the UI keys off.
+  error?: string;
+  reason?: string;
+  regenerate?: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -595,4 +662,44 @@ export const api = {
   // (ForbiddenInline), 404 = the kill-switch.
   addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
     postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
+
+  // listTools reads the merged tool catalog (curated ToolRegistry + the caller's
+  // BYO-MCP discoveries, m14.6) — the create-agent tool picker's source. A 403
+  // is an honest "can't list tools" surfaced via ApiError (the picker degrades
+  // to an empty catalog + note); a 200 carries every bindable tool with its
+  // source + approval state. The `tools` slice is non-null on the wire.
+  listTools: (signal?: AbortSignal) =>
+    getJSON<ToolListResponse>("/api/tools", signal),
+
+  // generateAgent runs create-from-prompt (ADR 0014): a description → a
+  // server-side LLM → the simplified agent.yaml, expand-validated. It NEVER
+  // auto-applies — the response is for a review step; Create is a separate
+  // POST /api/agents.
+  //
+  // Unlike other writes, a 422 is NOT thrown: it's the REGENERATE outcome (the
+  // generation failed validation) and carries a usable body (the reason + the
+  // raw agentYAML). We parse the JSON on both 200 and 422 and let the caller
+  // branch on the `regenerate` FLAG. A 403 (viewer), 404 (kill-switch), or other
+  // non-2xx/422 status still surfaces as a typed ApiError. The description flows
+  // through the BFF; the provider key never reaches the browser (ADR 0011/0015).
+  generateAgent: async (
+    req: GenerateAgentRequest,
+    signal?: AbortSignal,
+  ): Promise<GenerateAgentResponse> => {
+    const res = await apiFetch("/api/agents/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    // 200 (valid) and 422 (regenerate) both carry a JSON body the caller uses;
+    // any OTHER non-2xx is a genuine failure (403/404/500) → typed ApiError.
+    if (res.ok || res.status === 422) {
+      return (await res.json()) as GenerateAgentResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `generate failed (${res.status})`),
+      res.status,
+    );
+  },
 };
