@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { DashboardPage } from "@/pages/dashboard-page";
 
@@ -55,14 +56,30 @@ const runs = {
   ],
 };
 
+// A non-empty provider list — the default for the render-proof tests so the
+// first-run CTA does NOT show (a connected cluster, not a fresh install).
+const providersConnected = {
+  providers: [{ provider: "anthropic", displayName: "Anthropic", models: [{ id: "claude-opus-4" }] }],
+};
+
+// renderDashboard wraps the page in a MemoryRouter — the empty-state CTA calls
+// useNavigate, so the page needs a router context in tests.
+function renderDashboard() {
+  return render(
+    <MemoryRouter>
+      <DashboardPage />
+    </MemoryRouter>,
+  );
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("DashboardPage (render proof)", () => {
   it("renders topology, cost, and recent runs from mocked BFF data", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
-    render(<DashboardPage />);
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
 
     // Topology graph rendered a node for the agent (React Flow custom node).
     expect(await screen.findByText("echo-agent")).toBeInTheDocument();
@@ -76,8 +93,8 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("opens the embedded Langfuse trace deep-view when a run is selected", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
-    render(<DashboardPage />);
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
 
     // Before selection: the deep-view is a prompt, not an iframe.
     expect(
@@ -97,9 +114,56 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("shows an error state when the topology fetch fails (e.g. RBAC 403)", async () => {
-    routeFetch({ "/api/cost": cost, "/api/runs": runs }); // topology 404s
-    render(<DashboardPage />);
+    routeFetch({ "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected }); // topology 404s
+    renderDashboard();
     expect(await screen.findByText(/Failed to load topology/)).toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage — first-run provider CTA (the aha entry point)", () => {
+  it("renders the teaching CTA when no providers are connected", async () => {
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": { providers: [] },
+    });
+    renderDashboard();
+
+    // The EmptyState teaching CTA leads with "Connect a provider …".
+    expect(
+      await screen.findByText("Connect a provider to run your first agent"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Connect a provider/ })).toBeInTheDocument();
+  });
+
+  it("does NOT render the CTA when providers exist", async () => {
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
+    renderDashboard();
+
+    // Wait for the page to settle, then assert the CTA is absent.
+    await screen.findByText("checkout-flow");
+    expect(
+      screen.queryByText("Connect a provider to run your first agent"),
+    ).toBeNull();
+  });
+
+  it("does NOT render the CTA when the providers list fails to load (no false invitation)", async () => {
+    // /api/providers 404s (kill-switch or error) → not treated as 'empty'.
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
+    renderDashboard();
+
+    await screen.findByText("checkout-flow");
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Connect a provider to run your first agent"),
+      ).toBeNull(),
+    );
   });
 });
 
@@ -110,8 +174,8 @@ describe("CostPanel bar chart", () => {
       latency: [],
       scale: [],
     };
-    routeFetch({ "/api/topology": topology, "/api/cost": costNoProm, "/api/runs": runs });
-    render(<DashboardPage />);
+    routeFetch({ "/api/topology": topology, "/api/cost": costNoProm, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
     const hints = await screen.findAllByText(/Prometheus not wired/);
     // One hint each for scale + latency.
     expect(hints.length).toBeGreaterThanOrEqual(2);
