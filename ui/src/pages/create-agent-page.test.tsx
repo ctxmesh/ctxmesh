@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
@@ -357,5 +357,61 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
     fireEvent.click(await screen.findByTestId("create-button"));
     expect(await screen.findByText("Not allowed to create this agent")).toBeInTheDocument();
     expect(screen.getByText(/forbidden: cannot create agentdeployments/)).toBeInTheDocument();
+  });
+});
+
+// The create→landing swap (m14.11): on a successful Create the page navigates to
+// the created agent's LANDING page (/agents/{ns}/{name}), NOT the agents list —
+// the aha continues on the detail/status/run surface. This replaces the m14.10
+// deferred-navigation placeholder. A location-probe route captures the landing.
+describe("CreateAgentPage — create → landing navigation (m14.11)", () => {
+  function LocationProbe() {
+    const loc = useLocation();
+    return <div data-testid="location">{loc.pathname}</div>;
+  }
+
+  function renderWithRoutes() {
+    return render(
+      <MemoryRouter initialEntries={["/agents/new"]}>
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <>
+                <LocationProbe />
+                <Routes>
+                  <Route path="/agents/new" element={<CreateAgentPage />} />
+                  <Route path="/agents/:ns/:name" element={<div>landing</div>} />
+                  <Route path="/agents" element={<div>list</div>} />
+                </Routes>
+              </>
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("navigates to /agents/{ns}/{name} after Create (not the list)", async () => {
+    recordingFetch({
+      tools: [{ name: "get_order", source: "acme-mcp", approvalStatus: "approved" }],
+      generate: () => ({ ok: true, json: { agentYAML: "name: rev-agent\nruntime: managed\n", expanded: "kind: AgentDeployment\n", model: "m" } }),
+      create: () => ({ ok: true, json: { created: [{ kind: "AgentDeployment", name: "rev-agent", namespace: "default" }] } }),
+    });
+    renderWithRoutes();
+
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("shared-review");
+    fireEvent.click(screen.getByTestId("create-button"));
+    await screen.findByTestId("create-success");
+
+    // The redirect fires after the success beat (1200ms) → the LANDING page for
+    // the created agent (/agents/{ns}/{name}), NOT the agents list.
+    await waitFor(
+      () => expect(screen.getByTestId("location")).toHaveTextContent("/agents/default/rev-agent"),
+      { timeout: 3000 },
+    );
   });
 });

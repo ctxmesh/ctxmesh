@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   ApiError,
+  openLogStream,
   setSessionExpiredHandler,
   setTokenProvider,
   whoami,
+  type LogEventType,
 } from "@/lib/api";
 
 // mockFetch returns a fetch stub resolving a Response-like object. It captures
@@ -198,5 +200,195 @@ describe("api client", () => {
   it("generateAgent DOES throw on a genuine failure (403/500)", async () => {
     vi.stubGlobal("fetch", mockFetch({ error: "forbidden" }, false, 403));
     await expect(api.generateAgent({ description: "x" })).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("agentDetail reads GET /api/agents/{ns}/{name}", async () => {
+    const fetchMock = mockFetch({
+      name: "billing", namespace: "prod", image: "img:1", executionModel: "serving",
+      role: "", scaling: { min: 0, max: 3 }, phase: "Ready", ready: true, url: "http://x",
+      latestVersion: "v2", conditions: [], bindings: [], versions: ["v1", "v2"],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await api.agentDetail("prod", "billing");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/prod/billing");
+    expect(res.ready).toBe(true);
+    expect(res.versions).toEqual(["v1", "v2"]);
+  });
+
+  it("traceDetail reads GET /api/traces/{id}/detail (flat spans)", async () => {
+    const fetchMock = mockFetch({
+      rollup: { traceId: "t1", name: "run", timestamp: "", costUSD: 0.006, tokens: 1240, latencyMs: 1840, spanCount: 2 },
+      spans: [{ id: "s0", parentId: "", type: "SPAN", name: "run", startMs: 0, durationMs: 1840, model: "", tokensIn: 0, tokensOut: 0, costUSD: 0, level: "", status: "ok", input: "", output: "", inputRedacted: false, outputRedacted: false }],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await api.traceDetail("t1");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/traces/t1/detail");
+    expect(res.spans).toHaveLength(1);
+    expect(res.rollup.costUSD).toBeCloseTo(0.006);
+  });
+});
+
+// --- SSE log tail (fetch-stream reader) -------------------------------------
+// A fetch-stream Response whose body yields the given chunks in order, so the
+// reader parses `event:`/`data:` frames off a byte stream exactly as the BFF
+// writes them. It also records the (url, init) so a test can assert the Bearer.
+function sseResponse(chunks: string[], ok = true, status = 200, errorBody?: unknown) {
+  const enc = new TextEncoder();
+  let i = 0;
+  const body = {
+    getReader() {
+      return {
+        read() {
+          if (i < chunks.length) {
+            const value = enc.encode(chunks[i++]);
+            return Promise.resolve({ value, done: false });
+          }
+          return Promise.resolve({ value: undefined, done: true });
+        },
+        releaseLock() {},
+      };
+    },
+  };
+  return {
+    ok,
+    status,
+    body: ok ? body : null,
+    json: async () => errorBody ?? {},
+    text: async () => (errorBody ? JSON.stringify(errorBody) : ""),
+  } as unknown as Response;
+}
+
+// collect drains an openLogStream into a promise that resolves once a terminal
+// signal (end / error / forbidden / onError) fires, so tests can await it.
+function collect(
+  ns: string,
+  name: string,
+  makeFetch: (capture: RequestInit | undefined) => void,
+  opts?: Parameters<typeof openLogStream>[3],
+) {
+  type Errored = { message: string; status?: number } | null;
+  const events: { type: LogEventType; data: string }[] = [];
+  let forbidden: string | null = null;
+  let errored: Errored = null;
+  return new Promise<{
+    events: typeof events;
+    forbidden: string | null;
+    errored: Errored;
+    cancel: () => void;
+  }>((resolve) => {
+    const done = (cancel: () => void) =>
+      setTimeout(() => resolve({ events, forbidden, errored, cancel }), 0);
+    const cancel = openLogStream(
+      ns,
+      name,
+      {
+        onEvent: (type, data) => {
+          events.push({ type, data });
+          if (type === "end" || type === "error") done(cancel);
+        },
+        onForbidden: (m) => {
+          forbidden = m;
+          done(cancel);
+        },
+        onError: (m, s) => {
+          errored = { message: m, status: s };
+          done(cancel);
+        },
+      },
+      opts,
+    );
+    // Give the async fetch a beat to record the request headers.
+    setTimeout(() => makeFetch(lastInit), 0);
+  });
+}
+
+let lastInit: RequestInit | undefined;
+
+describe("openLogStream (fetch-stream SSE tail)", () => {
+  beforeEach(() => {
+    lastInit = undefined;
+  });
+
+  it("attaches the caller's Bearer to the SSE request (EventSource can't)", async () => {
+    setTokenProvider(() => "tok-abc");
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      lastInit = init;
+      return Promise.resolve(sseResponse(["event: end\ndata: done\n\n"]));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await collect("prod", "billing", () => {});
+    expect(new Headers(lastInit?.headers).get("Authorization")).toBe("Bearer tok-abc");
+    // The Bearer rides the /logs request specifically.
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/agents/prod/billing/logs");
+  });
+
+  it("renders log frames in order and ends on the end frame", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          sseResponse([
+            "event: log\ndata: line one\n\nevent: log\ndata: line two\n\n",
+            "event: log\ndata: line three\n\nevent: end\ndata: bye\n\n",
+          ]),
+        ),
+      ),
+    );
+    const { events } = await collect("prod", "billing", () => {});
+    const logs = events.filter((e) => e.type === "log").map((e) => e.data);
+    expect(logs).toEqual(["line one", "line two", "line three"]);
+    expect(events[events.length - 1].type).toBe("end");
+  });
+
+  it("surfaces a `waiting` frame (no pod yet), distinct from an error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(sseResponse(["event: waiting\ndata: starting\n\nevent: end\ndata: x\n\n"]))),
+    );
+    const { events, errored, forbidden } = await collect("prod", "billing", () => {});
+    expect(events.some((e) => e.type === "waiting")).toBe(true);
+    expect(errored).toBeNull();
+    expect(forbidden).toBeNull();
+  });
+
+  it("surfaces an IN-STREAM error frame (mid-stream break)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(sseResponse(["event: log\ndata: a\n\nevent: error\ndata: pod died\n\n"]))),
+    );
+    const { events } = await collect("prod", "billing", () => {});
+    const err = events.find((e) => e.type === "error");
+    expect(err?.data).toBe("pod died");
+  });
+
+  it("distinguishes a PRE-STREAM 403 (HTTP status, no frames) from an in-stream error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(sseResponse([], false, 403, { error: "forbidden: not allowed to read pods" })),
+      ),
+    );
+    const { events, forbidden, errored } = await collect("prod", "billing", () => {});
+    // No SSE frames — this is a forbidden STATE, not an in-stream `error` event.
+    expect(events).toHaveLength(0);
+    expect(forbidden).toContain("forbidden");
+    expect(errored).toBeNull();
+  });
+
+  it("cancel() aborts the request (no leak on unmount)", async () => {
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        return Promise.resolve(sseResponse(["event: log\ndata: a\n\n"]));
+      }),
+    );
+    const cancel = openLogStream("prod", "billing", {
+      onEvent: () => {},
+    });
+    cancel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(signal?.aborted).toBe(true);
   });
 });

@@ -1,8 +1,17 @@
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { AgentsPage } from "@/pages/agents-page";
 import { NamespaceProvider, useNamespace } from "@/lib/namespace";
+
+// The page now navigates on a row-click (m14.11: → the agent landing page), so
+// it needs a Router in context. renderPage wraps the page in a MemoryRouter so
+// the list-contract assertions below run exactly as before, with routing wired.
+function renderPage(ui: ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 // The agents list is now the FIRST DataTable consumer (ui-foundation §4/§6): it
 // reads the list contract's `items` + `nextCursor` (NOT the legacy `agents`
@@ -56,7 +65,7 @@ afterEach(() => {
 describe("AgentsPage (DataTable + list contract)", () => {
   it("renders the teaching empty-state when the BFF returns no items", async () => {
     installFetch({ agents: () => ({ ok: true, body: { agents: [], items: [], nextCursor: "" } }) });
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     expect(await screen.findByText("No agents yet")).toBeInTheDocument();
   });
 
@@ -65,7 +74,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
       // `agents` is intentionally EMPTY: the DataTable must read `items`.
       agents: () => ({ ok: true, body: { agents: [], items: [agent("echo")], nextCursor: "" } }),
     });
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     expect(await screen.findByText("echo")).toBeInTheDocument();
     expect(screen.getByText("prod")).toBeInTheDocument();
     expect(screen.getByText("echo:1")).toBeInTheDocument();
@@ -82,7 +91,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
       },
     });
 
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     expect(await screen.findByText("echo-0")).toBeInTheDocument();
 
     const next = screen.getByRole("button", { name: /Next page/ });
@@ -115,7 +124,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
       },
     });
 
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     expect(await screen.findByText("echo-0")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Filter list"), {
@@ -129,7 +138,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
 
   it("labels the filter as a windowed FILTER, never a global search", async () => {
     installFetch({ agents: () => ({ ok: true, body: { agents: [], items: [agent("echo")], nextCursor: "" } }) });
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     await screen.findByText("echo");
     expect(
       screen.getByPlaceholderText(/Filter agents on this page/),
@@ -147,7 +156,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
         body: { error: "forbidden: cannot list agentdeployments" },
       }),
     });
-    render(<AgentsPage />);
+    renderPage(<AgentsPage />);
     expect(
       await screen.findByText(/forbidden: cannot list agentdeployments/),
     ).toBeInTheDocument();
@@ -171,7 +180,7 @@ describe("AgentsPage (DataTable + list contract)", () => {
       },
     });
 
-    render(
+    renderPage(
       <NamespaceProvider>
         <NsSwitcher />
         <AgentsPage />
