@@ -147,7 +147,14 @@ func (s *Server) Handler() http.Handler {
 	if s.adapters.Prometheus == nil {
 		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
 	}
-	if s.adapters.Invoke == nil {
+	// Playground invoke (m12.7): run a deployed agent, traced, and return its
+	// traceId. Wired only when BOTH the InvokeAdapter (the pure-HTTP invoker) AND
+	// the caller-client factory are present — the run is CALLER-SCOPED (the agent
+	// lookup + dispatch act as the caller, ADR 0011), so it needs the caller-client
+	// seam and must never fall back to the BFF SA. Honest 501 otherwise.
+	if s.adapters.Invoke != nil && s.callerClients != nil {
+		authed.HandleFunc("POST /api/invoke", s.handleInvoke)
+	} else {
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired

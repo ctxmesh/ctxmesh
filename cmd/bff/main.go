@@ -98,6 +98,11 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// The config-builder expand adapter (m12.6) is a pure transform reusing the
 	// CLI expand core — always available, no external creds.
 	adapters.Expand = bff.NewExpandAdapter()
+	// The Playground invoke adapter (m12.7) is a pure HTTP invoker — no creds, no
+	// cluster access. The caller-scoped handler resolves the agent endpoint and the
+	// adapter POSTs /invoke with a minted traceparent (the run stays caller-scoped,
+	// ADR 0011). Always available.
+	adapters.Invoke = bff.NewInvokeAdapter(bff.InvokeAdapterConfig{})
 
 	srv := bff.NewServer(bff.Options{
 		CallerClients: callerClients,
