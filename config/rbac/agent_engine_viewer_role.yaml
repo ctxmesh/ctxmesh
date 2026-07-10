@@ -14,7 +14,7 @@ metadata:
     app.kubernetes.io/name: agent-engine
     app.kubernetes.io/managed-by: kustomize
     rbac.ctxmesh.ai/persona: viewer
-  name: agent-engine-viewer
+  name: viewer
 rules:
 - apiGroups:
   - agents.ctxmesh.ai
