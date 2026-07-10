@@ -36,6 +36,17 @@ type AgentReader interface {
 	List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
 }
 
+// AgentWriter creates the agent CRDs on the caller's behalf (the config-builder
+// apply path, m12.6). Like AgentReader it is satisfied by the controller-runtime
+// client.Client, so the real BFF passes the same client-go client for both. The
+// K8s API server makes the authorization decision (M11 RBAC personas) when the
+// Create runs — a viewer's create is rejected with a Forbidden the handler
+// surfaces as 403; the BFF does not re-implement RBAC. Narrowing to Create keeps
+// the apply handler unit-testable with a fake client.
+type AgentWriter interface {
+	Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
+}
+
 // listAgentDeployments lists AgentDeployments via the reader. It is the single
 // place the CRD list happens; the handler maps the result to the UI DTO.
 func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentDeploymentList, error) {

@@ -98,6 +98,23 @@ export interface TraceLinkResponse {
   url: string;
 }
 
+// --- Config builder (POST /api/expand, POST /api/agents) --------------------
+// The config-builder submits the SAME simplified agent.yaml the CLI consumes:
+// the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
+// expand core), and /api/agents applies it (client-go create, RBAC-scoped). The
+// browser never hand-edits raw CRDs.
+
+// One created CRD object's flat identity (mirrors the BFF createdObject DTO).
+export interface CreatedObject {
+  kind: string;
+  name: string;
+  namespace: string;
+}
+
+export interface CreateAgentResponse {
+  created: CreatedObject[];
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -106,6 +123,18 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+// errorMessage extracts the BFF's JSON {"error": "..."} body when present, so a
+// validation 400 / RBAC 403 surfaces its real reason (not just a status code).
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: string };
+    if (body && typeof body.error === "string" && body.error) return body.error;
+  } catch {
+    // Non-JSON body — fall through to the generic message.
+  }
+  return fallback;
 }
 
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -134,4 +163,47 @@ export const api = {
       `/api/traces/${encodeURIComponent(traceId)}`,
       signal,
     ),
+
+  // expand posts the form's agent.yaml and returns the expanded CRD manifest(s)
+  // as plain YAML text — the config-builder's read-only preview. A validation
+  // failure (400) surfaces the BFF's message via ApiError.
+  expand: async (agentYAML: string, signal?: AbortSignal): Promise<string> => {
+    const res = await fetch("/api/expand", {
+      method: "POST",
+      headers: { "Content-Type": "application/yaml" },
+      body: agentYAML,
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `expand failed (${res.status})`),
+        res.status,
+      );
+    }
+    return res.text();
+  },
+
+  // createAgent applies the previewed agent.yaml (the SAME body /api/expand
+  // received) via the BFF's client-go create path. Returns the created objects'
+  // identities. A 403 (RBAC viewer), 409 (already exists) or 400 (invalid)
+  // surfaces the BFF message via ApiError.
+  createAgent: async (
+    agentYAML: string,
+    namespace: string,
+    signal?: AbortSignal,
+  ): Promise<CreateAgentResponse> => {
+    const res = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentYAML, namespace }),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as CreateAgentResponse;
+  },
 };
