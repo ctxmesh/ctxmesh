@@ -1,0 +1,156 @@
+import {
+  Boxes,
+  Coins,
+  FlaskConical,
+  GitBranch,
+  KeyRound,
+  LayoutDashboard,
+  ListTree,
+  MessagesSquare,
+  Network,
+  PlugZap,
+  Settings,
+  SlidersHorizontal,
+  Users,
+  Wrench,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+
+// nav.ts — the ONE source of truth for the console's information architecture
+// (ui-foundation §6 re-housing). Both the REAL app shell (components/app-shell)
+// and the DESIGN wireframes (design/console-chrome re-exports NAV_SECTIONS from
+// here) read this list, so the approved IA and the shipped shell can never drift
+// — approve the IA at the design gate and the shell follows by construction.
+//
+// This module is gallery-free (no design-only imports) so the production shell
+// can consume it without pulling the review-only wireframes into the main chunk.
+//
+// Milestone tags mark which arc milestone SHIPS each surface. Only surfaces that
+// exist TODAY (m13.5 re-housing scope) carry a `route`; the rest render a
+// PlaceholderPage ("arrives in M<n>") so the full IA is walkable without pulling
+// later features forward.
+
+// Milestone is duplicated from design/scaffold to keep this module independent of
+// the design gallery (the wireframes' own tag type). It is display-only.
+export type Milestone =
+  | "M13"
+  | "M14"
+  | "M15"
+  | "M16"
+  | "M17"
+  | "M18";
+
+// The golden CRD resources the console probes capabilities for — the plural
+// names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
+// item or action gates on `capabilities.allowed[resource][verb]`.
+export const RES_AGENTS = "agentdeployments";
+export const RES_ROUTES = "modelroutes";
+export const RES_SECRETS = "secretbindings";
+export const RES_REGISTRIES = "agentregistries";
+
+export interface NavItem {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  milestone: Milestone;
+  /**
+   * The router path this nav item routes to. Present only for surfaces that
+   * exist in the current build (re-housed M12 surfaces); absent items render a
+   * PlaceholderPage keyed on the milestone. `/` for the index (dashboard).
+   */
+  route?: string;
+  /**
+   * When set, this destination is a WRITE affordance — hidden from a viewer's
+   * chrome (display-only, ADR 0011). Gated on `allowed[requiresWrite.resource]
+   * [requiresWrite.verb]`. Read-only destinations omit it and are always shown.
+   */
+  requiresWrite?: { resource: string; verb: string };
+}
+
+export interface NavSection {
+  heading: string;
+  items: NavItem[];
+}
+
+// THE PROPOSED IA — one flat, grouped sidebar telling a first-run story:
+// Overview → Build → Observe → Platform → Settings (ui-foundation §6, the
+// approved shell/IA wireframes). The four re-housed M12 surfaces carry a route;
+// everything else is a milestone placeholder.
+export const NAV_SECTIONS: NavSection[] = [
+  {
+    heading: "Overview",
+    items: [
+      {
+        id: "dashboard",
+        label: "Dashboard",
+        icon: LayoutDashboard,
+        milestone: "M13",
+        route: "/",
+      },
+      { id: "topology", label: "Topology", icon: Network, milestone: "M15" },
+    ],
+  },
+  {
+    heading: "Build",
+    items: [
+      {
+        id: "agents",
+        label: "Agents",
+        icon: Boxes,
+        milestone: "M13",
+        route: "/agents",
+      },
+      {
+        // The re-housed config-builder — a WRITE surface (it applies CRDs), so
+        // it is hidden from a viewer's nav. It gates on create agentdeployments.
+        id: "config",
+        label: "Config builder",
+        icon: SlidersHorizontal,
+        milestone: "M13",
+        route: "/config",
+        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+      },
+      {
+        // The re-housed Playground — running an agent is a create/invoke-shaped
+        // op; a viewer's chrome hides it (they still get an honest 403 if they
+        // reach it directly). Gated on create agentdeployments (the run path).
+        id: "playground",
+        label: "Playground",
+        icon: FlaskConical,
+        milestone: "M13",
+        route: "/playground",
+        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+      },
+      { id: "tools", label: "Tool catalog", icon: Wrench, milestone: "M14" },
+      { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
+      { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
+    ],
+  },
+  {
+    heading: "Observe",
+    items: [
+      { id: "traces", label: "Traces", icon: ListTree, milestone: "M16" },
+      { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16" },
+      { id: "feedback", label: "Feedback", icon: MessagesSquare, milestone: "M16" },
+      { id: "cost", label: "Cost", icon: Coins, milestone: "M16" },
+    ],
+  },
+  {
+    heading: "Platform",
+    items: [
+      { id: "providers", label: "Providers", icon: PlugZap, milestone: "M14" },
+      { id: "registries", label: "Registries", icon: Users, milestone: "M15" },
+      { id: "routes", label: "Model routes", icon: GitBranch, milestone: "M15" },
+      { id: "secrets", label: "Secret bindings", icon: KeyRound, milestone: "M15" },
+    ],
+  },
+  {
+    heading: "Settings",
+    items: [
+      { id: "settings", label: "Settings", icon: Settings, milestone: "M13" },
+    ],
+  },
+];
+
+// NAV_ITEMS is the flat list (every section's items) — handy for route/lookup.
+export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);

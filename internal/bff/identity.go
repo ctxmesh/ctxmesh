@@ -1,0 +1,237 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+import (
+	"context"
+	"net/http"
+	"slices"
+	"strings"
+	"sync"
+
+	authnv1 "k8s.io/api/authentication/v1"
+	authzv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// This file implements the RBAC-aware-chrome endpoints (ui-foundation §3,
+// ADR 0012): /api/whoami, /api/capabilities, /api/namespaces. All three run
+// through the CALLER-SCOPED client (ADR 0011) so every answer is the K8s API
+// server's own decision about the CALLER — the BFF re-implements no authz and
+// gates nothing server-side. whoami/capabilities are DISPLAY-ONLY: the UI hides
+// or disables affordances the caller lacks; enforcement stays with K8s.
+
+// The golden CRD resource names (plural, as the API server expects them in a
+// SelfSubjectAccessReview's ResourceAttributes) the console probes capabilities
+// for. Named so the string is defined once (the capabilities map keys off it and
+// tests reference it).
+const (
+	resAgentDeployments = "agentdeployments"
+	resModelRoutes      = "modelroutes"
+	resSecretBindings   = "secretbindings"
+	resAgentRegistries  = "agentregistries"
+)
+
+// agentsAPIGroup is the API group all the golden CRD kinds live in.
+const agentsAPIGroup = "agents.ctxmesh.ai"
+
+// golden{Resources,Verbs} are the capability matrix the console probes per
+// namespace (ui-foundation §3). Resources are the plural CRD names in the
+// agents.ctxmesh.ai group; verbs are the standard write/read set. The console
+// keys off exactly these strings, so the response map is `resource -> verb ->
+// allowed` over this cross product.
+var (
+	goldenResources = []string{
+		resAgentDeployments,
+		resModelRoutes,
+		resSecretBindings,
+		resAgentRegistries,
+	}
+	goldenVerbs = []string{"get", "list", "create", "update", "delete"}
+)
+
+// handleWhoAmI serves GET /api/whoami — the caller's identity (username +
+// groups) as the API server reports it. It issues a SelfSubjectReview
+// (authentication/v1) through the CALLER-SCOPED client, so the token being
+// described is exactly the caller's own (ADR 0011). A missing token → 401 before
+// any K8s call (the factory gate). An API-server rejection surfaces honestly as
+// 401/403 (never a 500 masking an authn failure); anything else is a real 500.
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	// A SelfSubjectReview asks the API server "who am I?" for the token that
+	// authenticates THIS request. It is a create-only virtual resource: the
+	// server fills Status.UserInfo on the create.
+	review := &authnv1.SelfSubjectReview{}
+	if err := caller.Create(r.Context(), review); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "SelfSubjectReview failed")
+		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity")
+		return
+	}
+
+	groups := review.Status.UserInfo.Groups
+	if groups == nil {
+		// [] not null so the header never guards a null.
+		groups = []string{}
+	}
+	writeJSON(w, http.StatusOK, WhoAmIResponse{
+		Username: review.Status.UserInfo.Username,
+		Groups:   groups,
+	})
+}
+
+// handleCapabilities serves GET /api/capabilities?namespace=<ns> — a flat
+// capability map for the golden kinds × verbs, computed by batched SelfSubject
+// AccessReviews (authorization/v1) through the CALLER-SCOPED client. Each SSAR
+// asks the API server "may the CALLER do <verb> on <resource> in <ns>?", so the
+// answers are the server's own RBAC decisions (ADR 0011). This is DISPLAY-ONLY:
+// the UI disables what is false; the API server still enforces on the real op.
+//
+// The reviews run in parallel (independent, read-only probes); a single review's
+// failure (a true API error, not a plain allowed/denied) fails the whole request
+// honestly rather than reporting a half-filled matrix as success. There is no
+// server-side cache — the SPA caches the result per session.
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	namespace := r.URL.Query().Get("namespace")
+
+	allowed, err := probeCapabilities(r.Context(), caller, namespace)
+	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "capabilities probe failed")
+		writeError(w, http.StatusInternalServerError, "failed to probe capabilities")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, CapabilitiesResponse{
+		Namespace: namespace,
+		Allowed:   allowed,
+	})
+}
+
+// probeCapabilities runs one SelfSubjectAccessReview per golden resource × verb
+// against the caller-scoped client and folds them into resource → verb →
+// allowed. The SSARs run concurrently (each is an independent read-only probe);
+// the first true API error (not an allowed/denied answer) is returned so the
+// handler can surface it honestly. The result map is fully populated for every
+// resource × verb (an errored request never yields a partial matrix).
+func probeCapabilities(ctx context.Context, caller client.Client, namespace string) (map[string]map[string]bool, error) {
+	// Pre-size and pre-seed the result so concurrent writers only ever touch
+	// their own (resource, verb) cell — no map-growth race, no shared verb map
+	// written by two goroutines.
+	allowed := make(map[string]map[string]bool, len(goldenResources))
+	for _, res := range goldenResources {
+		allowed[res] = make(map[string]bool, len(goldenVerbs))
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	for _, res := range goldenResources {
+		for _, verb := range goldenVerbs {
+			wg.Add(1)
+			go func(res, verb string) {
+				defer wg.Done()
+				ok, err := reviewAccess(ctx, caller, namespace, res, verb)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					return
+				}
+				allowed[res][verb] = ok
+			}(res, verb)
+		}
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return allowed, nil
+}
+
+// reviewAccess issues one SelfSubjectAccessReview for (namespace, resource, verb)
+// in the agents API group and returns the API server's allow decision. A
+// transport/API error (not the allow/deny answer itself) is returned so the
+// caller can fail honestly.
+func reviewAccess(ctx context.Context, caller client.Client, namespace, resource, verb string) (bool, error) {
+	ssar := &authzv1.SelfSubjectAccessReview{
+		Spec: authzv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authzv1.ResourceAttributes{
+				Namespace: namespace,
+				Group:     agentsAPIGroup,
+				Resource:  resource,
+				Verb:      verb,
+			},
+		},
+	}
+	if err := caller.Create(ctx, ssar); err != nil {
+		return false, err
+	}
+	return ssar.Status.Allowed, nil
+}
+
+// handleNamespaces serves GET /api/namespaces — the namespaces the CALLER can
+// list, through the CALLER-SCOPED client (ADR 0011). A caller whose RBAC does
+// not permit listing namespaces gets an honest 403 (via classifyReadError), NEVER
+// a silent empty list that would masquerade as "no namespaces exist". An
+// authentically empty cluster still yields {"namespaces":[]}.
+func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	var list corev1.NamespaceList
+	if err := caller.List(r.Context(), &list); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "list namespaces failed")
+		writeError(w, http.StatusInternalServerError, "failed to list namespaces")
+		return
+	}
+
+	summaries := make([]NamespaceSummary, 0, len(list.Items))
+	for i := range list.Items {
+		summaries = append(summaries, NamespaceSummary{Name: list.Items[i].Name})
+	}
+	// Stable order so the SPA's namespace picker is deterministic.
+	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
+
+	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+}

@@ -129,3 +129,64 @@ func TestServesStaticSPA(t *testing.T) {
 func TestAllowAllAuthenticator(t *testing.T) {
 	assert.NoError(t, AllowAll{}.Authenticate(httptest.NewRequest(http.MethodGet, "/", nil)))
 }
+
+// TestSPASecurityHeaders asserts the strict CSP (and its companions) is served
+// with the SPA — on the index document, a client-side route fallback, AND the
+// hashed assets — because the SPA holds the caller's bearer token in
+// sessionStorage and the CSP is its primary XSS mitigation (ADR 0012).
+func TestSPASecurityHeaders(t *testing.T) {
+	static := fstest.MapFS{
+		"index.html":    {Data: []byte("<!doctype html><div id=root></div>")},
+		"assets/app.js": {Data: []byte("console.log('app')")},
+	}
+	s := newAuthServer(t, static)
+
+	// The CSP must be the exact strict policy (locked to the const so a drift in
+	// either the value or a stray directive fails the test).
+	const wantCSP = "default-src 'self'; script-src 'self'; style-src 'self' " +
+		"'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src " +
+		"'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; " +
+		"object-src 'none'"
+	// Guard the test against the production const drifting silently.
+	require.Equal(t, wantCSP, contentSecurityPolicy)
+
+	for _, path := range []string{"/", "/agents", "/assets/app.js"} {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		require.Equalf(t, http.StatusOK, rec.Code, "path %s", path)
+		assert.Equalf(t, wantCSP, rec.Header().Get("Content-Security-Policy"),
+			"CSP on %s", path)
+		assert.Equalf(t, "DENY", rec.Header().Get("X-Frame-Options"),
+			"X-Frame-Options on %s", path)
+		assert.Equalf(t, "nosniff", rec.Header().Get("X-Content-Type-Options"),
+			"X-Content-Type-Options on %s", path)
+		assert.Equalf(t, "no-referrer", rec.Header().Get("Referrer-Policy"),
+			"Referrer-Policy on %s", path)
+	}
+}
+
+// TestAPIResponsesHaveNoCSP asserts the /api surface is UNCHANGED by the SPA CSP
+// work: the strict Content-Security-Policy (and its SPA companions) are NOT set
+// on API responses — they are a document/asset concern only, and adding them to
+// JSON responses would be meaningless noise. This pins the "golden /api headers
+// unchanged" contract the CSP change must not violate.
+func TestAPIResponsesHaveNoCSP(t *testing.T) {
+	s := newAuthServer(t, nil)
+	// A representative authenticated API response (empty fake cluster → 200 []).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Content-Security-Policy"),
+		"/api responses must not carry the SPA CSP")
+	assert.Empty(t, rec.Header().Get("X-Frame-Options"))
+	assert.Empty(t, rec.Header().Get("Referrer-Policy"))
+
+	// Health (unauthenticated) is also an API response — no CSP either.
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("Content-Security-Policy"),
+		"/api/health must not carry the SPA CSP")
+}

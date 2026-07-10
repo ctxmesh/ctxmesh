@@ -80,7 +80,10 @@ func TestListAgentsEmpty(t *testing.T) {
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"agents":[]}`, rec.Body.String())
+	// The list-contract fields (items/nextCursor, m13.2) are additive: `agents`
+	// stays [] (not null) exactly as before, alongside the new mirror `items` and
+	// an empty nextCursor (an empty cluster has no next page).
+	assert.JSONEq(t, `{"agents":[],"items":[],"nextCursor":""}`, rec.Body.String())
 }
 
 func TestListAgentsProjection(t *testing.T) {
