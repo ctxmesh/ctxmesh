@@ -154,6 +154,114 @@ func TestExpand_ModelRoute(t *testing.T) {
 	}
 }
 
+// TestExpand_Managed verifies the managed runtime golden (ADR 0013): image
+// omitted → resolved to the pinned managed ref; systemPrompt → SYSTEM_PROMPT env;
+// each tool → an MCPToolBinding; the AgentDeployment comes last.
+func TestExpand_Managed(t *testing.T) {
+	got := expandFile(t, "managed")
+	checkGolden(t, "managed", got)
+
+	// The resolved managed image (image was omitted from the input).
+	if !strings.Contains(got, "image: ghcr.io/ctxmesh/managed-agent:latest") {
+		t.Error("output missing the resolved managed-agent image ref")
+	}
+	// systemPrompt → SYSTEM_PROMPT env.
+	if !strings.Contains(got, "name: SYSTEM_PROMPT") {
+		t.Error("output missing the SYSTEM_PROMPT env")
+	}
+	// One MCPToolBinding per tool, before the AgentDeployment.
+	if strings.Count(got, "kind: MCPToolBinding") != 2 {
+		t.Errorf("expected 2 MCPToolBinding docs, got:\n%s", got)
+	}
+	// spec.toolName keeps the REAL catalog name (incl. the underscore).
+	if !strings.Contains(got, "toolName: echo_tool") || !strings.Contains(got, "toolName: word-count") {
+		t.Error("output missing an MCPToolBinding toolName (real catalog name)")
+	}
+	// metadata.name is DNS-sanitized (echo_tool → echo-tool), so a bare apply is
+	// admitted; the raw underscored object name must NOT appear.
+	if !strings.Contains(got, "name: managed-agent-echo-tool") {
+		t.Error("output missing the DNS-sanitized binding name managed-agent-echo-tool")
+	}
+	if strings.Contains(got, "name: managed-agent-echo_tool") {
+		t.Error("binding metadata.name must be DNS-sanitized (no underscore)")
+	}
+	if strings.Index(got, "kind: MCPToolBinding") > strings.Index(got, "kind: AgentDeployment") {
+		t.Error("MCPToolBinding docs must precede the AgentDeployment")
+	}
+}
+
+// TestExpand_Managed_ImageOptional verifies a managed agent WITHOUT an image is
+// valid (resolved to the managed ref), while a custom agent WITHOUT an image
+// still errors.
+func TestExpand_Managed_ImageOptional(t *testing.T) {
+	// Managed, no image → valid (resolved).
+	managed := "name: m\nruntime: managed\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(managed), &buf); err != nil {
+		t.Fatalf("managed agent without image should be valid, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "image: ghcr.io/ctxmesh/managed-agent:latest") {
+		t.Errorf("managed agent without image should resolve the managed ref, got:\n%s", buf.String())
+	}
+
+	// Custom (no runtime), no image → still errors (unchanged custom path).
+	custom := "name: c\n"
+	var buf2 bytes.Buffer
+	err := expandBytes([]byte(custom), &buf2)
+	if err == nil {
+		t.Fatal("custom agent without image must still error")
+	}
+	if !strings.Contains(err.Error(), "image") {
+		t.Errorf("custom-without-image error should mention image, got: %v", err)
+	}
+}
+
+// TestExpand_Managed_ExplicitImageWins verifies an explicit image on a managed
+// agent is used verbatim (a managed fork can be pinned).
+func TestExpand_Managed_ExplicitImageWins(t *testing.T) {
+	input := "name: m\nruntime: managed\nimage: ghcr.io/acme/custom-managed:v2\n"
+	var buf bytes.Buffer
+	if err := expandBytes([]byte(input), &buf); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "image: ghcr.io/acme/custom-managed:v2") {
+		t.Errorf("explicit managed image should win, got:\n%s", got)
+	}
+	if strings.Contains(got, "managed-agent:latest") {
+		t.Errorf("resolved ref should not appear when image is explicit, got:\n%s", got)
+	}
+}
+
+// TestExpand_Managed_ToolsRequireManaged verifies tools/systemPrompt on the
+// custom path are rejected (they are managed-only), and an unknown runtime value
+// is a hard error.
+func TestExpand_Managed_ManagedOnlyFieldsRejectedOnCustom(t *testing.T) {
+	const customImage = "name: c\nimage: ghcr.io/x/y:latest\n"
+	cases := []struct {
+		name    string
+		input   string
+		wantSub string
+	}{
+		{"tools-without-runtime", customImage + "tools:\n  - echo_tool\n", "tools requires runtime: managed"},
+		{"systemprompt-without-runtime", customImage + "systemPrompt: hi\n", "systemPrompt requires runtime: managed"},
+		{"unknown-runtime", customImage + "runtime: hosted\n", "unknown runtime"},
+		{"empty-tool-name", "name: m\nruntime: managed\ntools:\n  - \"\"\n", "empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := expandBytes([]byte(tc.input), &buf)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error should contain %q, got: %v", tc.wantSub, err)
+			}
+		})
+	}
+}
+
 // ── Error-path tests ──────────────────────────────────────────────────────────
 
 // TestExpand_UnknownField verifies that a completely unknown top-level field
@@ -296,20 +404,24 @@ func TestFloatToDecimalString(t *testing.T) {
 	}
 }
 
-// TestExpand_FutureField_Tools verifies that the tools future field is rejected.
-func TestExpand_FutureField_Tools(t *testing.T) {
-	input := "name: t\nimage: ghcr.io/x/y:latest\ntools:\n  - name: search\n"
+// TestExpand_Tools_RequireManagedRuntime verifies that tools on the custom path
+// (no runtime: managed) are rejected — tools is now a managed-runtime field
+// (ADR 0013), no longer a not-yet-supported future field. (A list of strings is
+// the managed shape; a list of dicts, the old custom shape, still errors here
+// because tools requires runtime: managed regardless of its element type.)
+func TestExpand_Tools_RequireManagedRuntime(t *testing.T) {
+	input := "name: t\nimage: ghcr.io/x/y:latest\ntools:\n  - search\n"
 	var buf bytes.Buffer
 	err := expandBytes([]byte(input), &buf)
 	if err == nil {
-		t.Fatal("expected error for future field tools, got nil")
+		t.Fatal("expected error for tools without runtime: managed, got nil")
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "tools") {
 		t.Errorf("error should name 'tools', got: %v", msg)
 	}
-	if !strings.Contains(msg, "not yet supported") {
-		t.Errorf("error should say 'not yet supported', got: %v", msg)
+	if !strings.Contains(msg, "runtime: managed") {
+		t.Errorf("error should say tools requires 'runtime: managed', got: %v", msg)
 	}
 }
 

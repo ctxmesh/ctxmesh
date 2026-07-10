@@ -50,16 +50,20 @@ func newExpandCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "expand <file>",
 		Short: "Expand a simplified agent.yaml to an AgentDeployment CRD manifest",
-		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2+M8+M9 subset) and prints
+		Long: `expand reads a simplified agent.yaml (PRD §8.5 M2+M8+M9+M14 subset) and prints
 the fully-expanded YAML manifests to stdout.
 
-Supported fields: name, image, executionModel, resources, scaling, model.route, budget, eval, prompt
+Supported fields: name, image, executionModel, resources, scaling, model.route,
+budget, eval, prompt, runtime, systemPrompt, tools
 When eval: is present an EvalSuite manifest is emitted first, followed by the
 AgentDeployment with spec.evalSuiteRef set. When prompt: is present a PromptVersion
 manifest is emitted, followed by the AgentDeployment with spec.promptRef set.
+With runtime: managed (ADR 0013) image becomes optional (resolved to the pinned
+managed-agent ref), systemPrompt becomes the SYSTEM_PROMPT env, and each entry of
+tools generates an MCPToolBinding; a custom agent (no runtime) still requires image.
 Multiple documents are separated by "---".
 Unknown fields cause a hard error. Fields that land in later milestones
-(tools, memory, registry) are rejected with an informative message.
+(memory, registry) are rejected with an informative message.
 
 Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error`,
 		Args: cobra.ExactArgs(1),
