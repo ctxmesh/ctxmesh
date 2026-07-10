@@ -1,0 +1,31 @@
+{{- /*
+Prometheus ServiceMonitor for the controller-manager metrics endpoint.
+Opt-in (values: prometheus.serviceMonitor.enabled) because it requires the
+Prometheus Operator CRDs. Mirrors config/prometheus/monitor.yaml (kept out of
+config/default in kustomize for the same reason); the chart offers it as an
+operator-enabled add-on WITHOUT changing the no-drift control-plane baseline.
+*/ -}}
+{{- if .Values.prometheus.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: Helm
+  name: agent-engine-controller-manager-metrics-monitor
+  namespace: {{ .Values.namespace }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # insecureSkipVerify: enable cert-manager for production TLS verification.
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: agent-engine
+{{- end }}

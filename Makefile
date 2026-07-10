@@ -246,6 +246,40 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Helm chart (deploy/helm/agent-engine — GENERATED from config/, m12.2)
+
+# The Helm chart's control-plane + CRD templates are GENERATED from
+# `kustomize build config/default` — NEVER hand-maintained — so `helm install`
+# cannot drift from `make deploy`. `helm-generate` regenerates them;
+# `helm-verify` fails if the committed chart drifts from config/ OR if
+# `helm template` (default values) stops matching `kustomize build config/default`.
+HELM ?= helm
+HELM_CHART ?= deploy/helm/agent-engine
+
+.PHONY: helm-generate
+helm-generate: manifests kustomize ## Regenerate the Helm chart templates from config/default. Run after any config/ change.
+	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh
+
+.PHONY: helm-verify
+helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).
+	@set -e; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	echo ">> regenerating chart templates into a scratch dir and diffing vs committed"; \
+	mkdir -p "$$tmp/gen"; \
+	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh "$$tmp/gen" >/dev/null; \
+	for f in crds.yaml control-plane.yaml dev-data-plane.yaml; do \
+	  diff -u "$(HELM_CHART)/templates/$$f" "$$tmp/gen/$$f" \
+	    || { echo "DRIFT: $(HELM_CHART)/templates/$$f is stale — run 'make helm-generate'"; exit 1; }; \
+	done; \
+	echo ">> checking helm template (default values) == kustomize build config/default"; \
+	"$(KUSTOMIZE)" build config/default > "$$tmp/kustomize.yaml"; \
+	"$(HELM)" template agent-engine "$(HELM_CHART)" > "$$tmp/helm.yaml"; \
+	python3 ./hack/helm_nodrift_diff.py "$$tmp/kustomize.yaml" "$$tmp/helm.yaml"
+
+.PHONY: helm-lint
+helm-lint: ## helm lint the chart.
+	"$(HELM)" lint "$(HELM_CHART)"
+
 ##@ Dependencies
 
 ## Location to install dependencies to
