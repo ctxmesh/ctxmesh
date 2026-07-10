@@ -1,0 +1,18 @@
+/* Design tokens (the brand source of truth) must be imported FIRST — CSS
+ * requires @import to precede all other statements. The tokens define the
+ * :root custom properties Tailwind's theme maps onto. */
+@import "./styles/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}

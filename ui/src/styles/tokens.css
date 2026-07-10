@@ -1,0 +1,105 @@
+/*
+ * ============================================================================
+ *  DESIGN TOKENS — the single source of truth for the agent-engine UI theme.
+ * ============================================================================
+ *
+ *  This file IS the brand. Every color / radius / shadow / typography value the
+ *  UI renders resolves to a custom property defined here (mapped into Tailwind
+ *  by tailwind.config.ts). Surfaces (dashboard / config-builder / Playground)
+ *  and shadcn/ui components consume the SEMANTIC tokens only — they never
+ *  hardcode a color.
+ *
+ *  >>> TO RE-BRAND THE WHOLE UI: change the VALUES below. <<<
+ *  Nothing else needs to change — a token edit here re-themes every surface by
+ *  construction (ADR 0010). Colors are HSL channels (no hsl() wrapper) so
+ *  Tailwind can compose them with opacity, e.g. `hsl(var(--primary) / 0.5)`.
+ *
+ *  The DEFAULT values below are a neutral, professional slate + indigo system.
+ *  They are placeholders for the real brand, which the user refines HERE.
+ */
+
+@layer base {
+  :root {
+    /* --- Typography -------------------------------------------------------- */
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Menlo",
+      "Consolas", monospace;
+
+    /* --- Radius (single knob; sm/md derive from it in Tailwind) ------------ */
+    --radius: 0.625rem;
+
+    /* --- Surface / text ---------------------------------------------------- */
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* --- Brand: primary (indigo) ------------------------------------------- */
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
+
+    /* --- Neutrals ---------------------------------------------------------- */
+    --secondary: 215 25% 95%;
+    --secondary-foreground: 222 47% 20%;
+    --muted: 215 25% 95%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 243 75% 96%;
+    --accent-foreground: 243 60% 30%;
+
+    /* --- Status ------------------------------------------------------------ */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142 71% 40%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 47% 11%;
+
+    /* --- Lines / focus ----------------------------------------------------- */
+    --border: 215 20% 88%;
+    --input: 215 20% 88%;
+    --ring: 243 75% 59%;
+
+    /* --- Elevation --------------------------------------------------------- */
+    --shadow-card: 0 1px 2px 0 hsl(222 47% 11% / 0.05),
+      0 1px 3px 0 hsl(222 47% 11% / 0.08);
+    --shadow-elevated: 0 4px 6px -1px hsl(222 47% 11% / 0.08),
+      0 10px 15px -3px hsl(222 47% 11% / 0.1);
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 20% 96%;
+    --card: 222 44% 11%;
+    --card-foreground: 210 20% 96%;
+    --popover: 222 44% 11%;
+    --popover-foreground: 210 20% 96%;
+
+    --primary: 243 75% 66%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 33% 18%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 217 33% 18%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 20% 96%;
+
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 20% 96%;
+    --success: 142 60% 45%;
+    --success-foreground: 210 20% 96%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 222 47% 11%;
+
+    --border: 217 33% 22%;
+    --input: 217 33% 22%;
+    --ring: 243 75% 66%;
+
+    --shadow-card: 0 1px 2px 0 hsl(0 0% 0% / 0.3), 0 1px 3px 0 hsl(0 0% 0% / 0.4);
+    --shadow-elevated: 0 4px 6px -1px hsl(0 0% 0% / 0.4),
+      0 10px 15px -3px hsl(0 0% 0% / 0.5);
+  }
+}
