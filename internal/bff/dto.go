@@ -60,9 +60,62 @@ type AgentSummary struct {
 	Ready     bool   `json:"ready"`
 }
 
-// AgentListResponse is returned by GET /api/agents.
+// AgentListResponse is returned by GET /api/agents. It carries the list-contract
+// fields the console's DataTable consumes (ADR 0012, ui-foundation §4):
+//
+//   - Agents/Items — the SAME flat AgentSummary slice under two keys (the M12
+//     surfaces read `agents`; the v2 console's generic DataTable reads `items`).
+//     Both are non-nil on the wire ([] not null) so the SPA never sees a null.
+//   - NextCursor — the opaque K8s `continue` token for the NEXT page, or "" when
+//     the list is exhausted. The SPA passes it back verbatim as ?cursor= to page.
+//
+// Keeping `agents` is purely additive: the M12 Playwright suite still finds it,
+// while the new console keys off `items` + `nextCursor`.
 type AgentListResponse struct {
-	Agents []AgentSummary `json:"agents"`
+	Agents     []AgentSummary `json:"agents"`
+	Items      []AgentSummary `json:"items"`
+	NextCursor string         `json:"nextCursor"`
+}
+
+// --- Identity & RBAC-aware chrome (ADR 0012, ui-foundation §3) ---------------
+//
+// These three endpoints power the console's honest chrome. They are DISPLAY-ONLY:
+// the BFF re-implements no authorization — every review runs with the CALLER'S
+// token through the same factory (ADR 0011), so the answers are the API server's
+// own, and enforcement stays entirely with K8s. The UI merely hides/disables what
+// the caller cannot do.
+
+// WhoAmIResponse is returned by GET /api/whoami — the caller's identity as the
+// API server reports it via a SelfSubjectReview. Groups is non-nil on the wire
+// ([] not null) so the header never has to guard a null.
+type WhoAmIResponse struct {
+	Username string   `json:"username"`
+	Groups   []string `json:"groups"`
+}
+
+// CapabilitiesResponse is returned by GET /api/capabilities?namespace=<ns> — a
+// flat map of resource → verb → allowed, computed by batched SelfSubjectAccess
+// Reviews for the golden kinds × verbs. Namespace echoes the probed namespace
+// (empty = cluster-wide / "all namespaces"). Allowed is never nil on the wire.
+//
+// The map is intentionally flat (`{"agentdeployments":{"get":true,...},...}`) so
+// the SPA reads `caps.allowed["agentdeployments"]["create"]` directly with no
+// client-side reshaping. No server-side caching — the SPA caches per session.
+type CapabilitiesResponse struct {
+	Namespace string                     `json:"namespace"`
+	Allowed   map[string]map[string]bool `json:"allowed"`
+}
+
+// NamespaceSummary is the flat projection of one Namespace the caller can see.
+type NamespaceSummary struct {
+	Name string `json:"name"`
+}
+
+// NamespaceListResponse is returned by GET /api/namespaces — the namespaces the
+// caller's own RBAC lets them list. Namespaces is non-nil on the wire ([] not
+// null). A Forbidden on the underlying list is an honest 403, never a silent [].
+type NamespaceListResponse struct {
+	Namespaces []NamespaceSummary `json:"namespaces"`
 }
 
 // --- Topology (GET /api/topology) -------------------------------------------
