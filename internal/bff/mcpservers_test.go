@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -236,9 +237,11 @@ func TestRegisterMCPOpenServerNoSecret(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "no Secret for an open server")
 }
 
-// TestRegisterMCPHardenedIsPendingApproval proves the values-gated hardened mode
-// (requireApproval) marks the entry pending-approval instead of approved.
-func TestRegisterMCPHardenedIsPendingApproval(t *testing.T) {
+// TestRegisterMCPHardenedIsPendingApprovalNoEgress proves the values-gated
+// hardened mode (requireApproval) marks the entry pending-approval AND — the B1
+// review fix — opens NO egress before approval (ADR 0016 §4: egress opens per
+// APPROVED server only). The M17 approval step opens egress later.
+func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, true) // requireApproval = true
@@ -254,11 +257,22 @@ func TestRegisterMCPHardenedIsPendingApproval(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, agentsv1alpha1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
 
+	// The catalog entry is pending.
 	var tr agentsv1alpha1.ToolRegistry
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "hardened-mcp", Namespace: "prod"}, &tr))
 	for _, e := range tr.Spec.Tools {
 		assert.Equal(t, agentsv1alpha1.ApprovalPending, e.ApprovalStatus)
 	}
+
+	// B1: NO NetworkPolicy is created for a pending server — the created list
+	// contains only the ToolRegistry (no key → no Secret; pending → no egress).
+	for _, obj := range resp.Created {
+		assert.NotEqual(t, "NetworkPolicy", obj.Kind, "a pending server must NOT open egress before approval")
+	}
+	var np networkingv1.NetworkPolicy
+	err := c.Get(context.Background(),
+		client.ObjectKey{Name: "hardened-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np)
+	assert.True(t, apierrors.IsNotFound(err), "no egress NetworkPolicy exists for a pending server")
 }
 
 // TestRegisterMCPUnreachableIs4xxNoOrphan proves an unreachable / mis-speaking MCP
@@ -716,5 +730,74 @@ func TestHostPortFromURL(t *testing.T) {
 		require.NoError(t, err, tc.url)
 		assert.Equal(t, tc.wantHost, host, tc.url)
 		assert.Equal(t, tc.wantPort, port, tc.url)
+	}
+}
+
+// --- egress peers: the B2 invariant (never an empty-peers rule) --------------
+
+// stubResolver temporarily replaces the package DNS resolver so the DNS-host
+// egress path is deterministic in tests. It restores the original on cleanup.
+func stubResolver(t *testing.T, fn func(string) ([]net.IP, error)) {
+	t.Helper()
+	prev := resolveHostIPs
+	resolveHostIPs = fn
+	t.Cleanup(func() { resolveHostIPs = prev })
+}
+
+// TestEgressPolicyIPLiteralIsHostCIDR proves an IP-literal MCP host produces a
+// single /32 ipBlock peer (tight host route), no DNS lookup.
+func TestEgressPolicyIPLiteralIsHostCIDR(t *testing.T) {
+	np, err := mcpEgressNetworkPolicy("srv", "prod", "http://10.0.0.5:8080/mcp", map[string]string{})
+	require.Nil(t, err)
+	require.Len(t, np.Spec.Egress, 1)
+	to := np.Spec.Egress[0].To
+	require.Len(t, to, 1, "the egress `to` must be bounded (never empty)")
+	require.NotNil(t, to[0].IPBlock)
+	assert.Equal(t, "10.0.0.5/32", to[0].IPBlock.CIDR)
+}
+
+// TestEgressPolicyDNSHostResolvesToBoundedIPBlocks is the B2 fix: a DNS host is
+// RESOLVED at register time to bounded ipBlock peers — NEVER an empty-peers rule
+// (which K8s reads as "allow to any destination on the port" = a blanket hole).
+func TestEgressPolicyDNSHostResolvesToBoundedIPBlocks(t *testing.T) {
+	stubResolver(t, func(host string) ([]net.IP, error) {
+		assert.Equal(t, "my-mcp.example.com", host)
+		// Return two addresses (v4 + a dup) to also cover dedupe.
+		return []net.IP{net.ParseIP("203.0.113.10"), net.ParseIP("203.0.113.10"), net.ParseIP("2001:db8::1")}, nil
+	})
+
+	np, err := mcpEgressNetworkPolicy("srv", "prod", "https://my-mcp.example.com/mcp", map[string]string{})
+	require.Nil(t, err)
+	require.Len(t, np.Spec.Egress, 1)
+	to := np.Spec.Egress[0].To
+	require.NotEmpty(t, to, "a DNS host MUST resolve to bounded ipBlock peers, never an empty `to`")
+	cidrs := make([]string, 0, len(to))
+	for _, p := range to {
+		require.NotNil(t, p.IPBlock, "every egress peer must be a scoped ipBlock")
+		cidrs = append(cidrs, p.IPBlock.CIDR)
+	}
+	// Deduped to two distinct host routes (v4 /32 + v6 /128); the port is 443.
+	assert.ElementsMatch(t, []string{"203.0.113.10/32", "2001:db8::1/128"}, cidrs)
+	require.Len(t, np.Spec.Egress[0].Ports, 1)
+	assert.Equal(t, int32(443), np.Spec.Egress[0].Ports[0].Port.IntVal)
+}
+
+// TestEgressPolicyUnresolvableHostIsTeaching4xx proves a DNS host that resolves to
+// nothing (or fails) is an honest 4xx — NEVER a shipped empty-peers rule.
+func TestEgressPolicyUnresolvableHostIsTeaching4xx(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   func(string) ([]net.IP, error)
+	}{
+		{"lookup-error", func(string) ([]net.IP, error) { return nil, assert.AnError }},
+		{"empty-result", func(string) ([]net.IP, error) { return nil, nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubResolver(t, tc.fn)
+			np, err := mcpEgressNetworkPolicy("srv", "prod", "https://ghost.example.com/mcp", map[string]string{})
+			assert.Nil(t, np, "no policy is built when the host cannot be bounded")
+			require.NotNil(t, err)
+			assert.Equal(t, http.StatusBadRequest, err.status, "an unresolvable host is a teaching 4xx, not an empty-peers rule")
+		})
 	}
 }
