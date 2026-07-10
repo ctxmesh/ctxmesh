@@ -13,6 +13,7 @@ import {
   useCapabilities,
 } from "@/lib/capabilities";
 import { NamespaceProvider, useNamespace } from "@/lib/namespace";
+import { ShellCommandPalette } from "@/components/command-palette-shell";
 import { cn } from "@/lib/utils";
 
 // AppShell — the persistent console layout every re-housed surface renders
@@ -213,6 +214,11 @@ function ShellChrome() {
               Control plane
             </h1>
             <div className="flex items-center gap-4">
+              {/* ⌘K command palette — the global navigator + the discoverable
+                  header chip that opens it (m13.6b). Mounted here, inside the
+                  Namespace + Capabilities providers, so it RBAC-filters exactly
+                  like the nav and shares the shell's sign-out flow. */}
+              <ShellCommandPalette onLogout={onLogout} />
               <NamespacePicker />
               {session && (
                 <WhoAmIBadge
