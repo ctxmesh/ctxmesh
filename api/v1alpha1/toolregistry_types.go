@@ -21,6 +21,26 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// Tool approval states (ADR 0016 trust model). ApprovalApproved is the
+// self-serve default (a curated operator entry, or a BYO tool on a cluster that
+// does not require approval) — the tool is immediately bindable. ApprovalPending
+// is a BYO tool discovered on a HARDENED cluster (mcp.requireApproval): it sits
+// in the catalog with a pending status until an operator approves it (the
+// approval queue itself is M17; M14 only marks the state).
+const (
+	ApprovalApproved = "approved"
+	ApprovalPending  = "pending"
+)
+
+// Tool provenance (ADR 0016). SourceCurated is an operator-authored catalog
+// entry; SourceUserAdded is a tool discovered by the BYO-MCP register flow. The
+// merged catalog (GET /api/tools) surfaces the source so the console can badge
+// curated vs user-added tools.
+const (
+	SourceCurated   = "curated"
+	SourceUserAdded = "user-added"
+)
+
 // ToolEntry is one approved MCP tool in a ToolRegistry catalog. A
 // MCPToolBinding is valid only if its toolName matches an entry here and its
 // server image/url matches whatever the entry pins (empty pin = any value
@@ -44,6 +64,38 @@ type ToolEntry struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	URL string `json:"url,omitempty"`
+
+	// description is the tool's human-readable description as advertised by the
+	// MCP server's tools/list (or authored by the operator for a curated entry).
+	// Surfaced in the catalog UI; not load-bearing for binding.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Description string `json:"description,omitempty"`
+
+	// inputSchema is the tool's argument JSON Schema, captured verbatim from the
+	// MCP server's tools/list (the object under each tool's "inputSchema"). It is
+	// stored as raw JSON so the managed loop (m14.6b) can hand the model exact
+	// tool-call schemas without re-probing the server. Empty for a curated entry
+	// that pre-dates schema capture. Preserved unknown-fields so a schema addition
+	// never breaks the projection.
+	// +kubebuilder:validation:XPreserveUnknownFields
+	// +optional
+	InputSchema *k8sruntime.RawExtension `json:"inputSchema,omitempty"`
+
+	// source records the tool's provenance: "curated" (operator-authored) or
+	// "user-added" (discovered by the BYO-MCP register flow, ADR 0016). Empty is
+	// treated as "curated" for backward compatibility with pre-M14 registries.
+	// +kubebuilder:validation:Enum=curated;user-added
+	// +optional
+	Source string `json:"source,omitempty"`
+
+	// approvalStatus is the trust state (ADR 0016): "approved" (self-serve default
+	// — immediately bindable) or "pending" (a BYO tool on a hardened cluster
+	// awaiting operator approval; the approval queue is M17). Empty is treated as
+	// "approved" for backward compatibility with pre-M14 curated registries.
+	// +kubebuilder:validation:Enum=approved;pending
+	// +optional
+	ApprovalStatus string `json:"approvalStatus,omitempty"`
 }
 
 // ToolRegistrySpec is the v1 approved-tool catalog (PRD §9.4, minimal M4

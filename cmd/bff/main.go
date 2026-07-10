@@ -124,6 +124,21 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("platform generation models pinned", "models", platformGenModels)
 	}
 
+	// The BYO-MCP kill-switch + trust policy (ADR 0016). MCP_ENABLED defaults TRUE
+	// (dev/trial); a hardened install sets it false to 404 the register/catalog
+	// endpoints. MCP_REQUIRE_APPROVAL defaults FALSE (self-serve — tools are
+	// immediately bindable); a hardened install sets it true to mark newly
+	// registered tools pending-approval (the approval queue is M17). Same
+	// "flag-from-env" pattern as the connect kill-switch.
+	mcpEnabled := envEnabledDefaultTrue(os.Getenv("MCP_ENABLED"))
+	if !mcpEnabled {
+		log.Info("BYO-MCP disabled by MCP_ENABLED=false; /api/mcpservers + /api/tools serve 404")
+	}
+	mcpRequireApproval := envTrue(os.Getenv("MCP_REQUIRE_APPROVAL"))
+	if mcpRequireApproval {
+		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
+	}
+
 	srv := bff.NewServer(bff.Options{
 		CallerClients:            callerClients,
 		Scheme:                   scheme,
@@ -133,6 +148,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		StaticDir:                staticDir,
 		ProviderConnect:          providerConnect,
 		PlatformGenerationModels: platformGenModels,
+		MCPEnabled:               mcpEnabled,
+		MCPRequireApproval:       mcpRequireApproval,
 		Log:                      ctrl.Log.WithName("bff.server"),
 	})
 
@@ -172,11 +189,33 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 // permissive-by-default so a fresh `helm install` gives the console the connect
 // flow with no extra config.
 func providerConnectEnabled(raw string) bool {
+	return envEnabledDefaultTrue(raw)
+}
+
+// envEnabledDefaultTrue resolves a boolean feature flag that defaults to ENABLED:
+// an empty or unrecognized value → true; only an explicit falsey value
+// ("false"/"0"/"no"/"off", case-insensitive) disables it. Used for the
+// connect-a-provider and BYO-MCP kill-switches (permissive-by-default so a fresh
+// install gets the console features with no extra config).
+func envEnabledDefaultTrue(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "false", "0", "no", "off":
 		return false
 	default:
 		return true
+	}
+}
+
+// envTrue resolves a boolean flag that defaults to FALSE: only an explicit truthy
+// value ("true"/"1"/"yes"/"on", case-insensitive) enables it. Used for the
+// BYO-MCP hardened trust policy (MCP_REQUIRE_APPROVAL), off by default so the
+// self-serve aha stays frictionless.
+func envTrue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

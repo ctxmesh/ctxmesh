@@ -69,6 +69,19 @@ type Server struct {
 	// from PLATFORM_GENERATION_MODELS in cmd/bff/main.go).
 	platformGenerationModels []string
 
+	// mcpEnabled is the BYO-MCP kill-switch (ADR 0016), mirroring the connect
+	// kill-switch. When false the register/catalog endpoints (POST/GET
+	// /api/mcpservers, GET /api/tools) are NOT registered and 404 — a hardened
+	// install that forbids BYO MCP. Default true (dev/trial). Wired from
+	// MCP_ENABLED in cmd/bff/main.go (Helm value bff.mcp.enabled).
+	mcpEnabled bool
+	// mcpRequireApproval is the ADR 0016 TRUST policy switch. Default false
+	// (self-serve — a registered server's tools are immediately bindable). When
+	// true (hardened) a freshly-registered server's tools are marked
+	// pending-approval; the approval queue itself is M17 (here we only mark the
+	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
+	mcpRequireApproval bool
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -110,6 +123,16 @@ type Options struct {
 	// caller's connected-provider model unpinned. Wired from
 	// PLATFORM_GENERATION_MODELS in cmd/bff/main.go.
 	PlatformGenerationModels []string
+	// MCPEnabled is the BYO-MCP kill-switch (ADR 0016). When true (the default for
+	// dev/trial) the register/catalog endpoints are registered; when false (a
+	// hardened install) POST/GET /api/mcpservers + GET /api/tools 404. Wired from
+	// MCP_ENABLED in cmd/bff/main.go.
+	MCPEnabled bool
+	// MCPRequireApproval is the ADR 0016 trust policy. When false (default,
+	// self-serve) a registered server's tools are immediately bindable; when true
+	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
+	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
+	MCPRequireApproval bool
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -126,6 +149,8 @@ func NewServer(opts Options) *Server {
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
 		platformGenerationModels: opts.PlatformGenerationModels,
+		mcpEnabled:               opts.MCPEnabled,
+		mcpRequireApproval:       opts.MCPRequireApproval,
 		log:                      opts.Log,
 	}
 	if s.version == "" {
@@ -253,6 +278,34 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
 			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
 			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
+		}
+	}
+
+	// BYO-MCP register + tool catalog (m14.6, ADR 0016): probe a user's MCP server,
+	// capture its tools (with inputSchema), store an optional key as a Secret, write
+	// a user-added ToolRegistry entry per tool, and open per-server egress — all
+	// CALLER-SCOPED. Gated by TWO factors, in order (the connect-flow pattern):
+	//
+	//  1. the Helm KILL-SWITCH (mcpEnabled). OFF → the routes are NOT registered, so
+	//     they fall through to the SPA handler and 404 (feature-off) — a hardened
+	//     install that forbids BYO MCP. Checked FIRST so the endpoints are genuinely
+	//     absent.
+	//  2. the CALLER-CLIENT factory (like every user-facing CRD route): nil → 501,
+	//     never a BFF-SA fallback (ADR 0011). GET /api/tools reads ToolRegistries
+	//     caller-scoped; POST /api/mcpservers writes caller-scoped.
+	//
+	// The trust policy (self-serve vs pending-approval) is the SEPARATE
+	// mcpRequireApproval value, read inside the handler — it changes the entry
+	// status, not the route wiring.
+	if s.mcpEnabled {
+		if s.callerClients != nil {
+			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
+			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
+			authed.HandleFunc("GET /api/tools", s.handleListTools)
+		} else {
+			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
+			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
+			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
 		}
 	}
 
