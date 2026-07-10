@@ -189,7 +189,7 @@ jobs:
         # FRESH CI cluster: (1) no kustomize-owned control plane → real `helm
         # install` (no UIE2E_RESET_CONTROL_PLANE), and (2) the in-cluster BFF
         # reaches the Knative URL → the Playground LIVE run works with NO
-        # UIE2E_SKIP_PLAYGROUND_RUN escape hatch — both m12.8b deferrals close on
+        # UI_E2E_SKIP_PLAYGROUND_RUN escape hatch — both m12.8b deferrals close on
         # a clean cluster. Runs LAST (heaviest: helm install + browser + a live
         # agent run). specs/ui.md, ADR 0010/0011.
         run: make -C agent-brain/harness tier2 SLICE=m12-ui
