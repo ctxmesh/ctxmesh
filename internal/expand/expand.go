@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -40,6 +41,75 @@ import (
 
 // APIVersion is the group/version stamped on every expanded CRD manifest.
 const APIVersion = "agents.ctxmesh.ai/v1alpha1"
+
+// ── Managed-runtime configuration (ADR 0013) ──────────────────────────────────
+//
+// The managed runtime resolves a `runtime: managed` agent to a stock,
+// platform-owned image + registry-backed tool bindings. These three references
+// are configurable (env override with a sane default) so a Helm deploy can pin
+// the published managed image (Helm value managedAgent.image), a cluster can
+// point at its own tool registry, and the per-tool server convention can be
+// retargeted — without changing code. Defaults keep the CLI usable offline.
+
+const (
+	// DefaultManagedImage is the pinned managed-agent image ref used when an
+	// agent sets `runtime: managed` and omits `image`. Override at deploy time
+	// via the Helm value managedAgent.image (surfaced to expand as the
+	// MANAGED_AGENT_IMAGE env). This is the image built by
+	// `make docker-build-managed`.
+	DefaultManagedImage = "ghcr.io/ctxmesh/managed-agent:latest"
+
+	// DefaultManagedToolRegistry is the ToolRegistry the generated MCPToolBindings
+	// reference (registryRef). The BYO-MCP flow (ADR 0016) feeds this catalog;
+	// override via MANAGED_TOOL_REGISTRY.
+	DefaultManagedToolRegistry = "default-tools"
+
+	// DefaultManagedToolServerTemplate is the remote-mode server URL the generated
+	// MCPToolBindings point at, built from the tool name via a single "%s"
+	// placeholder. The concrete catalog URL is owned by the ToolRegistry/BYO-MCP
+	// path; this convention keeps expand's output admissible (the CRD's CEL
+	// requires a server) and deterministic. Override via MANAGED_TOOL_SERVER_URL
+	// (must contain exactly one "%s" for the tool name).
+	DefaultManagedToolServerTemplate = "http://%s.mcp.svc.cluster.local/mcp"
+
+	// envManagedImage / envManagedToolRegistry / envManagedToolServer are the
+	// env vars that override the defaults above.
+	envManagedImage        = "MANAGED_AGENT_IMAGE"
+	envManagedToolRegistry = "MANAGED_TOOL_REGISTRY"
+	envManagedToolServer   = "MANAGED_TOOL_SERVER_URL"
+)
+
+// managedImageRef returns the resolved managed-agent image ref (env override →
+// default).
+func managedImageRef() string {
+	if v := os.Getenv(envManagedImage); v != "" {
+		return v
+	}
+	return DefaultManagedImage
+}
+
+// managedToolRegistry returns the ToolRegistry name generated bindings reference.
+func managedToolRegistry() string {
+	if v := os.Getenv(envManagedToolRegistry); v != "" {
+		return v
+	}
+	return DefaultManagedToolRegistry
+}
+
+// managedToolServerURL returns the remote server URL for a tool, from the
+// configurable template. A template missing the "%s" placeholder falls back to
+// the default so a misconfigured env can never emit an empty (inadmissible)
+// server URL.
+func managedToolServerURL(tool string) string {
+	tmpl := os.Getenv(envManagedToolServer)
+	if tmpl == "" || !strings.Contains(tmpl, "%s") {
+		tmpl = DefaultManagedToolServerTemplate
+	}
+	return fmt.Sprintf(tmpl, tool)
+}
+
+// managedRuntimeValue is the only accepted value of the `runtime` field.
+const managedRuntimeValue = "managed"
 
 // ErrorKind classifies an expand failure so callers can map it to their own
 // error channel (an exit code for the CLI, an HTTP status for the BFF) without
@@ -77,7 +147,9 @@ func parseErr(format string, args ...any) *Error {
 	return &Error{Kind: KindParse, Err: fmt.Errorf(format, args...)}
 }
 
-// knownFields is the set of top-level agent.yaml fields supported in M2+M8+M9.
+// knownFields is the set of top-level agent.yaml fields supported in
+// M2+M8+M9+M14. `runtime`, `systemPrompt`, and `tools` are the M14 managed-
+// runtime additions (ADR 0013).
 var knownFields = map[string]bool{
 	"name":           true,
 	"image":          true,
@@ -88,6 +160,9 @@ var knownFields = map[string]bool{
 	"budget":         true,
 	"eval":           true,
 	"prompt":         true,
+	"runtime":        true,
+	"systemPrompt":   true,
+	"tools":          true,
 }
 
 // futureField describes a top-level field not yet supported, with the milestone
@@ -99,14 +174,14 @@ type futureField struct {
 // futureFields is the set of recognised-but-not-yet-supported top-level fields.
 // Fields not in knownFields and not in futureFields are fully unknown → hard error.
 var futureFields = map[string]futureField{
-	"tools":    {milestone: "M4"},
 	"memory":   {milestone: "M5"},
 	"registry": {milestone: "M6"},
 }
 
 // ── Input types ───────────────────────────────────────────────────────────────
 
-// agentYAML is the M2+M8+M9 subset of the simplified PRD §8.5 agent.yaml format.
+// agentYAML is the M2+M8+M9+M14 subset of the simplified PRD §8.5 agent.yaml
+// format. Runtime/SystemPrompt/Tools are the M14 managed-runtime fields.
 type agentYAML struct {
 	Name           string         `yaml:"name"`
 	Image          string         `yaml:"image"`
@@ -117,6 +192,16 @@ type agentYAML struct {
 	Budget         *budgetYAML    `yaml:"budget"`
 	Eval           *evalYAML      `yaml:"eval"`
 	Prompt         *promptYAML    `yaml:"prompt"`
+	// Runtime selects the agent runtime. Empty = custom (image required, the
+	// unchanged path); "managed" = the stock managed-agent image (image optional,
+	// resolved to the pinned managed ref) — ADR 0013.
+	Runtime string `yaml:"runtime"`
+	// SystemPrompt is the managed agent's system prompt (delivered to the pod as
+	// the SYSTEM_PROMPT env). Managed runtime only.
+	SystemPrompt string `yaml:"systemPrompt"`
+	// Tools is the list of tool catalog names to bind (each → one MCPToolBinding,
+	// the same binding path a custom agent uses). Managed runtime only.
+	Tools []string `yaml:"tools"`
 }
 
 // budgetYAML holds optional cost-governance caps from the agent.yaml budget block.
@@ -238,6 +323,30 @@ type promptVersionSpec struct {
 	Git gitPromptOut `yaml:"git"`
 }
 
+// mcpToolBindingOut is a lightweight representation of an MCPToolBinding manifest
+// for YAML output (ADR 0013 / specs/mcp-tools.md). One is emitted per managed
+// agent tool — the same binding path a custom agent uses.
+type mcpToolBindingOut struct {
+	APIVersion string             `yaml:"apiVersion"`
+	Kind       string             `yaml:"kind"`
+	Metadata   metaOut            `yaml:"metadata"`
+	Spec       mcpToolBindingSpec `yaml:"spec"`
+}
+
+// mcpToolBindingSpec mirrors MCPToolBindingSpec for YAML marshalling.
+type mcpToolBindingSpec struct {
+	AgentRef    string        `yaml:"agentRef"`
+	RegistryRef string        `yaml:"registryRef"`
+	ToolName    string        `yaml:"toolName"`
+	Mode        string        `yaml:"mode"`
+	Server      toolServerOut `yaml:"server"`
+}
+
+// toolServerOut mirrors ToolServer for YAML marshalling (remote mode: url).
+type toolServerOut struct {
+	URL string `yaml:"url"`
+}
+
 // gitPromptOut mirrors GitPromptSource for YAML marshalling.
 type gitPromptOut struct {
 	Repo string `yaml:"repo"`
@@ -323,12 +432,12 @@ func ExpandBytes(rawYAML []byte, w io.Writer) error {
 		return parseErr("YAML parse error: %v", err)
 	}
 
-	// Phase 3: validate required fields.
+	// Phase 3: validate required fields + the runtime branch (ADR 0013).
 	if ay.Name == "" {
 		return validationErr("required field missing: name")
 	}
-	if ay.Image == "" {
-		return validationErr("required field missing: image")
+	if err := validateRuntime(&ay); err != nil {
+		return err
 	}
 
 	// Phase 4: validate eval/prompt sub-fields when present.
@@ -355,6 +464,16 @@ func ExpandBytes(rawYAML []byte, w io.Writer) error {
 	}
 	if ay.Prompt != nil {
 		if err := marshalYAML(w, buildPromptVersionOutput(ay.Prompt)); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprint(w, "---\n"); err != nil {
+			return fmt.Errorf("writing YAML separator: %w", err)
+		}
+	}
+	// Managed runtime: one MCPToolBinding per bound tool (the same binding path a
+	// custom agent uses). Emitted before the AgentDeployment, in list order.
+	for _, binding := range buildToolBindings(&ay) {
+		if err := marshalYAML(w, binding); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprint(w, "---\n"); err != nil {
@@ -398,6 +517,43 @@ func validatePromptYAML(p *promptYAML) error {
 		return validationErr("prompt.git.path is required when prompt block is present")
 	}
 	return nil
+}
+
+// validateRuntime enforces the two-runtime branch (ADR 0013):
+//
+//   - runtime unset (custom path): `image` is REQUIRED (unchanged); the
+//     managed-only fields (systemPrompt, tools) are rejected so a custom agent
+//     can't accidentally set managed-only knobs.
+//   - runtime: managed: `image` is OPTIONAL (resolved to the pinned managed ref
+//     when omitted; an explicit image still wins so a fork can be pinned).
+//
+// Any other runtime value is a hard error.
+func validateRuntime(ay *agentYAML) error {
+	switch ay.Runtime {
+	case "":
+		// Custom path — unchanged: image required, no managed-only fields.
+		if ay.Image == "" {
+			return validationErr("required field missing: image")
+		}
+		if ay.SystemPrompt != "" {
+			return validationErr("systemPrompt requires runtime: managed")
+		}
+		if len(ay.Tools) > 0 {
+			return validationErr("tools requires runtime: managed")
+		}
+		return nil
+	case managedRuntimeValue:
+		// Managed path — image optional (resolved when omitted). Tool names must
+		// be non-empty when provided.
+		for i, t := range ay.Tools {
+			if strings.TrimSpace(t) == "" {
+				return validationErr("tools[%d] is empty — each tool must be a non-empty catalog name", i)
+			}
+		}
+		return nil
+	default:
+		return validationErr("unknown runtime %q — the only supported value is %q", ay.Runtime, managedRuntimeValue)
+	}
 }
 
 // checkFields validates that every top-level key in raw is either a known
@@ -454,9 +610,27 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 		execModel = "serving" // CRD default
 	}
 
+	// Resolve the image: for a managed agent with no explicit image, resolve to
+	// the pinned managed-agent ref (ADR 0013). An explicit image always wins (a
+	// managed fork can be pinned); the custom path uses ay.Image verbatim.
+	image := ay.Image
+	if ay.Runtime == managedRuntimeValue && image == "" {
+		image = managedImageRef()
+	}
+
 	spec := specOut{
-		Image:          ay.Image,
+		Image:          image,
 		ExecutionModel: execModel,
+	}
+
+	// Managed runtime: deliver the system prompt as the SYSTEM_PROMPT env the
+	// managed-agent entrypoint reads (config → behaviour). Emitted before
+	// MODEL_ROUTE so the env order is deterministic (systemPrompt, then route).
+	if ay.Runtime == managedRuntimeValue && ay.SystemPrompt != "" {
+		spec.Env = append(spec.Env, envVarOut{
+			Name:  "SYSTEM_PROMPT",
+			Value: ay.SystemPrompt,
+		})
 	}
 
 	if ay.Resources != nil {
@@ -567,6 +741,37 @@ func buildPromptVersionOutput(p *promptYAML) *promptVersionOut {
 			},
 		},
 	}
+}
+
+// buildToolBindings converts a managed agent's tools list into one
+// MCPToolBinding manifest per tool — the same binding path a custom agent uses
+// (specs/mcp-tools.md). Each binding references the configured ToolRegistry
+// (registryRef) and points at the per-tool remote server URL (the configurable
+// convention). Returns nil for a custom agent or a managed agent with no tools.
+//
+// The binding name is "<agent>-<tool>" so multiple tools on one agent produce
+// distinct, deterministic binding names.
+func buildToolBindings(ay *agentYAML) []*mcpToolBindingOut {
+	if ay.Runtime != managedRuntimeValue || len(ay.Tools) == 0 {
+		return nil
+	}
+	registry := managedToolRegistry()
+	bindings := make([]*mcpToolBindingOut, 0, len(ay.Tools))
+	for _, tool := range ay.Tools {
+		bindings = append(bindings, &mcpToolBindingOut{
+			APIVersion: APIVersion,
+			Kind:       "MCPToolBinding",
+			Metadata:   metaOut{Name: ay.Name + "-" + tool},
+			Spec: mcpToolBindingSpec{
+				AgentRef:    ay.Name,
+				RegistryRef: registry,
+				ToolName:    tool,
+				Mode:        "remote",
+				Server:      toolServerOut{URL: managedToolServerURL(tool)},
+			},
+		})
+	}
+	return bindings
 }
 
 // marshalYAML writes the output struct as 2-space-indented YAML to w.

@@ -41,10 +41,13 @@ _CHAT_TIMEOUT = 60.0
 class ChatResponse:
     """The parsed result of ``model.chat`` — the completion text plus usage.
 
-    ``text`` is the assistant message content (the common case a loop wants).
-    ``usage`` is the raw ``usage`` block (prompt/completion/total token counts)
-    when the gateway returned one, else ``{}``. ``raw`` is the full decoded
-    response for callers that need more (multiple choices, finish reason, …).
+    ``text`` is the assistant message content (the common case a loop wants). On
+    a **tool-calling turn** the OpenAI wire sets ``content: null`` and carries a
+    ``tool_calls`` array instead; ``text`` is then ``""`` and :meth:`tool_calls`
+    returns the calls. ``usage`` is the raw ``usage`` block (prompt/completion/
+    total token counts) when the gateway returned one, else ``{}``. ``raw`` is the
+    full decoded response for callers that need more (multiple choices, the
+    assistant message with its ``tool_calls``, finish reason, …).
     """
 
     __slots__ = ("text", "usage", "model", "raw")
@@ -57,6 +60,38 @@ class ChatResponse:
 
     def __str__(self) -> str:  # so `str(resp)` / logging gives the completion
         return self.text
+
+    @property
+    def message(self) -> Dict[str, Any]:
+        """The raw assistant message object (``choices[0].message``), or ``{}``.
+
+        The managed loop appends this verbatim to the running ``messages`` list on
+        a tool-calling turn — OpenAI requires the assistant message (with its
+        ``tool_calls``) to precede the ``role: "tool"`` results on the follow-up
+        request.
+        """
+        return _assistant_message(self.raw)
+
+    @property
+    def tool_calls(self) -> List[Dict[str, Any]]:
+        """The assistant's ``tool_calls`` for this turn (``[]`` when none).
+
+        Each entry is the OpenAI tool-call object
+        ``{"id", "type", "function": {"name", "arguments": <json-string>}}`` — the
+        exact shape the m14.2 tool-call mock emits on turn 1. Off ``raw`` so the
+        managed loop can dispatch without re-parsing the body. ``[]`` (never
+        raises) when the turn is a plain text completion.
+        """
+        message = _assistant_message(self.raw)
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            return [c for c in calls if isinstance(c, dict)]
+        return []
+
+    @property
+    def has_tool_calls(self) -> bool:
+        """True when this turn asked to call one or more tools."""
+        return len(self.tool_calls) > 0
 
 
 class ModelClient:
@@ -144,17 +179,52 @@ class ModelClient:
         }
 
 
-def _completion_text(data: Dict[str, Any]) -> str:
-    """Extract ``choices[0].message.content`` from an OpenAI-style response."""
+def _first_choice(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``choices[0]`` as a dict, raising if the response has no choices."""
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
         raise EndpointError("model gateway response has no choices")
     first = choices[0]
     if not isinstance(first, dict):
         raise EndpointError("model gateway choice is not an object")
+    return first
+
+
+def _assistant_message(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``choices[0].message`` as a dict (``{}`` when absent/malformed).
+
+    Never raises — the tool_calls/message accessors on :class:`ChatResponse`
+    degrade to empty rather than crash a loop reading a slightly-off body.
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return {}
+    first = choices[0]
+    if not isinstance(first, dict):
+        return {}
     message = first.get("message")
-    if isinstance(message, dict) and isinstance(message.get("content"), str):
-        return message["content"]
+    return message if isinstance(message, dict) else {}
+
+
+def _completion_text(data: Dict[str, Any]) -> str:
+    """Extract ``choices[0].message.content`` from an OpenAI-style response.
+
+    A **tool-calling turn** legitimately has ``content: null`` and a
+    ``tool_calls`` array (the m14.2 turn-1 shape): that is NOT an error — the
+    managed loop reads the calls off :attr:`ChatResponse.tool_calls` and this
+    returns ``""`` for the (absent) text. Only a response that has neither text
+    NOR tool_calls is a malformed body and raises.
+    """
+    first = _first_choice(data)
+    message = first.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        # A tool-calling turn: content is null, tool_calls carries the intent.
+        # Return "" (no text) rather than raising — the loop dispatches the calls.
+        if message.get("tool_calls"):
+            return ""
     # Some gateways/streamed shapes put the text on `text`; accept that too.
     if isinstance(first.get("text"), str):
         return first["text"]

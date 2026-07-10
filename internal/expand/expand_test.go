@@ -35,7 +35,7 @@ const cliGoldenDir = "../../cmd/agent-engine/testdata"
 // BFF (which calls Expand) ever diverged from the CLI, this fails — there is one
 // mapping, not two.
 func TestExpandEquivalentToCLIGolden(t *testing.T) {
-	fixtures := []string{"minimal", "full", "model-route"}
+	fixtures := []string{"minimal", "full", "model-route", "managed"}
 	for _, name := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			in, err := os.ReadFile(filepath.Join(cliGoldenDir, name+".yaml"))
@@ -106,6 +106,54 @@ prompt:
 	}
 }
 
+// TestExpandManagedRuntime exercises the managed-runtime branch (ADR 0013)
+// through the public Expand() the BFF calls: image resolves when omitted,
+// systemPrompt → SYSTEM_PROMPT env, tools → MCPToolBinding docs; the custom path
+// (image required) is unchanged.
+func TestExpandManagedRuntime(t *testing.T) {
+	in := []byte("name: m\nruntime: managed\nsystemPrompt: be nice\ntools:\n  - echo_tool\n")
+	got, err := Expand(in)
+	if err != nil {
+		t.Fatalf("Expand: unexpected error: %v", err)
+	}
+	out := string(got)
+	for _, want := range []string{
+		"kind: MCPToolBinding",
+		"toolName: echo_tool",
+		"registryRef: default-tools",
+		"mode: remote",
+		"kind: AgentDeployment",
+		DefaultManagedImage,
+		"name: SYSTEM_PROMPT",
+		"value: be nice",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("managed output missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// runtime: managed without image is valid; custom without image errors.
+	if _, err := Expand([]byte("name: m\nruntime: managed\n")); err != nil {
+		t.Errorf("managed without image should be valid, got: %v", err)
+	}
+	if _, err := Expand([]byte("name: c\n")); err == nil {
+		t.Error("custom without image must still error")
+	}
+}
+
+// TestExpandManagedImageRefConfigurable asserts the managed image ref is
+// overridable via env (the documented configurable ref).
+func TestExpandManagedImageRefConfigurable(t *testing.T) {
+	t.Setenv(envManagedImage, "registry.example.com/mine:9")
+	got, err := Expand([]byte("name: m\nruntime: managed\n"))
+	if err != nil {
+		t.Fatalf("Expand: unexpected error: %v", err)
+	}
+	if !strings.Contains(string(got), "image: registry.example.com/mine:9") {
+		t.Errorf("MANAGED_AGENT_IMAGE override not honoured, got:\n%s", got)
+	}
+}
+
 // TestExpandErrorKinds asserts the typed error routing the BFF depends on:
 // unknown/future/missing fields → KindValidation (→ HTTP 400), malformed YAML →
 // KindParse (→ HTTP 400). Swallowing either would surface a bad manifest.
@@ -116,7 +164,9 @@ func TestExpandErrorKinds(t *testing.T) {
 		kind ErrorKind
 	}{
 		{"unknown-field", "name: a\nimage: b\nbogus: x\n", KindValidation},
-		{"future-field", "name: a\nimage: b\ntools: []\n", KindValidation},
+		{"future-field", "name: a\nimage: b\nmemory: {}\n", KindValidation},
+		{"tools-without-managed", "name: a\nimage: b\ntools:\n  - t\n", KindValidation},
+		{"unknown-runtime", "name: a\nimage: b\nruntime: hosted\n", KindValidation},
 		{"missing-name", "image: b\n", KindValidation},
 		{"missing-image", "name: a\n", KindValidation},
 		{"eval-missing-suite", "name: a\nimage: b\neval:\n  dataset: d\n  threshold: \"0.5\"\n  scorers:\n    - name: s\n      type: t\n", KindValidation},

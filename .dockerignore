@@ -38,3 +38,7 @@ ui/dist/**
 
 # Re-include sdk-custom-agent example assets (m10.4)
 !examples/sdk-custom-agent/agent.py
+
+# Re-include managed-agent runtime image assets (m14.3: the config-driven
+# managed agent — a thin entrypoint over the SDK's run_managed_loop, ADR 0013)
+!images/managed-agent/entrypoint.py

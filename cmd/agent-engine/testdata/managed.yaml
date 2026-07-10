@@ -1,0 +1,8 @@
+name: managed-agent
+runtime: managed
+systemPrompt: You are a concise, helpful assistant.
+model:
+  route: default-model
+tools:
+  - echo_tool
+  - word-count
