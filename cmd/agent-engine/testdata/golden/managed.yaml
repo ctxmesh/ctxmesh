@@ -1,14 +1,14 @@
 apiVersion: agents.ctxmesh.ai/v1alpha1
 kind: MCPToolBinding
 metadata:
-  name: managed-agent-echo_tool
+  name: managed-agent-echo-tool
 spec:
   agentRef: managed-agent
   registryRef: default-tools
   toolName: echo_tool
   mode: remote
   server:
-    url: http://echo_tool.mcp.svc.cluster.local/mcp
+    url: http://echo-tool.mcp.svc.cluster.local/mcp
 ---
 apiVersion: agents.ctxmesh.ai/v1alpha1
 kind: MCPToolBinding

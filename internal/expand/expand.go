@@ -97,19 +97,62 @@ func managedToolRegistry() string {
 }
 
 // managedToolServerURL returns the remote server URL for a tool, from the
-// configurable template. A template missing the "%s" placeholder falls back to
-// the default so a misconfigured env can never emit an empty (inadmissible)
-// server URL.
+// configurable template. The tool name is DNS-sanitized before it goes into the
+// URL host so an underscored catalog name (echo_tool, get_weather — the MCP
+// mainline) yields a resolvable RFC-1123 label rather than an invalid host. A
+// template missing the "%s" placeholder falls back to the default so a
+// misconfigured env can never emit an empty (inadmissible) server URL.
 func managedToolServerURL(tool string) string {
 	tmpl := os.Getenv(envManagedToolServer)
 	if tmpl == "" || !strings.Contains(tmpl, "%s") {
 		tmpl = DefaultManagedToolServerTemplate
 	}
-	return fmt.Sprintf(tmpl, tool)
+	return fmt.Sprintf(tmpl, dns1123Label(tool))
 }
 
 // managedRuntimeValue is the only accepted value of the `runtime` field.
 const managedRuntimeValue = "managed"
+
+// dns1123Label sanitizes s into a valid RFC-1123 DNS label (a k8s metadata.name
+// component and a DNS host label): lowercase, [a-z0-9-], starting and ending
+// alphanumeric, ≤63 chars. This is used ONLY for the generated MCPToolBinding
+// metadata.name component and the convention server-URL host label — the REAL
+// catalog name is preserved verbatim in spec.toolName (the discovery/loop match
+// is on toolName, and toolmanifest.Binding keeps BindingName and ToolName
+// independent), so an underscored tool (echo_tool) binds correctly while its
+// binding OBJECT gets an admissible name.
+//
+// Rule:
+//   - lowercase; any char not in [a-z0-9-] (incl. "_" and ".") → "-".
+//   - collapse runs and trim leading/trailing "-".
+//   - cap at 63 chars (RFC-1123 label limit), re-trimming a trailing "-".
+//   - an input that sanitizes to empty → "x" (never emit an empty label).
+func dns1123Label(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevDash := false
+	for _, r := range strings.ToLower(s) {
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlnum {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		// Any other rune (incl. "_", ".", spaces) becomes a single "-".
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 63 {
+		out = strings.TrimRight(out[:63], "-")
+	}
+	if out == "" {
+		return "x"
+	}
+	return out
+}
 
 // ErrorKind classifies an expand failure so callers can map it to their own
 // error channel (an exit code for the CLI, an HTTP status for the BFF) without
@@ -749,8 +792,11 @@ func buildPromptVersionOutput(p *promptYAML) *promptVersionOut {
 // (registryRef) and points at the per-tool remote server URL (the configurable
 // convention). Returns nil for a custom agent or a managed agent with no tools.
 //
-// The binding name is "<agent>-<tool>" so multiple tools on one agent produce
-// distinct, deterministic binding names.
+// The binding OBJECT name is "<agent>-<dns-sanitized-tool>" so it is always a
+// valid RFC-1123 subdomain even for an underscored catalog name (echo_tool →
+// managed-agent-echo-tool). The REAL catalog name is preserved verbatim in
+// spec.toolName — that is what the discovery manifest and the loop match on, so
+// the binding still resolves the correct tool.
 func buildToolBindings(ay *agentYAML) []*mcpToolBindingOut {
 	if ay.Runtime != managedRuntimeValue || len(ay.Tools) == 0 {
 		return nil
@@ -761,7 +807,9 @@ func buildToolBindings(ay *agentYAML) []*mcpToolBindingOut {
 		bindings = append(bindings, &mcpToolBindingOut{
 			APIVersion: APIVersion,
 			Kind:       "MCPToolBinding",
-			Metadata:   metaOut{Name: ay.Name + "-" + tool},
+			// metadata.name is DNS-sanitized (admissible); spec.toolName is the
+			// real catalog name (the match key) — kept independent on purpose.
+			Metadata: metaOut{Name: ay.Name + "-" + dns1123Label(tool)},
 			Spec: mcpToolBindingSpec{
 				AgentRef:    ay.Name,
 				RegistryRef: registry,
