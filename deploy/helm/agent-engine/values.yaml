@@ -47,8 +47,13 @@ networkPolicy:
   metricsIngress:
     enabled: false
 
-# --- UI + Go BFF (built in m12.4+) -------------------------------------------
-# Clean values seam for the operator/engineer UI + Go BFF folded in by a later
-# task. No UI templates ship in this chart yet (m12.2 scope = control plane).
+# --- UI + Go BFF (folded in, m12.8a) -----------------------------------------
+# The operator/engineer UI (static Vite SPA) + the Go BFF that serves it and the
+# /api surface, behind the M11 control-plane auth. The BFF's SA is least-
+# privilege (ADR 0011): it holds NO agent-CRD access — every user-facing CRD
+# read/write runs on the CALLER'S own token, so the K8s API server enforces the
+# caller's RBAC (the M11 personas). See templates/bff.yaml (generated from
+# config/bff). Enabled by default so `helm install` brings the UI up with the
+# platform (spec §6); set false for a headless control-plane-only install.
 ui:
-  enabled: false
+  enabled: true

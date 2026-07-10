@@ -318,7 +318,7 @@ helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `ku
 	echo ">> regenerating chart templates into a scratch dir and diffing vs committed"; \
 	mkdir -p "$$tmp/gen"; \
 	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh "$$tmp/gen" >/dev/null; \
-	for f in crds.yaml control-plane.yaml dev-data-plane.yaml; do \
+	for f in crds.yaml control-plane.yaml dev-data-plane.yaml bff.yaml; do \
 	  diff -u "$(HELM_CHART)/templates/$$f" "$$tmp/gen/$$f" \
 	    || { echo "DRIFT: $(HELM_CHART)/templates/$$f is stale — run 'make helm-generate'"; exit 1; }; \
 	done; \

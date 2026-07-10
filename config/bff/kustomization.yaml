@@ -1,0 +1,10 @@
+# BFF kustomize base — the Go BFF (UI server-side layer) + its least-privilege
+# SA/RBAC. Wired into config/default so it flows into BOTH `make deploy` and the
+# generated Helm chart (the m12.2 no-drift contract). ADR 0011: the SA holds no
+# agent-CRD access; user ops run on the caller's token.
+resources:
+- service_account.yaml
+- role.yaml
+- role_binding.yaml
+- deployment.yaml
+- service.yaml

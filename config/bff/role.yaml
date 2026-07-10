@@ -1,0 +1,30 @@
+# BFF Role — INFRA/HEALTH READS ONLY, and today that set is EMPTY.
+#
+# ADR 0011 (auth-transparent proxy): the BFF must NOT hold agent-CRD access. All
+# user-facing CRD list/get/create/update/delete run on the CALLER'S token via a
+# per-request client, so the API server enforces the caller's RBAC. Consequently
+# the BFF's own SA needs NO agent-CRD verbs (agentdeployments / agentregistries /
+# agentversions / …) and NO create/update/delete anywhere.
+#
+# The BFF's server-side work that is NOT caller-scoped uses NON-K8s creds:
+#   - /api/health           — no cluster access at all (pure liveness + version)
+#   - Langfuse adapter      — Langfuse public API creds (env/Secret), not RBAC
+#   - Prometheus adapter    — Prometheus URL/token (env), not RBAC
+#   - in-cluster base config — only AUTHENTICATES to the API server (host + CA);
+#                              authentication needs no RBAC grant
+# so the genuine least-privilege set is empty. This Role is committed with an
+# empty ruleset (rather than omitted) to make the "infra-reads-only, no agent-CRD
+# access" guarantee explicit and auditable — a reviewer sees exactly what the SA
+# can do (nothing) instead of inferring it from an absent binding. If the BFF
+# ever needs a specific SA-side read (e.g. a ConfigMap holding the Langfuse URL),
+# add EXACTLY that get/list here and nothing more — never an agent-CRD verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+  name: bff-role
+  namespace: system
+rules: []

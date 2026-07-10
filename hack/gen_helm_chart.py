@@ -11,6 +11,11 @@ documents, buckets each by component, and writes three template files:
                                  their dev creds/config — gated by
                                  `.Values.devDataPlane.enabled` (dev/trial ONLY,
                                  PRD §23; production brings its own data plane)
+  templates/bff.yaml           — the Go BFF (UI server-side layer) Deployment +
+                                 Service + its least-privilege SA/RBAC (ADR 0011:
+                                 no agent-CRD access) — gated by
+                                 `.Values.ui.enabled` (default true; the UI ships
+                                 with the platform, spec §6)
 
 THE NO-DRIFT INVARIANT: the resource *bodies* are copied verbatim from the
 kustomize render — only two textual substitutions are applied, and only to make
@@ -35,6 +40,12 @@ IMG_KUSTOMIZE = "controller:latest"
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
 DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore"}
+
+# Resources whose `control-plane:` label marks them as the Go BFF (the UI's
+# server-side layer) + its least-privilege SA/RBAC. Gated behind
+# .Values.ui.enabled (default true) so an operator can install the platform
+# headless; with the default it renders, keeping no-drift with kustomize.
+BFF_LABELS = {"bff"}
 
 GEN_BANNER = (
     "# ============================================================================\n"
@@ -106,7 +117,7 @@ def main() -> None:
     raw = sys.stdin.read()
     docs = [d for d in raw.split("\n---\n") if d.strip()]
 
-    crds, control_plane, dev_data_plane = [], [], []
+    crds, control_plane, dev_data_plane, bff = [], [], [], []
 
     for doc in docs:
         doc = doc.strip("\n")
@@ -123,6 +134,8 @@ def main() -> None:
             crds.append(doc)
         elif cp in DEV_DATA_PLANE_LABELS:
             dev_data_plane.append(doc)
+        elif cp in BFF_LABELS:
+            bff.append(doc)
         else:
             control_plane.append(doc)
 
@@ -153,6 +166,23 @@ def main() -> None:
         )
         f.write("{{- if .Values.devDataPlane.enabled }}\n")
         f.write("\n---\n".join(dev_data_plane))
+        f.write("\n{{- end }}\n")
+
+    # --- bff.yaml ------------------------------------------------------------
+    # The Go BFF (UI server-side layer) + its least-privilege SA/RBAC. Gated by
+    # .Values.ui.enabled (default true), so the UI ships with the platform but an
+    # operator can install headless. ADR 0011: the BFF SA holds NO agent-CRD
+    # access — user ops run on the caller's token, K8s RBAC is the single authz.
+    with open(os.path.join(out_dir, "bff.yaml"), "w") as f:
+        f.write(GEN_BANNER)
+        f.write(
+            "# The Go BFF serves the static UI + /api behind M11 auth. Its SA is"
+            " least-\n# privilege (ADR 0011): no agent-CRD access — every"
+            " user-facing CRD op runs\n# on the CALLER'S token, so the K8s API"
+            " server enforces the caller's RBAC.\n"
+        )
+        f.write("{{- if .Values.ui.enabled }}\n")
+        f.write("\n---\n".join(bff))
         f.write("\n{{- end }}\n")
 
 

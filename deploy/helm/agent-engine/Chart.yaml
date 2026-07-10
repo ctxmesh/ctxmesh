@@ -3,8 +3,11 @@ name: agent-engine
 description: >-
   agent-engine — the Kubernetes-native control plane for deploying, scaling, and
   observing LLM agents. This chart deploys the control plane (controller-manager,
-  CRDs, the LiteLLM gateway, RBAC personas, metrics wiring) and an optional
-  bundled dev data plane (Valkey + MinIO) for dev/trial use only (PRD §23).
+  CRDs, the LiteLLM gateway, RBAC personas, metrics wiring), the operator UI +
+  Go BFF (ui.enabled, default on; the BFF SA holds no agent-CRD access — ADR 0011),
+  and an optional bundled dev data plane (Valkey + MinIO) for dev/trial use only
+  (PRD §23). PREREQUISITES: the controller watches Knative Serving + Eventing and
+  KEDA CRDs — install those add-ons on the cluster first (see NOTES on install).
 # The control-plane + CRD templates are GENERATED from `kustomize build
 # config/default` by hack/gen-helm-chart.sh — see templates/ banners and the
 # `make helm-verify` no-drift check. Do not hand-edit generated templates.
