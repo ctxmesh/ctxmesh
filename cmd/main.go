@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -232,6 +233,18 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// Control-plane audit (M11.4, PRD §20): a controller-emitted audit trail of
+	// mutating actions (create/update/delete) on every agent CRD. It watches the
+	// CRDs via the manager cache and logs a structured entry per mutation —
+	// crucially including DELETE, which the reconcilers do not observe without a
+	// finalizer. The "who" is best-effort (managedFields field-manager); the
+	// precise authenticated caller requires an admission webhook (phase-2).
+	if err := audit.NewAuditor(mgr.GetCache(), mgr.GetScheme(), audit.NewLogSink(ctrl.Log)).
+		SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up control-plane audit")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

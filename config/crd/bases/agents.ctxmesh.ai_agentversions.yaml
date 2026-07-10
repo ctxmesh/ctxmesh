@@ -373,6 +373,54 @@ spec:
                         minimum: 0
                         type: integer
                     type: object
+                  tracePolicy:
+                    description: |-
+                      tracePolicy optionally extends the always-on trace-redaction policy
+                      (PRD §13.3). The built-in detectors (emails, US SSNs, API keys/tokens) are
+                      ALWAYS applied to the sensitive payload attributes at the collector before
+                      persistence, regardless of this field. tracePolicy lets an agent add extra
+                      regex detectors for its own domain-specific PII. When omitted, only the
+                      built-in defaults apply.
+                    properties:
+                      customDetectors:
+                        description: |-
+                          customDetectors are additional named regex redaction rules applied — after
+                          the built-in defaults — to the sensitive payload attributes. Each match is
+                          replaced with a "[REDACTED:<name>]" marker. Patterns MUST be RE2-compatible
+                          (Go regexp / the collector's OTTL replace_pattern: no backreferences or
+                          lookaround). Bounded at 16 detectors so the rendered collector config stays
+                          small and predictable.
+                        items:
+                          description: |-
+                            CustomDetector is one per-agent redaction rule: a name (used in the marker)
+                            and an RE2 regex whose matches are scrubbed from the sensitive payload
+                            attributes.
+                          properties:
+                            name:
+                              description: |-
+                                name labels the detector and appears in its marker, e.g. name "badge"
+                                replaces matches with "[REDACTED:badge]". Lowercase alnum + dashes, so the
+                                marker is a stable, readable token.
+                              maxLength: 32
+                              minLength: 1
+                              pattern: ^[a-z0-9][a-z0-9-]*$
+                              type: string
+                            pattern:
+                              description: |-
+                                pattern is the RE2 regular expression identifying the sensitive substring
+                                to redact. Applied to every sensitive payload attribute's value; each match
+                                is replaced by the detector's marker.
+                              maxLength: 256
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          - pattern
+                          type: object
+                        maxItems: 16
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    type: object
                 required:
                 - image
                 type: object

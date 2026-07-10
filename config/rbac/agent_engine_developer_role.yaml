@@ -1,0 +1,59 @@
+# Platform-persona ClusterRole: agent-engine-developer (M11.4, PRD §20).
+#
+# Manage agents: create/update/delete/get/list/watch on every agent.ctxmesh.ai
+# CRD (developers author AgentDeployment/PromptVersion/EvalSuite and their
+# supporting bindings), plus read access to the status subresources. Does NOT
+# grant '*' (no ability to escalate/manage RBAC or use unbounded verbs on the
+# resources) — that is the operator persona.
+#
+# This role is NOT used by the agent-engine controller itself; it is a built-in
+# persona for developers acting on the CRDs through the Kubernetes API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+    rbac.ctxmesh.ai/persona: developer
+  name: developer
+rules:
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments
+  - agentversions
+  - modelroutes
+  - secretbindings
+  - mcptoolbindings
+  - toolregistries
+  - memorybindings
+  - agentregistries
+  - agentscalingpolicies
+  - evalsuites
+  - promptversions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments/status
+  - agentversions/status
+  - modelroutes/status
+  - secretbindings/status
+  - mcptoolbindings/status
+  - toolregistries/status
+  - memorybindings/status
+  - agentregistries/status
+  - agentscalingpolicies/status
+  - evalsuites/status
+  - promptversions/status
+  verbs:
+  - get
+  - list
+  - watch

@@ -1,0 +1,53 @@
+# Platform-persona ClusterRole: agent-engine-operator (M11.4, PRD §20).
+#
+# Full management of every agent.ctxmesh.ai CRD — all verbs on all agent
+# resources plus their status subresources. Intended for platform operators who
+# own the agent control plane. Bind to users/groups/ServiceAccounts via a
+# (Cluster)RoleBinding created by the cluster admin.
+#
+# This role is NOT used by the agent-engine controller itself (that is
+# manager-role in role.yaml); it is a built-in persona for humans/automation
+# acting on the CRDs through the Kubernetes API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+    rbac.ctxmesh.ai/persona: operator
+  name: operator
+rules:
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments
+  - agentversions
+  - modelroutes
+  - secretbindings
+  - mcptoolbindings
+  - toolregistries
+  - memorybindings
+  - agentregistries
+  - agentscalingpolicies
+  - evalsuites
+  - promptversions
+  verbs:
+  - '*'
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentdeployments/status
+  - agentversions/status
+  - modelroutes/status
+  - secretbindings/status
+  - mcptoolbindings/status
+  - toolregistries/status
+  - memorybindings/status
+  - agentregistries/status
+  - agentscalingpolicies/status
+  - evalsuites/status
+  - promptversions/status
+  verbs:
+  - get
+  - list
+  - watch
