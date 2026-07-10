@@ -193,3 +193,14 @@ jobs:
         # a clean cluster. Runs LAST (heaviest: helm install + browser + a live
         # agent run). specs/ui.md, ADR 0010/0011.
         run: make -C agent-brain/harness tier2 SLICE=m12-ui
+      - name: M13 console-foundation e2e (token login / RBAC chrome / forced-403)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The v2 console foundation (ADR 0012): 50-login drives the REAL login
+        # form (paste a persona token → whoami → console + who-am-I; wrong token
+        # → honest inline error; deep-link return-path/open-redirect guard);
+        # 51-rbac-chrome proves the viewer read-only chrome + the caller-scoped
+        # forced-403 (viewer POST /api/agents → real API-server 403). Reuses the
+        # same fresh-cluster helm-install path + nvm Playwright toolchain as
+        # m12-ui, minting developer/operator/viewer persona tokens at runtime.
+        run: make -C agent-brain/harness tier2 SLICE=m13-ui
