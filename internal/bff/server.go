@@ -96,12 +96,25 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	authed.HandleFunc("GET /api/agents", s.handleListAgents)
 
-	// Adapter seams for m12.5–m12.7: mounted now (discoverable) but honest 501
-	// until their adapter is wired. Register a route only where the adapter is
-	// nil so a wired adapter (later) can replace the handler cleanly.
-	if s.adapters.Langfuse == nil {
+	// Topology is client-go only (no external adapter) → always available.
+	authed.HandleFunc("GET /api/topology", s.handleTopology)
+
+	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
+	// Wired when the Langfuse adapter is present; honest 501 otherwise so the
+	// routes stay discoverable. Registering the real handler only when wired
+	// keeps the nil-adapter seam clean.
+	if s.adapters.Langfuse != nil {
+		authed.HandleFunc("GET /api/runs", s.handleRuns)
+		authed.HandleFunc("GET /api/cost", s.handleCost)
+		authed.HandleFunc("GET /api/traces/{id}", s.handleTraceLink)
+	} else {
+		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
+		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
 		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
 	}
+
+	// Remaining adapter seams for m12.6–m12.7: mounted now (discoverable) but
+	// honest 501 until their adapter is wired.
 	if s.adapters.Prometheus == nil {
 		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
 	}

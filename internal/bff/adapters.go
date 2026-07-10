@@ -46,6 +46,24 @@ func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.Lis
 	return &out, nil
 }
 
+// listAgentRegistries lists AgentRegistries via the reader (topology roots).
+func listAgentRegistries(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentRegistryList, error) {
+	var out agentsv1alpha1.AgentRegistryList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// listMCPToolBindings lists MCPToolBindings via the reader (topology tool leaves).
+func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.MCPToolBindingList, error) {
+	var out agentsv1alpha1.MCPToolBindingList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- Seams fleshed out by later m12 surface tasks ---------------------------
 //
 // These are declared (not implemented) so the endpoint groups in the spec (§2)
@@ -55,18 +73,30 @@ func listAgentDeployments(ctx context.Context, r AgentReader, opts ...client.Lis
 
 // LangfuseAdapter proxies the Langfuse public API server-side (cost/trace
 // summaries) and supplies the embed/link target for a traceId (m12.5/m12.7,
-// ADR 0005). Implemented against ONE configurable Langfuse base URL.
+// ADR 0005). Implemented against ONE configurable Langfuse base URL. The
+// Langfuse public-API credentials live in this process (injected env) — they
+// are NEVER sent to the browser; the SPA only ever sees the flat DTOs below.
 type LangfuseAdapter interface {
 	// TraceURL returns the embed/link-out URL for a traceId (native views +
-	// iframe target). Implemented in m12.5.
+	// iframe target). One configurable Langfuse base URL, swappable (ADR 0005).
 	TraceURL(traceID string) (string, error)
+
+	// RecentRuns returns the most recent traces (newest first), projected onto
+	// the flat RunSummary DTO. limit bounds the page size.
+	RecentRuns(ctx context.Context, limit int) ([]RunSummary, error)
+
+	// CostUsage returns an aggregate cost/usage summary over the recent window
+	// (a rollup the dashboard cards + chart render). Never nil on success.
+	CostUsage(ctx context.Context) (CostSummary, error)
 }
 
 // PrometheusAdapter queries Prometheus for cost/latency/scale metrics that back
-// the native dashboard charts (m12.5).
+// the native dashboard charts (m12.5). The Prometheus endpoint/credentials stay
+// server-side (injected env); the browser only receives the flat MetricPoints.
 type PrometheusAdapter interface {
-	// Query runs an instant PromQL query. Implemented in m12.5.
-	Query(ctx context.Context, promQL string) ([]byte, error)
+	// Query runs an instant PromQL query and returns the scalar/vector samples
+	// projected onto flat MetricPoints. Never nil on success (empty → []).
+	Query(ctx context.Context, promQL string) ([]MetricPoint, error)
 }
 
 // InvokeAdapter proxies /invoke to a deployed agent (or the warm pool) for the

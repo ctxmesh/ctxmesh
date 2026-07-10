@@ -65,6 +65,116 @@ type AgentListResponse struct {
 	Agents []AgentSummary `json:"agents"`
 }
 
+// --- Topology (GET /api/topology) -------------------------------------------
+//
+// The dashboard renders a live React Flow graph: AgentRegistry roots → their
+// member agents → the agents' bound MCP tools, with health/readiness. These
+// DTOs are a FLAT projection — a list of nodes + a list of edges, never the raw
+// K8s objects — so the SPA graph layer stays decoupled from the CRD schema.
+
+// Topology node kinds. Kept as string constants so the SPA can switch on them
+// without importing the CRD schema.
+const (
+	nodeKindRegistry = "registry"
+	nodeKindAgent    = "agent"
+	nodeKindTool     = "tool"
+)
+
+// Topology health states projected onto every node. "unknown" is used when a
+// resource exposes no Ready condition yet (e.g. a just-created object).
+const (
+	healthReady    = "ready"
+	healthNotReady = "notReady"
+	healthPending  = "pending"
+	healthUnknown  = "unknown"
+)
+
+// TopologyNode is one vertex in the topology graph (a registry, agent, or tool).
+// id is stable and unique within the graph ("<kind>/<namespace>/<name>"); the
+// SPA keys React Flow nodes on it.
+type TopologyNode struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Health    string `json:"health"`
+	// Detail is a short, kind-specific descriptor (image for an agent, tool
+	// mode for a tool, registryId for a registry). Optional; "" when absent.
+	Detail string `json:"detail"`
+}
+
+// TopologyEdge connects two nodes by their ids (registry→agent membership,
+// agent→tool binding).
+type TopologyEdge struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// TopologyResponse is returned by GET /api/topology. Both slices are non-nil on
+// the wire ([] not null) so the SPA graph layer never sees a null.
+type TopologyResponse struct {
+	Nodes []TopologyNode `json:"nodes"`
+	Edges []TopologyEdge `json:"edges"`
+}
+
+// --- Cost / usage (GET /api/cost) -------------------------------------------
+
+// MetricPoint is one (label, value) sample projected from the Prometheus
+// adapter — a flat, chart-ready pair. label is the series identity (a metric or
+// PromQL label value); value is the sample. The SPA renders these directly.
+type MetricPoint struct {
+	Label string  `json:"label"`
+	Value float64 `json:"value"`
+}
+
+// CostSummary is the aggregate cost/usage rollup the dashboard cards render,
+// sourced from the Langfuse public API. Totals are numbers the SPA formats;
+// ByModel is a non-nil breakdown ([] not null) the native cost chart plots.
+type CostSummary struct {
+	TotalCostUSD float64       `json:"totalCostUSD"`
+	TotalTokens  int64         `json:"totalTokens"`
+	Observations int64         `json:"observations"`
+	ByModel      []MetricPoint `json:"byModel"`
+}
+
+// CostResponse is returned by GET /api/cost: the Langfuse cost rollup plus the
+// Prometheus-backed metric series (latency/scale). Both metric slices are
+// non-nil on the wire.
+type CostResponse struct {
+	Summary CostSummary   `json:"summary"`
+	Latency []MetricPoint `json:"latency"`
+	Scale   []MetricPoint `json:"scale"`
+}
+
+// --- Recent runs (GET /api/runs) --------------------------------------------
+
+// RunSummary is the flat projection of one Langfuse trace the dashboard's
+// "recent runs" list renders. TraceID links to the embedded deep-view /
+// link-out (via GET /api/traces/{id}).
+type RunSummary struct {
+	TraceID   string  `json:"traceId"`
+	Name      string  `json:"name"`
+	Timestamp string  `json:"timestamp"`
+	CostUSD   float64 `json:"costUSD"`
+	Tokens    int64   `json:"tokens"`
+	LatencyMs float64 `json:"latencyMs"`
+}
+
+// RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).
+type RunListResponse struct {
+	Runs []RunSummary `json:"runs"`
+}
+
+// TraceLinkResponse is returned by GET /api/traces/{id}: the one Langfuse target
+// URL for a traceId (the embedded iframe src AND the link-out href). The SPA
+// never hardcodes a Langfuse URL — it always resolves it here so swapping the
+// backend (ADR 0005) is a server-side config change.
+type TraceLinkResponse struct {
+	TraceID string `json:"traceId"`
+	URL     string `json:"url"`
+}
+
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil
@@ -89,5 +199,24 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Image:     ad.Spec.Image,
 		Phase:     phase,
 		Ready:     ready,
+	}
+}
+
+// healthFromConditions maps a resource's standard "Ready" condition onto the
+// topology health vocabulary. Absent condition → "unknown" (not yet reconciled),
+// True → "ready", False → "notReady", anything else → "pending". This is the one
+// place topology health is derived so every node kind is consistent.
+func healthFromConditions(conds []metav1.Condition) string {
+	c := apimeta.FindStatusCondition(conds, "Ready")
+	if c == nil {
+		return healthUnknown
+	}
+	switch c.Status {
+	case metav1.ConditionTrue:
+		return healthReady
+	case metav1.ConditionFalse:
+		return healthNotReady
+	default:
+		return healthPending
 	}
 }
