@@ -88,9 +88,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return err
 	}
 
+	// Build the optional server-side adapters from the injected environment. The
+	// Langfuse/Prometheus credentials stay in THIS process — they are never sent
+	// to the browser (ADR 0010). A missing/incomplete config leaves the adapter
+	// nil, and the server serves an honest 501 for its routes rather than wiring
+	// a half-configured client.
+	adapters := buildAdapters(log)
+
 	srv := bff.NewServer(bff.Options{
 		Reader:    k8s,
 		Auth:      bff.BearerAuthenticator{},
+		Adapters:  adapters,
 		Version:   version,
 		StaticDir: staticDir,
 		Log:       ctrl.Log.WithName("bff.server"),
@@ -123,4 +131,39 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+// buildAdapters constructs the optional server-side adapters from environment
+// variables (the same server-side creds the collector/M9 use). A missing or
+// incomplete config leaves that adapter nil — the server then serves 501 for its
+// routes instead of a broken client. Credentials read here stay in-process.
+//
+// Env:
+//   - LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY → Langfuse adapter
+//   - PROMETHEUS_URL [+ PROMETHEUS_TOKEN]                       → Prometheus adapter
+func buildAdapters(log logr.Logger) bff.Adapters {
+	var adapters bff.Adapters
+
+	langfuse, err := bff.NewLangfuseAdapter(bff.LangfuseConfig{
+		BaseURL:   os.Getenv("LANGFUSE_HOST"),
+		PublicKey: os.Getenv("LANGFUSE_PUBLIC_KEY"),
+		SecretKey: os.Getenv("LANGFUSE_SECRET_KEY"),
+	})
+	if err != nil {
+		log.Info("Langfuse adapter not configured; /api/runs|cost|traces serve 501", "reason", err.Error())
+	} else {
+		adapters.Langfuse = langfuse
+	}
+
+	prom, err := bff.NewPrometheusAdapter(bff.PrometheusConfig{
+		BaseURL:     os.Getenv("PROMETHEUS_URL"),
+		BearerToken: os.Getenv("PROMETHEUS_TOKEN"),
+	})
+	if err != nil {
+		log.Info("Prometheus adapter not configured; /api/cost omits latency/scale series", "reason", err.Error())
+	} else {
+		adapters.Prometheus = prom
+	}
+
+	return adapters
 }
