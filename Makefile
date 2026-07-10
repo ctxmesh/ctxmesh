@@ -237,6 +237,10 @@ docker-build-batch-example: docker-build-base-python ## Build the batch-agent ex
 docker-build-sdk-custom-agent: docker-build-base-python ## Build the M10 no-framework SDK example (sdk-custom-agent:latest); depends on base-python:latest (which bundles ctxmesh).
 	$(CONTAINER_TOOL) build -t sdk-custom-agent:latest -f examples/sdk-custom-agent/Dockerfile .
 
+.PHONY: docker-build-managed
+docker-build-managed: docker-build-base-python ## Build the M14 managed-agent runtime image (managed-agent:latest — config-driven, no user Docker build; ADR 0013); depends on base-python:latest (which bundles the launcher + ctxmesh).
+	$(CONTAINER_TOOL) build -t managed-agent:latest -f images/managed-agent/Dockerfile .
+
 .PHONY: docker-build-collector
 docker-build-collector: ## Build the project OTel Collector image (dev.local/agent-otel-collector:0.116.0) — contrib collector (M11 redaction transform) on a glibc base.
 	$(CONTAINER_TOOL) build -t dev.local/agent-otel-collector:0.116.0 -f images/otel-collector/Dockerfile .

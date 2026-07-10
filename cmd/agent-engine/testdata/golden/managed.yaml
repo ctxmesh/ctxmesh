@@ -1,0 +1,36 @@
+apiVersion: agents.ctxmesh.ai/v1alpha1
+kind: MCPToolBinding
+metadata:
+  name: managed-agent-echo_tool
+spec:
+  agentRef: managed-agent
+  registryRef: default-tools
+  toolName: echo_tool
+  mode: remote
+  server:
+    url: http://echo_tool.mcp.svc.cluster.local/mcp
+---
+apiVersion: agents.ctxmesh.ai/v1alpha1
+kind: MCPToolBinding
+metadata:
+  name: managed-agent-word-count
+spec:
+  agentRef: managed-agent
+  registryRef: default-tools
+  toolName: word-count
+  mode: remote
+  server:
+    url: http://word-count.mcp.svc.cluster.local/mcp
+---
+apiVersion: agents.ctxmesh.ai/v1alpha1
+kind: AgentDeployment
+metadata:
+  name: managed-agent
+spec:
+  image: ghcr.io/ctxmesh/managed-agent:latest
+  executionModel: serving
+  env:
+    - name: SYSTEM_PROMPT
+      value: You are a concise, helpful assistant.
+    - name: MODEL_ROUTE
+      value: default-model
