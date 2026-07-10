@@ -3,7 +3,9 @@ import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentsPage } from "@/pages/agents-page";
+import { AddMcpPage } from "@/pages/add-mcp-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
+import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
@@ -77,6 +79,11 @@ export function App() {
             <Route path="agents" element={<AgentsPage />} />
             <Route path="config" element={<ConfigBuilderPage />} />
             <Route path="playground" element={<PlaygroundPage />} />
+            {/* The M14 first-agent wizards (m14.9) — these nav destinations were
+                /soon placeholders; they're now the real connect-provider +
+                add-MCP flows, the first UI of the aha. */}
+            <Route path="providers/connect" element={<ConnectProviderPage />} />
+            <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* Not-yet-built IA destinations (Topology, Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}
