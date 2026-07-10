@@ -21,6 +21,10 @@ resources:
 - ../gateway
 - ../statelayer
 - ../objectstore
+# The Go BFF (UI server-side layer) + its least-privilege SA/RBAC. Flows into
+# both `make deploy` and the generated Helm chart (no-drift). ADR 0011: the BFF
+# SA holds no agent-CRD access — user ops run on the caller's token.
+- ../bff
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
