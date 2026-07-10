@@ -1,0 +1,92 @@
+# Go BFF Deployment — the UI's server-side layer (ADR 0010 / spec ui-dev-helm §2).
+#
+# Serves the STATIC Vite SPA (from /ui/dist baked into the image) plus the /api/*
+# surface, all behind the M11 control-plane auth (BearerAuthenticator). The image
+# is the distroless Go binary + compiled dist (Dockerfile.bff) — NO Node runtime.
+#
+# AUTHZ POSTURE (ADR 0011): user-facing CRD ops run on the CALLER'S token via a
+# per-request client; the BFF SA (serviceAccountName: bff) holds no agent-CRD
+# access. The in-cluster rest.Config the SA provides is used only as the BASE
+# (API-server host + cluster CA) for that caller-scoped factory.
+#
+# ADAPTER CREDS: Langfuse/Prometheus creds are injected from an OPTIONAL Secret
+# (envFrom, optional: true) — never literals in this manifest. Absent the Secret
+# the adapters stay nil and their routes serve an honest 501; /api/health and the
+# static UI still work. The Secret is supplied out of band (a real deploy) or by
+# the dev data plane; the env var names match cmd/bff/main.go
+# (LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / PROMETHEUS_URL /
+# PROMETHEUS_TOKEN).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  namespace: system
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: bff
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: bff
+      labels:
+        control-plane: bff
+        app.kubernetes.io/name: agent-engine
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bff
+          image: bff:latest
+          imagePullPolicy: IfNotPresent
+          # --static-dir is baked into the image ENTRYPOINT; --addr defaults to
+          # :9090. Nothing here overrides them so the manifest stays minimal.
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+          # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
+          # their routes 501; the UI + /api/health still serve. No literals here.
+          envFrom:
+            - secretRef:
+                name: bff-adapters
+                optional: true
+          # /api/health needs no cluster access (pure liveness + version), so it
+          # is a safe probe target and works before any caller authenticates.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts: []
+      volumes: []
+      serviceAccountName: bff
+      terminationGracePeriodSeconds: 10

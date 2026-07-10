@@ -1,0 +1,121 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+
+import { DashboardPage } from "@/pages/dashboard-page";
+
+// A URL-routed fetch mock: the dashboard fans out to /api/topology, /api/cost,
+// /api/runs (and /api/traces/{id} once a run is selected). Each returns canned,
+// deterministic data — no live cluster/Langfuse/Prometheus (tier0 determinism).
+function routeFetch(routes: Record<string, unknown>) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const path = url.split("?")[0];
+      // Exact match first, then a prefix match for /api/traces/{id}.
+      const body =
+        routes[path] ??
+        (path.startsWith("/api/traces/")
+          ? { traceId: path.slice("/api/traces/".length), url: "https://lf.test/trace/x" }
+          : undefined);
+      if (body === undefined) {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+    }),
+  );
+}
+
+const topology = {
+  nodes: [
+    { id: "registry/prod/team", kind: "registry", name: "team-registry", namespace: "prod", health: "ready", detail: "team-a" },
+    { id: "agent/prod/echo", kind: "agent", name: "echo-agent", namespace: "prod", health: "ready", detail: "echo:1" },
+    { id: "tool/prod/echo-search", kind: "tool", name: "search-tool", namespace: "prod", health: "ready", detail: "remote" },
+  ],
+  edges: [
+    { id: "registry/prod/team->agent/prod/echo", source: "registry/prod/team", target: "agent/prod/echo" },
+    { id: "agent/prod/echo->tool/prod/echo-search", source: "agent/prod/echo", target: "tool/prod/echo-search" },
+  ],
+};
+
+const cost = {
+  summary: {
+    totalCostUSD: 1.75,
+    totalTokens: 1500,
+    observations: 3,
+    byModel: [{ label: "gpt-4o", value: 1.75 }],
+  },
+  latency: [{ label: "billing-agent", value: 120 }],
+  scale: [{ label: "billing-agent", value: 3 }],
+};
+
+const runs = {
+  runs: [
+    { traceId: "t-abc", name: "checkout-flow", timestamp: "2026-07-01T00:00:00Z", costUSD: 0.5, tokens: 900, latencyMs: 120 },
+  ],
+};
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("DashboardPage (render proof)", () => {
+  it("renders topology, cost, and recent runs from mocked BFF data", async () => {
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
+    render(<DashboardPage />);
+
+    // Topology graph rendered a node for the agent (React Flow custom node).
+    expect(await screen.findByText("echo-agent")).toBeInTheDocument();
+    // Cost cards rendered the Langfuse rollup (headline stat + the by-model chart).
+    expect(screen.getByText("Total cost")).toBeInTheDocument();
+    expect(screen.getByText("Cost by model")).toBeInTheDocument();
+    expect(screen.getByText("gpt-4o")).toBeInTheDocument();
+    // Recent runs rendered the traced run.
+    expect(screen.getByText("checkout-flow")).toBeInTheDocument();
+    expect(screen.getByText("t-abc")).toBeInTheDocument();
+  });
+
+  it("opens the embedded Langfuse trace deep-view when a run is selected", async () => {
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
+    render(<DashboardPage />);
+
+    // Before selection: the deep-view is a prompt, not an iframe.
+    expect(
+      await screen.findByText(/Select a run to open its embedded Langfuse trace/),
+    ).toBeInTheDocument();
+
+    // Click the run row → the trace embed resolves via /api/traces/{id}.
+    fireEvent.click(screen.getByText("checkout-flow"));
+
+    // The embedded iframe (the accepted off-theme panel) mounts with the
+    // BFF-resolved src + a link-out to full Langfuse.
+    const iframe = await screen.findByTitle("Langfuse trace deep-view");
+    expect(iframe).toHaveAttribute("src", "https://lf.test/trace/x");
+    const linkOut = screen.getByRole("link", { name: /Open in Langfuse/ });
+    expect(linkOut).toHaveAttribute("href", "https://lf.test/trace/x");
+    expect(linkOut).toHaveAttribute("target", "_blank");
+  });
+
+  it("shows an error state when the topology fetch fails (e.g. RBAC 403)", async () => {
+    routeFetch({ "/api/cost": cost, "/api/runs": runs }); // topology 404s
+    render(<DashboardPage />);
+    expect(await screen.findByText(/Failed to load topology/)).toBeInTheDocument();
+  });
+});
+
+describe("CostPanel bar chart", () => {
+  it("degrades to an empty-series hint when Prometheus is not wired", async () => {
+    const costNoProm = {
+      summary: { totalCostUSD: 1, totalTokens: 10, observations: 1, byModel: [] },
+      latency: [],
+      scale: [],
+    };
+    routeFetch({ "/api/topology": topology, "/api/cost": costNoProm, "/api/runs": runs });
+    render(<DashboardPage />);
+    const hints = await screen.findAllByText(/Prometheus not wired/);
+    // One hint each for scale + latency.
+    expect(hints.length).toBeGreaterThanOrEqual(2);
+    const chart = screen.getByText("Cost by model").closest("div");
+    expect(within(chart as HTMLElement).queryByRole("progressbar")).toBeNull();
+  });
+});

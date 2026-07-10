@@ -1,0 +1,219 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+import (
+	"io/fs"
+	"net/http"
+	"os"
+	"path"
+	"strings"
+
+	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+// defaultVersion is reported by /api/health when no version is injected at
+// build time.
+const defaultVersion = "dev"
+
+// Server is the BFF HTTP server: it serves the static SPA build and the /api
+// surface (behind the M11 auth). It composes narrow seams (a CallerClientFactory
+// that mints a per-request caller-scoped client-go client, an Authenticator for
+// the M11 edge, optional Adapters for m12.5+) so each is independently testable.
+//
+// ADR 0011: every user-facing CRD read/write runs through a client the
+// callerClients factory builds from the CALLER'S bearer token, so the K8s API
+// server enforces the caller's own RBAC. The BFF holds no static SA client for
+// user CRD ops — the confused-deputy gap is closed by construction.
+type Server struct {
+	callerClients CallerClientFactory
+	scheme        *runtime.Scheme
+	auth          Authenticator
+	adapters      Adapters
+	version       string
+	log           logr.Logger
+
+	// static is the filesystem serving the Vite build (dist/). Nil disables
+	// static serving (api-only mode, useful in tests).
+	static fs.FS
+}
+
+// Options configures a Server.
+type Options struct {
+	// CallerClients mints a per-request client.Client scoped to the caller's
+	// bearer token (ADR 0011). Required for the CRD routes (GET/POST /api/agents,
+	// GET /api/topology): they run as the caller so K8s RBAC enforces the M11
+	// personas. Nil leaves those routes serving 501 (the caller-scoped seam is not
+	// wired) — the BFF never falls back to its own SA for user CRD ops.
+	CallerClients CallerClientFactory
+	// Scheme decodes the expand-emitted CRD manifests into typed objects for the
+	// apply path. Required when CallerClients is set (the agent CRDs must be
+	// registered so the caller-scoped client can encode them).
+	Scheme *runtime.Scheme
+	// Auth gates /api requests (the M11 control-plane auth seam). Required.
+	Auth Authenticator
+	// Adapters are the optional server-side adapters (Langfuse/Prometheus/invoke/
+	// expand). Nil entries serve 501 for their routes (m12.5+ wires them).
+	Adapters Adapters
+	// Version is reported by /api/health.
+	Version string
+	// StaticDir is the directory of the built SPA (dist/). Empty disables static
+	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
+	StaticDir string
+	// Log is the structured logger.
+	Log logr.Logger
+}
+
+// NewServer builds a Server from Options. It does not start listening; the
+// caller mounts Handler() on an http.Server.
+func NewServer(opts Options) *Server {
+	s := &Server{
+		callerClients: opts.CallerClients,
+		scheme:        opts.Scheme,
+		auth:          opts.Auth,
+		adapters:      opts.Adapters,
+		version:       opts.Version,
+		log:           opts.Log,
+	}
+	if s.version == "" {
+		s.version = defaultVersion
+	}
+	if opts.StaticDir != "" {
+		s.static = os.DirFS(opts.StaticDir)
+	}
+	return s
+}
+
+// Handler returns the fully-wired http.Handler: the /api mux (auth-gated) plus
+// the SPA static handler as the fallback for everything else.
+func (s *Server) Handler() http.Handler {
+	api := http.NewServeMux()
+
+	// Health is unauthenticated (liveness/version probe; no cluster access).
+	api.HandleFunc("GET /api/health", s.handleHealth)
+
+	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
+	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
+	// permits, enforced by the K8s API server. They are wired only when the
+	// caller-client factory is configured; honest 501 otherwise (the BFF never
+	// falls back to its own SA for user CRD ops — that is the confused-deputy gap
+	// this task closes). Create additionally needs the scheme to decode manifests.
+	authed := http.NewServeMux()
+	if s.callerClients != nil {
+		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
+		} else {
+			authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
+		}
+	} else {
+		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
+		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
+		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
+	}
+
+	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
+	// Wired when the Langfuse adapter is present; honest 501 otherwise so the
+	// routes stay discoverable. Registering the real handler only when wired
+	// keeps the nil-adapter seam clean.
+	if s.adapters.Langfuse != nil {
+		authed.HandleFunc("GET /api/runs", s.handleRuns)
+		authed.HandleFunc("GET /api/cost", s.handleCost)
+		authed.HandleFunc("GET /api/traces/{id}", s.handleTraceLink)
+	} else {
+		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
+		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
+		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
+	}
+
+	// Remaining adapter seams for m12.6–m12.7: mounted now (discoverable) but
+	// honest 501 until their adapter is wired.
+	if s.adapters.Prometheus == nil {
+		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
+	}
+	// Playground invoke (m12.7): run a deployed agent, traced, and return its
+	// traceId. Wired only when BOTH the InvokeAdapter (the pure-HTTP invoker) AND
+	// the caller-client factory are present — the run is CALLER-SCOPED (the agent
+	// lookup + dispatch act as the caller, ADR 0011), so it needs the caller-client
+	// seam and must never fall back to the BFF SA. Honest 501 otherwise.
+	if s.adapters.Invoke != nil && s.callerClients != nil {
+		authed.HandleFunc("POST /api/invoke", s.handleInvoke)
+	} else {
+		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
+	}
+	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
+	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
+	// honest 501 otherwise.
+	if s.adapters.Expand != nil {
+		authed.HandleFunc("POST /api/expand", s.handleExpand)
+	} else {
+		authed.Handle("POST /api/expand", notImplemented("config expand"))
+	}
+
+	api.Handle("/api/", s.requireAuth(authed))
+
+	root := http.NewServeMux()
+	root.Handle("/api/", api)
+	root.Handle("/", s.spaHandler())
+	return root
+}
+
+// spaHandler serves the static Vite build. Requests for real files are served
+// verbatim; any other path (a client-side route like /agents) falls back to
+// index.html so the React router can handle it (SPA history-mode routing).
+// When no static FS is configured, it 404s (api-only mode).
+func (s *Server) spaHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.static == nil {
+			http.NotFound(w, r)
+			return
+		}
+		// Clean the request path to a filesystem path (io/fs uses no leading /).
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if f, err := s.static.Open(name); err == nil {
+			// A directory request falls through to index.html (SPA route).
+			if info, statErr := f.Stat(); statErr == nil && !info.IsDir() {
+				_ = f.Close()
+				http.FileServerFS(s.static).ServeHTTP(w, r)
+				return
+			}
+			_ = f.Close()
+		}
+		// Not a real file → serve the SPA entrypoint for client-side routing.
+		s.serveIndex(w)
+	})
+}
+
+// serveIndex writes dist/index.html (the SPA shell). Used for client-side routes
+// and when the requested asset does not exist on disk.
+func (s *Server) serveIndex(w http.ResponseWriter) {
+	data, err := fs.ReadFile(s.static, "index.html")
+	if err != nil {
+		http.Error(w, "UI not built", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// index.html must never be cached so a new build's asset hashes are picked
+	// up immediately.
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
+}

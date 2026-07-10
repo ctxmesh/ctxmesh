@@ -1,0 +1,22 @@
+# Binds the BFF SA to its (empty) infra-reads-only Role. Namespaced RoleBinding,
+# not a ClusterRoleBinding: the BFF's SA-side needs never span the cluster, and a
+# Role keeps the least-privilege blast radius to the install namespace. See
+# role.yaml / service_account.yaml for the ADR-0011 rationale (caller-scoped
+# authz; the BFF SA holds no agent-CRD access).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+  name: bff-rolebinding
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bff-role
+subjects:
+- kind: ServiceAccount
+  name: bff
+  namespace: system
