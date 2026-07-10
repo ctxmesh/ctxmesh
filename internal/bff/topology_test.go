@@ -26,7 +26,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
@@ -169,7 +171,17 @@ func TestTopologyEmptyClusterIsNonNull(t *testing.T) {
 }
 
 func TestTopologyReaderErrorIs500(t *testing.T) {
-	s := newTestServer(t, erroringReader{err: assert.AnError})
+	// A non-RBAC List failure from the caller-scoped client → 500 (a generic API
+	// fault, not an authz denial). Injected via a fake-client interceptor.
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return assert.AnError
+			},
+		}).
+		Build()
+	s := newTestServer(t, c)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/topology", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

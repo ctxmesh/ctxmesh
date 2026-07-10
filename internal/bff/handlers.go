@@ -47,14 +47,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handleListAgents serves GET /api/agents — lists AgentDeployments via the
-// client-go read seam, RBAC-scoped by the M11 auth in front of it, and projects
-// them onto the UI DTO. Credentials stay server-side; the browser only receives
-// the flat summaries. An empty cluster yields {"agents":[]} (a valid state the
-// SPA renders as "no agents").
+// handleListAgents serves GET /api/agents — lists AgentDeployments through the
+// CALLER-SCOPED client (ADR 0011), so the list reflects exactly what the
+// caller's own RBAC permits: the K8s API server, not the BFF, decides what the
+// caller may see. The caller's token stays server-side (it authenticates the
+// per-request client); the browser only receives the flat summaries. An empty
+// (or fully-filtered) result yields {"agents":[]} — a valid "no agents" state.
+// A K8s Forbidden on the list surfaces as 403, never swallowed as an empty list.
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	list, err := listAgentDeployments(r.Context(), s.reader)
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	list, err := listAgentDeployments(r.Context(), caller)
 	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
 		s.log.Error(err, "list AgentDeployments failed")
 		writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
@@ -70,11 +80,20 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 // handleTopology serves GET /api/topology — the live graph the dashboard's
 // React Flow view renders. It reads AgentRegistry + AgentDeployment +
-// MCPToolBinding via the client-go seam (creds server-side) and returns the flat
-// nodes+edges DTO. An empty cluster yields {"nodes":[],"edges":[]}.
+// MCPToolBinding through the CALLER-SCOPED client (ADR 0011), so the graph shows
+// only the CRDs the caller's RBAC permits. An empty (or filtered) cluster yields
+// {"nodes":[],"edges":[]}. A K8s Forbidden surfaces as 403, not a blank graph.
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
-	graph, err := buildTopology(r.Context(), s.reader)
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	graph, err := buildTopology(r.Context(), caller)
 	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
 		s.log.Error(err, "build topology failed")
 		writeError(w, http.StatusInternalServerError, "failed to build topology")
 		return
