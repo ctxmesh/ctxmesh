@@ -179,6 +179,14 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
+		// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
+		// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22
+		// ServeMux treats "GET /api/agents", "GET /api/agents/{ns}/{name}" and
+		// ".../{name}/logs" as three DISTINCT patterns (the more specific wins), so
+		// these never shadow the list route above or the create route below.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
@@ -195,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 		}
 	} else {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
+		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
+		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))

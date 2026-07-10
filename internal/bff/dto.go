@@ -28,6 +28,7 @@ package bff
 
 import (
 	"encoding/json"
+	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,6 +78,65 @@ type AgentListResponse struct {
 	Agents     []AgentSummary `json:"agents"`
 	Items      []AgentSummary `json:"items"`
 	NextCursor string         `json:"nextCursor"`
+}
+
+// --- Agent detail (GET /api/agents/{ns}/{name}) ------------------------------
+//
+// The agent-landing page (first-agent-flow.md §3) reads one AgentDeployment in
+// full: the spec summary the console shows, the live status (conditions + the
+// Knative URL + readiness), the bindings that reference this agent, and its
+// version history. Like every BFF DTO it is a FLAT projection of the CRDs — never
+// the raw K8s objects — so the SPA stays decoupled from the schema. Every slice
+// is non-nil on the wire ([] not null).
+
+// AgentCondition is the flat projection of one status condition. It carries just
+// what the status timeline renders — no managedFields/lastTransition churn beyond
+// the human-facing bits.
+type AgentCondition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason"`
+	Message            string `json:"message"`
+	LastTransitionTime string `json:"lastTransitionTime"`
+}
+
+// AgentScaling is the flat projection of the Knative autoscaler bounds.
+type AgentScaling struct {
+	Min int32 `json:"min"`
+	Max int32 `json:"max"`
+}
+
+// AgentBinding is one compact entry in the agent's bindings list — an
+// MCPToolBinding ("tool") or a MemoryBinding ("memory") that references this
+// agent. Detail is the human-facing subject (the tool name, or the memory scope);
+// Ready mirrors the binding's own Ready condition so the page can show a
+// per-binding health dot.
+type AgentBinding struct {
+	Kind   string `json:"kind"`   // "tool" | "memory"
+	Name   string `json:"name"`   // the binding object's own name
+	Detail string `json:"detail"` // tool name (tool) or scope (memory)
+	Ready  bool   `json:"ready"`
+}
+
+// AgentDetailResponse is returned by GET /api/agents/{ns}/{name}. It is the full
+// agent-landing projection: identity, the spec summary (image, executionModel,
+// scaling, role), the live status (conditions + Knative URL + readiness/phase),
+// the bindings referencing this agent, and the AgentVersion history names.
+// Bindings and Versions and Conditions are non-nil on the wire ([] not null).
+type AgentDetailResponse struct {
+	Name           string           `json:"name"`
+	Namespace      string           `json:"namespace"`
+	Image          string           `json:"image"`
+	ExecutionModel string           `json:"executionModel"`
+	Role           string           `json:"role"`
+	Scaling        AgentScaling     `json:"scaling"`
+	Phase          string           `json:"phase"`
+	Ready          bool             `json:"ready"`
+	URL            string           `json:"url"`
+	LatestVersion  string           `json:"latestVersion"`
+	Conditions     []AgentCondition `json:"conditions"`
+	Bindings       []AgentBinding   `json:"bindings"`
+	Versions       []string         `json:"versions"`
 }
 
 // --- Identity & RBAC-aware chrome (ADR 0012, ui-foundation §3) ---------------
@@ -500,6 +560,115 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Image:     ad.Spec.Image,
 		Phase:     phase,
 		Ready:     ready,
+	}
+}
+
+// phaseFromConditions derives the (ready, phase) pair from a resource's standard
+// "Ready" condition — the same rule newAgentSummary uses, factored out so the
+// detail DTO and the summary agree. Absent condition → (false, Pending).
+func phaseFromConditions(conds []metav1.Condition) (bool, string) {
+	c := apimeta.FindStatusCondition(conds, "Ready")
+	if c == nil {
+		return false, phasePending
+	}
+	switch c.Status {
+	case metav1.ConditionTrue:
+		return true, phaseReady
+	case metav1.ConditionFalse:
+		return false, phaseNotReady
+	default:
+		return false, phasePending
+	}
+}
+
+// conditionReady reports whether a resource's "Ready" condition is True — the
+// per-binding health dot the detail page renders.
+func conditionReady(conds []metav1.Condition) bool {
+	c := apimeta.FindStatusCondition(conds, "Ready")
+	return c != nil && c.Status == metav1.ConditionTrue
+}
+
+// newAgentDetail projects an AgentDeployment plus the bindings/versions that
+// reference it onto the flat agent-landing DTO. The caller passes the CRD lists it
+// already read caller-scoped; this helper only projects (no I/O), so it stays
+// unit-testable in isolation. Every slice is non-nil on the wire.
+func newAgentDetail(
+	ad *agentsv1alpha1.AgentDeployment,
+	toolBindings []agentsv1alpha1.MCPToolBinding,
+	memoryBindings []agentsv1alpha1.MemoryBinding,
+	versions []agentsv1alpha1.AgentVersion,
+) AgentDetailResponse {
+	ready, phase := phaseFromConditions(ad.Status.Conditions)
+
+	// Scaling defaults mirror the CRD (min=0 scale-to-zero, max=3) when the spec
+	// omits the block, so the page never shows a bare 0/0.
+	scaling := AgentScaling{Min: 0, Max: 3}
+	if ad.Spec.Scaling != nil {
+		scaling = AgentScaling{Min: ad.Spec.Scaling.Min, Max: ad.Spec.Scaling.Max}
+	}
+
+	conditions := make([]AgentCondition, 0, len(ad.Status.Conditions))
+	for i := range ad.Status.Conditions {
+		c := &ad.Status.Conditions[i]
+		conditions = append(conditions, AgentCondition{
+			Type:               c.Type,
+			Status:             string(c.Status),
+			Reason:             c.Reason,
+			Message:            c.Message,
+			LastTransitionTime: c.LastTransitionTime.Format(time.RFC3339),
+		})
+	}
+
+	// Bindings: only those whose spec.agentRef names this agent (the lists are
+	// namespace-scoped already). Tools first, then memory, each stably ordered.
+	bindings := make([]AgentBinding, 0, len(toolBindings)+len(memoryBindings))
+	for i := range toolBindings {
+		b := &toolBindings[i]
+		if b.Spec.AgentRef != ad.Name {
+			continue
+		}
+		bindings = append(bindings, AgentBinding{
+			Kind:   "tool",
+			Name:   b.Name,
+			Detail: b.Spec.ToolName,
+			Ready:  conditionReady(b.Status.Conditions),
+		})
+	}
+	for i := range memoryBindings {
+		b := &memoryBindings[i]
+		if b.Spec.AgentRef != ad.Name {
+			continue
+		}
+		bindings = append(bindings, AgentBinding{
+			Kind:   "memory",
+			Name:   b.Name,
+			Detail: b.Spec.Scope,
+			Ready:  conditionReady(b.Status.Conditions),
+		})
+	}
+
+	// Versions: the AgentVersion snapshot names pinned to this deployment.
+	versionNames := make([]string, 0, len(versions))
+	for i := range versions {
+		if versions[i].Spec.DeploymentName == ad.Name {
+			versionNames = append(versionNames, versions[i].Name)
+		}
+	}
+
+	return AgentDetailResponse{
+		Name:           ad.Name,
+		Namespace:      ad.Namespace,
+		Image:          ad.Spec.Image,
+		ExecutionModel: ad.Spec.ExecutionModel,
+		Role:           ad.Spec.Role,
+		Scaling:        scaling,
+		Phase:          phase,
+		Ready:          ready,
+		URL:            ad.Status.URL,
+		LatestVersion:  ad.Status.LatestVersion,
+		Conditions:     conditions,
+		Bindings:       bindings,
+		Versions:       versionNames,
 	}
 }
 
