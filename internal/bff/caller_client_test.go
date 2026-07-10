@@ -27,8 +27,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -124,6 +127,19 @@ func TestForTokenSwapsCredentialOnly(t *testing.T) {
 		Host:            "https://api.example:6443",
 		BearerToken:     "bff-service-account-token",
 		BearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		// Populate EVERY in-cluster credential channel so the test proves the swap
+		// clears them ALL — not just the bearer pair. If any one leaked through,
+		// client-go could authenticate as the BFF SA (a confused-deputy regression).
+		Username: "bff-sa",
+		Password: "bff-sa-pass",
+		TLSClientConfig: rest.TLSClientConfig{
+			CertData: []byte("bff-client-cert"),
+			CertFile: "/var/run/bff/tls.crt",
+			KeyData:  []byte("bff-client-key"),
+			KeyFile:  "/var/run/bff/tls.key",
+		},
+		AuthProvider: &clientcmdapi.AuthProviderConfig{Name: "gcp"},
+		ExecProvider: &clientcmdapi.ExecConfig{Command: "gke-gcloud-auth-plugin"},
 	}
 	base.CAData = []byte("cluster-ca")
 
@@ -145,13 +161,29 @@ func TestForTokenSwapsCredentialOnly(t *testing.T) {
 	assert.Equal(t, "caller-viewer-token", captured.BearerToken)
 	// BearerTokenFile is cleared so client-go cannot fall back to the SA token.
 	assert.Empty(t, captured.BearerTokenFile, "BearerTokenFile must be cleared")
+	// ALL 8 other in-cluster credential fields are cleared so ONLY the caller's
+	// bearer token can authenticate the per-request client (no cert / basic-auth /
+	// auth-provider / exec-plugin can override or supplement it).
+	assert.Nil(t, captured.CertData, "CertData must be cleared")
+	assert.Empty(t, captured.CertFile, "CertFile must be cleared")
+	assert.Nil(t, captured.KeyData, "KeyData must be cleared")
+	assert.Empty(t, captured.KeyFile, "KeyFile must be cleared")
+	assert.Empty(t, captured.Username, "Username must be cleared")
+	assert.Empty(t, captured.Password, "Password must be cleared")
+	assert.Nil(t, captured.AuthProvider, "AuthProvider must be cleared")
+	assert.Nil(t, captured.ExecProvider, "ExecProvider must be cleared")
 	// Host + CA are inherited from the in-cluster config.
 	assert.Equal(t, "https://api.example:6443", captured.Host)
 	assert.Equal(t, []byte("cluster-ca"), captured.CAData)
 
-	// The shared base config is untouched (no cross-request leakage).
+	// The shared base config is untouched (no cross-request leakage): its own
+	// credential material — bearer AND every other channel — is intact.
 	assert.Equal(t, "bff-service-account-token", base.BearerToken)
 	assert.Equal(t, "/var/run/secrets/kubernetes.io/serviceaccount/token", base.BearerTokenFile)
+	assert.Equal(t, []byte("bff-client-cert"), base.CertData)
+	assert.Equal(t, "bff-sa", base.Username)
+	assert.NotNil(t, base.AuthProvider, "base AuthProvider must be untouched")
+	assert.NotNil(t, base.ExecProvider, "base ExecProvider must be untouched")
 }
 
 // TestForRequestRejectsMissingToken proves ForRequest returns errUnauthenticated
@@ -274,4 +306,70 @@ func TestListWithoutTokenIs401ThroughFactory(t *testing.T) {
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, listCalled, "no K8s list must run for a token-less request")
+}
+
+// --- read denials must surface as 403, never swallowed as an empty list -------
+//
+// The m12.6b review's non-blocking follow-up: classifyReadError must map a K8s
+// Forbidden on a LIST to an HTTP 403 with an error body — NOT a 200 with an empty
+// collection. A swallowed read denial would silently show a viewer "no agents" /
+// "empty topology" instead of "you're not allowed", masking a real authz gap.
+
+// forbiddenListInterceptor returns a K8s Forbidden on every List, as the API
+// server would for a caller whose RBAC does not permit reading the resource.
+func forbiddenListInterceptor() interceptor.Funcs {
+	return interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return apierrors.NewForbidden(
+				schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"},
+				"", assert.AnError,
+			)
+		},
+	}
+}
+
+// TestListAgentsForbiddenIs403 proves a Forbidden on the caller-scoped List of
+// AgentDeployments surfaces as HTTP 403 and the body is an error — NOT the empty
+// {"agents":[]} success shape a swallowed denial would produce.
+func TestListAgentsForbiddenIs403(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(forbiddenListInterceptor()).
+		Build()
+	s := newCallerServer(t, newFakeFactory(c))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	req.Header.Set("Authorization", "Bearer viewer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, "a read denial must be a 403, not a swallowed empty list")
+	body := rec.Body.String()
+	assert.NotContains(t, body, `"agents"`, "the 403 body must NOT be the empty-list success shape")
+	var errBody errorBody
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
+	assert.NotEmpty(t, errBody.Error, "the 403 must carry an error message")
+}
+
+// TestTopologyForbiddenIs403 proves the topology read path likewise surfaces a
+// Forbidden as 403 with an error body — NOT the empty {"nodes":[],"edges":[]}
+// success shape (topology's first read is the AgentRegistry list).
+func TestTopologyForbiddenIs403(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(forbiddenListInterceptor()).
+		Build()
+	s := newCallerServer(t, newFakeFactory(c))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/topology", nil)
+	req.Header.Set("Authorization", "Bearer viewer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, "a topology read denial must be a 403, not a swallowed empty graph")
+	body := rec.Body.String()
+	assert.NotContains(t, body, `"nodes"`, "the 403 body must NOT be the empty-graph success shape")
+	var errBody errorBody
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
+	assert.NotEmpty(t, errBody.Error, "the 403 must carry an error message")
 }
