@@ -112,6 +112,34 @@ func validateBinding(b *agentsv1alpha1.MCPToolBinding, registries map[string]age
 	return bindingValidation{Valid: true, Reason: reasonBound, Message: "tool registered, pin-matched, and rendered into the agent manifest"}
 }
 
+// registryInputSchema returns the argument JSON Schema stored on the catalog
+// entry a valid binding references (ToolEntry.InputSchema, captured from the MCP
+// server's tools/list, m14.6). It is returned VERBATIM as raw JSON so the
+// manifest — and in turn the managed loop (m14.6b) — hands the model exact
+// tool-call parameters. Returns nil when the registry, the entry, or the schema
+// is absent (curated/legacy entries): the render omits inputSchema and the SDK
+// falls back to a permissive schema. Callers pass only bindings validateBinding
+// already admitted, so the lookups are expected to hit — the nil returns are the
+// graceful-absence path, not an error.
+func registryInputSchema(
+	b *agentsv1alpha1.MCPToolBinding,
+	registries map[string]agentsv1alpha1.ToolRegistry,
+) []byte {
+	reg, ok := registries[b.Spec.RegistryRef]
+	if !ok {
+		return nil
+	}
+	for i := range reg.Spec.Tools {
+		if reg.Spec.Tools[i].Name == b.Spec.ToolName {
+			if schema := reg.Spec.Tools[i].InputSchema; schema != nil {
+				return schema.Raw
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
 // listAgentBindings returns the agent's live bindings, sorted by binding name
 // for deterministic port/container assignment. It lists all bindings in the
 // namespace and filters by agentRef IN MEMORY (no field index exists for this
@@ -198,6 +226,11 @@ func resolveAgentBindings(
 			Mode:        b.Spec.Mode,
 			Image:       b.Spec.Server.Image,
 			URL:         b.Spec.Server.URL,
+			// Carry the matched catalog entry's argument JSON Schema verbatim
+			// into the manifest so the managed loop (m14.6b) can hand a real
+			// model exact tool-call parameters. Nil when the entry has none
+			// (curated/legacy) → manifest omits it → SDK permissive fallback.
+			InputSchema: registryInputSchema(b, registries),
 		})
 	}
 	return valid, validations, nil

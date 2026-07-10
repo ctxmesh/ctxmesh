@@ -83,22 +83,37 @@ class ManagedResult:
     tools_called: List[str]
 
 
-def _tool_schema(name: str) -> Dict[str, Any]:
+#: The permissive parameters schema advertised when a tool has no discovered
+#: inputSchema (curated/legacy entries, the m14.2 echo mock). It accepts any
+#: object so the gateway can relay ``tools`` and the model can at least name the
+#: tool; the concrete arguments pass through to ``tools.call`` verbatim.
+_PERMISSIVE_PARAMETERS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": True,
+}
+
+
+def _tool_schema(tool: Any) -> Dict[str, Any]:
     """Build an OpenAI ``tools[]`` function schema for a discovered tool.
 
-    The discovery manifest carries only the catalog name + endpoint (the MCP
-    input schema is resolved at call time, tools.py) — not a JSON schema. So the
-    loop advertises each bound tool with a permissive object-parameters schema:
-    enough for the gateway to relay ``tools`` and for the model to name the tool
-    it wants; the concrete arguments the model produces are passed through to
-    ``tools.call`` verbatim.
+    *tool* is a :class:`ctxmesh.tools.Tool` from ``tools.list()``. When the
+    discovery manifest carried the tool's ``inputSchema`` (m14.6 stored it on the
+    ToolRegistry entry; m14.6b plumbs it through), it is used VERBATIM as the
+    OpenAI function ``parameters`` — so a real model sees the tool's exact
+    argument schema and produces correct ``arguments``. When the manifest omits
+    it (a curated/legacy entry or the schema-less echo mock), the loop falls back
+    to :data:`_PERMISSIVE_PARAMETERS` — enough for the gateway to relay ``tools``
+    and for the model to name the tool it wants.
     """
+    schema = getattr(tool, "input_schema", None)
+    parameters = schema if isinstance(schema, dict) and schema else _PERMISSIVE_PARAMETERS
     return {
         "type": "function",
         "function": {
-            "name": name,
-            "description": f"The {name} tool bound to this agent.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+            "name": tool.name,
+            "description": f"The {tool.name} tool bound to this agent.",
+            "parameters": parameters,
         },
     }
 
@@ -156,7 +171,7 @@ def run_managed_loop(
     # then behaves like a plain chat agent (no tools advertised).
     tools = client.tools.list()
     tool_names = {t.name for t in tools}
-    tool_schemas = [_tool_schema(t.name) for t in tools]
+    tool_schemas = [_tool_schema(t) for t in tools]
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": config.system_prompt},
