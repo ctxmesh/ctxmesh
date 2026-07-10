@@ -192,6 +192,211 @@ func traceTokens(t lfTrace) int64 {
 	return t.TotalTokens
 }
 
+// lfTraceDetail is the shape of GET /api/public/traces/{id} we consume: the
+// trace fields (embedded lfTrace) plus its observations[] (the spans). We map
+// only the fields the flat run-inspector projection needs; a Langfuse schema
+// addition does not break it.
+type lfTraceDetail struct {
+	lfTrace
+	Observations []lfObservation `json:"observations"`
+}
+
+// lfObservation is one Langfuse observation (a span). We read both spellings
+// Langfuse uses across versions (parentObservationId vs parentId, usage vs
+// usageDetails, calculatedTotalCost vs totalCost/cost) and pick whichever is
+// populated so the projection is robust to the backend's field naming.
+type lfObservation struct {
+	ID                  string          `json:"id"`
+	ParentObservationID string          `json:"parentObservationId"`
+	ParentID            string          `json:"parentId"`
+	Type                string          `json:"type"`
+	Name                string          `json:"name"`
+	StartTime           string          `json:"startTime"`
+	EndTime             string          `json:"endTime"`
+	Model               string          `json:"model"`
+	Level               string          `json:"level"`
+	Usage               *lfObsUsage     `json:"usage,omitempty"`
+	CalculatedTotalCost *float64        `json:"calculatedTotalCost,omitempty"`
+	TotalCost           *float64        `json:"totalCost,omitempty"`
+	Cost                *float64        `json:"cost,omitempty"`
+	Input               json.RawMessage `json:"input,omitempty"`
+	Output              json.RawMessage `json:"output,omitempty"`
+}
+
+// lfObsUsage carries the per-observation token split (prompt/completion). Absent
+// fields decode to 0 — the projection then reports 0, never null.
+type lfObsUsage struct {
+	Input  int64 `json:"input"`
+	Output int64 `json:"output"`
+	Total  int64 `json:"total"`
+}
+
+// TraceDetail fetches ONE trace + its observations from GET
+// /api/public/traces/{id} and projects them onto the run inspector's flat span
+// summary (m14.8): the trace-level rollup plus a FLAT list of spans (parentId-
+// linked; the UI builds the tree). Timing is relative to the trace start.
+//
+// Degrade honestly: an upstream 404 → ErrTraceNotFound (the handler serves 404);
+// any other non-200 → a generic error (the handler serves 502). Cost/tokens
+// absent → 0. Input/output are the PERSISTED (already-redacted, M11) content,
+// passed through verbatim and NEVER un-redacted; an empty/absent field sets the
+// span's *Redacted flag so the panel shows structure with a redacted marker.
+func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (TraceDetail, error) {
+	id := strings.TrimSpace(traceID)
+	if id == "" {
+		return TraceDetail{}, fmt.Errorf("langfuse: empty traceID")
+	}
+
+	var body lfTraceDetail
+	// The trace id is a path segment; escape it so an id with reserved characters
+	// cannot alter the request path.
+	if err := a.getJSON(ctx, "/api/public/traces/"+url.PathEscape(id), nil, &body); err != nil {
+		return TraceDetail{}, err
+	}
+
+	// The trace start anchors every span's relative timing. Parse it once; a
+	// missing/unparseable timestamp yields a zero anchor (startMs falls back to 0
+	// per span) rather than a failure — the summary still renders.
+	traceStart, haveStart := parseLangfuseTime(body.Timestamp)
+
+	spans := make([]SpanSummary, 0, len(body.Observations))
+	for i := range body.Observations {
+		spans = append(spans, projectObservation(&body.Observations[i], traceStart, haveStart))
+	}
+
+	// Trace-level token total: prefer the trace's own usage/totalTokens; when the
+	// backend did not roll it up, sum the observations so the header is honest.
+	tokens := traceTokens(body.lfTrace)
+	if tokens == 0 {
+		for i := range spans {
+			tokens += spans[i].TokensIn + spans[i].TokensOut
+		}
+	}
+
+	return TraceDetail{
+		Rollup: TraceRollup{
+			TraceID:   body.ID,
+			Name:      body.Name,
+			Timestamp: body.Timestamp,
+			CostUSD:   body.TotalCost,
+			Tokens:    tokens,
+			LatencyMs: body.LatencyMs,
+			SpanCount: len(spans),
+		},
+		Spans: spans,
+	}, nil
+}
+
+// projectObservation projects one Langfuse observation onto the flat SpanSummary:
+// parentId-linked, timing relative to the trace start, tokens/cost defaulting to
+// 0, and a redaction-honest input/output pass-through. It never un-redacts.
+func projectObservation(o *lfObservation, traceStart time.Time, haveStart bool) SpanSummary {
+	parent := o.ParentObservationID
+	if parent == "" {
+		parent = o.ParentID
+	}
+
+	var startMs, durationMs int64
+	obsStart, haveObsStart := parseLangfuseTime(o.StartTime)
+	if haveStart && haveObsStart {
+		if d := obsStart.Sub(traceStart).Milliseconds(); d > 0 {
+			startMs = d
+		}
+	}
+	if haveObsStart {
+		if obsEnd, haveEnd := parseLangfuseTime(o.EndTime); haveEnd {
+			if d := obsEnd.Sub(obsStart).Milliseconds(); d > 0 {
+				durationMs = d
+			}
+		}
+	}
+
+	var tokensIn, tokensOut int64
+	if o.Usage != nil {
+		tokensIn = o.Usage.Input
+		tokensOut = o.Usage.Output
+	}
+
+	cost := 0.0
+	switch {
+	case o.CalculatedTotalCost != nil:
+		cost = *o.CalculatedTotalCost
+	case o.TotalCost != nil:
+		cost = *o.TotalCost
+	case o.Cost != nil:
+		cost = *o.Cost
+	}
+
+	input, inputRedacted := projectPayload(o.Input)
+	output, outputRedacted := projectPayload(o.Output)
+
+	status := "ok"
+	if strings.EqualFold(o.Level, "ERROR") {
+		status = "error"
+	}
+
+	return SpanSummary{
+		ID:             o.ID,
+		ParentID:       parent,
+		Type:           o.Type,
+		Name:           o.Name,
+		StartMs:        startMs,
+		DurationMs:     durationMs,
+		Model:          o.Model,
+		TokensIn:       tokensIn,
+		TokensOut:      tokensOut,
+		CostUSD:        cost,
+		Level:          o.Level,
+		Status:         status,
+		Input:          input,
+		Output:         output,
+		InputRedacted:  inputRedacted,
+		OutputRedacted: outputRedacted,
+	}
+}
+
+// projectPayload turns a Langfuse observation input/output (raw JSON) into the
+// persisted string the panel shows, plus a redacted flag. It is redaction-honest
+// (M11): the content is already redacted before persistence, so we pass it
+// through VERBATIM and NEVER un-redact. An absent/JSON-null/empty payload is
+// reported as redacted=true (empty string) so the panel shows the span's
+// structure with a redacted marker instead of a blank field. A JSON string is
+// unwrapped to its text; any other JSON value is passed through as its compact
+// JSON so structured input/output still renders.
+func projectPayload(raw json.RawMessage) (string, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" || trimmed == `""` {
+		return "", true
+	}
+	// A JSON string unwraps to its text (the common redacted-marker-bearing case);
+	// non-string JSON is passed through compactly.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if strings.TrimSpace(s) == "" {
+			return "", true
+		}
+		return s, false
+	}
+	return trimmed, false
+}
+
+// parseLangfuseTime parses a Langfuse RFC3339 timestamp. It returns (zero, false)
+// for an empty/unparseable value so callers fall back gracefully rather than
+// failing the whole projection on one bad timestamp.
+func parseLangfuseTime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
 // getJSON performs an authenticated GET against the Langfuse public API and
 // decodes the JSON body into out. The public-API credentials are sent as HTTP
 // Basic auth from this process only — they never leave the BFF.
@@ -216,6 +421,12 @@ func (a *langfuseAdapter) getJSON(ctx context.Context, apiPath string, q url.Val
 	if resp.StatusCode != http.StatusOK {
 		// Bound the error body so a large/hostile response cannot blow up logs.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		// A 404 is a genuinely-missing resource (e.g. an unknown traceId): wrap the
+		// sentinel so the handler can serve an honest 404, distinct from a generic
+		// upstream failure (which the handler serves as 502, never a 500).
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("langfuse: %s returned 404: %s: %w", apiPath, strings.TrimSpace(string(snippet)), ErrTraceNotFound)
+		}
 		return fmt.Errorf("langfuse: %s returned %d: %s", apiPath, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

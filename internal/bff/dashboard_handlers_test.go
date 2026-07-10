@@ -33,10 +33,12 @@ import (
 // tests: deterministic canned data, no HTTP. It lets the /api/runs|cost|traces
 // handlers be tested without a live Langfuse (tier0 determinism).
 type fakeLangfuseAdapter struct {
-	runs    []RunSummary
-	cost    CostSummary
-	traceFn func(string) (string, error)
-	err     error
+	runs      []RunSummary
+	cost      CostSummary
+	traceFn   func(string) (string, error)
+	detail    TraceDetail
+	detailErr error
+	err       error
 }
 
 func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -58,6 +60,13 @@ func (f fakeLangfuseAdapter) TraceURL(id string) (string, error) {
 		return f.traceFn(id)
 	}
 	return "https://lf.example/trace/" + id, nil
+}
+
+func (f fakeLangfuseAdapter) TraceDetail(_ context.Context, _ string) (TraceDetail, error) {
+	if f.detailErr != nil {
+		return TraceDetail{}, f.detailErr
+	}
+	return f.detail, nil
 }
 
 // fakePrometheusAdapter is an in-memory PrometheusAdapter for handler tests.

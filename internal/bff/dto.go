@@ -290,6 +290,107 @@ type TraceLinkResponse struct {
 	URL     string `json:"url"`
 }
 
+// --- Run inspector (GET /api/traces/{id}/detail) -----------------------------
+//
+// The run-inspector panel (first-agent-flow.md §3/§5 — the aha's "see what the
+// agent did") reads ONE trace in full: the trace-level rollup plus a FLAT list of
+// spans projected from Langfuse observations. It is the RUN SUMMARY
+// (steps/timing/tokens/cost with the tool span visible), NOT the full native
+// trace explorer (M16). The list is deliberately FLAT — each span carries its
+// parentId and the UI (m14.11) builds the tree; the BFF never pre-nests. Timing
+// is RELATIVE to the trace start (startMs/durationMs) so the panel plots a
+// waterfall without re-parsing timestamps. Every slice is non-nil on the wire
+// ([] not null); absent cost/tokens project to 0, never null.
+//
+// Redaction-honest (M11, §13.3): input/output are redacted BEFORE persistence, so
+// a span's persisted content may already be scrubbed. The projection passes the
+// persisted (non-secret) content through verbatim — it NEVER tries to un-redact —
+// and sets inputRedacted/outputRedacted when the content is empty/absent so the
+// panel shows the span's STRUCTURE (name/timing/tokens) with a redacted marker
+// instead of crashing or leaking.
+
+// SpanSummary is the flat projection of one Langfuse observation onto the run
+// inspector's span list. It is a FLAT node (a list entry with a parentId, NOT a
+// nested subtree): the UI builds the tree from parentId. Timing is relative to
+// the trace start. Cost/tokens absent → 0, never null. input/output are the
+// persisted (already-redacted, M11) content — passed through, never un-redacted;
+// the *Redacted flags say the content was scrubbed to empty so the UI shows
+// structure with a redacted marker.
+type SpanSummary struct {
+	// ID is the observation id (stable within the trace; the UI keys nodes on it).
+	ID string `json:"id"`
+	// ParentID is the parent observation id, or "" for a root span. The UI builds
+	// the tree from this; the BFF keeps the list flat (never pre-nested).
+	ParentID string `json:"parentId"`
+	// Type is the observation type: "SPAN" | "GENERATION" | "EVENT". The tool call
+	// surfaces as a SPAN/GENERATION so the panel can mark the tool span.
+	Type string `json:"type"`
+	// Name is the observation name (the step label the panel renders).
+	Name string `json:"name"`
+	// StartMs is the span start relative to the TRACE start, in milliseconds
+	// (>= 0). The panel plots the waterfall off this without re-parsing timestamps.
+	StartMs int64 `json:"startMs"`
+	// DurationMs is the span wall-clock duration in milliseconds (0 when the span
+	// has no end time yet — an in-flight/instant observation).
+	DurationMs int64 `json:"durationMs"`
+	// Model is the model the observation used (GENERATION only; "" otherwise).
+	Model string `json:"model"`
+	// TokensIn / TokensOut are the prompt / completion token counts. Absent → 0.
+	TokensIn  int64 `json:"tokensIn"`
+	TokensOut int64 `json:"tokensOut"`
+	// CostUSD is the observation's cost. Absent → 0, never null.
+	CostUSD float64 `json:"costUSD"`
+	// Level is the observation level Langfuse reports ("DEFAULT" | "WARNING" |
+	// "ERROR" | "DEBUG"); the panel colors an ERROR span. "" when absent.
+	Level string `json:"level"`
+	// Status is a coarse projection of Level for the panel's health dot: "error"
+	// when Level is ERROR, else "ok".
+	Status string `json:"status"`
+	// Input / Output are the persisted (already-redacted, M11) content, verbatim.
+	// Empty when the observation carried none OR the redactor scrubbed it away; the
+	// *Redacted flags below distinguish "scrubbed" so the UI shows a marker. The
+	// BFF NEVER attempts to reveal redacted content.
+	Input  string `json:"input"`
+	Output string `json:"output"`
+	// InputRedacted / OutputRedacted are true when the persisted content was
+	// empty/absent — the redaction-honest signal for the panel to show a redacted
+	// marker over the span's structure rather than a blank field.
+	InputRedacted  bool `json:"inputRedacted"`
+	OutputRedacted bool `json:"outputRedacted"`
+}
+
+// TraceRollup is the trace-level summary the run inspector's header renders: the
+// run name, the totals (cost/tokens/latency), and the start timestamp. Absent
+// numbers project to 0, never null.
+type TraceRollup struct {
+	TraceID   string  `json:"traceId"`
+	Name      string  `json:"name"`
+	Timestamp string  `json:"timestamp"`
+	CostUSD   float64 `json:"costUSD"`
+	Tokens    int64   `json:"tokens"`
+	LatencyMs float64 `json:"latencyMs"`
+	// SpanCount is len(Spans) — a convenience the panel shows without counting.
+	SpanCount int `json:"spanCount"`
+}
+
+// TraceDetail is the adapter-level projection of one trace + its observations:
+// the rollup plus the FLAT span list. The handler wraps it in
+// TraceDetailResponse. Spans is non-nil ([] not null).
+type TraceDetail struct {
+	Rollup TraceRollup
+	Spans  []SpanSummary
+}
+
+// TraceDetailResponse is returned by GET /api/traces/{id}/detail — the run
+// inspector's flat span summary for one trace. Rollup is the trace-level header;
+// Spans is the FLAT list (parentId-linked; the UI builds the tree). Spans is
+// non-nil on the wire ([] not null). This is the run SUMMARY, distinct from the
+// embed-URL route (GET /api/traces/{id}) which returns only the link target.
+type TraceDetailResponse struct {
+	Rollup TraceRollup   `json:"rollup"`
+	Spans  []SpanSummary `json:"spans"`
+}
+
 // --- Connect a provider (ADR 0015) ------------------------------------------
 //
 // The connect flow lets a user paste a provider API key once and get a working
