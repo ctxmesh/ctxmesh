@@ -1,10 +1,40 @@
 agent-engine has been installed into namespace {{ .Values.namespace }}.
 
+PREREQUISITES (install these in the cluster BEFORE agents will reconcile):
+  The controller integrates with cluster add-ons that provide CRDs it watches
+  and creates. If they are absent you will see "no matches for kind ..." /
+  CRD-not-found errors on the agent CRDs — the platform installs, but agents
+  won't come up. Install:
+    - Knative Serving   — the agent runtime (Service; scale-to-zero data plane).
+    - Knative Eventing  — the event mesh (Broker/Trigger for event-driven agents).
+    - KEDA              — event/metric autoscaling (ScaledObject).
+  agent-engine deploys its own controllers + gateway + (optional) dev data plane
+  and UI, but it does NOT bundle Knative or KEDA — install them separately
+  (their upstream Helm charts / release YAMLs) on the target cluster.
+
 Control plane:
   - CRDs installed:            {{ .Values.crds.install }}
   - controller-manager:        Deployment/agent-engine-controller-manager
   - LiteLLM gateway:           Deployment/agent-engine-gateway
   - RBAC personas:             agent-engine-{operator,developer,viewer} (+ manager role)
+
+UI + Go BFF (spec §6):
+  - enabled:                   {{ .Values.ui.enabled }}
+{{- if .Values.ui.enabled }}
+  - BFF (UI + /api):           Deployment/agent-engine-bff, Service/agent-engine-bff:9090
+  - auth:                      behind M11 control-plane auth; the BFF SA holds NO
+                               agent-CRD access — user ops run on the CALLER'S own
+                               token (ADR 0011), so K8s RBAC (the personas above)
+                               is the single authz source.
+  - reach the UI:              kubectl -n {{ .Values.namespace }} port-forward svc/agent-engine-bff 9090:9090
+                               then open http://localhost:9090/ (and /api/health)
+  - adapter creds (optional):  create a Secret named `bff-adapters` in
+                               {{ .Values.namespace }} with LANGFUSE_HOST /
+                               LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY /
+                               PROMETHEUS_URL [/ PROMETHEUS_TOKEN] to light up the
+                               cost/trace/metrics views. Absent → those routes 501;
+                               the UI + /api/health still work.
+{{- end }}
 
 Bundled dev data plane (dev/trial ONLY — PRD §23):
   - enabled:                   {{ .Values.devDataPlane.enabled }}
@@ -18,6 +48,9 @@ Bundled dev data plane (dev/trial ONLY — PRD §23):
 Check readiness:
   kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-controller-manager
   kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-gateway
+{{- if .Values.ui.enabled }}
+  kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-bff
+{{- end }}
   kubectl get crds | grep agents.ctxmesh.ai
 
 This chart's control-plane + CRD templates are generated from
