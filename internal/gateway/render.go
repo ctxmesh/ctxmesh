@@ -118,6 +118,7 @@ type modelEntry struct {
 	provider  string
 	model     string
 	apiKey    string
+	apiBase   string // OpenAI-compatible upstream URL; empty for mock/real entries.
 	mockResp  string
 	isMock    bool
 	rpm       int32
@@ -140,6 +141,9 @@ type modelEntry struct {
 //   - Providers within a route are ordered by ascending Priority.
 //   - alias = route name (metadata.name).
 //   - provider: mock renders mock_response + mockDummyAPIKey; no SecretBinding required.
+//   - a provider with apiBase set renders api_base: <url> + mockDummyAPIKey and
+//     proxies to that OpenAI-compatible upstream (e.g. the tool-call mock); no
+//     SecretBinding required (keyless upstream).
 //   - non-mock renders api_key: os.environ/SB_<sanitized-binding-name>.
 //   - rateLimit.tenantRPM → rpm on every provider entry for that route.
 //   - Routes with any unresolved binding or secret are excluded and reported in
@@ -189,6 +193,12 @@ func Render(
 		isExcluded := false
 		for _, p := range r.Spec.Providers {
 			if p.Provider == mockProvider {
+				continue
+			}
+			// An apiBase provider targets a keyless OpenAI-compatible upstream
+			// (e.g. the tool-call mock); it needs no SecretBinding, so it can
+			// never be excluded for a missing key.
+			if p.APIBase != "" {
 				continue
 			}
 			if p.SecretBindingRef == "" {
@@ -243,6 +253,16 @@ func Render(
 				e.apiKey = mockDummyAPIKey
 				e.mockResp = MockResponse
 				e.isMock = true
+			} else if p.APIBase != "" {
+				// api_base seam: proxy this route to an arbitrary OpenAI-compatible
+				// upstream (e.g. the deterministic tool-call mock). LiteLLM PROXIES
+				// the request (relaying tools/tool_calls unchanged) rather than
+				// short-circuiting like mock. The upstream needs no real key, so a
+				// dummy non-empty api_key is used and NO SecretBinding/env var is
+				// required — mirrors the CLI dev_plan.go real-with-api_base path and
+				// harness/mock-provider/litellm-tool-mock.yaml.
+				e.apiBase = p.APIBase
+				e.apiKey = mockDummyAPIKey
 			} else {
 				bindingKey := r.Namespace + "/" + p.SecretBindingRef
 				sb := bindings[bindingKey]
@@ -351,6 +371,9 @@ func buildConfigYAML(entries []modelEntry) string {
 		buf.WriteString("    litellm_params:\n")
 		fmt.Fprintf(&buf, "      model: %s/%s\n", e.provider, e.model)
 		fmt.Fprintf(&buf, "      api_key: %s\n", e.apiKey)
+		if e.apiBase != "" {
+			fmt.Fprintf(&buf, "      api_base: %s\n", e.apiBase)
+		}
 		if e.isMock {
 			// %q produces a correctly double-quoted YAML scalar for the mock response.
 			fmt.Fprintf(&buf, "      mock_response: %q\n", e.mockResp)
