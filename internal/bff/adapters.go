@@ -75,6 +75,26 @@ func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.List
 	return &out, nil
 }
 
+// listMemoryBindings lists MemoryBindings via the reader (agent-detail bindings).
+func listMemoryBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.MemoryBindingList, error) {
+	var out agentsv1alpha1.MemoryBindingList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// listAgentVersions lists AgentVersions via the reader (agent-detail version
+// history). Each AgentVersion is a controller-created immutable snapshot pinned to
+// its parent via spec.deploymentName.
+func listAgentVersions(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentVersionList, error) {
+	var out agentsv1alpha1.AgentVersionList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- Seams fleshed out by later m12 surface tasks ---------------------------
 //
 // These are declared (not implemented) so the endpoint groups in the spec (§2)
