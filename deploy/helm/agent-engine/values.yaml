@@ -72,3 +72,13 @@ ui:
 bff:
   providerConnect:
     enabled: true
+  # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
+  # leaves generation using the caller's connected-provider model unpinned — the
+  # zero-config dev/trial path. An operator that wants a GOVERNED generation model
+  # sets a comma-separated list (e.g. "claude-sonnet-4-6,gpt-4o"); it becomes the
+  # UI's model dropdown source and the allowed set the /api/agents/generate
+  # endpoint enforces. This templates the BFF deployment's PLATFORM_GENERATION_MODELS
+  # env; with this default the render is the quoted empty string == kustomize
+  # (helm-verify no-drift).
+  generation:
+    platformModels: ""
