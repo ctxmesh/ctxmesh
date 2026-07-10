@@ -58,6 +58,104 @@ export interface AgentListParams {
   namespace?: string;
 }
 
+// --- Agent detail (GET /api/agents/{ns}/{name}, m14.7) ----------------------
+// The agent-landing projection (first-agent-flow.md §5) — one AgentDeployment in
+// full, FLAT (never the raw CRD): identity + the spec summary + the live status
+// (conditions + Knative URL + readiness) + the bindings that reference it + the
+// version history. Every slice is non-null on the wire ([] not null). A 404 →
+// not-found; a 403 → ForbiddenInline (caller can't read this agent, ADR 0011).
+
+// AgentCondition mirrors the BFF's flat status-condition projection — exactly
+// what the status timeline renders (the readiness progression).
+export interface AgentCondition {
+  type: string;
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// AgentScaling is the flat Knative autoscaler bound projection.
+export interface AgentScaling {
+  min: number;
+  max: number;
+}
+
+// AgentBinding is one entry in the agent's bindings list — an MCPToolBinding
+// ("tool") or a MemoryBinding ("memory"). `detail` is the human subject (the
+// tool name / memory scope); `ready` mirrors the binding's own Ready condition.
+export interface AgentBinding {
+  kind: string;
+  name: string;
+  detail: string;
+  ready: boolean;
+}
+
+export interface AgentDetailResponse {
+  name: string;
+  namespace: string;
+  image: string;
+  executionModel: string;
+  role: string;
+  scaling: AgentScaling;
+  phase: string;
+  ready: boolean;
+  url: string;
+  latestVersion: string;
+  conditions: AgentCondition[];
+  bindings: AgentBinding[];
+  versions: string[];
+}
+
+// --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
+// The native run-summary source (first-agent-flow.md §5): a FLAT span list +
+// the trace-level rollup. The UI builds the tree/waterfall CLIENT-side from the
+// flat spans (key on id, tree from parentId, plot at startMs width durationMs).
+// Redaction-honest (M11): input/output are the persisted, already-redacted
+// content passed through verbatim; *Redacted flags say the content was scrubbed
+// to empty so the panel shows STRUCTURE with a marker, never a blank/leak.
+
+export interface SpanSummary {
+  id: string;
+  parentId: string;
+  // "SPAN" | "GENERATION" | "EVENT" — the tool call surfaces as a SPAN/GENERATION.
+  type: string;
+  name: string;
+  startMs: number;
+  durationMs: number;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUSD: number;
+  // "DEFAULT" | "WARNING" | "ERROR" | "DEBUG" | "".
+  level: string;
+  // "error" when Level is ERROR, else "ok" — the panel's health dot.
+  status: string;
+  input: string;
+  output: string;
+  inputRedacted: boolean;
+  outputRedacted: boolean;
+}
+
+// TraceRollup is the trace-level header the inspector renders (name + totals).
+export interface TraceRollup {
+  traceId: string;
+  name: string;
+  timestamp: string;
+  costUSD: number;
+  tokens: number;
+  latencyMs: number;
+  spanCount: number;
+}
+
+// TraceDetailResponse mirrors GET /api/traces/{id}/detail — the run SUMMARY
+// (rollup + FLAT spans). Distinct from GET /api/traces/{id} (the Langfuse embed
+// URL). Spans is non-null on the wire ([] not null).
+export interface TraceDetailResponse {
+  rollup: TraceRollup;
+  spans: SpanSummary[];
+}
+
 // --- Capabilities (GET /api/capabilities?namespace=) ------------------------
 // The flat RBAC capability map for the golden CRD kinds × verbs, computed by the
 // BFF via batched SelfSubjectAccessReviews with the CALLER'S token (ADR 0011).
@@ -514,6 +612,148 @@ export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
   });
 }
 
+// --- SSE log tail (GET /api/agents/{ns}/{name}/logs, m14.7) ------------------
+// The live pod-log tail is Server-Sent Events, but EventSource CANNOT set an
+// Authorization header (ADR 0012: the caller's bearer lives in memory, not a
+// cookie). So we read the stream with fetch + a ReadableStream reader, which
+// attaches `Authorization: Bearer` through the SAME apiFetch seam every other
+// /api/* call uses. This also lets us distinguish, cleanly:
+//   • a PRE-STREAM 401/403 — an HTTP status BEFORE any SSE frame (res.ok is
+//     false) → onForbidden/onError with NO events emitted (a forbidden state,
+//     not an in-stream error);
+//   • an IN-STREAM `error` frame — a mid-stream break the BFF surfaces as an SSE
+//     event (e.g. pods/log denied after pods list allowed, or the pod died).
+// The SSE grammar the BFF writes is `event: <type>\ndata: <line>\n\n` (one frame
+// per blank-line-terminated block; multi-line data spans repeated `data:` lines,
+// re-joined with "\n"). We parse frames incrementally off the byte stream.
+
+// LogEventType names the four SSE frame types the BFF emits (agent_detail.go):
+//   log     — one log line, in order.
+//   waiting — no running pod yet (the agent is starting) — HTTP 200, clean close.
+//   error   — an IN-STREAM failure (forbidden pods/log, or a mid-stream break).
+//   end     — a clean end of the stream.
+export type LogEventType = "log" | "waiting" | "error" | "end";
+
+export interface LogStreamHandlers {
+  /** One SSE frame arrived (log/waiting/error/end). Called in wire order. */
+  onEvent: (type: LogEventType, data: string) => void;
+  /**
+   * A PRE-STREAM 403 (RBAC denied pods list) — an HTTP status BEFORE the stream
+   * opens, distinct from an in-stream `error` frame. No events were emitted.
+   */
+  onForbidden?: (message: string) => void;
+  /**
+   * A PRE-STREAM transport/HTTP failure that is NOT a 403 (e.g. a 500, a network
+   * error, a 400). Also called if the request could not open at all.
+   */
+  onError?: (message: string, status?: number) => void;
+}
+
+export interface LogStreamOptions {
+  follow?: boolean;
+  container?: string;
+  tailLines?: number;
+  signal?: AbortSignal;
+}
+
+// openLogStream opens the SSE pod-log tail with the caller's bearer attached and
+// drives the handlers. It returns a cancel() that aborts the stream (call it on
+// unmount — no leak). A pre-stream 401 routes to login via apiFetch's own 401
+// handler (the session expired); we still report it via onError so the caller
+// can render honestly until the redirect lands.
+export function openLogStream(
+  ns: string,
+  name: string,
+  handlers: LogStreamHandlers,
+  opts: LogStreamOptions = {},
+): () => void {
+  const qs = new URLSearchParams();
+  if (opts.follow) qs.set("follow", "true");
+  if (opts.container) qs.set("container", opts.container);
+  if (opts.tailLines && opts.tailLines > 0) qs.set("tailLines", String(opts.tailLines));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const path = `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/logs${suffix}`;
+
+  // Our own controller so unmount can abort even when the caller passed no signal;
+  // if the caller DID pass one, we chain it so either aborts the fetch.
+  const controller = new AbortController();
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  void (async () => {
+    let res: Response;
+    try {
+      res = await apiFetch(path, {
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (controller.signal.aborted) return; // unmounted — silent, no leak.
+      handlers.onError?.(err instanceof Error ? err.message : "log stream failed");
+      return;
+    }
+
+    // PRE-STREAM status: a non-2xx arrives as an HTTP status BEFORE any SSE frame.
+    // 403 → forbidden state (NOT an in-stream error); anything else → onError.
+    if (!res.ok) {
+      const message = await errorMessage(res, `log stream failed (${res.status})`);
+      if (res.status === 403) handlers.onForbidden?.(message);
+      else handlers.onError?.(message, res.status);
+      return;
+    }
+    if (!res.body) {
+      handlers.onError?.("log stream returned no body");
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Frames are separated by a blank line ("\n\n"). Parse every COMPLETE
+        // frame in the buffer; keep the trailing partial for the next chunk.
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const parsed = parseSSEFrame(frame);
+          if (parsed) handlers.onEvent(parsed.type, parsed.data);
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return; // aborted on unmount — expected.
+      handlers.onError?.(err instanceof Error ? err.message : "log stream broke");
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+// parseSSEFrame parses one SSE frame ("event: <t>\ndata: <l>\n[data: <l>...]")
+// into a typed event. Multiple data: lines re-join with "\n" (the SSE grammar).
+// Unknown event names map to "log" defensively (a data-only frame is a log line).
+function parseSSEFrame(frame: string): { type: LogEventType; data: string } | null {
+  let event = "log";
+  const dataLines: string[] = [];
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0 && event === "log") return null; // blank/keep-alive.
+  const type: LogEventType =
+    event === "waiting" || event === "error" || event === "end" ? event : "log";
+  return { type, data: dataLines.join("\n") };
+}
+
 // agentsQuery builds the /api/agents query string from the list-contract params,
 // omitting empty values so the URL stays clean (and the K8s `continue`/namespace
 // defaults apply BFF-side). Every value is URL-encoded.
@@ -559,6 +799,24 @@ export const api = {
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(
       `/api/traces/${encodeURIComponent(traceId)}`,
+      signal,
+    ),
+
+  // agentDetail reads one AgentDeployment's full landing projection (m14.7). A
+  // 404 = not-found (no such agent), 403 = viewer-can't-read (ForbiddenInline),
+  // 400 = a malformed ns/name — all surface as a typed ApiError.
+  agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentDetailResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // traceDetail reads one trace's FLAT span summary (m14.8) — the run
+  // inspector's source. The UI builds the tree/waterfall client-side. A 404 =
+  // no such trace, 403 = can't read traces — surfaced as a typed ApiError.
+  traceDetail: (traceId: string, signal?: AbortSignal) =>
+    getJSON<TraceDetailResponse>(
+      `/api/traces/${encodeURIComponent(traceId)}/detail`,
       signal,
     ),
 

@@ -994,18 +994,21 @@ function SharedReview({
     }
   }
 
-  // On create → the agent landing page (m14.11). That route isn't built in this
-  // task, so we navigate to the agents LIST (a real, shipped surface) with the
-  // success toast, and note the intended target in a comment. Once m14.11 lands,
-  // swap this for navigate(`/agents/${ns}/${name}`).
+  // On create → the agent LANDING page (m14.11): the detail/status/logs/run
+  // surface where the user watches it come alive and runs it (the aha loop). We
+  // navigate to /agents/{ns}/{name} using the created AgentDeployment's identity;
+  // if — defensively — no AgentDeployment came back, fall back to the list.
   React.useEffect(() => {
     if (state.kind !== "created") return;
     const agent = state.created.find((o) => o.kind === "AgentDeployment") ?? state.created[0];
     const t = setTimeout(() => {
-      // TODO(m14.11): navigate(`/agents/${agent.namespace}/${agent.name}`) once
-      // the agent landing page ships. Until then, the list is the landing spot.
-      void agent;
-      navigate("/agents");
+      if (agent) {
+        navigate(
+          `/agents/${encodeURIComponent(agent.namespace)}/${encodeURIComponent(agent.name)}`,
+        );
+      } else {
+        navigate("/agents");
+      }
     }, 1200);
     return () => clearTimeout(t);
   }, [state, navigate]);
@@ -1017,7 +1020,7 @@ function SharedReview({
         <div className="flex items-center gap-2 text-success">
           <CheckCircle2 className="h-5 w-5" />
           <p className="text-sm font-medium text-foreground">
-            {agent ? `${agent.name} created` : "Agent created"} — opening your agents…
+            {agent ? `${agent.name} created` : "Agent created"} — opening its page…
           </p>
         </div>
         <div className="mt-3 grid gap-2">
