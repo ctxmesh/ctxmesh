@@ -179,6 +179,52 @@ type AgentDeploymentSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	PromptRef string `json:"promptRef,omitempty"`
+
+	// tracePolicy optionally extends the always-on trace-redaction policy
+	// (PRD §13.3). The built-in detectors (emails, US SSNs, API keys/tokens) are
+	// ALWAYS applied to the sensitive payload attributes at the collector before
+	// persistence, regardless of this field. tracePolicy lets an agent add extra
+	// regex detectors for its own domain-specific PII. When omitted, only the
+	// built-in defaults apply.
+	// +optional
+	TracePolicy *TracePolicy `json:"tracePolicy,omitempty"`
+}
+
+// TracePolicy is the per-agent extension of the built-in trace-redaction policy
+// (PRD §13.3). v1 supports adding custom regex detectors; the built-in
+// email/SSN/key detectors are always on and cannot be disabled here (removing a
+// default detector is a deliberate non-goal for the security baseline).
+type TracePolicy struct {
+	// customDetectors are additional named regex redaction rules applied — after
+	// the built-in defaults — to the sensitive payload attributes. Each match is
+	// replaced with a "[REDACTED:<name>]" marker. Patterns MUST be RE2-compatible
+	// (Go regexp / the collector's OTTL replace_pattern: no backreferences or
+	// lookaround). Bounded at 16 detectors so the rendered collector config stays
+	// small and predictable.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	CustomDetectors []CustomDetector `json:"customDetectors,omitempty"`
+}
+
+// CustomDetector is one per-agent redaction rule: a name (used in the marker)
+// and an RE2 regex whose matches are scrubbed from the sensitive payload
+// attributes.
+type CustomDetector struct {
+	// name labels the detector and appears in its marker, e.g. name "badge"
+	// replaces matches with "[REDACTED:badge]". Lowercase alnum + dashes, so the
+	// marker is a stable, readable token.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9-]*$`
+	Name string `json:"name"`
+
+	// pattern is the RE2 regular expression identifying the sensitive substring
+	// to redact. Applied to every sensitive payload attribute's value; each match
+	// is replaced by the detector's marker.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Pattern string `json:"pattern"`
 }
 
 // GateStatus reports the deploy-gate state for an AgentDeployment that references
