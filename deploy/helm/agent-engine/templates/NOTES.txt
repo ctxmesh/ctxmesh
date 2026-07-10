@@ -1,0 +1,24 @@
+agent-engine has been installed into namespace {{ .Values.namespace }}.
+
+Control plane:
+  - CRDs installed:            {{ .Values.crds.install }}
+  - controller-manager:        Deployment/agent-engine-controller-manager
+  - LiteLLM gateway:           Deployment/agent-engine-gateway
+  - RBAC personas:             agent-engine-{operator,developer,viewer} (+ manager role)
+
+Bundled dev data plane (dev/trial ONLY — PRD §23):
+  - enabled:                   {{ .Values.devDataPlane.enabled }}
+{{- if .Values.devDataPlane.enabled }}
+  - statelayer (Valkey):       Deployment/agent-engine-statelayer
+  - objectstore (MinIO):       Deployment/agent-engine-objectstore
+  NOTE: uses DETERMINISTIC DEV credentials — never use in production. Set
+        `--set devDataPlane.enabled=false` and supply your own data plane.
+{{- end }}
+
+Check readiness:
+  kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-controller-manager
+  kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-gateway
+  kubectl get crds | grep agents.ctxmesh.ai
+
+This chart's control-plane + CRD templates are generated from
+`kustomize build config/default` (no-drift with `make deploy`).
