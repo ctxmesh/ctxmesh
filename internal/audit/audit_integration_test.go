@@ -231,17 +231,17 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 	}{
 		{
 			file:      "agent_engine_operator_role.yaml",
-			roleName:  "agent-engine-operator",
+			roleName:  "operator",
 			wantVerbs: []string{"*"},
 		},
 		{
 			file:      "agent_engine_developer_role.yaml",
-			roleName:  "agent-engine-developer",
+			roleName:  "developer",
 			wantVerbs: []string{"create", "delete", "get", "list", "patch", "update", "watch"},
 		},
 		{
 			file:      "agent_engine_viewer_role.yaml",
-			roleName:  "agent-engine-viewer",
+			roleName:  "viewer",
 			wantVerbs: []string{"get", "list", "watch"},
 		},
 	}
