@@ -302,6 +302,77 @@ type ProviderModelsResponse struct {
 	Models   []string `json:"models"`
 }
 
+// --- Create-from-prompt generation (ADR 0014) --------------------------------
+//
+// Generation turns a natural-language description into a REVIEWED agent config.
+// The LLM call runs SERVER-SIDE through the caller's connected provider (the key
+// is resolved caller-scoped and never crosses to the browser); the emitted
+// simplified agent.yaml is validated by the SAME internal/expand core the CLI +
+// form use (one mapping, no divergent generator). Generation NEVER auto-applies —
+// it returns the config for a review step; Create is the separate POST /api/agents.
+
+// GenerateAgentRequest is the POST /api/agents/generate body. Description is the
+// natural-language sentence; Provider + Model are optional and select the
+// generation model. The default is the caller's connected provider (ADR 0015); an
+// operator that pinned platform generation models lets the UI's dropdown pick one
+// via Model. A request for an unconnected/unknown provider is an honest 400.
+type GenerateAgentRequest struct {
+	// Description is the natural-language agent description the model turns into a
+	// simplified agent.yaml. Required.
+	Description string `json:"description"`
+	// Provider optionally names the connected provider route to generate through
+	// (e.g. "anthropic"). Empty → the caller's single connected provider is used
+	// (or an honest 400 asking the caller to pick when there is more than one).
+	Provider string `json:"provider"`
+	// Model optionally pins the generation model. Empty → the connected provider's
+	// primary model. When platform generation models are pinned, this selects one
+	// of them (the UI dropdown source); a model outside the pinned list is a 400.
+	Model string `json:"model"`
+	// Namespace scopes the connected-provider lookup; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// GenerateAgentResponse is returned by POST /api/agents/generate on a SUCCESSFUL
+// generation: the emitted simplified agent.yaml plus its expand-validated CRD
+// preview (the same bytes /api/expand renders), the model that produced it, and
+// any advisory warnings. The SPA renders a friendly review + the raw CRDs behind
+// Advanced; nothing is applied. No secret material is present.
+type GenerateAgentResponse struct {
+	// AgentYAML is the model-emitted simplified agent.yaml (expand-validated).
+	AgentYAML string `json:"agentYAML"`
+	// Expanded is the CRD manifest preview (the internal/expand output), for the
+	// review's Advanced view. It is byte-identical to POST /api/expand of AgentYAML.
+	Expanded string `json:"expanded"`
+	// Model is the generation model that produced the config (for the cost note).
+	Model string `json:"model"`
+	// Provider is the connected provider the generation ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+}
+
+// GenerateInvalidResponse is returned (HTTP 422) when the model produced output
+// that does NOT expand-validate. It is NOT a 500 and NOTHING is applied: the raw
+// generation + the expand error are handed back so the UI shows a REGENERATE
+// affordance (a bad generation is a non-event, ADR 0014). Regenerate re-posts the
+// same description; the constrained schema + expand-validate + one-click
+// regenerate makes a miss recoverable, not a broken apply.
+type GenerateInvalidResponse struct {
+	// Error is the client-safe headline ("the generated config was not valid").
+	Error string `json:"error"`
+	// Reason is the expand validation/parse message (which field was wrong).
+	Reason string `json:"reason"`
+	// AgentYAML is the RAW model output (unvalidated) so the UI can show what the
+	// model produced and offer regenerate. It is not applied and not previewed.
+	AgentYAML string `json:"agentYAML"`
+	// Model / Provider identify the generation source (for the regenerate note).
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	// Regenerate signals the UI to surface the regenerate affordance (always true
+	// on this response — a stable flag the SPA keys off without status-code sniffing).
+	Regenerate bool `json:"regenerate"`
+}
+
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil

@@ -200,7 +200,7 @@ func parseConnectRequest(raw []byte) (ConnectProviderRequest, *createError) {
 		return req, &createError{status: http.StatusBadRequest, msg: "provider is required"}
 	}
 	if strings.TrimSpace(req.APIKey) == "" {
-		return req, &createError{status: http.StatusBadRequest, msg: "apiKey is required"}
+		return req, &createError{status: http.StatusBadRequest, msg: msgAPIKeyRequired}
 	}
 	return req, nil
 }

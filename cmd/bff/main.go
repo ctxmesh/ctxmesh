@@ -114,15 +114,26 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("provider-connect disabled by PROVIDER_CONNECT_ENABLED=false; /api/providers routes serve 404")
 	}
 
+	// The create-from-prompt platform generation-model pin (ADR 0014). Empty (the
+	// default) → generation uses the caller's connected-provider model unpinned. An
+	// operator that wants a governed generation model sets a comma-separated list
+	// (PLATFORM_GENERATION_MODELS) — the UI's model dropdown source and the allowed
+	// set the generate endpoint enforces.
+	platformGenModels := parseGenerationModels(os.Getenv("PLATFORM_GENERATION_MODELS"))
+	if len(platformGenModels) > 0 {
+		log.Info("platform generation models pinned", "models", platformGenModels)
+	}
+
 	srv := bff.NewServer(bff.Options{
-		CallerClients:   callerClients,
-		Scheme:          scheme,
-		Auth:            bff.BearerAuthenticator{},
-		Adapters:        adapters,
-		Version:         version,
-		StaticDir:       staticDir,
-		ProviderConnect: providerConnect,
-		Log:             ctrl.Log.WithName("bff.server"),
+		CallerClients:            callerClients,
+		Scheme:                   scheme,
+		Auth:                     bff.BearerAuthenticator{},
+		Adapters:                 adapters,
+		Version:                  version,
+		StaticDir:                staticDir,
+		ProviderConnect:          providerConnect,
+		PlatformGenerationModels: platformGenModels,
+		Log:                      ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{
@@ -167,6 +178,20 @@ func providerConnectEnabled(raw string) bool {
 	default:
 		return true
 	}
+}
+
+// parseGenerationModels splits the PLATFORM_GENERATION_MODELS env (a
+// comma-separated list) into the pinned generation-model list (ADR 0014). Empty
+// or whitespace-only entries are dropped; an empty env → nil (unpinned — the
+// default). Kept permissive so a fresh install needs no extra config.
+func parseGenerationModels(raw string) []string {
+	var out []string
+	for m := range strings.SplitSeq(raw, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // buildAdapters constructs the optional server-side adapters from environment
