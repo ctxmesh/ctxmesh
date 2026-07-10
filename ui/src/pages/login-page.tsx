@@ -24,12 +24,32 @@ interface FromState {
   from?: { pathname?: string; search?: string; hash?: string };
 }
 
+// returnPath resolves the post-login destination from the location state the
+// auth guard captured — but ONLY if it is a same-origin, in-app path. This is a
+// SECURITY boundary: a hostile `from` (e.g. a crafted link that lands the user
+// on /login carrying `from.pathname = "//evil.com/steal"` or an absolute
+// "https://evil.com") must never become the navigate() target, or a valid login
+// would bounce the user off-origin — a classic post-login open-redirect /
+// phishing primitive on the trusted origin. (Especially important before the
+// M18 OIDC redirect flows.)
+//
+// The whole composed target (pathname + search + hash) is validated, not just
+// the pathname, so nothing slips in through search/hash. An in-app path must
+// start with exactly one "/" and not a second (which would be protocol-relative
+// "//host") — enforced by /^\/(?!\/)/. Anything else falls back to "/".
 function returnPath(state: unknown): string {
   const from = (state as FromState | null)?.from;
-  if (from?.pathname) {
-    return `${from.pathname}${from.search ?? ""}${from.hash ?? ""}`;
+  if (!from?.pathname) return "/";
+
+  const target = `${from.pathname}${from.search ?? ""}${from.hash ?? ""}`;
+
+  // Must be a single-slash-rooted in-app path: starts with "/" but not "//"
+  // (protocol-relative) and is not an absolute URL. Reject backslashes too
+  // (some UAs treat "\" as "/", so "/\evil.com" could be coerced off-origin).
+  if (!/^\/(?!\/)/.test(target) || target.includes("\\")) {
+    return "/";
   }
-  return "/";
+  return target;
 }
 
 export function LoginPage() {
