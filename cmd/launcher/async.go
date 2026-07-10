@@ -30,9 +30,15 @@ package main
 //  4. invokes the agent (the user container) with the envelope's payload;
 //  5. emits an a2a.async.consume span recording the dedupe hit/miss.
 //
-// FAIL-OPEN: if the dedupe store is unreachable the message is PROCESSED (a rare
-// double-process is safer than dropping — at-least-once is the contract,
-// §"Edge cases"). The seen-set is best-effort, exactly like the M5 memory path.
+// FAIL-CLOSED (M11, resolves M7 deferral — specs/trace-governance-security.md
+// §"Eventing dedupe fail-open → fail-closed"): if the dedupe store is
+// unreachable or the per-op timeout fires, the message is NOT processed — the
+// consumer NACKs (non-2xx) so the broker retries. A transient Valkey blip means
+// the retry's dedupe check succeeds and the message processes exactly once; a
+// persistent outage lets the broker's bounded retry schedule exhaust and land the
+// message in the per-registry DLQ (M7 machinery, no new loop here). This
+// prevents a dedupe-store blip from causing double-processing, which is the M11
+// security posture: dedupe uncertainty → reject/retry, not process.
 //
 // The publisher (publishEnvelope) is the producer side: it encodes an envelope
 // as a CloudEvent and POSTs it to the registry broker — enough for the e2e (and
@@ -67,8 +73,8 @@ const (
 	dedupeTTL = 10 * time.Minute
 
 	// dedupeOpTimeout bounds a single seen-set round-trip. A slow/hung Valkey
-	// must never wedge the consume path beyond this — on timeout we fail OPEN
-	// (process) rather than block, matching the memory endpoint's per-op bound.
+	// must never wedge the consume path beyond this — on timeout we fail CLOSED
+	// (NACK) rather than block, consistent with the M11 fail-closed posture.
 	dedupeOpTimeout = 2 * time.Second
 
 	// dedupeKeyPrefix namespaces the seen-set keys so they never collide with the
@@ -90,7 +96,7 @@ type SeenSet interface {
 	// reports whether this was the FIRST sighting: true ⇒ first-seen (process),
 	// false ⇒ already seen within the window (duplicate — ack without
 	// re-invoking). An error means the store is unreachable; the caller MUST
-	// fail open (treat as first-seen).
+	// fail closed (NACK — do not process, let the broker retry).
 	MarkSeen(ctx context.Context, messageID string, ttl time.Duration) (bool, error)
 }
 
@@ -175,15 +181,19 @@ func isCloudEventRequest(r *http.Request) bool {
 }
 
 // consume is the async-consume handler. It decodes the CloudEvent → envelope,
-// dedupes on messageId (fail-open), invokes the agent on a miss, and acks. It is
-// wired into the proxy for CloudEvent-shaped POSTs (buildHandler), so an eventing
-// agent's Trigger delivery lands here while an ordinary /invoke is unaffected.
+// dedupes on messageId (fail-closed), invokes the agent on a miss, and acks. It
+// is wired into the proxy for CloudEvent-shaped POSTs (buildHandler), so an
+// eventing agent's Trigger delivery lands here while an ordinary /invoke is
+// unaffected.
 //
 // Ack semantics (Knative Eventing at-least-once): a 2xx acks the event (the
 // broker drops it); a non-2xx is a NACK (the broker retries, then DLQs after the
 // retry budget). A DUPLICATE is acked (2xx, no re-invoke) — it has already been
 // processed. A decode failure is a 400 (a malformed event the broker should not
-// retry endlessly — it will DLQ). An agent FAILURE is a 502 NACK (retry/DLQ).
+// retry endlessly — it will DLQ). An agent FAILURE is a 502 NACK (retry/DLQ). A
+// DEDUPE-STORE ERROR is a 503 NACK (fail-closed: broker retries; on a transient
+// blip the retry's dedupe check succeeds → exactly-once; persistent outage →
+// bounded retries exhaust → DLQ, no infinite block).
 func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	ctx, span := c.tracer.Start(r.Context(), "a2a.async.consume",
 		trace.WithSpanKind(trace.SpanKindConsumer))
@@ -221,9 +231,20 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 		attribute.String("a2a.conversation.id", env.ConversationID),
 	)
 
-	// Dedupe on messageId (fail-open). firstSeen==false ⇒ a duplicate already
-	// processed within the TTL: ack (204) without re-invoking the agent.
-	firstSeen := c.markSeen(ctx, span, env.MessageID)
+	// Dedupe on messageId (fail-closed, M11). Three outcomes from markSeen:
+	//   (true, nil)  — first-seen: proceed to invoke.
+	//   (false, nil) — duplicate within the TTL: ack (204) without re-invoking.
+	//   (_, err)     — dedupe-store error/timeout: NACK (503) so the broker
+	//                  retries; a transient blip means the retry succeeds →
+	//                  exactly-once; persistent outage → DLQ (M7 machinery).
+	firstSeen, seenErr := c.markSeen(ctx, span, env.MessageID)
+	if seenErr != nil {
+		// Fail-closed: do NOT process — NACK so the broker retries.
+		span.SetStatus(codes.Error, "dedupe store error: "+seenErr.Error())
+		span.SetAttributes(attribute.Bool("a2a.dedup_fail_closed", true))
+		writeJSONError(w, http.StatusServiceUnavailable, "dedupe store unavailable: "+seenErr.Error())
+		return
+	}
 	if !firstSeen {
 		span.SetAttributes(attribute.Bool("a2a.dedup_hit", true))
 		span.AddEvent("a2a.async.dedup_hit")
@@ -284,30 +305,31 @@ func (c *asyncConsumer) consume(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// markSeen consults the seen-set for messageID and returns whether this is the
-// first sighting. It FAILS OPEN: a nil store (dedupe disabled) or an
-// unreachable/erroring store yields true (first-seen ⇒ process), because
-// at-least-once is the contract and a rare double-process beats dropping a
-// message (specs/eventing-scaling.md §"Edge cases"). A fail-open is recorded on
-// the span so the operator can see the dedupe was skipped.
-func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID string) bool {
+// markSeen consults the seen-set for messageID and returns (firstSeen, err).
+// A nil store (dedupe disabled) yields (true, nil) — treat every message as
+// first-seen when there is no store to consult. An error from the store (Valkey
+// unreachable, per-op timeout) is returned as-is so the caller can FAIL CLOSED
+// (NACK — do not process), preventing a dedupe-store blip from causing
+// double-processing (M11, resolves M7 deferral). The error and the fail-closed
+// decision are recorded on the span for observability.
+func (c *asyncConsumer) markSeen(ctx context.Context, span trace.Span, messageID string) (bool, error) {
 	if c.seen == nil {
 		span.SetAttributes(attribute.Bool("a2a.dedup_enabled", false))
-		return true
+		return true, nil
 	}
 	opCtx, cancel := context.WithTimeout(ctx, dedupeOpTimeout)
 	defer cancel()
 
 	firstSeen, err := c.seen.MarkSeen(opCtx, messageID, dedupeTTL)
 	if err != nil {
-		// Fail OPEN: process the message. Record the fail-open so it is visible.
-		span.SetAttributes(attribute.Bool("a2a.dedup_fail_open", true))
-		span.AddEvent("a2a.async.dedup_fail_open", trace.WithAttributes(
+		// Fail CLOSED: surface the error so consume NACKs. Record it on the span
+		// so the operator can observe the fail-closed decision and error detail.
+		span.AddEvent("a2a.async.dedup_fail_closed", trace.WithAttributes(
 			attribute.String("error", err.Error()),
 		))
-		return true
+		return false, err
 	}
-	return firstSeen
+	return firstSeen, nil
 }
 
 // newProxyInvoker builds the production invoke func: it POSTs the envelope's
