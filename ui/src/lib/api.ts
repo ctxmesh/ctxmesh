@@ -1,12 +1,26 @@
 // Typed client for the Go BFF. The SPA is served same-origin by the BFF, so all
-// requests are relative "/api/*" — the browser never holds K8s/Langfuse creds;
-// the BFF injects them server-side (ADR 0010). Auth is carried by the browser's
-// session (the M11 control-plane auth in front of the BFF); nothing is added
-// here.
+// requests are relative "/api/*" (ADR 0010). The browser never holds
+// K8s/Langfuse creds for the BFF's OWN work — but per ADR 0012 the browser DOES
+// hold the CALLER'S bearer token (the token login) and attaches it as
+// `Authorization: Bearer <token>` on every same-origin /api/* request, so the
+// BFF forwards it to the K8s API (ADR 0011: the caller's own RBAC enforces).
+//
+// The session token comes from lib/session.ts via a tiny provider seam (set once
+// at boot) so this module has no static import of the session store — that keeps
+// the import graph acyclic (session.ts imports whoami() from here). A 401 on any
+// authenticated request (a token that expired mid-session) routes to login via a
+// registered handler, distinct from a login-validation 401 (see below).
 
 export interface HealthResponse {
   status: string;
   version: string;
+}
+
+// WhoAmI mirrors the BFF's WhoAmIResponse (internal/bff/dto.go): the caller's
+// identity from a SelfSubjectReview. `groups` is never null on the wire.
+export interface WhoAmI {
+  username: string;
+  groups: string[];
 }
 
 // Mirrors the BFF's AgentSummary DTO (internal/bff): the SPA gets a flat,
@@ -142,6 +156,40 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+
+  /** True for an authorization failure — RBAC denied (ADR 0011). Callers render
+   *  ForbiddenInline rather than a generic error. */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
+
+  /** True for an authentication failure — the token is missing/expired/invalid.
+   *  Mid-session, api.ts clears the session and routes to login; a login-
+   *  validation 401 is surfaced to the login page instead. */
+  get isUnauthorized(): boolean {
+    return this.status === 401;
+  }
+}
+
+// --- Session seam -----------------------------------------------------------
+// api.ts must attach the caller's bearer token and react to a 401, but must NOT
+// statically import lib/session.ts (session.ts imports whoami() from here — a
+// static cycle). Instead the app registers two small providers at boot: a token
+// source, and a "session expired" handler that clears the session + routes to
+// login preserving the return path. Until registered, requests are anonymous and
+// a 401 is just a normal ApiError (the pre-login state, and the test default).
+
+let tokenProvider: () => string | null = () => null;
+let onSessionExpired: (() => void) | null = null;
+
+/** Register how api.ts reads the current bearer token (from lib/session.ts). */
+export function setTokenProvider(fn: () => string | null): void {
+  tokenProvider = fn;
+}
+
+/** Register the mid-session-401 handler (clear session + redirect to login). */
+export function setSessionExpiredHandler(fn: () => void): void {
+  onSessionExpired = fn;
 }
 
 // errorMessage extracts the BFF's JSON {"error": "..."} body when present, so a
@@ -156,20 +204,90 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    headers: { Accept: "application/json" },
-    signal,
-  });
+// RequestExtras lets a caller override the token (login-validation, which runs
+// BEFORE a session exists) and mark a call as a login-validation call so a 401 is
+// NOT treated as a session expiry (it's a wrong-token login error the login page
+// handles itself). Everything else is a normal same-origin /api/* request.
+interface RequestExtras {
+  /** Explicit token for this request (login-validation, before a session). */
+  token?: string;
+  /** This is a login-validation call: a 401 must NOT clear/redirect. */
+  login?: boolean;
+}
+
+// apiFetch is the ONE fetch seam: it attaches Authorization: Bearer for
+// same-origin /api/* requests (never third-party), and on a mid-session 401 it
+// invokes the registered session-expired handler exactly once before rejecting.
+// It never logs the token (the header value is written straight into the request
+// and never read back into a string we log).
+async function apiFetch(
+  path: string,
+  init: RequestInit = {},
+  extras: RequestExtras = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+
+  // Same-origin guard: only relative /api/* paths carry the bearer token, so the
+  // credential never leaks to a third-party origin even if a caller passed an
+  // absolute URL by mistake.
+  if (path.startsWith("/api/")) {
+    const token = extras.token ?? tokenProvider();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+  }
+
+  const res = await fetch(path, { ...init, headers });
+
+  // Mid-session 401 → the live token expired between requests. Clear the session
+  // and route to login (preserving the return path — the handler reads it). A
+  // login-validation 401 (extras.login) is skipped: no session to expire, and the
+  // login page renders the wrong-token error itself.
+  if (res.status === 401 && !extras.login && onSessionExpired) {
+    onSessionExpired();
+  }
+  return res;
+}
+
+async function getJSON<T>(
+  path: string,
+  signal?: AbortSignal,
+  extras?: RequestExtras,
+): Promise<T> {
+  const res = await apiFetch(path, { headers: { Accept: "application/json" }, signal }, extras);
   if (!res.ok) {
-    throw new ApiError(`${path} failed (${res.status})`, res.status);
+    throw new ApiError(
+      await errorMessage(res, `${path} failed (${res.status})`),
+      res.status,
+    );
   }
   return (await res.json()) as T;
+}
+
+// WhoAmIOptions covers the two whoami callers: the session module validating a
+// pasted/persisted token (token supplied, login:true → a 401 is a login error,
+// not a session expiry) and, in principle, a re-check with the live session.
+export interface WhoAmIOptions {
+  token?: string;
+  login?: boolean;
+  signal?: AbortSignal;
+}
+
+// whoami resolves the caller's identity via GET /api/whoami. It is the login
+// validator: a non-200 (typically 401) means the token is bad/expired. When
+// called with {login:true} a 401 does NOT trigger the session-expiry redirect
+// (the caller — session.login()/restore() — decides the outcome).
+export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
+  return getJSON<WhoAmI>("/api/whoami", opts.signal, {
+    token: opts.token,
+    login: opts.login,
+  });
 }
 
 export const api = {
   health: (signal?: AbortSignal) =>
     getJSON<HealthResponse>("/api/health", signal),
+  whoami: (signal?: AbortSignal) => whoami({ signal }),
   listAgents: (signal?: AbortSignal) =>
     getJSON<AgentListResponse>("/api/agents", signal),
   topology: (signal?: AbortSignal) =>
@@ -187,7 +305,7 @@ export const api = {
   // as plain YAML text — the config-builder's read-only preview. A validation
   // failure (400) surfaces the BFF's message via ApiError.
   expand: async (agentYAML: string, signal?: AbortSignal): Promise<string> => {
-    const res = await fetch("/api/expand", {
+    const res = await apiFetch("/api/expand", {
       method: "POST",
       headers: { "Content-Type": "application/yaml" },
       body: agentYAML,
@@ -211,7 +329,7 @@ export const api = {
     namespace: string,
     signal?: AbortSignal,
   ): Promise<CreateAgentResponse> => {
-    const res = await fetch("/api/agents", {
+    const res = await apiFetch("/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agentYAML, namespace }),
@@ -234,7 +352,7 @@ export const api = {
     req: InvokeRequest,
     signal?: AbortSignal,
   ): Promise<InvokeResponse> => {
-    const res = await fetch("/api/invoke", {
+    const res = await apiFetch("/api/invoke", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
