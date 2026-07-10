@@ -126,6 +126,40 @@ describe("LoginPage + auth routing", () => {
     expect(await screen.findByText("AGENTS CONSOLE")).toBeInTheDocument();
   });
 
+  // Open-redirect guard (m13.3 review). A hostile `from` captured into the login
+  // location state must NOT become the post-login navigate() target — a valid
+  // login has to land on a same-origin in-app path, else it's a phishing
+  // primitive on the trusted origin. Both a protocol-relative "//evil.com" and an
+  // absolute "https://evil.com" from must fall back to "/".
+  it.each([
+    ["protocol-relative //evil.com", "//evil.com/steal"],
+    ["absolute https://evil.com", "https://evil.com/steal"],
+    ["backslash-coerced /\\evil.com", "/\\evil.com"],
+  ])("rejects an off-origin login return path (%s) and lands on /", async (_label, pathname) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(whoamiOk()));
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          { pathname: "/login", state: { from: { pathname } } },
+        ]}
+      >
+        <TestApp />
+      </MemoryRouter>,
+    );
+
+    const input = await screen.findByLabelText(/bearer token/i);
+    fireEvent.change(input, { target: { value: "good" } });
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+
+    // Falls back to the in-app root, NOT the hostile /agents or off-origin.
+    expect(await screen.findByText("DASHBOARD CONSOLE")).toBeInTheDocument();
+    expect(screen.queryByText("AGENTS CONSOLE")).toBeNull();
+    // MemoryRouter can't navigate off-origin, but assert the location is the
+    // in-app root — the guard rewrote the hostile target to "/".
+    expect(window.location.href).not.toContain("evil.com");
+  });
+
   it("mid-session 401: an expired token clears the session and redirects to login (return path preserved)", async () => {
     // Boot with a valid persisted token → restore() resolves a live session and
     // the console renders.
