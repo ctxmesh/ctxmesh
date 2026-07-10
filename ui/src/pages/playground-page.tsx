@@ -13,9 +13,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { TraceView } from "@/components/dashboard/trace-view";
 import { api, ApiError, type CreatedObject } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_AGENTS } from "@/lib/nav";
 import {
   emptyForm,
   toAgentYAML,
@@ -39,7 +42,7 @@ type Run =
   | { kind: "idle" }
   | { kind: "running" }
   | { kind: "done"; traceId: string; response: string }
-  | { kind: "error"; message: string; status?: number };
+  | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 // Export is the export-to-CRD lifecycle: expand (preview) → apply. It reuses the
 // config-builder's expand/apply path verbatim (same server-side mapping as the
@@ -50,7 +53,7 @@ type Export =
   | { kind: "preview"; yaml: string; manifest: string }
   | { kind: "applying"; yaml: string; manifest: string }
   | { kind: "applied"; created: CreatedObject[] }
-  | { kind: "error"; message: string; status?: number };
+  | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 export function PlaygroundPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
@@ -59,6 +62,11 @@ export function PlaygroundPage() {
   const [input, setInput] = useState('{\n  "prompt": "Hello, agent"\n}');
   const [run, setRun] = useState<Run>({ kind: "idle" });
   const [exp, setExp] = useState<Export>({ kind: "idle" });
+  // RBAC-aware chrome (§3): running an agent and applying a CRD are both
+  // create-shaped ops; a viewer's affordances are hidden. DISPLAY-ONLY — the API
+  // still enforces, so the 403 paths below stay live even if this is optimistic.
+  const { can, reprobe } = useCapabilities();
+  const canRun = can(RES_AGENTS, "create");
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -91,6 +99,7 @@ export function PlaygroundPage() {
       });
       setRun({ kind: "done", traceId: res.traceId, response: res.response });
     } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
     }
   }
@@ -122,6 +131,7 @@ export function PlaygroundPage() {
       const res = await api.createAgent(yaml, namespace.trim());
       setExp({ kind: "applied", created: res.created });
     } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
       setExp(errorExport(err));
     }
   }
@@ -209,16 +219,38 @@ export function PlaygroundPage() {
               />
             </FormField>
 
-            <div className="flex items-center gap-3 pt-1">
-              <Button onClick={onRun} disabled={running}>
-                <Play className="h-4 w-4" />
-                {running ? "Running…" : "Run agent"}
-              </Button>
-              {run.kind === "error" && (
-                <p className="text-sm text-destructive" role="alert">
-                  {run.message}
-                  {run.status ? ` (${run.status})` : ""}
-                </p>
+            <div className="space-y-3 pt-1">
+              <div className="flex items-center gap-3">
+                {canRun ? (
+                  <Button onClick={onRun} disabled={running}>
+                    <Play className="h-4 w-4" />
+                    {running ? "Running…" : "Run agent"}
+                  </Button>
+                ) : (
+                  // RBAC-aware chrome: a viewer has no Run affordance (running is
+                  // a write-shaped op). They can still Preview/Export below.
+                  <p
+                    className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
+                    data-testid="run-readonly-note"
+                  >
+                    You have read-only access — running an agent requires create
+                    permission on AgentDeployments.
+                  </p>
+                )}
+                {run.kind === "error" && !run.forbidden && (
+                  <p className="text-sm text-destructive" role="alert">
+                    {run.message}
+                    {run.status ? ` (${run.status})` : ""}
+                  </p>
+                )}
+              </div>
+              {run.kind === "error" && run.forbidden && (
+                // A surface-level 403 → the explain-and-suggest 403 primitive.
+                <ForbiddenInline
+                  title="Not allowed to run this agent"
+                  description="Your account can't invoke agents in this cluster."
+                  detail={run.message}
+                />
               )}
             </div>
           </CardContent>
@@ -323,20 +355,32 @@ export function PlaygroundPage() {
                 }
                 placeholder="Press “Preview CRD” to see the generated manifest."
               />
-              {exp.kind === "error" && (
-                <p className="text-sm text-destructive" role="alert">
-                  {exp.message}
-                  {exp.status ? ` (${exp.status})` : ""}
-                </p>
+              {exp.kind === "error" && exp.forbidden ? (
+                <ForbiddenInline
+                  title="Not allowed to apply"
+                  description="Your account can preview the manifest but can't create AgentDeployments in this cluster."
+                  detail={exp.message}
+                />
+              ) : (
+                exp.kind === "error" && (
+                  <p className="text-sm text-destructive" role="alert">
+                    {exp.message}
+                    {exp.status ? ` (${exp.status})` : ""}
+                  </p>
+                )
               )}
               <div className="flex items-center gap-3">
                 <Button onClick={onPreview} disabled={exporting} variant="outline">
                   {exp.kind === "previewing" ? "Expanding…" : "Preview CRD"}
                 </Button>
-                <Button onClick={onApply} disabled={exp.kind !== "preview"}>
-                  <Rocket className="h-4 w-4" />
-                  {exp.kind === "applying" ? "Applying…" : "Apply to cluster"}
-                </Button>
+                {/* Apply is a WRITE affordance — hidden for a viewer (Preview
+                    stays available so they can still inspect the CRD). */}
+                {canRun && (
+                  <Button onClick={onApply} disabled={exp.kind !== "preview"}>
+                    <Rocket className="h-4 w-4" />
+                    {exp.kind === "applying" ? "Applying…" : "Apply to cluster"}
+                  </Button>
+                )}
               </div>
             </>
           )}
@@ -351,14 +395,14 @@ export function PlaygroundPage() {
 // reason (e.g. a 403 RBAC denial, a 409 not-ready).
 function errorRun(err: unknown): Run {
   if (err instanceof ApiError) {
-    return { kind: "error", message: err.message, status: err.status };
+    return { kind: "error", message: err.message, status: err.status, forbidden: err.isForbidden };
   }
   return { kind: "error", message: err instanceof Error ? err.message : "request failed" };
 }
 
 function errorExport(err: unknown): Export {
   if (err instanceof ApiError) {
-    return { kind: "error", message: err.message, status: err.status };
+    return { kind: "error", message: err.message, status: err.status, forbidden: err.isForbidden };
   }
   return { kind: "error", message: err instanceof Error ? err.message : "request failed" };
 }
