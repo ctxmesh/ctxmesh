@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // PromQL the dashboard cost/usage view runs through the Prometheus adapter. The
@@ -37,6 +39,14 @@ const (
 // defaultRunLimit bounds GET /api/runs when the caller passes no ?limit.
 const defaultRunLimit = 20
 
+// The list-contract page bounds (ui-foundation §4) applied to GET /api/agents:
+// ?limit defaults to defaultListLimit and is capped at maxListLimit so a single
+// request can never ask the API server for an unbounded page.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 200
+)
+
 // handleHealth serves GET /api/health — a liveness + version probe. It needs no
 // cluster access, so it works even before the SPA is authenticated (the SPA
 // dashboard renders it to prove the BFF seam).
@@ -52,14 +62,49 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // caller's own RBAC permits: the K8s API server, not the BFF, decides what the
 // caller may see. The caller's token stays server-side (it authenticates the
 // per-request client); the browser only receives the flat summaries. An empty
-// (or fully-filtered) result yields {"agents":[]} — a valid "no agents" state.
-// A K8s Forbidden on the list surfaces as 403, never swallowed as an empty list.
+// (or fully-filtered) result yields {"agents":[],"items":[],"nextCursor":""} — a
+// valid "no agents" state. A K8s Forbidden on the list surfaces as 403, never
+// swallowed as an empty list.
+//
+// It implements the console's list contract (ui-foundation §4):
+//
+//   - ?limit=<n>  — page size, default defaultListLimit, capped at maxListLimit;
+//     mapped to the K8s native `limit` so the API server returns one page.
+//   - ?cursor=<c> — the opaque K8s `continue` token from a prior page, passed
+//     through verbatim as client.Continue (we only validate it is non-empty
+//     before using it; the API server validates its contents).
+//   - ?namespace=<ns> — scopes the list to one namespace; empty = every
+//     namespace the caller's RBAC permits (cluster-wide list).
+//   - ?q=<substr> — a case-insensitive substring filter on the agent NAME.
+//
+// WINDOWED q (honesty, per the spec): Kubernetes has no server-side substring
+// search, so q is applied by the BFF to the FETCHED WINDOW only — the single page
+// the API server returned for this limit/cursor. It is a page filter, not a
+// cluster-wide search: a match on a later page is only found once the caller
+// pages to it. This is deliberate — looping to fetch the whole cluster to satisfy
+// q would let a 10k-agent cluster OOM the BFF. The SPA labels q as "filter".
+// nextCursor is the API server's continue token for the raw page (independent of
+// q), so paging is honest even while q hides some rows in the current window.
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
 	}
-	list, err := listAgentDeployments(r.Context(), caller)
+
+	limit := parseListLimit(r.URL.Query().Get("limit"))
+	cursor := r.URL.Query().Get("cursor")
+	namespace := r.URL.Query().Get("namespace")
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+
+	opts := []client.ListOption{client.Limit(int64(limit))}
+	if cursor != "" {
+		opts = append(opts, client.Continue(cursor))
+	}
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+
+	list, err := listAgentDeployments(r.Context(), caller, opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -70,12 +115,41 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-nil slice so the JSON is [] rather than null for zero agents.
+	// Non-nil slice so the JSON is [] rather than null for zero agents. q filters
+	// only this fetched window (see the handler doc): a case-insensitive substring
+	// match on the name.
 	summaries := make([]AgentSummary, 0, len(list.Items))
 	for i := range list.Items {
-		summaries = append(summaries, newAgentSummary(&list.Items[i]))
+		summary := newAgentSummary(&list.Items[i])
+		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
+			continue
+		}
+		summaries = append(summaries, summary)
 	}
-	writeJSON(w, http.StatusOK, AgentListResponse{Agents: summaries})
+
+	writeJSON(w, http.StatusOK, AgentListResponse{
+		Agents:     summaries,
+		Items:      summaries,
+		NextCursor: list.Continue,
+	})
+}
+
+// parseListLimit resolves the ?limit query value to a page size within the
+// contract bounds: a missing/invalid/non-positive value → defaultListLimit; any
+// value above maxListLimit is clamped down. This is the one place the page bound
+// is enforced so no request can ask the API server for an unbounded page.
+func parseListLimit(raw string) int {
+	if raw == "" {
+		return defaultListLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultListLimit
+	}
+	if n > maxListLimit {
+		return maxListLimit
+	}
+	return n
 }
 
 // handleTopology serves GET /api/topology — the live graph the dashboard's

@@ -31,6 +31,10 @@ import (
 // build time.
 const defaultVersion = "dev"
 
+// indexHTML is the SPA entrypoint filename in the static build (dist/). Named
+// once so the fallback path and the direct read reference the same literal.
+const indexHTML = "index.html"
+
 // Server is the BFF HTTP server: it serves the static SPA build and the /api
 // surface (behind the M11 auth). It composes narrow seams (a CallerClientFactory
 // that mints a per-request caller-scoped client-go client, an Authenticator for
@@ -117,6 +121,14 @@ func (s *Server) Handler() http.Handler {
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
+		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
+		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
+		// is a caller-scoped list. Gated on the same factor as the CRD routes: nil
+		// factory → 501, never a fallback to the BFF SA.
+		authed.HandleFunc("GET /api/whoami", s.handleWhoAmI)
+		authed.HandleFunc("GET /api/capabilities", s.handleCapabilities)
+		authed.HandleFunc("GET /api/namespaces", s.handleNamespaces)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
 		} else {
@@ -125,6 +137,9 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
+		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
+		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
+		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 	}
 
@@ -174,20 +189,82 @@ func (s *Server) Handler() http.Handler {
 	return root
 }
 
+// contentSecurityPolicy is the strict CSP served with the SPA (ADR 0012).
+// sessionStorage holds the caller's bearer token, so an XSS foothold could
+// exfiltrate it; the CSP is the primary mitigation (alongside short-TTL tokens).
+// Each directive is deliberately minimal — only what the Vite build genuinely
+// needs (the built index.html loads a same-origin module script + a same-origin
+// stylesheet from /assets; no third-party origins, no inline <script>). Why each
+// directive exists:
+//
+//	default-src 'self'      deny everything by default; only same-origin, which
+//	                        alone blocks third-party script/connect/img/etc.
+//	script-src 'self'       the bundle is same-origin /assets/*.js only; NO
+//	                        'unsafe-inline'/'unsafe-eval' — inline scripts and
+//	                        eval are forbidden (the strongest anti-XSS lever).
+//	style-src 'self' 'unsafe-inline'
+//	                        same-origin CSS + inline style ATTRIBUTES, which
+//	                        React emits for style-prop elements (the topology
+//	                        graph positions nodes via element style). No
+//	                        third-party stylesheets. Revisit at OIDC/M18 —
+//	                        a nonce could drop 'unsafe-inline'.
+//	img-src 'self' data:    same-origin images + data: URIs (inline SVG icons /
+//	                        tiny data-URL assets Vite may inline).
+//	font-src 'self'         fonts are same-origin only (none are third-party).
+//	connect-src 'self'      XHR/fetch (the /api/* calls) only to the serving
+//	                        origin — the bearer token can never be POSTed to a
+//	                        third party even if injected script tried.
+//	frame-ancestors 'none'  the console is never framed (clickjacking guard).
+//	base-uri 'self'         a <base> injection can't repoint relative asset URLs.
+//	form-action 'self'      a stolen form can't submit off-origin.
+//	object-src 'none'       no plugins/embeds (legacy XSS vector).
+//
+// It is set on EVERY SPA response (the index document AND the hashed assets),
+// never on /api/* responses (those keep their own headers — the SPA handler is a
+// separate branch of the root mux). Kept as a single const so the value and the
+// unit test reference the exact same string.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; " +
+	"font-src 'self'; " +
+	"connect-src 'self'; " +
+	"frame-ancestors 'none'; " +
+	"base-uri 'self'; " +
+	"form-action 'self'; " +
+	"object-src 'none'"
+
+// setSPASecurityHeaders applies the SPA's security headers to a response. Called
+// on every static/index response (not /api). CSP is the sessionStorage-token XSS
+// mitigation (ADR 0012); the companions are cheap, standard hardening.
+func setSPASecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Security-Policy", contentSecurityPolicy)
+	// Belt-and-braces alongside the CSP frame-ancestors directive (older UAs).
+	h.Set("X-Frame-Options", "DENY")
+	// Don't let the browser MIME-sniff a static asset into an executable type.
+	h.Set("X-Content-Type-Options", "nosniff")
+	// Don't leak the console URL (which may carry a namespace) to third parties.
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
 // spaHandler serves the static Vite build. Requests for real files are served
 // verbatim; any other path (a client-side route like /agents) falls back to
 // index.html so the React router can handle it (SPA history-mode routing).
-// When no static FS is configured, it 404s (api-only mode).
+// When no static FS is configured, it 404s (api-only mode). Every served
+// response carries the strict SPA security headers (CSP et al., ADR 0012).
 func (s *Server) spaHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.static == nil {
 			http.NotFound(w, r)
 			return
 		}
+		// Security headers on every SPA response — the document AND its assets.
+		setSPASecurityHeaders(w)
 		// Clean the request path to a filesystem path (io/fs uses no leading /).
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if name == "" {
-			name = "index.html"
+			name = indexHTML
 		}
 		if f, err := s.static.Open(name); err == nil {
 			// A directory request falls through to index.html (SPA route).
@@ -204,9 +281,10 @@ func (s *Server) spaHandler() http.Handler {
 }
 
 // serveIndex writes dist/index.html (the SPA shell). Used for client-side routes
-// and when the requested asset does not exist on disk.
+// and when the requested asset does not exist on disk. The caller (spaHandler)
+// has already applied the SPA security headers.
 func (s *Server) serveIndex(w http.ResponseWriter) {
-	data, err := fs.ReadFile(s.static, "index.html")
+	data, err := fs.ReadFile(s.static, indexHTML)
 	if err != nil {
 		http.Error(w, "UI not built", http.StatusNotFound)
 		return

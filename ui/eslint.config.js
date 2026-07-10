@@ -37,8 +37,21 @@ export default tseslint.config(
   {
     // shadcn/ui primitives co-locate a component with its cva variants
     // (the canonical shadcn pattern); the react-refresh "components-only
-    // export" rule does not apply to these hand-vendored primitives.
-    files: ["src/components/ui/**/*.{ts,tsx}"],
+    // export" rule does not apply to these hand-vendored primitives. The same
+    // exception covers the scale-primitive kit (components + a co-located hook
+    // like useCommandK / variant maps — m13.1, spec §5), the /design gallery
+    // scaffolding (design-time helpers alongside their wireframe components —
+    // a review-only surface, never hot-reloaded in production), and the RBAC
+    // chrome context providers (m13.5), which by design co-locate a Provider
+    // component with its consumer hooks (useCapabilities/useCan/Can,
+    // useNamespace) — the standard React context pattern.
+    files: [
+      "src/components/ui/**/*.{ts,tsx}",
+      "src/components/kit/**/*.{ts,tsx}",
+      "src/design/**/*.{ts,tsx}",
+      "src/lib/capabilities.tsx",
+      "src/lib/namespace.tsx",
+    ],
     rules: {
       "react-refresh/only-export-components": "off",
     },
