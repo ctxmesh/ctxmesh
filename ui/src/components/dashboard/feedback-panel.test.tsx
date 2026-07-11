@@ -78,14 +78,15 @@ describe("FeedbackPanel (m16.9)", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("renders a calm disabled state on 502 — no error alert", async () => {
+  it("surfaces a 502 (Langfuse wired but upstream failed) as an error, NOT a calm banner", async () => {
+    // A 502 is a real, likely-transient upstream failure — it must be visible,
+    // never silently collapsed into the 501 "not connected" calm state.
     stubFeedback({ error: "bad gateway" }, false, 502);
     render(<FeedbackPanel traceId="t1" />);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("feedback-panel")).toHaveTextContent("unavailable"),
-    );
-    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load feedback scores");
+    expect(screen.queryByTestId("feedback-panel")).not.toHaveTextContent("unavailable");
   });
 
   it("renders an error notice on a non-501/502 failure", async () => {
