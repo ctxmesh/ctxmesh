@@ -202,6 +202,38 @@ func TestOrderSpansDFSDeterminism(t *testing.T) {
 	assert.Equal(t, "c2", out1[3].ID)
 }
 
+// TestOrderSpansDFSCycleVictimDeterminism guards the m16.2-review fix: spans that
+// no root reaches (a pure cycle island) are emitted by the deferred "remaining"
+// pass, which MUST sort by (StartMs, id) — the same order as roots/children — so
+// the output is identical regardless of the input slice's order. Before the fix
+// the remaining pass emitted in input order, so a permuted input reordered them.
+func TestOrderSpansDFSCycleVictimDeterminism(t *testing.T) {
+	// A pure 3-node cycle island (a→c→b→a): none is parentless or has a missing
+	// parent, so NONE is a root — all three fall through to the remaining pass.
+	a := span("a", "c", 5)
+	b := span("b", "a", 5)
+	c := span("c", "b", 5)
+
+	out1, root1 := orderSpansDFS([]SpanSummary{a, b, c})
+	out2, root2 := orderSpansDFS([]SpanSummary{c, b, a}) // permuted input
+
+	require.Len(t, out1, 3)
+	require.Len(t, out2, 3)
+	for i := range out1 {
+		assert.Equal(t, out1[i].ID, out2[i].ID, "cycle-victim position %d must be stable across input permutations", i)
+	}
+	// Deterministic (StartMs, id) order: all StartMs 5 → id a < b < c.
+	assert.Equal(t, "a", out1[0].ID)
+	assert.Equal(t, "b", out1[1].ID)
+	assert.Equal(t, "c", out1[2].ID)
+	for _, s := range out1 {
+		assert.Equal(t, 0, s.NestingDepth, "cycle victims attach at depth 0")
+	}
+	// No root reaches them → rootID is empty and stable across permutations.
+	assert.Equal(t, "", root1)
+	assert.Equal(t, "", root2)
+}
+
 // TestOrderSpansDFSInputUnmodified: the function must not modify the input slice.
 func TestOrderSpansDFSInputUnmodified(t *testing.T) {
 	root := span("root", "", 0)

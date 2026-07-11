@@ -599,14 +599,12 @@ func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
 	// depth 0.
 	ordered = make([]SpanSummary, 0, len(spans))
 	visited := make(map[string]bool, len(spans))
-	deferred := make([]int, 0) // indices of cycle-involved spans
 
 	var dfs func(idx int, depth int)
 	dfs = func(idx int, depth int) {
 		s := spans[idx]
 		if visited[s.ID] {
 			// Already emitted — this is a cycle; skip to avoid an infinite loop.
-			// The span was already emitted or will be deferred.
 			return
 		}
 		visited[s.ID] = true
@@ -614,11 +612,10 @@ func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
 		ordered = append(ordered, s)
 
 		for _, childIdx := range children[s.ID] {
-			childID := spans[childIdx].ID
-			if visited[childID] {
-				// Cycle detected: child is already in the output or being visited.
-				// The child will be emitted via the deferred pass, not here.
-				deferred = append(deferred, childIdx)
+			if visited[spans[childIdx].ID] {
+				// Cycle: the child is already in the output. Skip; any span that
+				// never gets visited via a root is caught by the deterministic
+				// remaining-pass below.
 				continue
 			}
 			dfs(childIdx, depth+1)
@@ -630,23 +627,26 @@ func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
 		dfs(ri, 0)
 	}
 
-	// Emit any spans not yet visited (orphaned by cycles or missing from tree due
-	// to all their ancestors being cycles). Sort for determinism.
+	// Emit any spans not yet visited (orphaned by cycles, or whose ancestors are
+	// all cycle victims). Sort by (StartMs, id) — the SAME order used for roots and
+	// children — so cycle-victim emission is deterministic regardless of the input
+	// slice's order (a re-fetched/permuted trace yields identical output).
+	remaining := make([]int, 0)
 	for i := range spans {
 		if !visited[spans[i].ID] {
-			deferred = append(deferred, i)
+			remaining = append(remaining, i)
 		}
 	}
-	// Deduplicate deferred list (cycle detection may have added indices twice).
-	seen := make(map[int]bool, len(deferred))
-	for _, di := range deferred {
-		if !seen[di] && !visited[spans[di].ID] {
-			seen[di] = true
-			s := spans[di]
-			s.NestingDepth = 0
-			visited[s.ID] = true
-			ordered = append(ordered, s)
+	sortByStartID(remaining)
+	for _, di := range remaining {
+		if visited[spans[di].ID] {
+			// A duplicate id already emitted by an earlier remaining entry.
+			continue
 		}
+		s := spans[di]
+		s.NestingDepth = 0
+		visited[s.ID] = true
+		ordered = append(ordered, s)
 	}
 
 	return ordered, rootID
