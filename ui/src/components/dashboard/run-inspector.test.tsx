@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { RunInspector } from "@/components/dashboard/run-inspector";
 import type { SpanSummary } from "@/lib/api";
@@ -56,7 +57,7 @@ afterEach(() => {
 describe("RunInspector (native summary from flat spans)", () => {
   it("builds the tree — a tool span nested under a generation, tokens/cost visible", async () => {
     stubTrace(SPANS);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     // The tool span row renders.
     const toolRow = await screen.findByTestId("span-row-tool");
     expect(toolRow).toHaveTextContent("get_invoice");
@@ -77,7 +78,7 @@ describe("RunInspector (native summary from flat spans)", () => {
 
   it("shows a generation's model + tokens when selected", async () => {
     stubTrace(SPANS);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     fireEvent.click(await screen.findByTestId("span-row-gen"));
     const detail = screen.getByTestId("span-detail");
     expect(detail).toHaveTextContent("claude-sonnet-4");
@@ -86,7 +87,7 @@ describe("RunInspector (native summary from flat spans)", () => {
 
   it("renders a redacted marker over a redacted span — never a blank or a leak", async () => {
     stubTrace(SPANS);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     fireEvent.click(await screen.findByTestId("span-row-redacted"));
     const detail = screen.getByTestId("span-detail");
     // The redacted markers are present; no raw input/output pre blocks.
@@ -97,7 +98,7 @@ describe("RunInspector (native summary from flat spans)", () => {
 
   it("shows the error dot for a status:error span", async () => {
     stubTrace(SPANS);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     await screen.findByTestId("span-row-err");
     expect(screen.getByTestId("span-error-dot-err")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("span-row-err"));
@@ -106,7 +107,7 @@ describe("RunInspector (native summary from flat spans)", () => {
 
   it("keeps Langfuse as a link-out (not the primary surface)", async () => {
     stubTrace(SPANS);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     const link = await screen.findByTestId("open-in-langfuse");
     expect(link).toHaveAttribute("href", "https://lf/trace/t1");
     expect(link).toHaveAttribute("target", "_blank");
@@ -114,7 +115,7 @@ describe("RunInspector (native summary from flat spans)", () => {
 
   it("a 403 renders ForbiddenInline", async () => {
     stubTrace(SPANS, false, 403);
-    render(<RunInspector traceId="t1" />);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
     await waitFor(() =>
       expect(screen.getByText("Not allowed to read this run")).toBeInTheDocument(),
     );
