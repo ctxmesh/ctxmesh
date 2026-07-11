@@ -381,8 +381,32 @@ export interface RunSummary {
   latencyMs: number;
 }
 
+// RunListResponse mirrors the BFF's list-contract DTO for runs (m16.3):
+// `runs` is non-null on the wire ([] not null). `nextCursor` is the opaque
+// pagination token — empty string = list exhausted. Present on the filtered
+// variant; absent/empty on the simple recent-runs call.
 export interface RunListResponse {
   runs: RunSummary[];
+  nextCursor?: string;
+}
+
+// RunsFilteredParams are the query params for GET /api/runs (m16.3):
+//   agent  — ns/name filter (server-side)
+//   from   — ISO8601 start timestamp (server-side)
+//   to     — ISO8601 end timestamp (server-side)
+//   q      — client-side substring filter (BFF filters the loaded page window;
+//            NOTE: q is NOT a server-side substring search — it is page-windowed)
+//   limit  — page size (BFF defaults + caps it)
+//   cursor — opaque continue token from a prior page's nextCursor
+// NOTE: there is NO status filter — status was rejected server-side in m16.3
+// (the Langfuse trace list has no per-trace status).
+export interface RunsFilteredParams {
+  agent?: string;
+  from?: string;
+  to?: string;
+  q?: string;
+  limit?: number;
+  cursor?: string;
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
@@ -1129,6 +1153,41 @@ export const api = {
   cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),
   runs: (signal?: AbortSignal) =>
     getJSON<RunListResponse>("/api/runs", signal),
+
+  // runsFiltered reads one paginated window of runs from the global /api/runs
+  // endpoint (m16.3) with server-side agent/from/to filters + client-side q
+  // (page-windowed substring). Returns null on 501 (Langfuse not configured)
+  // as the calm sentinel — callers render "unavailable", NOT an error. Throws
+  // ApiError on 502 (Langfuse configured but upstream fetch FAILED) — a real,
+  // likely-transient error the UI should surface. This mirrors the 501-calm /
+  // 502-error discipline established for agentRuns and feedback (ADR 0012).
+  runsFiltered: async (
+    params: RunsFilteredParams = {},
+    signal?: AbortSignal,
+  ): Promise<RunListResponse | null> => {
+    const qs = new URLSearchParams();
+    if (params.agent) qs.set("agent", params.agent);
+    if (params.from) qs.set("from", params.from);
+    if (params.to) qs.set("to", params.to);
+    if (params.q) qs.set("q", params.q);
+    if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    const res = await apiFetch(
+      `/api/runs${suffix}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = Langfuse not configured — calm null sentinel (not an error).
+    // 502 = Langfuse configured but upstream fetch failed — real error, throw.
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `runs failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunListResponse;
+  },
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(
       `/api/traces/${encodeURIComponent(traceId)}`,
