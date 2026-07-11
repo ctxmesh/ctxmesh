@@ -446,20 +446,18 @@ func TestFilteredRunsQSubstringClientSide(t *testing.T) {
 // All runs are returned; the test asserts the adapter does not reject a valid
 // status value and that all traces survive (status=error does not drop runs that
 // lack an error flag).
-func TestFilteredRunsStatusNotApplied(t *testing.T) {
-	corpus := []lfTrace{
-		{ID: "t1", Name: "ok-run", Timestamp: "2026-07-01T00:01:00Z"},
-		{ID: "t2", Name: "err-run", Timestamp: "2026-07-01T00:00:00Z"},
-	}
-	srv, _ := fakeLangfuseFiltered(t, corpus)
+func TestFilteredRunsStatusRejected(t *testing.T) {
+	srv, _ := fakeLangfuseFiltered(t, nil)
 	a := newTestLangfuse(t, srv.URL)
 
-	page, err := a.FilteredRuns(context.Background(), RunFilter{Status: "error", Limit: 20})
-	require.NoError(t, err)
-
-	// Both runs survive because status is NOT applied at the list level.
-	require.Len(t, page.Runs, 2,
-		"status filter is not applied at the list level; all traces are returned")
+	// Status is NOT supported on the runs list — rather than silently return
+	// everything (a filter that lies), both "ok" and "error" are rejected with a
+	// teaching ErrBadParam. The UI must not offer a status filter on the list.
+	for _, status := range []string{"ok", "error"} {
+		_, err := a.FilteredRuns(context.Background(), RunFilter{Status: status, Limit: 20})
+		require.Error(t, err, "status=%q must be rejected on the runs list", status)
+		assert.ErrorIs(t, err, ErrBadParam)
+	}
 }
 
 // TestFilteredRunsUnknownStatusErrors: status values other than "", "ok",

@@ -238,18 +238,18 @@ func traceHasTag(t lfTrace, tag string) bool {
 //
 // Client-side filters (applied in-process after the Langfuse response):
 //   - Q         → name substring match (Langfuse `name=` is an exact match;
-//     substring is applied post-fetch so partial names still work)
-//   - Status    → "ok"/"error" (Langfuse traces don't expose a status field at
-//     the list level; derived from observation.level on full detail,
-//     which is NOT available on the list API — omit for now and
-//     document: status filtering is NOT applied; include ALL statuses)
+//     substring is applied post-fetch so partial names still work). Because it
+//     runs AFTER Langfuse paging, a page may come back short and NextCursor is
+//     derived from the unfiltered page count — a caller must not infer "no more
+//     results" from a single short page when Q is set.
 //
-// NOTE on status: the Langfuse /api/public/traces list does not include a top-
-// level error/ok field per trace (only the full detail does). The existing code
-// derives status only when fetching TraceDetail (observation.level). Filtering
-// by status at the list level would require a full-detail fetch per trace —
-// prohibitively expensive. We accept status="" always at the list level and
-// document it honestly. Callers should use status filtering at the UI layer.
+// NOTE on status: NOT supported on the runs list and REJECTED with ErrBadParam.
+// The Langfuse /api/public/traces list carries no per-trace error/ok field (only
+// the full TraceDetail's observation.level does), so list-level status filtering
+// would need a detail fetch per trace — prohibitively expensive and a breach of
+// the metadata-only/bounded contract. Rather than accept the param and silently
+// return everything (a filter that lies), FilteredRuns rejects any non-empty
+// status. Status is inspected on the trace DETAIL, not the runs list.
 type RunFilter struct {
 	// Agent is "namespace/name" (e.g. "default/my-agent"). Empty → no tag filter.
 	Agent string
@@ -271,14 +271,6 @@ type RunFilter struct {
 
 // maxRunLimit caps the page size so one request cannot exhaust Langfuse memory.
 const maxRunLimit = 100
-
-// runStatusError / runStatusOK are the two valid status filter values. They are
-// constants so the goconst linter doesn't flag three string literals of "error"
-// across the switch and error message in FilteredRuns.
-const (
-	runStatusOK    = "ok"
-	runStatusError = "error"
-)
 
 // RunListPage is the paginated result of FilteredRuns.
 type RunListPage struct {
@@ -342,12 +334,14 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 		}
 	}
 
-	// Validate status: only known values pass.
-	switch f.Status {
-	case "", runStatusOK, runStatusError:
-		// allowed
-	default:
-		return RunListPage{}, fmt.Errorf("%w: status must be %q, %q, or empty, got %q", ErrBadParam, runStatusOK, runStatusError, f.Status)
+	// Status filtering is NOT supported on the runs LIST. The Langfuse trace-list
+	// response carries no per-trace status/level (only the full TraceDetail's
+	// observation.level does), so filtering here would need a detail fetch per
+	// trace — prohibitively expensive and a breach of the metadata-only/bounded
+	// contract. Rather than accept the param and silently return everything (a
+	// filter that lies), reject any non-empty status with a teaching error.
+	if f.Status != "" {
+		return RunListPage{}, fmt.Errorf("%w: status filtering is not supported on the runs list (the Langfuse trace list has no per-trace status); filter by status on the trace detail instead", ErrBadParam)
 	}
 
 	q := url.Values{}
