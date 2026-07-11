@@ -446,8 +446,8 @@ export interface RunsFilteredParams {
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
-// The one Langfuse target for a traceId — the embedded iframe src AND the
-// link-out href. Resolved server-side so the SPA never hardcodes a Langfuse URL.
+// The Langfuse link-out target for a traceId — the forensics href resolved
+// server-side so the SPA never hardcodes a Langfuse URL (link-out only, m17.13).
 
 export interface TraceLinkResponse {
   traceId: string;
@@ -559,12 +559,17 @@ export interface DiscoveredTool {
 }
 
 // AddMcpRequest is the POST /api/mcpservers body — a remote URL OR an image, plus
-// an optional bearer key (held only until submit, per ADR 0016).
+// an optional bearer key (held only until submit, per ADR 0016). An OAuth server
+// omits apiKey; the BFF returns 202 + an authorization URL + a state handle (no
+// token exchange happens client-side — the SPA only sees the URL to redirect to).
 export interface AddMcpRequest {
   name: string;
   url?: string;
   image?: string;
   apiKey?: string;
+  // authType: "oauth" signals the BFF to start the OAuth 2.1 flow instead of
+  // immediate probe. The SPA never holds OAuth tokens — only the auth URL + state.
+  authType?: "key" | "oauth";
 }
 
 // AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're
@@ -573,6 +578,33 @@ export interface AddMcpResponse {
   name: string;
   tools: DiscoveredTool[];
   approvalStatus?: "approved" | "pending";
+}
+
+// OAuthInitResponse is the 202 body for an OAuth MCP add: the authorization URL
+// the browser should redirect to, plus the opaque state handle the BFF correlates
+// on callback. The SPA NEVER receives, stores, or displays a token — only this
+// URL + state. The full token exchange happens server-side via the BFF callback.
+export interface OAuthInitResponse {
+  // The authorization URL at the OAuth provider — the browser redirects here.
+  authorizationURL: string;
+  // Opaque state handle the BFF echoes on callback for CSRF protection.
+  state: string;
+}
+
+// McpApproval is one pending MCP server awaiting operator approval
+// (GET /api/mcp/approvals). The operator approves/rejects via
+// POST /api/mcp/approvals/{ns}/{name}[/reject].
+export interface McpApproval {
+  namespace: string;
+  name: string;
+  submittedBy?: string;
+  submittedAt?: string;
+  url?: string;
+  toolCount?: number;
+}
+
+export interface McpApprovalsResponse {
+  approvals: McpApproval[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
@@ -597,6 +629,346 @@ export interface CatalogTool {
 
 export interface ToolListResponse {
   tools: CatalogTool[];
+}
+
+// --- MemoryBinding DTOs (m17.6) -----------------------------------------------
+// A MemoryBinding attaches a memory store (scope) to an AgentDeployment so the
+// agent can read/write long-term memory. The SPA never sees the raw memory data —
+// only the binding's identity + status. One agent may have at most one binding
+// per scope; the controller sets a Ready condition on reconciliation.
+
+export interface MemoryBindingSummary {
+  name: string;
+  namespace: string;
+  /** agentRef.name — the AgentDeployment this binding attaches to. */
+  agentRef: string;
+  /** The memory scope (e.g. "global", "user", or a custom scope name). */
+  scope: string;
+  /** backend is the memory provider (e.g. "redis", "in-cluster"). */
+  backend?: string;
+  ready: boolean;
+}
+
+export interface MemoryBindingDetail {
+  name: string;
+  namespace: string;
+  agentRef: string;
+  scope: string;
+  backend?: string;
+  ready: boolean;
+}
+
+export interface MemoryBindingListResponse {
+  items: MemoryBindingSummary[];
+  nextCursor: string;
+}
+
+export interface MemoryBindingListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface MemoryBindingCreateRequest {
+  name?: string;
+  namespace?: string;
+  /** agentRef.name — the AgentDeployment to attach to. */
+  agentRef: string;
+  scope: string;
+  backend?: string;
+}
+
+export interface MemoryBindingUpdateRequest {
+  scope?: string;
+  backend?: string;
+}
+
+// --- EvalSuite DTOs (m17.7) ---------------------------------------------------
+// An EvalSuite bundles a dataset reference + scorers + a gate/threshold.
+// Results come from GET /api/evalsuites/{ns}/{name}/results. The "honest
+// results" contract: scores are ONLY present when Langfuse is wired
+// (scoresAvailable=true); when absent scoresUnavailableReason explains why.
+// The gate outcome lives in `conditions` (the controller's gate condition).
+// NEVER fabricate scores — surface scoresUnavailableReason calmly.
+
+// EvalCondition mirrors one status.Condition on an EvalSuite result.
+export interface EvalCondition {
+  type: string;
+  // "True" | "False" | "Unknown"
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// EvalScore is one scorer's result — name + value (numeric) or stringValue
+// (categorical). Only present when scoresAvailable=true.
+export interface EvalScore {
+  scorer: string;
+  value?: number;
+  stringValue?: string;
+}
+
+// EvalSuiteResults mirrors GET /api/evalsuites/{ns}/{name}/results. The honest
+// contract: `conditions` is the controller's gate outcome; `scores` is only
+// present when `scoresAvailable=true`; when false, `scoresUnavailableReason`
+// explains why (e.g. "Langfuse not configured"). NEVER fabricate scores.
+export interface EvalSuiteResults {
+  conditions: EvalCondition[];
+  scoresAvailable: boolean;
+  scores?: EvalScore[];
+  scoresUnavailableReason?: string;
+}
+
+export interface EvalSuiteSummary {
+  name: string;
+  namespace: string;
+  /** datasetRef is the reference to the evaluation dataset (name or URI). */
+  datasetRef: string;
+  /** scorers is the list of scorer names to run. */
+  scorers: string[];
+  /** gate/threshold: the pass/fail gate condition name and threshold value. */
+  gate?: string;
+  threshold?: number;
+  ready: boolean;
+}
+
+export interface EvalSuiteDetail {
+  name: string;
+  namespace: string;
+  datasetRef: string;
+  scorers: string[];
+  gate?: string;
+  threshold?: number;
+  ready: boolean;
+}
+
+export interface EvalSuiteListResponse {
+  items: EvalSuiteSummary[];
+  nextCursor: string;
+}
+
+export interface EvalSuiteListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface EvalSuiteCreateRequest {
+  name?: string;
+  namespace?: string;
+  datasetRef: string;
+  scorers: string[];
+  gate?: string;
+  threshold?: number;
+}
+
+export interface EvalSuiteUpdateRequest {
+  datasetRef?: string;
+  scorers?: string[];
+  gate?: string;
+  threshold?: number;
+}
+
+// --- PromptVersion DTOs (m17.8) -----------------------------------------------
+// A PromptVersion pins a named prompt to a version ref. The diff endpoint
+// returns a textual line diff (resolveMode="textual" — ALWAYS explicit).
+// Honest degrade contract:
+//   501 → "prompt resolution not configured" (calm state — NOT an error)
+//   404 → "version/ref not found"
+//   502 → "resolve failed (retry)" — real transient error
+// NEVER fabricate a diff.
+
+// PromptDiffLine is one line in the textual diff.
+export interface PromptDiffLine {
+  // op: "+" added, "-" removed, " " context (unchanged)
+  op: "+" | "-" | " ";
+  content: string;
+}
+
+// PromptDiffResponse mirrors GET /api/promptversions/{ns}/{name}/diff?from=.
+// resolveMode is ALWAYS "textual" (the only supported resolver). lines is the
+// line-level diff. NEVER present when the endpoint errors.
+export interface PromptDiffResponse {
+  resolveMode: "textual";
+  lines: PromptDiffLine[];
+}
+
+export interface PromptVersionSummary {
+  name: string;
+  namespace: string;
+  /** ref is the version identifier (git SHA, semver, tag, etc.). */
+  ref: string;
+  /** promptName is the logical prompt this version belongs to. */
+  promptName: string;
+  createdAt?: string;
+}
+
+export interface PromptVersionDetail {
+  name: string;
+  namespace: string;
+  ref: string;
+  promptName: string;
+  content?: string;
+  createdAt?: string;
+}
+
+export interface PromptVersionListResponse {
+  items: PromptVersionSummary[];
+  nextCursor: string;
+}
+
+export interface PromptVersionListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+  promptName?: string;
+}
+
+export interface PromptVersionCreateRequest {
+  name?: string;
+  namespace?: string;
+  ref: string;
+  promptName: string;
+  content?: string;
+}
+
+export interface PromptVersionUpdateRequest {
+  ref?: string;
+  content?: string;
+}
+
+// --- AgentScalingPolicy DTOs (m17.6) ------------------------------------------
+// An AgentScalingPolicy lets operators attach a custom scaling policy to an agent
+// (min/max replicas + an optional schedule). The controller validates:
+//   • max >= min (XValidation — returns 422 with the reason if violated)
+//   • schedule fields present only when mode == "scheduled" (XValidation)
+// The BFF surfaces 422 with the server's CEL message; the UI renders it in-form.
+
+export interface AgentScalingPolicySummary {
+  name: string;
+  namespace: string;
+  /** agentRef.name — the AgentDeployment this policy attaches to. */
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  /** mode: "static" (no schedule) or "scheduled" (time-based scaling). */
+  mode?: string;
+  /** schedule is a cron expression — only set when mode == "scheduled". */
+  schedule?: string;
+  ready: boolean;
+}
+
+export interface AgentScalingPolicyDetail {
+  name: string;
+  namespace: string;
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  mode?: string;
+  schedule?: string;
+  ready: boolean;
+}
+
+export interface AgentScalingPolicyListResponse {
+  items: AgentScalingPolicySummary[];
+  nextCursor: string;
+}
+
+export interface AgentScalingPolicyListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface AgentScalingPolicyCreateRequest {
+  name?: string;
+  namespace?: string;
+  /** agentRef.name — the AgentDeployment to attach to. */
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  mode?: string;
+  /** schedule is required when mode == "scheduled". */
+  schedule?: string;
+}
+
+export interface AgentScalingPolicyUpdateRequest {
+  minReplicas?: number;
+  maxReplicas?: number;
+  mode?: string;
+  schedule?: string;
+}
+
+// --- MCPToolBinding DTOs (m17.5 / m17.10) ------------------------------------
+// An MCPToolBinding is the controller object that attaches one catalog tool to
+// one AgentDeployment. The controller reconciles it and sets a Ready condition
+// whose status reflects actual propagation — "propagated" (hot-updated live) or
+// the reason it hasn't propagated yet. The SPA NEVER fakes the propagation
+// state: it reads the controller's Ready condition truthfully.
+
+// MCPToolBindingCondition mirrors one status.Condition from the controller.
+export interface MCPToolBindingCondition {
+  type: string;
+  // "True" | "False" | "Unknown"
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// MCPToolBindingSummary is one binding in a list response (minimal projection).
+export interface MCPToolBindingSummary {
+  name: string;
+  namespace: string;
+  agentName: string;
+  agentNamespace: string;
+  toolName: string;
+  ready: boolean;
+}
+
+// MCPToolBindingDetail is the full binding projection including the controller's
+// Ready condition. `propagationStatus` is the BFF's flat projection of the Ready
+// condition: "propagated" (Ready: True) or the reason string (not yet ready,
+// e.g. "Pending", "ToolNotFound"). NEVER faked — it reflects the controller.
+export interface MCPToolBindingDetail {
+  name: string;
+  namespace: string;
+  agentName: string;
+  agentNamespace: string;
+  toolName: string;
+  ready: boolean;
+  // propagationStatus is "propagated" when Ready is True; otherwise the reason
+  // (e.g. "Pending", "ToolApprovalRequired", or the actual failure reason).
+  propagationStatus: string;
+  conditions: MCPToolBindingCondition[];
+}
+
+export interface MCPToolBindingListResponse {
+  items: MCPToolBindingSummary[];
+  nextCursor: string;
+}
+
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The binding
+// attaches `toolName` (from the merged catalog) to `agentRef` (namespace/name).
+// A pending-approval tool is REJECTED by the controller (m17.4 gate) — the UI
+// must disable binding for pending-approval tools before ever calling this.
+export interface MCPToolBindingCreateRequest {
+  name?: string;
+  namespace?: string;
+  agentRef: {
+    namespace: string;
+    name: string;
+  };
+  toolName: string;
+}
+
+// MCPToolBindingListParams are the list-contract query params for bindings.
+export interface MCPToolBindingListParams {
+  limit?: number;
+  cursor?: string;
+  agentName?: string;
+  namespace?: string;
 }
 
 // --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
@@ -1349,6 +1721,87 @@ export const api = {
   addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
     postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
 
+  // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202
+  // + { authorizationURL, state } — the SPA redirects the browser to that URL and
+  // NEVER sees a token (the full exchange happens server-side on callback). A 403
+  // (RBAC) or 404 (kill-switch) surface as a typed ApiError.
+  //
+  // Unlike the key-auth variant (201 → body), this returns the OAuthInitResponse
+  // (202 body) directly. The SPA's only job is to redirect: window.location.href =
+  // result.authorizationURL. The BFF handles the callback at /api/mcp/oauth/callback.
+  addMcpServerOAuth: async (
+    req: AddMcpRequest,
+    signal?: AbortSignal,
+  ): Promise<OAuthInitResponse> => {
+    const res = await apiFetch("/api/mcpservers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    // 202 = OAuth flow initiated — body carries { authorizationURL, state }.
+    // No token is in the response; the SPA only reads the URL to redirect to.
+    if (res.status === 202) {
+      return (await res.json()) as OAuthInitResponse;
+    }
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `addMcpServerOAuth failed (${res.status})`),
+        res.status,
+      );
+    }
+    // A 200/201 means the BFF treated the OAuth request as key-auth (unexpected)
+    // — surface it as a protocol error so the caller doesn't silently mishandle.
+    throw new ApiError("unexpected 2xx status for OAuth initiation (expected 202)", res.status);
+  },
+
+  // mcpApprovals lists the pending MCP servers awaiting operator approval
+  // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
+  // caller can't list approvals (non-operator); a 501 = approval queue not enabled.
+  mcpApprovals: (signal?: AbortSignal) =>
+    getJSON<McpApprovalsResponse>("/api/mcp/approvals", signal),
+
+  // approveMcp approves a pending MCP server (POST /api/mcp/approvals/{ns}/{name}).
+  // Operator-only: a non-operator gets a real 403 from the API (display gating is
+  // additional UX, not the gate). A 404 = the approval is gone (already actioned).
+  approveMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+    const res = await apiFetch(
+      `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `approve failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // rejectMcp rejects (denies) a pending MCP server
+  // (POST /api/mcp/approvals/{ns}/{name}/reject). Same RBAC constraints as approveMcp.
+  rejectMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+    const res = await apiFetch(
+      `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/reject`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `reject failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
   // listTools reads the merged tool catalog (curated ToolRegistry + the caller's
   // BYO-MCP discoveries, m14.6) — the create-agent tool picker's source. A 403
   // is an honest "can't list tools" surfaced via ApiError (the picker degrades
@@ -1774,5 +2227,430 @@ export const api = {
       );
     }
     return (await res.json()) as AgentRunListResponse;
+  },
+
+  // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
+  // listMcpToolBindings reads one page window of MCPToolBindings through the
+  // list contract. Pass agentName/namespace to scope to a single agent.
+  // A 403 surfaces as a typed ApiError (isForbidden).
+  listMcpToolBindings: (
+    params?: MCPToolBindingListParams,
+    signal?: AbortSignal,
+  ): Promise<MCPToolBindingListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.agentName) qs.set("agentName", params.agentName);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<MCPToolBindingListResponse>(`/api/mcptoolbindings${suffix}`, signal);
+  },
+
+  // createMcpToolBinding creates a new MCPToolBinding — attaching a catalog
+  // tool to an agent. The controller reconciles it and sets the Ready condition.
+  // A 403 (viewer-can't-create) or 409 (already exists) surfaces via ApiError.
+  // IMPORTANT: pending-approval tools must NOT be submitted — the m17.4 gate
+  // rejects them server-side and the UI must gate the submit button.
+  createMcpToolBinding: async (
+    req: MCPToolBindingCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<MCPToolBindingDetail> => {
+    const res = await apiFetch("/api/mcptoolbindings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MCPToolBindingDetail;
+  },
+
+  // mcpToolBinding reads one MCPToolBinding's full detail projection including
+  // the controller's Ready condition and propagationStatus. The propagation
+  // status reflects the CONTROLLER'S actual Ready condition — NEVER faked.
+  // A 404 = not-found; a 403 = viewer-can't-read (ForbiddenInline).
+  mcpToolBinding: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<MCPToolBindingDetail>(
+      `/api/mcptoolbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // --- MemoryBinding CRUD (m17.6) -----------------------------------------------
+  // listMemoryBindings reads one page window of MemoryBindings. Pass namespace to
+  // scope to a namespace. Filter by agentRef client-side (the list returns all in
+  // the namespace; callers filter .items by agentRef === agentName).
+  listMemoryBindings: (
+    params?: MemoryBindingListParams,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<MemoryBindingListResponse>(`/api/memorybindings${suffix}`, signal);
+  },
+
+  memoryBindingDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<MemoryBindingDetail>(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createMemoryBinding attaches a memory scope to an agent. A 403 (viewer),
+  // 409 (already exists), or 422 (validation) surfaces via ApiError.
+  createMemoryBinding: async (
+    req: MemoryBindingCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingDetail> => {
+    const res = await apiFetch("/api/memorybindings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MemoryBindingDetail;
+  },
+
+  updateMemoryBinding: async (
+    ns: string,
+    name: string,
+    req: MemoryBindingUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingDetail> => {
+    const res = await apiFetch(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MemoryBindingDetail;
+  },
+
+  removeMemoryBinding: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // --- AgentScalingPolicy CRUD (m17.6) ------------------------------------------
+  // listAgentScalingPolicies reads one page window of AgentScalingPolicies.
+  // Filter client-side by agentRef for the agent detail panel.
+  listAgentScalingPolicies: (
+    params?: AgentScalingPolicyListParams,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<AgentScalingPolicyListResponse>(`/api/agentscalingpolicies${suffix}`, signal);
+  },
+
+  agentScalingPolicyDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentScalingPolicyDetail>(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createAgentScalingPolicy attaches a scaling policy to an agent. A 403
+  // (viewer-can't-create), 409 (already exists), or 422 (XValidation: max<min or
+  // schedule-without-scheduled-mode) surfaces honestly via ApiError.
+  createAgentScalingPolicy: async (
+    req: AgentScalingPolicyCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyDetail> => {
+    const res = await apiFetch("/api/agentscalingpolicies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentScalingPolicyDetail;
+  },
+
+  updateAgentScalingPolicy: async (
+    ns: string,
+    name: string,
+    req: AgentScalingPolicyUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyDetail> => {
+    const res = await apiFetch(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentScalingPolicyDetail;
+  },
+
+  removeAgentScalingPolicy: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // --- EvalSuite CRUD + results (m17.7) ----------------------------------------
+  // listEvalSuites reads one page window of EvalSuites.
+  listEvalSuites: (
+    params?: EvalSuiteListParams,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<EvalSuiteListResponse>(`/api/evalsuites${suffix}`, signal);
+  },
+
+  evalSuiteDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<EvalSuiteDetail>(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createEvalSuite creates a new EvalSuite. A 403 (viewer), 409 (exists), or
+  // 422 (validation) surfaces as ApiError.
+  createEvalSuite: async (
+    req: EvalSuiteCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteDetail> => {
+    const res = await apiFetch("/api/evalsuites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalSuiteDetail;
+  },
+
+  updateEvalSuite: async (
+    ns: string,
+    name: string,
+    req: EvalSuiteUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteDetail> => {
+    const res = await apiFetch(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalSuiteDetail;
+  },
+
+  removeEvalSuite: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // evalSuiteResults reads the honest results for a suite (m17.7). The contract:
+  //   • conditions = controller gate outcome (always present)
+  //   • scores only when scoresAvailable=true (Langfuse wired)
+  //   • when false, scoresUnavailableReason explains calmly — NEVER fabricate
+  // A 404 = no such suite; 403 = can't read. Both surface as ApiError.
+  evalSuiteResults: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<EvalSuiteResults>(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/results`,
+      signal,
+    ),
+
+  // --- PromptVersion CRUD + diff (m17.8) ----------------------------------------
+  // listPromptVersions reads one page window of PromptVersions.
+  listPromptVersions: (
+    params?: PromptVersionListParams,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    if (params?.promptName) qs.set("promptName", params.promptName);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<PromptVersionListResponse>(`/api/promptversions${suffix}`, signal);
+  },
+
+  promptVersionDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<PromptVersionDetail>(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  createPromptVersion: async (
+    req: PromptVersionCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionDetail> => {
+    const res = await apiFetch("/api/promptversions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptVersionDetail;
+  },
+
+  updatePromptVersion: async (
+    ns: string,
+    name: string,
+    req: PromptVersionUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionDetail> => {
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptVersionDetail;
+  },
+
+  removePromptVersion: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // promptVersionDiff fetches the textual line diff between two PromptVersion
+  // refs (m17.8). The honest degrade contract:
+  //   501 → returns null (calm state: "prompt resolution not configured")
+  //   404 → throws ApiError (isNotFound: "version/ref not found")
+  //   502 → throws ApiError ("resolve failed — retry")
+  //   200 → PromptDiffResponse with resolveMode="textual" (ALWAYS explicit)
+  // NEVER fabricate a diff. The null sentinel (501) is for calm degraded UX.
+  promptVersionDiff: async (
+    ns: string,
+    name: string,
+    fromRef: string,
+    signal?: AbortSignal,
+  ): Promise<PromptDiffResponse | null> => {
+    const qs = new URLSearchParams();
+    qs.set("from", fromRef);
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/diff?${qs.toString()}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = no resolver configured — calm null sentinel (NOT an error toast).
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      // 404 = version/ref not found; 502 = resolver failed. Both throw — the
+      // UI renders distinct honest states for each (not fabricated diffs).
+      throw new ApiError(
+        await errorMessage(res, `diff failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptDiffResponse;
   },
 };

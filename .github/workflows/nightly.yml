@@ -251,3 +251,18 @@ jobs:
         # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies —
         # the Langfuse-fed legs skip when the adapter/runs are absent.)
         run: make -C agent-brain/harness tier2 SLICE=m16-ui
+      - name: M17 authoring-depth e2e (OAuth MCP + tool hot-swap + approval queue)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The authoring-depth 🧪 (§28.2/§31, spec authoring-depth-ui): reuses the
+        # M16 bring-up + deploys the OAuth-fixture MCP (harness/fixtures/m17,
+        # OAuth 2.1 authorize/token/refresh, PKCE S256), then drives the deployed
+        # console headless — spec 90-tool-hot-swap (bind a catalog tool → the
+        # MCPToolBinding propagation status surfaces honestly [Ready→propagated,
+        # else the reason]; viewer forced-403) and spec 91-oauth-mcp (the OAuth
+        # add-MCP branch redirects to the fixture's /authorize; the operator
+        # approval queue approve/reject; NO token ever in the SPA). MCP-resource
+        # OAuth, NOT the M18 console-login OIDC. ADR 0006: full headless slice on a
+        # FRESH CI cluster; locally provable — tier0 + tsc --noEmit + playwright
+        # test --list + shellcheck + the fixture contract test. ADR 0004 gate-and-skip.
+        run: make -C agent-brain/harness tier2 SLICE=m17-ui

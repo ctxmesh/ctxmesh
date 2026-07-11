@@ -54,6 +54,12 @@ import (
 // Authorization header" — not an error condition for an open server.
 var errNoMCPCredential = errors.New("no credential registered for this MCP server")
 
+// credentialKindBearer is the MCPCredential.Kind for a value attached as an
+// "Authorization: Bearer <value>" header at the egress hop — the only scheme M14/
+// M17 emit (a shared key or a per-user OAuth access token). Kept as a constant so
+// the shared + per-user resolvers agree on the scheme name.
+const credentialKindBearer = "bearer"
+
 // MCPCredential is a resolved credential for one (server, user) pair. In M14 it
 // is always the shared bearer key from the register flow; in M17 it becomes the
 // invoking user's OAuth access token. Kind lets m14.6b/M17 branch on how to
@@ -133,5 +139,5 @@ func (r *sharedSecretCredentialResolver) Resolve(ctx context.Context, ns, server
 	if !ok || len(keyBytes) == 0 {
 		return MCPCredential{}, errNoMCPCredential
 	}
-	return MCPCredential{Kind: "bearer", Value: string(keyBytes)}, nil
+	return MCPCredential{Kind: credentialKindBearer, Value: string(keyBytes)}, nil
 }
