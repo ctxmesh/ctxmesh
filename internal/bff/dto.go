@@ -321,6 +321,40 @@ type CostResponse struct {
 	Scale   []MetricPoint `json:"scale"`
 }
 
+// --- Cost breakdown by agent (GET /api/cost/breakdown?by=agent) --------------
+//
+// NOTE: this is a RECENT-WINDOW ROLLUP — it aggregates a bounded window of the
+// most recent Langfuse traces (up to a few hundred), NOT an all-time historical
+// total. The window is the same bounded fetch CostUsage uses so the numbers are
+// self-consistent. Callers must not treat these totals as complete lifetime cost.
+
+// AgentCostItem is the per-agent cost/usage aggregate in the breakdown. It
+// accumulates cost and tokens across all traces tagged agent:<ns>/<name> within
+// the recent window. RunCount is the number of traces in the window attributed
+// to this agent.
+//
+// AgentNs is "" for agents whose tag lacks a namespace (bare `agent:<name>`
+// format). AgentName is "(untagged)" for traces that carry no agent tag at all
+// — surfaced explicitly so they are visible, not silently dropped.
+type AgentCostItem struct {
+	AgentNs      string  `json:"agentNs"`
+	AgentName    string  `json:"agentName"`
+	TotalCostUSD float64 `json:"totalCostUSD"`
+	TotalTokens  int64   `json:"totalTokens"`
+	RunCount     int     `json:"runCount"`
+}
+
+// CostBreakdownResponse is returned by GET /api/cost/breakdown?by=agent.
+// Agents is non-nil ([] not null), sorted by totalCostUSD desc. Total is the
+// rollup over the same bounded window. NextCursor is the opaque cursor for the
+// next page of the AGENT LIST (not the trace window); "" means last page.
+// This is a recent-window rollup — see the package-level NOTE above.
+type CostBreakdownResponse struct {
+	Agents     []AgentCostItem `json:"agents"`
+	Total      CostSummary     `json:"total"`
+	NextCursor string          `json:"nextCursor"`
+}
+
 // --- Recent runs (GET /api/runs) --------------------------------------------
 
 // RunSummary is the flat projection of one Langfuse trace the dashboard's

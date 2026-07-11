@@ -157,6 +157,17 @@ type LangfuseAdapter interface {
 	// a programming error and returns an error directly; an upstream failure returns an
 	// error that the handler maps to 502.
 	TraceScores(ctx context.Context, traceID string) ([]FeedbackScore, error)
+
+	// CostBreakdown aggregates a bounded window of recent traces into a per-agent
+	// cost/usage breakdown (GET /api/cost/breakdown?by=agent). It groups traces by
+	// the `agent:<ns>/<name>` tag the launcher stamps, accumulates cost/tokens/count
+	// per agent, surfaces untagged traces as an explicit "(untagged)" bucket, sorts
+	// agents by totalCostUSD desc, and paginates the agent list via limit/cursor.
+	//
+	// HONEST BOUNDED WINDOW: the rollup is over a recent window of traces, NOT
+	// all-time historical cost. A malformed cursor returns ErrBadParam (→ 400).
+	// Upstream failure returns an error (→ 502). Agents is non-nil on success.
+	CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error)
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend
