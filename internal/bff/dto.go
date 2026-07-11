@@ -340,6 +340,20 @@ type RunListResponse struct {
 	Runs []RunSummary `json:"runs"`
 }
 
+// AgentRunsResponse is returned by GET /api/agents/{ns}/{name}/runs — the bounded
+// recent-runs list for ONE agent (the agent detail page's per-agent history). The
+// namespace/name echo which agent the list belongs to; Runs is non-nil ([] not
+// null), and every entry is guaranteed to belong to THIS agent (filtered by the
+// `agent:<ns>/<name>` trace identity tag, so a same-named agent in another
+// namespace never leaks in). Each run's payloads stay in Langfuse — this is
+// metadata only (traceId/name/timestamp/cost/tokens/latency), never un-redacted
+// content.
+type AgentRunsResponse struct {
+	Namespace string       `json:"namespace"`
+	Name      string       `json:"name"`
+	Runs      []RunSummary `json:"runs"`
+}
+
 // TraceLinkResponse is returned by GET /api/traces/{id}: the one Langfuse target
 // URL for a traceId (the embedded iframe src AND the link-out href). The SPA
 // never hardcodes a Langfuse URL — it always resolves it here so swapping the
