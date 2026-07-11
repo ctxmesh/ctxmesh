@@ -16,6 +16,7 @@ import { ModelRouteDetailPage, NewModelRoutePage } from "@/pages/model-route-det
 import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
+import { RunsPage } from "@/pages/runs-page";
 import { SecretBindingDetailPage, NewSecretBindingPage } from "@/pages/secret-binding-detail-page";
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
@@ -119,6 +120,8 @@ export function App() {
             <Route path="registries/:ns/:name" element={<AgentRegistryDetailPage />} />
             {/* m15.13: Topology v2 — grouped/searchable/list↔graph */}
             <Route path="topology" element={<TopologyPage />} />
+            {/* m16.8: runs browser — paginated + filterable global run history. */}
+            <Route path="runs" element={<RunsPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />
