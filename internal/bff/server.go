@@ -298,6 +298,41 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("agent registry update"))
 		}
 		authed.HandleFunc("DELETE /api/agentregistries/{ns}/{name}", s.handleDeleteAgentRegistry)
+		// ToolRegistry CRUD (m17.5): direct edit of the operator-curated tool catalog.
+		// Five endpoints following the list contract for GET /list and SSA for PUT/POST.
+		// IMPORTANT: the m14.6 GET /api/tools merged catalog (distinct route, distinct
+		// handler) is NOT affected — these routes are /api/toolregistries, not /api/tools.
+		// The PUT preserves each tool entry's approvalStatus (controller/approval-owned);
+		// the console CRUD edits the curated fields, never the approval state.
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes serve 501.
+		authed.HandleFunc("GET /api/toolregistries", s.handleListToolRegistries)
+		authed.HandleFunc("GET /api/toolregistries/{ns}/{name}", s.handleGetToolRegistry)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/toolregistries", s.handleCreateToolRegistry)
+			authed.HandleFunc("PUT /api/toolregistries/{ns}/{name}", s.handleUpdateToolRegistry)
+		} else {
+			authed.Handle("POST /api/toolregistries", notImplemented("tool registry create"))
+			authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("tool registry update"))
+		}
+		authed.HandleFunc("DELETE /api/toolregistries/{ns}/{name}", s.handleDeleteToolRegistry)
+		// MCPToolBinding CRUD (m17.5): direct edit of the tool-to-agent bindings.
+		// Five endpoints following the list contract + SSA. The detail DTO surfaces
+		// the HONEST hot-update propagation status: "propagated" only when the
+		// controller's Ready=True (tool registered, pin-matched, rendered + pushed to
+		// the discovery sidecar); failure reason when Ready=False (UnregisteredTool /
+		// RegistryMismatch); "pending" when the condition is absent. The console NEVER
+		// reports "propagated" unless the controller confirms it — the m16 honest-contract
+		// lesson. SSA never clobbles the controller's status/Ready condition.
+		authed.HandleFunc("GET /api/mcptoolbindings", s.handleListMCPToolBindings)
+		authed.HandleFunc("GET /api/mcptoolbindings/{ns}/{name}", s.handleGetMCPToolBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/mcptoolbindings", s.handleCreateMCPToolBinding)
+			authed.HandleFunc("PUT /api/mcptoolbindings/{ns}/{name}", s.handleUpdateMCPToolBinding)
+		} else {
+			authed.Handle("POST /api/mcptoolbindings", notImplemented("MCP tool binding create"))
+			authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("MCP tool binding update"))
+		}
+		authed.HandleFunc("DELETE /api/mcptoolbindings/{ns}/{name}", s.handleDeleteMCPToolBinding)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -335,6 +370,16 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agentregistries", notImplemented("caller-scoped agent registry create"))
 		authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry update"))
 		authed.Handle("DELETE /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry delete"))
+		authed.Handle("GET /api/toolregistries", notImplemented("caller-scoped tool registry list"))
+		authed.Handle("GET /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry detail"))
+		authed.Handle("POST /api/toolregistries", notImplemented("caller-scoped tool registry create"))
+		authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry update"))
+		authed.Handle("DELETE /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry delete"))
+		authed.Handle("GET /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding list"))
+		authed.Handle("GET /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding detail"))
+		authed.Handle("POST /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding create"))
+		authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding update"))
+		authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
