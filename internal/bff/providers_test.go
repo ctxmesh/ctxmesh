@@ -628,3 +628,103 @@ func TestProviderModelsProbeUnsupported(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, http.StatusBadRequest, pe.status)
 }
+
+// --- POST /api/providers/{name}/rotate + DELETE /api/providers/{name} --------
+
+// seedConnectedProvider builds the route+binding+secret triple a connected
+// provider consists of (name "anthropic" in "prod"), with the route's baseURL
+// pointed at the fake provider so the rotation's re-probe reaches it.
+func seedConnectedProvider(baseURL, key string) []client.Object {
+	route := &agentsv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "anthropic", Namespace: "prod",
+			Labels:      map[string]string{labelManagedBy: managedByConnect, labelProvider: "anthropic"},
+			Annotations: map[string]string{annBaseURL: baseURL, annDisplayName: "Anthropic"},
+		},
+		Spec: agentsv1alpha1.ModelRouteSpec{
+			Providers: []agentsv1alpha1.ProviderRef{{
+				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: "anthropic",
+			}},
+		},
+	}
+	binding := &agentsv1alpha1.SecretBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
+		Spec: agentsv1alpha1.SecretBindingSpec{
+			Backend:   secretBackendKubernetes,
+			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "anthropic", Key: secretKeyAPIKey},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
+		Data:       map[string][]byte{secretKeyAPIKey: []byte(key)},
+	}
+	return []client.Object{route, binding, secret}
+}
+
+// TestRotateProviderKeyRotatesInPlace proves rotate validates the NEW key and
+// rewrites ONLY the Secret's data — the key never appears in the response or logs.
+func TestRotateProviderKeyRotatesInPlace(t *testing.T) {
+	prov := fakeProvider(t, "claude-sonnet-4-6")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(seedConnectedProvider(prov.URL, "sk-OLD-key-rotated-away")...).Build()
+	s, _, lb := newConnectServer(t, c)
+
+	body, err := json.Marshal(RotateProviderKeyRequest{APIKey: theTestKey, Namespace: "prod"})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/anthropic/rotate", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got corev1.Secret
+	require.NoError(t, c.Get(context.Background(),
+		client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &got))
+	assert.Equal(t, theTestKey, string(got.Data[secretKeyAPIKey]), "the stored key is rotated in place")
+	assert.NotContains(t, rec.Body.String(), theTestKey, "the key never appears in the response")
+	assert.NotContains(t, lb.String(), theTestKey, "the key never appears in any log line")
+}
+
+// TestRotateProviderKeyBadKeyIs401NoChange proves a bad NEW key is rejected by the
+// live probe (401) and the stored key is left UNCHANGED — never a silent rotate to
+// a broken credential.
+func TestRotateProviderKeyBadKeyIs401NoChange(t *testing.T) {
+	prov := fakeProvider(t, "claude-sonnet-4-6") // accepts only theTestKey
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(seedConnectedProvider(prov.URL, theTestKey)...).Build()
+	s, _, _ := newConnectServer(t, c)
+
+	body, err := json.Marshal(RotateProviderKeyRequest{APIKey: "sk-bad-new-key", Namespace: "prod"})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/anthropic/rotate", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	var got corev1.Secret
+	require.NoError(t, c.Get(context.Background(),
+		client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &got))
+	assert.Equal(t, theTestKey, string(got.Data[secretKeyAPIKey]), "the stored key is unchanged on a bad rotate")
+}
+
+// TestDisconnectProviderDeletesAllThree proves DELETE removes the ModelRoute,
+// SecretBinding, and Secret with the caller's client.
+func TestDisconnectProviderDeletesAllThree(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(seedConnectedProvider("http://unused", theTestKey)...).Build()
+	s, _, _ := newConnectServer(t, c)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/providers/anthropic?namespace=prod", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	for _, o := range []client.Object{
+		&agentsv1alpha1.ModelRoute{}, &agentsv1alpha1.SecretBinding{}, &corev1.Secret{},
+	} {
+		err := c.Get(context.Background(), client.ObjectKey{Name: "anthropic", Namespace: "prod"}, o)
+		assert.True(t, apierrors.IsNotFound(err), "%T must be deleted", o)
+	}
+}

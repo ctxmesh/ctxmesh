@@ -589,10 +589,14 @@ func (s *Server) Handler() http.Handler {
 			authed.HandleFunc("POST /api/providers", s.handleConnectProvider)
 			authed.HandleFunc("GET /api/providers", s.handleListProviders)
 			authed.HandleFunc("GET /api/providers/{name}/models", s.handleProviderModels)
+			authed.HandleFunc("POST /api/providers/{name}/rotate", s.handleRotateProviderKey)
+			authed.HandleFunc("DELETE /api/providers/{name}", s.handleDisconnectProvider)
 		} else {
 			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
 			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
 			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
+			authed.Handle("POST /api/providers/{name}/rotate", notImplemented("caller-scoped provider key rotation"))
+			authed.Handle("DELETE /api/providers/{name}", notImplemented("caller-scoped provider disconnect"))
 		}
 	}
 
