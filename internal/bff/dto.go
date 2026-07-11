@@ -238,11 +238,58 @@ type TopologyEdge struct {
 	Target string `json:"target"`
 }
 
-// TopologyResponse is returned by GET /api/topology. Both slices are non-nil on
-// the wire ([] not null) so the SPA graph layer never sees a null.
+// Topology group kinds. A group folds many member agents behind one collapsible
+// vertex so a 1000-agent cluster renders as a handful of groups, not N nodes.
+const (
+	groupKindRegistry  = "registry"
+	groupKindNamespace = "namespace"
+)
+
+// HealthRollup is a COUNT of a group's member agents by health state — the
+// bounded summary the SPA renders on a collapsed group (a "3 ready / 1 notReady"
+// badge) without ever fetching the members. It always reflects the FULL group,
+// independent of any per-group expansion cap.
+type HealthRollup struct {
+	Ready    int `json:"ready"`
+	NotReady int `json:"notReady"`
+	Pending  int `json:"pending"`
+	Unknown  int `json:"unknown"`
+}
+
+// TopologyGroup is one collapsible cluster of member agents (a registry's
+// members, or a namespace's agents). It carries a health rollup COUNT so the SPA
+// can render the group's aggregate state while collapsed — the members
+// themselves are only emitted as nodes when the group is explicitly expanded
+// (?expand=<id>) or matched by search (?q=). This is the bounded-scale unit: at
+// 200+ agents the default response is a list of groups, never every agent.
+type TopologyGroup struct {
+	// ID is stable and unique across groups ("<kind>/<namespace>/<name>" for a
+	// registry group, "namespace/<ns>" for a namespace group); it is the token
+	// the SPA passes back in ?expand.
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Label is the human name (registry name, or the namespace for a ns group).
+	Label     string `json:"label"`
+	Namespace string `json:"namespace"`
+	// MemberCount is the FULL count of member agents (never the truncated view).
+	MemberCount int          `json:"memberCount"`
+	Health      HealthRollup `json:"health"`
+	// Truncated is true when this group was expanded but has more members than
+	// the per-group cap, so only ShownCount member agent nodes were emitted; the
+	// SPA renders a "+N more" affordance. Both are zero-valued (false/0) for a
+	// collapsed group — the members were intentionally omitted, not truncated.
+	Truncated  bool `json:"truncated"`
+	ShownCount int  `json:"shownCount"`
+}
+
+// TopologyResponse is returned by GET /api/topology. Nodes and Edges are non-nil
+// on the wire ([] not null) so the SPA graph layer never sees a null. Groups is
+// non-nil ([]) when grouping is requested (?group=) and nil/omitted in raw mode
+// (?group empty) — so the M12 raw-graph response stays byte-compatible.
 type TopologyResponse struct {
-	Nodes []TopologyNode `json:"nodes"`
-	Edges []TopologyEdge `json:"edges"`
+	Nodes  []TopologyNode  `json:"nodes"`
+	Edges  []TopologyEdge  `json:"edges"`
+	Groups []TopologyGroup `json:"groups,omitempty"`
 }
 
 // --- Cost / usage (GET /api/cost) -------------------------------------------
