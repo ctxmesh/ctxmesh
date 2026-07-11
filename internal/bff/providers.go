@@ -83,9 +83,9 @@ const defaultTenantRPM = 60
 var rfc1123Invalid = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // providerRouteName derives the object name (Secret/SecretBinding/ModelRoute
-// share it, suffixed) from the provider id. The name is deterministic so
-// re-connecting the same provider collides on create → a clean 409 (documented
-// idempotency: re-connect is a 409, the operator deletes+reconnects to rotate).
+// share it) from the provider id. The name is deterministic so re-connecting the
+// same provider addresses the SAME objects — which the connect flow now UPSERTS
+// (ADR 0018): re-connect rotates the key in place and succeeds, never a 409.
 func providerRouteName(provider string) string {
 	base := strings.ToLower(strings.TrimSpace(provider))
 	base = rfc1123Invalid.ReplaceAllString(base, "-")
@@ -217,14 +217,19 @@ type providerCreateSpec struct {
 	models      []string
 }
 
-// createProviderObjects creates the Secret, SecretBinding, and ModelRoute (in
+// createProviderObjects UPSERTS the Secret, SecretBinding, and ModelRoute (in
 // that order — the ModelRoute references the SecretBinding which references the
-// Secret) with the caller's client. It returns the flat identity of every created
-// object, or a typed *createError with the right HTTP status on the first
-// failure. A partial create (K8s is not transactional) leaves the earlier objects
-// and the error names the one that failed; the deterministic names make a
-// re-connect a clean AlreadyExists → 409.
-func createProviderObjects(ctx context.Context, w AgentWriter, spec providerCreateSpec) ([]createdObject, *createError) {
+// Secret) with the caller's client. It returns the flat identity of every object,
+// or a typed *createError with the right HTTP status on the first failure.
+//
+// Idempotency (ADR 0018): the object names are deterministic, so re-connecting the
+// same provider addresses the SAME objects. Each is created, or — if it already
+// exists — UPDATED in place (rotating the Secret key / refreshing the route). A
+// re-connect therefore succeeds and rotates, never a 409. The update is still
+// CALLER-SCOPED: a viewer without update on Secret/ModelRoute is denied by the API
+// server → the 403 surfaces (ADR 0011). A partial upsert (K8s is not transactional)
+// leaves the earlier objects and the error names the one that failed.
+func createProviderObjects(ctx context.Context, w client.Client, spec providerCreateSpec) ([]createdObject, *createError) {
 	provider := strings.ToLower(strings.TrimSpace(spec.provider))
 	labels := map[string]string{
 		labelManagedBy: managedByConnect,
@@ -295,7 +300,7 @@ func createProviderObjects(ctx context.Context, w AgentWriter, spec providerCrea
 		{"SecretBinding", binding},
 		{"ModelRoute", route},
 	} {
-		if err := w.Create(ctx, obj.o); err != nil {
+		if err := upsertObject(ctx, w, obj.o); err != nil {
 			return created, classifyCreateError(err, obj.kind, obj.o.GetName())
 		}
 		created = append(created, createdObject{
@@ -305,6 +310,33 @@ func createProviderObjects(ctx context.Context, w AgentWriter, spec providerCrea
 		})
 	}
 	return created, nil
+}
+
+// upsertObject creates obj, or — if it already exists — updates it in place (the
+// idempotent-connect contract, ADR 0018). On AlreadyExists it fetches the live
+// object for its resourceVersion/UID, carries them onto the desired object, and
+// Updates: the Secret's Data is replaced (rotating the key), the SecretBinding/
+// ModelRoute Spec is refreshed — while status subresources are untouched. Every
+// call is CALLER-SCOPED; a caller without update is denied by the API server and
+// the error propagates unchanged for classifyCreateError to map (Forbidden→403).
+func upsertObject(ctx context.Context, w client.Client, obj client.Object) error {
+	err := w.Create(ctx, obj)
+	if err == nil || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	// Exists → read the live object to obtain its resourceVersion/UID, then Update
+	// the desired object in place. A fresh copy of the SAME concrete type is the
+	// Get target (Get overwrites it with cluster state).
+	live, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return err // unreachable for our typed objects; keep the AlreadyExists
+	}
+	if getErr := w.Get(ctx, client.ObjectKeyFromObject(obj), live); getErr != nil {
+		return getErr
+	}
+	obj.SetResourceVersion(live.GetResourceVersion())
+	obj.SetUID(live.GetUID())
+	return w.Update(ctx, obj)
 }
 
 // defaultPrimaryModel is the fallback model name returned by primaryModel when the
