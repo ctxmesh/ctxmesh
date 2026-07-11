@@ -18,6 +18,7 @@ package bff
 
 import (
 	"context"
+	"errors"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -75,6 +76,26 @@ func listMCPToolBindings(ctx context.Context, r AgentReader, opts ...client.List
 	return &out, nil
 }
 
+// listMemoryBindings lists MemoryBindings via the reader (agent-detail bindings).
+func listMemoryBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.MemoryBindingList, error) {
+	var out agentsv1alpha1.MemoryBindingList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// listAgentVersions lists AgentVersions via the reader (agent-detail version
+// history). Each AgentVersion is a controller-created immutable snapshot pinned to
+// its parent via spec.deploymentName.
+func listAgentVersions(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.AgentVersionList, error) {
+	var out agentsv1alpha1.AgentVersionList
+	if err := r.List(ctx, &out, opts...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // --- Seams fleshed out by later m12 surface tasks ---------------------------
 //
 // These are declared (not implemented) so the endpoint groups in the spec (§2)
@@ -99,7 +120,21 @@ type LangfuseAdapter interface {
 	// CostUsage returns an aggregate cost/usage summary over the recent window
 	// (a rollup the dashboard cards + chart render). Never nil on success.
 	CostUsage(ctx context.Context) (CostSummary, error)
+
+	// TraceDetail fetches ONE trace + its observations and projects them onto the
+	// run inspector's flat span summary (m14.8): the trace-level rollup plus a FLAT
+	// list of spans (parentId-linked; the UI builds the tree). It is the run
+	// SUMMARY, NOT the full explorer (M16). A trace the backend does not know
+	// returns ErrTraceNotFound (→ the handler serves 404); any other upstream
+	// failure is a generic error (→ 502). Spans is non-nil on success.
+	TraceDetail(ctx context.Context, traceID string) (TraceDetail, error)
 }
+
+// ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend
+// reports the trace does not exist (upstream 404). The handler maps it to a 404
+// (a genuinely-missing trace), distinct from a generic upstream failure which is
+// a 502 — an honest degrade, never a 500.
+var ErrTraceNotFound = errors.New("trace not found")
 
 // PrometheusAdapter queries Prometheus for cost/latency/scale metrics that back
 // the native dashboard charts (m12.5). The Prometheus endpoint/credentials stay

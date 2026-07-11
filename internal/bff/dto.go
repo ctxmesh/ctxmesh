@@ -27,6 +27,9 @@ limitations under the License.
 package bff
 
 import (
+	"encoding/json"
+	"time"
+
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -75,6 +78,65 @@ type AgentListResponse struct {
 	Agents     []AgentSummary `json:"agents"`
 	Items      []AgentSummary `json:"items"`
 	NextCursor string         `json:"nextCursor"`
+}
+
+// --- Agent detail (GET /api/agents/{ns}/{name}) ------------------------------
+//
+// The agent-landing page (first-agent-flow.md §3) reads one AgentDeployment in
+// full: the spec summary the console shows, the live status (conditions + the
+// Knative URL + readiness), the bindings that reference this agent, and its
+// version history. Like every BFF DTO it is a FLAT projection of the CRDs — never
+// the raw K8s objects — so the SPA stays decoupled from the schema. Every slice
+// is non-nil on the wire ([] not null).
+
+// AgentCondition is the flat projection of one status condition. It carries just
+// what the status timeline renders — no managedFields/lastTransition churn beyond
+// the human-facing bits.
+type AgentCondition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason"`
+	Message            string `json:"message"`
+	LastTransitionTime string `json:"lastTransitionTime"`
+}
+
+// AgentScaling is the flat projection of the Knative autoscaler bounds.
+type AgentScaling struct {
+	Min int32 `json:"min"`
+	Max int32 `json:"max"`
+}
+
+// AgentBinding is one compact entry in the agent's bindings list — an
+// MCPToolBinding ("tool") or a MemoryBinding ("memory") that references this
+// agent. Detail is the human-facing subject (the tool name, or the memory scope);
+// Ready mirrors the binding's own Ready condition so the page can show a
+// per-binding health dot.
+type AgentBinding struct {
+	Kind   string `json:"kind"`   // "tool" | "memory"
+	Name   string `json:"name"`   // the binding object's own name
+	Detail string `json:"detail"` // tool name (tool) or scope (memory)
+	Ready  bool   `json:"ready"`
+}
+
+// AgentDetailResponse is returned by GET /api/agents/{ns}/{name}. It is the full
+// agent-landing projection: identity, the spec summary (image, executionModel,
+// scaling, role), the live status (conditions + Knative URL + readiness/phase),
+// the bindings referencing this agent, and the AgentVersion history names.
+// Bindings and Versions and Conditions are non-nil on the wire ([] not null).
+type AgentDetailResponse struct {
+	Name           string           `json:"name"`
+	Namespace      string           `json:"namespace"`
+	Image          string           `json:"image"`
+	ExecutionModel string           `json:"executionModel"`
+	Role           string           `json:"role"`
+	Scaling        AgentScaling     `json:"scaling"`
+	Phase          string           `json:"phase"`
+	Ready          bool             `json:"ready"`
+	URL            string           `json:"url"`
+	LatestVersion  string           `json:"latestVersion"`
+	Conditions     []AgentCondition `json:"conditions"`
+	Bindings       []AgentBinding   `json:"bindings"`
+	Versions       []string         `json:"versions"`
 }
 
 // --- Identity & RBAC-aware chrome (ADR 0012, ui-foundation §3) ---------------
@@ -228,6 +290,353 @@ type TraceLinkResponse struct {
 	URL     string `json:"url"`
 }
 
+// --- Run inspector (GET /api/traces/{id}/detail) -----------------------------
+//
+// The run-inspector panel (first-agent-flow.md §3/§5 — the aha's "see what the
+// agent did") reads ONE trace in full: the trace-level rollup plus a FLAT list of
+// spans projected from Langfuse observations. It is the RUN SUMMARY
+// (steps/timing/tokens/cost with the tool span visible), NOT the full native
+// trace explorer (M16). The list is deliberately FLAT — each span carries its
+// parentId and the UI (m14.11) builds the tree; the BFF never pre-nests. Timing
+// is RELATIVE to the trace start (startMs/durationMs) so the panel plots a
+// waterfall without re-parsing timestamps. Every slice is non-nil on the wire
+// ([] not null); absent cost/tokens project to 0, never null.
+//
+// Redaction-honest (M11, §13.3): input/output are redacted BEFORE persistence, so
+// a span's persisted content may already be scrubbed. The projection passes the
+// persisted (non-secret) content through verbatim — it NEVER tries to un-redact —
+// and sets inputRedacted/outputRedacted when the content is empty/absent so the
+// panel shows the span's STRUCTURE (name/timing/tokens) with a redacted marker
+// instead of crashing or leaking.
+
+// SpanSummary is the flat projection of one Langfuse observation onto the run
+// inspector's span list. It is a FLAT node (a list entry with a parentId, NOT a
+// nested subtree): the UI builds the tree from parentId. Timing is relative to
+// the trace start. Cost/tokens absent → 0, never null. input/output are the
+// persisted (already-redacted, M11) content — passed through, never un-redacted;
+// the *Redacted flags say the content was scrubbed to empty so the UI shows
+// structure with a redacted marker.
+type SpanSummary struct {
+	// ID is the observation id (stable within the trace; the UI keys nodes on it).
+	ID string `json:"id"`
+	// ParentID is the parent observation id, or "" for a root span. The UI builds
+	// the tree from this; the BFF keeps the list flat (never pre-nested).
+	ParentID string `json:"parentId"`
+	// Type is the observation type: "SPAN" | "GENERATION" | "EVENT". The tool call
+	// surfaces as a SPAN/GENERATION so the panel can mark the tool span.
+	Type string `json:"type"`
+	// Name is the observation name (the step label the panel renders).
+	Name string `json:"name"`
+	// StartMs is the span start relative to the TRACE start, in milliseconds
+	// (>= 0). The panel plots the waterfall off this without re-parsing timestamps.
+	StartMs int64 `json:"startMs"`
+	// DurationMs is the span wall-clock duration in milliseconds (0 when the span
+	// has no end time yet — an in-flight/instant observation).
+	DurationMs int64 `json:"durationMs"`
+	// Model is the model the observation used (GENERATION only; "" otherwise).
+	Model string `json:"model"`
+	// TokensIn / TokensOut are the prompt / completion token counts. Absent → 0.
+	TokensIn  int64 `json:"tokensIn"`
+	TokensOut int64 `json:"tokensOut"`
+	// CostUSD is the observation's cost. Absent → 0, never null.
+	CostUSD float64 `json:"costUSD"`
+	// Level is the observation level Langfuse reports ("DEFAULT" | "WARNING" |
+	// "ERROR" | "DEBUG"); the panel colors an ERROR span. "" when absent.
+	Level string `json:"level"`
+	// Status is a coarse projection of Level for the panel's health dot: "error"
+	// when Level is ERROR, else "ok".
+	Status string `json:"status"`
+	// Input / Output are the persisted (already-redacted, M11) content, verbatim.
+	// Empty when the observation carried none OR the redactor scrubbed it away; the
+	// *Redacted flags below distinguish "scrubbed" so the UI shows a marker. The
+	// BFF NEVER attempts to reveal redacted content.
+	Input  string `json:"input"`
+	Output string `json:"output"`
+	// InputRedacted / OutputRedacted are true when the persisted content was
+	// empty/absent — the redaction-honest signal for the panel to show a redacted
+	// marker over the span's structure rather than a blank field.
+	InputRedacted  bool `json:"inputRedacted"`
+	OutputRedacted bool `json:"outputRedacted"`
+}
+
+// TraceRollup is the trace-level summary the run inspector's header renders: the
+// run name, the totals (cost/tokens/latency), and the start timestamp. Absent
+// numbers project to 0, never null.
+type TraceRollup struct {
+	TraceID   string  `json:"traceId"`
+	Name      string  `json:"name"`
+	Timestamp string  `json:"timestamp"`
+	CostUSD   float64 `json:"costUSD"`
+	Tokens    int64   `json:"tokens"`
+	LatencyMs float64 `json:"latencyMs"`
+	// SpanCount is len(Spans) — a convenience the panel shows without counting.
+	SpanCount int `json:"spanCount"`
+}
+
+// TraceDetail is the adapter-level projection of one trace + its observations:
+// the rollup plus the FLAT span list. The handler wraps it in
+// TraceDetailResponse. Spans is non-nil ([] not null).
+type TraceDetail struct {
+	Rollup TraceRollup
+	Spans  []SpanSummary
+}
+
+// TraceDetailResponse is returned by GET /api/traces/{id}/detail — the run
+// inspector's flat span summary for one trace. Rollup is the trace-level header;
+// Spans is the FLAT list (parentId-linked; the UI builds the tree). Spans is
+// non-nil on the wire ([] not null). This is the run SUMMARY, distinct from the
+// embed-URL route (GET /api/traces/{id}) which returns only the link target.
+type TraceDetailResponse struct {
+	Rollup TraceRollup   `json:"rollup"`
+	Spans  []SpanSummary `json:"spans"`
+}
+
+// --- Connect a provider (ADR 0015) ------------------------------------------
+//
+// The connect flow lets a user paste a provider API key once and get a working
+// model route, all server-side. The key is validated (a live model-list probe),
+// stored ONLY in a Kubernetes Secret, and NEVER returned in any of these DTOs or
+// logged. These DTOs are the flat projection the console's connect wizard reads.
+
+// ConnectProviderRequest is the POST /api/providers body. apiKey is the ONLY
+// place the key crosses into the BFF; after validation it is written to a Secret
+// and dropped — it is never echoed back in a response. baseURL optionally points
+// at an OpenAI-compatible / self-hosted endpoint (empty → the provider default).
+type ConnectProviderRequest struct {
+	// Provider is the LiteLLM provider prefix, e.g. "anthropic" or "openai".
+	Provider string `json:"provider"`
+	// DisplayName is a human label for the connected provider (optional; defaults
+	// to Provider). It is stored as a label/annotation, never as a secret.
+	DisplayName string `json:"displayName"`
+	// APIKey is the pasted provider key. Used ONCE to validate + stored in a
+	// Secret; never returned in a DTO, never logged (ADR 0015).
+	APIKey string `json:"apiKey"`
+	// BaseURL optionally overrides the provider's API base URL.
+	BaseURL string `json:"baseURL"`
+	// Namespace scopes the created objects; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// ProviderSummary is the flat projection of one connected provider. It carries
+// the route identity + the discovered models, and DELIBERATELY no secret
+// material — no key, no Secret data, only the Secret's NAME as a reference. Models
+// is non-nil on the wire ([] not null).
+type ProviderSummary struct {
+	// Name is the connected provider's route name (the ModelRoute / provider
+	// resource name), used as the {name} path segment for the models endpoint.
+	Name string `json:"name"`
+	// Namespace the route + Secret live in.
+	Namespace string `json:"namespace"`
+	// Provider is the LiteLLM provider prefix (e.g. "anthropic").
+	Provider string `json:"provider"`
+	// DisplayName is the human label.
+	DisplayName string `json:"displayName"`
+	// Models is the model list on the route (from the connect-time probe). Never
+	// nil on the wire.
+	Models []string `json:"models"`
+	// SecretName references the Secret holding the key — a NAME only, never the
+	// key material.
+	SecretName string `json:"secretName"`
+	// Ready mirrors the ModelRoute "Ready" condition (rendered into the gateway).
+	Ready bool `json:"ready"`
+}
+
+// ConnectProviderResponse is returned by POST /api/providers on success: the
+// connected provider summary plus the flat identities of the created objects
+// (Secret / SecretBinding / ModelRoute), so the wizard can confirm exactly what
+// landed. The key is ABSENT here by construction.
+type ConnectProviderResponse struct {
+	Provider ProviderSummary `json:"provider"`
+	Created  []createdObject `json:"created"`
+}
+
+// ProviderListResponse is returned by GET /api/providers. Providers is non-nil on
+// the wire ([] not null). No entry carries secret material.
+type ProviderListResponse struct {
+	Providers []ProviderSummary `json:"providers"`
+	Items     []ProviderSummary `json:"items"`
+}
+
+// ProviderModelsResponse is returned by GET /api/providers/{name}/models — the
+// provider's live model list, proxied server-side using the stored key. Models is
+// non-nil on the wire; no secret material is present.
+type ProviderModelsResponse struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
+// --- BYO-MCP register + tool catalog (ADR 0016) ------------------------------
+//
+// The BYO-MCP flow lets a user register their OWN MCP server, discover its tools
+// (with inputSchema), and catalog them — all server-side. The handler probes the
+// server (initialize + tools/list), stores an optional bearer key ONLY in a
+// Kubernetes Secret (never browser-side, never logged — the m14.4 discipline),
+// writes a user-added ToolRegistry entry per discovered tool (capturing each
+// tool's inputSchema), and opens per-server egress. These DTOs are the flat
+// projection the console's add-MCP wizard + tool picker read; none carries secret
+// material.
+
+// RegisterMCPServerRequest is the POST /api/mcpservers body. apiKey is the ONLY
+// place the MCP bearer key crosses into the BFF; after the probe it is written to
+// a Secret and dropped — it is never echoed back in a response, never logged.
+type RegisterMCPServerRequest struct {
+	// Name is a human label for the server; it also seeds the deterministic object
+	// name (Secret / SecretBinding / ToolRegistry / NetworkPolicy). Required.
+	Name string `json:"name"`
+	// URL is the remote MCP server endpoint to probe (streamable-http). Required
+	// for M14 — sidecar/image-mode BYO servers are a later tier.
+	URL string `json:"url"`
+	// APIKey is the optional MCP bearer key. When present it is validated by the
+	// probe, stored in a Secret + SecretBinding, and NEVER returned or logged
+	// (ADR 0016). Omit for an unauthenticated server.
+	APIKey string `json:"apiKey"`
+	// Namespace scopes the created objects; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// MCPServerSummary is the flat projection of one registered MCP server. It
+// carries the server identity + tool count + trust status, and DELIBERATELY no
+// secret material — no key, only the Secret's NAME as a reference (empty when the
+// server needs no key).
+type MCPServerSummary struct {
+	// Name is the server's registry/object name (the {name} the console keys off).
+	Name string `json:"name"`
+	// Namespace the ToolRegistry + Secret live in.
+	Namespace string `json:"namespace"`
+	// URL is the remote MCP endpoint (non-secret).
+	URL string `json:"url"`
+	// ToolCount is how many tools the server advertised at register time.
+	ToolCount int `json:"toolCount"`
+	// Status is the trust state of the server's tools: "approved" (self-serve —
+	// immediately bindable) or "pending" (hardened cluster, awaiting operator
+	// approval, ADR 0016).
+	Status string `json:"status"`
+	// SecretName references the Secret holding the key — a NAME only, never the
+	// key material. Empty when the server was registered without a key.
+	SecretName string `json:"secretName"`
+}
+
+// RegisterMCPServerResponse is returned by POST /api/mcpservers on success: the
+// server summary, the discovered tools (with inputSchema), and the flat
+// identities of the created objects (Secret/SecretBinding/ToolRegistry/
+// NetworkPolicy). The key is ABSENT by construction.
+type RegisterMCPServerResponse struct {
+	Server  MCPServerSummary   `json:"server"`
+	Tools   []ToolCatalogEntry `json:"tools"`
+	Created []createdObject    `json:"created"`
+}
+
+// MCPServerListResponse is returned by GET /api/mcpservers. Servers is non-nil on
+// the wire ([] not null). No entry carries secret material.
+type MCPServerListResponse struct {
+	Servers []MCPServerSummary `json:"servers"`
+	Items   []MCPServerSummary `json:"items"`
+}
+
+// ToolCatalogEntry is one tool in the merged catalog (GET /api/tools): the
+// operator-curated ToolRegistry entries + the user-added BYO tools, each with its
+// inputSchema, provenance, and approval status. InputSchema is raw JSON (the JSON
+// Schema the managed loop hands the model); it is passed through verbatim and is
+// never secret. No entry carries key material.
+type ToolCatalogEntry struct {
+	// Name is the catalog key (the toolName a binding references).
+	Name string `json:"name"`
+	// Registry is the ToolRegistry the entry lives in (so the picker can build a
+	// binding's registryRef).
+	Registry string `json:"registry"`
+	// Namespace the registry lives in.
+	Namespace string `json:"namespace"`
+	// Description is the tool's human description (advisory; may be "").
+	Description string `json:"description"`
+	// InputSchema is the tool's argument JSON Schema, verbatim. null when the entry
+	// pre-dates schema capture (a legacy curated entry). This is the m14.3-review
+	// requirement: real tool-calling (m14.6b) reads it from here.
+	InputSchema json.RawMessage `json:"inputSchema"`
+	// Source is "curated" (operator-authored) or "user-added" (BYO, ADR 0016).
+	Source string `json:"source"`
+	// ApprovalStatus is "approved" (bindable) or "pending" (hardened, awaiting
+	// operator approval).
+	ApprovalStatus string `json:"approvalStatus"`
+}
+
+// ToolCatalogResponse is returned by GET /api/tools — the merged tool catalog.
+// Tools is non-nil on the wire ([] not null); no entry carries secret material.
+type ToolCatalogResponse struct {
+	Tools []ToolCatalogEntry `json:"tools"`
+	Items []ToolCatalogEntry `json:"items"`
+}
+
+// --- Create-from-prompt generation (ADR 0014) --------------------------------
+//
+// Generation turns a natural-language description into a REVIEWED agent config.
+// The LLM call runs SERVER-SIDE through the caller's connected provider (the key
+// is resolved caller-scoped and never crosses to the browser); the emitted
+// simplified agent.yaml is validated by the SAME internal/expand core the CLI +
+// form use (one mapping, no divergent generator). Generation NEVER auto-applies —
+// it returns the config for a review step; Create is the separate POST /api/agents.
+
+// GenerateAgentRequest is the POST /api/agents/generate body. Description is the
+// natural-language sentence; Provider + Model are optional and select the
+// generation model. The default is the caller's connected provider (ADR 0015); an
+// operator that pinned platform generation models lets the UI's dropdown pick one
+// via Model. A request for an unconnected/unknown provider is an honest 400.
+type GenerateAgentRequest struct {
+	// Description is the natural-language agent description the model turns into a
+	// simplified agent.yaml. Required.
+	Description string `json:"description"`
+	// Provider optionally names the connected provider route to generate through
+	// (e.g. "anthropic"). Empty → the caller's single connected provider is used
+	// (or an honest 400 asking the caller to pick when there is more than one).
+	Provider string `json:"provider"`
+	// Model optionally pins the generation model. Empty → the connected provider's
+	// primary model. When platform generation models are pinned, this selects one
+	// of them (the UI dropdown source); a model outside the pinned list is a 400.
+	Model string `json:"model"`
+	// Namespace scopes the connected-provider lookup; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
+// GenerateAgentResponse is returned by POST /api/agents/generate on a SUCCESSFUL
+// generation: the emitted simplified agent.yaml plus its expand-validated CRD
+// preview (the same bytes /api/expand renders), the model that produced it, and
+// any advisory warnings. The SPA renders a friendly review + the raw CRDs behind
+// Advanced; nothing is applied. No secret material is present.
+type GenerateAgentResponse struct {
+	// AgentYAML is the model-emitted simplified agent.yaml (expand-validated).
+	AgentYAML string `json:"agentYAML"`
+	// Expanded is the CRD manifest preview (the internal/expand output), for the
+	// review's Advanced view. It is byte-identical to POST /api/expand of AgentYAML.
+	Expanded string `json:"expanded"`
+	// Model is the generation model that produced the config (for the cost note).
+	Model string `json:"model"`
+	// Provider is the connected provider the generation ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+}
+
+// GenerateInvalidResponse is returned (HTTP 422) when the model produced output
+// that does NOT expand-validate. It is NOT a 500 and NOTHING is applied: the raw
+// generation + the expand error are handed back so the UI shows a REGENERATE
+// affordance (a bad generation is a non-event, ADR 0014). Regenerate re-posts the
+// same description; the constrained schema + expand-validate + one-click
+// regenerate makes a miss recoverable, not a broken apply.
+type GenerateInvalidResponse struct {
+	// Error is the client-safe headline ("the generated config was not valid").
+	Error string `json:"error"`
+	// Reason is the expand validation/parse message (which field was wrong).
+	Reason string `json:"reason"`
+	// AgentYAML is the RAW model output (unvalidated) so the UI can show what the
+	// model produced and offer regenerate. It is not applied and not previewed.
+	AgentYAML string `json:"agentYAML"`
+	// Model / Provider identify the generation source (for the regenerate note).
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	// Regenerate signals the UI to surface the regenerate affordance (always true
+	// on this response — a stable flag the SPA keys off without status-code sniffing).
+	Regenerate bool `json:"regenerate"`
+}
+
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil
@@ -252,6 +661,115 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Image:     ad.Spec.Image,
 		Phase:     phase,
 		Ready:     ready,
+	}
+}
+
+// phaseFromConditions derives the (ready, phase) pair from a resource's standard
+// "Ready" condition — the same rule newAgentSummary uses, factored out so the
+// detail DTO and the summary agree. Absent condition → (false, Pending).
+func phaseFromConditions(conds []metav1.Condition) (bool, string) {
+	c := apimeta.FindStatusCondition(conds, "Ready")
+	if c == nil {
+		return false, phasePending
+	}
+	switch c.Status {
+	case metav1.ConditionTrue:
+		return true, phaseReady
+	case metav1.ConditionFalse:
+		return false, phaseNotReady
+	default:
+		return false, phasePending
+	}
+}
+
+// conditionReady reports whether a resource's "Ready" condition is True — the
+// per-binding health dot the detail page renders.
+func conditionReady(conds []metav1.Condition) bool {
+	c := apimeta.FindStatusCondition(conds, "Ready")
+	return c != nil && c.Status == metav1.ConditionTrue
+}
+
+// newAgentDetail projects an AgentDeployment plus the bindings/versions that
+// reference it onto the flat agent-landing DTO. The caller passes the CRD lists it
+// already read caller-scoped; this helper only projects (no I/O), so it stays
+// unit-testable in isolation. Every slice is non-nil on the wire.
+func newAgentDetail(
+	ad *agentsv1alpha1.AgentDeployment,
+	toolBindings []agentsv1alpha1.MCPToolBinding,
+	memoryBindings []agentsv1alpha1.MemoryBinding,
+	versions []agentsv1alpha1.AgentVersion,
+) AgentDetailResponse {
+	ready, phase := phaseFromConditions(ad.Status.Conditions)
+
+	// Scaling defaults mirror the CRD (min=0 scale-to-zero, max=3) when the spec
+	// omits the block, so the page never shows a bare 0/0.
+	scaling := AgentScaling{Min: 0, Max: 3}
+	if ad.Spec.Scaling != nil {
+		scaling = AgentScaling{Min: ad.Spec.Scaling.Min, Max: ad.Spec.Scaling.Max}
+	}
+
+	conditions := make([]AgentCondition, 0, len(ad.Status.Conditions))
+	for i := range ad.Status.Conditions {
+		c := &ad.Status.Conditions[i]
+		conditions = append(conditions, AgentCondition{
+			Type:               c.Type,
+			Status:             string(c.Status),
+			Reason:             c.Reason,
+			Message:            c.Message,
+			LastTransitionTime: c.LastTransitionTime.Format(time.RFC3339),
+		})
+	}
+
+	// Bindings: only those whose spec.agentRef names this agent (the lists are
+	// namespace-scoped already). Tools first, then memory, each stably ordered.
+	bindings := make([]AgentBinding, 0, len(toolBindings)+len(memoryBindings))
+	for i := range toolBindings {
+		b := &toolBindings[i]
+		if b.Spec.AgentRef != ad.Name {
+			continue
+		}
+		bindings = append(bindings, AgentBinding{
+			Kind:   "tool",
+			Name:   b.Name,
+			Detail: b.Spec.ToolName,
+			Ready:  conditionReady(b.Status.Conditions),
+		})
+	}
+	for i := range memoryBindings {
+		b := &memoryBindings[i]
+		if b.Spec.AgentRef != ad.Name {
+			continue
+		}
+		bindings = append(bindings, AgentBinding{
+			Kind:   "memory",
+			Name:   b.Name,
+			Detail: b.Spec.Scope,
+			Ready:  conditionReady(b.Status.Conditions),
+		})
+	}
+
+	// Versions: the AgentVersion snapshot names pinned to this deployment.
+	versionNames := make([]string, 0, len(versions))
+	for i := range versions {
+		if versions[i].Spec.DeploymentName == ad.Name {
+			versionNames = append(versionNames, versions[i].Name)
+		}
+	}
+
+	return AgentDetailResponse{
+		Name:           ad.Name,
+		Namespace:      ad.Namespace,
+		Image:          ad.Spec.Image,
+		ExecutionModel: ad.Spec.ExecutionModel,
+		Role:           ad.Spec.Role,
+		Scaling:        scaling,
+		Phase:          phase,
+		Ready:          ready,
+		URL:            ad.Status.URL,
+		LatestVersion:  ad.Status.LatestVersion,
+		Conditions:     conditions,
+		Bindings:       bindings,
+		Versions:       versionNames,
 	}
 }
 

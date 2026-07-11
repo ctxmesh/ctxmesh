@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Network, RefreshCw } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Network, PlugZap, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -8,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { EmptyState } from "@/components/kit";
 import { TopologyGraph } from "@/components/dashboard/topology-graph";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
@@ -15,6 +17,7 @@ import { TraceView } from "@/components/dashboard/trace-view";
 import {
   api,
   type CostResponse,
+  type ProviderListResponse,
   type RunListResponse,
   type TopologyResponse,
 } from "@/lib/api";
@@ -38,11 +41,19 @@ function messageOf(err: unknown): string {
 }
 
 export function DashboardPage() {
+  const navigate = useNavigate();
   const [topology, setTopology] = useState<Loadable<TopologyResponse>>({
     kind: "loading",
   });
   const [cost, setCost] = useState<Loadable<CostResponse>>({ kind: "loading" });
   const [runs, setRuns] = useState<Loadable<RunListResponse>>({
+    kind: "loading",
+  });
+  // Providers drive the FIRST-RUN teaching CTA: an empty list ⇒ "Connect a
+  // provider to run your first agent" (the aha entry point, spec §5). A load
+  // failure (incl. the kill-switch 404) is NOT treated as "empty" — we simply
+  // don't show the CTA (an honest "no false invitation").
+  const [providers, setProviders] = useState<Loadable<ProviderListResponse>>({
     kind: "loading",
   });
   const [selectedTrace, setSelectedTrace] = useState<string | null>(null);
@@ -51,7 +62,15 @@ export function DashboardPage() {
     setTopology({ kind: "loading" });
     setCost({ kind: "loading" });
     setRuns({ kind: "loading" });
+    setProviders({ kind: "loading" });
 
+    api
+      .listProviders(signal)
+      .then((data) => setProviders({ kind: "ready", data }))
+      .catch((err: unknown) => {
+        if (signal?.aborted) return;
+        setProviders({ kind: "error", message: messageOf(err) });
+      });
     api
       .topology(signal)
       .then((data) => setTopology({ kind: "ready", data }))
@@ -106,6 +125,23 @@ export function DashboardPage() {
           Refresh
         </Button>
       </div>
+
+      {/* First-run teaching CTA — the aha entry point. When no providers are
+          connected the dashboard leads with "Connect a provider to run your
+          first agent" → the connect-provider wizard (spec §5). Shown ONLY on a
+          confirmed-empty list (a load error is not a false invitation). */}
+      {providers.kind === "ready" && providers.data.providers.length === 0 && (
+        <EmptyState
+          icon={PlugZap}
+          title="Connect a provider to run your first agent"
+          description="No model provider is connected yet. Paste a key once — it's validated and stored server-side — then describe an agent and run it. No YAML, no kubectl."
+          action={{
+            label: "Connect a provider",
+            icon: PlugZap,
+            onClick: () => navigate("/providers/connect"),
+          }}
+        />
+      )}
 
       {/* 1. Live topology */}
       <Card>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Boxes } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -66,6 +67,7 @@ type Load =
   | { kind: "error"; message: string; forbidden: boolean };
 
 export function AgentsPage() {
+  const navigate = useNavigate();
   const { namespace } = useNamespace();
   const [query, setQuery] = useState("");
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
@@ -178,6 +180,11 @@ export function AgentsPage() {
         onNext={onNext}
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Agents"
+        // Row-click → the agent LANDING page (m14.11): the detail/status/logs/run
+        // surface. Keyed on namespace/name (the same key the row uses).
+        onRowClick={(a) =>
+          navigate(`/agents/${encodeURIComponent(a.namespace)}/${encodeURIComponent(a.name)}`)
+        }
         empty={{
           icon: Boxes,
           title: "No agents yet",

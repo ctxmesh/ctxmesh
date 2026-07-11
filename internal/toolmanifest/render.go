@@ -17,6 +17,7 @@ limitations under the License.
 package toolmanifest
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -65,6 +66,12 @@ type Binding struct {
 	// URL is the remote-mode server URL, carried verbatim into the manifest
 	// endpoint (must already include the /mcp path). Empty for sidecar.
 	URL string
+	// InputSchema is the bound tool's argument JSON Schema, taken from the
+	// matched ToolRegistry entry (ToolEntry.InputSchema) and carried VERBATIM
+	// into the manifest tool entry. Nil/empty when the registry entry has no
+	// schema (curated/legacy entries) — the manifest then omits inputSchema and
+	// the SDK falls back to a permissive schema (m14.6b).
+	InputSchema json.RawMessage
 }
 
 // SidecarTool describes an assigned sidecar-mode tool container: which image to
@@ -106,10 +113,11 @@ func Render(bindings []Binding) (Manifest, []SidecarTool) {
 			port := nextPort
 			nextPort++
 			tools = append(tools, Tool{
-				Name:      b.ToolName,
-				Mode:      ModeSidecar,
-				Endpoint:  fmt.Sprintf("http://%s:%d%s", SidecarLoopbackHost, port, MCPPath),
-				Transport: Transport,
+				Name:        b.ToolName,
+				Mode:        ModeSidecar,
+				Endpoint:    fmt.Sprintf("http://%s:%d%s", SidecarLoopbackHost, port, MCPPath),
+				Transport:   Transport,
+				InputSchema: normalizeSchema(b.InputSchema),
 			})
 			sidecars = append(sidecars, SidecarTool{
 				BindingName: b.BindingName,
@@ -119,15 +127,33 @@ func Render(bindings []Binding) (Manifest, []SidecarTool) {
 			})
 		default: // ModeRemote
 			tools = append(tools, Tool{
-				Name:      b.ToolName,
-				Mode:      ModeRemote,
-				Endpoint:  b.URL, // verbatim — binding URLs carry /mcp
-				Transport: Transport,
+				Name:        b.ToolName,
+				Mode:        ModeRemote,
+				Endpoint:    b.URL, // verbatim — binding URLs carry /mcp
+				Transport:   Transport,
+				InputSchema: normalizeSchema(b.InputSchema),
 			})
 		}
 	}
 
 	return Normalize(Manifest{Tools: tools}), sidecars
+}
+
+// normalizeSchema decides whether a binding's raw inputSchema is present enough
+// to carry into the manifest. It returns the schema VERBATIM when it is real
+// JSON, and nil when it is absent — an empty slice, whitespace only, or the JSON
+// literal null. Returning nil means the Tool's inputSchema is omitted
+// (omitempty), so a schema-less tool renders identically whether the registry
+// entry stored no InputSchema, an empty RawExtension, or an explicit null — the
+// content-addressed Version stays stable and the SDK takes its permissive
+// fallback. The bytes are NOT re-serialized/re-indented: an arbitrary JSON
+// Schema rides through unchanged (the verbatim contract, m14.6b).
+func normalizeSchema(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return raw
 }
 
 // StructuralDigest is the load-bearing hash for the Knative revision name: it

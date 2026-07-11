@@ -36,6 +36,64 @@ import sys
 NS_KUSTOMIZE = "agent-engine-system"
 IMG_KUSTOMIZE = "controller:latest"
 
+# The BFF's connect-a-provider kill-switch (ADR 0015). config/bff hardcodes the
+# env value "true" (so `kustomize build` and `make deploy` stay valid); the chart
+# templates that ONE value from a Helm value so a hardened install can disable it
+# with `--set bff.providerConnect.enabled=false`. values.yaml ships the default
+# `true`, so with DEFAULT values the render is quoted "true" == the kustomize
+# literal → no drift; an operator's `--set …=false` renders "false". We quote the
+# value directly (no `| default true`) because Helm's `default` treats the boolean
+# `false` as empty and would silently override a real `--set …=false` back to true.
+PROVIDER_CONNECT_ENV_KUSTOMIZE = (
+    '        - name: PROVIDER_CONNECT_ENABLED\n' '          value: "true"'
+)
+PROVIDER_CONNECT_ENV_HELM = (
+    "        - name: PROVIDER_CONNECT_ENABLED\n"
+    "          value: {{ .Values.bff.providerConnect.enabled | quote }}"
+)
+
+# The BFF's create-from-prompt platform generation-model pin (ADR 0014). config/bff
+# hardcodes the env value "" (unpinned — the default; so `kustomize build`/`make
+# deploy` stay valid); the chart templates it from a Helm value so an operator can
+# pin a governed generation-model list with `--set bff.generation.platformModels=…`.
+# values.yaml ships the default "" so with DEFAULT values the render is the quoted
+# empty string == the kustomize literal → no drift.
+PLATFORM_GEN_MODELS_ENV_KUSTOMIZE = (
+    '        - name: PLATFORM_GENERATION_MODELS\n' '          value: ""'
+)
+PLATFORM_GEN_MODELS_ENV_HELM = (
+    "        - name: PLATFORM_GENERATION_MODELS\n"
+    "          value: {{ .Values.bff.generation.platformModels | quote }}"
+)
+
+# The BFF's BYO-MCP kill-switch (ADR 0016). config/bff hardcodes "true" (default;
+# so `kustomize build`/`make deploy` stay valid); the chart templates it from a
+# Helm value so a hardened install can disable BYO MCP with
+# `--set bff.mcp.enabled=false`. values.yaml ships `true` so with DEFAULT values
+# the render is quoted "true" == kustomize → no drift. Quoted directly (no
+# `| default true`) for the same reason as the connect switch (Helm's `default`
+# treats boolean `false` as empty).
+MCP_ENABLED_ENV_KUSTOMIZE = (
+    '        - name: MCP_ENABLED\n' '          value: "true"'
+)
+MCP_ENABLED_ENV_HELM = (
+    "        - name: MCP_ENABLED\n"
+    "          value: {{ .Values.bff.mcp.enabled | quote }}"
+)
+
+# The BFF's BYO-MCP trust policy (ADR 0016). config/bff hardcodes "false"
+# (self-serve — the default); the chart templates it from a Helm value so a
+# hardened install can require operator approval with
+# `--set bff.mcp.requireApproval=true`. values.yaml ships `false` so with DEFAULT
+# values the render is quoted "false" == kustomize → no drift.
+MCP_REQUIRE_APPROVAL_ENV_KUSTOMIZE = (
+    '        - name: MCP_REQUIRE_APPROVAL\n' '          value: "false"'
+)
+MCP_REQUIRE_APPROVAL_ENV_HELM = (
+    "        - name: MCP_REQUIRE_APPROVAL\n"
+    "          value: {{ .Values.bff.mcp.requireApproval | quote }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -87,6 +145,33 @@ def substitute(doc: str) -> str:
         rf"(\bnamespace:\s*){re.escape(NS_KUSTOMIZE)}\b",
         r"\1{{ .Values.namespace }}",
         doc,
+    )
+    # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
+    # deployment carries this exact env block; the default keeps the render at
+    # "true" == kustomize (no drift), while `--set …=false` disables it.
+    doc = doc.replace(
+        PROVIDER_CONNECT_ENV_KUSTOMIZE,
+        PROVIDER_CONNECT_ENV_HELM,
+    )
+    # BFF create-from-prompt platform generation-model pin -> Helm value (ADR 0014).
+    # Default renders the quoted empty string == kustomize (no drift); an operator's
+    # `--set …=<list>` pins the generation models.
+    doc = doc.replace(
+        PLATFORM_GEN_MODELS_ENV_KUSTOMIZE,
+        PLATFORM_GEN_MODELS_ENV_HELM,
+    )
+    # BFF BYO-MCP kill-switch -> Helm value (ADR 0016). Default renders "true" ==
+    # kustomize (no drift); `--set bff.mcp.enabled=false` disables BYO MCP.
+    doc = doc.replace(
+        MCP_ENABLED_ENV_KUSTOMIZE,
+        MCP_ENABLED_ENV_HELM,
+    )
+    # BFF BYO-MCP trust policy -> Helm value (ADR 0016). Default renders "false" ==
+    # kustomize (no drift); `--set bff.mcp.requireApproval=true` marks new tools
+    # pending-approval on a hardened install.
+    doc = doc.replace(
+        MCP_REQUIRE_APPROVAL_ENV_KUSTOMIZE,
+        MCP_REQUIRE_APPROVAL_ENV_HELM,
     )
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.

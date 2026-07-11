@@ -1,0 +1,433 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+)
+
+// readyCondition is a terse "Ready" condition fixture for the detail tests.
+func readyCondition(status metav1.ConditionStatus, reason, msg string) metav1.Condition {
+	return metav1.Condition{
+		Type:               "Ready",
+		Status:             status,
+		Reason:             reason,
+		Message:            msg,
+		LastTransitionTime: metav1.NewTime(time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)),
+	}
+}
+
+// detailNS is the namespace every detail/logs fixture lives in.
+const detailNS = "team-a"
+
+// getDetail drives GET /api/agents/team-a/{name} against a caller-scoped server
+// and returns the recorder.
+func getDetail(t *testing.T, s *Server, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+detailNS+"/"+name, nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAgentDetailHappyPath proves the detail DTO carries the conditions, the
+// Knative URL, readiness/phase, the bindings referencing THIS agent (tool +
+// memory), and the version history — with []-not-null slices — read caller-scoped.
+func TestAgentDetailHappyPath(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:          "img:1",
+			ExecutionModel: "serving",
+			Role:           "worker",
+			Scaling:        &agentsv1alpha1.ScalingSpec{Min: 1, Max: 5},
+		},
+		Status: agentsv1alpha1.AgentDeploymentStatus{
+			Conditions:    []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "serving")},
+			URL:           "http://echo.team-a.example",
+			LatestVersion: "echo-abc123",
+		},
+	}
+	// A tool binding + a memory binding referencing echo, plus a decoy binding for
+	// a different agent that must NOT appear.
+	toolBinding := &agentsv1alpha1.MCPToolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"}},
+		Status:     agentsv1alpha1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
+	}
+	decoyBinding := &agentsv1alpha1.MCPToolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-tool", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://y"}},
+	}
+	memBinding := &agentsv1alpha1.MemoryBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-mem", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.MemoryBindingSpec{AgentRef: "echo", Scope: "session"},
+	}
+	version := &agentsv1alpha1.AgentVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-abc123", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "echo", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
+	}
+	decoyVersion := &agentsv1alpha1.AgentVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-v1", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "other", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(ad, toolBinding, decoyBinding, memBinding, version, decoyVersion).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+	assert.Equal(t, "echo", got.Name)
+	assert.Equal(t, "team-a", got.Namespace)
+	assert.Equal(t, "img:1", got.Image)
+	assert.Equal(t, "serving", got.ExecutionModel)
+	assert.Equal(t, "worker", got.Role)
+	assert.Equal(t, int32(1), got.Scaling.Min)
+	assert.Equal(t, int32(5), got.Scaling.Max)
+	assert.True(t, got.Ready)
+	assert.Equal(t, phaseReady, got.Phase)
+	assert.Equal(t, "http://echo.team-a.example", got.URL)
+	assert.Equal(t, "echo-abc123", got.LatestVersion)
+
+	require.Len(t, got.Conditions, 1)
+	assert.Equal(t, "Ready", got.Conditions[0].Type)
+	assert.Equal(t, "True", got.Conditions[0].Status)
+	assert.Equal(t, "Deployed", got.Conditions[0].Reason)
+
+	// Bindings: only echo's tool + memory binding, not the decoy.
+	require.Len(t, got.Bindings, 2)
+	kinds := map[string]AgentBinding{}
+	for _, b := range got.Bindings {
+		kinds[b.Kind] = b
+	}
+	require.Contains(t, kinds, "tool")
+	require.Contains(t, kinds, "memory")
+	assert.Equal(t, "search", kinds["tool"].Detail)
+	assert.True(t, kinds["tool"].Ready)
+	assert.Equal(t, "session", kinds["memory"].Detail)
+	for _, b := range got.Bindings {
+		assert.NotEqual(t, "other-tool", b.Name, "decoy binding for a different agent leaked")
+	}
+
+	// Versions: only echo's version.
+	assert.Equal(t, []string{"echo-abc123"}, got.Versions)
+}
+
+// TestAgentDetailNotFoundIs404 proves a missing agent surfaces as 404.
+func TestAgentDetailNotFoundIs404(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "ghost")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestAgentDetailForbiddenAgentIs403 proves a Forbidden on the AGENT read is fatal
+// (403) — a caller who cannot read the agent sees an honest denial, not a body.
+func TestAgentDetailForbiddenAgentIs403(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"))
+			},
+		}).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestAgentDetailForbiddenBindingsIsDegraded proves a Forbidden on the BINDINGS
+// list is degraded (200 with empty bindings), not fatal — the caller can read the
+// agent, so hiding it behind a binding-RBAC 403 would be worse than a partial view.
+func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// The agent Get succeeds; the binding/version LISTs are forbidden.
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "", errors.New("viewer denied"))
+			},
+		}).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code, "a binding-list forbidden must not hide the agent")
+
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	// []-not-null even when the lists were denied.
+	assert.NotNil(t, got.Bindings)
+	assert.NotNil(t, got.Versions)
+	assert.Empty(t, got.Bindings)
+	assert.Empty(t, got.Versions)
+}
+
+// TestAgentDetailScalingDefault proves a nil spec.Scaling projects the CRD default
+// (min=0, max=3) so the page never shows a bare 0/0.
+func TestAgentDetailScalingDefault(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, int32(0), got.Scaling.Min)
+	assert.Equal(t, int32(3), got.Scaling.Max)
+	// A pending agent (no Ready condition) → not ready, Pending phase.
+	assert.False(t, got.Ready)
+	assert.Equal(t, phasePending, got.Phase)
+	assert.Empty(t, got.Conditions)
+	assert.NotNil(t, got.Conditions)
+}
+
+// --- Logs (SSE pod-log tail) -------------------------------------------------
+
+// fakePodLogAccessor is the PodLogAccessor test double: it returns preset pods and
+// a preset log stream (or a preset error) so the SSE handler is exercised without a
+// real cluster. It records the last request so a test can assert the follow/tail
+// flags and the label selector flowed through.
+type fakePodLogAccessor struct {
+	pods        []corev1.Pod
+	listErr     error
+	stream      io.ReadCloser
+	streamErr   error
+	gotFollow   bool
+	gotTail     *int64
+	gotPod      string
+	gotSelector string
+}
+
+func (a *fakePodLogAccessor) ListPods(ctx context.Context, namespace, labelSelector string) (*corev1.PodList, error) {
+	a.gotSelector = labelSelector
+	if a.listErr != nil {
+		return nil, a.listErr
+	}
+	return &corev1.PodList{Items: a.pods}, nil
+}
+
+func (a *fakePodLogAccessor) StreamPodLog(ctx context.Context, namespace, pod, container string, follow bool, tailLines *int64) (io.ReadCloser, error) {
+	a.gotPod = pod
+	a.gotFollow = follow
+	a.gotTail = tailLines
+	if a.streamErr != nil {
+		return nil, a.streamErr
+	}
+	return a.stream, nil
+}
+
+// runningPod is a terse Running-pod fixture backing the "echo" agent by Knative
+// label, created at the given time.
+func runningPod(name string, created time.Time) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         detailNS,
+			Labels:            map[string]string{knativeServiceLabel: "echo"},
+			CreationTimestamp: metav1.NewTime(created),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+// getLogs drives GET /api/agents/team-a/echo/logs with the given query and header,
+// returning the recorder. auth controls whether a bearer token is attached.
+func getLogs(t *testing.T, s *Server, query string, auth bool) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	url := "/api/agents/" + detailNS + "/echo/logs"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	if auth {
+		req.Header.Set("Authorization", "Bearer caller-token")
+	}
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAgentLogsStreamsLinesAsSSE proves the tail streams each log line as an SSE
+// "log" event, in order, and ends with a terminal "end" event (a clean close, not
+// a hang). It also asserts follow=false + the bounded tail flowed to the stream.
+func TestAgentLogsStreamsLinesAsSSE(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		pods:   []corev1.Pod{runningPod("echo-xyz", time.Now())},
+		stream: io.NopCloser(strings.NewReader("line one\nline two\nline three\n")),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	rec := getLogs(t, s, "follow=false&tailLines=50", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+	assert.Equal(t, "no-cache", rec.Header().Get("Cache-Control"))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: log\ndata: line one\n")
+	assert.Contains(t, body, "event: log\ndata: line two\n")
+	assert.Contains(t, body, "event: log\ndata: line three\n")
+	// The stream closed cleanly with a terminal event, never left hanging.
+	assert.Contains(t, body, "event: end\n")
+	// The order is preserved.
+	assert.Less(t, strings.Index(body, "line one"), strings.Index(body, "line two"))
+
+	// The caller-scoped label selector resolves the agent's pods.
+	assert.Equal(t, knativeServiceLabel+"=echo", acc.gotSelector)
+	assert.False(t, acc.gotFollow, "follow=false must reach the stream")
+	require.NotNil(t, acc.gotTail)
+	assert.Equal(t, int64(50), *acc.gotTail, "the bounded tail must reach the stream")
+	assert.Equal(t, "echo-xyz", acc.gotPod)
+}
+
+// TestAgentLogsFollowFlag proves follow=true reaches the stream (the live tail).
+func TestAgentLogsFollowFlag(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		pods:   []corev1.Pod{runningPod("echo-xyz", time.Now())},
+		stream: io.NopCloser(strings.NewReader("streaming\n")),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	rec := getLogs(t, s, "follow=true", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, acc.gotFollow, "follow=true must reach the stream")
+}
+
+// TestAgentLogsForbiddenPodsListIs403 proves a caller who cannot LIST pods gets an
+// HTTP 403 BEFORE the SSE stream opens (an error status, never a hanging stream).
+func TestAgentLogsForbiddenPodsListIs403(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		listErr: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("viewer denied")),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	rec := getLogs(t, s, "", true)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	// It is a real HTTP error body, NOT an SSE stream.
+	assert.NotEqual(t, "text/event-stream", rec.Header().Get("Content-Type"))
+}
+
+// TestAgentLogsForbiddenPodLogIsSSEError proves a caller who can LIST pods but
+// cannot read pods/log gets the 403 SURFACED as an SSE "error" event (the SSE
+// headers are already committed) — never a silent hang or a 500.
+func TestAgentLogsForbiddenPodLogIsSSEError(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		pods:      []corev1.Pod{runningPod("echo-xyz", time.Now())},
+		streamErr: apierrors.NewForbidden(schema.GroupResource{Resource: "pods/log"}, "echo-xyz", errors.New("no log access")),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	rec := getLogs(t, s, "", true)
+	// The SSE stream had already started (200), so the denial is an SSE error event.
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: error\n")
+	assert.Contains(t, strings.ToLower(body), "forbidden")
+}
+
+// TestAgentLogsPodNotRunningIsWaiting proves an agent with no pod yet (still
+// starting / scaled to zero) yields a graceful "waiting" SSE event and a clean
+// close — NOT a 500.
+func TestAgentLogsPodNotRunningIsWaiting(t *testing.T) {
+	acc := &fakePodLogAccessor{pods: nil} // no pods at all
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	rec := getLogs(t, s, "", true)
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: waiting\n")
+	// It never tried to open a log stream (no pod resolved).
+	assert.Empty(t, acc.gotPod)
+}
+
+// TestAgentLogsAnonIs401 proves a request with no bearer token is rejected 401
+// BEFORE any K8s call — the caller-scoped seam never falls back to the BFF SA.
+func TestAgentLogsAnonIs401(t *testing.T) {
+	acc := &fakePodLogAccessor{pods: []corev1.Pod{runningPod("echo-xyz", time.Now())}}
+	s := newCallerServer(t, &fakeCallerClientFactory{
+		client:       fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
+		podLogs:      acc,
+		requireToken: true,
+	})
+
+	rec := getLogs(t, s, "", false)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Empty(t, acc.gotSelector, "no K8s call must happen for an anon request")
+}
+
+// TestSelectActivePod proves the pod picker prefers a Running pod, then the newest,
+// with a deterministic name tie-break, and returns "" for no pods.
+func TestSelectActivePod(t *testing.T) {
+	base := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	pending := runningPod("pending", base.Add(time.Hour))
+	pending.Status.Phase = corev1.PodPending
+	older := runningPod("run-old", base)
+	newer := runningPod("run-new", base.Add(2*time.Hour))
+
+	// Running beats a newer Pending.
+	assert.Equal(t, "run-old", selectActivePod([]corev1.Pod{pending, older}))
+	// Between two Running, the newer wins.
+	assert.Equal(t, "run-new", selectActivePod([]corev1.Pod{older, newer}))
+	// No pods → "".
+	assert.Equal(t, "", selectActivePod(nil))
+}
+
+// TestParseTailLines proves the bound: default when absent/invalid, honored when in
+// range, clamped when above the cap.
+func TestParseTailLines(t *testing.T) {
+	assert.Equal(t, int64(defaultLogTailLines), *parseTailLines(""))
+	assert.Equal(t, int64(defaultLogTailLines), *parseTailLines("abc"))
+	assert.Equal(t, int64(defaultLogTailLines), *parseTailLines("0"))
+	assert.Equal(t, int64(100), *parseTailLines("100"))
+	assert.Equal(t, int64(maxLogTailLines), *parseTailLines("999999"))
+}

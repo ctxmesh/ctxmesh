@@ -10,6 +10,13 @@
 
 export type ExecutionModel = "serving" | "eventing" | "job";
 export type EvalGate = "block" | "warn";
+// Runtime selects the agent runtime (ADR 0013): "managed" is the stock
+// tool-calling image (no Docker build — image OPTIONAL, systemPrompt + tools
+// allowed); "custom" is the unchanged bring-your-own-image path (image
+// REQUIRED, managed-only fields rejected). The create wizard defaults to
+// "managed" (the aha on-ramp); the config-builder keeps "custom" (its original
+// image-required behavior).
+export type Runtime = "managed" | "custom";
 
 // ScorerForm is one eval scorer row. weight is a string in the form (empty →
 // omitted, so the CRD default of 1 applies).
@@ -26,7 +33,17 @@ export interface ScorerForm {
 // are multi-field and the expand schema requires all sub-fields once present.
 export interface ConfigForm {
   name: string;
+  // runtime selects the two-runtime branch (ADR 0013). "managed" → image
+  // optional + systemPrompt/tools serialized; "custom" → image required, the
+  // managed-only fields omitted. Defaults to "custom" in emptyForm (the M12
+  // config-builder's unchanged behavior); the create wizard seeds "managed".
+  runtime: Runtime;
   image: string;
+  // systemPrompt + tools are MANAGED-ONLY (expand rejects them on a custom
+  // agent). tools is the list of catalog tool names bound to the managed loop —
+  // the SAME field generation emits and the tool picker edits.
+  systemPrompt: string;
+  tools: string[];
   executionModel: ExecutionModel;
   modelRoute: string;
   resourcesCpu: string;
@@ -57,7 +74,10 @@ export interface ConfigForm {
 export function emptyForm(): ConfigForm {
   return {
     name: "",
+    runtime: "custom",
     image: "",
+    systemPrompt: "",
+    tools: [],
     executionModel: "serving",
     modelRoute: "",
     resourcesCpu: "",
@@ -107,7 +127,9 @@ export function validate(form: ConfigForm): FieldErrors {
     errors.name = "Name must be at most 44 characters.";
   }
 
-  if (!form.image.trim()) {
+  // Image is REQUIRED for a custom agent (unchanged), OPTIONAL for a managed
+  // one (expand resolves the pinned managed image when omitted; ADR 0013).
+  if (form.runtime !== "managed" && !form.image.trim()) {
     errors.image = "Image is required.";
   }
 
@@ -178,15 +200,45 @@ function yamlString(v: string): string {
   return JSON.stringify(v); // JSON strings are valid YAML double-quoted scalars.
 }
 
+// yamlBlockScalar emits a multi-line string field as a YAML literal block
+// scalar (`key: |`) — the readable way to carry a system prompt (which may span
+// lines) without escaping. Each content line is indented two spaces under the
+// key; a single-line value still round-trips as one indented line. Trailing
+// blank lines are trimmed so the block stays clean.
+function yamlBlockScalar(key: string, value: string): string[] {
+  const body = value.replace(/\s+$/, "").split("\n");
+  return [`${key}: |`, ...body.map((l) => `  ${l}`)];
+}
+
 // toAgentYAML serializes a form into the simplified agent.yaml the BFF expands.
 // It omits empty optional fields so the output mirrors what a hand-written
 // agent.yaml would contain — the SAME schema the CLI `expand` consumes.
 export function toAgentYAML(form: ConfigForm): string {
   const lines: string[] = [];
   lines.push(`name: ${yamlString(form.name.trim())}`);
-  lines.push(`image: ${yamlString(form.image.trim())}`);
+  // Runtime branch (ADR 0013): managed → emit `runtime: managed` + the
+  // managed-only fields (systemPrompt, tools) and only include an explicit
+  // image when the user pinned one; custom → the unchanged image-required path
+  // with NO managed-only fields (expand rejects them on a custom agent).
+  const managed = form.runtime === "managed";
+  if (managed) {
+    lines.push("runtime: managed");
+    if (form.image.trim()) lines.push(`image: ${yamlString(form.image.trim())}`);
+  } else {
+    lines.push(`image: ${yamlString(form.image.trim())}`);
+  }
   if (form.executionModel && form.executionModel !== "serving") {
     lines.push(`executionModel: ${form.executionModel}`);
+  }
+
+  if (managed) {
+    const prompt = form.systemPrompt.trim();
+    if (prompt) lines.push(...yamlBlockScalar("systemPrompt", form.systemPrompt));
+    const tools = form.tools.map((t) => t.trim()).filter(Boolean);
+    if (tools.length > 0) {
+      lines.push("tools:");
+      for (const t of tools) lines.push(`  - ${yamlString(t)}`);
+    }
   }
 
   const cpu = form.resourcesCpu.trim();
