@@ -88,7 +88,7 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M13",
         route: "/",
       },
-      { id: "topology", label: "Topology", icon: Network, milestone: "M15" },
+      { id: "topology", label: "Topology", icon: Network, milestone: "M15", route: "/topology" },
     ],
   },
   {
