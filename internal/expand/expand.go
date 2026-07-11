@@ -217,6 +217,7 @@ var knownFields = map[string]bool{
 	"tools":          true,
 	"role":           true,
 	"allowedCallers": true,
+	"promptRef":      true,
 }
 
 // futureField describes a top-level field not yet supported, with the milestone
@@ -262,6 +263,11 @@ type agentYAML struct {
 	// AllowedCallers restricts which agents may call this one (per-agent allowlist);
 	// empty = registry-default. Maps to AgentDeployment.spec.allowedCallers.
 	AllowedCallers []string `yaml:"allowedCallers"`
+	// PromptRef REFERENCES an existing PromptVersion by name (sets spec.promptRef
+	// WITHOUT creating one). Mutually exclusive with the `prompt:` block, which
+	// CREATES a new git-backed PromptVersion. This is how the console composes an
+	// existing prompt into a new agent (m18.6).
+	PromptRef string `yaml:"promptRef"`
 }
 
 // budgetYAML holds optional cost-governance caps from the agent.yaml budget block.
@@ -513,6 +519,9 @@ func ExpandBytes(rawYAML []byte, w io.Writer) error {
 			return err
 		}
 	}
+	if ay.PromptRef != "" && ay.Prompt != nil {
+		return validationErr("use either promptRef (reference an existing PromptVersion) or the prompt block (create one), not both")
+	}
 
 	// Phase 5: build and emit manifests. Additional CRD manifests come first,
 	// then the AgentDeployment. Each document is separated by "---\n".
@@ -746,6 +755,11 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 	// Absent prompt block → promptRef stays empty (image-bundled prompt).
 	if ay.Prompt != nil {
 		spec.PromptRef = ay.Prompt.Name
+	}
+	// promptRef → spec.promptRef directly, REFERENCING an existing PromptVersion
+	// (no PromptVersion manifest is emitted). Mutually exclusive with prompt: above.
+	if ay.PromptRef != "" {
+		spec.PromptRef = ay.PromptRef
 	}
 
 	// role + allowedCallers → the within-registry A2A fields (both optional; empty

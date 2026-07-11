@@ -61,6 +61,14 @@ export interface ConfigForm {
   promptRepo: string;
   promptRef: string;
   promptPath: string;
+  // promptVersionRef REFERENCES an existing PromptVersion by name (→ top-level
+  // promptRef). Mutually exclusive with the git-backed prompt block above (m18.6).
+  promptVersionRef: string;
+
+  // role + allowedCallers → the within-registry A2A fields (m18.6). allowedCallers
+  // is a comma/newline-separated list in the form; serialized as a YAML sequence.
+  role: string;
+  allowedCallers: string;
 
   evalEnabled: boolean;
   evalSuite: string;
@@ -93,6 +101,9 @@ export function emptyForm(): ConfigForm {
     promptRepo: "",
     promptRef: "",
     promptPath: "",
+    promptVersionRef: "",
+    role: "",
+    allowedCallers: "",
     evalEnabled: false,
     evalSuite: "",
     evalDataset: "",
@@ -160,6 +171,13 @@ export function validate(form: ConfigForm): FieldErrors {
     if (!form.promptRepo.trim()) errors.promptRepo = "Git repo is required.";
     if (!form.promptRef.trim()) errors.promptRef = "Git ref is required.";
     if (!form.promptPath.trim()) errors.promptPath = "Git path is required.";
+  }
+
+  // Referencing an existing PromptVersion and creating a git-backed one are
+  // mutually exclusive (mirrors expand's validation).
+  if (form.promptVersionRef.trim() && form.promptEnabled) {
+    errors.promptVersionRef =
+      "Reference an existing prompt OR create a git-backed one, not both.";
   }
 
   if (form.evalEnabled) {
@@ -262,6 +280,21 @@ export function toAgentYAML(form: ConfigForm): string {
     lines.push("model:");
     lines.push(`  route: ${yamlString(route)}`);
   }
+
+  // role + allowedCallers + promptRef (reference an existing PromptVersion) —
+  // top-level spec fields the console composes (m18.6).
+  const role = form.role.trim();
+  if (role) lines.push(`role: ${yamlString(role)}`);
+  const callers = form.allowedCallers
+    .split(/[,\n]/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+  if (callers.length > 0) {
+    lines.push("allowedCallers:");
+    for (const c of callers) lines.push(`  - ${yamlString(c)}`);
+  }
+  const promptVersionRef = form.promptVersionRef.trim();
+  if (promptVersionRef) lines.push(`promptRef: ${yamlString(promptVersionRef)}`);
 
   if (form.budgetEnabled) {
     const conv = form.budgetPerConversationUSD.trim();
