@@ -111,6 +111,17 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	}
 	name := mcpServerName(req.Name)
 
+	// OAuth 2.1 tier (m17.2, ADR 0016): when auth.type == "oauth", registration does
+	// NOT probe/create now — the server's tools are behind a token the user must
+	// consent to. Instead the BFF starts an Auth-Code + PKCE flow SERVER-SIDE and
+	// returns ONLY the authorization URL + state handle; the browser redirect →
+	// consent → GET /api/mcp/oauth/callback completes the registration (token
+	// exchange + Secret + probe). No token/verifier is ever in this branch's output.
+	if req.Auth != nil && strings.EqualFold(strings.TrimSpace(req.Auth.Type), oauthAuthType) {
+		s.beginMCPOAuthRegistration(w, r, req, name, ns)
+		return
+	}
+
 	// (2) Probe the server. A bad URL / non-MCP endpoint → an honest 4xx with a
 	// teaching message; an unreachable host → 502. The optional key is used only
 	// for the probe here; it is neither returned nor logged.
@@ -215,6 +226,14 @@ type mcpCreateSpec struct {
 	apiKey    string
 	tools     []discoveredTool
 	status    string
+	// authType is the credential tier stamped as a non-secret annotation on the
+	// created objects ("" / oauthAuthType). It only NAMES the scheme; no credential.
+	authType string
+	// oauthSecretData, when non-nil, is the OAuth-grant Secret payload (access +
+	// refresh token, expiry, token endpoint, client id) written into the Secret
+	// INSTEAD of a bearer key. It is the ONLY place the tokens land — never a DTO,
+	// log, annotation, or label. Mutually exclusive with a non-empty apiKey.
+	oauthSecretData map[string][]byte
 }
 
 // createMCPObjects creates, with the caller's client and in dependency order:
@@ -234,12 +253,19 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 		labelManagedBy: managedByMCP,
 	}
 	hasKey := strings.TrimSpace(spec.apiKey) != ""
+	hasOAuth := len(spec.oauthSecretData) > 0
+	// The two credential tiers are mutually exclusive: an OAuth grant OR a bearer
+	// key, never both. hasSecret gates whether a Secret/SecretBinding is created.
+	hasSecret := hasKey || hasOAuth
 
 	annotations := map[string]string{
 		annMCPURL:    spec.url,
 		annMCPStatus: spec.status,
 	}
-	if hasKey {
+	if spec.authType != "" {
+		annotations[annMCPAuthType] = spec.authType
+	}
+	if hasSecret {
 		annotations[annMCPSecret] = spec.name
 	}
 
@@ -281,7 +307,18 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 	}
 	objs := make([]kindObj, 0, 4)
 
-	if hasKey {
+	if hasSecret {
+		// The Secret holds EITHER the bearer key (key tier) OR the OAuth grant
+		// (access/refresh token + expiry + refresh inputs) — never both. This is the
+		// ONLY object the credential material lands in; it is never in a DTO, log,
+		// annotation, or label. The SecretBinding's referenced key differs by tier so
+		// the credential resolver reads the right value.
+		secretData := map[string][]byte{secretKeyAPIKey: []byte(spec.apiKey)}
+		bindingKey := secretKeyAPIKey
+		if hasOAuth {
+			secretData = spec.oauthSecretData
+			bindingKey = secretKeyOAuthAccessToken
+		}
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        spec.name,
@@ -290,8 +327,7 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 				Annotations: annotations,
 			},
 			Type: corev1.SecretTypeOpaque,
-			// The bearer key lands in the SAME data key the provider flow uses.
-			Data: map[string][]byte{secretKeyAPIKey: []byte(spec.apiKey)},
+			Data: secretData,
 		}
 		binding := &agentsv1alpha1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{
@@ -302,7 +338,7 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 			},
 			Spec: agentsv1alpha1.SecretBindingSpec{
 				Backend:   secretBackendKubernetes,
-				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: secretKeyAPIKey},
+				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: bindingKey},
 			},
 		}
 		objs = append(objs, kindObj{"Secret", secret}, kindObj{"SecretBinding", binding})
@@ -587,6 +623,7 @@ func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSumm
 		ToolCount:  len(tr.Spec.Tools),
 		Status:     status,
 		SecretName: tr.Annotations[annMCPSecret],
+		AuthType:   mcpServerSummaryAuthType(tr),
 	}
 }
 
