@@ -61,6 +61,12 @@ type AgentSummary struct {
 	Image     string `json:"image"`
 	Phase     string `json:"phase"`
 	Ready     bool   `json:"ready"`
+	// Drift / ManagedOutsideUI are the fleet-health flags (m18.11, ADR 0017):
+	// managedOutsideUI = the agent has no console source-spec (kubectl-created);
+	// drift = a console-managed agent whose live spec diverged from its source-spec.
+	// Both power the SRE fleet drift badges (m18.12).
+	Drift            bool `json:"drift"`
+	ManagedOutsideUI bool `json:"managedOutsideUI"`
 }
 
 // AgentListResponse is returned by GET /api/agents. It carries the list-contract

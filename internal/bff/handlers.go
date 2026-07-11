@@ -135,6 +135,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
 			continue
 		}
+		// Fleet-health flags (m18.11) — computed only for agents that pass the
+		// filter so a filtered page never pays for skipped agents.
+		summary.ManagedOutsideUI, summary.Drift = s.editModeFlags(&list.Items[i])
 		summaries = append(summaries, summary)
 	}
 
