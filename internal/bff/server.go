@@ -231,6 +231,27 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("model route update"))
 		}
 		authed.HandleFunc("DELETE /api/modelroutes/{ns}/{name}", s.handleDeleteModelRoute)
+		// SecretBinding CRUD (m15.6): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT.
+		//
+		// SECURITY (ADR 0015): the BFF NEVER reads the referenced Kubernetes Secret
+		// to return its data. Every DTO projects only the SecretBinding CRD's own
+		// fields — which Secret name, which key — plus status. The credential value
+		// lives only in the Secret; it never flows through this API surface.
+		//
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly. The GET routes do not need the scheme.
+		authed.HandleFunc("GET /api/secretbindings", s.handleListSecretBindings)
+		authed.HandleFunc("GET /api/secretbindings/{ns}/{name}", s.handleGetSecretBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/secretbindings", s.handleCreateSecretBinding)
+			authed.HandleFunc("PUT /api/secretbindings/{ns}/{name}", s.handleUpdateSecretBinding)
+		} else {
+			authed.Handle("POST /api/secretbindings", notImplemented("secret binding create"))
+			authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("secret binding update"))
+		}
+		authed.HandleFunc("DELETE /api/secretbindings/{ns}/{name}", s.handleDeleteSecretBinding)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -257,6 +278,11 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/modelroutes", notImplemented("caller-scoped model route create"))
 		authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route update"))
 		authed.Handle("DELETE /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route delete"))
+		authed.Handle("GET /api/secretbindings", notImplemented("caller-scoped secret binding list"))
+		authed.Handle("GET /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding detail"))
+		authed.Handle("POST /api/secretbindings", notImplemented("caller-scoped secret binding create"))
+		authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding update"))
+		authed.Handle("DELETE /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
