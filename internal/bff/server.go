@@ -214,6 +214,11 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
+		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
+		// API server (a viewer without update is denied → 403).
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
 		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
 		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
 		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
