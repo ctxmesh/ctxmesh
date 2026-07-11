@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,14 +105,52 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// ADR 0011). Always available.
 	adapters.Invoke = bff.NewInvokeAdapter(bff.InvokeAdapterConfig{})
 
+	// The connect-a-provider kill-switch (ADR 0015). Default TRUE (dev/trial); a
+	// hardened install sets PROVIDER_CONNECT_ENABLED=false via the chart so the
+	// connect endpoints 404 and the UI falls back to reference-existing. Read from
+	// env with the same "flag-from-env" pattern the adapters use.
+	providerConnect := providerConnectEnabled(os.Getenv("PROVIDER_CONNECT_ENABLED"))
+	if !providerConnect {
+		log.Info("provider-connect disabled by PROVIDER_CONNECT_ENABLED=false; /api/providers routes serve 404")
+	}
+
+	// The create-from-prompt platform generation-model pin (ADR 0014). Empty (the
+	// default) → generation uses the caller's connected-provider model unpinned. An
+	// operator that wants a governed generation model sets a comma-separated list
+	// (PLATFORM_GENERATION_MODELS) — the UI's model dropdown source and the allowed
+	// set the generate endpoint enforces.
+	platformGenModels := parseGenerationModels(os.Getenv("PLATFORM_GENERATION_MODELS"))
+	if len(platformGenModels) > 0 {
+		log.Info("platform generation models pinned", "models", platformGenModels)
+	}
+
+	// The BYO-MCP kill-switch + trust policy (ADR 0016). MCP_ENABLED defaults TRUE
+	// (dev/trial); a hardened install sets it false to 404 the register/catalog
+	// endpoints. MCP_REQUIRE_APPROVAL defaults FALSE (self-serve — tools are
+	// immediately bindable); a hardened install sets it true to mark newly
+	// registered tools pending-approval (the approval queue is M17). Same
+	// "flag-from-env" pattern as the connect kill-switch.
+	mcpEnabled := envEnabledDefaultTrue(os.Getenv("MCP_ENABLED"))
+	if !mcpEnabled {
+		log.Info("BYO-MCP disabled by MCP_ENABLED=false; /api/mcpservers + /api/tools serve 404")
+	}
+	mcpRequireApproval := envTrue(os.Getenv("MCP_REQUIRE_APPROVAL"))
+	if mcpRequireApproval {
+		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
+	}
+
 	srv := bff.NewServer(bff.Options{
-		CallerClients: callerClients,
-		Scheme:        scheme,
-		Auth:          bff.BearerAuthenticator{},
-		Adapters:      adapters,
-		Version:       version,
-		StaticDir:     staticDir,
-		Log:           ctrl.Log.WithName("bff.server"),
+		CallerClients:            callerClients,
+		Scheme:                   scheme,
+		Auth:                     bff.BearerAuthenticator{},
+		Adapters:                 adapters,
+		Version:                  version,
+		StaticDir:                staticDir,
+		ProviderConnect:          providerConnect,
+		PlatformGenerationModels: platformGenModels,
+		MCPEnabled:               mcpEnabled,
+		MCPRequireApproval:       mcpRequireApproval,
+		Log:                      ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{
@@ -141,6 +180,57 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+// providerConnectEnabled resolves the connect-a-provider kill-switch from its
+// env value. The feature defaults to ENABLED (dev/trial, ADR 0015): an empty or
+// unrecognized value → true. Only an explicit falsey value ("false"/"0"/"no",
+// case-insensitive) disables it — the way a hardened install opts out. Kept
+// permissive-by-default so a fresh `helm install` gives the console the connect
+// flow with no extra config.
+func providerConnectEnabled(raw string) bool {
+	return envEnabledDefaultTrue(raw)
+}
+
+// envEnabledDefaultTrue resolves a boolean feature flag that defaults to ENABLED:
+// an empty or unrecognized value → true; only an explicit falsey value
+// ("false"/"0"/"no"/"off", case-insensitive) disables it. Used for the
+// connect-a-provider and BYO-MCP kill-switches (permissive-by-default so a fresh
+// install gets the console features with no extra config).
+func envEnabledDefaultTrue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// envTrue resolves a boolean flag that defaults to FALSE: only an explicit truthy
+// value ("true"/"1"/"yes"/"on", case-insensitive) enables it. Used for the
+// BYO-MCP hardened trust policy (MCP_REQUIRE_APPROVAL), off by default so the
+// self-serve aha stays frictionless.
+func envTrue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseGenerationModels splits the PLATFORM_GENERATION_MODELS env (a
+// comma-separated list) into the pinned generation-model list (ADR 0014). Empty
+// or whitespace-only entries are dropped; an empty env → nil (unpinned — the
+// default). Kept permissive so a fresh install needs no extra config.
+func parseGenerationModels(raw string) []string {
+	var out []string
+	for m := range strings.SplitSeq(raw, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // buildAdapters constructs the optional server-side adapters from environment

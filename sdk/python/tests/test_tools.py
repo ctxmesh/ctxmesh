@@ -7,6 +7,7 @@ import pytest
 from ctxmesh import agent
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
+from ctxmesh.tools import Tool
 
 from .launcher_stub import DiscoveryStub
 
@@ -21,6 +22,57 @@ def test_list_returns_manifest_tools(client, discovery_stub: DiscoveryStub):
     # It hit the discovery /tools endpoint.
     assert discovery_stub.requests[0].method == "GET"
     assert discovery_stub.requests[0].path == "/tools"
+
+
+def test_tool_from_dict_parses_input_schema():
+    """A manifest tool carrying inputSchema exposes it verbatim on the Tool (m14.6b)."""
+    schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    }
+    tool = Tool.from_dict(
+        {
+            "name": "word-count",
+            "mode": "remote",
+            "endpoint": "http://wc.svc/mcp",
+            "transport": "streamable-http",
+            "inputSchema": schema,
+        }
+    )
+    # Parsed verbatim — the exact object the manifest carried.
+    assert tool.input_schema == schema
+
+
+def test_tool_from_dict_absent_input_schema_is_none():
+    """A manifest tool WITHOUT inputSchema (or a non-object one) → input_schema None."""
+    base = {
+        "name": "echo",
+        "mode": "remote",
+        "endpoint": "http://echo.svc/mcp",
+        "transport": "streamable-http",
+    }
+    # Absent key.
+    assert Tool.from_dict(base).input_schema is None
+    # Explicit null.
+    assert Tool.from_dict({**base, "inputSchema": None}).input_schema is None
+    # A non-object (defensive): also treated as "no schema".
+    assert Tool.from_dict({**base, "inputSchema": "not-an-object"}).input_schema is None
+
+
+def test_list_carries_input_schema_from_manifest(discovery_stub: DiscoveryStub):
+    """tools.list() surfaces a manifest's inputSchema on the discovered Tool."""
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+
+    def manifest_with_schema():
+        m = DiscoveryStub._manifest(discovery_stub)
+        m["tools"][0]["inputSchema"] = schema
+        return m
+
+    discovery_stub._manifest = manifest_with_schema  # type: ignore[method-assign]
+    cfg = PlaneConfig.for_test(discovery_base_url=discovery_stub.base_url)
+    tools = agent.from_config(cfg).tools.list()
+    assert tools[0].input_schema == schema
 
 
 def test_call_follows_307_redirect_to_mcp_slash(client, discovery_stub: DiscoveryStub):

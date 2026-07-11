@@ -54,6 +54,20 @@ func newRealRoute(name, bindingRef, provider, model string, priority int32) agen
 	}
 }
 
+// newAPIBaseRoute constructs a ModelRoute with a single provider that targets an
+// arbitrary OpenAI-compatible upstream via apiBase (the tool-mock seam) — no
+// SecretBinding.
+func newAPIBaseRoute(name, provider, model, apiBase string) agentsv1alpha1.ModelRoute {
+	return agentsv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec: agentsv1alpha1.ModelRouteSpec{
+			Providers: []agentsv1alpha1.ProviderRef{
+				{Provider: provider, Model: model, Priority: 1, APIBase: apiBase},
+			},
+		},
+	}
+}
+
 // newBinding constructs a SecretBinding.
 func newBinding(name, secretName, secretKey string) agentsv1alpha1.SecretBinding {
 	return agentsv1alpha1.SecretBinding{
@@ -264,6 +278,40 @@ func TestRender_MockRouteContainsMockOK(t *testing.T) {
 		"mock provider entry must contain the MOCK_OK marker")
 	assert.True(t, strings.Contains(result.ConfigYAML, gateway.MockResponse),
 		"mock provider entry must contain the full MockResponse string")
+}
+
+// TestRender_APIBaseRouteProxiesUpstream verifies the api_base seam (m14.12b): a
+// ModelRoute provider with apiBase set renders api_base: <url> with a dummy
+// (non-secret) key and requires NO SecretBinding — the route that lets an
+// in-cluster managed-agent run target the deterministic tool-call mock and
+// produce a provable tool span. The upstream URL mirrors where the harness
+// deploys tool-call-mock.py (openai client prefix + arbitrary model id, since the
+// real target is api_base — matching harness/mock-provider/litellm-tool-mock.yaml).
+func TestRender_APIBaseRouteProxiesUpstream(t *testing.T) {
+	const upstream = "http://tool-mock.default.svc.cluster.local:9099/v1"
+	routes := []agentsv1alpha1.ModelRoute{
+		newAPIBaseRoute("tool-mock", "openai", "tool-call-mock", upstream),
+	}
+
+	// No bindings/secrets provided — an apiBase route must render regardless.
+	result := gateway.Render(routes, nil, nil, gateway.OTelConfig{})
+
+	wantConfig := `model_list:
+  - model_name: tool-mock
+    litellm_params:
+      model: openai/tool-call-mock
+      api_key: DUMMY_MOCK_KEY
+      api_base: http://tool-mock.default.svc.cluster.local:9099/v1
+`
+	assert.Equal(t, wantConfig, result.ConfigYAML, "apiBase route must render api_base with a dummy key")
+
+	// The apiBase route must NOT be excluded (it needs no SecretBinding)...
+	assert.Empty(t, result.Excluded, "apiBase route must never be excluded for a missing key")
+	// ...and must inject NO SB_* env var (keyless upstream).
+	assert.Empty(t, result.EnvVars, "apiBase route must not inject any SB_* env var")
+	// It must not carry the mock short-circuit marker (it PROXIES, not short-circuits).
+	assert.NotContains(t, result.ConfigYAML, "mock_response", "apiBase route must not render mock_response")
+	assert.NotContains(t, result.ConfigYAML, "MOCK_OK", "apiBase route must not carry the MOCK_OK marker")
 }
 
 // TestSanitizeName verifies the binding-name → env-var-suffix conversion.

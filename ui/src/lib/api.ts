@@ -58,6 +58,104 @@ export interface AgentListParams {
   namespace?: string;
 }
 
+// --- Agent detail (GET /api/agents/{ns}/{name}, m14.7) ----------------------
+// The agent-landing projection (first-agent-flow.md §5) — one AgentDeployment in
+// full, FLAT (never the raw CRD): identity + the spec summary + the live status
+// (conditions + Knative URL + readiness) + the bindings that reference it + the
+// version history. Every slice is non-null on the wire ([] not null). A 404 →
+// not-found; a 403 → ForbiddenInline (caller can't read this agent, ADR 0011).
+
+// AgentCondition mirrors the BFF's flat status-condition projection — exactly
+// what the status timeline renders (the readiness progression).
+export interface AgentCondition {
+  type: string;
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// AgentScaling is the flat Knative autoscaler bound projection.
+export interface AgentScaling {
+  min: number;
+  max: number;
+}
+
+// AgentBinding is one entry in the agent's bindings list — an MCPToolBinding
+// ("tool") or a MemoryBinding ("memory"). `detail` is the human subject (the
+// tool name / memory scope); `ready` mirrors the binding's own Ready condition.
+export interface AgentBinding {
+  kind: string;
+  name: string;
+  detail: string;
+  ready: boolean;
+}
+
+export interface AgentDetailResponse {
+  name: string;
+  namespace: string;
+  image: string;
+  executionModel: string;
+  role: string;
+  scaling: AgentScaling;
+  phase: string;
+  ready: boolean;
+  url: string;
+  latestVersion: string;
+  conditions: AgentCondition[];
+  bindings: AgentBinding[];
+  versions: string[];
+}
+
+// --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
+// The native run-summary source (first-agent-flow.md §5): a FLAT span list +
+// the trace-level rollup. The UI builds the tree/waterfall CLIENT-side from the
+// flat spans (key on id, tree from parentId, plot at startMs width durationMs).
+// Redaction-honest (M11): input/output are the persisted, already-redacted
+// content passed through verbatim; *Redacted flags say the content was scrubbed
+// to empty so the panel shows STRUCTURE with a marker, never a blank/leak.
+
+export interface SpanSummary {
+  id: string;
+  parentId: string;
+  // "SPAN" | "GENERATION" | "EVENT" — the tool call surfaces as a SPAN/GENERATION.
+  type: string;
+  name: string;
+  startMs: number;
+  durationMs: number;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  costUSD: number;
+  // "DEFAULT" | "WARNING" | "ERROR" | "DEBUG" | "".
+  level: string;
+  // "error" when Level is ERROR, else "ok" — the panel's health dot.
+  status: string;
+  input: string;
+  output: string;
+  inputRedacted: boolean;
+  outputRedacted: boolean;
+}
+
+// TraceRollup is the trace-level header the inspector renders (name + totals).
+export interface TraceRollup {
+  traceId: string;
+  name: string;
+  timestamp: string;
+  costUSD: number;
+  tokens: number;
+  latencyMs: number;
+  spanCount: number;
+}
+
+// TraceDetailResponse mirrors GET /api/traces/{id}/detail — the run SUMMARY
+// (rollup + FLAT spans). Distinct from GET /api/traces/{id} (the Langfuse embed
+// URL). Spans is non-null on the wire ([] not null).
+export interface TraceDetailResponse {
+  rollup: TraceRollup;
+  spans: SpanSummary[];
+}
+
 // --- Capabilities (GET /api/capabilities?namespace=) ------------------------
 // The flat RBAC capability map for the golden CRD kinds × verbs, computed by the
 // BFF via batched SelfSubjectAccessReviews with the CALLER'S token (ADR 0011).
@@ -193,6 +291,158 @@ export interface InvokeResponse {
   response: string;
 }
 
+// --- Provider connect (POST/GET /api/providers, GET .../models) -------------
+// The connect-a-provider flow (ADR 0015). The BFF validates the pasted key
+// against the provider, then creates a Secret + SecretBinding + ModelRoute with
+// the CALLER'S client (RBAC-scoped). The key is used ONCE (validate) and stored
+// server-side — it is NEVER returned in any DTO, never logged, never re-sent to
+// the browser. The POST RESPONSE carries the live model list (no 2nd round-trip)
+// so the review step renders it inline. A hardened install disables the flow via
+// the Helm kill-switch → the endpoints 404 and the UI falls back to
+// "reference an existing SecretBinding".
+
+// ProviderModel is one model the provider serves (from the live model list). The
+// modality (chat/embedding/…) is display-only; `id` is the model id used as a
+// ModelRoute target.
+export interface ProviderModel {
+  id: string;
+  modality?: string;
+}
+
+// ConnectProviderRequest is the POST /api/providers body. `apiKey` is the pasted
+// key — it lives ONLY in this request body (built at submit, cleared on success),
+// never in a store/localStorage/sessionStorage/URL (ADR 0015).
+export interface ConnectProviderRequest {
+  provider: string;
+  displayName: string;
+  apiKey: string;
+  baseURL?: string;
+}
+
+// ConnectProviderResponse mirrors the BFF DTO: the created resources' identities
+// + the live model list (pre-create, from the just-validated key). It carries NO
+// secret material — only the `secretName` REFERENCE.
+export interface ConnectProviderResponse {
+  provider: string;
+  models: ProviderModel[];
+  secretName: string;
+  ready: boolean;
+}
+
+// ConnectedProvider is one already-connected provider (GET /api/providers). No
+// secrets — names/models only.
+export interface ConnectedProvider {
+  provider: string;
+  displayName: string;
+  models: ProviderModel[];
+}
+
+export interface ProviderListResponse {
+  providers: ConnectedProvider[];
+}
+
+// --- BYO-MCP (POST/GET /api/mcpservers, GET /api/tools) ----------------------
+// The add-an-MCP flow (ADR 0016). The BFF probes the server + runs tools/list
+// discovery, stores an optional bearer key as a Secret (attached at the egress
+// hop, never browser-side), and adds the discovered tools to the merged catalog —
+// immediately bindable (self-serve) or pending operator approval (hardened). Like
+// providers, the key lives only in the POST body; the kill-switch 404s the flow.
+
+// DiscoveredTool is one tool from tools/list discovery. `approvalStatus` is
+// "approved" (self-serve, immediately bindable) or "pending" (hardened install,
+// queued for operator approval before binding). `source` names the server.
+export interface DiscoveredTool {
+  name: string;
+  description?: string;
+  source?: string;
+  approvalStatus?: "approved" | "pending";
+  inputSchema?: unknown;
+}
+
+// AddMcpRequest is the POST /api/mcpservers body — a remote URL OR an image, plus
+// an optional bearer key (held only until submit, per ADR 0016).
+export interface AddMcpRequest {
+  name: string;
+  url?: string;
+  image?: string;
+  apiKey?: string;
+}
+
+// AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're
+// immediately bindable or pending approval. No secret material.
+export interface AddMcpResponse {
+  name: string;
+  tools: DiscoveredTool[];
+  approvalStatus?: "approved" | "pending";
+}
+
+// --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
+// The merged tool catalog — curated ToolRegistry entries + the user's own
+// BYO-MCP discoveries (ADR 0016). It's the create-agent tool picker's source:
+// the review step lists every bindable tool with its source + approval state,
+// and the selected names become the agent's `tools` field (the SAME field the
+// form serializer + generation emit → MCPToolBindings via `expand`, ADR 0013).
+
+// CatalogTool is one tool in the merged catalog. `source` names its origin (a
+// curated registry or a user MCP server); `approvalStatus` is "approved"
+// (immediately bindable) or "pending" (hardened install — queued for operator
+// approval). `inputSchema` is the JSON-schema the managed loop passes to the
+// model (display-only in the picker — its presence shows a "schema" badge).
+export interface CatalogTool {
+  name: string;
+  description?: string;
+  source?: string;
+  approvalStatus?: "approved" | "pending";
+  inputSchema?: unknown;
+}
+
+export interface ToolListResponse {
+  tools: CatalogTool[];
+}
+
+// --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
+// The "Describe it" magic step: a natural-language description → a server-side
+// LLM (the caller's connected provider, or an operator-pinned model) → the
+// SIMPLIFIED agent.yaml, VALIDATED through the same `expand` core the CLI + form
+// use (no divergent schema). It is NEVER auto-applied — it returns for a review
+// step; Create is a separate explicit POST /api/agents. Generation burns the
+// caller's key and is cost-tagged (surfaced in the review header).
+//
+// TWO outcomes, distinguished by the `regenerate` FLAG (not the status code):
+//   • 200 → a valid generation: { agentYAML, expanded, model, warnings }.
+//   • 422 → an INVALID generation (the LLM produced something `expand` rejected):
+//     { error, reason, agentYAML (the raw attempt — PRESERVED so nothing is
+//     lost), regenerate: true }. The UI shows the reason + a Regenerate button;
+//     the raw YAML is kept visible. The client keys off `regenerate`, so a BFF
+//     that returns the flag on any status is handled uniformly.
+
+// GenerateAgentRequest is the POST body: the description + an optional model /
+// provider override (the review's model dropdown when the operator pins models
+// or multiple providers are connected).
+export interface GenerateAgentRequest {
+  description: string;
+  model?: string;
+  provider?: string;
+}
+
+// GenerateAgentResponse is the unified generation outcome. `regenerate` is the
+// discriminator: absent/false ⇒ a valid config (agentYAML + expanded preview +
+// the model used + any non-fatal warnings); true ⇒ the generation failed
+// validation — `reason` explains why and `agentYAML` is the raw attempt (kept so
+// the user sees what was produced and can regenerate without losing context).
+export interface GenerateAgentResponse {
+  agentYAML: string;
+  // expanded is the CRD preview (the `expand` output) — shown behind Advanced.
+  // Present only on a valid generation.
+  expanded?: string;
+  model?: string;
+  warnings?: string[];
+  // The failure path (422): a human reason + the flag the UI keys off.
+  error?: string;
+  reason?: string;
+  regenerate?: boolean;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -213,6 +463,13 @@ export class ApiError extends Error {
    *  validation 401 is surfaced to the login page instead. */
   get isUnauthorized(): boolean {
     return this.status === 401;
+  }
+
+  /** True for a 404 — for the connect/MCP flows this is the Helm KILL-SWITCH
+   *  (the endpoint is disabled on a hardened install), which the wizards render
+   *  as the "reference an existing SecretBinding" fallback (ADR 0015/0016). */
+  get isNotFound(): boolean {
+    return this.status === 404;
   }
 }
 
@@ -309,6 +566,32 @@ async function getJSON<T>(
   return (await res.json()) as T;
 }
 
+// postJSON is the write analogue of getJSON: POST a JSON body, parse a JSON
+// response, and surface the BFF's {"error"} on a non-2xx as a typed ApiError so
+// callers branch on isForbidden (403) / isNotFound (kill-switch 404) / status.
+// The request body may carry a pasted key (provider/MCP) — it is written straight
+// into the request and never logged (api.ts never reads the header/body back into
+// a logged string).
+async function postJSON<TReq, TRes>(
+  path: string,
+  body: TReq,
+  signal?: AbortSignal,
+): Promise<TRes> {
+  const res = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    throw new ApiError(
+      await errorMessage(res, `${path} failed (${res.status})`),
+      res.status,
+    );
+  }
+  return (await res.json()) as TRes;
+}
+
 // WhoAmIOptions covers the two whoami callers: the session module validating a
 // pasted/persisted token (token supplied, login:true → a 401 is a login error,
 // not a session expiry) and, in principle, a re-check with the live session.
@@ -327,6 +610,148 @@ export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
     token: opts.token,
     login: opts.login,
   });
+}
+
+// --- SSE log tail (GET /api/agents/{ns}/{name}/logs, m14.7) ------------------
+// The live pod-log tail is Server-Sent Events, but EventSource CANNOT set an
+// Authorization header (ADR 0012: the caller's bearer lives in memory, not a
+// cookie). So we read the stream with fetch + a ReadableStream reader, which
+// attaches `Authorization: Bearer` through the SAME apiFetch seam every other
+// /api/* call uses. This also lets us distinguish, cleanly:
+//   • a PRE-STREAM 401/403 — an HTTP status BEFORE any SSE frame (res.ok is
+//     false) → onForbidden/onError with NO events emitted (a forbidden state,
+//     not an in-stream error);
+//   • an IN-STREAM `error` frame — a mid-stream break the BFF surfaces as an SSE
+//     event (e.g. pods/log denied after pods list allowed, or the pod died).
+// The SSE grammar the BFF writes is `event: <type>\ndata: <line>\n\n` (one frame
+// per blank-line-terminated block; multi-line data spans repeated `data:` lines,
+// re-joined with "\n"). We parse frames incrementally off the byte stream.
+
+// LogEventType names the four SSE frame types the BFF emits (agent_detail.go):
+//   log     — one log line, in order.
+//   waiting — no running pod yet (the agent is starting) — HTTP 200, clean close.
+//   error   — an IN-STREAM failure (forbidden pods/log, or a mid-stream break).
+//   end     — a clean end of the stream.
+export type LogEventType = "log" | "waiting" | "error" | "end";
+
+export interface LogStreamHandlers {
+  /** One SSE frame arrived (log/waiting/error/end). Called in wire order. */
+  onEvent: (type: LogEventType, data: string) => void;
+  /**
+   * A PRE-STREAM 403 (RBAC denied pods list) — an HTTP status BEFORE the stream
+   * opens, distinct from an in-stream `error` frame. No events were emitted.
+   */
+  onForbidden?: (message: string) => void;
+  /**
+   * A PRE-STREAM transport/HTTP failure that is NOT a 403 (e.g. a 500, a network
+   * error, a 400). Also called if the request could not open at all.
+   */
+  onError?: (message: string, status?: number) => void;
+}
+
+export interface LogStreamOptions {
+  follow?: boolean;
+  container?: string;
+  tailLines?: number;
+  signal?: AbortSignal;
+}
+
+// openLogStream opens the SSE pod-log tail with the caller's bearer attached and
+// drives the handlers. It returns a cancel() that aborts the stream (call it on
+// unmount — no leak). A pre-stream 401 routes to login via apiFetch's own 401
+// handler (the session expired); we still report it via onError so the caller
+// can render honestly until the redirect lands.
+export function openLogStream(
+  ns: string,
+  name: string,
+  handlers: LogStreamHandlers,
+  opts: LogStreamOptions = {},
+): () => void {
+  const qs = new URLSearchParams();
+  if (opts.follow) qs.set("follow", "true");
+  if (opts.container) qs.set("container", opts.container);
+  if (opts.tailLines && opts.tailLines > 0) qs.set("tailLines", String(opts.tailLines));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const path = `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/logs${suffix}`;
+
+  // Our own controller so unmount can abort even when the caller passed no signal;
+  // if the caller DID pass one, we chain it so either aborts the fetch.
+  const controller = new AbortController();
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  void (async () => {
+    let res: Response;
+    try {
+      res = await apiFetch(path, {
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (controller.signal.aborted) return; // unmounted — silent, no leak.
+      handlers.onError?.(err instanceof Error ? err.message : "log stream failed");
+      return;
+    }
+
+    // PRE-STREAM status: a non-2xx arrives as an HTTP status BEFORE any SSE frame.
+    // 403 → forbidden state (NOT an in-stream error); anything else → onError.
+    if (!res.ok) {
+      const message = await errorMessage(res, `log stream failed (${res.status})`);
+      if (res.status === 403) handlers.onForbidden?.(message);
+      else handlers.onError?.(message, res.status);
+      return;
+    }
+    if (!res.body) {
+      handlers.onError?.("log stream returned no body");
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Frames are separated by a blank line ("\n\n"). Parse every COMPLETE
+        // frame in the buffer; keep the trailing partial for the next chunk.
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const parsed = parseSSEFrame(frame);
+          if (parsed) handlers.onEvent(parsed.type, parsed.data);
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return; // aborted on unmount — expected.
+      handlers.onError?.(err instanceof Error ? err.message : "log stream broke");
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+// parseSSEFrame parses one SSE frame ("event: <t>\ndata: <l>\n[data: <l>...]")
+// into a typed event. Multiple data: lines re-join with "\n" (the SSE grammar).
+// Unknown event names map to "log" defensively (a data-only frame is a log line).
+function parseSSEFrame(frame: string): { type: LogEventType; data: string } | null {
+  let event = "log";
+  const dataLines: string[] = [];
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0 && event === "log") return null; // blank/keep-alive.
+  const type: LogEventType =
+    event === "waiting" || event === "error" || event === "end" ? event : "log";
+  return { type, data: dataLines.join("\n") };
 }
 
 // agentsQuery builds the /api/agents query string from the list-contract params,
@@ -374,6 +799,24 @@ export const api = {
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(
       `/api/traces/${encodeURIComponent(traceId)}`,
+      signal,
+    ),
+
+  // agentDetail reads one AgentDeployment's full landing projection (m14.7). A
+  // 404 = not-found (no such agent), 403 = viewer-can't-read (ForbiddenInline),
+  // 400 = a malformed ns/name — all surface as a typed ApiError.
+  agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentDetailResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // traceDetail reads one trace's FLAT span summary (m14.8) — the run
+  // inspector's source. The UI builds the tree/waterfall client-side. A 404 =
+  // no such trace, 403 = can't read traces — surfaced as a typed ApiError.
+  traceDetail: (traceId: string, signal?: AbortSignal) =>
+    getJSON<TraceDetailResponse>(
+      `/api/traces/${encodeURIComponent(traceId)}/detail`,
       signal,
     ),
 
@@ -441,5 +884,80 @@ export const api = {
       );
     }
     return (await res.json()) as InvokeResponse;
+  },
+
+  // listProviders lists the already-connected providers (names/models, NO
+  // secrets). Drives the dashboard empty-state decision ([] ⇒ show the CTA) and
+  // the connect wizard's "already connected" awareness. A 404 = the kill-switch.
+  listProviders: (signal?: AbortSignal) =>
+    getJSON<ProviderListResponse>("/api/providers", signal),
+
+  // connectProvider validates the pasted key server-side and creates the
+  // Secret + SecretBinding + ModelRoute (caller-scoped, ADR 0015). The response
+  // carries the LIVE model list (pre-create, no 2nd round-trip). A 400/401 =
+  // bad key (honest inline error), 403 = viewer-can't-create (ForbiddenInline),
+  // 404 = the kill-switch (reference-existing fallback).
+  connectProvider: (req: ConnectProviderRequest, signal?: AbortSignal) =>
+    postJSON<ConnectProviderRequest, ConnectProviderResponse>(
+      "/api/providers",
+      req,
+      signal,
+    ),
+
+  // providerModels re-fetches a connected provider's live model list (proxied
+  // server-side via the stored Secret). Not on the connect happy path (the POST
+  // response already carries them) — kept for a re-connect / refresh.
+  providerModels: (name: string, signal?: AbortSignal) =>
+    getJSON<{ models: ProviderModel[] }>(
+      `/api/providers/${encodeURIComponent(name)}/models`,
+      signal,
+    ),
+
+  // addMcpServer probes the MCP server + runs tools/list discovery, storing an
+  // optional bearer key server-side (ADR 0016). The response carries the
+  // discovered tools + whether they're immediately bindable or pending approval.
+  // A 422/502 = probe failure (teaching error + retry), 403 = viewer-can't-create
+  // (ForbiddenInline), 404 = the kill-switch.
+  addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
+    postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
+
+  // listTools reads the merged tool catalog (curated ToolRegistry + the caller's
+  // BYO-MCP discoveries, m14.6) — the create-agent tool picker's source. A 403
+  // is an honest "can't list tools" surfaced via ApiError (the picker degrades
+  // to an empty catalog + note); a 200 carries every bindable tool with its
+  // source + approval state. The `tools` slice is non-null on the wire.
+  listTools: (signal?: AbortSignal) =>
+    getJSON<ToolListResponse>("/api/tools", signal),
+
+  // generateAgent runs create-from-prompt (ADR 0014): a description → a
+  // server-side LLM → the simplified agent.yaml, expand-validated. It NEVER
+  // auto-applies — the response is for a review step; Create is a separate
+  // POST /api/agents.
+  //
+  // Unlike other writes, a 422 is NOT thrown: it's the REGENERATE outcome (the
+  // generation failed validation) and carries a usable body (the reason + the
+  // raw agentYAML). We parse the JSON on both 200 and 422 and let the caller
+  // branch on the `regenerate` FLAG. A 403 (viewer), 404 (kill-switch), or other
+  // non-2xx/422 status still surfaces as a typed ApiError. The description flows
+  // through the BFF; the provider key never reaches the browser (ADR 0011/0015).
+  generateAgent: async (
+    req: GenerateAgentRequest,
+    signal?: AbortSignal,
+  ): Promise<GenerateAgentResponse> => {
+    const res = await apiFetch("/api/agents/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    // 200 (valid) and 422 (regenerate) both carry a JSON body the caller uses;
+    // any OTHER non-2xx is a genuine failure (403/404/500) → typed ApiError.
+    if (res.ok || res.status === 422) {
+      return (await res.json()) as GenerateAgentResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `generate failed (${res.status})`),
+      res.status,
+    );
   },
 };

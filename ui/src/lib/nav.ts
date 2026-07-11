@@ -11,6 +11,7 @@ import {
   PlugZap,
   Settings,
   SlidersHorizontal,
+  Sparkles,
   Users,
   Wrench,
 } from "lucide-react";
@@ -101,6 +102,18 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/agents",
       },
       {
+        // The create-agent wizard (m14.10) — the aha's heart: Describe it /
+        // Configure it → one review + tool picker → Create. A WRITE surface
+        // (it creates AgentDeployments), hidden from a viewer's nav; gates on
+        // create agentdeployments. This is the primary "new agent" entry point.
+        id: "new-agent",
+        label: "New agent",
+        icon: Sparkles,
+        milestone: "M14",
+        route: "/agents/new",
+        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+      },
+      {
         // The re-housed config-builder — a WRITE surface (it applies CRDs), so
         // it is hidden from a viewer's nav. It gates on create agentdeployments.
         id: "config",
@@ -121,7 +134,19 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/playground",
         requiresWrite: { resource: RES_AGENTS, verb: "create" },
       },
-      { id: "tools", label: "Tool catalog", icon: Wrench, milestone: "M14" },
+      {
+        // Add-an-MCP wizard (m14.9). Registering a BYO MCP server creates a
+        // ToolRegistry entry (+ a Secret for its key) — a WRITE surface, hidden
+        // from a viewer's nav. Gates on create agentregistries (the catalog seam
+        // the discovered tools land in). The full tool CATALOG page is a later
+        // task; this entry opens the add-server wizard directly.
+        id: "tools",
+        label: "Add MCP server",
+        icon: Wrench,
+        milestone: "M14",
+        route: "/tools/add-mcp",
+        requiresWrite: { resource: RES_REGISTRIES, verb: "create" },
+      },
       { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
       { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
     ],
@@ -138,7 +163,19 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Platform",
     items: [
-      { id: "providers", label: "Providers", icon: PlugZap, milestone: "M14" },
+      {
+        // Connect-provider wizard (m14.9). Connecting a provider creates a
+        // Secret + SecretBinding + ModelRoute — a WRITE surface, hidden from a
+        // viewer's nav. Gates on create secretbindings (the key-storage seam).
+        // The full connected-providers LIST page is a later task; this entry
+        // opens the connect wizard directly.
+        id: "providers",
+        label: "Providers",
+        icon: PlugZap,
+        milestone: "M14",
+        route: "/providers/connect",
+        requiresWrite: { resource: RES_SECRETS, verb: "create" },
+      },
       { id: "registries", label: "Registries", icon: Users, milestone: "M15" },
       { id: "routes", label: "Model routes", icon: GitBranch, milestone: "M15" },
       { id: "secrets", label: "Secret bindings", icon: KeyRound, milestone: "M15" },

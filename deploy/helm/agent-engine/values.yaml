@@ -57,3 +57,41 @@ networkPolicy:
 # platform (spec §6); set false for a headless control-plane-only install.
 ui:
   enabled: true
+
+# --- BFF feature flags (m14.4) -----------------------------------------------
+# The Go BFF's connect-a-provider flow (ADR 0015): paste a provider API key once
+# and get a working model route, validated + stored server-side (the key never
+# touches the browser). Enabled by default for dev/trial so the console's first
+# step is a paste, not a terminal. Set `enabled: false` on a HARDENED install:
+# the connect endpoints (POST/GET /api/providers, GET /api/providers/{name}/
+# models) then 404 and the UI falls back to referencing an out-of-band-created
+# SecretBinding. This templates the BFF deployment's PROVIDER_CONNECT_ENABLED
+# env: with this default the render is "true" == kustomize (helm-verify no-drift);
+# `helm install --set bff.providerConnect.enabled=false` renders "false" to
+# disable it — the ADR 0015 hardened-install path.
+bff:
+  providerConnect:
+    enabled: true
+  # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
+  # leaves generation using the caller's connected-provider model unpinned — the
+  # zero-config dev/trial path. An operator that wants a GOVERNED generation model
+  # sets a comma-separated list (e.g. "claude-sonnet-4-6,gpt-4o"); it becomes the
+  # UI's model dropdown source and the allowed set the /api/agents/generate
+  # endpoint enforces. This templates the BFF deployment's PLATFORM_GENERATION_MODELS
+  # env; with this default the render is the quoted empty string == kustomize
+  # (helm-verify no-drift).
+  generation:
+    platformModels: ""
+  # The BYO-MCP flow (ADR 0016): register your OWN MCP server, discover its tools
+  # (with inputSchema), and catalog them — all server-side (the optional bearer key
+  # never touches the browser). Enabled by default for dev/trial so the console's
+  # add-MCP wizard works out of the box. Set `enabled: false` on a HARDENED install
+  # to forbid BYO MCP: the register/catalog endpoints (POST/GET /api/mcpservers,
+  # GET /api/tools) then 404. `requireApproval: true` (hardened) marks newly
+  # registered MCP tools pending-approval instead of self-serve (the approval queue
+  # itself is M17). This templates the BFF deployment's MCP_ENABLED /
+  # MCP_REQUIRE_APPROVAL envs; with these defaults the render is "true"/"false" ==
+  # kustomize (helm-verify no-drift).
+  mcp:
+    enabled: true
+    requireApproval: false

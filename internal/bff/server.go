@@ -52,6 +52,36 @@ type Server struct {
 	version       string
 	log           logr.Logger
 
+	// providerConnect is the ADR 0015 kill-switch. When false the connect
+	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
+	// NOT registered and serve 404 — the UI falls back to reference-existing.
+	// Default true (dev/trial); an operator sets it false on hardened installs.
+	providerConnect bool
+	// providerHTTP is the HTTP client the connect flow uses to validate a key +
+	// fetch a provider's model list server-side. Nil → a bounded default client;
+	// tests point it at an httptest fake provider.
+	providerHTTP *http.Client
+
+	// platformGenerationModels is the operator-pinned list of models the
+	// create-from-prompt generation endpoint (ADR 0014) may use — the UI's model
+	// dropdown source. Empty (the default) → generation uses the caller's connected
+	// provider model with no pin. A values seam like the connect kill-switch (wired
+	// from PLATFORM_GENERATION_MODELS in cmd/bff/main.go).
+	platformGenerationModels []string
+
+	// mcpEnabled is the BYO-MCP kill-switch (ADR 0016), mirroring the connect
+	// kill-switch. When false the register/catalog endpoints (POST/GET
+	// /api/mcpservers, GET /api/tools) are NOT registered and 404 — a hardened
+	// install that forbids BYO MCP. Default true (dev/trial). Wired from
+	// MCP_ENABLED in cmd/bff/main.go (Helm value bff.mcp.enabled).
+	mcpEnabled bool
+	// mcpRequireApproval is the ADR 0016 TRUST policy switch. Default false
+	// (self-serve — a registered server's tools are immediately bindable). When
+	// true (hardened) a freshly-registered server's tools are marked
+	// pending-approval; the approval queue itself is M17 (here we only mark the
+	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
+	mcpRequireApproval bool
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -79,6 +109,30 @@ type Options struct {
 	// StaticDir is the directory of the built SPA (dist/). Empty disables static
 	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
 	StaticDir string
+	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
+	// (the default for dev/trial) the connect endpoints are registered; when
+	// false (a hardened install) they serve 404 and the UI falls back to
+	// reference-existing. Wired from PROVIDER_CONNECT_ENABLED in cmd/bff/main.go.
+	ProviderConnect bool
+	// ProviderHTTP overrides the HTTP client the connect flow uses to reach the
+	// provider (validation + model list + generation chat). Nil uses a bounded
+	// default; tests inject a client pointed at an httptest fake provider.
+	ProviderHTTP *http.Client
+	// PlatformGenerationModels is the operator-pinned generation-model list (ADR
+	// 0014) — the UI's model dropdown source. Empty (default) → generation uses the
+	// caller's connected-provider model unpinned. Wired from
+	// PLATFORM_GENERATION_MODELS in cmd/bff/main.go.
+	PlatformGenerationModels []string
+	// MCPEnabled is the BYO-MCP kill-switch (ADR 0016). When true (the default for
+	// dev/trial) the register/catalog endpoints are registered; when false (a
+	// hardened install) POST/GET /api/mcpservers + GET /api/tools 404. Wired from
+	// MCP_ENABLED in cmd/bff/main.go.
+	MCPEnabled bool
+	// MCPRequireApproval is the ADR 0016 trust policy. When false (default,
+	// self-serve) a registered server's tools are immediately bindable; when true
+	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
+	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
+	MCPRequireApproval bool
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -87,12 +141,17 @@ type Options struct {
 // caller mounts Handler() on an http.Server.
 func NewServer(opts Options) *Server {
 	s := &Server{
-		callerClients: opts.CallerClients,
-		scheme:        opts.Scheme,
-		auth:          opts.Auth,
-		adapters:      opts.Adapters,
-		version:       opts.Version,
-		log:           opts.Log,
+		callerClients:            opts.CallerClients,
+		scheme:                   opts.Scheme,
+		auth:                     opts.Auth,
+		adapters:                 opts.Adapters,
+		version:                  opts.Version,
+		providerConnect:          opts.ProviderConnect,
+		providerHTTP:             opts.ProviderHTTP,
+		platformGenerationModels: opts.PlatformGenerationModels,
+		mcpEnabled:               opts.MCPEnabled,
+		mcpRequireApproval:       opts.MCPRequireApproval,
+		log:                      opts.Log,
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -120,6 +179,14 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
+		// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
+		// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22
+		// ServeMux treats "GET /api/agents", "GET /api/agents/{ns}/{name}" and
+		// ".../{name}/logs" as three DISTINCT patterns (the more specific wins), so
+		// these never shadow the list route above or the create route below.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
@@ -136,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 		}
 	} else {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
+		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
+		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
@@ -151,6 +220,12 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/runs", s.handleRuns)
 		authed.HandleFunc("GET /api/cost", s.handleCost)
 		authed.HandleFunc("GET /api/traces/{id}", s.handleTraceLink)
+		// Run inspector (m14.8, first-agent-flow.md §3/§5): the flat span summary for
+		// one trace (trace + observations). The Go 1.22 ServeMux treats
+		// "GET /api/traces/{id}" and "GET /api/traces/{id}/detail" as DISTINCT
+		// patterns (the more specific "/detail" wins), so this is additive and never
+		// shadows the embed-URL route above.
+		authed.HandleFunc("GET /api/traces/{id}/detail", s.handleTraceDetail)
 	} else {
 		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
@@ -179,6 +254,75 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("POST /api/expand", s.handleExpand)
 	} else {
 		authed.Handle("POST /api/expand", notImplemented("config expand"))
+	}
+
+	// Create-from-prompt generation (m14.5, ADR 0014): a natural-language
+	// description → a server-side chat/completions call through the CALLER'S
+	// connected provider → the emitted simplified agent.yaml validated by the SAME
+	// expand core → returned for REVIEW (never auto-applied). It needs BOTH seams:
+	//   - the CALLER-CLIENT factory — the generation key is resolved caller-scoped
+	//     (route → SecretBinding → Secret), so a viewer denied the Secret is a 403
+	//     and the BFF never falls back to its own SA (ADR 0011); AND
+	//   - the EXPAND adapter — the emitted YAML is validated through the one mapping
+	//     (no divergent generator schema, ADR 0014).
+	// Either missing → an honest 501. The generation chat reuses providerHTTP (nil
+	// → a bounded default client).
+	if s.callerClients != nil && s.adapters.Expand != nil {
+		authed.HandleFunc("POST /api/agents/generate", s.handleGenerate)
+	} else {
+		authed.Handle("POST /api/agents/generate", notImplemented("create-from-prompt generation"))
+	}
+
+	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
+	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by
+	// TWO factors, in order:
+	//
+	//  1. the Helm KILL-SWITCH (providerConnect). OFF → the routes are NOT
+	//     registered, so they fall through to the SPA handler and 404 (feature-off);
+	//     the UI then falls back to reference-existing. This is checked FIRST so a
+	//     hardened install makes the endpoints genuinely absent.
+	//  2. the CALLER-CLIENT factory (like every user-facing CRD route): nil → 501,
+	//     never a BFF-SA fallback (ADR 0011).
+	//
+	// When both are satisfied the three connect endpoints run caller-scoped.
+	if s.providerConnect {
+		if s.callerClients != nil {
+			authed.HandleFunc("POST /api/providers", s.handleConnectProvider)
+			authed.HandleFunc("GET /api/providers", s.handleListProviders)
+			authed.HandleFunc("GET /api/providers/{name}/models", s.handleProviderModels)
+		} else {
+			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
+			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
+			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
+		}
+	}
+
+	// BYO-MCP register + tool catalog (m14.6, ADR 0016): probe a user's MCP server,
+	// capture its tools (with inputSchema), store an optional key as a Secret, write
+	// a user-added ToolRegistry entry per tool, and open per-server egress — all
+	// CALLER-SCOPED. Gated by TWO factors, in order (the connect-flow pattern):
+	//
+	//  1. the Helm KILL-SWITCH (mcpEnabled). OFF → the routes are NOT registered, so
+	//     they fall through to the SPA handler and 404 (feature-off) — a hardened
+	//     install that forbids BYO MCP. Checked FIRST so the endpoints are genuinely
+	//     absent.
+	//  2. the CALLER-CLIENT factory (like every user-facing CRD route): nil → 501,
+	//     never a BFF-SA fallback (ADR 0011). GET /api/tools reads ToolRegistries
+	//     caller-scoped; POST /api/mcpservers writes caller-scoped.
+	//
+	// The trust policy (self-serve vs pending-approval) is the SEPARATE
+	// mcpRequireApproval value, read inside the handler — it changes the entry
+	// status, not the route wiring.
+	if s.mcpEnabled {
+		if s.callerClients != nil {
+			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
+			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
+			authed.HandleFunc("GET /api/tools", s.handleListTools)
+		} else {
+			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
+			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
+			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
+		}
 	}
 
 	api.Handle("/api/", s.requireAuth(authed))

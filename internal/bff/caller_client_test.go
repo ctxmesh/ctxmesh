@@ -55,6 +55,10 @@ type fakeCallerClientFactory struct {
 	// requireToken, when true, makes ForRequest reject an empty token with
 	// errUnauthenticated — mirroring the production factory's 401-before-K8s gate.
 	requireToken bool
+	// podLogs is the PodLogAccessor stand-in returned by PodLogsForRequest (the
+	// caller-scoped log-tail seam). Nil → PodLogsForRequest returns a nil accessor,
+	// which is fine for the CRD-route tests that never hit the logs endpoint.
+	podLogs PodLogAccessor
 }
 
 func (f *fakeCallerClientFactory) ForRequest(r *http.Request) (client.Client, error) {
@@ -64,6 +68,15 @@ func (f *fakeCallerClientFactory) ForRequest(r *http.Request) (client.Client, er
 		return nil, errUnauthenticated
 	}
 	return f.client, nil
+}
+
+func (f *fakeCallerClientFactory) PodLogsForRequest(r *http.Request) (PodLogAccessor, error) {
+	token := bearerToken(r)
+	f.gotToken = token
+	if f.requireToken && token == "" {
+		return nil, errUnauthenticated
+	}
+	return f.podLogs, nil
 }
 
 // newFakeFactory wraps a client.Client as a permissive caller-client factory for

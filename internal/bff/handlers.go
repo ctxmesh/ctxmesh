@@ -18,6 +18,7 @@ package bff
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -254,6 +255,45 @@ func (s *Server) handleTraceLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, TraceLinkResponse{TraceID: id, URL: u})
+}
+
+// handleTraceDetail serves GET /api/traces/{id}/detail — the run inspector's
+// flat span summary for one trace (m14.8, first-agent-flow.md §3/§5). It fetches
+// the trace + its observations through the Langfuse adapter (server-side creds,
+// ADR 0005) and returns the trace-level rollup plus a FLAT list of spans
+// (parentId-linked; the UI builds the tree). It is the run SUMMARY, distinct from
+// the embed-URL route GET /api/traces/{id} (which returns only the link target) —
+// the Go 1.22 ServeMux treats the two patterns as distinct (the more specific
+// "/detail" wins), so this is purely additive and never shadows m12.5.
+//
+// Degrades honestly: a genuinely-missing trace → 404 (ErrTraceNotFound); any
+// other Langfuse upstream failure → 502 (never a 500). Only registered when the
+// Langfuse adapter is wired (nil → the route seam serves 501, like the others).
+func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing trace id")
+		return
+	}
+	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrTraceNotFound) {
+			writeError(w, http.StatusNotFound, "trace not found")
+			return
+		}
+		s.log.Error(err, "fetch trace detail failed", "traceID", id)
+		writeError(w, http.StatusBadGateway, "failed to fetch trace detail")
+		return
+	}
+	// Non-nil slice so the JSON is [] rather than null for a trace with no spans.
+	spans := detail.Spans
+	if spans == nil {
+		spans = []SpanSummary{}
+	}
+	writeJSON(w, http.StatusOK, TraceDetailResponse{
+		Rollup: detail.Rollup,
+		Spans:  spans,
+	})
 }
 
 // notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/

@@ -40,6 +40,12 @@ from ctxmesh.errors import (
     EndpointError,
     NotInPodError,
 )
+from ctxmesh.managed import (
+    DEFAULT_MAX_STEPS,
+    ManagedConfig,
+    ManagedResult,
+    run_managed_loop,
+)
 from ctxmesh.model import ChatResponse, ModelClient
 from ctxmesh.trace import SpanHandle, TraceClient
 
@@ -55,6 +61,10 @@ __all__ = [
     "ChatResponse",
     "TraceClient",
     "SpanHandle",
+    "run_managed_loop",
+    "ManagedConfig",
+    "ManagedResult",
+    "DEFAULT_MAX_STEPS",
 ]
 
 __version__ = "0.1.0"

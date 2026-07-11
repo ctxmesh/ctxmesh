@@ -2,8 +2,12 @@ import { lazy, Suspense } from "react";
 import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
+import { AgentDetailPage } from "@/pages/agent-detail-page";
 import { AgentsPage } from "@/pages/agents-page";
+import { AddMcpPage } from "@/pages/add-mcp-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
+import { ConnectProviderPage } from "@/pages/connect-provider-page";
+import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
@@ -75,8 +79,24 @@ export function App() {
           >
             <Route index element={<DashboardPage />} />
             <Route path="agents" element={<AgentsPage />} />
+            {/* The agent LANDING page (m14.11) — closes the aha loop: status
+                timeline + live log tail + Run panel + the native run inspector.
+                Reached from the agents list row-click and the create→landing
+                swap. Placed before /agents/new so the wizard route (a literal
+                segment) still wins its exact match. */}
+            <Route path="agents/:ns/:name" element={<AgentDetailPage />} />
+            {/* The create-agent wizard (m14.10) — the heart of the aha: two
+                entrances (Describe it / Configure it) → one review + tool
+                picker → Create. Placed under /agents/new (the agents surface's
+                primary create action). */}
+            <Route path="agents/new" element={<CreateAgentPage />} />
             <Route path="config" element={<ConfigBuilderPage />} />
             <Route path="playground" element={<PlaygroundPage />} />
+            {/* The M14 first-agent wizards (m14.9) — these nav destinations were
+                /soon placeholders; they're now the real connect-provider +
+                add-MCP flows, the first UI of the aha. */}
+            <Route path="providers/connect" element={<ConnectProviderPage />} />
+            <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* Not-yet-built IA destinations (Topology, Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}
