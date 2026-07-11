@@ -110,8 +110,13 @@ function fmtCost(usd: number): string {
 
 type State =
   | { kind: "loading" }
+  | { kind: "ingesting" } // 404 → Langfuse ingestion lag; polling, not a failure
   | { kind: "ready"; detail: TraceDetailResponse }
   | { kind: "error"; message: string; forbidden: boolean };
+
+// ingestBackoffMs is the poll schedule for a freshly-completed run whose trace has
+// not landed in Langfuse yet (~20s lag). ~50s total before declaring not-found.
+const ingestBackoffMs = [1500, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 12000];
 
 export function RunInspector({ traceId }: { traceId: string }) {
   const [state, setState] = React.useState<State>({ kind: "loading" });
@@ -126,22 +131,44 @@ export function RunInspector({ traceId }: { traceId: string }) {
     const controller = new AbortController();
     setState({ kind: "loading" });
     setSelectedId(null);
-    api
-      .traceDetail(traceId, controller.signal)
-      .then((detail) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", detail });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the run",
-          forbidden,
+
+    // Langfuse ingestion lags a run by ~20s, so a just-completed run's trace 404s
+    // briefly. Poll with backoff and show a calm "still landing" state instead of a
+    // hard "trace not found" error (m18.7 — the shakedown run-inspector bug).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = (i: number) => {
+      api
+        .traceDetail(traceId, controller.signal)
+        .then((detail) => {
+          if (controller.signal.aborted) return;
+          setState({ kind: "ready", detail });
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
+          if (err instanceof ApiError && err.isNotFound && i < ingestBackoffMs.length) {
+            setState({ kind: "ingesting" });
+            timer = setTimeout(() => attempt(i + 1), ingestBackoffMs[i]);
+            return;
+          }
+          const forbidden = err instanceof ApiError && err.isForbidden;
+          setState({
+            kind: "error",
+            message:
+              err instanceof ApiError && err.isNotFound
+                ? "The trace hasn't appeared yet — it may still be ingesting. Try reopening the run in a moment."
+                : err instanceof Error
+                  ? err.message
+                  : "couldn't load the run",
+            forbidden,
+          });
         });
-      });
-    return () => controller.abort();
+    };
+    attempt(0);
+
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
   }, [traceId]);
 
   // Resolve the Langfuse link-out in the background (best-effort — a failure just
@@ -184,6 +211,18 @@ export function RunInspector({ traceId }: { traceId: string }) {
         data-testid="run-inspector-loading"
       >
         Loading the run…
+      </div>
+    );
+  }
+
+  if (state.kind === "ingesting") {
+    return (
+      <div
+        className="flex h-40 flex-col items-center justify-center gap-1 rounded-lg border bg-card text-sm text-muted-foreground shadow-card"
+        data-testid="run-inspector-ingesting"
+      >
+        <span>The trace is still landing…</span>
+        <span className="text-xs">Traces take ~20s to ingest after a run completes.</span>
       </div>
     );
   }

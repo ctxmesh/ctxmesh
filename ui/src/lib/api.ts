@@ -1721,7 +1721,9 @@ export const api = {
   // server-side via the stored Secret). Not on the connect happy path (the POST
   // response already carries them) — kept for a re-connect / refresh.
   providerModels: (name: string, signal?: AbortSignal) =>
-    getJSON<{ models: ProviderModel[] }>(
+    // The real BFF DTO is { provider, models: string[] } — NOT ProviderModel[]
+    // objects (the m18.4 fixture pins the connect/list shapes; this matches them).
+    getJSON<{ provider: string; models: string[] }>(
       `/api/providers/${encodeURIComponent(name)}/models`,
       signal,
     ),
