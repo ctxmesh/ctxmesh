@@ -604,7 +604,12 @@ export interface McpApproval {
 }
 
 export interface McpApprovalsResponse {
-  approvals: McpApproval[];
+  // The BFF (MCPServerListResponse) returns the pending servers under BOTH
+  // `servers` (semantic) and `items` (the list-contract key), carrying the same
+  // MCPServerSummary rows. Read `items` (with a `servers` fallback); there is no
+  // top-level `approvals` field (a fixed integration-shape bug).
+  servers: McpApproval[];
+  items: McpApproval[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------

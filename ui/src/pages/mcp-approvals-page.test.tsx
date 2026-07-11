@@ -67,7 +67,12 @@ function installFetch(opts: FetchSetup = {}) {
           status,
           json: async () =>
             ok
-              ? { approvals: opts.approvals ?? PENDING_APPROVALS }
+              // Match the REAL BFF shape (MCPServerListResponse: servers + items),
+              // not a `{approvals}` wrapper — the integration-shape the crash bug hid.
+              ? {
+                  servers: opts.approvals ?? PENDING_APPROVALS,
+                  items: opts.approvals ?? PENDING_APPROVALS,
+                }
               : { error: "forbidden" },
         } as Response);
       }
