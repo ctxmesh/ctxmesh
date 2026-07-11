@@ -307,6 +307,11 @@ func createProviderObjects(ctx context.Context, w AgentWriter, spec providerCrea
 	return created, nil
 }
 
+// defaultPrimaryModel is the fallback model name returned by primaryModel when the
+// provider returns no models (rare — an authenticated empty list). A non-empty
+// literal is required so the ModelRoute stays schema-valid (Model MinLength).
+const defaultPrimaryModel = "default"
+
 // primaryModel picks the route's primary model from the discovered list. When
 // the provider returned no models (rare — an authenticated empty list), it falls
 // back to the provider id so the ModelRoute stays schema-valid (Model MinLength).
@@ -314,7 +319,7 @@ func primaryModel(models []string) string {
 	if len(models) > 0 {
 		return models[0]
 	}
-	return "default"
+	return defaultPrimaryModel
 }
 
 // handleListProviders serves GET /api/providers — the connected providers, read

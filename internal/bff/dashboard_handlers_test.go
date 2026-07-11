@@ -52,6 +52,9 @@ type fakeLangfuseAdapter struct {
 	// scores / scoresErr are returned by TraceScores (m16.4).
 	scores    []FeedbackScore
 	scoresErr error
+	// breakdown / breakdownErr are returned by CostBreakdown (m16.5).
+	breakdown    *CostBreakdownResponse
+	breakdownErr error
 }
 
 func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -125,6 +128,17 @@ func (f fakeLangfuseAdapter) TraceScores(_ context.Context, _ string) ([]Feedbac
 		return f.scores, nil
 	}
 	return []FeedbackScore{}, nil
+}
+
+// CostBreakdown returns the seeded breakdown/breakdownErr (m16.5 cost drill-down).
+func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, _ int, _ string) (CostBreakdownResponse, error) {
+	if f.breakdownErr != nil {
+		return CostBreakdownResponse{}, f.breakdownErr
+	}
+	if f.breakdown != nil {
+		return *f.breakdown, nil
+	}
+	return CostBreakdownResponse{Agents: []AgentCostItem{}, Total: CostSummary{ByModel: []MetricPoint{}}}, nil
 }
 
 // fakePrometheusAdapter is an in-memory PrometheusAdapter for handler tests.
