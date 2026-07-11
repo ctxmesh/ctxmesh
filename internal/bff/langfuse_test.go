@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -291,4 +292,284 @@ func TestLangfuseRunsForAgentEmptyNameErrors(t *testing.T) {
 	a := newTestLangfuse(t, srv.URL)
 	_, err := a.RunsForAgent(context.Background(), "default", "  ", 20)
 	assert.Error(t, err)
+}
+
+// --- FilteredRuns tests -------------------------------------------------------
+
+// fakeLangfuseFiltered spins a Langfuse stub that filters the provided corpus
+// by tags, name, fromTimestamp/toTimestamp, and page/limit, records the
+// outbound query params, and returns the paged result with meta.
+func fakeLangfuseFiltered(t *testing.T, all []lfTrace) (*httptest.Server, *recordedRequest) {
+	t.Helper()
+	rec := &recordedRequest{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.path = r.URL.Path
+		rec.query = r.URL.RawQuery
+		rec.user, rec.pass, rec.hadAuth = r.BasicAuth()
+		if r.URL.Path != "/api/public/traces" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+
+		// Filter by tags.
+		wantTags := q["tags"]
+		// Filter by fromTimestamp/toTimestamp.
+		from := q.Get("fromTimestamp")
+		to := q.Get("toTimestamp")
+		// Filter by name (not used by FilteredRuns server-side, but kept for
+		// completeness so the test server is a faithful stub).
+		nameFilter := q.Get("name")
+
+		page := 1
+		if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
+			page = p
+		}
+		limit := 20
+		if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 {
+			limit = l
+		}
+
+		out := []lfTrace{}
+		for _, tr := range all {
+			if !traceHasAllTags(tr, wantTags) {
+				continue
+			}
+			if from != "" && tr.Timestamp < from {
+				continue
+			}
+			if to != "" && tr.Timestamp > to {
+				continue
+			}
+			if nameFilter != "" && tr.Name != nameFilter {
+				continue
+			}
+			out = append(out, tr)
+		}
+		totalPages := (len(out) + limit - 1) / limit
+		if totalPages == 0 {
+			totalPages = 1
+		}
+		start := (page - 1) * limit
+		end := start + limit
+		if start > len(out) {
+			start = len(out)
+		}
+		if end > len(out) {
+			end = len(out)
+		}
+		paged := out[start:end]
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lfTracesResponse{
+			Data: paged,
+			Meta: &lfPageMeta{Page: page, Limit: limit, TotalItems: len(out), TotalPages: totalPages},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+// TestFilteredRunsByAgent: agent filter → only that agent's runs; other agents
+// excluded; the outbound query carries the correct tags= param.
+func TestFilteredRunsByAgent(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "d1", Name: "run", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "d2", Name: "run", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "o1", Name: "run", Timestamp: "2026-07-01T00:03:00Z", Tags: []string{"agent:other/foo"}},
+	}
+	srv, rec := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	page, err := a.FilteredRuns(context.Background(), RunFilter{Agent: "default/foo", Limit: 20})
+	require.NoError(t, err)
+
+	require.Len(t, page.Runs, 2)
+	for _, r := range page.Runs {
+		assert.NotEqual(t, "o1", r.TraceID, "other/foo must not appear in default/foo's filtered runs")
+	}
+	// Server-side: tags= param reaches Langfuse.
+	assert.Contains(t, rec.query, "tags=agent%3Adefault%2Ffoo", "agent tag must be sent as tags= param")
+	assert.True(t, rec.hadAuth)
+}
+
+// TestFilteredRunsFromToTimestamps: from/to params reach Langfuse as
+// fromTimestamp/toTimestamp query params.
+func TestFilteredRunsFromToTimestamps(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "early", Name: "run", Timestamp: "2026-06-30T00:00:00Z"},
+		{ID: "mid", Name: "run", Timestamp: "2026-07-01T12:00:00Z"},
+		{ID: "late", Name: "run", Timestamp: "2026-07-02T00:00:00Z"},
+	}
+	srv, rec := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	from := "2026-07-01T00:00:00Z"
+	to := "2026-07-01T23:59:59Z"
+	page, err := a.FilteredRuns(context.Background(), RunFilter{From: from, To: to, Limit: 20})
+	require.NoError(t, err)
+
+	// Stub filtered: only "mid" is in the from/to window.
+	require.Len(t, page.Runs, 1)
+	assert.Equal(t, "mid", page.Runs[0].TraceID)
+
+	// The outbound request carries fromTimestamp and toTimestamp.
+	assert.Contains(t, rec.query, "fromTimestamp=", "fromTimestamp must reach Langfuse")
+	assert.Contains(t, rec.query, "toTimestamp=", "toTimestamp must reach Langfuse")
+}
+
+// TestFilteredRunsQSubstringClientSide: q applies a client-side substring
+// filter on the run name AFTER the Langfuse response — not a server-side param.
+func TestFilteredRunsQSubstringClientSide(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "t1", Name: "chat-session", Timestamp: "2026-07-01T00:02:00Z"},
+		{ID: "t2", Name: "summarize-doc", Timestamp: "2026-07-01T00:01:00Z"},
+		{ID: "t3", Name: "chat-batch", Timestamp: "2026-07-01T00:00:00Z"},
+	}
+	srv, rec := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	page, err := a.FilteredRuns(context.Background(), RunFilter{Q: "chat", Limit: 20})
+	require.NoError(t, err)
+
+	// Only the two "chat" traces survive the client-side filter.
+	require.Len(t, page.Runs, 2)
+	for _, r := range page.Runs {
+		assert.Contains(t, r.Name, "chat", "non-chat names must be filtered out")
+	}
+	// "name" should NOT appear as a Langfuse query param (client-side only).
+	assert.NotContains(t, rec.query, "name=", "q must NOT be forwarded as a server-side name= param")
+}
+
+// TestFilteredRunsStatusErrorClientSide: status filter is validated but NOT
+// applied at the trace-list level (Langfuse list has no per-trace status field).
+// All runs are returned; the test asserts the adapter does not reject a valid
+// status value and that all traces survive (status=error does not drop runs that
+// lack an error flag).
+func TestFilteredRunsStatusNotApplied(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "t1", Name: "ok-run", Timestamp: "2026-07-01T00:01:00Z"},
+		{ID: "t2", Name: "err-run", Timestamp: "2026-07-01T00:00:00Z"},
+	}
+	srv, _ := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	page, err := a.FilteredRuns(context.Background(), RunFilter{Status: "error", Limit: 20})
+	require.NoError(t, err)
+
+	// Both runs survive because status is NOT applied at the list level.
+	require.Len(t, page.Runs, 2,
+		"status filter is not applied at the list level; all traces are returned")
+}
+
+// TestFilteredRunsUnknownStatusErrors: status values other than "", "ok",
+// "error" are rejected with ErrBadParam (→ handler serves 400).
+func TestFilteredRunsUnknownStatusErrors(t *testing.T) {
+	srv, _ := fakeLangfuseFiltered(t, nil)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.FilteredRuns(context.Background(), RunFilter{Status: "unknown"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrBadParam)
+}
+
+// TestFilteredRunsMalformedFromErrors: a non-RFC3339 `from` returns ErrBadParam
+// (→ handler serves 400).
+func TestFilteredRunsMalformedFromErrors(t *testing.T) {
+	srv, _ := fakeLangfuseFiltered(t, nil)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.FilteredRuns(context.Background(), RunFilter{From: "not-a-timestamp"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrBadParam)
+}
+
+// TestFilteredRunsCursorPagination: cursor round-trip (page 1 → nextCursor →
+// page 2) with stable ordering (tie-break by TraceID when timestamps equal).
+func TestFilteredRunsCursorPagination(t *testing.T) {
+	// 4 traces with distinct timestamps → 2 pages of 2.
+	corpus := []lfTrace{
+		{ID: "t1", Name: "run", Timestamp: "2026-07-01T00:04:00Z"},
+		{ID: "t2", Name: "run", Timestamp: "2026-07-01T00:03:00Z"},
+		{ID: "t3", Name: "run", Timestamp: "2026-07-01T00:02:00Z"},
+		{ID: "t4", Name: "run", Timestamp: "2026-07-01T00:01:00Z"},
+	}
+	srv, _ := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	// Page 1.
+	page1, err := a.FilteredRuns(context.Background(), RunFilter{Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, page1.Runs, 2)
+	require.NotEmpty(t, page1.NextCursor, "non-exhausted list must have a nextCursor")
+
+	// Page 2: feed page 1's nextCursor back.
+	page2, err := a.FilteredRuns(context.Background(), RunFilter{Limit: 2, Cursor: page1.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, page2.Runs, 2)
+	assert.Empty(t, page2.NextCursor, "last page must have an empty nextCursor")
+
+	// All 4 runs visited exactly once.
+	all := append(page1.Runs, page2.Runs...)
+	ids := make([]string, len(all))
+	for i, r := range all {
+		ids[i] = r.TraceID
+	}
+	assert.ElementsMatch(t, []string{"t1", "t2", "t3", "t4"}, ids)
+}
+
+// TestFilteredRunsStableOrderTieBreak: traces with equal timestamps are ordered
+// by TraceID (stable secondary key — m16.2 carry-forward).
+func TestFilteredRunsStableOrderTieBreak(t *testing.T) {
+	// All same timestamp: order must be by TraceID ascending (after asc sort the
+	// slice, since we sort desc-timestamp then asc-ID).
+	corpus := []lfTrace{
+		{ID: "zzz", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "aaa", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "mmm", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
+	}
+	srv, _ := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	page, err := a.FilteredRuns(context.Background(), RunFilter{Limit: 20})
+	require.NoError(t, err)
+	require.Len(t, page.Runs, 3)
+	assert.Equal(t, "aaa", page.Runs[0].TraceID, "tie-break must be ascending TraceID")
+	assert.Equal(t, "mmm", page.Runs[1].TraceID)
+	assert.Equal(t, "zzz", page.Runs[2].TraceID)
+}
+
+// TestFilteredRunsNoParamsBackwardCompat: no params → recent-runs behavior
+// (same as the dashboard's existing /api/runs consumption): all traces returned,
+// no tag filter, no time bounds, empty cursor.
+func TestFilteredRunsNoParamsBackwardCompat(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "t1", Name: "chat", Timestamp: "2026-07-01T00:01:00Z"},
+		{ID: "t2", Name: "summarize", Timestamp: "2026-07-01T00:00:00Z"},
+	}
+	srv, rec := fakeLangfuseFiltered(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	page, err := a.FilteredRuns(context.Background(), RunFilter{})
+	require.NoError(t, err)
+
+	require.Len(t, page.Runs, 2)
+	// No agent tag filter in the query.
+	assert.NotContains(t, rec.query, "tags=", "no-params must not send a tags= filter")
+	// No timestamps.
+	assert.NotContains(t, rec.query, "fromTimestamp=")
+	assert.NotContains(t, rec.query, "toTimestamp=")
+}
+
+// TestFilteredRunsUpstreamError: an upstream failure surfaces (never swallowed).
+func TestFilteredRunsUpstreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.FilteredRuns(context.Background(), RunFilter{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "502")
 }
