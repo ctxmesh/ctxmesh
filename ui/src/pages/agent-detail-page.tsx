@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Boxes,
@@ -63,7 +63,7 @@ import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 //   • Per-agent Runs list (agentRuns): bounded, 501 → calm empty state.
 //   • All write affordances RBAC-aware (display-only, ADR 0011).
 
-const TABS = ["Overview", "Logs", "Runs", "Bindings", "Memory", "Scaling"] as const;
+const TABS = ["Overview", "Logs", "Runs", "Bindings", "Memory", "Scaling", "Redaction"] as const;
 type Tab = (typeof TABS)[number];
 
 type Load =
@@ -213,6 +213,9 @@ export function AgentDetailPage() {
       {tab === "Scaling" && (
         <ScalingPanel ns={detail.namespace} agentName={detail.name} />
       )}
+      {tab === "Redaction" && (
+        <RedactionPanel ns={detail.namespace} agentName={detail.name} />
+      )}
 
       {/* The run inspector opens over the page (drawer) so list/tab context is
           kept. It closes back to exactly where you were. */}
@@ -342,6 +345,34 @@ function AgentHeader({
         )}
         {detail.executionModel && <HeaderKV k="Execution" v={detail.executionModel} />}
         {detail.role && <HeaderKV k="Role" v={detail.role} />}
+        {detail.modelRoute && (
+          <HeaderKV
+            k="Model route"
+            v={
+              <Link
+                to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.modelRoute)}`}
+                className="truncate text-primary hover:underline"
+                data-testid="agent-modelroute-link"
+              >
+                {detail.modelRoute}
+              </Link>
+            }
+          />
+        )}
+        {detail.promptRef && (
+          <HeaderKV
+            k="Prompt"
+            v={
+              <Link
+                to="/prompts"
+                className="truncate text-primary hover:underline"
+                data-testid="agent-promptref-link"
+              >
+                {detail.promptRef}
+              </Link>
+            }
+          />
+        )}
         <HeaderKV k="Scaling" v={`${detail.scaling.min} – ${detail.scaling.max}`} />
         {detail.latestVersion && (
           <HeaderKV k="Latest version" v={<span className="font-mono text-xs">{detail.latestVersion}</span>} />
@@ -2044,3 +2075,166 @@ function RunsTab({
 
 // Keep exported for any backward-compat consumers that import it directly.
 export { RunsTab };
+
+// ── Redaction policy editor (m18.14, ADR 0019) ────────────────────────────────
+// The per-agent custom redaction detectors (name + RE2 pattern), on top of the
+// always-on built-in redaction. Editing gates on agentdeployments update; a bad
+// name/regex (rejected by the CRD validation) surfaces inline as a 422. No secret
+// material is ever rendered.
+type RedactionLoad =
+  | { kind: "loading" }
+  | { kind: "ready" }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const { can } = useCapabilities();
+  const canEdit = can(RES_AGENTS, "update");
+  const { toast } = useToast();
+  const [load, setLoad] = React.useState<RedactionLoad>({ kind: "loading" });
+  const [rows, setRows] = React.useState<{ name: string; pattern: string }[]>([]);
+  const [saving, setSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  const reload = React.useCallback(() => {
+    const controller = new AbortController();
+    setLoad({ kind: "loading" });
+    api
+      .getTracePolicy(ns, agentName, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setRows(res.customDetectors ?? []);
+        setLoad({ kind: "ready" });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        const forbidden = err instanceof ApiError && err.isForbidden;
+        setLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load the redaction policy",
+          forbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, agentName]);
+
+  React.useEffect(() => reload(), [reload]);
+
+  async function save() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const cleaned = rows.filter((r) => r.name.trim() || r.pattern.trim());
+      const res = await api.updateTracePolicy(ns, agentName, { customDetectors: cleaned });
+      setRows(res.customDetectors ?? []);
+      toast({
+        variant: "success",
+        title: "Redaction policy saved",
+        description: `${cleaned.length} custom detector${cleaned.length === 1 ? "" : "s"}.`,
+      });
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (load.kind === "loading") {
+    return (
+      <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground shadow-card">
+        Loading the redaction policy…
+      </div>
+    );
+  }
+  if (load.kind === "error") {
+    return (
+      <div className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card" role="alert">
+        {load.forbidden
+          ? "Not allowed to read this agent's redaction policy."
+          : load.message}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 rounded-lg border bg-card p-6 shadow-card" data-testid="redaction-panel">
+      <div>
+        <p className="text-sm font-medium">Custom redaction detectors</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Extra named regex rules applied to trace payloads before they are stored —
+          on top of the always-on built-in detectors (emails, keys, SSNs). Each match
+          becomes <span className="font-mono">[REDACTED:name]</span>.
+        </p>
+      </div>
+
+      {rows.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No custom detectors — only the built-in redaction is active.
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-center gap-2" data-testid={`detector-${i}`}>
+            <Input
+              aria-label={`Detector ${i} name`}
+              placeholder="name (e.g. badge)"
+              value={r.name}
+              disabled={!canEdit}
+              className="w-40"
+              onChange={(e) =>
+                setRows((rs) => rs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+              }
+            />
+            <Input
+              aria-label={`Detector ${i} pattern`}
+              placeholder="RE2 pattern (e.g. BADGE-[0-9]+)"
+              value={r.pattern}
+              disabled={!canEdit}
+              className="flex-1 font-mono"
+              onChange={(e) =>
+                setRows((rs) => rs.map((x, j) => (j === i ? { ...x, pattern: e.target.value } : x)))
+              }
+            />
+            {canEdit && (
+              <Button
+                variant="ghost"
+                size="sm"
+                data-testid={`remove-detector-${i}`}
+                onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {saveError && (
+        <p className="text-sm text-destructive" role="alert" data-testid="redaction-error">
+          {saveError}
+        </p>
+      )}
+
+      {canEdit && (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="add-detector"
+            onClick={() => setRows((rs) => [...rs, { name: "", pattern: "" }])}
+          >
+            Add detector
+          </Button>
+          <Button
+            size="sm"
+            disabled={saving}
+            data-testid="save-redaction"
+            onClick={() => void save()}
+          >
+            {saving ? "Saving…" : "Save policy"}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}

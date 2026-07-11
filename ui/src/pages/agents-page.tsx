@@ -218,11 +218,32 @@ export function AgentsPage() {
     {
       id: "phase",
       header: "Status",
-      className: "w-32",
+      className: "w-44",
       cell: (a) => (
-        <Badge variant={a.ready ? "success" : "warning"}>
-          {a.phase || (a.ready ? "Ready" : "Pending")}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant={a.ready ? "success" : "warning"}>
+            {a.phase || (a.ready ? "Ready" : "Pending")}
+          </Badge>
+          {/* Fleet-health badges (m18.12) from the m18.11 flags. */}
+          {a.drift && (
+            <Badge
+              variant="warning"
+              data-testid={`drift-${a.name}`}
+              title="The live spec has diverged from the console config (ADR 0017)."
+            >
+              drift
+            </Badge>
+          )}
+          {a.managedOutsideUI && !a.drift && (
+            <Badge
+              variant="secondary"
+              data-testid={`external-${a.name}`}
+              title="Created outside the console (e.g. kubectl) — edits are limited."
+            >
+              external
+            </Badge>
+          )}
+        </div>
       ),
     },
     // The actions column only appears when the caller can edit or delete.

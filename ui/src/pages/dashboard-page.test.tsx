@@ -156,7 +156,7 @@ describe("DashboardPage (render proof)", () => {
 });
 
 describe("DashboardPage — first-run provider CTA (the aha entry point)", () => {
-  it("renders the teaching CTA when no providers are connected", async () => {
+  it("renders the first-run checklist when setup is incomplete (no providers)", async () => {
     routeFetch({
       "/api/topology": topology,
       "/api/cost": cost,
@@ -165,11 +165,12 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     });
     renderDashboard();
 
-    // The EmptyState teaching CTA leads with "Connect a provider …".
-    expect(
-      await screen.findByText("Connect a provider to run your first agent"),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Connect a provider/ })).toBeInTheDocument();
+    // The guided 3-step checklist appears; the CTA leads to the first incomplete
+    // step (connect a provider).
+    expect(await screen.findByTestId("first-run-checklist")).toBeInTheDocument();
+    expect(screen.getByTestId("first-run-cta")).toHaveTextContent(/Connect a provider/);
+    // Step 0 (connect) is not done yet.
+    expect(screen.getByTestId("first-run-step-0")).toBeInTheDocument();
   });
 
   it("does NOT render the CTA when providers exist", async () => {
@@ -184,7 +185,7 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     // Wait for the page to settle, then assert the CTA is absent.
     await screen.findByText("checkout-flow");
     expect(
-      screen.queryByText("Connect a provider to run your first agent"),
+      screen.queryByTestId("first-run-checklist"),
     ).toBeNull();
   });
 
@@ -196,7 +197,7 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     await screen.findByText("checkout-flow");
     await waitFor(() =>
       expect(
-        screen.queryByText("Connect a provider to run your first agent"),
+        screen.queryByTestId("first-run-checklist"),
       ).toBeNull(),
     );
   });

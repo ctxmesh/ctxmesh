@@ -317,6 +317,22 @@ describe("AddMcpPage — OAuth flow", () => {
     expect(payload.name).toBe("oauth-mcp");
   });
 
+  it("degrades to an inline error (no redirect, no login bounce) on a bad authorizationURL", async () => {
+    // A 202 with an empty/invalid authorizationURL must NOT trigger window.location
+    // (which would remount the SPA and bounce to /login) — the m18.7 guard.
+    const { getHref } = recordingFetchOAuth({ status: 202, json: { authorizationURL: "", state: "x" } });
+    renderPage();
+
+    await fillServerOAuth();
+    fireEvent.click(screen.getByRole("button", { name: /Connect via OAuth/ }));
+
+    expect(
+      await screen.findByText(/did not return a valid OAuth authorization URL/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("oauth-redirecting")).not.toBeInTheDocument();
+    expect(getHref()).toBe("");
+  });
+
   it("no token appears in state, DOM, localStorage, or sessionStorage after OAuth redirect", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     recordingFetchOAuth({ json: { authorizationURL: AUTH_URL, state: "xyz123" } });

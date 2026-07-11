@@ -292,4 +292,28 @@ describe("AgentsPage — RBAC-aware row actions (m15.11)", () => {
     expect(screen.queryByTestId("edit-echo")).toBeNull();
     expect(screen.getByTestId("delete-echo")).toBeInTheDocument();
   });
+
+  it("shows fleet-health badges: drift and external (m18.12)", async () => {
+    installFetch({
+      agents: () => ({
+        ok: true,
+        body: {
+          agents: [],
+          items: [
+            { ...agent("drifted"), drift: true },
+            { ...agent("external"), managedOutsideUI: true },
+            agent("clean"),
+          ],
+          nextCursor: "",
+        },
+      }),
+    });
+    renderPage(<AgentsPage />);
+    await screen.findByText("drifted");
+    expect(screen.getByTestId("drift-drifted")).toBeInTheDocument();
+    expect(screen.getByTestId("external-external")).toBeInTheDocument();
+    // A clean console-managed agent gets neither badge.
+    expect(screen.queryByTestId("drift-clean")).toBeNull();
+    expect(screen.queryByTestId("external-clean")).toBeNull();
+  });
 });

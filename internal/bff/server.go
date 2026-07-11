@@ -214,6 +214,11 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
+		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
+		// API server (a viewer without update is denied → 403).
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
 		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
 		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
 		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
@@ -255,6 +260,7 @@ func (s *Server) Handler() http.Handler {
 		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
 		// detail GET above.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
+		authed.HandleFunc("GET /api/usedby", s.handleUsedBy)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
 		// annotation. Five endpoints following the list contract for GET /list and
@@ -589,10 +595,14 @@ func (s *Server) Handler() http.Handler {
 			authed.HandleFunc("POST /api/providers", s.handleConnectProvider)
 			authed.HandleFunc("GET /api/providers", s.handleListProviders)
 			authed.HandleFunc("GET /api/providers/{name}/models", s.handleProviderModels)
+			authed.HandleFunc("POST /api/providers/{name}/rotate", s.handleRotateProviderKey)
+			authed.HandleFunc("DELETE /api/providers/{name}", s.handleDisconnectProvider)
 		} else {
 			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
 			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
 			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
+			authed.Handle("POST /api/providers/{name}/rotate", notImplemented("caller-scoped provider key rotation"))
+			authed.Handle("DELETE /api/providers/{name}", notImplemented("caller-scoped provider disconnect"))
 		}
 	}
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Coins, Network, PlugZap, RefreshCw } from "lucide-react";
+import { CheckCircle2, Circle, Coins, Network, RefreshCw } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -9,7 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { EmptyState } from "@/components/kit";
 import { TopologyGraph } from "@/components/dashboard/topology-graph";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
@@ -123,22 +122,64 @@ export function DashboardPage() {
         </Button>
       </div>
 
-      {/* First-run teaching CTA — the aha entry point. When no providers are
-          connected the dashboard leads with "Connect a provider to run your
-          first agent" → the connect-provider wizard (spec §5). Shown ONLY on a
-          confirmed-empty list (a load error is not a false invitation). */}
-      {providers.kind === "ready" && providers.data.providers.length === 0 && (
-        <EmptyState
-          icon={PlugZap}
-          title="Connect a provider to run your first agent"
-          description="No model provider is connected yet. Paste a key once — it's validated and stored server-side — then describe an agent and run it. No YAML, no kubectl."
-          action={{
-            label: "Connect a provider",
-            icon: PlugZap,
-            onClick: () => navigate("/providers/connect"),
-          }}
-        />
-      )}
+      {/* First-run checklist (m18.10) — the guided aha path. Rendered only when all
+          three signals are loaded (accurate checkmarks) AND the setup is incomplete
+          (a fully set-up or errored cluster shows nothing — no false invitation). */}
+      {providers.kind === "ready" &&
+        topology.kind === "ready" &&
+        runs.kind === "ready" &&
+        (() => {
+          const hasProvider = providers.data.providers.length > 0;
+          const hasAgent = topology.data.nodes.some((n) => n.kind === "agent");
+          const hasRun = runs.data.runs.length > 0;
+          if (hasProvider && hasAgent && hasRun) return null; // fully set up
+          const steps = [
+            { label: "Connect a provider", done: hasProvider, to: "/providers/connect" },
+            { label: "Create an agent", done: hasAgent, to: "/agents/new" },
+            { label: "Run your agent", done: hasRun, to: "/agents" },
+          ];
+          const next = steps.find((s) => !s.done);
+          return (
+            <div
+              className="rounded-lg border bg-card p-5 shadow-card"
+              data-testid="first-run-checklist"
+            >
+              <p className="text-sm font-medium">Get started</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Three steps to your first running agent — paste a key once, describe an
+                agent, run it. No YAML, no kubectl.
+              </p>
+              <ol className="mt-3 space-y-2">
+                {steps.map((s, i) => (
+                  <li
+                    key={s.label}
+                    className="flex items-center gap-2 text-sm"
+                    data-testid={`first-run-step-${i}`}
+                  >
+                    {s.done ? (
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                    ) : (
+                      <Circle className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    )}
+                    <span className={s.done ? "text-muted-foreground line-through" : ""}>
+                      {s.label}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+              {next && (
+                <Button
+                  size="sm"
+                  className="mt-4"
+                  onClick={() => navigate(next.to)}
+                  data-testid="first-run-cta"
+                >
+                  {next.label}
+                </Button>
+              )}
+            </div>
+          );
+        })()}
 
       {/* 1. Live topology */}
       <Card>

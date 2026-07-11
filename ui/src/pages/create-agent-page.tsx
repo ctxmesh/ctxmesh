@@ -27,7 +27,7 @@ import {
   api,
   ApiError,
   type CatalogTool,
-  type ConnectedProvider,
+  type ProviderSummary,
   type CreatedObject,
   type GenerateAgentResponse,
 } from "@/lib/api";
@@ -124,7 +124,7 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
     const controller = new AbortController();
     api
       .listProviders(controller.signal)
-      .then((res: { providers: ConnectedProvider[] }) => {
+      .then((res: { providers: ProviderSummary[] }) => {
         if (controller.signal.aborted) return;
         setState(res.providers.length === 0 ? { kind: "gate" } : { kind: "ok" });
       })
@@ -216,7 +216,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   // The connected providers drive the model dropdown: default the connected
   // provider's model; if the operator pinned platform models or multiple
   // providers exist, the user can pick. A single provider ⇒ no dropdown noise.
-  const [providers, setProviders] = React.useState<ConnectedProvider[]>([]);
+  const [providers, setProviders] = React.useState<ProviderSummary[]>([]);
   React.useEffect(() => {
     const controller = new AbortController();
     api
@@ -236,7 +236,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   const modelChoices = React.useMemo(
     () =>
       providers.flatMap((p) =>
-        p.models.map((m) => ({ id: m.id, provider: p.provider })),
+        p.models.map((m) => ({ id: m, provider: p.provider })),
       ),
     [providers],
   );
@@ -492,6 +492,31 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
   const [current, setCurrent] = React.useState(STEP_BASICS);
   const [done, setDone] = React.useState(false);
 
+  // Compose from existing resources (m18.6): the model-route + prompt-version
+  // pickers pull the real lists so the user SELECTS instead of typing a ref.
+  const [routes, setRoutes] = React.useState<string[]>([]);
+  const [prompts, setPrompts] = React.useState<string[]>([]);
+  React.useEffect(() => {
+    const c = new AbortController();
+    api
+      .listModelRoutes({ limit: 100 }, c.signal)
+      .then((r) => {
+        if (!c.signal.aborted) setRoutes(r.items.map((x) => x.name));
+      })
+      .catch(() => {
+        /* soft miss: fall back to a free-text route */
+      });
+    api
+      .listPromptVersions({ limit: 100 }, c.signal)
+      .then((r) => {
+        if (!c.signal.aborted) setPrompts(r.items.map((x) => x.name));
+      })
+      .catch(() => {
+        /* soft miss: the prompt picker just stays hidden */
+      });
+    return () => c.abort();
+  }, []);
+
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
   }
@@ -616,17 +641,52 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
               />
             </FormField>
           )}
+          {prompts.length > 0 && (
+            <FormField
+              id="cfg-prompt-ref"
+              label="Prompt version"
+              hint="Reference an existing PromptVersion, or leave blank to use the system prompt above."
+            >
+              <Select
+                id="cfg-prompt-ref"
+                value={form.promptVersionRef}
+                onChange={(e) => set("promptVersionRef", e.target.value)}
+              >
+                <option value="">— none (use the system prompt) —</option>
+                {prompts.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+          )}
           <FormField
             id="cfg-model-route"
             label="Model route"
             hint="ModelRoute alias for the agent's LLM calls (optional)."
           >
-            <Input
-              id="cfg-model-route"
-              value={form.modelRoute}
-              onChange={(e) => set("modelRoute", e.target.value)}
-              placeholder="default-model"
-            />
+            {routes.length > 0 ? (
+              <Select
+                id="cfg-model-route"
+                value={form.modelRoute}
+                onChange={(e) => set("modelRoute", e.target.value)}
+              >
+                <option value="">— none (registry default) —</option>
+                {routes.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <Input
+                id="cfg-model-route"
+                value={form.modelRoute}
+                onChange={(e) => set("modelRoute", e.target.value)}
+                placeholder="connect a provider to create a route"
+              />
+            )}
           </FormField>
           <FormField id="cfg-execution-model" label="Execution model">
             <Select
@@ -640,6 +700,30 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
               <option value="eventing">eventing (broker-triggered)</option>
               <option value="job">job (one-shot)</option>
             </Select>
+          </FormField>
+          <FormField
+            id="cfg-role"
+            label="Role"
+            hint="Within-registry A2A role (orchestrator / worker / reviewer). Optional."
+          >
+            <Input
+              id="cfg-role"
+              value={form.role}
+              onChange={(e) => set("role", e.target.value)}
+              placeholder="worker"
+            />
+          </FormField>
+          <FormField
+            id="cfg-allowed-callers"
+            label="Allowed callers"
+            hint="Comma-separated agents allowed to call this one. Optional."
+          >
+            <Input
+              id="cfg-allowed-callers"
+              value={form.allowedCallers}
+              onChange={(e) => set("allowedCallers", e.target.value)}
+              placeholder="orchestrator, auditor"
+            />
           </FormField>
         </div>
       ),
@@ -980,8 +1064,12 @@ function SharedReview({
     setState({ kind: "creating" });
     try {
       const res = await api.createAgent(finalYAML, namespace);
-      setState({ kind: "created", created: res.created });
-      const agent = res.created.find((o) => o.kind === "AgentDeployment") ?? res.created[0];
+      // Transactional (m18.7): the POST succeeded, so the agent EXISTS. Default a
+      // missing/odd `created` to [] so the success screen + navigation can never
+      // crash into an error that hides a real create (the orphaned-objects bug).
+      const created = res.created ?? [];
+      setState({ kind: "created", created });
+      const agent = created.find((o) => o.kind === "AgentDeployment") ?? created[0];
       toast({
         variant: "success",
         title: "Agent created",

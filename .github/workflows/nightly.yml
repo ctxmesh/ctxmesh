@@ -266,3 +266,15 @@ jobs:
         # FRESH CI cluster; locally provable — tier0 + tsc --noEmit + playwright
         # test --list + shellcheck + the fixture contract test. ADR 0004 gate-and-skip.
         run: make -C agent-brain/harness tier2 SLICE=m17-ui
+      - name: M18 console-cohesion e2e (personas — providers/compose/fleet/redaction)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The console-cohesion 🧪 (§28–31, spec console-cohesion): reuses the M16/M17
+        # bring-up shape (M18 adds NO new fixture server) + seeds a connected-provider
+        # ModelRoute + the aha agent, then drives the deployed console headless per
+        # persona — 100-developer-cohesion (Providers list + create-agent composes),
+        # 101-first-run (onboarding checklist), 102-sre-fleet (drift/external badges),
+        # 103-compliance (redaction-policy editor). All gate-gracefully (ADR 0004).
+        # ADR 0006: full headless slice on a FRESH CI cluster; locally provable —
+        # tier0 + tsc --noEmit + playwright test --list + shellcheck.
+        run: make -C agent-brain/harness tier2 SLICE=m18-ui
