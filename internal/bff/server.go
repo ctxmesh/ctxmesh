@@ -261,9 +261,10 @@ func (s *Server) Handler() http.Handler {
 		// roles); the controller-owned NetworkPolicy (M6 whitelist + M11 default-deny)
 		// is never touched. There is no egress/allowlist field in any DTO.
 		//
-		// registryId is immutable after creation (CRD XValidation). A PUT that
-		// changes it is rejected by the API server as Invalid and surfaced here as
-		// an honest 422. The BFF never bypasses this constraint.
+		// registryId is immutable after creation (CRD XValidation). The PUT body has
+		// no registryId field, so an edit cannot change it: a submitted value is
+		// ignored and the live value is preserved (the PUT returns 200). Immutability
+		// holds by construction, not by an API-server rejection.
 		//
 		// The scheme is needed for SSA (ensureGVK); when absent the write routes
 		// serve 501 honestly. The GET routes do not need the scheme.

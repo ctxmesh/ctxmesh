@@ -113,9 +113,10 @@ type AgentRegistryCreateRequest struct {
 	Name string `json:"name"`
 	// Namespace scopes the created object; empty → default namespace.
 	Namespace string `json:"namespace"`
-	// RegistryId is the stable identifier for this registry. Required.
-	// Immutable after creation (CRD XValidation); a PUT that changes it
-	// surfaces as a 422 (the API server's rejection is surfaced honestly).
+	// RegistryId is the stable identifier for this registry. Required at create.
+	// Immutable after creation (CRD XValidation). The update request (PUT) has no
+	// registryId field, so an edit cannot change it: a submitted value is ignored
+	// and the live value is preserved (the PUT returns 200, not 422).
 	RegistryId string `json:"registryId"`
 	// MemberSelector selects AgentDeployments that belong to this registry.
 	MemberSelector LabelSelectorDTO `json:"memberSelector"`
@@ -130,9 +131,10 @@ type AgentRegistryCreateRequest struct {
 // AgentRegistryUpdateRequest is the PUT /api/agentregistries/{ns}/{name} body.
 // The BFF applies it via SSA under the console field-manager (ForceOwnership) so
 // the controller's status and NetworkPolicy are never clobbered. Only the editable
-// spec fields (memberSelector, guards, roles) may be changed. The registryId field
-// is immutable: a PUT that changes it is rejected 422 by the API server's
-// XValidation; the BFF surfaces this as an honest 422 (never bypasses it).
+// spec fields (memberSelector, guards, roles) may be changed. The registryId is
+// deliberately absent here: it cannot be changed through this path — a submitted
+// value is ignored and the live value is preserved (the PUT returns 200). A PUT is
+// a full-spec replace of the editable fields.
 type AgentRegistryUpdateRequest struct {
 	// Name must match the URL {name}; a mismatch is rejected 400 (rename guard).
 	// +optional
@@ -459,10 +461,10 @@ func (s *Server) handleCreateAgentRegistry(w http.ResponseWriter, r *http.Reques
 // handleUpdateAgentRegistry serves PUT /api/agentregistries/{ns}/{name} — edits
 // an AgentRegistry via SSA under the "agent-engine-console" field-manager
 // (ForceOwnership). Only the editable spec fields are applied: memberSelector,
-// guards, roles. The registryId is NOT sent in the SSA apply object (it is not
-// part of the update request) — if a caller tries to change registryId, the API
-// server's XValidation fires ("registryId is immutable after creation") and the
-// BFF surfaces it as an honest 422.
+// guards, roles. registryId is read from the live object and re-sent unchanged,
+// so it cannot be changed through this path — a submitted registryId is ignored
+// (it is not part of the update request) and the live value is preserved; the PUT
+// returns 200. (Immutability holds by construction, not by an API-server rejection.)
 //
 // The SSA apply object carries ONLY the AgentRegistry spec — never a NetworkPolicy.
 // The controller-owned NetworkPolicy is NOT touched by this handler. The console
@@ -506,13 +508,15 @@ func (s *Server) handleUpdateAgentRegistry(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Build a minimal SSA apply object carrying only the identity + the editable spec
-	// fields (memberSelector, guards, roles). registryId is intentionally NOT included
-	// in the update request DTO and NOT set here — a caller cannot change an immutable
-	// field through this path. If they try to submit registryId in a JSON body it is
-	// ignored (unknown to AgentRegistryUpdateRequest). If somehow the API server sees a
-	// registryId change, its XValidation fires → classifyAgentRegistryWriteError returns
-	// 422. SSA co-ownership means the console owns exactly the fields it sends; the
-	// controller retains ownership of status / derived fields (NetworkPolicy).
+	// fields (memberSelector, guards, roles). registryId is intentionally absent from
+	// the update request DTO, so a caller cannot change it: a registryId submitted in
+	// the JSON body is ignored (unknown to AgentRegistryUpdateRequest), and the live
+	// value is re-sent below (line ~545) so the apply never attempts a change. The PUT
+	// therefore preserves registryId and returns 200 — immutability holds by
+	// construction, not by an API-server rejection. SSA co-ownership means the console
+	// owns exactly the fields it sends; the controller retains ownership of status /
+	// derived fields (NetworkPolicy). (classifyAgentRegistryWriteError still maps any
+	// unexpected API-server Invalid to 422 defensively.)
 	apply := &agentsv1alpha1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,

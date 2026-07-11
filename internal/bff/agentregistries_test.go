@@ -746,16 +746,19 @@ func TestUpdateAgentRegistryPreservesRegistryId(t *testing.T) {
 	assert.Equal(t, "immutable-id", detail.RegistryId)
 }
 
-// TestUpdateAgentRegistryRegistryIdChangeSurfaces422 proves that a simulated
-// API server rejection for an immutable registryId change surfaces as an honest
-// 422 (never a 500). The CRD XValidation ("registryId is immutable after
-// creation") fires as an Invalid error; we simulate it via an interceptor.
-func TestUpdateAgentRegistryRegistryIdChangeSurfaces422(t *testing.T) {
+// TestUpdateAgentRegistryInvalidWriteSurfaces422 proves the error-MAPPING: when the
+// API server rejects an SSA apply with an Invalid error, the BFF surfaces it as an
+// honest 422 (never a 500). This exercises classifyAgentRegistryWriteError, NOT a
+// registryId change — registryId cannot change through this path (the update DTO has
+// no such field; the live value is always re-sent), so a registryId edit is a
+// silent-preserve 200, not an Invalid. See TestUpdateAgentRegistryPreservesRegistryId
+// for that behavior. Here we simulate a generic Invalid via an interceptor.
+func TestUpdateAgentRegistryInvalidWriteSurfaces422(t *testing.T) {
 	existing := mockAgentRegistry("my-registry", arNS, "original-id")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
-				// Simulate the CRD XValidation: "registryId is immutable after creation"
+				// Simulate any API-server Invalid rejection (e.g. a CRD XValidation).
 				return apierrors.NewInvalid(
 					schema.GroupKind{Group: agentsAPIGroup, Kind: agentRegistryKind},
 					obj.GetName(),
@@ -769,8 +772,8 @@ func TestUpdateAgentRegistryRegistryIdChangeSurfaces422(t *testing.T) {
 		MemberSelector: LabelSelectorDTO{},
 	}
 	_, code, body := putAgentRegistry(t, s, "my-registry", req)
-	// Must surface as 422 (Unprocessable Entity), never a 500.
-	assert.Equal(t, http.StatusUnprocessableEntity, code, "registryId immutability violation must surface as 422, got %d: %s", code, body)
+	// An API-server Invalid must surface as 422 (Unprocessable Entity), never a 500.
+	assert.Equal(t, http.StatusUnprocessableEntity, code, "API-server Invalid must surface as 422, got %d: %s", code, body)
 }
 
 // TestUpdateAgentRegistryRenameGuardIs400 proves a spec name that does not match
