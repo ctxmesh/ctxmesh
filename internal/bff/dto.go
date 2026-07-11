@@ -321,6 +321,40 @@ type CostResponse struct {
 	Scale   []MetricPoint `json:"scale"`
 }
 
+// --- Cost breakdown by agent (GET /api/cost/breakdown?by=agent) --------------
+//
+// NOTE: this is a RECENT-WINDOW ROLLUP — it aggregates a bounded window of the
+// most recent Langfuse traces (up to a few hundred), NOT an all-time historical
+// total. The window is the same bounded fetch CostUsage uses so the numbers are
+// self-consistent. Callers must not treat these totals as complete lifetime cost.
+
+// AgentCostItem is the per-agent cost/usage aggregate in the breakdown. It
+// accumulates cost and tokens across all traces tagged agent:<ns>/<name> within
+// the recent window. RunCount is the number of traces in the window attributed
+// to this agent.
+//
+// AgentNs is "" for agents whose tag lacks a namespace (bare `agent:<name>`
+// format). AgentName is "(untagged)" for traces that carry no agent tag at all
+// — surfaced explicitly so they are visible, not silently dropped.
+type AgentCostItem struct {
+	AgentNs      string  `json:"agentNs"`
+	AgentName    string  `json:"agentName"`
+	TotalCostUSD float64 `json:"totalCostUSD"`
+	TotalTokens  int64   `json:"totalTokens"`
+	RunCount     int     `json:"runCount"`
+}
+
+// CostBreakdownResponse is returned by GET /api/cost/breakdown?by=agent.
+// Agents is non-nil ([] not null), sorted by totalCostUSD desc. Total is the
+// rollup over the same bounded window. NextCursor is the opaque cursor for the
+// next page of the AGENT LIST (not the trace window); "" means last page.
+// This is a recent-window rollup — see the package-level NOTE above.
+type CostBreakdownResponse struct {
+	Agents     []AgentCostItem `json:"agents"`
+	Total      CostSummary     `json:"total"`
+	NextCursor string          `json:"nextCursor"`
+}
+
 // --- Recent runs (GET /api/runs) --------------------------------------------
 
 // RunSummary is the flat projection of one Langfuse trace the dashboard's
@@ -336,8 +370,12 @@ type RunSummary struct {
 }
 
 // RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).
+// NextCursor is the opaque page token for the next page; "" means this is the
+// last page. It is always present (even as "") for backward-compat — callers
+// that do not use pagination can safely ignore it.
 type RunListResponse struct {
-	Runs []RunSummary `json:"runs"`
+	Runs       []RunSummary `json:"runs"`
+	NextCursor string       `json:"nextCursor"`
 }
 
 // AgentRunsResponse is returned by GET /api/agents/{ns}/{name}/runs — the bounded
@@ -430,6 +468,10 @@ type SpanSummary struct {
 	// marker over the span's structure rather than a blank field.
 	InputRedacted  bool `json:"inputRedacted"`
 	OutputRedacted bool `json:"outputRedacted"`
+	// NestingDepth is the span's depth in the parent/child tree (0 for a root
+	// span, +1 per level). Set by orderSpansDFS (m16.2) when the adapter produces
+	// a DFS-ordered span list; a flat/unordered list leaves this 0.
+	NestingDepth int `json:"nestingDepth"`
 }
 
 // TraceRollup is the trace-level summary the run inspector's header renders: the
@@ -447,21 +489,28 @@ type TraceRollup struct {
 }
 
 // TraceDetail is the adapter-level projection of one trace + its observations:
-// the rollup plus the FLAT span list. The handler wraps it in
-// TraceDetailResponse. Spans is non-nil ([] not null).
+// the rollup plus the DFS-ordered span list (m16.2). The handler wraps it in
+// TraceDetailResponse. Spans is non-nil ([] not null). RootSpanID is the id of
+// the root span (the earliest parentless observation); "" when no spans.
 type TraceDetail struct {
-	Rollup TraceRollup
-	Spans  []SpanSummary
+	Rollup     TraceRollup
+	Spans      []SpanSummary
+	RootSpanID string
 }
 
 // TraceDetailResponse is returned by GET /api/traces/{id}/detail — the run
-// inspector's flat span summary for one trace. Rollup is the trace-level header;
-// Spans is the FLAT list (parentId-linked; the UI builds the tree). Spans is
-// non-nil on the wire ([] not null). This is the run SUMMARY, distinct from the
-// embed-URL route (GET /api/traces/{id}) which returns only the link target.
+// inspector's DFS-ordered span summary for one trace (m16.2). Rollup is the
+// trace-level header; Spans is the DFS-ordered, depth-annotated flat list
+// (parentId-linked; the M14.11 UI still builds its own tree from parentId, and
+// the TraceExplorer (m16.6) renders by nestingDepth indentation). Spans is
+// non-nil on the wire ([] not null). RootSpanID is the id of the root span
+// (earliest by StartMs when multiple roots exist); "" when no spans. This is
+// the run SUMMARY, distinct from the embed-URL route (GET /api/traces/{id})
+// which returns only the link target.
 type TraceDetailResponse struct {
-	Rollup TraceRollup   `json:"rollup"`
-	Spans  []SpanSummary `json:"spans"`
+	Rollup     TraceRollup   `json:"rollup"`
+	Spans      []SpanSummary `json:"spans"`
+	RootSpanID string        `json:"rootSpanId"`
 }
 
 // --- Connect a provider (ADR 0015) ------------------------------------------
@@ -708,6 +757,56 @@ type GenerateInvalidResponse struct {
 	// Regenerate signals the UI to surface the regenerate affordance (always true
 	// on this response — a stable flag the SPA keys off without status-code sniffing).
 	Regenerate bool `json:"regenerate"`
+}
+
+// --- Feedback / scores (GET /api/feedback?traceId=<id>) ----------------------
+//
+// The feedback panel reads Langfuse SCORES attached to one trace — the
+// operator-or-user quality signals (thumbs, numeric ratings, categorical labels)
+// that a post-run evaluator stamped. Scores are metadata: name/value/comment/
+// source are passed through verbatim and NEVER un-redacted.
+//
+// Langfuse score value modeling: the Langfuse public API returns a JSON `value`
+// field (a number) for NUMERIC/BOOLEAN dataTypes, and a `stringValue` field for
+// CATEGORICAL dataTypes. Rather than conflate them into a single json.Number (which
+// would return the string "null" for absent fields and force the SPA to type-switch
+// on a raw JSON value), we model both fields explicitly. The SPA picks whichever is
+// non-zero/non-empty based on `dataType`. This is the honest projection: it matches
+// the Langfuse schema field names and does not require the UI to parse raw JSON.
+
+// FeedbackScore is the flat projection of one Langfuse score onto the feedback
+// panel. SpanId and Comment are omitempty (optional per the Langfuse schema).
+// Value is the numeric score (NUMERIC/BOOLEAN dataTypes); StringValue is the label
+// (CATEGORICAL dataType). The SPA uses DataType to pick which to render.
+type FeedbackScore struct {
+	// ID is the Langfuse score id (stable, unique within the trace's scores).
+	ID string `json:"id"`
+	// TraceID is the trace this score belongs to (echoed for panel binding).
+	TraceID string `json:"traceId"`
+	// SpanID is the span (observation) the score is attached to, if any.
+	SpanID string `json:"spanId,omitempty"`
+	// Name is the score dimension name (e.g. "quality", "faithfulness").
+	Name string `json:"name"`
+	// DataType is the Langfuse score dataType: "NUMERIC", "BOOLEAN", or "CATEGORICAL".
+	DataType string `json:"dataType"`
+	// Value is the numeric score value (populated for NUMERIC and BOOLEAN dataTypes).
+	// Zero when the score is CATEGORICAL (use StringValue instead).
+	Value float64 `json:"value"`
+	// StringValue is the categorical label (populated for CATEGORICAL dataType).
+	// Empty when the score is NUMERIC or BOOLEAN (use Value instead).
+	StringValue string `json:"stringValue,omitempty"`
+	// Comment is the optional human annotation on the score.
+	Comment string `json:"comment,omitempty"`
+	// Source is the score origin: "API", "REVIEW", "ANNOTATION".
+	Source string `json:"source"`
+	// CreatedAt is the Langfuse score creation timestamp (RFC3339).
+	CreatedAt string `json:"createdAt"`
+}
+
+// FeedbackResponse is returned by GET /api/feedback?traceId=<id>. Scores is
+// non-nil on the wire ([] not null) — an empty list means no scores, not an error.
+type FeedbackResponse struct {
+	Scores []FeedbackScore `json:"scores"`
 }
 
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag

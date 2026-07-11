@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +96,17 @@ func (a *langfuseAdapter) TraceURL(traceID string) (string, error) {
 // only the fields the flat RunSummary needs and ignore the rest, so a Langfuse
 // schema addition does not break the projection.
 type lfTracesResponse struct {
-	Data []lfTrace `json:"data"`
+	Data []lfTrace   `json:"data"`
+	Meta *lfPageMeta `json:"meta,omitempty"`
+}
+
+// lfPageMeta is the Langfuse pagination metadata returned alongside each page.
+// The TotalPages field lets FilteredRuns know whether a next page exists.
+type lfPageMeta struct {
+	Page       int `json:"page"`
+	Limit      int `json:"limit"`
+	TotalItems int `json:"totalItems"`
+	TotalPages int `json:"totalPages"`
 }
 
 type lfTrace struct {
@@ -160,6 +171,31 @@ func agentRunTag(namespace, name string) string {
 	return "agent:" + ns + "/" + n
 }
 
+// parseAgentTag is the INVERSE of agentRunTag: it strips the "agent:" prefix and
+// splits the remainder to recover (namespace, name). It is derived from the
+// producer (agentRunTag) so the group key in CostBreakdown EXACTLY matches what
+// the launcher stamps:
+//
+//   - "agent:<ns>/<name>"  → (ns, name, true)   [namespace present]
+//   - "agent:<name>"       → ("",  name, true)   [bare name, no slash → no namespace]
+//   - anything else        → ("",  "",   false)   [not an agent tag]
+//
+// The split is on the LAST "/" (strings.LastIndex) so a name that itself contains
+// a slash parses correctly: the part before the last "/" is the namespace and the
+// rest is the name — matching how agentRunTag constructs "agent:"+ns+"/"+name.
+func parseAgentTag(tag string) (ns, name string, ok bool) {
+	rest, found := strings.CutPrefix(tag, "agent:")
+	if !found || rest == "" {
+		return "", "", false
+	}
+	idx := strings.LastIndex(rest, "/")
+	if idx < 0 {
+		// No slash: bare "agent:<name>" → namespace is empty.
+		return "", rest, true
+	}
+	return rest[:idx], rest[idx+1:], true
+}
+
 // RunsForAgent fetches the most recent traces (newest first) for ONE agent and
 // projects them onto RunSummary. It filters on the Langfuse-native tags query
 // (`?tags=agent:<ns>/<name>`) so the upstream returns only this agent's runs, then
@@ -216,6 +252,206 @@ func traceHasTag(t lfTrace, tag string) bool {
 	return slices.Contains(t.Tags, tag)
 }
 
+// RunFilter parameterises a FilteredRuns request. Zero values mean "no
+// restriction" on that dimension. Limit 0 defaults to defaultRunLimit.
+//
+// Server-side filters (sent to Langfuse as query params):
+//   - Agent     → tags=agent:<ns>/<name>   (Langfuse-native tag filter)
+//   - From/To   → fromTimestamp/toTimestamp (RFC3339)
+//   - Limit     → limit (page size)
+//   - Cursor    → page number (1-indexed, opaque to the caller)
+//
+// Client-side filters (applied in-process after the Langfuse response):
+//   - Q         → name substring match (Langfuse `name=` is an exact match;
+//     substring is applied post-fetch so partial names still work). Because it
+//     runs AFTER Langfuse paging, a page may come back short and NextCursor is
+//     derived from the unfiltered page count — a caller must not infer "no more
+//     results" from a single short page when Q is set.
+//
+// NOTE on status: NOT supported on the runs list and REJECTED with ErrBadParam.
+// The Langfuse /api/public/traces list carries no per-trace error/ok field (only
+// the full TraceDetail's observation.level does), so list-level status filtering
+// would need a detail fetch per trace — prohibitively expensive and a breach of
+// the metadata-only/bounded contract. Rather than accept the param and silently
+// return everything (a filter that lies), FilteredRuns rejects any non-empty
+// status. Status is inspected on the trace DETAIL, not the runs list.
+type RunFilter struct {
+	// Agent is "namespace/name" (e.g. "default/my-agent"). Empty → no tag filter.
+	Agent string
+	// From/To are RFC3339 timestamps (or ""). Both optional. Malformed values
+	// cause FilteredRuns to return a 400-class error via ErrBadParam.
+	From string
+	To   string
+	// Status is "ok", "error", or "". NOT applied server-side (see NOTE above).
+	// Present here so the handler can 400 on unknown values (honest contract).
+	Status string
+	// Q is a substring filter on the trace name, applied client-side post-fetch.
+	Q string
+	// Limit is the page size. 0 → defaultRunLimit. Clamped to maxRunLimit.
+	Limit int
+	// Cursor is the opaque page token from a prior RunListPage.NextCursor. ""
+	// means "first page". The cursor encodes a Langfuse page number (1-indexed).
+	Cursor string
+}
+
+// maxRunLimit caps the page size so one request cannot exhaust Langfuse memory.
+const maxRunLimit = 100
+
+// RunListPage is the paginated result of FilteredRuns.
+type RunListPage struct {
+	Runs       []RunSummary
+	NextCursor string // "" when this is the last page
+}
+
+// ErrBadParam is returned by FilteredRuns when a request param is malformed
+// (e.g. non-RFC3339 timestamp). The handler maps it to 400.
+var ErrBadParam = errors.New("bad parameter")
+
+// FilteredRuns fetches traces matching RunFilter and returns them as a paginated
+// RunListPage. It is the engine behind GET /api/runs?agent=&from=&to=&q=&status=
+// &limit=&cursor=.
+//
+// Cursor encoding: Langfuse uses 1-indexed integer pages. FilteredRuns encodes
+// the NEXT page number as the opaque cursor (e.g. "2"). An empty cursor means
+// "start from page 1". "" NextCursor in the response means last page (current
+// page == totalPages, or the upstream returned no meta).
+//
+// Status filter: NOT applied (see RunFilter doc). All traces are returned
+// regardless of status. Callers that need status filtering should do it
+// client-side on the returned Runs.
+//
+// Q filter: applied client-side (substring match on Run.Name after Langfuse
+// returns the page). Langfuse's `name=` param is an exact match, which would
+// be too strict for a search box — we accept all names from Langfuse and
+// filter here.
+//
+// Agent filter: applied server-side via Langfuse tags= + defensive post-fetch
+// tag re-check (same cross-namespace correctness guarantee as RunsForAgent).
+func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+	if limit > maxRunLimit {
+		limit = maxRunLimit
+	}
+
+	// Decode cursor → Langfuse page number (1-indexed). "" = page 1.
+	page := 1
+	if f.Cursor != "" {
+		p, err := strconv.Atoi(f.Cursor)
+		if err != nil || p < 1 {
+			return RunListPage{}, fmt.Errorf("%w: cursor must be a positive integer, got %q", ErrBadParam, f.Cursor)
+		}
+		page = p
+	}
+
+	// Validate From/To timestamps before sending to Langfuse: catch malformed
+	// values early and return a 400-class error, not a silent wrong query.
+	if f.From != "" {
+		if _, ok := parseLangfuseTime(f.From); !ok {
+			return RunListPage{}, fmt.Errorf("%w: from must be RFC3339, got %q", ErrBadParam, f.From)
+		}
+	}
+	if f.To != "" {
+		if _, ok := parseLangfuseTime(f.To); !ok {
+			return RunListPage{}, fmt.Errorf("%w: to must be RFC3339, got %q", ErrBadParam, f.To)
+		}
+	}
+
+	// Status filtering is NOT supported on the runs LIST. The Langfuse trace-list
+	// response carries no per-trace status/level (only the full TraceDetail's
+	// observation.level does), so filtering here would need a detail fetch per
+	// trace — prohibitively expensive and a breach of the metadata-only/bounded
+	// contract. Rather than accept the param and silently return everything (a
+	// filter that lies), reject any non-empty status with a teaching error.
+	if f.Status != "" {
+		return RunListPage{}, fmt.Errorf("%w: status filtering is not supported on the runs list (the Langfuse trace list has no per-trace status); filter by status on the trace detail instead", ErrBadParam)
+	}
+
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("page", strconv.Itoa(page))
+	q.Set("orderBy", "timestamp.desc")
+
+	// Server-side filters.
+	var agentTag string
+	if f.Agent != "" {
+		// Agent is "namespace/name" or "name" (bare).
+		parts := strings.SplitN(f.Agent, "/", 2)
+		if len(parts) == 2 {
+			agentTag = agentRunTag(parts[0], parts[1])
+		} else {
+			agentTag = agentRunTag("", parts[0])
+		}
+		q.Set("tags", agentTag)
+	}
+	if f.From != "" {
+		q.Set("fromTimestamp", f.From)
+	}
+	if f.To != "" {
+		q.Set("toTimestamp", f.To)
+	}
+
+	var body lfTracesResponse
+	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+		return RunListPage{}, err
+	}
+
+	// Project and filter.
+	q2 := strings.ToLower(strings.TrimSpace(f.Q))
+	runs := make([]RunSummary, 0, len(body.Data))
+	for _, t := range body.Data {
+		// Agent defensive tag re-check (same guarantee as RunsForAgent).
+		if agentTag != "" && !traceHasTag(t, agentTag) {
+			continue
+		}
+		// Q: client-side substring filter on name.
+		if q2 != "" && !strings.Contains(strings.ToLower(t.Name), q2) {
+			continue
+		}
+		// NOTE: status filter is NOT applied here — see RunFilter doc.
+		runs = append(runs, RunSummary{
+			TraceID:   t.ID,
+			Name:      t.Name,
+			Timestamp: t.Timestamp,
+			CostUSD:   t.TotalCost,
+			Tokens:    traceTokens(t),
+			LatencyMs: t.LatencyMs,
+		})
+	}
+
+	// Sort for determinism: timestamp desc (newest first), then traceId as
+	// tie-break (stable secondary key when timestamps are equal — m16.2
+	// carry-forward). The Langfuse upstream returns timestamp.desc already, but
+	// client-side filtering may reorder ties; re-sorting ensures stability.
+	slices.SortStableFunc(runs, func(a, b RunSummary) int {
+		if a.Timestamp != b.Timestamp {
+			// Reverse chronological: b > a means b is newer, sort first.
+			if b.Timestamp > a.Timestamp {
+				return 1
+			}
+			return -1
+		}
+		// Tie-break by TraceID for a stable, deterministic order.
+		if a.TraceID < b.TraceID {
+			return -1
+		}
+		if a.TraceID > b.TraceID {
+			return 1
+		}
+		return 0
+	})
+
+	// Compute next cursor: encode (page+1) if there are more pages.
+	nextCursor := ""
+	if body.Meta != nil && page < body.Meta.TotalPages {
+		nextCursor = strconv.Itoa(page + 1)
+	}
+
+	return RunListPage{Runs: runs, NextCursor: nextCursor}, nil
+}
+
 // CostUsage aggregates the recent traces into the dashboard cost rollup. We
 // aggregate client-side over the same recent window so the summary and the
 // recent-runs list are consistent (one source, one call shape). ByModel is a
@@ -256,6 +492,188 @@ func (a *langfuseAdapter) CostUsage(ctx context.Context) (CostSummary, error) {
 		TotalTokens:  totalTokens,
 		Observations: int64(len(body.Data)),
 		ByModel:      byModel,
+	}, nil
+}
+
+// costBreakdownWindowLimit is the number of recent traces fetched for the
+// CostBreakdown rollup. This is a bounded window, NOT a full historical scan —
+// the rollup is honest about being recent-window only.
+const costBreakdownWindowLimit = 200
+
+// agentCostKey is the per-agent accumulator key used inside CostBreakdown to
+// group traces before sorting and paginating.
+type agentCostKey struct {
+	ns   string
+	name string
+}
+
+// CostBreakdown aggregates a bounded window of recent traces into a per-agent
+// cost/usage breakdown (GET /api/cost/breakdown?by=agent). It fetches up to
+// costBreakdownWindowLimit recent traces in one call (the same bounded window
+// shape as CostUsage) and groups them by the `agent:<ns>/<name>` trace tag.
+//
+// HONEST BOUNDED WINDOW: this rolls up a recent window of at most
+// costBreakdownWindowLimit traces, NOT all-time historical cost. The numbers are
+// self-consistent with CostUsage (same window), but do not represent total
+// lifetime spend. Callers must treat these as recency-bounded aggregates.
+//
+// Traces with no agent tag go into an explicit "(untagged)" bucket
+// (agentNs="", agentName="(untagged)") so they are visible, not silently
+// dropped. The agent list is sorted by totalCostUSD desc (tie-break: agentNs,
+// agentName asc) and then paginated by limit/cursor — the cursor is an offset
+// over the sorted agent list, encoded as an opaque integer.
+func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error) {
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+
+	// Decode cursor → offset into the sorted agent list. "" = start.
+	offset := 0
+	if cursor != "" {
+		off, err := strconv.Atoi(cursor)
+		if err != nil || off < 0 {
+			return CostBreakdownResponse{}, fmt.Errorf("%w: cursor must be a non-negative integer, got %q", ErrBadParam, cursor)
+		}
+		offset = off
+	}
+
+	// Fetch a bounded window of recent traces for aggregation.
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(costBreakdownWindowLimit))
+	q.Set("orderBy", "timestamp.desc")
+
+	var body lfTracesResponse
+	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+		return CostBreakdownResponse{}, err
+	}
+
+	// Accumulate per-agent cost/tokens/count.
+	type acc struct {
+		totalCostUSD float64
+		totalTokens  int64
+		runCount     int
+	}
+	accs := map[agentCostKey]*acc{}
+	// Order keys to preserve insertion order for deterministic output when costs
+	// are equal; we use a slice to track insertion order.
+	var keyOrder []agentCostKey
+
+	var totalCost float64
+	var totalTokens int64
+
+	for _, t := range body.Data {
+		totalCost += t.TotalCost
+		totalTokens += traceTokens(t)
+
+		// Find the first agent tag on the trace.
+		var key agentCostKey
+		found := false
+		for _, tag := range t.Tags {
+			if ns, name, ok := parseAgentTag(tag); ok {
+				key = agentCostKey{ns: ns, name: name}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Untagged traces go into an explicit bucket.
+			key = agentCostKey{ns: "", name: "(untagged)"}
+		}
+
+		if _, exists := accs[key]; !exists {
+			accs[key] = &acc{}
+			keyOrder = append(keyOrder, key)
+		}
+		accs[key].totalCostUSD += t.TotalCost
+		accs[key].totalTokens += traceTokens(t)
+		accs[key].runCount++
+	}
+
+	// Build the agent list.
+	agents := make([]AgentCostItem, 0, len(accs))
+	for _, k := range keyOrder {
+		a := accs[k]
+		agents = append(agents, AgentCostItem{
+			AgentNs:      k.ns,
+			AgentName:    k.name,
+			TotalCostUSD: a.totalCostUSD,
+			TotalTokens:  a.totalTokens,
+			RunCount:     a.runCount,
+		})
+	}
+
+	// Sort by totalCostUSD desc; tie-break (agentNs, agentName) asc.
+	slices.SortStableFunc(agents, func(a, b AgentCostItem) int {
+		if b.TotalCostUSD != a.TotalCostUSD {
+			// Desc: higher cost first. b > a → return -1 (a comes after b)? No:
+			// SortStableFunc returns negative if a < b. We want higher cost first,
+			// so when a.Cost > b.Cost → a comes first → return -1.
+			if a.TotalCostUSD > b.TotalCostUSD {
+				return -1
+			}
+			return 1
+		}
+		// Tie-break: namespace asc, then name asc.
+		if a.AgentNs != b.AgentNs {
+			if a.AgentNs < b.AgentNs {
+				return -1
+			}
+			return 1
+		}
+		if a.AgentName < b.AgentName {
+			return -1
+		}
+		if a.AgentName > b.AgentName {
+			return 1
+		}
+		return 0
+	})
+
+	// Build the total summary over the window (same as CostUsage, minus ByModel).
+	// We reuse the ByModel breakdown here (by trace name) to stay consistent.
+	byName := map[string]float64{}
+	for _, t := range body.Data {
+		name := t.Name
+		if name == "" {
+			name = "unnamed"
+		}
+		byName[name] += t.TotalCost
+	}
+	byModel := make([]MetricPoint, 0, len(byName))
+	for n, cost := range byName {
+		byModel = append(byModel, MetricPoint{Label: n, Value: cost})
+	}
+	sortMetricPoints(byModel)
+
+	total := CostSummary{
+		TotalCostUSD: totalCost,
+		TotalTokens:  totalTokens,
+		Observations: int64(len(body.Data)),
+		ByModel:      byModel,
+	}
+
+	// Paginate the agent list.
+	if offset >= len(agents) {
+		return CostBreakdownResponse{
+			Agents:     []AgentCostItem{},
+			Total:      total,
+			NextCursor: "",
+		}, nil
+	}
+	page := agents[offset:]
+	nextCursor := ""
+	if len(page) > limit {
+		page = page[:limit]
+		nextCursor = strconv.Itoa(offset + limit)
+	}
+	if page == nil {
+		page = []AgentCostItem{}
+	}
+
+	return CostBreakdownResponse{
+		Agents:     page,
+		Total:      total,
+		NextCursor: nextCursor,
 	}, nil
 }
 
@@ -349,6 +767,13 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 		}
 	}
 
+	// DFS-order the spans (m16.2): root first, then each child subtree
+	// depth-first (children sorted by StartMs then id for determinism). Sets
+	// NestingDepth on each span and identifies the root span id. A malformed
+	// parent chain (cycle or missing parent) is handled by the cycle-guard inside
+	// orderSpansDFS — every span appears exactly once, no infinite loops.
+	ordered, rootID := orderSpansDFS(spans)
+
 	return TraceDetail{
 		Rollup: TraceRollup{
 			TraceID:   body.ID,
@@ -357,9 +782,10 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			CostUSD:   body.TotalCost,
 			Tokens:    tokens,
 			LatencyMs: body.LatencyMs,
-			SpanCount: len(spans),
+			SpanCount: len(ordered),
 		},
-		Spans: spans,
+		Spans:      ordered,
+		RootSpanID: rootID,
 	}, nil
 }
 
@@ -473,6 +899,69 @@ func parseLangfuseTime(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// lfScoresResponse is the shape of GET /api/public/scores we consume. We map only
+// the fields the flat FeedbackScore needs; a Langfuse schema addition does not break
+// the projection.
+type lfScoresResponse struct {
+	Data []lfScore   `json:"data"`
+	Meta *lfPageMeta `json:"meta,omitempty"`
+}
+
+// lfScore is one Langfuse score. The Langfuse API returns `value` (a number) for
+// NUMERIC/BOOLEAN dataTypes, and `stringValue` (a string) for CATEGORICAL dataType.
+// We read both fields explicitly so the projection never needs to type-switch on raw
+// JSON — each is absent when it does not apply for the given dataType.
+type lfScore struct {
+	ID            string  `json:"id"`
+	TraceID       string  `json:"traceId"`
+	ObservationID string  `json:"observationId,omitempty"`
+	Name          string  `json:"name"`
+	DataType      string  `json:"dataType"`
+	Value         float64 `json:"value"`
+	StringValue   string  `json:"stringValue,omitempty"`
+	Comment       string  `json:"comment,omitempty"`
+	Source        string  `json:"source"`
+	CreatedAt     string  `json:"createdAt"`
+}
+
+// TraceScores fetches the Langfuse scores for one trace from GET
+// /api/public/scores?traceId=<id> and projects them onto the flat FeedbackScore
+// list the feedback panel renders. Returns a non-nil slice ([] when the trace has
+// no scores). Scores are metadata (name/value/comment/source) — passed through
+// verbatim, never un-redacted. An upstream failure is returned as-is so the handler
+// maps it to 502.
+func (a *langfuseAdapter) TraceScores(ctx context.Context, traceID string) ([]FeedbackScore, error) {
+	id := strings.TrimSpace(traceID)
+	if id == "" {
+		return nil, fmt.Errorf("langfuse: empty traceID")
+	}
+
+	q := url.Values{}
+	q.Set("traceId", id)
+
+	var body lfScoresResponse
+	if err := a.getJSON(ctx, "/api/public/scores", q, &body); err != nil {
+		return nil, err
+	}
+
+	scores := make([]FeedbackScore, 0, len(body.Data))
+	for _, s := range body.Data {
+		scores = append(scores, FeedbackScore{
+			ID:          s.ID,
+			TraceID:     s.TraceID,
+			SpanID:      s.ObservationID,
+			Name:        s.Name,
+			DataType:    s.DataType,
+			Value:       s.Value,
+			StringValue: s.StringValue,
+			Comment:     s.Comment,
+			Source:      s.Source,
+			CreatedAt:   s.CreatedAt,
+		})
+	}
+	return scores, nil
+}
+
 // getJSON performs an authenticated GET against the Langfuse public API and
 // decodes the JSON body into out. The public-API credentials are sent as HTTP
 // Basic auth from this process only — they never leave the BFF.
@@ -509,4 +998,137 @@ func (a *langfuseAdapter) getJSON(ctx context.Context, apiPath string, q url.Val
 		return fmt.Errorf("langfuse: decode %s: %w", apiPath, err)
 	}
 	return nil
+}
+
+// orderSpansDFS takes a flat []SpanSummary (parentId-linked, any order) and
+// returns a DFS-pre-order flat slice with each span's NestingDepth set, plus
+// the id of the root span (the earliest-by-StartMs parentless span, or "" when
+// spans is empty).
+//
+// Algorithm:
+//  1. Build a children-map (parentId → []child) and collect roots (spans with
+//     no parent OR whose parent id does not exist in the span set — orphans).
+//  2. Sort roots by StartMs then ID for determinism.
+//  3. DFS pre-order: visit a node, then recurse into its children (also sorted
+//     by StartMs then ID).
+//  4. Cycle-guard via a per-call visited set: before descending into a child,
+//     check whether it has been visited. A cycle or a span whose parent chain
+//     loops is interrupted — the offending span is emitted as a root-level
+//     orphan (depth 0) exactly once, never dropped, never looped.
+//
+// The input slice is not modified. Every span in the input appears exactly once
+// in the output. RootSpanID is "" when the input is empty.
+func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
+	if len(spans) == 0 {
+		return []SpanSummary{}, ""
+	}
+
+	// Index all span ids so we can detect missing/orphan parents.
+	known := make(map[string]struct{}, len(spans))
+	for i := range spans {
+		known[spans[i].ID] = struct{}{}
+	}
+
+	// Build parent → children map; collect root (parentless or orphan) spans.
+	children := make(map[string][]int, len(spans)) // parent id → indices into spans
+	var roots []int
+	for i := range spans {
+		p := spans[i].ParentID
+		if p == "" {
+			// Explicitly parentless: a true root.
+			roots = append(roots, i)
+		} else if _, ok := known[p]; !ok {
+			// Parent id references a missing span: treat as orphan root.
+			roots = append(roots, i)
+		} else {
+			children[p] = append(children[p], i)
+		}
+	}
+
+	// Sort children lists by StartMs then ID for determinism.
+	sortByStartID := func(indices []int) {
+		slices.SortStableFunc(indices, func(a, b int) int {
+			sa, sb := &spans[a], &spans[b]
+			if sa.StartMs != sb.StartMs {
+				if sa.StartMs < sb.StartMs {
+					return -1
+				}
+				return 1
+			}
+			if sa.ID < sb.ID {
+				return -1
+			}
+			if sa.ID > sb.ID {
+				return 1
+			}
+			return 0
+		})
+	}
+	sortByStartID(roots)
+	for k := range children {
+		sortByStartID(children[k])
+	}
+
+	// Identify the primary root (earliest-by-StartMs root for RootSpanID).
+	if len(roots) > 0 {
+		rootID = spans[roots[0]].ID
+	}
+
+	// DFS pre-order with a visited set for cycle detection.
+	// Any span already in the visited set that would be visited again (cycle) is
+	// skipped in its tree position and will be emitted as a deferred orphan at
+	// depth 0.
+	ordered = make([]SpanSummary, 0, len(spans))
+	visited := make(map[string]bool, len(spans))
+
+	var dfs func(idx int, depth int)
+	dfs = func(idx int, depth int) {
+		s := spans[idx]
+		if visited[s.ID] {
+			// Already emitted — this is a cycle; skip to avoid an infinite loop.
+			return
+		}
+		visited[s.ID] = true
+		s.NestingDepth = depth
+		ordered = append(ordered, s)
+
+		for _, childIdx := range children[s.ID] {
+			if visited[spans[childIdx].ID] {
+				// Cycle: the child is already in the output. Skip; any span that
+				// never gets visited via a root is caught by the deterministic
+				// remaining-pass below.
+				continue
+			}
+			dfs(childIdx, depth+1)
+		}
+	}
+
+	// Visit all roots in order.
+	for _, ri := range roots {
+		dfs(ri, 0)
+	}
+
+	// Emit any spans not yet visited (orphaned by cycles, or whose ancestors are
+	// all cycle victims). Sort by (StartMs, id) — the SAME order used for roots and
+	// children — so cycle-victim emission is deterministic regardless of the input
+	// slice's order (a re-fetched/permuted trace yields identical output).
+	remaining := make([]int, 0)
+	for i := range spans {
+		if !visited[spans[i].ID] {
+			remaining = append(remaining, i)
+		}
+	}
+	sortByStartID(remaining)
+	for _, di := range remaining {
+		if visited[spans[di].ID] {
+			// A duplicate id already emitted by an earlier remaining entry.
+			continue
+		}
+		s := spans[di]
+		s.NestingDepth = 0
+		visited[s.ID] = true
+		ordered = append(ordered, s)
+	}
+
+	return ordered, rootID
 }

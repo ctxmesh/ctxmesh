@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Link } from "react-router-dom";
 import { ChevronDown, ExternalLink, EyeOff } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -300,19 +301,31 @@ export function RunInspector({ traceId }: { traceId: string }) {
         </div>
       </div>
 
-      {/* Langfuse stays a LINK-OUT (never the primary surface). */}
-      {langfuseUrl && (
-        <a
-          href={langfuseUrl}
-          target="_blank"
-          rel="noreferrer"
-          data-testid="open-in-langfuse"
+      {/* Action row: View full trace (m16.7) + optional Langfuse link-out. */}
+      <div className="flex flex-wrap gap-2">
+        {/* "View full trace" navigates to the native trace page (m16.7). */}
+        <Link
+          to={`/traces/${encodeURIComponent(traceId)}`}
+          data-testid="view-full-trace"
           className={buttonVariants({ variant: "outline", size: "sm" })}
         >
-          <ExternalLink className="h-4 w-4" />
-          Open in Langfuse
-        </a>
-      )}
+          View full trace
+        </Link>
+
+        {/* Langfuse stays a LINK-OUT (never the primary surface). */}
+        {langfuseUrl && (
+          <a
+            href={langfuseUrl}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="open-in-langfuse"
+            className={buttonVariants({ variant: "outline", size: "sm" })}
+          >
+            <ExternalLink className="h-4 w-4" />
+            Open in Langfuse
+          </a>
+        )}
+      </div>
     </div>
   );
 }

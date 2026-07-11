@@ -44,6 +44,17 @@ type fakeLangfuseAdapter struct {
 	agentRuns map[string][]RunSummary
 	// agentRunsErr, when set, is returned by RunsForAgent (upstream-failure path).
 	agentRunsErr error
+	// filteredPage, when non-nil, is returned by FilteredRuns. filteredErr is its
+	// paired error. If filteredPage is nil and filteredErr is nil, FilteredRuns
+	// falls back to runs with an empty NextCursor (simple backward-compat path).
+	filteredPage *RunListPage
+	filteredErr  error
+	// scores / scoresErr are returned by TraceScores (m16.4).
+	scores    []FeedbackScore
+	scoresErr error
+	// breakdown / breakdownErr are returned by CostBreakdown (m16.5).
+	breakdown    *CostBreakdownResponse
+	breakdownErr error
 }
 
 func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -86,6 +97,48 @@ func (f fakeLangfuseAdapter) TraceDetail(_ context.Context, _ string) (TraceDeta
 		return TraceDetail{}, f.detailErr
 	}
 	return f.detail, nil
+}
+
+// FilteredRuns returns the seeded filteredPage/filteredErr. If neither is set,
+// it falls back to the seeded runs with an empty NextCursor — this keeps the
+// existing handler tests that only seed `runs` working without change.
+func (f fakeLangfuseAdapter) FilteredRuns(_ context.Context, _ RunFilter) (RunListPage, error) {
+	if f.filteredErr != nil {
+		return RunListPage{}, f.filteredErr
+	}
+	if f.filteredPage != nil {
+		return *f.filteredPage, nil
+	}
+	runs := f.runs
+	if runs == nil {
+		runs = []RunSummary{}
+	}
+	if f.err != nil {
+		return RunListPage{}, f.err
+	}
+	return RunListPage{Runs: runs}, nil
+}
+
+// TraceScores returns the seeded scores/scoresErr (m16.4 feedback panel).
+func (f fakeLangfuseAdapter) TraceScores(_ context.Context, _ string) ([]FeedbackScore, error) {
+	if f.scoresErr != nil {
+		return nil, f.scoresErr
+	}
+	if f.scores != nil {
+		return f.scores, nil
+	}
+	return []FeedbackScore{}, nil
+}
+
+// CostBreakdown returns the seeded breakdown/breakdownErr (m16.5 cost drill-down).
+func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, _ int, _ string) (CostBreakdownResponse, error) {
+	if f.breakdownErr != nil {
+		return CostBreakdownResponse{}, f.breakdownErr
+	}
+	if f.breakdown != nil {
+		return *f.breakdown, nil
+	}
+	return CostBreakdownResponse{Agents: []AgentCostItem{}, Total: CostSummary{ByModel: []MetricPoint{}}}, nil
 }
 
 // fakePrometheusAdapter is an in-memory PrometheusAdapter for handler tests.
@@ -208,4 +261,92 @@ func TestRunsRouteSurfacesUpstreamError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
 	assert.Equal(t, http.StatusBadGateway, rec.Code, "an upstream failure surfaces as 502, not a silent empty list")
+}
+
+// --- handleRuns filterable/paginated handler tests (m16.3) -------------------
+
+// TestHandleRunsBackwardCompat: GET /api/runs with NO params returns all runs
+// and an empty nextCursor — the dashboard's existing consumption is unchanged.
+func TestHandleRunsBackwardCompat(t *testing.T) {
+	runs := []RunSummary{
+		{TraceID: "t1", Name: "chat", CostUSD: 0.5, Tokens: 900},
+		{TraceID: "t2", Name: "summarize", CostUSD: 0.2, Tokens: 400},
+	}
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{runs: runs}})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body RunListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Runs, 2)
+	assert.Equal(t, "t1", body.Runs[0].TraceID)
+	// nextCursor is present but empty (last page, backward-compat).
+	assert.Empty(t, body.NextCursor)
+}
+
+// TestHandleRunsWithNextCursor: when the adapter returns a non-empty NextCursor,
+// the handler propagates it to the JSON response.
+func TestHandleRunsWithNextCursor(t *testing.T) {
+	page := &RunListPage{
+		Runs:       []RunSummary{{TraceID: "t1", Name: "run"}},
+		NextCursor: "2",
+	}
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{filteredPage: page}})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?limit=1&cursor=1", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body RunListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "2", body.NextCursor)
+}
+
+// TestHandleRunsMalformedFromReturns400: a non-RFC3339 ?from → 400, never 500.
+func TestHandleRunsMalformedFromReturns400(t *testing.T) {
+	// Wire a real Langfuse adapter pointing at a stub so ErrBadParam comes from
+	// the adapter's validation, not the fake.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Should never be reached because validation happens before the HTTP call.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	adapter, err := NewLangfuseAdapter(LangfuseConfig{
+		BaseURL:    srv.URL,
+		PublicKey:  "pk",
+		SecretKey:  "sk",
+		HTTPClient: srv.Client(),
+	})
+	require.NoError(t, err)
+
+	s := serverWithAdapters(t, Adapters{Langfuse: adapter})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?from=not-a-date", nil))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleRunsLangfuseAbsentReturns501: when Langfuse adapter is not wired,
+// the route is discoverable and returns 501 (not 404).
+func TestHandleRunsLangfuseAbsentReturns501(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{}) // no Langfuse
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+// TestHandleRunsUpstreamFailureReturns502: adapter returns an error → 502, not
+// a fabricated 200 or silent empty list.
+func TestHandleRunsUpstreamFailureReturns502(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{filteredErr: assert.AnError}})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?agent=default/foo", nil))
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// TestHandleRunsBadLimitReturns400: a non-numeric ?limit → 400.
+func TestHandleRunsBadLimitReturns400(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?limit=abc", nil))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
