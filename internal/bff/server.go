@@ -471,12 +471,32 @@ func (s *Server) Handler() http.Handler {
 			// distinct patterns.
 			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
 			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
+			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
+			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
+			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
+			// pending→approved AND opens the per-server egress the register flow withheld —
+			// the ONLY transition that opens egress, preserving the m14.6 B1 invariant);
+			// POST .../{ns}/{name}/reject DENIES one (removes the pending catalog entry, so
+			// it stays non-bindable with no egress). All CALLER-SCOPED (ADR 0011): the
+			// approve UPDATE / reject DELETE run as the caller, so a non-operator's action
+			// is the API server's real 403 — no bypass. In self-serve mode nothing is
+			// pending, so the queue is empty/inert but the endpoints exist and behave
+			// honestly. The Go 1.22 ServeMux treats "POST .../{ns}/{name}" and
+			// "POST .../{ns}/{name}/reject" as DISTINCT patterns (the more specific
+			// "/reject" wins), and both are additive beside the "GET /api/mcp/approvals"
+			// list route.
+			authed.HandleFunc("GET /api/mcp/approvals", s.handleListMCPApprovals)
+			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}", s.handleApproveMCP)
+			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}/reject", s.handleRejectMCP)
 		} else {
 			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
 			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
 			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
 			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
 			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
+			authed.Handle("GET /api/mcp/approvals", notImplemented("caller-scoped MCP approval queue"))
+			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
+			authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", notImplemented("caller-scoped MCP reject"))
 		}
 	}
 
