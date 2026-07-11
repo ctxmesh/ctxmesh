@@ -446,8 +446,8 @@ export interface RunsFilteredParams {
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
-// The one Langfuse target for a traceId — the embedded iframe src AND the
-// link-out href. Resolved server-side so the SPA never hardcodes a Langfuse URL.
+// The Langfuse link-out target for a traceId — the forensics href resolved
+// server-side so the SPA never hardcodes a Langfuse URL (link-out only, m17.13).
 
 export interface TraceLinkResponse {
   traceId: string;
