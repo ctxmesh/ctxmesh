@@ -182,6 +182,13 @@ type pendingOAuthFlow struct {
 	namespace  string
 	serverURL  string
 	status     string
+	// grantUserHash, when non-empty, marks this flow as a PER-USER GRANT consent
+	// (m17.3, ADR 0016 §5) rather than a server registration: on callback the BFF
+	// stores the exchanged tokens as a (user, server) grant Secret labeled with this
+	// HASHED user identity, instead of running the full register (probe + catalog +
+	// egress). It is the hash of the consenting caller's username (never the raw
+	// username), captured at consent-begin. Empty → the m17.2 register flow.
+	grantUserHash string
 	// expiresAt bounds the flow's lifetime (register time + pendingFlowTTL).
 	expiresAt time.Time
 }

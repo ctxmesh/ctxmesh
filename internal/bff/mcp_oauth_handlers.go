@@ -165,6 +165,15 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// PER-USER GRANT consent (m17.3, ADR 0016 §5): this flow is a user consenting to
+	// an already-registered server, not a fresh registration. Store the exchanged
+	// tokens as THEIR (user, server) grant Secret (labeled by the hashed user) and
+	// return — no probe/catalog/egress (the server is already registered).
+	if flow.grantUserHash != "" {
+		s.completeGrantConsent(r.Context(), w, caller, *flow, toks)
+		return
+	}
+
 	// (4) Probe tools/list with the FRESH access token (server-side), so the tools
 	// appear. A server that rejects the token / speaks no MCP → an honest 4xx/502.
 	tools, pErr := probeMCPServer(r.Context(), s.providerHTTP, flow.serverURL, toks.AccessToken)

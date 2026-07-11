@@ -711,6 +711,39 @@ type MCPServerListResponse struct {
 	Items   []MCPServerSummary `json:"items"`
 }
 
+// MCPGrantConsentRequest is the POST /api/mcp/oauth/grant body (m17.3, ADR 0016 §5):
+// a user initiating per-user OAuth consent for an ALREADY-REGISTERED OAuth server.
+// It names the server + the namespace and carries the SAME OAuth client config as
+// register (endpoints + public client id + redirect) — NO secret material. The
+// invoking user is resolved from their token server-side (never a field here), so a
+// client cannot claim another user's identity.
+type MCPGrantConsentRequest struct {
+	// Server is the registered MCP server name to consent to. Required.
+	Server string `json:"server"`
+	// Namespace scopes the server + the grant Secret; empty → the default namespace.
+	Namespace string `json:"namespace"`
+	// Auth is the OAuth 2.1 client config for the consent flow (endpoints + public
+	// client id + redirect), the same shape register uses. Required, and its Type
+	// must be "oauth". Carries no secret material.
+	Auth *MCPAuthRequest `json:"auth"`
+}
+
+// MCPGrantResponse is returned by the per-user grant endpoints (m17.3). It carries
+// the (user, server) identity of the grant + the action outcome — DELIBERATELY no
+// token material. User is the HASHED invoking-user identity (the label value), never
+// the raw username and never a token.
+type MCPGrantResponse struct {
+	// Status is the outcome: "granted" (consent stored) or "revoked".
+	Status string `json:"status"`
+	// Server is the MCP server the grant is for.
+	Server string `json:"server"`
+	// Namespace the grant Secret lives in.
+	Namespace string `json:"namespace"`
+	// User is the HASHED invoking-user identity (a lookup key, non-PII) — never the
+	// raw username, never a token.
+	User string `json:"user"`
+}
+
 // ToolCatalogEntry is one tool in the merged catalog (GET /api/tools): the
 // operator-curated ToolRegistry entries + the user-added BYO tools, each with its
 // inputSchema, provenance, and approval status. InputSchema is raw JSON (the JSON

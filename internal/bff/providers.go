@@ -194,7 +194,7 @@ func (req *ConnectProviderRequest) displayNameOrDefault() string {
 func parseConnectRequest(raw []byte) (ConnectProviderRequest, *createError) {
 	var req ConnectProviderRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return req, &createError{status: http.StatusBadRequest, msg: "invalid JSON body"}
+		return req, &createError{status: http.StatusBadRequest, msg: msgInvalidJSONBody}
 	}
 	if strings.TrimSpace(req.Provider) == "" {
 		return req, &createError{status: http.StatusBadRequest, msg: "provider is required"}
