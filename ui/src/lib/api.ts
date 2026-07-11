@@ -105,6 +105,78 @@ export interface AgentDetailResponse {
   conditions: AgentCondition[];
   bindings: AgentBinding[];
   versions: string[];
+  // m15.11 — drift + managed-outside-UI flags (ADR 0017 round-trip).
+  // managedOutsideUI: true when the agent was created outside the console
+  // (e.g. raw kubectl). Drift: true when the live CRD diverges from the last
+  // console-applied spec. Both absent/false = console-managed, no drift.
+  managedOutsideUI?: boolean;
+  drift?: boolean;
+}
+
+// --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
+// The edit round-trip: the simplified spec fields the console knows about.
+// For a console-managed agent this is a FULL round-trip (all fields).
+// For a managedOutsideUI agent only safe fields are accepted (image, scaling,
+// modelRoute, systemPrompt) — the BFF applies a degraded safe-field patch
+// (ADR 0017). Callers that set non-safe fields on an outside-managed agent
+// should expect the BFF to ignore them (not an error, not a leak).
+export interface AgentSimplifiedSpec {
+  image?: string;
+  modelRoute?: string;
+  systemPrompt?: string;
+  scaling?: { min: number; max: number };
+  executionModel?: string;
+  role?: string;
+}
+
+// UpdateAgentResponse is the PUT response — the server returns the (possibly
+// normalized) spec it applied. `driftResolved` is true when the edit cleared
+// a prior drift (the live CRD now matches the console-applied spec).
+export interface UpdateAgentResponse {
+  name: string;
+  namespace: string;
+  driftResolved?: boolean;
+}
+
+// --- Agent delete (DELETE /api/agents/{ns}/{name}, m15.11) ------------------
+// DeleteAgentResponse carries the delete outcome. A 200 with `accepted: true`
+// means the GC has been triggered; a 202 is also acceptable (async delete).
+export interface DeleteAgentResponse {
+  accepted: boolean;
+}
+
+// --- Agent references (GET /api/agents/{ns}/{name}/references, m15.11) ------
+// The delete-impact preview: every object that references this agent + whether
+// it will be GC'd (owned by the agent) or orphaned (refers, not owns).
+export interface AgentReference {
+  kind: string;
+  name: string;
+  namespace: string;
+  // "gc" → the operator owns it + will GC it on delete.
+  // "orphan" → it refers to the agent but is not owned → left behind.
+  disposition: "gc" | "orphan";
+}
+
+export interface AgentReferencesResponse {
+  references: AgentReference[];
+}
+
+// --- Per-agent runs (GET /api/agents/{ns}/{name}/runs, m15.11) --------------
+// Bounded (BFF caps it); metadata rows only (no span detail). The endpoint
+// returns 501 when Langfuse is not wired — the UI must render a calm
+// "unavailable" empty state on 501, NOT an error toast.
+// AgentRunSummary is one run row in the per-agent bounded list.
+export interface AgentRunSummary {
+  traceId: string;
+  name: string;
+  timestamp: string;
+  costUSD: number;
+  tokens: number;
+  latencyMs: number;
+}
+
+export interface AgentRunListResponse {
+  runs: AgentRunSummary[];
 }
 
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
@@ -959,5 +1031,97 @@ export const api = {
       await errorMessage(res, `generate failed (${res.status})`),
       res.status,
     );
+  },
+
+  // updateAgent edits an existing agent via PUT /api/agents/{ns}/{name}
+  // (m15.11, ADR 0017 round-trip + degraded safe-field patch). A 403 (RBAC
+  // viewer), 409 (conflict), or 400 (invalid spec) surfaces via ApiError. The
+  // caller is responsible for showing the drift-overwrite warning BEFORE calling
+  // this for an agent with `drift: true`.
+  updateAgent: async (
+    ns: string,
+    name: string,
+    spec: AgentSimplifiedSpec,
+    signal?: AbortSignal,
+  ): Promise<UpdateAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spec),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as UpdateAgentResponse;
+  },
+
+  // deleteAgent removes an agent via DELETE /api/agents/{ns}/{name} (m15.11).
+  // A 403 (viewer), 404 (already gone), or 409 (conflict) surfaces via ApiError.
+  // The caller should show the delete-impact preview (agentReferences) BEFORE
+  // calling this.
+  deleteAgent: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<DeleteAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+        headers: { Accept: "application/json" },
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DeleteAgentResponse;
+  },
+
+  // agentReferences reads the delete-impact preview for an agent (m15.11):
+  // every referencing object + its disposition (gc vs orphan). A 403 (viewer
+  // can't read references), 404 (no such agent) surfaces via ApiError.
+  agentReferences: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentReferencesResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/references`,
+      signal,
+    ),
+
+  // agentRuns reads the bounded per-agent run list (m15.11). The endpoint
+  // returns 501 when Langfuse is not configured — the caller MUST treat a 501
+  // as an empty/disabled state (NOT an error toast). Any other non-2xx surfaces
+  // as a typed ApiError.
+  agentRuns: async (
+    ns: string,
+    name: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<AgentRunListResponse | null> => {
+    const qs = limit && limit > 0 ? `?limit=${limit}` : "";
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs${qs}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = Langfuse not configured — the caller degrades to "unavailable", not
+    // an error. Return null as the sentinel so callers can distinguish from an
+    // empty run list ([] is a valid empty list; null = not-available).
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `runs failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentRunListResponse;
   },
 };

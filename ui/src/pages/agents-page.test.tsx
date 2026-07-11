@@ -4,6 +4,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AgentsPage } from "@/pages/agents-page";
+import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider, useNamespace } from "@/lib/namespace";
 
 // The page now navigates on a row-click (m14.11: → the agent landing page), so
@@ -11,6 +12,17 @@ import { NamespaceProvider, useNamespace } from "@/lib/namespace";
 // the list-contract assertions below run exactly as before, with routing wired.
 function renderPage(ui: ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
+// renderWithCaps wraps with CapabilitiesProvider so RBAC-aware row actions are tested.
+function renderWithCaps(ui: ReactElement) {
+  return render(
+    <MemoryRouter>
+      <NamespaceProvider>
+        <CapabilitiesProvider>{ui}</CapabilitiesProvider>
+      </NamespaceProvider>
+    </MemoryRouter>,
+  );
 }
 
 // The agents list is now the FIRST DataTable consumer (ui-foundation §4/§6): it
@@ -28,6 +40,7 @@ interface Captured {
 function installFetch(opts: {
   namespaces?: { name: string }[];
   agents: (qs: URLSearchParams) => { ok: boolean; status?: number; body: unknown };
+  caps?: Record<string, Record<string, boolean>>;
 }) {
   const calls: Captured[] = [];
   vi.stubGlobal(
@@ -40,6 +53,16 @@ function installFetch(opts: {
           ok: true,
           status: 200,
           json: async () => ({ namespaces: opts.namespaces ?? [] }),
+        } as Response);
+      }
+      if (url.startsWith("/api/capabilities")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            namespace: "",
+            allowed: opts.caps ?? { agentdeployments: { create: true, update: true, delete: true } },
+          }),
         } as Response);
       }
       const qs = new URLSearchParams(url.split("?")[1] ?? "");
@@ -219,3 +242,54 @@ function NsSwitcher() {
     </select>
   );
 }
+
+// ── m15.11: RBAC-aware row actions ──────────────────────────────────────────
+describe("AgentsPage — RBAC-aware row actions (m15.11)", () => {
+  function oneAgent() {
+    return { ok: true, body: { agents: [], items: [{ name: "echo", namespace: "prod", image: "echo:1", phase: "Ready", ready: true }], nextCursor: "" } };
+  }
+
+  it("a viewer (no update/delete) sees NO edit or delete row buttons", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: false, update: false, delete: false } },
+      agents: () => oneAgent(),
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("echo");
+    expect(screen.queryByTestId("edit-echo")).toBeNull();
+    expect(screen.queryByTestId("delete-echo")).toBeNull();
+  });
+
+  it("a caller with update + delete sees edit AND delete row buttons", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: true, update: true, delete: true } },
+      agents: () => oneAgent(),
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("echo");
+    expect(screen.getByTestId("edit-echo")).toBeInTheDocument();
+    expect(screen.getByTestId("delete-echo")).toBeInTheDocument();
+  });
+
+  it("a caller with only update sees edit but NOT delete", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: false, update: true, delete: false } },
+      agents: () => oneAgent(),
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("echo");
+    expect(screen.getByTestId("edit-echo")).toBeInTheDocument();
+    expect(screen.queryByTestId("delete-echo")).toBeNull();
+  });
+
+  it("a caller with only delete sees delete but NOT edit", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: false, update: false, delete: true } },
+      agents: () => oneAgent(),
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("echo");
+    expect(screen.queryByTestId("edit-echo")).toBeNull();
+    expect(screen.getByTestId("delete-echo")).toBeInTheDocument();
+  });
+});

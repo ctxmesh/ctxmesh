@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Boxes } from "lucide-react";
+import { Boxes, Pencil, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
+import { RES_AGENTS } from "@/lib/nav";
 
 // AgentsPage — the FIRST DataTable consumer (ui-foundation §4/§6). Re-housed from
 // the M12 card list into the console's ONE table, backed by the list contract:
@@ -28,38 +31,71 @@ import { useNamespace } from "@/lib/namespace";
 // Changing it resets pagination. A 403 (RBAC can't-list in this scope) renders
 // the DataTable's forbidden variant (ErrorState forbidden — the ForbiddenInline
 // family), NOT a fake empty list.
+//
+// ── RBAC-AWARE ROW AFFORDANCES (m15.11) ─────────────────────────────────────
+// Edit + Delete row actions are rendered only when the caller has
+// agentdeployments/update + agentdeployments/delete respectively. A viewer sees
+// neither. The row-click → detail page remains available to viewers.
 
 const PAGE_LIMIT = 50;
 
-const columns: Column<AgentSummary>[] = [
-  {
-    id: "name",
-    header: "Name",
-    cell: (a) => <span className="font-medium">{a.name}</span>,
-  },
-  {
-    id: "namespace",
-    header: "Namespace",
-    cell: (a) => <span className="text-muted-foreground">{a.namespace}</span>,
-  },
-  {
-    id: "image",
-    header: "Image",
-    hideOnMobile: true,
-    className: "font-mono text-xs text-muted-foreground",
-    cell: (a) => a.image || "—",
-  },
-  {
-    id: "phase",
-    header: "Status",
-    className: "w-32",
-    cell: (a) => (
-      <Badge variant={a.ready ? "success" : "warning"}>
-        {a.phase || (a.ready ? "Ready" : "Pending")}
-      </Badge>
-    ),
-  },
-];
+// RowActions renders per-row edit + delete affordances, RBAC-aware.
+// Hidden entirely for viewers (capabilities-driven, display-only — the API is
+// the real gate, ADR 0011). We prevent the row-click from propagating on the
+// action buttons so they don't also trigger navigation.
+function RowActions({
+  agent,
+  canEdit,
+  canDelete,
+  onEdit,
+  onDelete,
+}: {
+  agent: AgentSummary;
+  canEdit: boolean;
+  canDelete: boolean;
+  onEdit: (a: AgentSummary) => void;
+  onDelete: (a: AgentSummary) => void;
+}) {
+  if (!canEdit && !canDelete) return null;
+  return (
+    <div
+      className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+      onClick={(e) => e.stopPropagation()}
+      data-testid={`row-actions-${agent.name}`}
+    >
+      {canEdit && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          aria-label={`Edit ${agent.name}`}
+          data-testid={`edit-${agent.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onEdit(agent);
+          }}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
+      )}
+      {canDelete && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-destructive hover:text-destructive"
+          aria-label={`Delete ${agent.name}`}
+          data-testid={`delete-${agent.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(agent);
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      )}
+    </div>
+  );
+}
 
 type Load =
   | { kind: "loading" }
@@ -69,6 +105,10 @@ type Load =
 export function AgentsPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
+  const { can } = useCapabilities();
+  const canEdit = can(RES_AGENTS, "update");
+  const canDelete = can(RES_AGENTS, "delete");
+
   const [query, setQuery] = useState("");
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
@@ -154,6 +194,66 @@ export function AgentsPage() {
           onRetry: state.forbidden ? undefined : load,
         }
       : null;
+
+  // Columns are rebuilt when RBAC capabilities change so the actions column
+  // only renders when the caller can act.
+  const columns: Column<AgentSummary>[] = [
+    {
+      id: "name",
+      header: "Name",
+      cell: (a) => <span className="font-medium">{a.name}</span>,
+    },
+    {
+      id: "namespace",
+      header: "Namespace",
+      cell: (a) => <span className="text-muted-foreground">{a.namespace}</span>,
+    },
+    {
+      id: "image",
+      header: "Image",
+      hideOnMobile: true,
+      className: "font-mono text-xs text-muted-foreground",
+      cell: (a) => a.image || "—",
+    },
+    {
+      id: "phase",
+      header: "Status",
+      className: "w-32",
+      cell: (a) => (
+        <Badge variant={a.ready ? "success" : "warning"}>
+          {a.phase || (a.ready ? "Ready" : "Pending")}
+        </Badge>
+      ),
+    },
+    // The actions column only appears when the caller can edit or delete.
+    // A viewer sees a clean 4-column table (no dead/greyed buttons).
+    ...(canEdit || canDelete
+      ? [
+          {
+            id: "actions" as const,
+            header: "",
+            className: "w-20 text-right",
+            cell: (a: AgentSummary) => (
+              <RowActions
+                agent={a}
+                canEdit={canEdit}
+                canDelete={canDelete}
+                onEdit={(agent) =>
+                  navigate(
+                    `/agents/${encodeURIComponent(agent.namespace)}/${encodeURIComponent(agent.name)}?edit=1`,
+                  )
+                }
+                onDelete={(agent) =>
+                  navigate(
+                    `/agents/${encodeURIComponent(agent.namespace)}/${encodeURIComponent(agent.name)}?delete=1`,
+                  )
+                }
+              />
+            ),
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
