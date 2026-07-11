@@ -49,6 +49,9 @@ type fakeLangfuseAdapter struct {
 	// falls back to runs with an empty NextCursor (simple backward-compat path).
 	filteredPage *RunListPage
 	filteredErr  error
+	// scores / scoresErr are returned by TraceScores (m16.4).
+	scores    []FeedbackScore
+	scoresErr error
 }
 
 func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -111,6 +114,17 @@ func (f fakeLangfuseAdapter) FilteredRuns(_ context.Context, _ RunFilter) (RunLi
 		return RunListPage{}, f.err
 	}
 	return RunListPage{Runs: runs}, nil
+}
+
+// TraceScores returns the seeded scores/scoresErr (m16.4 feedback panel).
+func (f fakeLangfuseAdapter) TraceScores(_ context.Context, _ string) ([]FeedbackScore, error) {
+	if f.scoresErr != nil {
+		return nil, f.scoresErr
+	}
+	if f.scores != nil {
+		return f.scores, nil
+	}
+	return []FeedbackScore{}, nil
 }
 
 // fakePrometheusAdapter is an in-memory PrometheusAdapter for handler tests.

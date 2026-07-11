@@ -692,6 +692,69 @@ func parseLangfuseTime(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// lfScoresResponse is the shape of GET /api/public/scores we consume. We map only
+// the fields the flat FeedbackScore needs; a Langfuse schema addition does not break
+// the projection.
+type lfScoresResponse struct {
+	Data []lfScore   `json:"data"`
+	Meta *lfPageMeta `json:"meta,omitempty"`
+}
+
+// lfScore is one Langfuse score. The Langfuse API returns `value` (a number) for
+// NUMERIC/BOOLEAN dataTypes, and `stringValue` (a string) for CATEGORICAL dataType.
+// We read both fields explicitly so the projection never needs to type-switch on raw
+// JSON — each is absent when it does not apply for the given dataType.
+type lfScore struct {
+	ID            string  `json:"id"`
+	TraceID       string  `json:"traceId"`
+	ObservationID string  `json:"observationId,omitempty"`
+	Name          string  `json:"name"`
+	DataType      string  `json:"dataType"`
+	Value         float64 `json:"value"`
+	StringValue   string  `json:"stringValue,omitempty"`
+	Comment       string  `json:"comment,omitempty"`
+	Source        string  `json:"source"`
+	CreatedAt     string  `json:"createdAt"`
+}
+
+// TraceScores fetches the Langfuse scores for one trace from GET
+// /api/public/scores?traceId=<id> and projects them onto the flat FeedbackScore
+// list the feedback panel renders. Returns a non-nil slice ([] when the trace has
+// no scores). Scores are metadata (name/value/comment/source) — passed through
+// verbatim, never un-redacted. An upstream failure is returned as-is so the handler
+// maps it to 502.
+func (a *langfuseAdapter) TraceScores(ctx context.Context, traceID string) ([]FeedbackScore, error) {
+	id := strings.TrimSpace(traceID)
+	if id == "" {
+		return nil, fmt.Errorf("langfuse: empty traceID")
+	}
+
+	q := url.Values{}
+	q.Set("traceId", id)
+
+	var body lfScoresResponse
+	if err := a.getJSON(ctx, "/api/public/scores", q, &body); err != nil {
+		return nil, err
+	}
+
+	scores := make([]FeedbackScore, 0, len(body.Data))
+	for _, s := range body.Data {
+		scores = append(scores, FeedbackScore{
+			ID:          s.ID,
+			TraceID:     s.TraceID,
+			SpanID:      s.ObservationID,
+			Name:        s.Name,
+			DataType:    s.DataType,
+			Value:       s.Value,
+			StringValue: s.StringValue,
+			Comment:     s.Comment,
+			Source:      s.Source,
+			CreatedAt:   s.CreatedAt,
+		})
+	}
+	return scores, nil
+}
+
 // getJSON performs an authenticated GET against the Langfuse public API and
 // decodes the JSON body into out. The public-API credentials are sent as HTTP
 // Basic auth from this process only — they never leave the BFF.

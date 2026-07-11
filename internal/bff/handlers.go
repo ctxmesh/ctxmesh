@@ -412,6 +412,39 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFeedback serves GET /api/feedback?traceId=<id> — the feedback panel's
+// quality-score list for one trace (m16.4). It reads the Langfuse scores attached to
+// the trace via the server-side Langfuse adapter and returns them as a flat
+// FeedbackScore list. Scores are operator/user quality signals (ratings, labels,
+// comments); they are metadata only and are passed through verbatim, never
+// un-redacted.
+//
+// Degrades honestly:
+//   - ?traceId missing/empty  → 400 (teaching error; the panel always supplies it).
+//   - Langfuse not wired       → 501 (registered by server.go seam; the panel shows
+//     a "not available" placeholder rather than crashing).
+//   - Upstream failure         → 502 (never a 500 on a Langfuse hiccup).
+//   - Empty scores             → {scores:[]} 200 (no scores is a valid state, not an
+//     error — new traces have no scores yet).
+func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	traceID := strings.TrimSpace(r.URL.Query().Get("traceId"))
+	if traceID == "" {
+		writeError(w, http.StatusBadRequest, "missing required query param: traceId")
+		return
+	}
+
+	scores, err := s.adapters.Langfuse.TraceScores(r.Context(), traceID)
+	if err != nil {
+		s.log.Error(err, "fetch trace scores failed", "traceID", traceID)
+		writeError(w, http.StatusBadGateway, "failed to fetch trace scores")
+		return
+	}
+	if scores == nil {
+		scores = []FeedbackScore{}
+	}
+	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
+}
+
 // notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/
 // invoke/expand) whose adapter is nil on the foundation. It returns 501 so the
 // route exists and is discoverable but honestly reports "not wired yet".
