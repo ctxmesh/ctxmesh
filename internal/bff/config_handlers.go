@@ -102,7 +102,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxAgentYAMLBytes))
+	body, err := readLimitedBody(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return

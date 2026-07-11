@@ -137,6 +137,18 @@ type AgentDetailResponse struct {
 	Conditions     []AgentCondition `json:"conditions"`
 	Bindings       []AgentBinding   `json:"bindings"`
 	Versions       []string         `json:"versions"`
+	// ManagedOutsideUI is true when the AgentDeployment does NOT carry the
+	// source-spec annotation (ADR 0017) — a kubectl-created agent the console never
+	// captured a simplified spec for. An edit of such an agent is DEGRADED: only the
+	// safe-field allowlist (image, scaling, model route, systemPrompt) can change;
+	// everything else is read-only. The UI shows a "managed outside the UI" badge.
+	ManagedOutsideUI bool `json:"managedOutsideUI"`
+	// Drift is true when the agent IS console-managed (annotation present) but its
+	// live spec-fields have diverged from what re-expanding the stored source-spec
+	// would produce — someone kubectl-patched a console-created agent. Edit still
+	// round-trips from the source-spec, but the UI warns the drift will be
+	// overwritten before the user confirms (ADR 0017 §5).
+	Drift bool `json:"drift"`
 }
 
 // --- Identity & RBAC-aware chrome (ADR 0012, ui-foundation §3) ---------------
@@ -698,6 +710,8 @@ func newAgentDetail(
 	toolBindings []agentsv1alpha1.MCPToolBinding,
 	memoryBindings []agentsv1alpha1.MemoryBinding,
 	versions []agentsv1alpha1.AgentVersion,
+	managedOutsideUI bool,
+	drift bool,
 ) AgentDetailResponse {
 	ready, phase := phaseFromConditions(ad.Status.Conditions)
 
@@ -757,19 +771,21 @@ func newAgentDetail(
 	}
 
 	return AgentDetailResponse{
-		Name:           ad.Name,
-		Namespace:      ad.Namespace,
-		Image:          ad.Spec.Image,
-		ExecutionModel: ad.Spec.ExecutionModel,
-		Role:           ad.Spec.Role,
-		Scaling:        scaling,
-		Phase:          phase,
-		Ready:          ready,
-		URL:            ad.Status.URL,
-		LatestVersion:  ad.Status.LatestVersion,
-		Conditions:     conditions,
-		Bindings:       bindings,
-		Versions:       versionNames,
+		Name:             ad.Name,
+		Namespace:        ad.Namespace,
+		Image:            ad.Spec.Image,
+		ExecutionModel:   ad.Spec.ExecutionModel,
+		Role:             ad.Spec.Role,
+		Scaling:          scaling,
+		Phase:            phase,
+		Ready:            ready,
+		URL:              ad.Status.URL,
+		LatestVersion:    ad.Status.LatestVersion,
+		Conditions:       conditions,
+		Bindings:         bindings,
+		Versions:         versionNames,
+		ManagedOutsideUI: managedOutsideUI,
+		Drift:            drift,
 	}
 }
 
