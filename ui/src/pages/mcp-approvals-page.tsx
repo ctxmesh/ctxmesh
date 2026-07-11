@@ -65,10 +65,14 @@ export function McpApprovalsPage() {
       .mcpApprovals(signal)
       .then((res) => {
         if (signal?.aborted) return;
-        if (res.approvals.length === 0) {
+        // The BFF returns the pending servers under `items` (list-contract key);
+        // fall back to `servers`, and default to [] so an unexpected shape can
+        // never crash on `.length` (the integration-shape bug this fixes).
+        const rows = res.items ?? res.servers ?? [];
+        if (rows.length === 0) {
           setPage({ kind: "empty" });
         } else {
-          setPage({ kind: "ready", approvals: res.approvals });
+          setPage({ kind: "ready", approvals: rows });
         }
       })
       .catch((err: unknown) => {
