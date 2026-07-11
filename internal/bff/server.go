@@ -252,6 +252,31 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("secret binding update"))
 		}
 		authed.HandleFunc("DELETE /api/secretbindings/{ns}/{name}", s.handleDeleteSecretBinding)
+		// AgentRegistry CRUD (m15.7): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT.
+		//
+		// SECURITY INVARIANT: the console CANNOT alter the egress posture. The SSA
+		// apply object carries only the AgentRegistry spec (memberSelector, guards,
+		// roles); the controller-owned NetworkPolicy (M6 whitelist + M11 default-deny)
+		// is never touched. There is no egress/allowlist field in any DTO.
+		//
+		// registryId is immutable after creation (CRD XValidation). A PUT that
+		// changes it is rejected by the API server as Invalid and surfaced here as
+		// an honest 422. The BFF never bypasses this constraint.
+		//
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly. The GET routes do not need the scheme.
+		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
+		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
+			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
+		} else {
+			authed.Handle("POST /api/agentregistries", notImplemented("agent registry create"))
+			authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("agent registry update"))
+		}
+		authed.HandleFunc("DELETE /api/agentregistries/{ns}/{name}", s.handleDeleteAgentRegistry)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -283,6 +308,11 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/secretbindings", notImplemented("caller-scoped secret binding create"))
 		authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding update"))
 		authed.Handle("DELETE /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding delete"))
+		authed.Handle("GET /api/agentregistries", notImplemented("caller-scoped agent registry list"))
+		authed.Handle("GET /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry detail"))
+		authed.Handle("POST /api/agentregistries", notImplemented("caller-scoped agent registry create"))
+		authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry update"))
+		authed.Handle("DELETE /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
