@@ -370,6 +370,42 @@ export interface CostResponse {
   scale: MetricPoint[];
 }
 
+// --- Cost breakdown (GET /api/cost/breakdown, m16.10) -----------------------
+// Per-agent cost rollup from the BFF. Returns a RECENT-WINDOW rollup (≤200
+// recent traces) — NOT all-time spend. Traces with no agent tag appear in an
+// "(untagged)" bucket (agentName="(untagged)"). The endpoint returns 501 when
+// Langfuse is not configured — the caller MUST render a calm "unavailable"
+// state on 501, NOT an error. A 502 (Langfuse configured but upstream fetch
+// FAILED) IS a real error and throws ApiError so the UI surfaces it.
+
+// AgentCostItem is one per-agent row in the breakdown table. agentNs/agentName
+// identify the agent; the "(untagged)" bucket has agentName="(untagged)".
+export interface AgentCostItem {
+  agentNs: string;
+  agentName: string;
+  totalCostUSD: number;
+  totalTokens: number;
+  runCount: number;
+}
+
+// CostBreakdownResponse mirrors GET /api/cost/breakdown?by=agent. agents is
+// the per-agent breakdown slice (non-null on wire, [] not null). total is the
+// window-level rollup. nextCursor is the opaque pagination token ("" = list
+// exhausted). ALL figures reflect the recent window only — not all-time spend.
+export interface CostBreakdownResponse {
+  agents: AgentCostItem[];
+  total: CostSummary;
+  nextCursor: string;
+}
+
+// CostBreakdownParams are the query params for GET /api/cost/breakdown:
+//   limit  — page size (BFF defaults + caps it)
+//   cursor — opaque continue token from a prior page's nextCursor
+export interface CostBreakdownParams {
+  limit?: number;
+  cursor?: string;
+}
+
 // --- Recent runs (GET /api/runs) --------------------------------------------
 
 export interface RunSummary {
@@ -1679,6 +1715,37 @@ export const api = {
       );
     }
     return (await res.json()) as FeedbackResponse;
+  },
+
+  // costBreakdown reads the per-agent cost rollup (m16.10) from
+  // GET /api/cost/breakdown?by=agent&limit=&cursor=. The data reflects a
+  // RECENT WINDOW of traces (≤200), NOT all-time spend. Returns null on 501
+  // (Langfuse not configured) as the calm sentinel — callers render
+  // "unavailable", NOT an error. Throws ApiError on 502 (Langfuse configured
+  // but upstream fetch FAILED) — a real, likely-transient error the UI should
+  // surface. This mirrors the 501-calm / 502-error discipline (ADR 0012).
+  costBreakdown: async (
+    params: CostBreakdownParams = {},
+    signal?: AbortSignal,
+  ): Promise<CostBreakdownResponse | null> => {
+    const qs = new URLSearchParams();
+    qs.set("by", "agent");
+    if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const res = await apiFetch(
+      `/api/cost/breakdown?${qs.toString()}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = Langfuse not configured — calm null sentinel (not an error).
+    // 502 = Langfuse configured but upstream fetch failed — real error, throw.
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `cost breakdown failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as CostBreakdownResponse;
   },
 
   // agentRuns reads the bounded per-agent run list (m15.11). The endpoint

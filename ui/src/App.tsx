@@ -8,6 +8,7 @@ import { AgentRegistryDetailPage, NewAgentRegistryPage } from "@/pages/agent-reg
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
+import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
@@ -125,6 +126,8 @@ export function App() {
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />
+            {/* m16.10: cost drill-down — per-agent breakdown (recent window). */}
+            <Route path="cost" element={<CostPage />} />
             {/* Not-yet-built IA destinations (Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}
