@@ -278,9 +278,46 @@ export interface TopologyEdge {
   target: string;
 }
 
+// HealthRollup is the aggregate health count for a collapsed group, mirroring
+// the BFF's HealthRollup DTO. It always reflects the FULL group, not just the
+// visible cap — so a collapsed group shows "60 ready / 3 pending" correctly.
+export interface HealthRollup {
+  ready: number;
+  notReady: number;
+  pending: number;
+  unknown: number;
+}
+
+// TopologyGroup is one collapsible cluster in grouped mode (?group=registry or
+// ?group=namespace). The SPA uses its id as the ?expand token.
+export interface TopologyGroup {
+  id: string;
+  kind: string;
+  label: string;
+  namespace: string;
+  memberCount: number;
+  health: HealthRollup;
+  // Truncated is true when the group was expanded but more members than the
+  // per-group cap exist; ShownCount reflects how many member nodes were emitted.
+  truncated: boolean;
+  shownCount: number;
+}
+
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+  // groups is present only in grouped mode (?group=registry|namespace); absent
+  // in raw mode (the M12 dashboard path stays byte-compatible).
+  groups?: TopologyGroup[];
+}
+
+// TopologyParams — the query shape for GET /api/topology.
+// group selects the axis (empty = raw/flat); q is a name-substring search;
+// expand is the comma-separated set of group ids to expand as nodes.
+export interface TopologyParams {
+  group?: "registry" | "namespace" | "";
+  q?: string;
+  expand?: string[]; // group ids to emit as member nodes
 }
 
 // --- Cost / usage (GET /api/cost) -------------------------------------------
@@ -1046,8 +1083,19 @@ export const api = {
   // A 403 is an honest "can't list namespaces", never a silent empty list.
   namespaces: (signal?: AbortSignal) =>
     getJSON<NamespaceListResponse>("/api/namespaces", signal),
-  topology: (signal?: AbortSignal) =>
-    getJSON<TopologyResponse>("/api/topology", signal),
+  // topology fetches the cluster graph. In raw mode (no params / params.group="")
+  // it returns the flat {nodes, edges} graph (M12 dashboard backward-compatible).
+  // In grouped mode (params.group="registry"|"namespace") the response includes
+  // groups[]; member nodes are only emitted for ids listed in params.expand, or
+  // for members whose name matches params.q.
+  topology: (params?: TopologyParams, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (params?.group) qs.set("group", params.group);
+    if (params?.q) qs.set("q", params.q);
+    if (params?.expand?.length) qs.set("expand", params.expand.join(","));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
+  },
   cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),
   runs: (signal?: AbortSignal) =>
     getJSON<RunListResponse>("/api/runs", signal),
