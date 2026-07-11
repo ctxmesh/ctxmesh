@@ -725,6 +725,56 @@ type GenerateInvalidResponse struct {
 	Regenerate bool `json:"regenerate"`
 }
 
+// --- Feedback / scores (GET /api/feedback?traceId=<id>) ----------------------
+//
+// The feedback panel reads Langfuse SCORES attached to one trace — the
+// operator-or-user quality signals (thumbs, numeric ratings, categorical labels)
+// that a post-run evaluator stamped. Scores are metadata: name/value/comment/
+// source are passed through verbatim and NEVER un-redacted.
+//
+// Langfuse score value modeling: the Langfuse public API returns a JSON `value`
+// field (a number) for NUMERIC/BOOLEAN dataTypes, and a `stringValue` field for
+// CATEGORICAL dataTypes. Rather than conflate them into a single json.Number (which
+// would return the string "null" for absent fields and force the SPA to type-switch
+// on a raw JSON value), we model both fields explicitly. The SPA picks whichever is
+// non-zero/non-empty based on `dataType`. This is the honest projection: it matches
+// the Langfuse schema field names and does not require the UI to parse raw JSON.
+
+// FeedbackScore is the flat projection of one Langfuse score onto the feedback
+// panel. SpanId and Comment are omitempty (optional per the Langfuse schema).
+// Value is the numeric score (NUMERIC/BOOLEAN dataTypes); StringValue is the label
+// (CATEGORICAL dataType). The SPA uses DataType to pick which to render.
+type FeedbackScore struct {
+	// ID is the Langfuse score id (stable, unique within the trace's scores).
+	ID string `json:"id"`
+	// TraceID is the trace this score belongs to (echoed for panel binding).
+	TraceID string `json:"traceId"`
+	// SpanID is the span (observation) the score is attached to, if any.
+	SpanID string `json:"spanId,omitempty"`
+	// Name is the score dimension name (e.g. "quality", "faithfulness").
+	Name string `json:"name"`
+	// DataType is the Langfuse score dataType: "NUMERIC", "BOOLEAN", or "CATEGORICAL".
+	DataType string `json:"dataType"`
+	// Value is the numeric score value (populated for NUMERIC and BOOLEAN dataTypes).
+	// Zero when the score is CATEGORICAL (use StringValue instead).
+	Value float64 `json:"value"`
+	// StringValue is the categorical label (populated for CATEGORICAL dataType).
+	// Empty when the score is NUMERIC or BOOLEAN (use Value instead).
+	StringValue string `json:"stringValue,omitempty"`
+	// Comment is the optional human annotation on the score.
+	Comment string `json:"comment,omitempty"`
+	// Source is the score origin: "API", "REVIEW", "ANNOTATION".
+	Source string `json:"source"`
+	// CreatedAt is the Langfuse score creation timestamp (RFC3339).
+	CreatedAt string `json:"createdAt"`
+}
+
+// FeedbackResponse is returned by GET /api/feedback?traceId=<id>. Scores is
+// non-nil on the wire ([] not null) — an empty list means no scores, not an error.
+type FeedbackResponse struct {
+	Scores []FeedbackScore `json:"scores"`
+}
+
 // newAgentSummary projects an AgentDeployment onto the UI DTO. The Ready flag
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil

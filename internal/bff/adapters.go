@@ -150,6 +150,13 @@ type LangfuseAdapter interface {
 	// (handler serves 400). Upstream failure → error (handler serves 502). Runs is
 	// non-nil on success.
 	FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error)
+
+	// TraceScores fetches the Langfuse scores (GET /api/public/scores?traceId=<id>)
+	// for one trace and projects them onto the flat FeedbackScore DTO list. Returns a
+	// non-nil slice on success ([] when the trace has no scores). An empty traceID is
+	// a programming error and returns an error directly; an upstream failure returns an
+	// error that the handler maps to 502.
+	TraceScores(ctx context.Context, traceID string) ([]FeedbackScore, error)
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend
