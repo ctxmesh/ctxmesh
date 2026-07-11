@@ -23,6 +23,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -33,8 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	sigsyaml "sigs.k8s.io/yaml"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
 // newConfigServer builds a Server with the expand adapter live and the CRD
@@ -240,6 +243,161 @@ func TestCreateAgentHandlerAlreadyExistsIs409(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
 	require.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// --- Source-spec annotation (ADR 0017, m15.2) -------------------------------
+
+// TestCreateAgentStampsSourceSpec proves a console create persists the exact
+// submitted simplified spec on the AgentDeployment under the source-spec
+// annotation as canonical JSON that round-trips back to the submitted intent.
+func TestCreateAgentStampsSourceSpec(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: sampleAgentYAML, Namespace: "prod"})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var got agentsv1alpha1.AgentDeployment
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &got))
+
+	stored, ok := got.Annotations[expand.AnnotationSourceSpec]
+	require.True(t, ok, "AgentDeployment must carry the source-spec annotation")
+	require.NotEmpty(t, stored)
+
+	// The stored value is canonical JSON and round-trips to the SAME structure the
+	// user submitted (YAML → the same generic tree). This is the edit source of truth.
+	var fromAnnotation, fromSubmitted any
+	require.NoError(t, json.Unmarshal([]byte(stored), &fromAnnotation))
+	require.NoError(t, sigsyaml.Unmarshal([]byte(sampleAgentYAML), &fromSubmitted))
+	assert.Equal(t, fromSubmitted, fromAnnotation, "source-spec must round-trip the submitted spec")
+}
+
+// TestCreateAgentSourceSpecOnlyOnPrimary proves the annotation lands ONLY on the
+// AgentDeployment — never on the generated EvalSuite/PromptVersion, which are
+// derived state, not the user's intent.
+func TestCreateAgentSourceSpecOnlyOnPrimary(t *testing.T) {
+	const withRefs = `name: rich-agent
+image: ghcr.io/ctxmesh/rich:v1
+eval:
+  suite: quality
+  dataset: golden-set
+  threshold: "0.8"
+  scorers:
+    - name: exact-match
+      type: heuristic
+prompt:
+  name: system-prompt
+  git:
+    repo: https://github.com/acme/prompts
+    ref: main
+    path: prompts/system.txt
+`
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: withRefs, Namespace: "prod"})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var ad agentsv1alpha1.AgentDeployment
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "rich-agent", Namespace: "prod"}, &ad))
+	assert.Contains(t, ad.Annotations, expand.AnnotationSourceSpec, "primary AgentDeployment carries the annotation")
+
+	var es agentsv1alpha1.EvalSuite
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "quality", Namespace: "prod"}, &es))
+	assert.NotContains(t, es.Annotations, expand.AnnotationSourceSpec, "generated EvalSuite must NOT carry the annotation")
+
+	var pv agentsv1alpha1.PromptVersion
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "system-prompt", Namespace: "prod"}, &pv))
+	assert.NotContains(t, pv.Annotations, expand.AnnotationSourceSpec, "generated PromptVersion must NOT carry the annotation")
+}
+
+// TestCreateAgentInlineSecretRejected proves a spec carrying inline credential
+// material is rejected with a teaching 4xx and NO object is created.
+func TestCreateAgentInlineSecretRejected(t *testing.T) {
+	// A managed agent with an inline apiKey — the exact anti-pattern ADR 0017 §2
+	// forbids (annotations are readable by anyone with `get`).
+	const withInlineSecret = `name: leaky-agent
+runtime: managed
+systemPrompt: hi
+model:
+  route: default-model
+apiKey: sk-super-secret-value
+`
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: withInlineSecret, Namespace: "prod"})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "inline secrets are not allowed")
+
+	// Nothing landed: the reject happens before any create.
+	var got agentsv1alpha1.AgentDeployment
+	err := c.Get(context.Background(), client.ObjectKey{Name: "leaky-agent", Namespace: "prod"}, &got)
+	assert.True(t, apierrors.IsNotFound(err), "no AgentDeployment must be created when the spec is rejected")
+}
+
+// TestCreateAgentOversizeSpecRejected proves a source-spec over the size ceiling
+// is rejected with a teaching 4xx and NO object is created.
+func TestCreateAgentOversizeSpecRejected(t *testing.T) {
+	// A valid-shaped spec whose systemPrompt alone pushes the canonical JSON well
+	// past the 128KB ceiling.
+	huge := strings.Repeat("x", maxSourceSpecBytes+1)
+	oversize := "name: big-agent\nruntime: managed\nsystemPrompt: " + huge + "\n"
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: oversize, Namespace: "prod"})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "too large")
+
+	var got agentsv1alpha1.AgentDeployment
+	err := c.Get(context.Background(), client.ObjectKey{Name: "big-agent", Namespace: "prod"}, &got)
+	assert.True(t, apierrors.IsNotFound(err), "no AgentDeployment must be created when the spec is oversize")
+}
+
+// TestFindInlineSecret is a focused unit test for the secret detector: it fires
+// on inline credential values (by key and by the `value:` pattern) but NOT on
+// by-name references or ordinary fields — the conservative-match contract.
+func TestFindInlineSecret(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		rejects bool
+	}{
+		{"clean full spec", sampleAgentYAML, false},
+		{"inline apiKey", "name: a\napiKey: sk-123\n", true},
+		{"inline token nested", "name: a\nauth:\n  token: abc\n", true},
+		{"inline password", "name: a\npassword: hunter2\n", true},
+		{"inline bearer", "name: a\nbearer: xyz\n", true},
+		{"secret block with inline value", "name: a\nsecret:\n  name: db\n  value: raw-pw\n", true},
+		{"by-name secret reference (map value)", "name: a\napiKey:\n  secretName: prod-key\n", false},
+		{"by-name secret ref block, no value", "name: a\nsecretRef:\n  secret: prod-key\n", true},
+		{"ordinary name/value pair (not secret-shaped)", "name: a\nenv:\n  - name: FOO\n    value: bar\n", false},
+		{"empty credential key", "name: a\ntoken: \"\"\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tree any
+			require.NoError(t, sigsyaml.Unmarshal([]byte(tc.yaml), &tree))
+			got := findInlineSecret(tree, "")
+			if tc.rejects {
+				assert.NotEmpty(t, got, "expected an inline-secret path")
+			} else {
+				assert.Empty(t, got, "expected no inline-secret match, got path %q", got)
+			}
+		})
+	}
 }
 
 // --- Auth + seam discipline -------------------------------------------------
