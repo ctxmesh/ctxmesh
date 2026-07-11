@@ -368,8 +368,9 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 		spans = []SpanSummary{}
 	}
 	writeJSON(w, http.StatusOK, TraceDetailResponse{
-		Rollup: detail.Rollup,
-		Spans:  spans,
+		Rollup:     detail.Rollup,
+		Spans:      spans,
+		RootSpanID: detail.RootSpanID,
 	})
 }
 

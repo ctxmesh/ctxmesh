@@ -349,6 +349,13 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 		}
 	}
 
+	// DFS-order the spans (m16.2): root first, then each child subtree
+	// depth-first (children sorted by StartMs then id for determinism). Sets
+	// NestingDepth on each span and identifies the root span id. A malformed
+	// parent chain (cycle or missing parent) is handled by the cycle-guard inside
+	// orderSpansDFS — every span appears exactly once, no infinite loops.
+	ordered, rootID := orderSpansDFS(spans)
+
 	return TraceDetail{
 		Rollup: TraceRollup{
 			TraceID:   body.ID,
@@ -357,9 +364,10 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			CostUSD:   body.TotalCost,
 			Tokens:    tokens,
 			LatencyMs: body.LatencyMs,
-			SpanCount: len(spans),
+			SpanCount: len(ordered),
 		},
-		Spans: spans,
+		Spans:      ordered,
+		RootSpanID: rootID,
 	}, nil
 }
 
@@ -509,4 +517,137 @@ func (a *langfuseAdapter) getJSON(ctx context.Context, apiPath string, q url.Val
 		return fmt.Errorf("langfuse: decode %s: %w", apiPath, err)
 	}
 	return nil
+}
+
+// orderSpansDFS takes a flat []SpanSummary (parentId-linked, any order) and
+// returns a DFS-pre-order flat slice with each span's NestingDepth set, plus
+// the id of the root span (the earliest-by-StartMs parentless span, or "" when
+// spans is empty).
+//
+// Algorithm:
+//  1. Build a children-map (parentId → []child) and collect roots (spans with
+//     no parent OR whose parent id does not exist in the span set — orphans).
+//  2. Sort roots by StartMs then ID for determinism.
+//  3. DFS pre-order: visit a node, then recurse into its children (also sorted
+//     by StartMs then ID).
+//  4. Cycle-guard via a per-call visited set: before descending into a child,
+//     check whether it has been visited. A cycle or a span whose parent chain
+//     loops is interrupted — the offending span is emitted as a root-level
+//     orphan (depth 0) exactly once, never dropped, never looped.
+//
+// The input slice is not modified. Every span in the input appears exactly once
+// in the output. RootSpanID is "" when the input is empty.
+func orderSpansDFS(spans []SpanSummary) (ordered []SpanSummary, rootID string) {
+	if len(spans) == 0 {
+		return []SpanSummary{}, ""
+	}
+
+	// Index all span ids so we can detect missing/orphan parents.
+	known := make(map[string]struct{}, len(spans))
+	for i := range spans {
+		known[spans[i].ID] = struct{}{}
+	}
+
+	// Build parent → children map; collect root (parentless or orphan) spans.
+	children := make(map[string][]int, len(spans)) // parent id → indices into spans
+	var roots []int
+	for i := range spans {
+		p := spans[i].ParentID
+		if p == "" {
+			// Explicitly parentless: a true root.
+			roots = append(roots, i)
+		} else if _, ok := known[p]; !ok {
+			// Parent id references a missing span: treat as orphan root.
+			roots = append(roots, i)
+		} else {
+			children[p] = append(children[p], i)
+		}
+	}
+
+	// Sort children lists by StartMs then ID for determinism.
+	sortByStartID := func(indices []int) {
+		slices.SortStableFunc(indices, func(a, b int) int {
+			sa, sb := &spans[a], &spans[b]
+			if sa.StartMs != sb.StartMs {
+				if sa.StartMs < sb.StartMs {
+					return -1
+				}
+				return 1
+			}
+			if sa.ID < sb.ID {
+				return -1
+			}
+			if sa.ID > sb.ID {
+				return 1
+			}
+			return 0
+		})
+	}
+	sortByStartID(roots)
+	for k := range children {
+		sortByStartID(children[k])
+	}
+
+	// Identify the primary root (earliest-by-StartMs root for RootSpanID).
+	if len(roots) > 0 {
+		rootID = spans[roots[0]].ID
+	}
+
+	// DFS pre-order with a visited set for cycle detection.
+	// Any span already in the visited set that would be visited again (cycle) is
+	// skipped in its tree position and will be emitted as a deferred orphan at
+	// depth 0.
+	ordered = make([]SpanSummary, 0, len(spans))
+	visited := make(map[string]bool, len(spans))
+	deferred := make([]int, 0) // indices of cycle-involved spans
+
+	var dfs func(idx int, depth int)
+	dfs = func(idx int, depth int) {
+		s := spans[idx]
+		if visited[s.ID] {
+			// Already emitted — this is a cycle; skip to avoid an infinite loop.
+			// The span was already emitted or will be deferred.
+			return
+		}
+		visited[s.ID] = true
+		s.NestingDepth = depth
+		ordered = append(ordered, s)
+
+		for _, childIdx := range children[s.ID] {
+			childID := spans[childIdx].ID
+			if visited[childID] {
+				// Cycle detected: child is already in the output or being visited.
+				// The child will be emitted via the deferred pass, not here.
+				deferred = append(deferred, childIdx)
+				continue
+			}
+			dfs(childIdx, depth+1)
+		}
+	}
+
+	// Visit all roots in order.
+	for _, ri := range roots {
+		dfs(ri, 0)
+	}
+
+	// Emit any spans not yet visited (orphaned by cycles or missing from tree due
+	// to all their ancestors being cycles). Sort for determinism.
+	for i := range spans {
+		if !visited[spans[i].ID] {
+			deferred = append(deferred, i)
+		}
+	}
+	// Deduplicate deferred list (cycle detection may have added indices twice).
+	seen := make(map[int]bool, len(deferred))
+	for _, di := range deferred {
+		if !seen[di] && !visited[spans[di].ID] {
+			seen[di] = true
+			s := spans[di]
+			s.NestingDepth = 0
+			visited[s.ID] = true
+			ordered = append(ordered, s)
+		}
+	}
+
+	return ordered, rootID
 }
