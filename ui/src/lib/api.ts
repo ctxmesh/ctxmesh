@@ -631,6 +631,77 @@ export interface ToolListResponse {
   tools: CatalogTool[];
 }
 
+// --- MCPToolBinding DTOs (m17.5 / m17.10) ------------------------------------
+// An MCPToolBinding is the controller object that attaches one catalog tool to
+// one AgentDeployment. The controller reconciles it and sets a Ready condition
+// whose status reflects actual propagation — "propagated" (hot-updated live) or
+// the reason it hasn't propagated yet. The SPA NEVER fakes the propagation
+// state: it reads the controller's Ready condition truthfully.
+
+// MCPToolBindingCondition mirrors one status.Condition from the controller.
+export interface MCPToolBindingCondition {
+  type: string;
+  // "True" | "False" | "Unknown"
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// MCPToolBindingSummary is one binding in a list response (minimal projection).
+export interface MCPToolBindingSummary {
+  name: string;
+  namespace: string;
+  agentName: string;
+  agentNamespace: string;
+  toolName: string;
+  ready: boolean;
+}
+
+// MCPToolBindingDetail is the full binding projection including the controller's
+// Ready condition. `propagationStatus` is the BFF's flat projection of the Ready
+// condition: "propagated" (Ready: True) or the reason string (not yet ready,
+// e.g. "Pending", "ToolNotFound"). NEVER faked — it reflects the controller.
+export interface MCPToolBindingDetail {
+  name: string;
+  namespace: string;
+  agentName: string;
+  agentNamespace: string;
+  toolName: string;
+  ready: boolean;
+  // propagationStatus is "propagated" when Ready is True; otherwise the reason
+  // (e.g. "Pending", "ToolApprovalRequired", or the actual failure reason).
+  propagationStatus: string;
+  conditions: MCPToolBindingCondition[];
+}
+
+export interface MCPToolBindingListResponse {
+  items: MCPToolBindingSummary[];
+  nextCursor: string;
+}
+
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The binding
+// attaches `toolName` (from the merged catalog) to `agentRef` (namespace/name).
+// A pending-approval tool is REJECTED by the controller (m17.4 gate) — the UI
+// must disable binding for pending-approval tools before ever calling this.
+export interface MCPToolBindingCreateRequest {
+  name?: string;
+  namespace?: string;
+  agentRef: {
+    namespace: string;
+    name: string;
+  };
+  toolName: string;
+}
+
+// MCPToolBindingListParams are the list-contract query params for bindings.
+export interface MCPToolBindingListParams {
+  limit?: number;
+  cursor?: string;
+  agentName?: string;
+  namespace?: string;
+}
+
 // --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
 // The "Describe it" magic step: a natural-language description → a server-side
 // LLM (the caller's connected provider, or an operator-pinned model) → the
@@ -1888,4 +1959,55 @@ export const api = {
     }
     return (await res.json()) as AgentRunListResponse;
   },
+
+  // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
+  // listMcpToolBindings reads one page window of MCPToolBindings through the
+  // list contract. Pass agentName/namespace to scope to a single agent.
+  // A 403 surfaces as a typed ApiError (isForbidden).
+  listMcpToolBindings: (
+    params?: MCPToolBindingListParams,
+    signal?: AbortSignal,
+  ): Promise<MCPToolBindingListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.agentName) qs.set("agentName", params.agentName);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<MCPToolBindingListResponse>(`/api/mcptoolbindings${suffix}`, signal);
+  },
+
+  // createMcpToolBinding creates a new MCPToolBinding — attaching a catalog
+  // tool to an agent. The controller reconciles it and sets the Ready condition.
+  // A 403 (viewer-can't-create) or 409 (already exists) surfaces via ApiError.
+  // IMPORTANT: pending-approval tools must NOT be submitted — the m17.4 gate
+  // rejects them server-side and the UI must gate the submit button.
+  createMcpToolBinding: async (
+    req: MCPToolBindingCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<MCPToolBindingDetail> => {
+    const res = await apiFetch("/api/mcptoolbindings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MCPToolBindingDetail;
+  },
+
+  // mcpToolBinding reads one MCPToolBinding's full detail projection including
+  // the controller's Ready condition and propagationStatus. The propagation
+  // status reflects the CONTROLLER'S actual Ready condition — NEVER faked.
+  // A 404 = not-found; a 403 = viewer-can't-read (ForbiddenInline).
+  mcpToolBinding: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<MCPToolBindingDetail>(
+      `/api/mcptoolbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
 };

@@ -14,6 +14,7 @@ import {
   Sparkles,
   Users,
   Wrench,
+  BookOpen,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -157,6 +158,16 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M17",
         route: "/tools/approvals",
         requiresWrite: { resource: RES_REGISTRIES, verb: "update" },
+      },
+      {
+        // Tool catalog (m17.10). The merged catalog of curated + user-added +
+        // pending-approval tools. Readable by anyone; bind wizard is gated on
+        // create mcptoolbindings. Uses BookOpen (distinct from Wrench above).
+        id: "tool-catalog",
+        label: "Tool catalog",
+        icon: BookOpen,
+        milestone: "M17",
+        route: "/tools/catalog",
       },
       { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
       { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },

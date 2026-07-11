@@ -8,6 +8,7 @@ import { AgentRegistryDetailPage, NewAgentRegistryPage } from "@/pages/agent-reg
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
@@ -110,6 +111,8 @@ export function App() {
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
             <Route path="tools/approvals" element={<McpApprovalsPage />} />
+            {/* m17.10: Tool catalog — merged curated + user-added + pending tools */}
+            <Route path="tools/catalog" element={<ToolCatalogPage />} />
             {/* m15.12: ModelRoute CRUD surfaces */}
             <Route path="routes" element={<ModelRoutesPage />} />
             <Route path="routes/new" element={<NewModelRoutePage />} />
