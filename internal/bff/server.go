@@ -187,6 +187,21 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
+		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
+		// console-managed agent, a degraded safe-field SSA patch for an annotation-
+		// less (kubectl-created) one. It runs through the SAME CALLER-SCOPED client
+		// (ADR 0011): a viewer's PUT surfaces the API server's real 403, and the write
+		// is SSA-only under a console field-manager (never a controller-clobbering
+		// Update). The Go 1.22 ServeMux treats "GET .../{ns}/{name}" and
+		// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
+		// beside the detail GET. It needs the scheme (to decode/apply manifests); when
+		// the scheme is absent the route serves an honest 501 below.
+		if s.scheme != nil {
+			authed.HandleFunc("PUT /api/agents/{ns}/{name}", s.handleUpdateAgent)
+		} else {
+			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
+		}
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
@@ -205,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
 		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
 		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
+		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
