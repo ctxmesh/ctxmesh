@@ -25,6 +25,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -89,6 +91,16 @@ type Server struct {
 	// callback handlers can use it whenever MCP is enabled.
 	oauthFlows *pendingOAuthStore
 
+	// promptResolver is the OPTIONAL server-side seam for resolving a git-pointer
+	// PromptVersion (repo, ref, path) → prompt content (m17.8). It is nil by default
+	// (no prompt resolution configured). When nil, the diff endpoint returns an honest
+	// 501 ("prompt resolution not configured") rather than fabricating any content.
+	// The BFF never stores resolved prompt content beyond the lifetime of a diff
+	// request — git remains the source of truth (ADR 0008).
+	// Wire via Options.PromptResolver at construction time (e.g. a FixtureResolver
+	// in tests, a real go-git Resolver in production when available).
+	promptResolver prompt.Resolver
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -140,6 +152,12 @@ type Options struct {
 	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
 	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
 	MCPRequireApproval bool
+	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
+	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
+	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
+	// real go-git Resolver in production. The BFF never stores resolved prompt content
+	// beyond the diff response (ADR 0008).
+	PromptResolver prompt.Resolver
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -159,6 +177,7 @@ func NewServer(opts Options) *Server {
 		mcpEnabled:               opts.MCPEnabled,
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		oauthFlows:               newPendingOAuthStore(),
+		promptResolver:           opts.PromptResolver,
 		log:                      opts.Log,
 	}
 	if s.version == "" {
@@ -385,6 +404,25 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("eval suite update"))
 		}
 		authed.HandleFunc("DELETE /api/evalsuites/{ns}/{name}", s.handleDeleteEvalSuite)
+		// PromptVersion CRUD + diff (m17.8): direct edit of git-backed prompt pointers.
+		// The detail DTO surfaces git (repo/ref/path) + status.conditions.
+		// The /diff sub-resource resolves the two PromptVersions' git pointers via the
+		// optional prompt Resolver and returns a TEXTUAL line diff of the resolved content.
+		// If no resolver is configured → the diff endpoint returns an honest 501 (never
+		// fabricates content). ErrNotFound → 404; transient resolve failure → 502.
+		// Controller status.conditions are NEVER clobbered (SSA spec-only applies).
+		authed.HandleFunc("GET /api/promptversions", s.handleListPromptVersions)
+		authed.HandleFunc("GET /api/promptversions/{ns}/{name}", s.handleGetPromptVersion)
+		// Diff is always wired (degrades to 501 when no resolver configured).
+		authed.HandleFunc("GET /api/promptversions/{ns}/{name}/diff", s.handlePromptVersionDiff)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/promptversions", s.handleCreatePromptVersion)
+			authed.HandleFunc("PUT /api/promptversions/{ns}/{name}", s.handleUpdatePromptVersion)
+		} else {
+			authed.Handle("POST /api/promptversions", notImplemented("prompt version create"))
+			authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("prompt version update"))
+		}
+		authed.HandleFunc("DELETE /api/promptversions/{ns}/{name}", s.handleDeletePromptVersion)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -448,6 +486,12 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/evalsuites", notImplemented("caller-scoped eval suite create"))
 		authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite update"))
 		authed.Handle("DELETE /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite delete"))
+		authed.Handle("GET /api/promptversions", notImplemented("caller-scoped prompt version list"))
+		authed.Handle("GET /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version detail"))
+		authed.Handle("GET /api/promptversions/{ns}/{name}/diff", notImplemented("caller-scoped prompt version diff"))
+		authed.Handle("POST /api/promptversions", notImplemented("caller-scoped prompt version create"))
+		authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version update"))
+		authed.Handle("DELETE /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
