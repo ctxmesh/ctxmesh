@@ -333,6 +333,40 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("MCP tool binding update"))
 		}
 		authed.HandleFunc("DELETE /api/mcptoolbindings/{ns}/{name}", s.handleDeleteMCPToolBinding)
+		// MemoryBinding CRUD (m17.6): direct edit of memory backend bindings for
+		// AgentDeployments. Five endpoints following the list contract + SSA.
+		// agentRef is NOT CRD-immutable (no oldSelf XValidation) — a PUT that
+		// changes agentRef is accepted and applied by the API server. The BFF does
+		// not enforce immutability because the CRD does not.
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly.
+		authed.HandleFunc("GET /api/memorybindings", s.handleListMemoryBindings)
+		authed.HandleFunc("GET /api/memorybindings/{ns}/{name}", s.handleGetMemoryBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/memorybindings", s.handleCreateMemoryBinding)
+			authed.HandleFunc("PUT /api/memorybindings/{ns}/{name}", s.handleUpdateMemoryBinding)
+		} else {
+			authed.Handle("POST /api/memorybindings", notImplemented("memory binding create"))
+			authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("memory binding update"))
+		}
+		authed.HandleFunc("DELETE /api/memorybindings/{ns}/{name}", s.handleDeleteMemoryBinding)
+		// AgentScalingPolicy CRUD (m17.6): direct edit of elastic scaling rules for
+		// AgentDeployments. Five endpoints following the list contract + SSA.
+		// CRD XValidations (max>=min, schedule required when trigger=schedule) are
+		// enforced by the API server — rejections surface as honest 422 with the
+		// server's message. The BFF does not re-implement these rules.
+		// agentRef is NOT CRD-immutable — a PUT that changes agentRef is accepted
+		// and applied. The scheme is needed for SSA; absent → 501.
+		authed.HandleFunc("GET /api/agentscalingpolicies", s.handleListAgentScalingPolicies)
+		authed.HandleFunc("GET /api/agentscalingpolicies/{ns}/{name}", s.handleGetAgentScalingPolicy)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agentscalingpolicies", s.handleCreateAgentScalingPolicy)
+			authed.HandleFunc("PUT /api/agentscalingpolicies/{ns}/{name}", s.handleUpdateAgentScalingPolicy)
+		} else {
+			authed.Handle("POST /api/agentscalingpolicies", notImplemented("agent scaling policy create"))
+			authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("agent scaling policy update"))
+		}
+		authed.HandleFunc("DELETE /api/agentscalingpolicies/{ns}/{name}", s.handleDeleteAgentScalingPolicy)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -380,6 +414,16 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding create"))
 		authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding update"))
 		authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding delete"))
+		authed.Handle("GET /api/memorybindings", notImplemented("caller-scoped memory binding list"))
+		authed.Handle("GET /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding detail"))
+		authed.Handle("POST /api/memorybindings", notImplemented("caller-scoped memory binding create"))
+		authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding update"))
+		authed.Handle("DELETE /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding delete"))
+		authed.Handle("GET /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy list"))
+		authed.Handle("GET /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy detail"))
+		authed.Handle("POST /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy create"))
+		authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy update"))
+		authed.Handle("DELETE /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
