@@ -118,7 +118,16 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		versions = list.Items
 	}
 
-	writeJSON(w, http.StatusOK, newAgentDetail(&ad, toolBindings, memoryBindings, versions))
+	// Edit-mode flags (ADR 0017). managedOutsideUI is the mechanical "no source-spec
+	// annotation" fact; drift is only meaningful for a console-managed agent and is
+	// computed by re-expanding the stored source-spec and comparing the console-
+	// managed spec fields against the live object. A drift computation error (a
+	// corrupt/unexpandable stored spec — should not happen for a spec we canonicalized
+	// at write) is treated as "no drift" rather than failing the whole read: the
+	// detail page is a read and must not 500 on a stale annotation.
+	managedOutsideUI, drift := s.editModeFlags(&ad)
+
+	writeJSON(w, http.StatusOK, newAgentDetail(&ad, toolBindings, memoryBindings, versions, managedOutsideUI, drift))
 }
 
 // handleAgentLogs serves GET /api/agents/{ns}/{name}/logs — the live SSE pod-log
