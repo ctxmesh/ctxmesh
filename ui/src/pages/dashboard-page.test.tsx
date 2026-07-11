@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { DashboardPage } from "@/pages/dashboard-page";
@@ -92,25 +92,60 @@ describe("DashboardPage (render proof)", () => {
     expect(screen.getByText("t-abc")).toBeInTheDocument();
   });
 
-  it("opens the embedded Langfuse trace deep-view when a run is selected", async () => {
+  it("does NOT render any Langfuse embedded iframe (m16.11: iframe demoted)", async () => {
     routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
     renderDashboard();
 
-    // Before selection: the deep-view is a prompt, not an iframe.
+    // Wait for data to load.
+    await screen.findByText("checkout-flow");
+
+    // No iframe in the dashboard — the Langfuse door is now the link-out on
+    // /traces/:id, not an embedded iframe here.
+    expect(document.querySelector("iframe")).toBeNull();
+    // No legacy "Select a run to open its embedded Langfuse trace" prompt.
     expect(
-      await screen.findByText(/Select a run to open its embedded Langfuse trace/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Select a run to open its embedded Langfuse trace/),
+    ).toBeNull();
+    // No "Langfuse deep-view" section heading.
+    expect(screen.queryByText("Langfuse deep-view")).toBeNull();
+  });
 
-    // Click the run row → the trace embed resolves via /api/traces/{id}.
-    fireEvent.click(screen.getByText("checkout-flow"));
+  it("cost card links to the native /cost page (m16.11)", async () => {
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
 
-    // The embedded iframe (the accepted off-theme panel) mounts with the
-    // BFF-resolved src + a link-out to full Langfuse.
-    const iframe = await screen.findByTitle("Langfuse trace deep-view");
-    expect(iframe).toHaveAttribute("src", "https://lf.test/trace/x");
-    const linkOut = screen.getByRole("link", { name: /Open in Langfuse/ });
-    expect(linkOut).toHaveAttribute("href", "https://lf.test/trace/x");
-    expect(linkOut).toHaveAttribute("target", "_blank");
+    // Wait for cost data to render.
+    await screen.findByText("Total cost");
+
+    // The "View cost details" link leads to the native /cost page.
+    const costLink = screen.getByTestId("view-cost-details");
+    expect(costLink).toBeInTheDocument();
+    expect(costLink).toHaveAttribute("href", "/cost");
+  });
+
+  it("recent runs list has a View-all-runs link to /runs (m16.11)", async () => {
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
+
+    // Wait for runs to render.
+    await screen.findByText("checkout-flow");
+
+    // "View all runs" links to the native /runs page.
+    const viewAllLink = screen.getByTestId("view-all-runs");
+    expect(viewAllLink).toBeInTheDocument();
+    expect(viewAllLink).toHaveAttribute("href", "/runs");
+  });
+
+  it("recent run rows link to /traces/:id (m16.11)", async () => {
+    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    renderDashboard();
+
+    // Wait for the run row to appear.
+    await screen.findByText("checkout-flow");
+
+    // The run row should be a link to the native trace page.
+    const traceLink = screen.getByRole("link", { name: /checkout-flow/ });
+    expect(traceLink).toHaveAttribute("href", "/traces/t-abc");
   });
 
   it("shows an error state when the topology fetch fails (e.g. RBAC 403)", async () => {
