@@ -353,6 +353,67 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCostBreakdown serves GET /api/cost/breakdown — the cost drill-down by
+// agent (m16.5). It groups a bounded window of recent Langfuse traces by their
+// `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
+//
+// Supported query params:
+//
+//	?by=agent   the grouping axis; REQUIRED and "agent" is the ONLY supported
+//	             value. Any other `by` value (including missing/empty) → 400
+//	             (honest: don't silently accept a by you don't implement).
+//	?limit=N     page size over the agent list (default defaultRunLimit, no max)
+//	?cursor=TOKEN opaque next-page token from a prior response's nextCursor
+//
+// The response is a RECENT-WINDOW ROLLUP — the totals cover a bounded recent
+// window of traces, NOT all-time historical cost. The window matches CostUsage.
+// Empty window → {agents:[], total:{...}, nextCursor:""} 200.
+//
+// Degrades honestly: Langfuse not wired → 501 (registered by server.go seam).
+// Upstream failure → 502. Bad param (unsupported by, bad cursor) → 400.
+func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	// ?by is required and the only supported value is "agent".
+	by := strings.TrimSpace(qs.Get("by"))
+	if by != "agent" {
+		if by == "" {
+			writeError(w, http.StatusBadRequest,
+				`missing required query param: by (supported values: "agent")`)
+		} else {
+			writeError(w, http.StatusBadRequest,
+				`unsupported by value `+strconv.Quote(by)+`; supported values: "agent"`)
+		}
+		return
+	}
+
+	limit := defaultRunLimit
+	if raw := qs.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
+	cursor := strings.TrimSpace(qs.Get("cursor"))
+
+	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), limit, cursor)
+	if err != nil {
+		if errors.Is(err, ErrBadParam) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.Error(err, "cost breakdown failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch cost breakdown")
+		return
+	}
+	if resp.Agents == nil {
+		resp.Agents = []AgentCostItem{}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one
 // Langfuse target URL (the embedded iframe src AND the link-out href). The SPA
 // never hardcodes a Langfuse URL; swapping the backend is a server-side config

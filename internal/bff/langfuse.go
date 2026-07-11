@@ -171,6 +171,31 @@ func agentRunTag(namespace, name string) string {
 	return "agent:" + ns + "/" + n
 }
 
+// parseAgentTag is the INVERSE of agentRunTag: it strips the "agent:" prefix and
+// splits the remainder to recover (namespace, name). It is derived from the
+// producer (agentRunTag) so the group key in CostBreakdown EXACTLY matches what
+// the launcher stamps:
+//
+//   - "agent:<ns>/<name>"  → (ns, name, true)   [namespace present]
+//   - "agent:<name>"       → ("",  name, true)   [bare name, no slash → no namespace]
+//   - anything else        → ("",  "",   false)   [not an agent tag]
+//
+// The split is on the LAST "/" (strings.LastIndex) so a name that itself contains
+// a slash parses correctly: the part before the last "/" is the namespace and the
+// rest is the name — matching how agentRunTag constructs "agent:"+ns+"/"+name.
+func parseAgentTag(tag string) (ns, name string, ok bool) {
+	rest, found := strings.CutPrefix(tag, "agent:")
+	if !found || rest == "" {
+		return "", "", false
+	}
+	idx := strings.LastIndex(rest, "/")
+	if idx < 0 {
+		// No slash: bare "agent:<name>" → namespace is empty.
+		return "", rest, true
+	}
+	return rest[:idx], rest[idx+1:], true
+}
+
 // RunsForAgent fetches the most recent traces (newest first) for ONE agent and
 // projects them onto RunSummary. It filters on the Langfuse-native tags query
 // (`?tags=agent:<ns>/<name>`) so the upstream returns only this agent's runs, then
@@ -467,6 +492,188 @@ func (a *langfuseAdapter) CostUsage(ctx context.Context) (CostSummary, error) {
 		TotalTokens:  totalTokens,
 		Observations: int64(len(body.Data)),
 		ByModel:      byModel,
+	}, nil
+}
+
+// costBreakdownWindowLimit is the number of recent traces fetched for the
+// CostBreakdown rollup. This is a bounded window, NOT a full historical scan —
+// the rollup is honest about being recent-window only.
+const costBreakdownWindowLimit = 200
+
+// agentCostKey is the per-agent accumulator key used inside CostBreakdown to
+// group traces before sorting and paginating.
+type agentCostKey struct {
+	ns   string
+	name string
+}
+
+// CostBreakdown aggregates a bounded window of recent traces into a per-agent
+// cost/usage breakdown (GET /api/cost/breakdown?by=agent). It fetches up to
+// costBreakdownWindowLimit recent traces in one call (the same bounded window
+// shape as CostUsage) and groups them by the `agent:<ns>/<name>` trace tag.
+//
+// HONEST BOUNDED WINDOW: this rolls up a recent window of at most
+// costBreakdownWindowLimit traces, NOT all-time historical cost. The numbers are
+// self-consistent with CostUsage (same window), but do not represent total
+// lifetime spend. Callers must treat these as recency-bounded aggregates.
+//
+// Traces with no agent tag go into an explicit "(untagged)" bucket
+// (agentNs="", agentName="(untagged)") so they are visible, not silently
+// dropped. The agent list is sorted by totalCostUSD desc (tie-break: agentNs,
+// agentName asc) and then paginated by limit/cursor — the cursor is an offset
+// over the sorted agent list, encoded as an opaque integer.
+func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error) {
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+
+	// Decode cursor → offset into the sorted agent list. "" = start.
+	offset := 0
+	if cursor != "" {
+		off, err := strconv.Atoi(cursor)
+		if err != nil || off < 0 {
+			return CostBreakdownResponse{}, fmt.Errorf("%w: cursor must be a non-negative integer, got %q", ErrBadParam, cursor)
+		}
+		offset = off
+	}
+
+	// Fetch a bounded window of recent traces for aggregation.
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(costBreakdownWindowLimit))
+	q.Set("orderBy", "timestamp.desc")
+
+	var body lfTracesResponse
+	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+		return CostBreakdownResponse{}, err
+	}
+
+	// Accumulate per-agent cost/tokens/count.
+	type acc struct {
+		totalCostUSD float64
+		totalTokens  int64
+		runCount     int
+	}
+	accs := map[agentCostKey]*acc{}
+	// Order keys to preserve insertion order for deterministic output when costs
+	// are equal; we use a slice to track insertion order.
+	var keyOrder []agentCostKey
+
+	var totalCost float64
+	var totalTokens int64
+
+	for _, t := range body.Data {
+		totalCost += t.TotalCost
+		totalTokens += traceTokens(t)
+
+		// Find the first agent tag on the trace.
+		var key agentCostKey
+		found := false
+		for _, tag := range t.Tags {
+			if ns, name, ok := parseAgentTag(tag); ok {
+				key = agentCostKey{ns: ns, name: name}
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Untagged traces go into an explicit bucket.
+			key = agentCostKey{ns: "", name: "(untagged)"}
+		}
+
+		if _, exists := accs[key]; !exists {
+			accs[key] = &acc{}
+			keyOrder = append(keyOrder, key)
+		}
+		accs[key].totalCostUSD += t.TotalCost
+		accs[key].totalTokens += traceTokens(t)
+		accs[key].runCount++
+	}
+
+	// Build the agent list.
+	agents := make([]AgentCostItem, 0, len(accs))
+	for _, k := range keyOrder {
+		a := accs[k]
+		agents = append(agents, AgentCostItem{
+			AgentNs:      k.ns,
+			AgentName:    k.name,
+			TotalCostUSD: a.totalCostUSD,
+			TotalTokens:  a.totalTokens,
+			RunCount:     a.runCount,
+		})
+	}
+
+	// Sort by totalCostUSD desc; tie-break (agentNs, agentName) asc.
+	slices.SortStableFunc(agents, func(a, b AgentCostItem) int {
+		if b.TotalCostUSD != a.TotalCostUSD {
+			// Desc: higher cost first. b > a → return -1 (a comes after b)? No:
+			// SortStableFunc returns negative if a < b. We want higher cost first,
+			// so when a.Cost > b.Cost → a comes first → return -1.
+			if a.TotalCostUSD > b.TotalCostUSD {
+				return -1
+			}
+			return 1
+		}
+		// Tie-break: namespace asc, then name asc.
+		if a.AgentNs != b.AgentNs {
+			if a.AgentNs < b.AgentNs {
+				return -1
+			}
+			return 1
+		}
+		if a.AgentName < b.AgentName {
+			return -1
+		}
+		if a.AgentName > b.AgentName {
+			return 1
+		}
+		return 0
+	})
+
+	// Build the total summary over the window (same as CostUsage, minus ByModel).
+	// We reuse the ByModel breakdown here (by trace name) to stay consistent.
+	byName := map[string]float64{}
+	for _, t := range body.Data {
+		name := t.Name
+		if name == "" {
+			name = "unnamed"
+		}
+		byName[name] += t.TotalCost
+	}
+	byModel := make([]MetricPoint, 0, len(byName))
+	for n, cost := range byName {
+		byModel = append(byModel, MetricPoint{Label: n, Value: cost})
+	}
+	sortMetricPoints(byModel)
+
+	total := CostSummary{
+		TotalCostUSD: totalCost,
+		TotalTokens:  totalTokens,
+		Observations: int64(len(body.Data)),
+		ByModel:      byModel,
+	}
+
+	// Paginate the agent list.
+	if offset >= len(agents) {
+		return CostBreakdownResponse{
+			Agents:     []AgentCostItem{},
+			Total:      total,
+			NextCursor: "",
+		}, nil
+	}
+	page := agents[offset:]
+	nextCursor := ""
+	if len(page) > limit {
+		page = page[:limit]
+		nextCursor = strconv.Itoa(offset + limit)
+	}
+	if page == nil {
+		page = []AgentCostItem{}
+	}
+
+	return CostBreakdownResponse{
+		Agents:     page,
+		Total:      total,
+		NextCursor: nextCursor,
 	}, nil
 }
 
