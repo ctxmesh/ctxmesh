@@ -12,6 +12,7 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  TestTube2,
   Users,
   Wrench,
   BookOpen,
@@ -51,6 +52,8 @@ export const RES_SECRETS = "secretbindings";
 export const RES_REGISTRIES = "agentregistries";
 export const RES_MEMORY = "memorybindings";
 export const RES_SCALING = "agentscalingpolicies";
+export const RES_EVALSUITES = "evalsuites";
+export const RES_PROMPTVERSIONS = "promptversions";
 
 export interface NavItem {
   id: string;
@@ -171,8 +174,24 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M17",
         route: "/tools/catalog",
       },
-      { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
-      { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
+      {
+        // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
+        // textual diff. Readable by any authenticated caller; create/delete gated.
+        id: "prompts",
+        label: "Prompts",
+        icon: GitBranch,
+        milestone: "M17",
+        route: "/prompts",
+      },
+      {
+        // EvalSuite builder + results browser (m17.12). Lists EvalSuites + a
+        // wizard to create; results view is read-open; create gated.
+        id: "evals",
+        label: "Evals",
+        icon: TestTube2,
+        milestone: "M17",
+        route: "/evals",
+      },
     ],
   },
   {
