@@ -31,6 +31,11 @@ export interface AgentSummary {
   image: string;
   phase: string;
   ready: boolean;
+  // Fleet-health flags (m18.11): managedOutsideUI = kubectl-created (no console
+  // source-spec); drift = a console-managed agent whose live spec diverged. Both
+  // drive the SRE fleet drift badges (m18.12). Optional for backward-compat.
+  drift?: boolean;
+  managedOutsideUI?: boolean;
 }
 
 // AgentListResponse mirrors the BFF's list-contract DTO (internal/bff/dto.go).
