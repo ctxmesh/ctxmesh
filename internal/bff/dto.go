@@ -579,6 +579,16 @@ type ProviderListResponse struct {
 	Items     []ProviderSummary `json:"items"`
 }
 
+// RotateProviderKeyRequest is the POST /api/providers/{name}/rotate body (ADR 0018).
+// apiKey is the ONLY field that carries secret material — validated once, written
+// only into the existing Secret, never returned in a DTO and never logged.
+type RotateProviderKeyRequest struct {
+	// APIKey is the new pasted provider key that replaces the stored one.
+	APIKey string `json:"apiKey"`
+	// Namespace scopes the provider objects; empty → the default namespace.
+	Namespace string `json:"namespace"`
+}
+
 // ProviderModelsResponse is returned by GET /api/providers/{name}/models — the
 // provider's live model list, proxied server-side using the stored key. Models is
 // non-nil on the wire; no secret material is present.
