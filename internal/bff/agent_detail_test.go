@@ -75,6 +75,8 @@ func TestAgentDetailHappyPath(t *testing.T) {
 			Image:          "img:1",
 			ExecutionModel: "serving",
 			Role:           "worker",
+			PromptRef:      "system-prompt-v2",
+			Env:            []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "anthropic"}},
 			Scaling:        &agentsv1alpha1.ScalingSpec{Min: 1, Max: 5},
 		},
 		Status: agentsv1alpha1.AgentDeploymentStatus{
@@ -122,6 +124,8 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	assert.Equal(t, "img:1", got.Image)
 	assert.Equal(t, "serving", got.ExecutionModel)
 	assert.Equal(t, "worker", got.Role)
+	assert.Equal(t, "system-prompt-v2", got.PromptRef, "promptRef surfaced for the used-by link")
+	assert.Equal(t, "anthropic", got.ModelRoute, "modelRoute surfaced from the MODEL_ROUTE env")
 	assert.Equal(t, int32(1), got.Scaling.Min)
 	assert.Equal(t, int32(5), got.Scaling.Max)
 	assert.True(t, got.Ready)
@@ -169,7 +173,8 @@ func TestAgentDetailForbiddenAgentIs403(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"))
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"),
+				)
 			},
 		}).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -191,7 +196,8 @@ func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
 			// The agent Get succeeds; the binding/version LISTs are forbidden.
 			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "", errors.New("viewer denied"))
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "", errors.New("viewer denied"),
+				)
 			},
 		}).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -526,7 +532,8 @@ func TestAgentRunsForbiddenAgentIs403(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"))
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"),
+				)
 			},
 		}).Build()
 	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c},

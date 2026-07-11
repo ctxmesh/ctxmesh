@@ -124,19 +124,23 @@ type AgentBinding struct {
 // the bindings referencing this agent, and the AgentVersion history names.
 // Bindings and Versions and Conditions are non-nil on the wire ([] not null).
 type AgentDetailResponse struct {
-	Name           string           `json:"name"`
-	Namespace      string           `json:"namespace"`
-	Image          string           `json:"image"`
-	ExecutionModel string           `json:"executionModel"`
-	Role           string           `json:"role"`
-	Scaling        AgentScaling     `json:"scaling"`
-	Phase          string           `json:"phase"`
-	Ready          bool             `json:"ready"`
-	URL            string           `json:"url"`
-	LatestVersion  string           `json:"latestVersion"`
-	Conditions     []AgentCondition `json:"conditions"`
-	Bindings       []AgentBinding   `json:"bindings"`
-	Versions       []string         `json:"versions"`
+	Name           string `json:"name"`
+	Namespace      string `json:"namespace"`
+	Image          string `json:"image"`
+	ExecutionModel string `json:"executionModel"`
+	Role           string `json:"role"`
+	// PromptRef / ModelRoute surface the agent's composed resources so the detail
+	// page can link to them (the used-by graph, m18.9). Empty when unset.
+	PromptRef     string           `json:"promptRef"`
+	ModelRoute    string           `json:"modelRoute"`
+	Scaling       AgentScaling     `json:"scaling"`
+	Phase         string           `json:"phase"`
+	Ready         bool             `json:"ready"`
+	URL           string           `json:"url"`
+	LatestVersion string           `json:"latestVersion"`
+	Conditions    []AgentCondition `json:"conditions"`
+	Bindings      []AgentBinding   `json:"bindings"`
+	Versions      []string         `json:"versions"`
 	// ManagedOutsideUI is true when the AgentDeployment does NOT carry the
 	// source-spec annotation (ADR 0017) — a kubectl-created agent the console never
 	// captured a simplified spec for. An edit of such an agent is DEGRADED: only the
@@ -1045,12 +1049,24 @@ func newAgentDetail(
 		}
 	}
 
+	// MODEL_ROUTE env carries the agent's model route (expand: model.route → env),
+	// surfaced so the detail page can link to the ModelRoute (used-by graph).
+	modelRoute := ""
+	for _, e := range ad.Spec.Env {
+		if e.Name == envModelRoute {
+			modelRoute = e.Value
+			break
+		}
+	}
+
 	return AgentDetailResponse{
 		Name:             ad.Name,
 		Namespace:        ad.Namespace,
 		Image:            ad.Spec.Image,
 		ExecutionModel:   ad.Spec.ExecutionModel,
 		Role:             ad.Spec.Role,
+		PromptRef:        ad.Spec.PromptRef,
+		ModelRoute:       modelRoute,
 		Scaling:          scaling,
 		Phase:            phase,
 		Ready:            ready,
