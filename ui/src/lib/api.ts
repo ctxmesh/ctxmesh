@@ -518,14 +518,25 @@ export interface ConnectProviderRequest {
   baseURL?: string;
 }
 
-// ConnectProviderResponse mirrors the BFF DTO: the created resources' identities
-// + the live model list (pre-create, from the just-validated key). It carries NO
-// secret material — only the `secretName` REFERENCE.
-export interface ConnectProviderResponse {
+// ProviderSummary is the BFF's connected-provider projection: the route name +
+// provider + the live model list (plain model-id strings, NOT objects) + the
+// secretName REFERENCE (never key material). Both connect + list return it.
+export interface ProviderSummary {
+  name: string;
+  namespace: string;
   provider: string;
-  models: ProviderModel[];
+  displayName: string;
+  models: string[];
   secretName: string;
   ready: boolean;
+}
+
+// ConnectProviderResponse mirrors the REAL BFF DTO: the provider details are
+// NESTED under `provider` (a ProviderSummary) with the created object identities
+// under `created` — NOT a flat {provider, models}. Carries no secret material.
+export interface ConnectProviderResponse {
+  provider: ProviderSummary;
+  created?: { kind: string; name: string; namespace: string }[];
 }
 
 // ConnectedProvider is one already-connected provider (GET /api/providers). No
