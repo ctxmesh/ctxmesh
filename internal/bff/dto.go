@@ -336,8 +336,12 @@ type RunSummary struct {
 }
 
 // RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).
+// NextCursor is the opaque page token for the next page; "" means this is the
+// last page. It is always present (even as "") for backward-compat — callers
+// that do not use pagination can safely ignore it.
 type RunListResponse struct {
-	Runs []RunSummary `json:"runs"`
+	Runs       []RunSummary `json:"runs"`
+	NextCursor string       `json:"nextCursor"`
 }
 
 // AgentRunsResponse is returned by GET /api/agents/{ns}/{name}/runs — the bounded

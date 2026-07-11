@@ -136,6 +136,20 @@ type LangfuseAdapter interface {
 	// returns ErrTraceNotFound (→ the handler serves 404); any other upstream
 	// failure is a generic error (→ 502). Spans is non-nil on success.
 	TraceDetail(ctx context.Context, traceID string) (TraceDetail, error)
+
+	// FilteredRuns fetches a filtered, cursor-paginated page of runs from Langfuse
+	// (GET /api/public/traces). It is the engine behind GET /api/runs?agent=&from=
+	// &to=&q=&status=&limit=&cursor=.
+	//
+	// Server-side filters: agent (tags=), from/to (fromTimestamp/toTimestamp).
+	// Client-side filters: q (name substring), status (NOT applied — see RunFilter).
+	// Pagination: opaque cursor encodes the Langfuse page number. NextCursor="" means
+	// last page.
+	//
+	// A malformed param (bad timestamp, unknown status, bad cursor) → ErrBadParam
+	// (handler serves 400). Upstream failure → error (handler serves 502). Runs is
+	// non-nil on success.
+	FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error)
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend
