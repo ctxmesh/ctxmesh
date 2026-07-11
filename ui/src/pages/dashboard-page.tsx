@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Network, PlugZap, RefreshCw } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { Coins, Network, PlugZap, RefreshCw } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -13,7 +13,6 @@ import { EmptyState } from "@/components/kit";
 import { TopologyGraph } from "@/components/dashboard/topology-graph";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
-import { TraceView } from "@/components/dashboard/trace-view";
 import {
   api,
   type CostResponse,
@@ -22,14 +21,14 @@ import {
   type TopologyResponse,
 } from "@/lib/api";
 
-// DashboardPage — the operator's landing surface (m12.5). It composes four
+// DashboardPage — the operator's landing surface (m12.5). It composes three
 // native, on-theme views over the Go BFF (creds server-side):
 //   1. Live topology  — a React Flow graph from /api/topology
-//   2. Cost / usage   — native cards + charts from /api/cost (Langfuse + Prom)
-//   3. Recent runs    — from /api/runs (Langfuse), each links to its trace
-//   4. Langfuse deep-view — the embedded iframe + link-out for a selected trace
-// Every surface uses design tokens; the embedded Langfuse iframe is the one
-// accepted off-theme panel (spec §4).
+//   2. Cost / usage   — native cards + charts from /api/cost; links to /cost
+//   3. Recent runs    — from /api/runs (Langfuse), each links to /traces/:id;
+//                       "View all runs" links to /runs
+// The Langfuse embedded iframe (formerly section 4) was demoted in m16.11.
+// The ONE sanctioned Langfuse door is the forensics link-out on /traces/:id.
 
 type Loadable<T> =
   | { kind: "loading" }
@@ -56,8 +55,6 @@ export function DashboardPage() {
   const [providers, setProviders] = useState<Loadable<ProviderListResponse>>({
     kind: "loading",
   });
-  const [selectedTrace, setSelectedTrace] = useState<string | null>(null);
-
   const load = useCallback((signal?: AbortSignal) => {
     setTopology({ kind: "loading" });
     setCost({ kind: "loading" });
@@ -170,7 +167,8 @@ export function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* 2. Cost / usage */}
+      {/* 2. Cost / usage — headline stats + charts; "View cost details" links
+          to the native /cost page (m16.10) for the full cost explorer. */}
       {cost.kind === "loading" && (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
@@ -185,47 +183,48 @@ export function DashboardPage() {
           </CardContent>
         </Card>
       )}
-      {cost.kind === "ready" && <CostPanel cost={cost.data} />}
-
-      {/* 3. Recent runs + 4. embedded Langfuse deep-view */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">Recent runs</h3>
-          {runs.kind === "loading" && (
-            <Card>
-              <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                Loading runs…
-              </CardContent>
-            </Card>
-          )}
-          {runs.kind === "error" && (
-            <Card>
-              <CardContent className="py-8 text-center text-sm text-destructive">
-                Failed to load runs: {runs.message}
-              </CardContent>
-            </Card>
-          )}
-          {runs.kind === "ready" && (
-            <RecentRuns
-              runs={runs.data.runs}
-              selectedTraceId={selectedTrace}
-              onSelect={setSelectedTrace}
-            />
-          )}
+      {cost.kind === "ready" && (
+        <div className="space-y-3">
+          <CostPanel cost={cost.data} />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Coins className="h-3.5 w-3.5" />
+              Full cost breakdown and historical trends on the Cost page.
+            </div>
+            <Link
+              to="/cost"
+              data-testid="view-cost-details"
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
+              View cost details
+            </Link>
+          </div>
         </div>
+      )}
 
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">Langfuse deep-view</h3>
-          {selectedTrace ? (
-            <TraceView traceId={selectedTrace} />
-          ) : (
-            <Card>
-              <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                Select a run to open its embedded Langfuse trace.
-              </CardContent>
-            </Card>
-          )}
-        </div>
+      {/* 3. Recent runs — each row navigates to /traces/:id (native trace
+          explorer, m16.7); "View all runs" links to /runs (m16.8).
+          The embedded Langfuse iframe (formerly section 4) was demoted in
+          m16.11 — use the forensics link-out on /traces/:id instead. */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Recent runs</h3>
+        {runs.kind === "loading" && (
+          <Card>
+            <CardContent className="py-8 text-center text-sm text-muted-foreground">
+              Loading runs…
+            </CardContent>
+          </Card>
+        )}
+        {runs.kind === "error" && (
+          <Card>
+            <CardContent className="py-8 text-center text-sm text-destructive">
+              Failed to load runs: {runs.message}
+            </CardContent>
+          </Card>
+        )}
+        {runs.kind === "ready" && (
+          <RecentRuns runs={runs.data.runs} />
+        )}
       </div>
     </div>
   );

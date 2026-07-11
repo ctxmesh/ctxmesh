@@ -9,13 +9,14 @@ import { api, type FeedbackScore } from "@/lib/api";
 // Fetches GET /api/feedback?traceId=<id> and renders the scores as a compact
 // table (name / value / comment / source). Three states:
 //   • loading    — SkeletonTable (honest loading state).
-//   • null       — 501 or 502: Langfuse not wired / unreachable → calm disabled
-//                  state (NOT an error toast, matching the m15.11 runs pattern).
+//   • null       — 501 ONLY: Langfuse not wired → calm disabled state
+//                  (NOT an error toast, matching the m15.11 runs pattern).
+//                  502 (Langfuse configured but upstream failed) throws → error.
 //   • empty list — "no feedback recorded" teaching empty state.
 //   • scores     — compact table row per score.
 //
-// The panel NEVER shows an error alert on a 501/502 — those are expected "not
-// configured" states. Any other error (e.g. 500) renders a brief error notice.
+// The panel NEVER shows an error alert on a 501 — that is an expected "not
+// configured" state. 502 and other errors render a brief error notice.
 //
 // data-testid contract:
 //   feedback-panel          — root container
@@ -23,7 +24,7 @@ import { api, type FeedbackScore } from "@/lib/api";
 
 type FeedbackState =
   | { kind: "loading" }
-  | { kind: "unavailable" } // 501 / 502 — Langfuse not wired
+  | { kind: "unavailable" } // 501 only — Langfuse not wired (502 throws → error)
   | { kind: "error"; message: string }
   | { kind: "ready"; scores: FeedbackScore[] };
 
