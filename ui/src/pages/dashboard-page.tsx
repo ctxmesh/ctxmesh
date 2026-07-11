@@ -72,7 +72,7 @@ export function DashboardPage() {
         setProviders({ kind: "error", message: messageOf(err) });
       });
     api
-      .topology(signal)
+      .topology(undefined, signal)
       .then((data) => setTopology({ kind: "ready", data }))
       .catch((err: unknown) => {
         if (signal?.aborted) return;

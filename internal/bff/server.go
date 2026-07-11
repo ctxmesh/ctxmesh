@@ -187,7 +187,109 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
+		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
+		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
+		// `agent:<ns>/<name>` trace identity tag (cross-namespace correct). The Go 1.22
+		// ServeMux treats ".../{name}/runs" as MORE SPECIFIC than "GET .../{ns}/{name}"
+		// so it never shadows the detail GET. Wired only when the Langfuse adapter is
+		// present; absent → an honest 501 (m14.8 degrade), never a 500.
+		if s.adapters.Langfuse != nil {
+			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleAgentRuns)
+		} else {
+			authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("Langfuse per-agent runs adapter"))
+		}
+		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
+		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
+		// console-managed agent, a degraded safe-field SSA patch for an annotation-
+		// less (kubectl-created) one. It runs through the SAME CALLER-SCOPED client
+		// (ADR 0011): a viewer's PUT surfaces the API server's real 403, and the write
+		// is SSA-only under a console field-manager (never a controller-clobbering
+		// Update). The Go 1.22 ServeMux treats "GET .../{ns}/{name}" and
+		// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
+		// beside the detail GET. It needs the scheme (to decode/apply manifests); when
+		// the scheme is absent the route serves an honest 501 below.
+		if s.scheme != nil {
+			authed.HandleFunc("PUT /api/agents/{ns}/{name}", s.handleUpdateAgent)
+		} else {
+			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
+		}
+		// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
+		// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
+		// Kubernetes; independent references (agentRef-only, no ownerRef) are left in
+		// place — orphan pruning is deferred. A viewer's DELETE surfaces the API
+		// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
+		// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
+		authed.HandleFunc("DELETE /api/agents/{ns}/{name}", s.handleDeleteAgent)
+		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
+		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
+		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
+		// (independent reference). The Go 1.22 ServeMux treats this sub-path pattern
+		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
+		// detail GET above.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT. The scheme is needed
+		// for SSA (ensureGVK); when absent the write routes serve 501 honestly.
+		authed.HandleFunc("GET /api/modelroutes", s.handleListModelRoutes)
+		authed.HandleFunc("GET /api/modelroutes/{ns}/{name}", s.handleGetModelRoute)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/modelroutes", s.handleCreateModelRoute)
+			authed.HandleFunc("PUT /api/modelroutes/{ns}/{name}", s.handleUpdateModelRoute)
+		} else {
+			authed.Handle("POST /api/modelroutes", notImplemented("model route create"))
+			authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("model route update"))
+		}
+		authed.HandleFunc("DELETE /api/modelroutes/{ns}/{name}", s.handleDeleteModelRoute)
+		// SecretBinding CRUD (m15.6): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT.
+		//
+		// SECURITY (ADR 0015): the BFF NEVER reads the referenced Kubernetes Secret
+		// to return its data. Every DTO projects only the SecretBinding CRD's own
+		// fields — which Secret name, which key — plus status. The credential value
+		// lives only in the Secret; it never flows through this API surface.
+		//
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly. The GET routes do not need the scheme.
+		authed.HandleFunc("GET /api/secretbindings", s.handleListSecretBindings)
+		authed.HandleFunc("GET /api/secretbindings/{ns}/{name}", s.handleGetSecretBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/secretbindings", s.handleCreateSecretBinding)
+			authed.HandleFunc("PUT /api/secretbindings/{ns}/{name}", s.handleUpdateSecretBinding)
+		} else {
+			authed.Handle("POST /api/secretbindings", notImplemented("secret binding create"))
+			authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("secret binding update"))
+		}
+		authed.HandleFunc("DELETE /api/secretbindings/{ns}/{name}", s.handleDeleteSecretBinding)
+		// AgentRegistry CRUD (m15.7): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT.
+		//
+		// SECURITY INVARIANT: the console CANNOT alter the egress posture. The SSA
+		// apply object carries only the AgentRegistry spec (memberSelector, guards,
+		// roles); the controller-owned NetworkPolicy (M6 whitelist + M11 default-deny)
+		// is never touched. There is no egress/allowlist field in any DTO.
+		//
+		// registryId is immutable after creation (CRD XValidation). The PUT body has
+		// no registryId field, so an edit cannot change it: a submitted value is
+		// ignored and the live value is preserved (the PUT returns 200). Immutability
+		// holds by construction, not by an API-server rejection.
+		//
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly. The GET routes do not need the scheme.
+		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
+		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
+			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
+		} else {
+			authed.Handle("POST /api/agentregistries", notImplemented("agent registry create"))
+			authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("agent registry update"))
+		}
+		authed.HandleFunc("DELETE /api/agentregistries/{ns}/{name}", s.handleDeleteAgentRegistry)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -205,7 +307,26 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
 		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
 		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
+		authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("caller-scoped agent runs"))
+		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
+		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
+		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
+		authed.Handle("GET /api/modelroutes", notImplemented("caller-scoped model route list"))
+		authed.Handle("GET /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route detail"))
+		authed.Handle("POST /api/modelroutes", notImplemented("caller-scoped model route create"))
+		authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route update"))
+		authed.Handle("DELETE /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route delete"))
+		authed.Handle("GET /api/secretbindings", notImplemented("caller-scoped secret binding list"))
+		authed.Handle("GET /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding detail"))
+		authed.Handle("POST /api/secretbindings", notImplemented("caller-scoped secret binding create"))
+		authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding update"))
+		authed.Handle("DELETE /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding delete"))
+		authed.Handle("GET /api/agentregistries", notImplemented("caller-scoped agent registry list"))
+		authed.Handle("GET /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry detail"))
+		authed.Handle("POST /api/agentregistries", notImplemented("caller-scoped agent registry create"))
+		authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry update"))
+		authed.Handle("DELETE /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))

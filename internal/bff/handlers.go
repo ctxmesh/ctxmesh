@@ -48,6 +48,16 @@ const (
 	maxListLimit     = 200
 )
 
+// The per-group member-node cap for grouped topology (GET /api/topology?group=).
+// An expanded or searched group emits at most maxTopologyExpand member agent
+// nodes (default defaultTopologyExpand); beyond that the group is marked
+// truncated so the SPA shows "+N more" — no code path emits every agent at
+// scale, which is the whole point of the endpoint.
+const (
+	defaultTopologyExpand = 50
+	maxTopologyExpand     = 200
+)
+
 // handleHealth serves GET /api/health — a liveness + version probe. It needs no
 // cluster access, so it works even before the SPA is authenticated (the SPA
 // dashboard renders it to prove the BFF seam).
@@ -158,12 +168,48 @@ func parseListLimit(raw string) int {
 // MCPToolBinding through the CALLER-SCOPED client (ADR 0011), so the graph shows
 // only the CRDs the caller's RBAC permits. An empty (or filtered) cluster yields
 // {"nodes":[],"edges":[]}. A K8s Forbidden surfaces as 403, not a blank graph.
+//
+// It has two modes, selected by the optional ?group query param:
+//
+//   - ?group empty → RAW mode (M12 dashboard, backward-compatible byte-for-byte):
+//     the flat {nodes, edges} graph with every node. groups is absent.
+//   - ?group=registry|namespace → GROUPED mode (bounded for 200+ agents): member
+//     agents are folded into groups carrying a health-rollup COUNT, and are
+//     COLLAPSED by default (their member nodes are NOT in nodes[]). Members are
+//     emitted only for a group named in ?expand=<id>[,<id>...], or (with ?q=<sub>)
+//     for members whose name matches — always capped per group (see
+//     defaultTopologyExpand/maxTopologyExpand) with truncated/shownCount set when
+//     cut. An unknown ?group value is a 400 (never a silent raw fallback).
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
 	}
-	graph, err := buildTopology(r.Context(), caller)
+
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	group := strings.TrimSpace(r.URL.Query().Get("group"))
+
+	var (
+		graph TopologyResponse
+		err   error
+	)
+	switch group {
+	case "":
+		// Raw mode: preserve the exact M12 response. q is only meaningful under a
+		// grouping axis, so it is ignored here (raw mode already emits every node).
+		graph, err = buildTopology(r.Context(), caller)
+	case groupKindRegistry, groupKindNamespace:
+		graph, err = buildGroupedTopology(r.Context(), caller, topologyGroupSpec{
+			group:  group,
+			q:      q,
+			expand: parseExpandSet(r.URL.Query().Get("expand")),
+			cap:    parseTopologyExpandLimit(r.URL.Query().Get("limit")),
+		})
+	default:
+		writeError(w, http.StatusBadRequest,
+			`invalid group: must be "registry", "namespace", or empty for the raw graph`)
+		return
+	}
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -174,6 +220,37 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, graph)
+}
+
+// parseExpandSet parses the comma-separated ?expand list into a set of group ids
+// whose members to emit. Empty/blank entries are dropped; an empty param yields
+// an empty (non-nil) set — every group stays collapsed.
+func parseExpandSet(raw string) map[string]bool {
+	set := map[string]bool{}
+	for id := range strings.SplitSeq(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			set[id] = true
+		}
+	}
+	return set
+}
+
+// parseTopologyExpandLimit resolves ?limit to the per-group member-node cap
+// within the topology bounds: missing/invalid/non-positive → defaultTopologyExpand;
+// above maxTopologyExpand is clamped. This is the one place the per-group ceiling
+// is enforced so no expanded/searched group can emit an unbounded node list.
+func parseTopologyExpandLimit(raw string) int {
+	if raw == "" {
+		return defaultTopologyExpand
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultTopologyExpand
+	}
+	if n > maxTopologyExpand {
+		return maxTopologyExpand
+	}
+	return n
 }
 
 // handleRuns serves GET /api/runs — the dashboard's recent-runs list, sourced

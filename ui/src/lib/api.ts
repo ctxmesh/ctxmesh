@@ -105,6 +105,78 @@ export interface AgentDetailResponse {
   conditions: AgentCondition[];
   bindings: AgentBinding[];
   versions: string[];
+  // m15.11 — drift + managed-outside-UI flags (ADR 0017 round-trip).
+  // managedOutsideUI: true when the agent was created outside the console
+  // (e.g. raw kubectl). Drift: true when the live CRD diverges from the last
+  // console-applied spec. Both absent/false = console-managed, no drift.
+  managedOutsideUI?: boolean;
+  drift?: boolean;
+}
+
+// --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
+// The edit round-trip: the simplified spec fields the console knows about.
+// For a console-managed agent this is a FULL round-trip (all fields).
+// For a managedOutsideUI agent only safe fields are accepted (image, scaling,
+// modelRoute, systemPrompt) — the BFF applies a degraded safe-field patch
+// (ADR 0017). Callers that set non-safe fields on an outside-managed agent
+// should expect the BFF to ignore them (not an error, not a leak).
+export interface AgentSimplifiedSpec {
+  image?: string;
+  modelRoute?: string;
+  systemPrompt?: string;
+  scaling?: { min: number; max: number };
+  executionModel?: string;
+  role?: string;
+}
+
+// UpdateAgentResponse is the PUT response — the server returns the (possibly
+// normalized) spec it applied. `driftResolved` is true when the edit cleared
+// a prior drift (the live CRD now matches the console-applied spec).
+export interface UpdateAgentResponse {
+  name: string;
+  namespace: string;
+  driftResolved?: boolean;
+}
+
+// --- Agent delete (DELETE /api/agents/{ns}/{name}, m15.11) ------------------
+// DeleteAgentResponse carries the delete outcome. A 200 with `accepted: true`
+// means the GC has been triggered; a 202 is also acceptable (async delete).
+export interface DeleteAgentResponse {
+  accepted: boolean;
+}
+
+// --- Agent references (GET /api/agents/{ns}/{name}/references, m15.11) ------
+// The delete-impact preview: every object that references this agent + whether
+// it will be GC'd (owned by the agent) or orphaned (refers, not owns).
+export interface AgentReference {
+  kind: string;
+  name: string;
+  namespace: string;
+  // "gc" → the operator owns it + will GC it on delete.
+  // "orphan" → it refers to the agent but is not owned → left behind.
+  disposition: "gc" | "orphan";
+}
+
+export interface AgentReferencesResponse {
+  references: AgentReference[];
+}
+
+// --- Per-agent runs (GET /api/agents/{ns}/{name}/runs, m15.11) --------------
+// Bounded (BFF caps it); metadata rows only (no span detail). The endpoint
+// returns 501 when Langfuse is not wired — the UI must render a calm
+// "unavailable" empty state on 501, NOT an error toast.
+// AgentRunSummary is one run row in the per-agent bounded list.
+export interface AgentRunSummary {
+  traceId: string;
+  name: string;
+  timestamp: string;
+  costUSD: number;
+  tokens: number;
+  latencyMs: number;
+}
+
+export interface AgentRunListResponse {
+  runs: AgentRunSummary[];
 }
 
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
@@ -206,9 +278,46 @@ export interface TopologyEdge {
   target: string;
 }
 
+// HealthRollup is the aggregate health count for a collapsed group, mirroring
+// the BFF's HealthRollup DTO. It always reflects the FULL group, not just the
+// visible cap — so a collapsed group shows "60 ready / 3 pending" correctly.
+export interface HealthRollup {
+  ready: number;
+  notReady: number;
+  pending: number;
+  unknown: number;
+}
+
+// TopologyGroup is one collapsible cluster in grouped mode (?group=registry or
+// ?group=namespace). The SPA uses its id as the ?expand token.
+export interface TopologyGroup {
+  id: string;
+  kind: string;
+  label: string;
+  namespace: string;
+  memberCount: number;
+  health: HealthRollup;
+  // Truncated is true when the group was expanded but more members than the
+  // per-group cap exist; ShownCount reflects how many member nodes were emitted.
+  truncated: boolean;
+  shownCount: number;
+}
+
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+  // groups is present only in grouped mode (?group=registry|namespace); absent
+  // in raw mode (the M12 dashboard path stays byte-compatible).
+  groups?: TopologyGroup[];
+}
+
+// TopologyParams — the query shape for GET /api/topology.
+// group selects the axis (empty = raw/flat); q is a name-substring search;
+// expand is the comma-separated set of group ids to expand as nodes.
+export interface TopologyParams {
+  group?: "registry" | "namespace" | "";
+  q?: string;
+  expand?: string[]; // group ids to emit as member nodes
 }
 
 // --- Cost / usage (GET /api/cost) -------------------------------------------
@@ -754,10 +863,193 @@ function parseSSEFrame(frame: string): { type: LogEventType; data: string } | nu
   return { type, data: dataLines.join("\n") };
 }
 
+// --- ModelRoute DTOs (m15.12) ------------------------------------------------
+
+// ModelRouteProviderDTO mirrors the BFF's ModelRouteProviderDTO.
+export interface ModelRouteProviderDTO {
+  provider: string;
+  model: string;
+  priority: number;
+  secretBindingRef?: string;
+  /** apiBase is required for non-mock providers that don't use secretBindingRef. */
+  apiBase?: string;
+}
+
+export interface ModelRouteRateLimitDTO {
+  tenantRPM: number;
+}
+
+export interface ModelRouteSummary {
+  name: string;
+  namespace: string;
+  providers: ModelRouteProviderDTO[];
+  phase: string;
+  ready: boolean;
+}
+
+export interface ModelRouteDetail {
+  name: string;
+  namespace: string;
+  providers: ModelRouteProviderDTO[];
+  rateLimit?: ModelRouteRateLimitDTO;
+  phase: string;
+  ready: boolean;
+}
+
+export interface ModelRouteListResponse {
+  items: ModelRouteSummary[];
+  nextCursor: string;
+}
+
+export interface ModelRouteCreateRequest {
+  name: string;
+  namespace?: string;
+  providers: ModelRouteProviderDTO[];
+  rateLimit?: ModelRouteRateLimitDTO;
+}
+
+export interface ModelRouteUpdateRequest {
+  name?: string;
+  providers: ModelRouteProviderDTO[];
+  rateLimit?: ModelRouteRateLimitDTO;
+}
+
+// --- SecretBinding DTOs (m15.12) ---------------------------------------------
+// SECURITY: these DTOs carry ONLY the ref (secretRef.name + secretRef.key) and
+// status — NEVER a credential value. The BFF does not read the referenced K8s
+// Secret; neither does the UI. There is no value/data field here or anywhere.
+
+export interface SecretRefDTO {
+  /** The Kubernetes Secret name. Never the credential value. */
+  name: string;
+  /** The data key within the Secret. Never the credential value. */
+  key: string;
+}
+
+export interface SecretBindingSummary {
+  name: string;
+  namespace: string;
+  backend: string;
+  /** Identifies the K8s Secret + key. NEVER the value. */
+  secretRef: SecretRefDTO;
+  phase: string;
+  ready: boolean;
+}
+
+export interface SecretBindingDetail {
+  name: string;
+  namespace: string;
+  backend: string;
+  /** Identifies the K8s Secret + key. NEVER the value. */
+  secretRef: SecretRefDTO;
+  phase: string;
+  ready: boolean;
+}
+
+export interface SecretBindingListResponse {
+  items: SecretBindingSummary[];
+  nextCursor: string;
+}
+
+export interface SecretBindingCreateRequest {
+  name: string;
+  namespace?: string;
+  backend?: string;
+  /** Ref to an existing K8s Secret. NEVER an inline value. */
+  secretRef: SecretRefDTO;
+}
+
+export interface SecretBindingUpdateRequest {
+  name?: string;
+  backend?: string;
+  /** Updated ref. NEVER an inline value. */
+  secretRef: SecretRefDTO;
+}
+
+// --- AgentRegistry DTOs (m15.12) ---------------------------------------------
+// NOTE: NO egress/allowlist field — the egress NetworkPolicy is controller-
+// managed and never exposed through this surface. registryId is immutable after
+// creation (shown read-only on edit).
+
+export interface LabelSelectorDTO {
+  matchLabels?: Record<string, string>;
+  matchExpressions?: Array<{
+    key: string;
+    operator: string;
+    values?: string[];
+  }>;
+}
+
+export interface RegistryGuardsDTO {
+  maxDepth?: number;
+  hopBudget?: number;
+}
+
+export interface AgentRegistrySummary {
+  name: string;
+  namespace: string;
+  registryId: string;
+  memberSelector: LabelSelectorDTO;
+  guards?: RegistryGuardsDTO;
+  roles: string[];
+  phase: string;
+  ready: boolean;
+}
+
+export interface AgentRegistryStatusDTO {
+  members: string[];
+  phase: string;
+  ready: boolean;
+}
+
+export interface AgentRegistryDetail {
+  name: string;
+  namespace: string;
+  registryId: string;
+  memberSelector: LabelSelectorDTO;
+  guards?: RegistryGuardsDTO;
+  roles: string[];
+  status: AgentRegistryStatusDTO;
+}
+
+export interface AgentRegistryListResponse {
+  items: AgentRegistrySummary[];
+  nextCursor: string;
+}
+
+export interface AgentRegistryCreateRequest {
+  name: string;
+  namespace?: string;
+  registryId: string;
+  memberSelector: LabelSelectorDTO;
+  guards?: RegistryGuardsDTO;
+  roles?: string[];
+}
+
+/** registryId is intentionally absent — it's immutable; the server preserves it. */
+export interface AgentRegistryUpdateRequest {
+  name?: string;
+  memberSelector: LabelSelectorDTO;
+  guards?: RegistryGuardsDTO;
+  roles?: string[];
+}
+
 // agentsQuery builds the /api/agents query string from the list-contract params,
 // omitting empty values so the URL stays clean (and the K8s `continue`/namespace
 // defaults apply BFF-side). Every value is URL-encoded.
 function agentsQuery(params: AgentListParams = {}): string {
+  const qs = new URLSearchParams();
+  if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  if (params.q) qs.set("q", params.q);
+  if (params.namespace) qs.set("namespace", params.namespace);
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
+// listQuery is the general list-contract query builder for the three new resource
+// endpoints (modelroutes, secretbindings, agentregistries). Matches agentsQuery.
+function listQuery(params: AgentListParams = {}): string {
   const qs = new URLSearchParams();
   if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
   if (params.cursor) qs.set("cursor", params.cursor);
@@ -791,8 +1083,19 @@ export const api = {
   // A 403 is an honest "can't list namespaces", never a silent empty list.
   namespaces: (signal?: AbortSignal) =>
     getJSON<NamespaceListResponse>("/api/namespaces", signal),
-  topology: (signal?: AbortSignal) =>
-    getJSON<TopologyResponse>("/api/topology", signal),
+  // topology fetches the cluster graph. In raw mode (no params / params.group="")
+  // it returns the flat {nodes, edges} graph (M12 dashboard backward-compatible).
+  // In grouped mode (params.group="registry"|"namespace") the response includes
+  // groups[]; member nodes are only emitted for ids listed in params.expand, or
+  // for members whose name matches params.q.
+  topology: (params?: TopologyParams, signal?: AbortSignal) => {
+    const qs = new URLSearchParams();
+    if (params?.group) qs.set("group", params.group);
+    if (params?.q) qs.set("q", params.q);
+    if (params?.expand?.length) qs.set("expand", params.expand.join(","));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
+  },
   cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),
   runs: (signal?: AbortSignal) =>
     getJSON<RunListResponse>("/api/runs", signal),
@@ -959,5 +1262,335 @@ export const api = {
       await errorMessage(res, `generate failed (${res.status})`),
       res.status,
     );
+  },
+
+  // updateAgent edits an existing agent via PUT /api/agents/{ns}/{name}
+  // (m15.11, ADR 0017 round-trip + degraded safe-field patch). A 403 (RBAC
+  // viewer), 409 (conflict), or 400 (invalid spec) surfaces via ApiError. The
+  // caller is responsible for showing the drift-overwrite warning BEFORE calling
+  // this for an agent with `drift: true`.
+  updateAgent: async (
+    ns: string,
+    name: string,
+    spec: AgentSimplifiedSpec,
+    signal?: AbortSignal,
+  ): Promise<UpdateAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spec),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as UpdateAgentResponse;
+  },
+
+  // deleteAgent removes an agent via DELETE /api/agents/{ns}/{name} (m15.11).
+  // A 403 (viewer), 404 (already gone), or 409 (conflict) surfaces via ApiError.
+  // The caller should show the delete-impact preview (agentReferences) BEFORE
+  // calling this.
+  deleteAgent: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<DeleteAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+        headers: { Accept: "application/json" },
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DeleteAgentResponse;
+  },
+
+  // agentReferences reads the delete-impact preview for an agent (m15.11):
+  // every referencing object + its disposition (gc vs orphan). A 403 (viewer
+  // can't read references), 404 (no such agent) surfaces via ApiError.
+  agentReferences: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentReferencesResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/references`,
+      signal,
+    ),
+
+  // --- ModelRoute CRUD (m15.12) -----------------------------------------------
+  // listModelRoutes reads one page window of ModelRoutes through the list
+  // contract (§4): { items, nextCursor }. Pass limit/cursor/q/namespace to
+  // page + scope + filter. A 403 surfaces as a typed ApiError (isForbidden).
+  listModelRoutes: (params?: AgentListParams, signal?: AbortSignal) =>
+    getJSON<ModelRouteListResponse>(`/api/modelroutes${listQuery(params)}`, signal),
+
+  // modelRouteDetail reads one ModelRoute's full detail projection. A 404 =
+  // not-found; a 403 = viewer-can't-read; both surface as a typed ApiError.
+  modelRouteDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<ModelRouteDetail>(
+      `/api/modelroutes/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createModelRoute creates a ModelRoute from the submitted spec. A 409 =
+  // already exists; a 422 = CRD validation rejected (e.g. non-mock provider
+  // missing secretBindingRef/apiBase — surfaces the BFF's honest message); a
+  // 403 = viewer-can't-create. All surface as typed ApiErrors.
+  createModelRoute: async (
+    req: ModelRouteCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<ModelRouteDetail> => {
+    const res = await apiFetch("/api/modelroutes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create model route failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as ModelRouteDetail;
+  },
+
+  // updateModelRoute edits a ModelRoute via PUT /api/modelroutes/{ns}/{name}.
+  // A 422 = CRD validation rejected; a 403 = viewer-can't-update.
+  updateModelRoute: async (
+    ns: string,
+    name: string,
+    req: ModelRouteUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<ModelRouteDetail> => {
+    const res = await apiFetch(
+      `/api/modelroutes/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update model route failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as ModelRouteDetail;
+  },
+
+  // removeModelRoute deletes a ModelRoute. 204 on success; 404 if not found;
+  // 403 if the caller's RBAC denies it.
+  removeModelRoute: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/modelroutes/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete model route failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // --- SecretBinding CRUD (m15.12) --------------------------------------------
+  // SECURITY: SecretBinding DTOs carry ONLY the ref (secretRef.name, .key) and
+  // status — NEVER the credential value stored in the referenced K8s Secret.
+  listSecretBindings: (params?: AgentListParams, signal?: AbortSignal) =>
+    getJSON<SecretBindingListResponse>(
+      `/api/secretbindings${listQuery(params)}`,
+      signal,
+    ),
+
+  secretBindingDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<SecretBindingDetail>(
+      `/api/secretbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createSecretBinding creates a SecretBinding from the submitted ref spec
+  // (backend + secretRef). The request carries NO value/credential — only the
+  // reference to the K8s Secret that holds it (ADR 0015 security invariant).
+  createSecretBinding: async (
+    req: SecretBindingCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<SecretBindingDetail> => {
+    const res = await apiFetch("/api/secretbindings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create secret binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as SecretBindingDetail;
+  },
+
+  updateSecretBinding: async (
+    ns: string,
+    name: string,
+    req: SecretBindingUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<SecretBindingDetail> => {
+    const res = await apiFetch(
+      `/api/secretbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update secret binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as SecretBindingDetail;
+  },
+
+  removeSecretBinding: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/secretbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete secret binding failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // --- AgentRegistry CRUD (m15.12) --------------------------------------------
+  // NOTE: The AgentRegistry DTO has NO egress/allowlist field — the egress
+  // NetworkPolicy is controller-managed and is never exposed through this API
+  // surface (ADR 0011: console cannot widen the egress posture). The registryId
+  // is immutable after creation and shown read-only on edit.
+  listAgentRegistries: (params?: AgentListParams, signal?: AbortSignal) =>
+    getJSON<AgentRegistryListResponse>(
+      `/api/agentregistries${listQuery(params)}`,
+      signal,
+    ),
+
+  agentRegistryDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentRegistryDetail>(
+      `/api/agentregistries/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  createAgentRegistry: async (
+    req: AgentRegistryCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentRegistryDetail> => {
+    const res = await apiFetch("/api/agentregistries", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create agent registry failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentRegistryDetail;
+  },
+
+  updateAgentRegistry: async (
+    ns: string,
+    name: string,
+    req: AgentRegistryUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentRegistryDetail> => {
+    const res = await apiFetch(
+      `/api/agentregistries/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update agent registry failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentRegistryDetail;
+  },
+
+  removeAgentRegistry: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/agentregistries/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete agent registry failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // agentRuns reads the bounded per-agent run list (m15.11). The endpoint
+  // returns 501 when Langfuse is not configured — the caller MUST treat a 501
+  // as an empty/disabled state (NOT an error toast). Any other non-2xx surfaces
+  // as a typed ApiError.
+  agentRuns: async (
+    ns: string,
+    name: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<AgentRunListResponse | null> => {
+    const qs = limit && limit > 0 ? `?limit=${limit}` : "";
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs${qs}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = Langfuse not configured — the caller degrades to "unavailable", not
+    // an error. Return null as the sentinel so callers can distinguish from an
+    // empty run list ([] is a valid empty list; null = not-available).
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `runs failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentRunListResponse;
   },
 };

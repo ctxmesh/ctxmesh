@@ -3,6 +3,8 @@ import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentDetailPage } from "@/pages/agent-detail-page";
+import { AgentRegistriesPage } from "@/pages/agent-registries-page";
+import { AgentRegistryDetailPage, NewAgentRegistryPage } from "@/pages/agent-registry-detail-page";
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
@@ -10,8 +12,13 @@ import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
+import { ModelRouteDetailPage, NewModelRoutePage } from "@/pages/model-route-detail-page";
+import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
+import { SecretBindingDetailPage, NewSecretBindingPage } from "@/pages/secret-binding-detail-page";
+import { SecretBindingsPage } from "@/pages/secret-bindings-page";
+import { TopologyPage } from "@/pages/topology-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
 import { NAV_ITEMS } from "@/lib/nav";
@@ -97,7 +104,21 @@ export function App() {
                 add-MCP flows, the first UI of the aha. */}
             <Route path="providers/connect" element={<ConnectProviderPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
-            {/* Not-yet-built IA destinations (Topology, Tools, Traces, … ,
+            {/* m15.12: ModelRoute CRUD surfaces */}
+            <Route path="routes" element={<ModelRoutesPage />} />
+            <Route path="routes/new" element={<NewModelRoutePage />} />
+            <Route path="routes/:ns/:name" element={<ModelRouteDetailPage />} />
+            {/* m15.12: SecretBinding CRUD surfaces */}
+            <Route path="secrets" element={<SecretBindingsPage />} />
+            <Route path="secrets/new" element={<NewSecretBindingPage />} />
+            <Route path="secrets/:ns/:name" element={<SecretBindingDetailPage />} />
+            {/* m15.12: AgentRegistry CRUD surfaces */}
+            <Route path="registries" element={<AgentRegistriesPage />} />
+            <Route path="registries/new" element={<NewAgentRegistryPage />} />
+            <Route path="registries/:ns/:name" element={<AgentRegistryDetailPage />} />
+            {/* m15.13: Topology v2 — grouped/searchable/list↔graph */}
+            <Route path="topology" element={<TopologyPage />} />
+            {/* Not-yet-built IA destinations (Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}
             <Route path="soon/:id" element={<SoonPage />} />
