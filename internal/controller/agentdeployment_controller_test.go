@@ -422,6 +422,23 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL must always be injected")
 	assert.Equal(t, "debug", envMap["LOG_LEVEL"], "user LOG_LEVEL env var must be present")
 
+	// Trace-identity env (m15.9): AGENT_NAME + POD_NAMESPACE are injected
+	// UNCONDITIONALLY for EVERY agent — a plain agent (no budget/memory/registry)
+	// still needs the unambiguous <namespace>/<name> trace identity so the console
+	// can filter its runs. Before m15.9 a plain agent got neither.
+	assert.Equal(t, name, envMap["AGENT_NAME"],
+		"AGENT_NAME must be injected for every agent (the trace identity), not only budget/memory/registry ones")
+	assert.Equal(t, namespace, envMap["POD_NAMESPACE"],
+		"POD_NAMESPACE must be injected for every agent so the trace identity is namespace-qualified")
+
+	// The trace-identity env must be STATIC (never valueFrom — the m5.7 Knative
+	// ksvc landmine that the tier1 no-valueFrom guard encodes).
+	for _, e := range c.Env {
+		if e.Name == "AGENT_NAME" || e.Name == "POD_NAMESPACE" {
+			assert.Nil(t, e.ValueFrom, "%s must be a static value, not valueFrom", e.Name)
+		}
+	}
+
 	// Port on container
 	require.Len(t, c.Ports, 1)
 	assert.Equal(t, int32(9090), c.Ports[0].ContainerPort)

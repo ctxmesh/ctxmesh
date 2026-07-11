@@ -39,6 +39,11 @@ type fakeLangfuseAdapter struct {
 	detail    TraceDetail
 	detailErr error
 	err       error
+	// agentRuns keys the per-agent run list on the "<ns>/<name>" identity so a
+	// handler test can prove the runs of default/foo exclude those of other/foo.
+	agentRuns map[string][]RunSummary
+	// agentRunsErr, when set, is returned by RunsForAgent (upstream-failure path).
+	agentRunsErr error
 }
 
 func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -46,6 +51,20 @@ func (f fakeLangfuseAdapter) RecentRuns(_ context.Context, _ int) ([]RunSummary,
 		return nil, f.err
 	}
 	return f.runs, nil
+}
+
+// RunsForAgent returns the runs seeded for the "<ns>/<name>" key — so a handler
+// test proves cross-namespace isolation (default/foo vs other/foo are distinct
+// keys) — truncated to limit so the limit-honored assertion holds end to end.
+func (f fakeLangfuseAdapter) RunsForAgent(_ context.Context, namespace, name string, limit int) ([]RunSummary, error) {
+	if f.agentRunsErr != nil {
+		return nil, f.agentRunsErr
+	}
+	runs := f.agentRuns[namespace+"/"+name]
+	if limit > 0 && len(runs) > limit {
+		runs = runs[:limit]
+	}
+	return runs, nil
 }
 
 func (f fakeLangfuseAdapter) CostUsage(_ context.Context) (CostSummary, error) {
@@ -87,6 +106,22 @@ func serverWithAdapters(t *testing.T, a Adapters) *Server {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	return NewServer(Options{
 		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      a,
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+}
+
+// serverWithCallerAndAdapters builds a Server wiring BOTH a caller-client factory
+// (for the caller-scoped existence check) AND the given adapters — the combination
+// the per-agent runs route needs (m15.9): caller-scoped agent Get, server-side
+// Langfuse fetch.
+func serverWithCallerAndAdapters(t *testing.T, factory CallerClientFactory, a Adapters) *Server {
+	t.Helper()
+	return NewServer(Options{
+		CallerClients: factory,
 		Scheme:        testScheme(t),
 		Auth:          AllowAll{},
 		Adapters:      a,

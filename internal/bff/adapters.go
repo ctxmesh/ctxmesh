@@ -117,6 +117,14 @@ type LangfuseAdapter interface {
 	// the flat RunSummary DTO. limit bounds the page size.
 	RecentRuns(ctx context.Context, limit int) ([]RunSummary, error)
 
+	// RunsForAgent returns the most recent traces (newest first) for ONE agent —
+	// the runs whose trace carries the `agent:<namespace>/<name>` identity tag the
+	// launcher stamps (proxy.go). It filters on the Langfuse-native tags query so
+	// two agents that share a bare NAME in different namespaces never mix: the runs
+	// for default/foo exclude every run of other/foo. limit bounds the page size.
+	// A non-nil slice on success (empty when the agent has no runs).
+	RunsForAgent(ctx context.Context, namespace, name string, limit int) ([]RunSummary, error)
+
 	// CostUsage returns an aggregate cost/usage summary over the recent window
 	// (a rollup the dashboard cards + chart render). Never nil on success.
 	CostUsage(ctx context.Context) (CostSummary, error)

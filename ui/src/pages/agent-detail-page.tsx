@@ -1,23 +1,33 @@
 import * as React from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  AlertTriangle,
   Boxes,
   CheckCircle2,
   ExternalLink,
+  Pencil,
   Play,
   Terminal,
+  Trash2,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ConfirmDialog,
   DataTable,
   type Column,
   DetailDrawer,
   EmptyState,
   ForbiddenInline,
+  Wizard,
+  type WizardStep,
+  useToast,
 } from "@/components/kit";
+import { FormField } from "@/components/config/form-field";
 import { RunInspector } from "@/components/dashboard/run-inspector";
 import {
   api,
@@ -26,23 +36,28 @@ import {
   type AgentBinding,
   type AgentCondition,
   type AgentDetailResponse,
+  type AgentReference,
+  type AgentRunSummary,
+  type AgentSimplifiedSpec,
   type LogEventType,
   type RunSummary,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 
-// AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11). It
-// closes the aha loop: watch the agent come alive (status timeline + live log
-// tail) → run it (the Run panel) → see the trace with the tool span (the native
-// run inspector). It reads GET /api/agents/{ns}/{name} (m14.7) for the detail,
-// tails GET .../logs over SSE with the caller's bearer attached (fetch-stream,
-// api.openLogStream), invokes via POST /api/invoke (m12.7), and opens the run
-// inspector on the returned traceId (GET /api/traces/{id}/detail, m14.8).
+// AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
+// extended m15.11). It closes the aha loop: watch the agent come alive (status
+// timeline + live log tail) → run it (the Run panel) → see the trace with the
+// tool span (the native run inspector).
 //
-// RBAC-aware chrome (§3, display-only): Run gates on agentdeployments.create; a
-// viewer sees an explain-note, not a button. A 404 → not-found, a 403 →
-// ForbiddenInline — the API server is the real gate (ADR 0011).
+// m15.11 additions:
+//   • drift / managedOutsideUI badges in the header.
+//   • Edit Wizard — full round-trip for console-managed; safe-field patch for
+//     managedOutsideUI. On drift, warns before submit (overwrite).
+//   • Typed-name Delete via ConfirmDialog: loads + shows agentReferences
+//     (GC vs orphan impact), then calls deleteAgent on confirm.
+//   • Per-agent Runs list (agentRuns): bounded, 501 → calm empty state.
+//   • All write affordances RBAC-aware (display-only, ADR 0011).
 
 const TABS = ["Overview", "Logs", "Runs", "Bindings"] as const;
 type Tab = (typeof TABS)[number];
@@ -54,11 +69,31 @@ type Load =
 
 export function AgentDetailPage() {
   const { ns = "", name = "" } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [state, setState] = React.useState<Load>({ kind: "loading" });
   const [tab, setTab] = React.useState<Tab>("Overview");
   // The trace to inspect — set when a run returns a traceId; opens the inspector
   // drawer over the page (list context preserved).
   const [inspectTrace, setInspectTrace] = React.useState<string | null>(null);
+
+  // Edit + delete dialogs are opened by ?edit=1 / ?delete=1 search params so
+  // they survive a hard reload and can be triggered from the list's row actions.
+  const editOpen = searchParams.get("edit") === "1";
+  const deleteOpen = searchParams.get("delete") === "1";
+
+  function openEdit() {
+    setSearchParams((p) => { p.set("edit", "1"); return p; });
+  }
+  function closeEdit() {
+    setSearchParams((p) => { p.delete("edit"); return p; });
+  }
+  function openDelete() {
+    setSearchParams((p) => { p.set("delete", "1"); return p; });
+  }
+  function closeDelete() {
+    setSearchParams((p) => { p.delete("delete"); return p; });
+  }
 
   const load = React.useCallback(() => {
     const controller = new AbortController();
@@ -135,7 +170,11 @@ export function AgentDetailPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="agent-detail-page">
-      <AgentHeader detail={detail} />
+      <AgentHeader
+        detail={detail}
+        onEdit={openEdit}
+        onDelete={openDelete}
+      />
 
       <div className="flex flex-wrap gap-1 border-b" role="tablist" aria-label="Agent detail">
         {TABS.map((t) => (
@@ -161,7 +200,7 @@ export function AgentDetailPage() {
       )}
       {tab === "Logs" && <LogsTab ns={detail.namespace} name={detail.name} ready={detail.ready} />}
       {tab === "Runs" && (
-        <RunsTab agentName={detail.name} onInspect={(id) => setInspectTrace(id)} />
+        <AgentRunsTab ns={detail.namespace} name={detail.name} onInspect={(id) => setInspectTrace(id)} />
       )}
       {tab === "Bindings" && <BindingsTab bindings={detail.bindings} />}
 
@@ -176,12 +215,53 @@ export function AgentDetailPage() {
       >
         {inspectTrace && <RunInspector traceId={inspectTrace} />}
       </DetailDrawer>
+
+      {/* Edit Wizard — opened by ?edit=1 search param. */}
+      <DetailDrawer
+        open={editOpen}
+        onClose={closeEdit}
+        title={`Edit ${detail.name}`}
+        subtitle={detail.managedOutsideUI ? "Managed outside the UI — safe fields only" : undefined}
+        size="lg"
+      >
+        {editOpen && (
+          <EditWizard
+            detail={detail}
+            onClose={closeEdit}
+            onSaved={() => {
+              closeEdit();
+              load();
+            }}
+          />
+        )}
+      </DetailDrawer>
+
+      {/* Delete dialog — opened by ?delete=1 search param. */}
+      {deleteOpen && (
+        <DeleteDialog
+          detail={detail}
+          onClose={closeDelete}
+          onDeleted={() => navigate("/agents")}
+        />
+      )}
     </div>
   );
 }
 
 // ── Header ──────────────────────────────────────────────────────────────────
-function AgentHeader({ detail }: { detail: AgentDetailResponse }) {
+function AgentHeader({
+  detail,
+  onEdit,
+  onDelete,
+}: {
+  detail: AgentDetailResponse;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { can } = useCapabilities();
+  const canEdit = can(RES_AGENTS, "update");
+  const canDelete = can(RES_AGENTS, "delete");
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -189,7 +269,45 @@ function AgentHeader({ detail }: { detail: AgentDetailResponse }) {
         <Badge variant={detail.ready ? "success" : "warning"}>
           {detail.phase || (detail.ready ? "Ready" : "Pending")}
         </Badge>
+        {/* m15.11: drift + managedOutsideUI badges */}
+        {detail.managedOutsideUI && (
+          <Badge variant="outline" data-testid="managed-outside-badge">
+            managed outside UI
+          </Badge>
+        )}
+        {detail.drift && (
+          <Badge variant="warning" data-testid="drift-badge">
+            <AlertTriangle className="mr-1 h-3 w-3" />
+            drift
+          </Badge>
+        )}
         <span className="text-sm text-muted-foreground">{detail.namespace}</span>
+        {/* RBAC-aware write affordances — hidden for viewers */}
+        <div className="ml-auto flex items-center gap-2">
+          {canEdit && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onEdit}
+              data-testid="edit-agent-button"
+            >
+              <Pencil className="h-4 w-4" />
+              Edit
+            </Button>
+          )}
+          {canDelete && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDelete}
+              className="text-destructive hover:text-destructive"
+              data-testid="delete-agent-button"
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          )}
+        </div>
       </div>
       <dl className="grid grid-cols-1 gap-x-8 gap-y-1.5 text-sm sm:grid-cols-2 lg:grid-cols-3">
         {detail.url && (
@@ -229,6 +347,442 @@ function HeaderKV({ k, v }: { k: string; v: React.ReactNode }) {
       <dt className="shrink-0 text-muted-foreground">{k}</dt>
       <dd className="min-w-0 truncate">{v}</dd>
     </div>
+  );
+}
+
+// ── Edit Wizard (m15.11) ──────────────────────────────────────────────────────
+// Two modes:
+//   • Console-managed (managedOutsideUI=false/absent): full round-trip — all
+//     simplified spec fields are editable.
+//   • Managed outside UI (managedOutsideUI=true): safe fields only (image,
+//     scaling, modelRoute, systemPrompt) — the rest are read-only with a note.
+//     The BFF applies a degraded safe-field patch (ADR 0017).
+// On drift (detail.drift=true): warn the user before submit that the edit will
+// overwrite any drift (i.e. the live CRD diverges from the last console spec).
+
+type EditForm = {
+  image: string;
+  modelRoute: string;
+  systemPrompt: string;
+  scalingMin: string;
+  scalingMax: string;
+  executionModel: string;
+  role: string;
+};
+
+type EditState =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function EditWizard({
+  detail,
+  onClose,
+  onSaved,
+}: {
+  detail: AgentDetailResponse;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const { reprobe } = useCapabilities();
+  const isManaged = !detail.managedOutsideUI;
+  const hasDrift = detail.drift ?? false;
+
+  const [form, setForm] = React.useState<EditForm>({
+    image: detail.image ?? "",
+    modelRoute: "",
+    systemPrompt: "",
+    scalingMin: String(detail.scaling.min),
+    scalingMax: String(detail.scaling.max),
+    executionModel: detail.executionModel ?? "",
+    role: detail.role ?? "",
+  });
+  const [current, setCurrent] = React.useState(0);
+  const [saveState, setSaveState] = React.useState<EditState>({ kind: "idle" });
+  // Drift-overwrite confirmation: set when the user tries to submit with drift.
+  const [confirmDriftOverwrite, setConfirmDriftOverwrite] = React.useState(false);
+
+  function set<K extends keyof EditForm>(k: K, v: EditForm[K]) {
+    setForm((f) => ({ ...f, [k]: v }));
+  }
+
+  async function doSave() {
+    setSaveState({ kind: "saving" });
+    try {
+      const spec: AgentSimplifiedSpec = {
+        image: form.image.trim() || undefined,
+        modelRoute: form.modelRoute.trim() || undefined,
+        systemPrompt: form.systemPrompt.trim() || undefined,
+        scaling: {
+          min: parseInt(form.scalingMin, 10) || 0,
+          max: parseInt(form.scalingMax, 10) || 1,
+        },
+        // Full round-trip fields only for console-managed agents.
+        ...(!detail.managedOutsideUI
+          ? {
+              executionModel: form.executionModel.trim() || undefined,
+              role: form.role.trim() || undefined,
+            }
+          : {}),
+      };
+      await api.updateAgent(detail.namespace, detail.name, spec);
+      toast({
+        variant: "success",
+        title: "Agent updated",
+        description: `${detail.name} saved successfully.`,
+      });
+      onSaved();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setSaveState({
+        kind: "error",
+        message: err instanceof Error ? err.message : "update failed",
+        forbidden: err instanceof ApiError && err.isForbidden,
+      });
+    }
+  }
+
+  function onFinish() {
+    // If there's drift, confirm before overwriting.
+    if (hasDrift && !confirmDriftOverwrite) {
+      setConfirmDriftOverwrite(true);
+      return;
+    }
+    void doSave();
+  }
+
+  // Step 1: Safe fields (image, scaling, modelRoute, systemPrompt) — always
+  // shown regardless of managedOutsideUI.
+  const safeFieldsStep: WizardStep = {
+    id: "safe-fields",
+    title: "Image & scaling",
+    description: "Editable on all agents",
+    content: (
+      <div className="space-y-4">
+        {detail.managedOutsideUI && (
+          <div
+            className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
+            data-testid="managed-outside-note"
+          >
+            <p className="font-medium">Managed outside the UI</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              This agent was created or last modified outside the console. Only safe
+              fields (image, scaling, model route, system prompt) are editable here.
+              Other fields are read-only to avoid overwriting your configuration.
+            </p>
+          </div>
+        )}
+        <FormField id="edit-image" label="Image">
+          <Input
+            id="edit-image"
+            value={form.image}
+            onChange={(e) => set("image", e.target.value)}
+            placeholder="ghcr.io/acme/agent:v1"
+            data-testid="edit-image"
+          />
+        </FormField>
+        <div className="grid grid-cols-2 gap-4">
+          <FormField id="edit-min" label="Min replicas">
+            <Input
+              id="edit-min"
+              inputMode="numeric"
+              value={form.scalingMin}
+              onChange={(e) => set("scalingMin", e.target.value)}
+              data-testid="edit-scaling-min"
+            />
+          </FormField>
+          <FormField id="edit-max" label="Max replicas">
+            <Input
+              id="edit-max"
+              inputMode="numeric"
+              value={form.scalingMax}
+              onChange={(e) => set("scalingMax", e.target.value)}
+              data-testid="edit-scaling-max"
+            />
+          </FormField>
+        </div>
+        <FormField id="edit-model-route" label="Model route">
+          <Input
+            id="edit-model-route"
+            value={form.modelRoute}
+            onChange={(e) => set("modelRoute", e.target.value)}
+            placeholder="default-model"
+            data-testid="edit-model-route"
+          />
+        </FormField>
+        <FormField id="edit-system-prompt" label="System prompt">
+          <Textarea
+            id="edit-system-prompt"
+            rows={4}
+            value={form.systemPrompt}
+            onChange={(e) => set("systemPrompt", e.target.value)}
+            placeholder="You are a support agent…"
+            data-testid="edit-system-prompt"
+          />
+        </FormField>
+      </div>
+    ),
+  };
+
+  // Step 2: Full round-trip fields — only for console-managed agents. For
+  // managedOutsideUI agents, shown as read-only with a note.
+  const fullFieldsStep: WizardStep = {
+    id: "full-fields",
+    title: "Execution & role",
+    description: isManaged ? "Full round-trip" : "Read-only (managed outside UI)",
+    content: (
+      <div className="space-y-4">
+        {!isManaged && (
+          <div
+            className="rounded-md border border-border bg-surface-2/40 px-3 py-2 text-xs text-muted-foreground"
+            data-testid="readonly-fields-note"
+          >
+            These fields are read-only because this agent is managed outside the
+            UI. Edit them via the tool that manages this agent.
+          </div>
+        )}
+        <FormField id="edit-execution-model" label="Execution model">
+          <Select
+            id="edit-execution-model"
+            value={form.executionModel}
+            onChange={(e) => set("executionModel", e.target.value)}
+            disabled={!isManaged}
+            data-testid="edit-execution-model"
+          >
+            <option value="">— unchanged —</option>
+            <option value="serving">serving (request-driven)</option>
+            <option value="eventing">eventing (broker-triggered)</option>
+            <option value="job">job (one-shot)</option>
+          </Select>
+        </FormField>
+        <FormField id="edit-role" label="Role">
+          <Input
+            id="edit-role"
+            value={form.role}
+            onChange={(e) => set("role", e.target.value)}
+            disabled={!isManaged}
+            data-testid="edit-role"
+          />
+        </FormField>
+      </div>
+    ),
+  };
+
+  // Review step.
+  const reviewStep: WizardStep = {
+    id: "review",
+    title: "Review",
+    review: true,
+    content: (
+      <div className="space-y-4" data-testid="edit-review">
+        <p className="text-sm font-medium">Review changes</p>
+        {hasDrift && (
+          <div
+            className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
+            data-testid="drift-overwrite-warning"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <p>
+              This agent has <strong>drift</strong> — the live CRD diverges from the
+              last console-applied spec. Saving here will overwrite that drift with the
+              values you've entered.
+            </p>
+          </div>
+        )}
+        {saveState.kind === "error" && saveState.forbidden && (
+          <ForbiddenInline
+            title="Not allowed to edit this agent"
+            description="Your account can't update AgentDeployments in this cluster."
+            detail={saveState.message}
+          />
+        )}
+        {saveState.kind === "error" && !saveState.forbidden && (
+          <p className="text-sm text-destructive" role="alert" data-testid="edit-error">
+            {saveState.message}
+          </p>
+        )}
+        <dl className="divide-y rounded-md border text-sm">
+          <ReviewRow k="Image" v={form.image || "—"} />
+          <ReviewRow k="Scaling" v={`${form.scalingMin} – ${form.scalingMax}`} />
+          {form.modelRoute && <ReviewRow k="Model route" v={form.modelRoute} />}
+          {form.systemPrompt && (
+            <ReviewRow k="System prompt" v={truncate(form.systemPrompt, 80)} />
+          )}
+          {isManaged && form.executionModel && (
+            <ReviewRow k="Execution" v={form.executionModel} />
+          )}
+          {isManaged && form.role && <ReviewRow k="Role" v={form.role} />}
+        </dl>
+      </div>
+    ),
+  };
+
+  const steps = isManaged
+    ? [safeFieldsStep, fullFieldsStep, reviewStep]
+    : [safeFieldsStep, reviewStep];
+
+  return (
+    <>
+      <Wizard
+        steps={steps}
+        current={current}
+        onStepChange={setCurrent}
+        busy={saveState.kind === "saving"}
+        onFinish={onFinish}
+        finishLabel="Save changes"
+        onCancel={onClose}
+        dirty={form.image !== (detail.image ?? "") ||
+          form.scalingMin !== String(detail.scaling.min) ||
+          form.scalingMax !== String(detail.scaling.max)}
+      />
+      {/* Drift-overwrite confirmation dialog */}
+      <ConfirmDialog
+        open={confirmDriftOverwrite}
+        onCancel={() => setConfirmDriftOverwrite(false)}
+        onConfirm={() => {
+          setConfirmDriftOverwrite(false);
+          void doSave();
+        }}
+        title="Overwrite drift?"
+        description="The live CRD has drifted from the last console-applied spec. Saving will overwrite it with your edits. Changes made outside the console will be lost."
+        confirmLabel="Save and overwrite drift"
+        destructive={false}
+      />
+    </>
+  );
+}
+
+function ReviewRow({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4 px-3 py-2">
+      <dt className="text-muted-foreground">{k}</dt>
+      <dd className="text-right">{v}</dd>
+    </div>
+  );
+}
+
+// ── Delete Dialog (m15.11) ───────────────────────────────────────────────────
+// Loads agentReferences (delete-impact preview) before showing the typed-name
+// ConfirmDialog. The impact section shows what GC'd vs what's orphaned. On
+// confirm → deleteAgent → navigate back to the agents list.
+
+type RefsLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; references: AgentReference[] }
+  | { kind: "error"; message: string };
+
+function DeleteDialog({
+  detail,
+  onClose,
+  onDeleted,
+}: {
+  detail: AgentDetailResponse;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const { toast } = useToast();
+  const { reprobe } = useCapabilities();
+  const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
+  const [deleting, setDeleting] = React.useState(false);
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    api
+      .agentReferences(detail.namespace, detail.name, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setRefs({ kind: "ready", references: res.references });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setRefs({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load delete impact",
+        });
+      });
+    return () => controller.abort();
+  }, [detail.namespace, detail.name]);
+
+  async function onConfirm() {
+    setDeleting(true);
+    try {
+      await api.deleteAgent(detail.namespace, detail.name);
+      toast({
+        variant: "success",
+        title: "Agent deleted",
+        description: `${detail.name} has been removed.`,
+      });
+      onDeleted();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      toast({
+        variant: "error",
+        title: "Delete failed",
+        description: err instanceof Error ? err.message : "delete failed",
+      });
+      setDeleting(false);
+      onClose();
+    }
+  }
+
+  // Delete-impact preview rendered inside the ConfirmDialog's `impact` slot.
+  const impact =
+    refs.kind === "loading" ? (
+      <p className="text-sm text-muted-foreground" data-testid="refs-loading">
+        Loading delete impact…
+      </p>
+    ) : refs.kind === "error" ? (
+      <p className="text-sm text-muted-foreground" data-testid="refs-error">
+        Couldn't load delete impact ({refs.message}) — proceeding will still
+        delete the agent.
+      </p>
+    ) : refs.references.length === 0 ? (
+      <p className="text-sm text-muted-foreground" data-testid="refs-empty">
+        No referencing objects found.
+      </p>
+    ) : (
+      <div data-testid="refs-list">
+        <p className="mb-2 text-xs font-medium text-muted-foreground">
+          Objects affected by this delete:
+        </p>
+        <ul className="space-y-1.5">
+          {refs.references.map((r) => (
+            <li
+              key={`${r.kind}/${r.namespace}/${r.name}`}
+              className="flex items-center justify-between gap-2 text-sm"
+              data-testid={`ref-${r.name}`}
+            >
+              <span>
+                <span className="font-mono text-xs">{r.kind}/{r.name}</span>
+                {r.namespace && r.namespace !== detail.namespace && (
+                  <span className="ml-1 text-xs text-muted-foreground">({r.namespace})</span>
+                )}
+              </span>
+              <Badge
+                variant={r.disposition === "gc" ? "warning" : "secondary"}
+                className="text-[10px]"
+              >
+                {r.disposition === "gc" ? "will be deleted" : "will be orphaned"}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+
+  return (
+    <ConfirmDialog
+      open={true}
+      onCancel={onClose}
+      onConfirm={onConfirm}
+      title={`Delete ${detail.name}?`}
+      description={`This will permanently delete the agent "${detail.name}" and may affect related objects (see below).`}
+      confirmText={detail.name}
+      confirmLabel="Delete agent"
+      busy={deleting}
+      impact={impact}
+    />
   );
 }
 
@@ -600,10 +1154,173 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
   );
 }
 
-// ── Runs tab (recent runs filtered to this agent) ────────────────────────────
-// Reuses the shipped GET /api/runs list (m12) and filters client-side by the
-// agent's name (the run's `name` is the agent name). Cheap and honest — a full
-// per-agent server filter is a later surface; here we scope the recent window.
+// ── Per-agent Runs tab (m15.11) ───────────────────────────────────────────────
+// Uses the bounded GET /api/agents/{ns}/{name}/runs endpoint. On 501 (Langfuse
+// not configured) renders a calm "unavailable" empty state, never an error toast.
+function AgentRunsTab({
+  ns,
+  name,
+  onInspect,
+}: {
+  ns: string;
+  name: string;
+  onInspect: (traceId: string) => void;
+}) {
+  const [state, setState] = React.useState<
+    | { kind: "loading" }
+    | { kind: "ready"; runs: AgentRunSummary[] }
+    | { kind: "unavailable" } // 501 — Langfuse not configured
+    | { kind: "error"; message: string; forbidden: boolean }
+  >({ kind: "loading" });
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    setState({ kind: "loading" });
+    api
+      .agentRuns(ns, name, 50, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        // null = 501 (Langfuse not wired) — degrade calmly.
+        if (res === null) {
+          setState({ kind: "unavailable" });
+          return;
+        }
+        setState({ kind: "ready", runs: res.runs });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load runs",
+          forbidden: err instanceof ApiError && err.isForbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, name]);
+
+  const cols: Column<AgentRunSummary>[] = [
+    {
+      id: "traceId",
+      header: "Run",
+      cell: (r) => <span className="font-mono text-xs">{r.traceId}</span>,
+    },
+    { id: "name", header: "Name", hideOnMobile: true, cell: (r) => r.name },
+    { id: "timestamp", header: "When", hideOnMobile: true, cell: (r) => r.timestamp },
+    {
+      id: "tokens",
+      header: "Tokens",
+      className: "text-right",
+      cell: (r) => <span className="tabular-nums">{r.tokens.toLocaleString()}</span>,
+    },
+    {
+      id: "cost",
+      header: "Cost",
+      className: "text-right",
+      cell: (r) => <span className="tabular-nums">${r.costUSD.toFixed(3)}</span>,
+    },
+    {
+      id: "latency",
+      header: "Latency",
+      className: "text-right",
+      hideOnMobile: true,
+      cell: (r) => <span className="tabular-nums">{Math.round(r.latencyMs)}ms</span>,
+    },
+  ];
+
+  // 501-degrade: calm empty state, NOT an error toast or error state.
+  if (state.kind === "unavailable") {
+    return (
+      <div
+        className="flex h-40 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
+        data-testid="runs-unavailable"
+      >
+        Runs unavailable — tracing not configured (Langfuse not wired).
+      </div>
+    );
+  }
+
+  if (state.kind === "error" && state.forbidden) {
+    return (
+      <ForbiddenInline
+        title="Not allowed to read runs"
+        description="Your account can't read run history in this cluster."
+        detail={state.message}
+      />
+    );
+  }
+
+  return (
+    <div data-testid="runs-tab">
+      <DataTable<AgentRunSummary>
+        columns={cols}
+        rows={state.kind === "ready" ? state.runs : []}
+        rowKey={(r) => r.traceId}
+        loading={state.kind === "loading"}
+        error={
+          state.kind === "error"
+            ? { message: state.message, forbidden: false, onRetry: undefined }
+            : null
+        }
+        onRowClick={(r) => onInspect(r.traceId)}
+        ariaLabel="Agent runs"
+        empty={{
+          icon: Play,
+          title: "No runs yet",
+          description: "Run this agent from the Overview tab to see its traced runs here.",
+        }}
+      />
+    </div>
+  );
+}
+
+// ── Bindings tab / list ──────────────────────────────────────────────────────
+function BindingsTab({ bindings }: { bindings: AgentBinding[] }) {
+  return (
+    <div data-testid="bindings-tab">
+      <BindingsList bindings={bindings} />
+    </div>
+  );
+}
+
+function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
+  if (bindings.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="bindings-empty">
+        No bindings reference this agent yet.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {bindings.map((b) => (
+        <div
+          key={`${b.kind}/${b.name}`}
+          className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+          data-testid={`binding-${b.name}`}
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge variant="secondary" className="text-[10px]">
+              {b.kind}
+            </Badge>
+            <span className="truncate">{b.detail || b.name}</span>
+          </div>
+          <Badge variant={b.ready ? "success" : "warning"} className="text-[10px]">
+            {b.ready ? "ready" : "pending"}
+          </Badge>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+// Keep the old RunsTab export for backward compatibility with existing tests
+// that import RunSummary-based runs from the global /api/runs endpoint.
+// This is ONLY used by old tests; the new AgentRunsTab uses the per-agent endpoint.
 function RunsTab({
   agentName,
   onInspect,
@@ -677,65 +1394,26 @@ function RunsTab({
   }
 
   return (
-    <div data-testid="runs-tab">
-      <DataTable<RunSummary>
-        columns={cols}
-        rows={state.kind === "ready" ? state.runs : []}
-        rowKey={(r) => r.traceId}
-        loading={state.kind === "loading"}
-        error={
-          state.kind === "error"
-            ? { message: state.message, forbidden: false, onRetry: undefined }
-            : null
-        }
-        onRowClick={(r) => onInspect(r.traceId)}
-        ariaLabel="Recent runs"
-        empty={{
-          icon: Play,
-          title: "No runs yet",
-          description: "Run this agent from the Overview tab to see its traced runs here.",
-        }}
-      />
-    </div>
+    <DataTable<RunSummary>
+      columns={cols}
+      rows={state.kind === "ready" ? state.runs : []}
+      rowKey={(r) => r.traceId}
+      loading={state.kind === "loading"}
+      error={
+        state.kind === "error"
+          ? { message: state.message, forbidden: false, onRetry: undefined }
+          : null
+      }
+      onRowClick={(r) => onInspect(r.traceId)}
+      ariaLabel="Recent runs"
+      empty={{
+        icon: Play,
+        title: "No runs yet",
+        description: "Run this agent from the Overview tab to see its traced runs here.",
+      }}
+    />
   );
 }
 
-// ── Bindings tab / list ──────────────────────────────────────────────────────
-function BindingsTab({ bindings }: { bindings: AgentBinding[] }) {
-  return (
-    <div data-testid="bindings-tab">
-      <BindingsList bindings={bindings} />
-    </div>
-  );
-}
-
-function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
-  if (bindings.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground" data-testid="bindings-empty">
-        No bindings reference this agent yet.
-      </p>
-    );
-  }
-  return (
-    <div className="space-y-2">
-      {bindings.map((b) => (
-        <div
-          key={`${b.kind}/${b.name}`}
-          className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
-          data-testid={`binding-${b.name}`}
-        >
-          <div className="flex min-w-0 items-center gap-2">
-            <Badge variant="secondary" className="text-[10px]">
-              {b.kind}
-            </Badge>
-            <span className="truncate">{b.detail || b.name}</span>
-          </div>
-          <Badge variant={b.ready ? "success" : "warning"} className="text-[10px]">
-            {b.ready ? "ready" : "pending"}
-          </Badge>
-        </div>
-      ))}
-    </div>
-  );
-}
+// Keep exported for any backward-compat consumers that import it directly.
+export { RunsTab };

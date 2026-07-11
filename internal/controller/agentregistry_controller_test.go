@@ -302,6 +302,10 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	// AGENT_NAME injected exactly once (no memory here, but assert the count is
 	// robust regardless).
 	assert.Equal(t, 1, countEnv(userContainer.Env, "AGENT_NAME"), "AGENT_NAME must appear exactly once")
+	// POD_NAMESPACE exactly once too: m15.9 injects it UNCONDITIONALLY in the base
+	// env for the trace identity, and the A2A path guards against re-adding it — a
+	// duplicate container env var name is invalid.
+	assert.Equal(t, 1, countEnv(userContainer.Env, "POD_NAMESPACE"), "POD_NAMESPACE must appear exactly once")
 
 	// Blob offload (m7.6b): a member gets the dedicated dev object-store address +
 	// the deterministic DEV-ONLY credentials as STATIC env so its launcher can
