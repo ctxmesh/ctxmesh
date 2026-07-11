@@ -1,0 +1,114 @@
+{
+  "AgentDetailResponse": {
+    "name": "echo",
+    "namespace": "default",
+    "image": "img:1",
+    "executionModel": "serving",
+    "role": "worker",
+    "promptRef": "system-prompt-v2",
+    "modelRoute": "anthropic",
+    "scaling": {
+      "min": 1,
+      "max": 5
+    },
+    "phase": "Ready",
+    "ready": true,
+    "url": "http://echo.default.example",
+    "latestVersion": "echo-abc123",
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True",
+        "reason": "Deployed",
+        "message": "serving",
+        "lastTransitionTime": "2026-07-12T10:00:00Z"
+      }
+    ],
+    "bindings": [
+      {
+        "kind": "tool",
+        "name": "echo-search",
+        "detail": "search",
+        "ready": true
+      }
+    ],
+    "versions": [
+      "echo-abc123"
+    ],
+    "managedOutsideUI": false,
+    "drift": false
+  },
+  "ConnectProviderResponse": {
+    "provider": {
+      "name": "anthropic",
+      "namespace": "default",
+      "provider": "anthropic",
+      "displayName": "Anthropic",
+      "models": [
+        "claude-opus-4",
+        "claude-sonnet-4"
+      ],
+      "secretName": "anthropic",
+      "ready": true
+    },
+    "created": [
+      {
+        "kind": "Secret",
+        "name": "anthropic",
+        "namespace": "default"
+      }
+    ]
+  },
+  "MCPServerListResponse": {
+    "servers": [
+      {
+        "name": "acme-mcp",
+        "namespace": "default",
+        "url": "https://mcp.acme.dev/sse",
+        "toolCount": 3,
+        "status": "approved",
+        "secretName": "acme-key"
+      }
+    ],
+    "items": [
+      {
+        "name": "acme-mcp",
+        "namespace": "default",
+        "url": "https://mcp.acme.dev/sse",
+        "toolCount": 3,
+        "status": "approved",
+        "secretName": "acme-key"
+      }
+    ]
+  },
+  "ProviderListResponse": {
+    "providers": [
+      {
+        "name": "anthropic",
+        "namespace": "default",
+        "provider": "anthropic",
+        "displayName": "Anthropic",
+        "models": [
+          "claude-opus-4",
+          "claude-sonnet-4"
+        ],
+        "secretName": "anthropic",
+        "ready": true
+      }
+    ],
+    "items": [
+      {
+        "name": "anthropic",
+        "namespace": "default",
+        "provider": "anthropic",
+        "displayName": "Anthropic",
+        "models": [
+          "claude-opus-4",
+          "claude-sonnet-4"
+        ],
+        "secretName": "anthropic",
+        "ready": true
+      }
+    ]
+  }
+}
