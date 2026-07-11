@@ -35,6 +35,15 @@ interface DetailOpts {
   agentRunsStatus?: number;
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
+  // m17.11 additions: memory + scaling panels
+  memoryBindings?: unknown[];
+  memoryCreateResult?: { ok: boolean; status?: number; body?: unknown };
+  memoryUpdateResult?: { ok: boolean; status?: number; body?: unknown };
+  memoryDeleteResult?: { ok: boolean; status?: number; body?: unknown };
+  scalingPolicies?: unknown[];
+  scalingCreateResult?: { ok: boolean; status?: number; body?: unknown };
+  scalingUpdateResult?: { ok: boolean; status?: number; body?: unknown };
+  scalingDeleteResult?: { ok: boolean; status?: number; body?: unknown };
 }
 
 const DEFAULT_DETAIL = {
@@ -80,7 +89,14 @@ function installFetch(opts: DetailOpts = {}) {
 
       if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
       if (url.startsWith("/api/capabilities"))
-        return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true, update: true, delete: true } } });
+        return j({
+          namespace: "",
+          allowed: opts.caps ?? {
+            agentdeployments: { create: true, update: true, delete: true },
+            memorybindings: { create: true, update: true, delete: true },
+            agentscalingpolicies: { create: true, update: true, delete: true },
+          },
+        });
       // The SSE log stream (fetch-stream). A pre-stream 403 → no body.
       if (url.includes("/logs")) {
         const status = opts.logStatus ?? 200;
@@ -137,6 +153,45 @@ function installFetch(opts: DetailOpts = {}) {
         const status = opts.detailStatus ?? 200;
         return j(opts.detail ?? DEFAULT_DETAIL, status < 400, status);
       }
+
+      // m17.11: memory bindings list (GET /api/memorybindings)
+      if (url.startsWith("/api/memorybindings") && method === "GET" && !url.match(/\/api\/memorybindings\/[^/]+\/[^/]+$/)) {
+        return j({ items: opts.memoryBindings ?? [], nextCursor: "" });
+      }
+      // m17.11: memory binding detail / delete
+      if (url.match(/\/api\/memorybindings\/[^/]+\/[^/]+$/) && method === "PUT") {
+        const r = opts.memoryUpdateResult ?? { ok: true, body: { name: "mb-1", namespace: "prod", agentRef: "billing", scope: "global", ready: true } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 400));
+      }
+      if (url.match(/\/api\/memorybindings\/[^/]+\/[^/]+$/) && method === "DELETE") {
+        const r = opts.memoryDeleteResult ?? { ok: true, body: {} };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 204 : 400));
+      }
+      // m17.11: memory binding create (POST /api/memorybindings)
+      if (url === "/api/memorybindings" && method === "POST") {
+        const r = opts.memoryCreateResult ?? { ok: true, body: { name: "mb-new", namespace: "prod", agentRef: "billing", scope: "global", ready: false } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 201 : 400));
+      }
+
+      // m17.11: scaling policies list (GET /api/agentscalingpolicies)
+      if (url.startsWith("/api/agentscalingpolicies") && method === "GET" && !url.match(/\/api\/agentscalingpolicies\/[^/]+\/[^/]+$/)) {
+        return j({ items: opts.scalingPolicies ?? [], nextCursor: "" });
+      }
+      // m17.11: scaling policy detail / delete
+      if (url.match(/\/api\/agentscalingpolicies\/[^/]+\/[^/]+$/) && method === "PUT") {
+        const r = opts.scalingUpdateResult ?? { ok: true, body: { name: "sp-1", namespace: "prod", agentRef: "billing", minReplicas: 0, maxReplicas: 3, ready: true } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 400));
+      }
+      if (url.match(/\/api\/agentscalingpolicies\/[^/]+\/[^/]+$/) && method === "DELETE") {
+        const r = opts.scalingDeleteResult ?? { ok: true, body: {} };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 204 : 400));
+      }
+      // m17.11: scaling policy create (POST /api/agentscalingpolicies)
+      if (url === "/api/agentscalingpolicies" && method === "POST") {
+        const r = opts.scalingCreateResult ?? { ok: true, body: { name: "sp-new", namespace: "prod", agentRef: "billing", minReplicas: 0, maxReplicas: 3, ready: false } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 201 : 400));
+      }
+
       return j({}, false, 404);
     }),
   );
@@ -564,5 +619,225 @@ describe("AgentDetailPage — RBAC-aware affordances (m15.11)", () => {
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
     // 403 renders ForbiddenInline in the review step.
     await screen.findByText("Not allowed to edit this agent");
+  });
+});
+
+// ── m17.11: Memory panel tests ───────────────────────────────────────────────
+
+describe("AgentDetailPage — Memory panel (m17.11)", () => {
+  it("renders the agent's MemoryBinding(s) filtered by agentRef", async () => {
+    installFetch({
+      memoryBindings: [
+        // Binding for this agent (agentRef = "billing")
+        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", backend: "redis", ready: true },
+        // Binding for a different agent — should NOT appear
+        { name: "mb-other", namespace: "prod", agentRef: "other-agent", scope: "user", ready: false },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("memory-panel");
+    // Only the billing binding should be visible
+    expect(screen.getByTestId("memory-binding-mb-billing-global")).toBeInTheDocument();
+    expect(screen.queryByTestId("memory-binding-mb-other")).toBeNull();
+  });
+
+  it("attach: createMemoryBinding is called with agentRef = the agent name", async () => {
+    const calls = installFetch({ memoryBindings: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("memory-attach");
+    fireEvent.click(screen.getByTestId("memory-attach"));
+
+    // Fill in scope
+    await screen.findByTestId("memory-scope-input");
+    fireEvent.change(screen.getByTestId("memory-scope-input"), { target: { value: "global" } });
+    fireEvent.click(screen.getByTestId("memory-form-submit"));
+
+    await waitFor(() => {
+      const postCall = calls.find((c) => c.url === "/api/memorybindings" && c.method === "POST");
+      expect(postCall).toBeDefined();
+      const body = JSON.parse(postCall!.body);
+      expect(body.agentRef).toBe("billing");
+      expect(body.scope).toBe("global");
+    });
+  });
+
+  it("detach: ConfirmDialog (typed-name) calls removeMemoryBinding on confirm", async () => {
+    const calls = installFetch({
+      memoryBindings: [
+        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", ready: true },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("memory-binding-mb-billing-global");
+    fireEvent.click(screen.getByTestId("memory-detach-mb-billing-global"));
+
+    // ConfirmDialog opens — confirm button disabled until name is typed
+    await waitFor(() => expect(screen.getByRole("alertdialog")).toBeInTheDocument());
+    const confirmBtn = screen.getByRole("button", { name: /detach/i });
+    expect(confirmBtn).toBeDisabled();
+
+    // Type the binding name to unlock
+    fireEvent.change(screen.getByPlaceholderText("mb-billing-global"), { target: { value: "mb-billing-global" } });
+    expect(confirmBtn).not.toBeDisabled();
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      const delCall = calls.find((c) => c.url.includes("/api/memorybindings/prod/mb-billing-global") && c.method === "DELETE");
+      expect(delCall).toBeDefined();
+    });
+  });
+
+  it("a viewer sees NO attach/detach/edit actions (RBAC display-gate)", async () => {
+    installFetch({
+      caps: {
+        agentdeployments: { create: false, update: false, delete: false },
+        memorybindings: { create: false, update: false, delete: false },
+        agentscalingpolicies: { create: false, update: false, delete: false },
+      },
+      memoryBindings: [
+        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", ready: true },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("memory-panel");
+    expect(screen.queryByTestId("memory-attach")).toBeNull();
+    expect(screen.queryByTestId("memory-detach-mb-billing-global")).toBeNull();
+    expect(screen.queryByTestId("memory-edit-mb-billing-global")).toBeNull();
+  });
+});
+
+// ── m17.11: Scaling panel tests ──────────────────────────────────────────────
+
+describe("AgentDetailPage — Scaling panel (m17.11)", () => {
+  it("renders the agent's AgentScalingPolicy filtered by agentRef", async () => {
+    installFetch({
+      scalingPolicies: [
+        // Policy for this agent
+        { name: "sp-billing", namespace: "prod", agentRef: "billing", minReplicas: 1, maxReplicas: 5, mode: "static", ready: true },
+        // Policy for a different agent — should NOT appear
+        { name: "sp-other", namespace: "prod", agentRef: "other-agent", minReplicas: 0, maxReplicas: 2, ready: false },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    await screen.findByTestId("scaling-panel");
+    expect(screen.getByTestId("scaling-policy-sp-billing")).toBeInTheDocument();
+    expect(screen.queryByTestId("scaling-policy-sp-other")).toBeNull();
+  });
+
+  it("attach: createAgentScalingPolicy is called with the form values", async () => {
+    const calls = installFetch({ scalingPolicies: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    await screen.findByTestId("scaling-attach");
+    fireEvent.click(screen.getByTestId("scaling-attach"));
+
+    await screen.findByTestId("scaling-min-input");
+    fireEvent.change(screen.getByTestId("scaling-min-input"), { target: { value: "2" } });
+    fireEvent.change(screen.getByTestId("scaling-max-input"), { target: { value: "8" } });
+    fireEvent.click(screen.getByTestId("scaling-form-submit"));
+
+    await waitFor(() => {
+      const postCall = calls.find((c) => c.url === "/api/agentscalingpolicies" && c.method === "POST");
+      expect(postCall).toBeDefined();
+      const body = JSON.parse(postCall!.body);
+      expect(body.agentRef).toBe("billing");
+      expect(body.minReplicas).toBe(2);
+      expect(body.maxReplicas).toBe(8);
+    });
+  });
+
+  it("a 422 (max < min XValidation) surfaces the server error in the form — NOT a success", async () => {
+    installFetch({
+      scalingPolicies: [],
+      scalingCreateResult: {
+        ok: false,
+        status: 422,
+        body: { error: "AgentScalingPolicy.spec: maxReplicas must be >= minReplicas" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    await screen.findByTestId("scaling-attach");
+    fireEvent.click(screen.getByTestId("scaling-attach"));
+
+    await screen.findByTestId("scaling-min-input");
+    // Set max < min (invalid)
+    fireEvent.change(screen.getByTestId("scaling-min-input"), { target: { value: "5" } });
+    fireEvent.change(screen.getByTestId("scaling-max-input"), { target: { value: "1" } });
+    fireEvent.click(screen.getByTestId("scaling-form-submit"));
+
+    // The server 422 message surfaces in the form — never fabricated as a success
+    await screen.findByTestId("scaling-form-error");
+    expect(screen.getByTestId("scaling-form-error")).toHaveTextContent("maxReplicas must be >= minReplicas");
+    // No success toast rendered (the form stays open with the error)
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("detach: ConfirmDialog (typed-name) calls removeAgentScalingPolicy on confirm", async () => {
+    const calls = installFetch({
+      scalingPolicies: [
+        { name: "sp-billing", namespace: "prod", agentRef: "billing", minReplicas: 0, maxReplicas: 3, ready: true },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    await screen.findByTestId("scaling-policy-sp-billing");
+    fireEvent.click(screen.getByTestId("scaling-detach-sp-billing"));
+
+    await waitFor(() => expect(screen.getByRole("alertdialog")).toBeInTheDocument());
+    const confirmBtn = screen.getByRole("button", { name: /detach/i });
+    expect(confirmBtn).toBeDisabled();
+
+    // Type the policy name to unlock
+    fireEvent.change(screen.getByPlaceholderText("sp-billing"), { target: { value: "sp-billing" } });
+    expect(confirmBtn).not.toBeDisabled();
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      const delCall = calls.find((c) => c.url.includes("/api/agentscalingpolicies/prod/sp-billing") && c.method === "DELETE");
+      expect(delCall).toBeDefined();
+    });
+  });
+
+  it("a viewer sees NO attach/detach/edit actions on the scaling panel (RBAC display-gate)", async () => {
+    installFetch({
+      caps: {
+        agentdeployments: { create: false, update: false, delete: false },
+        memorybindings: { create: false, update: false, delete: false },
+        agentscalingpolicies: { create: false, update: false, delete: false },
+      },
+      scalingPolicies: [
+        { name: "sp-billing", namespace: "prod", agentRef: "billing", minReplicas: 0, maxReplicas: 3, ready: true },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    await screen.findByTestId("scaling-panel");
+    expect(screen.queryByTestId("scaling-attach")).toBeNull();
+    expect(screen.queryByTestId("scaling-detach-sp-billing")).toBeNull();
+    expect(screen.queryByTestId("scaling-edit-sp-billing")).toBeNull();
   });
 });

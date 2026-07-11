@@ -49,6 +49,8 @@ export const RES_AGENTS = "agentdeployments";
 export const RES_ROUTES = "modelroutes";
 export const RES_SECRETS = "secretbindings";
 export const RES_REGISTRIES = "agentregistries";
+export const RES_MEMORY = "memorybindings";
+export const RES_SCALING = "agentscalingpolicies";
 
 export interface NavItem {
   id: string;

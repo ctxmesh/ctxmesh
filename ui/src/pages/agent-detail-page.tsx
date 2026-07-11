@@ -7,6 +7,8 @@ import {
   ExternalLink,
   Pencil,
   Play,
+  Plus,
+  SlidersHorizontal,
   Terminal,
   Trash2,
 } from "lucide-react";
@@ -38,12 +40,14 @@ import {
   type AgentDetailResponse,
   type AgentReference,
   type AgentRunSummary,
+  type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
+  type MemoryBindingSummary,
   type RunSummary,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
-import { RES_AGENTS } from "@/lib/nav";
+import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
 // extended m15.11). It closes the aha loop: watch the agent come alive (status
@@ -59,7 +63,7 @@ import { RES_AGENTS } from "@/lib/nav";
 //   • Per-agent Runs list (agentRuns): bounded, 501 → calm empty state.
 //   • All write affordances RBAC-aware (display-only, ADR 0011).
 
-const TABS = ["Overview", "Logs", "Runs", "Bindings"] as const;
+const TABS = ["Overview", "Logs", "Runs", "Bindings", "Memory", "Scaling"] as const;
 type Tab = (typeof TABS)[number];
 
 type Load =
@@ -203,6 +207,12 @@ export function AgentDetailPage() {
         <AgentRunsTab ns={detail.namespace} name={detail.name} onInspect={(id) => setInspectTrace(id)} />
       )}
       {tab === "Bindings" && <BindingsTab bindings={detail.bindings} />}
+      {tab === "Memory" && (
+        <MemoryPanel ns={detail.namespace} agentName={detail.name} />
+      )}
+      {tab === "Scaling" && (
+        <ScalingPanel ns={detail.namespace} agentName={detail.name} />
+      )}
 
       {/* The run inspector opens over the page (drawer) so list/tab context is
           kept. It closes back to exactly where you were. */}
@@ -1309,6 +1319,623 @@ function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
           </Badge>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Memory panel (m17.11) ────────────────────────────────────────────────────
+// Shows the MemoryBinding(s) that reference this agent (filtered by agentRef).
+// Supports attach (create), edit, and detach (typed-name delete). RBAC-aware:
+//   • attach/edit/detach are gated on can("memorybindings", verb)
+//   • a forced 403 surfaces honestly in the form; viewers see read-only.
+
+type MemoryForm = {
+  scope: string;
+  backend: string;
+};
+
+type MemoryActionState =
+  | { kind: "idle" }
+  | { kind: "attach-open"; busy: boolean; error: string | null; forbidden: boolean }
+  | { kind: "edit-open"; binding: MemoryBindingSummary; busy: boolean; error: string | null; forbidden: boolean }
+  | { kind: "detach-open"; binding: MemoryBindingSummary; busy: boolean };
+
+type MemoryPanelLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; bindings: MemoryBindingSummary[] }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const { can, reprobe } = useCapabilities();
+  const { toast } = useToast();
+  const canCreate = can(RES_MEMORY, "create");
+  const canUpdate = can(RES_MEMORY, "update");
+  const canDelete = can(RES_MEMORY, "delete");
+
+  const [load, setLoad] = React.useState<MemoryPanelLoad>({ kind: "loading" });
+  const [action, setAction] = React.useState<MemoryActionState>({ kind: "idle" });
+  const [form, setForm] = React.useState<MemoryForm>({ scope: "", backend: "" });
+
+  const fetchBindings = React.useCallback(() => {
+    const controller = new AbortController();
+    setLoad({ kind: "loading" });
+    api
+      .listMemoryBindings({ namespace: ns }, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        const mine = res.items.filter((b) => b.agentRef === agentName);
+        setLoad({ kind: "ready", bindings: mine });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load memory bindings",
+          forbidden: err instanceof ApiError && err.isForbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, agentName]);
+
+  React.useEffect(() => {
+    const cancel = fetchBindings();
+    return cancel;
+  }, [fetchBindings]);
+
+  function openAttach() {
+    setForm({ scope: "", backend: "" });
+    setAction({ kind: "attach-open", busy: false, error: null, forbidden: false });
+  }
+
+  function openEdit(binding: MemoryBindingSummary) {
+    setForm({ scope: binding.scope, backend: binding.backend ?? "" });
+    setAction({ kind: "edit-open", binding, busy: false, error: null, forbidden: false });
+  }
+
+  function openDetach(binding: MemoryBindingSummary) {
+    setAction({ kind: "detach-open", binding, busy: false });
+  }
+
+  async function doAttach() {
+    if (action.kind !== "attach-open") return;
+    setAction({ ...action, busy: true, error: null });
+    try {
+      await api.createMemoryBinding({
+        namespace: ns,
+        agentRef: agentName,
+        scope: form.scope.trim(),
+        backend: form.backend.trim() || undefined,
+      });
+      toast({ variant: "success", title: "Memory binding attached", description: `Scope "${form.scope}" attached to ${agentName}.` });
+      setAction({ kind: "idle" });
+      fetchBindings();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setAction({
+        ...action,
+        busy: false,
+        error: err instanceof Error ? err.message : "attach failed",
+        forbidden: err instanceof ApiError && err.isForbidden,
+      });
+    }
+  }
+
+  async function doEdit() {
+    if (action.kind !== "edit-open") return;
+    setAction({ ...action, busy: true, error: null });
+    try {
+      await api.updateMemoryBinding(ns, action.binding.name, {
+        scope: form.scope.trim(),
+        backend: form.backend.trim() || undefined,
+      });
+      toast({ variant: "success", title: "Memory binding updated" });
+      setAction({ kind: "idle" });
+      fetchBindings();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setAction({
+        ...action,
+        busy: false,
+        error: err instanceof Error ? err.message : "update failed",
+        forbidden: err instanceof ApiError && err.isForbidden,
+      });
+    }
+  }
+
+  async function doDetach() {
+    if (action.kind !== "detach-open") return;
+    setAction({ ...action, busy: true });
+    try {
+      await api.removeMemoryBinding(ns, action.binding.name);
+      toast({ variant: "success", title: "Memory binding detached", description: `Binding "${action.binding.name}" removed.` });
+      setAction({ kind: "idle" });
+      fetchBindings();
+    } catch (err) {
+      toast({ variant: "error", title: "Detach failed", description: err instanceof Error ? err.message : "detach failed" });
+      setAction({ kind: "idle" });
+    }
+  }
+
+  const isAttachOpen = action.kind === "attach-open";
+  const isEditOpen = action.kind === "edit-open";
+  const isDetachOpen = action.kind === "detach-open";
+  const formError = (action.kind === "attach-open" || action.kind === "edit-open") ? action.error : null;
+  const formForbidden = (action.kind === "attach-open" || action.kind === "edit-open") ? action.forbidden : false;
+  const formBusy = (action.kind === "attach-open" || action.kind === "edit-open" || action.kind === "detach-open") ? action.busy : false;
+
+  return (
+    <div data-testid="memory-panel">
+      <div className="mb-4 flex items-center justify-between">
+        <p className="text-sm font-medium">Memory bindings</p>
+        {canCreate && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={openAttach}
+            data-testid="memory-attach"
+          >
+            <Plus className="h-4 w-4" />
+            Attach
+          </Button>
+        )}
+      </div>
+
+      {load.kind === "loading" && (
+        <p className="text-sm text-muted-foreground" data-testid="memory-loading">Loading…</p>
+      )}
+      {load.kind === "error" && load.forbidden && (
+        <ForbiddenInline
+          title="Not allowed to list memory bindings"
+          description="Your account can't read MemoryBindings in this namespace."
+          detail={load.message}
+        />
+      )}
+      {load.kind === "error" && !load.forbidden && (
+        <p className="text-sm text-destructive" role="alert" data-testid="memory-error">
+          {load.message}
+        </p>
+      )}
+      {load.kind === "ready" && load.bindings.length === 0 && (
+        <EmptyState
+          icon={Boxes}
+          title="No memory bindings"
+          description="Attach a memory binding to give this agent long-term memory."
+        />
+      )}
+      {load.kind === "ready" && load.bindings.length > 0 && (
+        <ul className="space-y-2">
+          {load.bindings.map((b) => (
+            <li
+              key={b.name}
+              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+              data-testid={`memory-binding-${b.name}`}
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <Badge variant="secondary" className="text-[10px]">scope</Badge>
+                <span className="font-medium">{b.scope}</span>
+                {b.backend && (
+                  <span className="text-xs text-muted-foreground">via {b.backend}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge variant={b.ready ? "success" : "warning"} className="text-[10px]">
+                  {b.ready ? "ready" : "pending"}
+                </Badge>
+                {canUpdate && (
+                  <Button variant="ghost" size="sm" onClick={() => openEdit(b)} data-testid={`memory-edit-${b.name}`}>
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {canDelete && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => openDetach(b)}
+                    className="text-destructive hover:text-destructive"
+                    data-testid={`memory-detach-${b.name}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Attach / edit form inline */}
+      {(isAttachOpen || isEditOpen) && (
+        <div className="mt-4 rounded-lg border bg-card p-4 shadow-card">
+          <p className="mb-3 text-sm font-medium">{isAttachOpen ? "Attach memory binding" : "Edit memory binding"}</p>
+          <div className="space-y-3">
+            <FormField id="memory-scope" label="Scope">
+              <Input
+                id="memory-scope"
+                value={form.scope}
+                onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}
+                placeholder="global"
+                data-testid="memory-scope-input"
+              />
+            </FormField>
+            <FormField id="memory-backend" label="Backend (optional)">
+              <Input
+                id="memory-backend"
+                value={form.backend}
+                onChange={(e) => setForm((f) => ({ ...f, backend: e.target.value }))}
+                placeholder="redis"
+                data-testid="memory-backend-input"
+              />
+            </FormField>
+            {formForbidden && (
+              <ForbiddenInline
+                title="Not allowed to manage memory bindings"
+                description="Your account can't create or update MemoryBindings."
+                detail={formError ?? undefined}
+              />
+            )}
+            {formError && !formForbidden && (
+              <p className="text-sm text-destructive" role="alert" data-testid="memory-form-error">
+                {formError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setAction({ kind: "idle" })} disabled={formBusy}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={isAttachOpen ? doAttach : doEdit}
+                disabled={!form.scope.trim() || formBusy}
+                data-testid="memory-form-submit"
+              >
+                {formBusy ? "Saving…" : isAttachOpen ? "Attach" : "Save"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Typed-name detach confirmation */}
+      {isDetachOpen && action.kind === "detach-open" && (
+        <ConfirmDialog
+          open={true}
+          onCancel={() => setAction({ kind: "idle" })}
+          onConfirm={doDetach}
+          title={`Detach memory binding?`}
+          description={`This will remove the binding "${action.binding.name}" from ${agentName}. The agent will lose access to the "${action.binding.scope}" memory scope.`}
+          confirmText={action.binding.name}
+          confirmLabel="Detach"
+          busy={action.busy}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Scaling panel (m17.11) ────────────────────────────────────────────────────
+// Shows the AgentScalingPolicy for this agent (filtered by agentRef). Supports
+// attach (create), edit, and detach (typed-name delete). RBAC-aware. A 422
+// from the CRD XValidations (max < min, or schedule-without-scheduled-mode)
+// surfaces in the form with the server's message — never faked as success.
+
+type ScalingForm = {
+  minReplicas: string;
+  maxReplicas: string;
+  mode: string;
+  schedule: string;
+};
+
+type ScalingActionState =
+  | { kind: "idle" }
+  | { kind: "attach-open"; busy: boolean; error: string | null; forbidden: boolean }
+  | { kind: "edit-open"; policy: AgentScalingPolicySummary; busy: boolean; error: string | null; forbidden: boolean }
+  | { kind: "detach-open"; policy: AgentScalingPolicySummary; busy: boolean };
+
+type ScalingPanelLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; policies: AgentScalingPolicySummary[] }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const { can, reprobe } = useCapabilities();
+  const { toast } = useToast();
+  const canCreate = can(RES_SCALING, "create");
+  const canUpdate = can(RES_SCALING, "update");
+  const canDelete = can(RES_SCALING, "delete");
+
+  const [load, setLoad] = React.useState<ScalingPanelLoad>({ kind: "loading" });
+  const [action, setAction] = React.useState<ScalingActionState>({ kind: "idle" });
+  const [form, setForm] = React.useState<ScalingForm>({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
+
+  const fetchPolicies = React.useCallback(() => {
+    const controller = new AbortController();
+    setLoad({ kind: "loading" });
+    api
+      .listAgentScalingPolicies({ namespace: ns }, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        const mine = res.items.filter((p) => p.agentRef === agentName);
+        setLoad({ kind: "ready", policies: mine });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load scaling policies",
+          forbidden: err instanceof ApiError && err.isForbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, agentName]);
+
+  React.useEffect(() => {
+    const cancel = fetchPolicies();
+    return cancel;
+  }, [fetchPolicies]);
+
+  function openAttach() {
+    setForm({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
+    setAction({ kind: "attach-open", busy: false, error: null, forbidden: false });
+  }
+
+  function openEdit(policy: AgentScalingPolicySummary) {
+    setForm({
+      minReplicas: String(policy.minReplicas),
+      maxReplicas: String(policy.maxReplicas),
+      mode: policy.mode ?? "static",
+      schedule: policy.schedule ?? "",
+    });
+    setAction({ kind: "edit-open", policy, busy: false, error: null, forbidden: false });
+  }
+
+  function openDetach(policy: AgentScalingPolicySummary) {
+    setAction({ kind: "detach-open", policy, busy: false });
+  }
+
+  async function doAttach() {
+    if (action.kind !== "attach-open") return;
+    setAction({ ...action, busy: true, error: null });
+    try {
+      await api.createAgentScalingPolicy({
+        namespace: ns,
+        agentRef: agentName,
+        minReplicas: parseInt(form.minReplicas, 10) || 0,
+        maxReplicas: parseInt(form.maxReplicas, 10) || 1,
+        mode: form.mode || undefined,
+        schedule: form.mode === "scheduled" && form.schedule.trim() ? form.schedule.trim() : undefined,
+      });
+      toast({ variant: "success", title: "Scaling policy attached" });
+      setAction({ kind: "idle" });
+      fetchPolicies();
+    } catch (err) {
+      // 422 = XValidation rejection (max<min, schedule-without-scheduled-mode) —
+      // surfaced in the form with the server's message. NOT faked as a success.
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setAction({
+        ...action,
+        busy: false,
+        error: err instanceof Error ? err.message : "attach failed",
+        forbidden: err instanceof ApiError && err.isForbidden,
+      });
+    }
+  }
+
+  async function doEdit() {
+    if (action.kind !== "edit-open") return;
+    setAction({ ...action, busy: true, error: null });
+    try {
+      await api.updateAgentScalingPolicy(ns, action.policy.name, {
+        minReplicas: parseInt(form.minReplicas, 10) || 0,
+        maxReplicas: parseInt(form.maxReplicas, 10) || 1,
+        mode: form.mode || undefined,
+        schedule: form.mode === "scheduled" && form.schedule.trim() ? form.schedule.trim() : undefined,
+      });
+      toast({ variant: "success", title: "Scaling policy updated" });
+      setAction({ kind: "idle" });
+      fetchPolicies();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setAction({
+        ...action,
+        busy: false,
+        error: err instanceof Error ? err.message : "update failed",
+        forbidden: err instanceof ApiError && err.isForbidden,
+      });
+    }
+  }
+
+  async function doDetach() {
+    if (action.kind !== "detach-open") return;
+    setAction({ ...action, busy: true });
+    try {
+      await api.removeAgentScalingPolicy(ns, action.policy.name);
+      toast({ variant: "success", title: "Scaling policy detached", description: `Policy "${action.policy.name}" removed.` });
+      setAction({ kind: "idle" });
+      fetchPolicies();
+    } catch (err) {
+      toast({ variant: "error", title: "Detach failed", description: err instanceof Error ? err.message : "detach failed" });
+      setAction({ kind: "idle" });
+    }
+  }
+
+  const isAttachOpen = action.kind === "attach-open";
+  const isEditOpen = action.kind === "edit-open";
+  const isDetachOpen = action.kind === "detach-open";
+  const formError = (action.kind === "attach-open" || action.kind === "edit-open") ? action.error : null;
+  const formForbidden = (action.kind === "attach-open" || action.kind === "edit-open") ? action.forbidden : false;
+  const formBusy = (action.kind === "attach-open" || action.kind === "edit-open" || action.kind === "detach-open") ? action.busy : false;
+
+  return (
+    <div data-testid="scaling-panel">
+      <div className="mb-4 flex items-center justify-between">
+        <p className="text-sm font-medium">Scaling policies</p>
+        {canCreate && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={openAttach}
+            data-testid="scaling-attach"
+          >
+            <Plus className="h-4 w-4" />
+            Attach
+          </Button>
+        )}
+      </div>
+
+      {load.kind === "loading" && (
+        <p className="text-sm text-muted-foreground" data-testid="scaling-loading">Loading…</p>
+      )}
+      {load.kind === "error" && load.forbidden && (
+        <ForbiddenInline
+          title="Not allowed to list scaling policies"
+          description="Your account can't read AgentScalingPolicies in this namespace."
+          detail={load.message}
+        />
+      )}
+      {load.kind === "error" && !load.forbidden && (
+        <p className="text-sm text-destructive" role="alert" data-testid="scaling-error">
+          {load.message}
+        </p>
+      )}
+      {load.kind === "ready" && load.policies.length === 0 && (
+        <EmptyState
+          icon={SlidersHorizontal}
+          title="No scaling policies"
+          description="Attach a scaling policy to control how this agent scales."
+        />
+      )}
+      {load.kind === "ready" && load.policies.length > 0 && (
+        <ul className="space-y-2">
+          {load.policies.map((p) => (
+            <li
+              key={p.name}
+              className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"
+              data-testid={`scaling-policy-${p.name}`}
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <Badge variant="secondary" className="text-[10px]">{p.mode ?? "static"}</Badge>
+                <span className="font-medium">{p.minReplicas}–{p.maxReplicas} replicas</span>
+                {p.schedule && (
+                  <span className="font-mono text-xs text-muted-foreground">{p.schedule}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Badge variant={p.ready ? "success" : "warning"} className="text-[10px]">
+                  {p.ready ? "ready" : "pending"}
+                </Badge>
+                {canUpdate && (
+                  <Button variant="ghost" size="sm" onClick={() => openEdit(p)} data-testid={`scaling-edit-${p.name}`}>
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {canDelete && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => openDetach(p)}
+                    className="text-destructive hover:text-destructive"
+                    data-testid={`scaling-detach-${p.name}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Attach / edit form inline */}
+      {(isAttachOpen || isEditOpen) && (
+        <div className="mt-4 rounded-lg border bg-card p-4 shadow-card">
+          <p className="mb-3 text-sm font-medium">{isAttachOpen ? "Attach scaling policy" : "Edit scaling policy"}</p>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <FormField id="scaling-min" label="Min replicas">
+                <Input
+                  id="scaling-min"
+                  inputMode="numeric"
+                  value={form.minReplicas}
+                  onChange={(e) => setForm((f) => ({ ...f, minReplicas: e.target.value }))}
+                  data-testid="scaling-min-input"
+                />
+              </FormField>
+              <FormField id="scaling-max" label="Max replicas">
+                <Input
+                  id="scaling-max"
+                  inputMode="numeric"
+                  value={form.maxReplicas}
+                  onChange={(e) => setForm((f) => ({ ...f, maxReplicas: e.target.value }))}
+                  data-testid="scaling-max-input"
+                />
+              </FormField>
+            </div>
+            <FormField id="scaling-mode" label="Mode">
+              <Select
+                id="scaling-mode"
+                value={form.mode}
+                onChange={(e) => setForm((f) => ({ ...f, mode: e.target.value }))}
+                data-testid="scaling-mode-input"
+              >
+                <option value="static">static</option>
+                <option value="scheduled">scheduled</option>
+              </Select>
+            </FormField>
+            {form.mode === "scheduled" && (
+              <FormField id="scaling-schedule" label="Schedule (cron)">
+                <Input
+                  id="scaling-schedule"
+                  value={form.schedule}
+                  onChange={(e) => setForm((f) => ({ ...f, schedule: e.target.value }))}
+                  placeholder="0 8 * * 1-5"
+                  data-testid="scaling-schedule-input"
+                />
+              </FormField>
+            )}
+            {/* 422 from XValidations (max<min, schedule-without-scheduled) surfaces here
+                with the server message — never a fabricated success. */}
+            {formForbidden && (
+              <ForbiddenInline
+                title="Not allowed to manage scaling policies"
+                description="Your account can't create or update AgentScalingPolicies."
+                detail={formError ?? undefined}
+              />
+            )}
+            {formError && !formForbidden && (
+              <p className="text-sm text-destructive" role="alert" data-testid="scaling-form-error">
+                {formError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setAction({ kind: "idle" })} disabled={formBusy}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={isAttachOpen ? doAttach : doEdit}
+                disabled={formBusy}
+                data-testid="scaling-form-submit"
+              >
+                {formBusy ? "Saving…" : isAttachOpen ? "Attach" : "Save"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Typed-name detach confirmation */}
+      {isDetachOpen && action.kind === "detach-open" && (
+        <ConfirmDialog
+          open={true}
+          onCancel={() => setAction({ kind: "idle" })}
+          onConfirm={doDetach}
+          title="Detach scaling policy?"
+          description={`This will remove the scaling policy "${action.policy.name}" from ${agentName}.`}
+          confirmText={action.policy.name}
+          confirmLabel="Detach"
+          busy={action.busy}
+        />
+      )}
     </div>
   );
 }
