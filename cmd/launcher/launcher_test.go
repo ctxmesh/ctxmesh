@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -588,5 +589,133 @@ func TestProxy_PromptVersionSpanAttribute(t *testing.T) {
 	// Without a prompt (image-bundled) → no prompt.version attribute at all.
 	if _, present := promptVersionOf(Config{AgentName: "a"}); present {
 		t.Error("prompt.version attribute present when the agent has no promptRef")
+	}
+}
+
+// TestLoadConfig_PodNamespace: POD_NAMESPACE parses into cfg.AgentNamespace (the
+// trace-identity namespace); absent → empty.
+func TestLoadConfig_PodNamespace(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadConfig(envMap(map[string]string{
+		"AGENT_ENTRYPOINT": "/bin/agent",
+		"POD_NAMESPACE":    "team-a",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AgentNamespace != "team-a" {
+		t.Errorf("AgentNamespace = %q, want %q", cfg.AgentNamespace, "team-a")
+	}
+
+	cfg, err = loadConfig(envMap(map[string]string{"AGENT_ENTRYPOINT": "/bin/agent"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AgentNamespace != "" {
+		t.Errorf("AgentNamespace = %q, want empty when POD_NAMESPACE unset", cfg.AgentNamespace)
+	}
+}
+
+// invokeSpanAttrs drives one /invoke through the proxy for cfg and returns the
+// agent.invoke span's attributes as a key→string map (string-slice values joined
+// with a sentinel), so a test can assert the trace-level identity tag AND that the
+// existing agent.name/version/route attributes are unchanged.
+func invokeSpanAttrs(t *testing.T, cfg Config) map[string]string {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, tp := newTestTracer(t)
+	handler := buildHandler(tp.Tracer(tracerName), propagation.TraceContext{}, upstreamURL, cfg, nil, nil)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/invoke", nil))
+
+	var invoke sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == "agent.invoke" {
+			invoke = s
+		}
+	}
+	if invoke == nil {
+		t.Fatal("no agent.invoke span recorded")
+	}
+	attrs := map[string]string{}
+	for _, kv := range invoke.Attributes() {
+		if kv.Value.Type() == attribute.STRINGSLICE {
+			attrs[string(kv.Key)] = strings.Join(kv.Value.AsStringSlice(), ",")
+			continue
+		}
+		attrs[string(kv.Key)] = kv.Value.AsString()
+	}
+	return attrs
+}
+
+// TestProxy_AgentIdentityTraceTag: the agent.invoke span carries the trace-level
+// `langfuse.trace.tags` attribute `agent:<ns>/<name>` (the UNAMBIGUOUS per-agent
+// filter key the BFF per-agent run list uses) AND leaves the existing
+// agent.name/version/route span attributes intact — the tag is ADDITIVE, so
+// RecentRuns / CostUsage / the run inspector are unaffected.
+func TestProxy_AgentIdentityTraceTag(t *testing.T) {
+	t.Parallel()
+
+	attrs := invokeSpanAttrs(t, Config{
+		AgentName:      "foo",
+		AgentNamespace: "team-a",
+		AgentVersion:   "v0.0.1",
+		AgentRoute:     "/invoke",
+	})
+
+	// The trace-level identity tag is present and namespace-qualified.
+	if got, want := attrs[langfuseTraceTagsAttr], "agent:team-a/foo"; got != want {
+		t.Errorf("%s = %q, want %q", langfuseTraceTagsAttr, got, want)
+	}
+	// The existing attributes are UNCHANGED (non-breaking).
+	if attrs["agent.name"] != "foo" {
+		t.Errorf("agent.name = %q, want %q (existing attribute must be intact)", attrs["agent.name"], "foo")
+	}
+	if attrs["agent.version"] != "v0.0.1" {
+		t.Errorf("agent.version = %q, want %q", attrs["agent.version"], "v0.0.1")
+	}
+	if attrs["agent.route"] != "/invoke" {
+		t.Errorf("agent.route = %q, want %q", attrs["agent.route"], "/invoke")
+	}
+}
+
+// TestProxy_AgentIdentityTagCrossNamespaceDistinct: two agents that share a bare
+// NAME in different namespaces get DISTINCT identity tags — the property that keeps
+// the BFF per-agent run list from mixing default/foo with other/foo.
+func TestProxy_AgentIdentityTagCrossNamespaceDistinct(t *testing.T) {
+	t.Parallel()
+
+	a := invokeSpanAttrs(t, Config{AgentName: "foo", AgentNamespace: "default"})[langfuseTraceTagsAttr]
+	b := invokeSpanAttrs(t, Config{AgentName: "foo", AgentNamespace: "other"})[langfuseTraceTagsAttr]
+	if a == b {
+		t.Fatalf("same-named agents in different namespaces got the SAME tag %q — cross-namespace runs would mix", a)
+	}
+	if a != "agent:default/foo" || b != "agent:other/foo" {
+		t.Errorf("tags = %q / %q, want agent:default/foo / agent:other/foo", a, b)
+	}
+}
+
+// TestProxy_AgentIdentityTagDegradesWithoutNamespace: a mis-injected launcher with
+// no POD_NAMESPACE degrades to the bare `agent:<name>` (never an empty-namespace
+// `agent:/name`); an UNNAMED agent emits NO tag at all (nothing to filter on —
+// honest, not a crash).
+func TestProxy_AgentIdentityTagDegradesWithoutNamespace(t *testing.T) {
+	t.Parallel()
+
+	// Namespace absent → bare name, no empty segment.
+	if got, want := invokeSpanAttrs(t, Config{AgentName: "foo"})[langfuseTraceTagsAttr], "agent:foo"; got != want {
+		t.Errorf("namespace-absent tag = %q, want %q", got, want)
+	}
+
+	// Unnamed agent → no identity tag stamped.
+	if _, present := invokeSpanAttrs(t, Config{})[langfuseTraceTagsAttr]; present {
+		t.Errorf("%s stamped for an unnamed agent — nothing to filter on, so it must be absent", langfuseTraceTagsAttr)
 	}
 }

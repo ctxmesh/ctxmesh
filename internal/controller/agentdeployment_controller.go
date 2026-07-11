@@ -113,9 +113,17 @@ const (
 	// defaultGatewayProxyPort in the launcher.
 	budgetProxyURL = "http://localhost:2996"
 
-	// envAgentName is the AGENT_NAME env var — the agent's identity, injected by
-	// the memory, registry, and budget paths (each guards against double-inject).
+	// envAgentName is the AGENT_NAME env var — the agent's identity, injected
+	// unconditionally in the base env (the tracing identity) and reused by the
+	// memory, registry, and budget paths (each guards against double-inject).
 	envAgentName = "AGENT_NAME"
+
+	// envPodNamespace is the POD_NAMESPACE env var — the agent's namespace. Injected
+	// unconditionally in the base env so the launcher can form the UNAMBIGUOUS
+	// `<namespace>/<name>` trace identity; also consumed by the A2A path (cluster
+	// host resolution) and the memory key namespace. STATIC (deploy.Namespace),
+	// NEVER a downward-API valueFrom (the m5.7 Knative ksvc landmine).
+	envPodNamespace = "POD_NAMESPACE"
 )
 
 // Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
@@ -642,12 +650,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	env = append(env, deploy.Spec.Env...)
 
-	// AGENT_NAME keys the per-agent spend in the budget proxy. A budgeted agent
-	// needs it even without a MemoryBinding or registry membership (those paths
-	// also inject it, guarded against double-injection). Inject once, user-
-	// override-wins, BEFORE the memory/registry blocks so they see it present.
-	if deploy.Spec.Budget != nil && !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
+	// AGENT_NAME + POD_NAMESPACE identify the agent to the launcher's tracing:
+	// together they form the UNAMBIGUOUS `<namespace>/<name>` identity the launcher
+	// stamps as the Langfuse trace-level tag `agent:<ns>/<name>` (proxy.go), so the
+	// console can list the runs of exactly ONE agent without mixing two same-named
+	// agents in different namespaces. Injected UNCONDITIONALLY for every agent (a
+	// plain agent with no budget/memory/registry still needs a filterable trace
+	// identity), STATIC (values known at reconcile time — NEVER valueFrom, the m5.7
+	// Knative ksvc landmine / tier1 no-valueFrom guard), user-override-wins, and
+	// BEFORE the budget/memory/registry blocks so they observe it present (their own
+	// double-injection guards then no-op). These same vars also key per-agent spend
+	// (budget proxy), the Valkey memory prefix, and the A2A envelope identity — one
+	// injection now serves all of them.
+	if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 		env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+	}
+	if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
+		env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
 	}
 
 	var resources corev1.ResourceRequirements
@@ -760,17 +779,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
-			// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
-			// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
-			// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
-			// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
-			// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Injected
-			// UNCONDITIONALLY for a member: the memory path does NOT set it, so a
-			// registry member without a MemoryBinding would otherwise resolve
-			// {target}..svc.cluster.local (empty namespace → NXDOMAIN → every A2A
-			// call fails unknown_target).
-			corev1.EnvVar{Name: "POD_NAMESPACE", Value: deploy.Namespace},
 		)
+		// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
+		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
+		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
+		// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
+		// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Now injected
+		// UNCONDITIONALLY in the base env for the trace identity, so guard against a
+		// duplicate here (a duplicate container env var name is invalid); the base
+		// injection already covers a registry member without a MemoryBinding.
+		if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
+			env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
+		}
 		// AGENT_NAME: the launcher's senderAgentId / envelope path identity. The
 		// memory path (earlier in this function) may have already appended it, and
 		// the user may have overridden it in spec.env — inject exactly ONCE. Check
