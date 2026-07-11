@@ -239,8 +239,9 @@ export interface TraceDetailResponse {
 // --- Feedback (GET /api/feedback?traceId=<id>, m16.4) ------------------------
 // Per-trace feedback scores from Langfuse. The endpoint returns 501 when
 // Langfuse is not wired — the UI MUST degrade calmly (disabled state, not an
-// error toast). A 502 means Langfuse is configured but unreachable — also calm.
-// Both are sentinel null from the api.feedback() method.
+// error toast); api.feedback() signals that with the null sentinel. A 502 means
+// Langfuse IS wired but the upstream fetch FAILED — a real, likely-transient
+// error that throws ApiError so the panel surfaces it (retryable), never hidden.
 
 // FeedbackScore is one score observation on a trace (mirrors BFF's FeedbackScore
 // DTO). value and stringValue are mutually exclusive (numeric vs categorical).
@@ -1595,10 +1596,12 @@ export const api = {
     }
   },
 
-  // feedback reads the per-trace feedback scores from Langfuse (m16.4). Like
-  // agentRuns, a 501 (Langfuse not configured) or 502 (Langfuse unreachable) is
-  // NOT an error — the caller renders a calm disabled state. Returns null as the
-  // sentinel for "not available" so callers distinguish from "empty list".
+  // feedback reads the per-trace feedback scores from Langfuse (m16.4). Exactly
+  // like agentRuns: a 501 (Langfuse not configured) is NOT an error — the caller
+  // renders a calm disabled state, signalled by the null sentinel (distinct from
+  // an empty list). A 502 (Langfuse configured but the upstream fetch FAILED) IS
+  // a real, likely-transient error and throws ApiError so the panel surfaces it
+  // (retryable), never silently hiding a failure as "not connected".
   feedback: async (
     traceId: string,
     signal?: AbortSignal,
@@ -1607,8 +1610,9 @@ export const api = {
       `/api/feedback?traceId=${encodeURIComponent(traceId)}`,
       { headers: { Accept: "application/json" }, signal },
     );
-    // 501 = Langfuse not configured; 502 = Langfuse unreachable — both calm.
-    if (res.status === 501 || res.status === 502) return null;
+    // 501 = Langfuse not configured → calm null sentinel. A 502 (upstream failed)
+    // falls through to throw below — a real error the user should see + retry.
+    if (res.status === 501) return null;
     if (!res.ok) {
       throw new ApiError(
         await errorMessage(res, `feedback failed (${res.status})`),
