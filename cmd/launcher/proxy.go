@@ -37,6 +37,48 @@ import (
 
 const tracerName = "agent-engine/launcher"
 
+// langfuseTraceTagsAttr is the OTel span-attribute key Langfuse's OTLP ingestion
+// promotes to TRACE-LEVEL tags: a string-array attribute whose entries become the
+// trace's `tags` (filterable via GET /api/public/traces?tags=...). Unlike the
+// nested `agent.name` span attribute — which Langfuse buries as an observation
+// attribute, NOT a trace-level field — a tag is a first-class trace filter. We use
+// it to stamp the UNAMBIGUOUS per-agent identity so the BFF can list the runs of
+// exactly one agent, never mixing two same-named agents in different namespaces.
+const langfuseTraceTagsAttr = "langfuse.trace.tags"
+
+// agentTagPrefix prefixes the per-agent identity tag value. The full tag is
+// `agent:<namespace>/<name>` — the SAME `<ns>/<name>` key the BFF topology keys
+// agents on — so a filter for one agent's runs cannot match a same-named agent in
+// another namespace. Exported-shape kept in sync with the BFF's agentRunTag().
+const agentTagPrefix = "agent:"
+
+// agentIdentityTag builds the trace-level identity tag `agent:<ns>/<name>` from the
+// launcher config. When the namespace is absent (a misconfiguration — the
+// controller injects POD_NAMESPACE) it degrades to the bare `agent:<name>` rather
+// than emitting a `agent:/name` with an empty namespace segment; an empty name in
+// turn yields no meaningful tag, so the caller skips stamping it (an unnamed agent
+// simply is not per-agent-filterable, which is honest, not a crash).
+func agentIdentityTag(cfg Config) string {
+	if cfg.AgentName == "" {
+		return ""
+	}
+	if cfg.AgentNamespace == "" {
+		return agentTagPrefix + cfg.AgentName
+	}
+	return agentTagPrefix + cfg.AgentNamespace + "/" + cfg.AgentName
+}
+
+// setAgentIdentityTag stamps the trace-level `langfuse.trace.tags` attribute with
+// the agent-identity tag when one can be built. It is a no-op for an unnamed agent
+// (nothing to filter on), so a mis-injected launcher never emits an empty/garbage
+// tag. Called on EVERY agent.invoke span — including the guard-denied path — so a
+// denied run is still attributed to its agent.
+func setAgentIdentityTag(span trace.Span, cfg Config) {
+	if tag := agentIdentityTag(cfg); tag != "" {
+		span.SetAttributes(attribute.StringSlice(langfuseTraceTagsAttr, []string{tag}))
+	}
+}
+
 // setupOTel initialises a TracerProvider that exports via OTLP/gRPC to
 // endpoint and installs a W3C TraceContext propagator globally.
 //
@@ -173,6 +215,9 @@ func buildHandler(
 				attribute.Int("http.status_code", rw.code),
 				attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
 			)
+			// A denied run is still THIS agent's run — stamp the trace-level identity
+			// tag so it shows up in the agent's run list (never mis-attributed).
+			setAgentIdentityTag(span, cfg)
 			return
 		}
 
@@ -193,6 +238,12 @@ func buildHandler(
 			attribute.Int("http.status_code", rw.code),
 			attribute.Int64("latency_ms", latencyMS),
 		)
+		// Trace-level identity tag `agent:<ns>/<name>` (Langfuse promotes
+		// langfuse.trace.tags to the trace's tags): the UNAMBIGUOUS per-agent filter
+		// key the BFF's per-agent run list uses. Additive — the existing
+		// agent.name/version/route attributes above are untouched, so RecentRuns /
+		// CostUsage / the run inspector keep working exactly as before.
+		setAgentIdentityTag(span, cfg)
 		// prompt.version (M9): the resolved git-pointer prompt identifier, so
 		// Langfuse can display which prompt this run used. DISPLAY ONLY — git stays
 		// the source of truth. Stamped only when the agent has a promptRef (a

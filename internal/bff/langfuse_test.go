@@ -18,6 +18,7 @@ package bff
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -160,4 +161,134 @@ func TestLangfuseUpstreamErrorSurfaces(t *testing.T) {
 	_, err := a.RecentRuns(context.Background(), 5)
 	require.Error(t, err, "an upstream 401 must surface, not be swallowed")
 	assert.Contains(t, err.Error(), "401")
+}
+
+// fakeLangfuseTagged spins a stub Langfuse public API that FILTERS /api/public/
+// traces by the `tags` query param and returns each trace WITH its tags — so a
+// test can prove both the server-side tag filter and the adapter's defensive
+// post-fetch tag check. all is the full trace corpus (each with its own tags);
+// only traces carrying every requested tag are returned. It records the last
+// request so the query can be asserted.
+func fakeLangfuseTagged(t *testing.T, all []lfTrace) (*httptest.Server, *recordedRequest) {
+	t.Helper()
+	rec := &recordedRequest{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.path = r.URL.Path
+		rec.query = r.URL.RawQuery
+		rec.user, rec.pass, rec.hadAuth = r.BasicAuth()
+		if r.URL.Path != "/api/public/traces" {
+			http.NotFound(w, r)
+			return
+		}
+		wantTags := r.URL.Query()["tags"]
+		out := []lfTrace{}
+		for _, tr := range all {
+			if traceHasAllTags(tr, wantTags) {
+				out = append(out, tr)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lfTracesResponse{Data: out})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+func traceHasAllTags(tr lfTrace, want []string) bool {
+	for _, w := range want {
+		if !traceHasTag(tr, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestLangfuseRunsForAgentFiltersCrossNamespace is the cross-namespace correctness
+// property: two agents share the bare NAME "foo" in namespaces default and other;
+// RunsForAgent(default, foo) must return ONLY default/foo's runs, never other/foo's.
+func TestLangfuseRunsForAgentFiltersCrossNamespace(t *testing.T) {
+	corpus := []lfTrace{
+		{ID: "d1", Name: "run", Timestamp: "2026-07-01T00:02:00Z", TotalCost: 0.5, Tags: []string{"agent:default/foo"}},
+		{ID: "d2", Name: "run", Timestamp: "2026-07-01T00:01:00Z", TotalCost: 0.3, Tags: []string{"agent:default/foo"}},
+		{ID: "o1", Name: "run", Timestamp: "2026-07-01T00:03:00Z", TotalCost: 9.9, Tags: []string{"agent:other/foo"}},
+	}
+	srv, rec := fakeLangfuseTagged(t, corpus)
+	a := newTestLangfuse(t, srv.URL)
+
+	runs, err := a.RunsForAgent(context.Background(), "default", "foo", 20)
+	require.NoError(t, err)
+
+	// Only default/foo's two runs — other/foo's run (o1) is excluded.
+	require.Len(t, runs, 2)
+	ids := []string{runs[0].TraceID, runs[1].TraceID}
+	assert.ElementsMatch(t, []string{"d1", "d2"}, ids)
+	for _, r := range runs {
+		assert.NotEqual(t, "o1", r.TraceID, "a same-named agent in another namespace leaked into the run list")
+	}
+
+	// The adapter filtered on the Langfuse-native tag AND sent server-side creds.
+	assert.Contains(t, rec.query, "tags=agent%3Adefault%2Ffoo")
+	assert.Contains(t, rec.query, "orderBy=timestamp.desc")
+	assert.True(t, rec.hadAuth)
+	assert.Equal(t, "/api/public/traces", rec.path)
+}
+
+// TestLangfuseRunsForAgentDefensiveTagCheck proves the post-fetch tag re-check: even
+// if the UPSTREAM ignores the tags filter and returns a foreign agent's trace, the
+// adapter drops it — cross-namespace correctness cannot depend on the server.
+func TestLangfuseRunsForAgentDefensiveTagCheck(t *testing.T) {
+	// A server that returns EVERYTHING regardless of the tags query (loose filter).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/public/traces" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(lfTracesResponse{Data: []lfTrace{
+			{ID: "mine", Tags: []string{"agent:default/foo"}},
+			{ID: "foreign", Tags: []string{"agent:other/foo"}},
+			{ID: "untagged"}, // no tags at all
+		}})
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	runs, err := a.RunsForAgent(context.Background(), "default", "foo", 20)
+	require.NoError(t, err)
+	require.Len(t, runs, 1, "only the positively-confirmed trace survives the defensive check")
+	assert.Equal(t, "mine", runs[0].TraceID)
+}
+
+// TestLangfuseRunsForAgentEmptyIsNonNil: an agent with no runs → [] not nil.
+func TestLangfuseRunsForAgentEmptyIsNonNil(t *testing.T) {
+	srv, _ := fakeLangfuseTagged(t, []lfTrace{})
+	a := newTestLangfuse(t, srv.URL)
+
+	runs, err := a.RunsForAgent(context.Background(), "default", "foo", 20)
+	require.NoError(t, err)
+	assert.NotNil(t, runs)
+	assert.Empty(t, runs)
+}
+
+// TestLangfuseRunsForAgentUpstreamErrorSurfaces: an upstream failure surfaces (the
+// handler serves 502), never swallowed as an empty list.
+func TestLangfuseRunsForAgentUpstreamErrorSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.RunsForAgent(context.Background(), "default", "foo", 20)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+// TestLangfuseRunsForAgentEmptyNameErrors: a blank agent name is a programming
+// error, not a silent all-agents fetch.
+func TestLangfuseRunsForAgentEmptyNameErrors(t *testing.T) {
+	srv, _ := fakeLangfuseTagged(t, nil)
+	a := newTestLangfuse(t, srv.URL)
+	_, err := a.RunsForAgent(context.Background(), "default", "  ", 20)
+	assert.Error(t, err)
 }

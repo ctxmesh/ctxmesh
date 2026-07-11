@@ -431,3 +431,153 @@ func TestParseTailLines(t *testing.T) {
 	assert.Equal(t, int64(100), *parseTailLines("100"))
 	assert.Equal(t, int64(maxLogTailLines), *parseTailLines("999999"))
 }
+
+// --- Per-agent runs (GET /api/agents/{ns}/{name}/runs, m15.9) ----------------
+
+// getRuns drives GET /api/agents/{ns}/{name}/runs against a server and returns the
+// recorder. It sends a bearer token so the caller-scoped Get runs as a caller.
+func getRuns(t *testing.T, s *Server, ns, name, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	u := "/api/agents/" + ns + "/" + name + "/runs"
+	if query != "" {
+		u += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// agentFixture is a minimal AgentDeployment the caller can Get for the runs route.
+func agentFixture(ns, name string) *agentsv1alpha1.AgentDeployment {
+	return &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+}
+
+// TestAgentRunsCrossNamespaceIsolation is the cross-namespace correctness property
+// AT THE HANDLER: default/foo and other/foo both exist; the runs of default/foo must
+// contain ONLY default/foo's runs, never other/foo's — even though they share a name.
+func TestAgentRunsCrossNamespaceIsolation(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(agentFixture("default", "foo"), agentFixture("other", "foo")).Build()
+	lf := fakeLangfuseAdapter{agentRuns: map[string][]RunSummary{
+		"default/foo": {{TraceID: "d1", Name: "run"}, {TraceID: "d2", Name: "run"}},
+		"other/foo":   {{TraceID: "o1", Name: "run"}},
+	}}
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c}, Adapters{Langfuse: lf})
+
+	rec := getRuns(t, s, "default", "foo", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentRunsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "default", got.Namespace)
+	assert.Equal(t, "foo", got.Name)
+	require.Len(t, got.Runs, 2)
+	ids := []string{got.Runs[0].TraceID, got.Runs[1].TraceID}
+	assert.ElementsMatch(t, []string{"d1", "d2"}, ids)
+	for _, r := range got.Runs {
+		assert.NotEqual(t, "o1", r.TraceID, "other/foo's run leaked into default/foo's list")
+	}
+
+	// The sibling agent's list is its OWN single run — proving the isolation is real.
+	rec = getRuns(t, s, "other", "foo", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Runs, 1)
+	assert.Equal(t, "o1", got.Runs[0].TraceID)
+}
+
+// TestAgentRunsLimitHonored proves ?limit bounds the returned list. It uses a
+// DIFFERENT agent name than the other cases to prove the fixture/handler are not
+// coupled to a single name.
+func TestAgentRunsLimitHonored(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "bar")).Build()
+	lf := fakeLangfuseAdapter{agentRuns: map[string][]RunSummary{
+		"default/bar": {{TraceID: "a"}, {TraceID: "b"}, {TraceID: "c"}},
+	}}
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c}, Adapters{Langfuse: lf})
+
+	rec := getRuns(t, s, "default", "bar", "limit=2")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got AgentRunsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Runs, 2, "the ?limit must bound the run list")
+}
+
+// TestAgentRunsEmptyIsNonNullJSON: an agent with no runs serializes as [] not null.
+func TestAgentRunsEmptyIsNonNullJSON(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c},
+		Adapters{Langfuse: fakeLangfuseAdapter{agentRuns: map[string][]RunSummary{}}})
+
+	rec := getRuns(t, s, "default", "foo", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"runs":[]`, "runs must be [] not null on the wire")
+}
+
+// TestAgentRunsForbiddenAgentIs403: a caller who cannot `get` the agent gets an
+// honest 403 — and no runs are fetched (the existence gate runs FIRST).
+func TestAgentRunsForbiddenAgentIs403(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"}, key.Name, errors.New("viewer denied"))
+			},
+		}).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c},
+		Adapters{Langfuse: fakeLangfuseAdapter{agentRuns: map[string][]RunSummary{
+			"default/foo": {{TraceID: "should-not-be-returned"}},
+		}}})
+
+	rec := getRuns(t, s, "default", "foo", "")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "should-not-be-returned",
+		"no run metadata may be returned for an agent the caller cannot read")
+}
+
+// TestAgentRunsNotFoundIs404: a missing agent surfaces as 404 (not an empty 200).
+func TestAgentRunsNotFoundIs404(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c},
+		Adapters{Langfuse: fakeLangfuseAdapter{}})
+
+	rec := getRuns(t, s, "default", "ghost", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestAgentRunsUpstreamErrorIs502: a Langfuse failure degrades to 502, never a 500.
+func TestAgentRunsUpstreamErrorIs502(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c},
+		Adapters{Langfuse: fakeLangfuseAdapter{agentRunsErr: assert.AnError}})
+
+	rec := getRuns(t, s, "default", "foo", "")
+	assert.Equal(t, http.StatusBadGateway, rec.Code, "an upstream Langfuse failure is a 502, never a 500")
+}
+
+// TestAgentRunsLangfuseAbsentIs501: when the Langfuse adapter is not wired the route
+// serves an honest 501 (the m14.8 degrade), never a 500 or a fabricated empty list.
+func TestAgentRunsLangfuseAbsentIs501(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c}, Adapters{}) // no Langfuse
+
+	rec := getRuns(t, s, "default", "foo", "")
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+// TestAgentRunsAnonIs401: no bearer token → 401 before any K8s or Langfuse call.
+func TestAgentRunsAnonIs401(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
+	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c, requireToken: true},
+		Adapters{Langfuse: fakeLangfuseAdapter{}})
+
+	rec := httptest.NewRecorder()
+	// No Authorization header.
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/agents/default/foo/runs", nil))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
