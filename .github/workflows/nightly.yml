@@ -204,3 +204,17 @@ jobs:
         # same fresh-cluster helm-install path + nvm Playwright toolchain as
         # m12-ui, minting developer/operator/viewer persona tokens at runtime.
         run: make -C agent-brain/harness tier2 SLICE=m13-ui
+      - name: M14 first-agent aha e2e (connect → describe → create → run → tool span)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The aha (§28-30): connect a provider → add a keyed BYO-MCP (auth both
+        # directions) → describe an agent → generate/review/create → land on the
+        # agent page → watch the SSE log tail come alive → Run → the native run
+        # inspector shows the tool span with tokens/cost. The slice builds +
+        # kind-loads bff + managed-agent + the fixture MCP + the tool-call-mock,
+        # deploys them, seeds an apiBase ModelRoute (the m14.12b seam) so the run
+        # emits a DETERMINISTIC tool span with no real key (UI_E2E_TOOLMOCK=1).
+        # MUST run on this FRESH CI cluster (its ModelRoute CRD has apiBase; the
+        # persistent dev cluster's predates it) — the fresh helm install gives the
+        # current CRD. Runs LAST (heaviest: 4 images + 2 mock upstreams + browser).
+        run: make -C agent-brain/harness tier2 SLICE=m14-ui
