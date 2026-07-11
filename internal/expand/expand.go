@@ -42,6 +42,15 @@ import (
 // APIVersion is the group/version stamped on every expanded CRD manifest.
 const APIVersion = "agents.ctxmesh.ai/v1alpha1"
 
+// AnnotationSourceSpec is the annotation key under which the BFF persists the
+// exact submitted simplified agent spec (canonical JSON) on the primary
+// AgentDeployment at create/update through the console (ADR 0017). It is the
+// edit source of truth: a later PUT re-expands from it. Agents created outside
+// the console (kubectl) won't carry it → they are "managed outside the UI".
+// It is exported here — beside APIVersion, the annotation-convention home — so
+// the create path, the PUT path (m15.3), and the detail DTO share one key.
+const AnnotationSourceSpec = "agents.ctxmesh.ai/source-spec"
+
 // ── Managed-runtime configuration (ADR 0013) ──────────────────────────────────
 //
 // The managed runtime resolves a `runtime: managed` agent to a stock,
