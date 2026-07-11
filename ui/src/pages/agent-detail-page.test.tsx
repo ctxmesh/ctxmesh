@@ -44,6 +44,7 @@ interface DetailOpts {
   scalingCreateResult?: { ok: boolean; status?: number; body?: unknown };
   scalingUpdateResult?: { ok: boolean; status?: number; body?: unknown };
   scalingDeleteResult?: { ok: boolean; status?: number; body?: unknown };
+  detectors?: { name: string; pattern: string }[];
 }
 
 const DEFAULT_DETAIL = {
@@ -190,6 +191,13 @@ function installFetch(opts: DetailOpts = {}) {
       if (url === "/api/agentscalingpolicies" && method === "POST") {
         const r = opts.scalingCreateResult ?? { ok: true, body: { name: "sp-new", namespace: "prod", agentRef: "billing", minReplicas: 0, maxReplicas: 3, ready: false } };
         return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 201 : 400));
+      }
+      // m18.14: redaction policy get/put
+      if (url.match(/\/tracepolicy$/) && method === "GET") {
+        return j({ customDetectors: opts.detectors ?? [] });
+      }
+      if (url.match(/\/tracepolicy$/) && method === "PUT") {
+        return j({ customDetectors: opts.detectors ?? [] });
       }
 
       return j({}, false, 404);
@@ -839,5 +847,29 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     expect(screen.queryByTestId("scaling-attach")).toBeNull();
     expect(screen.queryByTestId("scaling-detach-sp-billing")).toBeNull();
     expect(screen.queryByTestId("scaling-edit-sp-billing")).toBeNull();
+  });
+
+  it("redaction panel loads detectors and can add + save (m18.14)", async () => {
+    const calls = installFetch({ detectors: [{ name: "badge", pattern: "BADGE-[0-9]+" }] });
+    renderAt();
+    fireEvent.click(await screen.findByTestId("tab-redaction"));
+    await screen.findByTestId("redaction-panel");
+    expect(screen.getByTestId("detector-0")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("add-detector"));
+    fireEvent.click(screen.getByTestId("save-redaction"));
+    await waitFor(() => {
+      const put = calls.find((c) => /\/tracepolicy$/.test(c.url) && c.method === "PUT");
+      expect(put).toBeDefined();
+    });
+  });
+
+  it("redaction panel is read-only for a viewer (no add/save)", async () => {
+    installFetch({ caps: { agentdeployments: { update: false } }, detectors: [] });
+    renderAt();
+    fireEvent.click(await screen.findByTestId("tab-redaction"));
+    await screen.findByTestId("redaction-panel");
+    expect(screen.queryByTestId("add-detector")).toBeNull();
+    expect(screen.queryByTestId("save-redaction")).toBeNull();
   });
 });

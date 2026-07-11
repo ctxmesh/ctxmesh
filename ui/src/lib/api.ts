@@ -38,6 +38,16 @@ export interface AgentSummary {
   managedOutsideUI?: boolean;
 }
 
+// CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):
+// an agent's per-agent custom redaction rules (name + RE2 pattern). No secrets.
+export interface CustomDetector {
+  name: string;
+  pattern: string;
+}
+export interface TracePolicyResponse {
+  customDetectors: CustomDetector[];
+}
+
 // AgentListResponse mirrors the BFF's list-contract DTO (internal/bff/dto.go).
 // The v2 console reads `items` + `nextCursor` (NOT the legacy `agents` key the
 // M12 surfaces used): `items` is one page window, `nextCursor` is the opaque K8s
@@ -1940,6 +1950,40 @@ export const api = {
       );
     }
     return (await res.json()) as UpdateAgentResponse;
+  },
+
+  // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =
+  // viewer-can't-read; 404 = no such agent — both typed ApiError.
+  getTracePolicy: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<TracePolicyResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/tracepolicy`,
+      signal,
+    ),
+
+  // updateTracePolicy replaces the agent's custom redaction detectors. A 403 =
+  // viewer-can't-update; a 422 = an invalid detector name/regex (CRD validation).
+  updateTracePolicy: async (
+    ns: string,
+    name: string,
+    body: TracePolicyResponse,
+    signal?: AbortSignal,
+  ): Promise<TracePolicyResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/tracepolicy`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as TracePolicyResponse;
   },
 
   // deleteAgent removes an agent via DELETE /api/agents/{ns}/{name} (m15.11).
