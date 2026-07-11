@@ -271,6 +271,75 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "route with resolved binding must be Ready=True")
 }
 
+// TestModelRoute_GatewaySecretSync verifies m18.2b (ADR 0018): a provider Secret
+// connected in a NON-gateway namespace is mirrored into the gateway namespace (so
+// the gateway pod's secretKeyRef can mount it), and the mirror is GC'd when the
+// route that referenced it is deleted.
+func TestModelRoute_GatewaySecretSync(t *testing.T) {
+	ensureNS(t, gwNS)
+	ensureNS(t, "default")
+
+	const (
+		routeName   = "mr-sync-test"
+		bindingName = "sync-binding"
+		secretName  = "sync-secret"
+		srcNS       = "default" // NOT the gateway namespace
+		apiKey      = "sk-sync-test-value"
+	)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: srcNS},
+		StringData: map[string]string{"api-key": apiKey},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, secret))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
+
+	binding := &agentsv1alpha1.SecretBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: srcNS},
+		Spec: agentsv1alpha1.SecretBindingSpec{
+			Backend:   "kubernetes",
+			SecretRef: agentsv1alpha1.SecretKeyRef{Name: secretName, Key: "api-key"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, binding))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
+
+	route := &agentsv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: srcNS},
+		Spec: agentsv1alpha1.ModelRouteSpec{
+			Providers: []agentsv1alpha1.ProviderRef{{
+				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: bindingName,
+			}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, route))
+	routeDeleted := false
+	t.Cleanup(func() {
+		if !routeDeleted {
+			_ = k8sClient.Delete(testCtx, route)
+		}
+	})
+
+	r := newMRReconciler()
+	reconcileMR(t, r, srcNS, routeName)
+
+	// The provider Secret is mirrored into the gateway namespace with the same data.
+	var mirror corev1.Secret
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: secretName, Namespace: gwNS}, &mirror),
+		"the provider Secret must be mirrored into the gateway namespace")
+	assert.Equal(t, apiKey, string(mirror.Data["api-key"]), "the mirror carries the same key data")
+	assert.Equal(t, gatewaySyncValue, mirror.Labels[gatewaySyncLabel], "the mirror is labelled for GC")
+
+	// GC: deleting the route removes the now-unreferenced mirror on the next reconcile.
+	require.NoError(t, k8sClient.Delete(testCtx, route))
+	routeDeleted = true
+	reconcileMR(t, r, srcNS, routeName)
+
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: secretName, Namespace: gwNS}, &corev1.Secret{})
+	assert.True(t, apierrors.IsNotFound(err), "the mirror must be GC'd when no route references it")
+}
+
 // TestModelRoute_MissingSecret_RouteExcluded verifies the failure path: a route
 // whose SecretBinding references a non-existent Secret must receive Ready=False
 // with reason SecretUnresolved, and must NOT appear in the gateway ConfigMap.
