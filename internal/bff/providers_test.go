@@ -283,13 +283,16 @@ func TestConnectViewerForbiddenIs403(t *testing.T) {
 	assert.NotEmpty(t, errBody.Error)
 }
 
-// TestConnectReconnectSameProviderIs409 proves re-connecting the same provider
-// (deterministic name) collides on the existing Secret → a clean 409, never a
-// silent overwrite or a 500 (documented idempotency).
-func TestConnectReconnectSameProviderIs409(t *testing.T) {
+// TestConnectReconnectRotatesNotConflict proves re-connecting the same provider
+// UPSERTS (ADR 0018): the existing Secret is updated in place — the stored key is
+// rotated to the newly pasted value — and the connect SUCCEEDS, never a 409.
+func TestConnectReconnectRotatesNotConflict(t *testing.T) {
 	prov := fakeProvider(t, "claude-sonnet-4-6")
-	// Pre-seed the Secret so the create collides.
-	existing := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"}}
+	// Pre-seed the Secret with an OLD key so we can prove the reconnect rotates it.
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "prod"},
+		Data:       map[string][]byte{secretKeyAPIKey: []byte("sk-OLD-key-rotated-away")},
+	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
 	s, _, _ := newConnectServer(t, c)
 
@@ -299,7 +302,14 @@ func TestConnectReconnectSameProviderIs409(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusConflict, rec.Code, "re-connecting an existing provider is a clean 409")
+	require.Equal(t, http.StatusCreated, rec.Code, "re-connecting an existing provider upserts (rotates), never 409")
+
+	// The stored key was rotated to the newly pasted value — the old key is gone.
+	var got corev1.Secret
+	require.NoError(t, c.Get(context.Background(),
+		client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &got))
+	assert.Equal(t, theTestKey, string(got.Data[secretKeyAPIKey]), "reconnect rotates the stored key")
+	assert.NotContains(t, string(got.Data[secretKeyAPIKey]), "OLD", "the old key must be overwritten")
 }
 
 // TestConnectMissingFieldsAre400 proves an empty provider or apiKey is a 400
