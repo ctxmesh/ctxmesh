@@ -1,5 +1,7 @@
 import * as React from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+
+import { UsedBySection } from "@/components/used-by-section";
 import { KeyRound, Pencil, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -229,6 +231,14 @@ function SecretBindingDetailContent({
           reference (which Secret, which key).
         </p>
       </div>
+
+      {/* Reverse-lookup: the ModelRoutes whose providers reference this binding. */}
+      <UsedBySection
+        kind="secretbinding"
+        name={detail.name}
+        namespace={detail.namespace}
+        title="Used by model routes"
+      />
 
       {/* Edit wizard */}
       <DetailDrawer

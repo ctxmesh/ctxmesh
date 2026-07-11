@@ -97,6 +97,10 @@ export interface AgentDetailResponse {
   image: string;
   executionModel: string;
   role: string;
+  // promptRef / modelRoute — the composed resources, surfaced so the detail page
+  // can link to them (the used-by graph, m18.9). Empty when unset.
+  promptRef: string;
+  modelRoute: string;
   scaling: AgentScaling;
   phase: string;
   ready: boolean;
@@ -1376,6 +1380,17 @@ export interface ModelRouteListResponse {
   nextCursor: string;
 }
 
+// UsedByRef / UsedByResponse mirror the m18.8 reverse-lookup DTO (GET /api/usedby):
+// the resources that reference the queried object. items is non-nil ([] not null).
+export interface UsedByRef {
+  kind: string;
+  name: string;
+  namespace: string;
+}
+export interface UsedByResponse {
+  items: UsedByRef[];
+}
+
 export interface ModelRouteCreateRequest {
   name: string;
   namespace?: string;
@@ -1954,6 +1969,22 @@ export const api = {
   agentReferences: (ns: string, name: string, signal?: AbortSignal) =>
     getJSON<AgentReferencesResponse>(
       `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/references`,
+      signal,
+    ),
+
+  // usedBy reads the reverse-lookup (m18.8): which resources reference the given
+  // object. kind = "modelroute" | "promptversion" (→ referencing agents) or
+  // "secretbinding" (→ referencing model routes). Powers the "Used by" sections.
+  usedBy: (
+    kind: "modelroute" | "promptversion" | "secretbinding",
+    name: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ) =>
+    getJSON<UsedByResponse>(
+      `/api/usedby?kind=${kind}&name=${encodeURIComponent(name)}${
+        namespace ? `&namespace=${encodeURIComponent(namespace)}` : ""
+      }`,
       signal,
     ),
 

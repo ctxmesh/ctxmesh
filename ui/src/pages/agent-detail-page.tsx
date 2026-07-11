@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Boxes,
@@ -342,6 +342,34 @@ function AgentHeader({
         )}
         {detail.executionModel && <HeaderKV k="Execution" v={detail.executionModel} />}
         {detail.role && <HeaderKV k="Role" v={detail.role} />}
+        {detail.modelRoute && (
+          <HeaderKV
+            k="Model route"
+            v={
+              <Link
+                to={`/routes/${encodeURIComponent(detail.namespace)}/${encodeURIComponent(detail.modelRoute)}`}
+                className="truncate text-primary hover:underline"
+                data-testid="agent-modelroute-link"
+              >
+                {detail.modelRoute}
+              </Link>
+            }
+          />
+        )}
+        {detail.promptRef && (
+          <HeaderKV
+            k="Prompt"
+            v={
+              <Link
+                to="/prompts"
+                className="truncate text-primary hover:underline"
+                data-testid="agent-promptref-link"
+              >
+                {detail.promptRef}
+              </Link>
+            }
+          />
+        )}
         <HeaderKV k="Scaling" v={`${detail.scaling.min} – ${detail.scaling.max}`} />
         {detail.latestVersion && (
           <HeaderKV k="Latest version" v={<span className="font-mono text-xs">{detail.latestVersion}</span>} />
