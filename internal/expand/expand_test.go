@@ -108,6 +108,34 @@ prompt:
 	}
 }
 
+// TestExpandRoleAllowedCallers proves the within-registry A2A fields round-trip:
+// role + allowedCallers on the agent.yaml land on the AgentDeployment spec (m18.3).
+func TestExpandRoleAllowedCallers(t *testing.T) {
+	in := []byte(`name: worker-agent
+image: ghcr.io/ctxmesh/worker:v1
+role: reviewer
+allowedCallers:
+  - orchestrator-agent
+  - auditor-agent
+`)
+	got, err := Expand(in)
+	if err != nil {
+		t.Fatalf("Expand: unexpected error: %v", err)
+	}
+	out := string(got)
+	for _, want := range []string{
+		"kind: AgentDeployment",
+		"role: reviewer",
+		"allowedCallers:",
+		"orchestrator-agent",
+		"auditor-agent",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expanded output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
 // TestExpandManagedRuntime exercises the managed-runtime branch (ADR 0013)
 // through the public Expand() the BFF calls: image resolves when omitted,
 // systemPrompt → SYSTEM_PROMPT env, tools → MCPToolBinding docs; the custom path

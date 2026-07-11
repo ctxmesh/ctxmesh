@@ -215,6 +215,8 @@ var knownFields = map[string]bool{
 	"runtime":        true,
 	"systemPrompt":   true,
 	"tools":          true,
+	"role":           true,
+	"allowedCallers": true,
 }
 
 // futureField describes a top-level field not yet supported, with the milestone
@@ -254,6 +256,12 @@ type agentYAML struct {
 	// Tools is the list of tool catalog names to bind (each → one MCPToolBinding,
 	// the same binding path a custom agent uses). Managed runtime only.
 	Tools []string `yaml:"tools"`
+	// Role is the agent's within-registry A2A role (orchestrator/worker/reviewer/
+	// custom); empty leaves it unset. Maps to AgentDeployment.spec.role.
+	Role string `yaml:"role"`
+	// AllowedCallers restricts which agents may call this one (per-agent allowlist);
+	// empty = registry-default. Maps to AgentDeployment.spec.allowedCallers.
+	AllowedCallers []string `yaml:"allowedCallers"`
 }
 
 // budgetYAML holds optional cost-governance caps from the agent.yaml budget block.
@@ -421,6 +429,8 @@ type specOut struct {
 	Budget         *budgetOut    `yaml:"budget,omitempty"`
 	EvalSuiteRef   string        `yaml:"evalSuiteRef,omitempty"`
 	PromptRef      string        `yaml:"promptRef,omitempty"`
+	Role           string        `yaml:"role,omitempty"`
+	AllowedCallers []string      `yaml:"allowedCallers,omitempty"`
 }
 
 // budgetOut mirrors BudgetSpec for YAML marshalling.
@@ -737,6 +747,11 @@ func buildOutput(ay *agentYAML) *agentDeploymentOut {
 	if ay.Prompt != nil {
 		spec.PromptRef = ay.Prompt.Name
 	}
+
+	// role + allowedCallers → the within-registry A2A fields (both optional; empty
+	// leaves them unset so the registry default applies).
+	spec.Role = ay.Role
+	spec.AllowedCallers = ay.AllowedCallers
 
 	return &agentDeploymentOut{
 		APIVersion: APIVersion,
