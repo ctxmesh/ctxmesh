@@ -82,6 +82,13 @@ type Server struct {
 	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
 	mcpRequireApproval bool
 
+	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
+	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
+	// PKCE code_verifier + the registering caller's token — NEVER surfaced to the
+	// browser. Always non-nil (initialized in NewServer) so the OAuth register +
+	// callback handlers can use it whenever MCP is enabled.
+	oauthFlows *pendingOAuthStore
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -151,6 +158,7 @@ func NewServer(opts Options) *Server {
 		platformGenerationModels: opts.PlatformGenerationModels,
 		mcpEnabled:               opts.MCPEnabled,
 		mcpRequireApproval:       opts.MCPRequireApproval,
+		oauthFlows:               newPendingOAuthStore(),
 		log:                      opts.Log,
 	}
 	if s.version == "" {
@@ -460,6 +468,26 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	api.Handle("/api/", s.requireAuth(authed))
+
+	// MCP OAuth 2.1 callback (m17.2, ADR 0016). Registered on the `api` mux
+	// DIRECTLY (a more specific pattern than "/api/"), so it is NOT behind
+	// requireAuth's bearer gate — a top-level browser redirect from the
+	// authorization server carries no Authorization header. Its authentication is
+	// the unguessable, single-use `state` (CSRF token) that resolves the pending
+	// flow; the flow itself carries the registering user's token, so the resulting
+	// K8s writes run CALLER-SCOPED (ADR 0011). The BFF exchanges the code for tokens
+	// SERVER-SIDE and stores them in a Secret — tokens NEVER reach the browser. It
+	// is gated by the mcpEnabled kill-switch (like the other MCP routes) so a
+	// hardened (MCP-disabled) install serves 404 (the route is simply absent and
+	// falls through to the SPA). callerClients is required to complete the K8s
+	// writes; absent → honest 501.
+	if s.mcpEnabled {
+		if s.callerClients != nil {
+			api.HandleFunc("GET /api/mcp/oauth/callback", s.handleMCPOAuthCallback)
+		} else {
+			api.Handle("GET /api/mcp/oauth/callback", notImplemented("caller-scoped MCP OAuth callback"))
+		}
+	}
 
 	root := http.NewServeMux()
 	root.Handle("/api/", api)

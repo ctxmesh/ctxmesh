@@ -612,8 +612,60 @@ type RegisterMCPServerRequest struct {
 	// probe, stored in a Secret + SecretBinding, and NEVER returned or logged
 	// (ADR 0016). Omit for an unauthenticated server.
 	APIKey string `json:"apiKey"`
+	// Auth optionally selects the OAuth 2.1 tier (m17.2, ADR 0016). When
+	// Auth.Type == "oauth" the register does NOT probe/create immediately; instead
+	// it starts an Authorization-Code + PKCE flow and returns an authorization URL
+	// for the SPA to redirect to (RegisterMCPServerResponse.OAuth). The tokens are
+	// obtained + stored SERVER-SIDE at the callback — they never cross to the
+	// browser. Omit for an open or key-authenticated server.
+	Auth *MCPAuthRequest `json:"auth,omitempty"`
 	// Namespace scopes the created objects; empty → the default namespace.
 	Namespace string `json:"namespace"`
+}
+
+// MCPAuthRequest is the OAuth 2.1 client configuration on a register request
+// (auth.type == "oauth"). It carries NO secret material — only the OAuth
+// endpoints, the PUBLIC client id, the requested scope, and the redirect URI (the
+// BFF's own callback, which the SPA passes as the absolute URL it was served
+// from). The PKCE code_verifier is generated + kept SERVER-SIDE by the BFF; it is
+// never part of this request or any response.
+type MCPAuthRequest struct {
+	// Type selects the auth tier; "oauth" starts the Authorization-Code + PKCE flow.
+	Type string `json:"type"`
+	// AuthorizationEndpoint is where the browser is redirected for consent.
+	AuthorizationEndpoint string `json:"authorizationEndpoint"`
+	// TokenEndpoint is where the BFF exchanges code→tokens + refreshes (server-side).
+	TokenEndpoint string `json:"tokenEndpoint"`
+	// ClientID is the PUBLIC OAuth client id (PKCE replaces a client secret).
+	ClientID string `json:"clientId"`
+	// Scope is the requested OAuth scope string (space-delimited); optional.
+	Scope string `json:"scope"`
+	// RedirectURI is the callback URL the authorization server redirects back to.
+	// It must resolve to the BFF's GET /api/mcp/oauth/callback route.
+	RedirectURI string `json:"redirectUri"`
+}
+
+// OAuthPendingResponse is returned by POST /api/mcpservers (HTTP 202) when the
+// registered server uses OAuth: the SPA must redirect the browser to
+// AuthorizationURL to obtain consent. State is the opaque anti-CSRF handle the
+// callback validates. DELIBERATELY carries NO token, NO code_verifier — only the
+// authorization URL (which itself contains only the public code_challenge, client
+// id, redirect, and state) and the state handle. The tokens are obtained SERVER-
+// SIDE at the callback and stored in a Secret; they never reach the browser.
+type OAuthPendingResponse struct {
+	// Status is the flow phase — always "authorization_required" here so the SPA
+	// keys off a stable field, not the HTTP status code alone.
+	Status string `json:"status"`
+	// AuthorizationURL is the URL the SPA redirects the browser to for consent. It
+	// contains only public parameters (response_type, client_id, redirect_uri,
+	// state, code_challenge, code_challenge_method, scope).
+	AuthorizationURL string `json:"authorizationURL"`
+	// State is the opaque CSRF handle echoed back to the callback. It is a lookup
+	// key for the SERVER-SIDE pending flow — it reveals nothing secret.
+	State string `json:"state"`
+	// Server echoes the target server name/namespace/url so the SPA can show what
+	// is being connected while the browser is at the consent screen. No secret.
+	Server MCPServerSummary `json:"server"`
 }
 
 // MCPServerSummary is the flat projection of one registered MCP server. It
@@ -636,6 +688,10 @@ type MCPServerSummary struct {
 	// SecretName references the Secret holding the key — a NAME only, never the
 	// key material. Empty when the server was registered without a key.
 	SecretName string `json:"secretName"`
+	// AuthType is the auth tier: "" / "key" for the bearer-key or open server, or
+	// "oauth" for an OAuth 2.1 server (m17.2). Non-secret — it only names the
+	// scheme, never any credential. Omitted on the wire when empty.
+	AuthType string `json:"authType,omitempty"`
 }
 
 // RegisterMCPServerResponse is returned by POST /api/mcpservers on success: the
