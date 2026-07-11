@@ -631,6 +631,120 @@ export interface ToolListResponse {
   tools: CatalogTool[];
 }
 
+// --- MemoryBinding DTOs (m17.6) -----------------------------------------------
+// A MemoryBinding attaches a memory store (scope) to an AgentDeployment so the
+// agent can read/write long-term memory. The SPA never sees the raw memory data —
+// only the binding's identity + status. One agent may have at most one binding
+// per scope; the controller sets a Ready condition on reconciliation.
+
+export interface MemoryBindingSummary {
+  name: string;
+  namespace: string;
+  /** agentRef.name — the AgentDeployment this binding attaches to. */
+  agentRef: string;
+  /** The memory scope (e.g. "global", "user", or a custom scope name). */
+  scope: string;
+  /** backend is the memory provider (e.g. "redis", "in-cluster"). */
+  backend?: string;
+  ready: boolean;
+}
+
+export interface MemoryBindingDetail {
+  name: string;
+  namespace: string;
+  agentRef: string;
+  scope: string;
+  backend?: string;
+  ready: boolean;
+}
+
+export interface MemoryBindingListResponse {
+  items: MemoryBindingSummary[];
+  nextCursor: string;
+}
+
+export interface MemoryBindingListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface MemoryBindingCreateRequest {
+  name?: string;
+  namespace?: string;
+  /** agentRef.name — the AgentDeployment to attach to. */
+  agentRef: string;
+  scope: string;
+  backend?: string;
+}
+
+export interface MemoryBindingUpdateRequest {
+  scope?: string;
+  backend?: string;
+}
+
+// --- AgentScalingPolicy DTOs (m17.6) ------------------------------------------
+// An AgentScalingPolicy lets operators attach a custom scaling policy to an agent
+// (min/max replicas + an optional schedule). The controller validates:
+//   • max >= min (XValidation — returns 422 with the reason if violated)
+//   • schedule fields present only when mode == "scheduled" (XValidation)
+// The BFF surfaces 422 with the server's CEL message; the UI renders it in-form.
+
+export interface AgentScalingPolicySummary {
+  name: string;
+  namespace: string;
+  /** agentRef.name — the AgentDeployment this policy attaches to. */
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  /** mode: "static" (no schedule) or "scheduled" (time-based scaling). */
+  mode?: string;
+  /** schedule is a cron expression — only set when mode == "scheduled". */
+  schedule?: string;
+  ready: boolean;
+}
+
+export interface AgentScalingPolicyDetail {
+  name: string;
+  namespace: string;
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  mode?: string;
+  schedule?: string;
+  ready: boolean;
+}
+
+export interface AgentScalingPolicyListResponse {
+  items: AgentScalingPolicySummary[];
+  nextCursor: string;
+}
+
+export interface AgentScalingPolicyListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface AgentScalingPolicyCreateRequest {
+  name?: string;
+  namespace?: string;
+  /** agentRef.name — the AgentDeployment to attach to. */
+  agentRef: string;
+  minReplicas: number;
+  maxReplicas: number;
+  mode?: string;
+  /** schedule is required when mode == "scheduled". */
+  schedule?: string;
+}
+
+export interface AgentScalingPolicyUpdateRequest {
+  minReplicas?: number;
+  maxReplicas?: number;
+  mode?: string;
+  schedule?: string;
+}
+
 // --- MCPToolBinding DTOs (m17.5 / m17.10) ------------------------------------
 // An MCPToolBinding is the controller object that attaches one catalog tool to
 // one AgentDeployment. The controller reconciles it and sets a Ready condition
@@ -2010,4 +2124,172 @@ export const api = {
       `/api/mcptoolbindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
       signal,
     ),
+
+  // --- MemoryBinding CRUD (m17.6) -----------------------------------------------
+  // listMemoryBindings reads one page window of MemoryBindings. Pass namespace to
+  // scope to a namespace. Filter by agentRef client-side (the list returns all in
+  // the namespace; callers filter .items by agentRef === agentName).
+  listMemoryBindings: (
+    params?: MemoryBindingListParams,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<MemoryBindingListResponse>(`/api/memorybindings${suffix}`, signal);
+  },
+
+  memoryBindingDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<MemoryBindingDetail>(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createMemoryBinding attaches a memory scope to an agent. A 403 (viewer),
+  // 409 (already exists), or 422 (validation) surfaces via ApiError.
+  createMemoryBinding: async (
+    req: MemoryBindingCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingDetail> => {
+    const res = await apiFetch("/api/memorybindings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MemoryBindingDetail;
+  },
+
+  updateMemoryBinding: async (
+    ns: string,
+    name: string,
+    req: MemoryBindingUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<MemoryBindingDetail> => {
+    const res = await apiFetch(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as MemoryBindingDetail;
+  },
+
+  removeMemoryBinding: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/memorybindings/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete memory binding failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // --- AgentScalingPolicy CRUD (m17.6) ------------------------------------------
+  // listAgentScalingPolicies reads one page window of AgentScalingPolicies.
+  // Filter client-side by agentRef for the agent detail panel.
+  listAgentScalingPolicies: (
+    params?: AgentScalingPolicyListParams,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<AgentScalingPolicyListResponse>(`/api/agentscalingpolicies${suffix}`, signal);
+  },
+
+  agentScalingPolicyDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<AgentScalingPolicyDetail>(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createAgentScalingPolicy attaches a scaling policy to an agent. A 403
+  // (viewer-can't-create), 409 (already exists), or 422 (XValidation: max<min or
+  // schedule-without-scheduled-mode) surfaces honestly via ApiError.
+  createAgentScalingPolicy: async (
+    req: AgentScalingPolicyCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyDetail> => {
+    const res = await apiFetch("/api/agentscalingpolicies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentScalingPolicyDetail;
+  },
+
+  updateAgentScalingPolicy: async (
+    ns: string,
+    name: string,
+    req: AgentScalingPolicyUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentScalingPolicyDetail> => {
+    const res = await apiFetch(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentScalingPolicyDetail;
+  },
+
+  removeAgentScalingPolicy: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete scaling policy failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
 };
