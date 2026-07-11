@@ -347,10 +347,23 @@ func (s *Server) Handler() http.Handler {
 		// patterns (the more specific "/detail" wins), so this is additive and never
 		// shadows the embed-URL route above.
 		authed.HandleFunc("GET /api/traces/{id}/detail", s.handleTraceDetail)
+		// Feedback / scores browser (m16.4): reads Langfuse scores for one trace
+		// (GET /api/public/scores?traceId=) and returns them as the feedback panel's
+		// flat score list. Requires ?traceId; missing → 400. Langfuse absent → 501
+		// (registered by the else branch below).
+		authed.HandleFunc("GET /api/feedback", s.handleFeedback)
+		// Cost breakdown by agent (m16.5): aggregates a bounded recent window of
+		// Langfuse traces by agent:<ns>/<name> tag and returns per-agent cost/usage.
+		// ?by=agent is required; any other `by` value → 400. Requires ?by=agent;
+		// other values are explicitly rejected (honest contract). Langfuse absent →
+		// 501 (registered by the else branch below).
+		authed.HandleFunc("GET /api/cost/breakdown", s.handleCostBreakdown)
 	} else {
 		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
 		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
 		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
+		authed.Handle("GET /api/feedback", notImplemented("Langfuse feedback adapter"))
+		authed.Handle("GET /api/cost/breakdown", notImplemented("Langfuse cost breakdown adapter"))
 	}
 
 	// Remaining adapter seams for m12.6–m12.7: mounted now (discoverable) but

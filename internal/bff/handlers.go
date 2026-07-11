@@ -253,27 +253,65 @@ func parseTopologyExpandLimit(raw string) int {
 	return n
 }
 
-// handleRuns serves GET /api/runs — the dashboard's recent-runs list, sourced
-// from the Langfuse public API (server-side creds). Each run links to its trace
-// (via GET /api/traces/{id}). Only registered when the Langfuse adapter is wired
-// (otherwise the route serves 501).
+// handleRuns serves GET /api/runs — the filterable, cursor-paginated runs
+// browser (m16.3), sourced from the Langfuse public API (server-side creds).
+//
+// Supported query params:
+//
+//	?agent=ns/name   filter by agent identity tag (server-side, Langfuse tags=)
+//	?from=RFC3339    lower timestamp bound (server-side, Langfuse fromTimestamp)
+//	?to=RFC3339      upper timestamp bound (server-side, Langfuse toTimestamp)
+//	?q=string        name substring filter (CLIENT-SIDE post-fetch)
+//	?status=ok|error status filter; validated but NOT applied at list level —
+//	                  the Langfuse list API has no per-trace status field; all
+//	                  runs are returned regardless of status (honest degrade)
+//	?limit=N         page size (default 20, max 100)
+//	?cursor=TOKEN    opaque next-page token from a prior response's nextCursor
+//
+// Backward-compat: with no params the handler behaves exactly as before (recent
+// runs, limit 20, no filters) so the dashboard's existing consumption is
+// unaffected.
+//
+// Degrade honestly: Langfuse not wired → 501 (registered by server.go seam).
+// Upstream failure → 502. Bad param (malformed from/to, unknown status, bad
+// cursor) → 400 teaching error. Never a fabricated 200.
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
 	limit := defaultRunLimit
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			limit = n
+	if raw := qs.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
 		}
+		limit = n
 	}
-	runs, err := s.adapters.Langfuse.RecentRuns(r.Context(), limit)
+
+	f := RunFilter{
+		Agent:  strings.TrimSpace(qs.Get("agent")),
+		From:   strings.TrimSpace(qs.Get("from")),
+		To:     strings.TrimSpace(qs.Get("to")),
+		Status: strings.TrimSpace(qs.Get("status")),
+		Q:      strings.TrimSpace(qs.Get("q")),
+		Limit:  limit,
+		Cursor: strings.TrimSpace(qs.Get("cursor")),
+	}
+
+	page, err := s.adapters.Langfuse.FilteredRuns(r.Context(), f)
 	if err != nil {
-		s.log.Error(err, "fetch recent runs failed")
-		writeError(w, http.StatusBadGateway, "failed to fetch recent runs")
+		if errors.Is(err, ErrBadParam) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.Error(err, "fetch runs failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch runs")
 		return
 	}
-	if runs == nil {
-		runs = []RunSummary{}
+	if page.Runs == nil {
+		page.Runs = []RunSummary{}
 	}
-	writeJSON(w, http.StatusOK, RunListResponse{Runs: runs})
+	writeJSON(w, http.StatusOK, RunListResponse(page))
 }
 
 // handleCost serves GET /api/cost — the dashboard's cost/usage view. It folds
@@ -313,6 +351,67 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 		Latency: latency,
 		Scale:   scale,
 	})
+}
+
+// handleCostBreakdown serves GET /api/cost/breakdown — the cost drill-down by
+// agent (m16.5). It groups a bounded window of recent Langfuse traces by their
+// `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
+//
+// Supported query params:
+//
+//	?by=agent   the grouping axis; REQUIRED and "agent" is the ONLY supported
+//	             value. Any other `by` value (including missing/empty) → 400
+//	             (honest: don't silently accept a by you don't implement).
+//	?limit=N     page size over the agent list (default defaultRunLimit, no max)
+//	?cursor=TOKEN opaque next-page token from a prior response's nextCursor
+//
+// The response is a RECENT-WINDOW ROLLUP — the totals cover a bounded recent
+// window of traces, NOT all-time historical cost. The window matches CostUsage.
+// Empty window → {agents:[], total:{...}, nextCursor:""} 200.
+//
+// Degrades honestly: Langfuse not wired → 501 (registered by server.go seam).
+// Upstream failure → 502. Bad param (unsupported by, bad cursor) → 400.
+func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	// ?by is required and the only supported value is "agent".
+	by := strings.TrimSpace(qs.Get("by"))
+	if by != "agent" {
+		if by == "" {
+			writeError(w, http.StatusBadRequest,
+				`missing required query param: by (supported values: "agent")`)
+		} else {
+			writeError(w, http.StatusBadRequest,
+				`unsupported by value `+strconv.Quote(by)+`; supported values: "agent"`)
+		}
+		return
+	}
+
+	limit := defaultRunLimit
+	if raw := qs.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
+	cursor := strings.TrimSpace(qs.Get("cursor"))
+
+	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), limit, cursor)
+	if err != nil {
+		if errors.Is(err, ErrBadParam) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.Error(err, "cost breakdown failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch cost breakdown")
+		return
+	}
+	if resp.Agents == nil {
+		resp.Agents = []AgentCostItem{}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one
@@ -368,9 +467,43 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 		spans = []SpanSummary{}
 	}
 	writeJSON(w, http.StatusOK, TraceDetailResponse{
-		Rollup: detail.Rollup,
-		Spans:  spans,
+		Rollup:     detail.Rollup,
+		Spans:      spans,
+		RootSpanID: detail.RootSpanID,
 	})
+}
+
+// handleFeedback serves GET /api/feedback?traceId=<id> — the feedback panel's
+// quality-score list for one trace (m16.4). It reads the Langfuse scores attached to
+// the trace via the server-side Langfuse adapter and returns them as a flat
+// FeedbackScore list. Scores are operator/user quality signals (ratings, labels,
+// comments); they are metadata only and are passed through verbatim, never
+// un-redacted.
+//
+// Degrades honestly:
+//   - ?traceId missing/empty  → 400 (teaching error; the panel always supplies it).
+//   - Langfuse not wired       → 501 (registered by server.go seam; the panel shows
+//     a "not available" placeholder rather than crashing).
+//   - Upstream failure         → 502 (never a 500 on a Langfuse hiccup).
+//   - Empty scores             → {scores:[]} 200 (no scores is a valid state, not an
+//     error — new traces have no scores yet).
+func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	traceID := strings.TrimSpace(r.URL.Query().Get("traceId"))
+	if traceID == "" {
+		writeError(w, http.StatusBadRequest, "missing required query param: traceId")
+		return
+	}
+
+	scores, err := s.adapters.Langfuse.TraceScores(r.Context(), traceID)
+	if err != nil {
+		s.log.Error(err, "fetch trace scores failed", "traceID", traceID)
+		writeError(w, http.StatusBadGateway, "failed to fetch trace scores")
+		return
+	}
+	if scores == nil {
+		scores = []FeedbackScore{}
+	}
+	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
 }
 
 // notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/

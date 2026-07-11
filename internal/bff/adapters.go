@@ -136,6 +136,38 @@ type LangfuseAdapter interface {
 	// returns ErrTraceNotFound (→ the handler serves 404); any other upstream
 	// failure is a generic error (→ 502). Spans is non-nil on success.
 	TraceDetail(ctx context.Context, traceID string) (TraceDetail, error)
+
+	// FilteredRuns fetches a filtered, cursor-paginated page of runs from Langfuse
+	// (GET /api/public/traces). It is the engine behind GET /api/runs?agent=&from=
+	// &to=&q=&status=&limit=&cursor=.
+	//
+	// Server-side filters: agent (tags=), from/to (fromTimestamp/toTimestamp).
+	// Client-side filters: q (name substring), status (NOT applied — see RunFilter).
+	// Pagination: opaque cursor encodes the Langfuse page number. NextCursor="" means
+	// last page.
+	//
+	// A malformed param (bad timestamp, unknown status, bad cursor) → ErrBadParam
+	// (handler serves 400). Upstream failure → error (handler serves 502). Runs is
+	// non-nil on success.
+	FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error)
+
+	// TraceScores fetches the Langfuse scores (GET /api/public/scores?traceId=<id>)
+	// for one trace and projects them onto the flat FeedbackScore DTO list. Returns a
+	// non-nil slice on success ([] when the trace has no scores). An empty traceID is
+	// a programming error and returns an error directly; an upstream failure returns an
+	// error that the handler maps to 502.
+	TraceScores(ctx context.Context, traceID string) ([]FeedbackScore, error)
+
+	// CostBreakdown aggregates a bounded window of recent traces into a per-agent
+	// cost/usage breakdown (GET /api/cost/breakdown?by=agent). It groups traces by
+	// the `agent:<ns>/<name>` tag the launcher stamps, accumulates cost/tokens/count
+	// per agent, surfaces untagged traces as an explicit "(untagged)" bucket, sorts
+	// agents by totalCostUSD desc, and paginates the agent list via limit/cursor.
+	//
+	// HONEST BOUNDED WINDOW: the rollup is over a recent window of traces, NOT
+	// all-time historical cost. A malformed cursor returns ErrBadParam (→ 400).
+	// Upstream failure returns an error (→ 502). Agents is non-nil on success.
+	CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error)
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend

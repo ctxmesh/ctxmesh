@@ -234,3 +234,20 @@ jobs:
         # locally provable without the cluster: tier0 + tsc --noEmit + playwright
         # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies.)
         run: make -C agent-brain/harness tier2 SLICE=m15-ui
+      - name: M16 observability-depth e2e (native trace explorer + feedback + cost)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The observability-depth 🧪 (§31, spec observability-depth-ui): reuses the
+        # M14 bring-up (helm + persona RBAC + fixture MCP + tool-mock + Langfuse),
+        # invokes the aha agent to seed ≥1 traced run, then drives the deployed
+        # console headless — spec 80-trace-explorer (runs browser → row-click →
+        # the native /traces/:id span tree with nestingDepth + I/O toggle +
+        # Langfuse forensics link-out + NO embedded iframe; no status filter) and
+        # spec 81-feedback (dashboard embeds no Langfuse iframe [unconditional] +
+        # cost card → /cost; /cost per-agent breakdown with the recent-window
+        # caveat; the feedback panel on a trace). Kills the second Langfuse login.
+        # ADR 0006 shared-cluster note: full headless slice on a FRESH CI cluster;
+        # locally provable without the cluster: tier0 + tsc --noEmit + playwright
+        # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies —
+        # the Langfuse-fed legs skip when the adapter/runs are absent.)
+        run: make -C agent-brain/harness tier2 SLICE=m16-ui

@@ -1,25 +1,19 @@
+import { Link } from "react-router-dom";
+
 import { Card, CardContent } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
 import { buttonVariants } from "@/components/ui/button";
 import type { RunSummary } from "@/lib/api";
 
 // RecentRuns lists the latest traced runs (from the BFF's /api/runs, Langfuse-
-// backed). Selecting a run opens its Langfuse deep-view (the embedded iframe +
-// link-out). Token-driven throughout.
+// backed). Each row navigates to the native trace page (/traces/:id, m16.7).
+// A "View all runs" link leads to the native runs browser (/runs, m16.8).
+// Token-driven throughout; no embedded iframe (demoted in m16.11).
 
 function formatUSD(n: number): string {
   return `$${n.toFixed(4)}`;
 }
 
-export function RecentRuns({
-  runs,
-  selectedTraceId,
-  onSelect,
-}: {
-  runs: RunSummary[];
-  selectedTraceId: string | null;
-  onSelect: (traceId: string) => void;
-}) {
+export function RecentRuns({ runs }: { runs: RunSummary[] }) {
   if (runs.length === 0) {
     return (
       <Card>
@@ -31,18 +25,13 @@ export function RecentRuns({
   }
 
   return (
-    <div className="divide-y rounded-lg border bg-card">
-      {runs.map((run) => {
-        const active = run.traceId === selectedTraceId;
-        return (
-          <button
+    <div className="space-y-2">
+      <div className="divide-y rounded-lg border bg-card">
+        {runs.map((run) => (
+          <Link
             key={run.traceId}
-            type="button"
-            onClick={() => onSelect(run.traceId)}
-            className={cn(
-              "flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition-colors hover:bg-accent/60",
-              active && "bg-accent",
-            )}
+            to={`/traces/${encodeURIComponent(run.traceId)}`}
+            className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition-colors hover:bg-accent/60"
           >
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-card-foreground">
@@ -56,15 +45,24 @@ export function RecentRuns({
               <span className="font-mono">{formatUSD(run.costUSD)}</span>
               <span className="font-mono">{run.tokens} tok</span>
               <span className="font-mono">{Math.round(run.latencyMs)}ms</span>
-              {/* Visual affordance only — the whole row is the button, so this
-                  is a styled span (a nested <button> is invalid HTML). */}
+              {/* Visual affordance only — the whole row is the Link, so this
+                  is a styled span (a nested interactive element is invalid). */}
               <span className={buttonVariants({ variant: "outline", size: "sm" })}>
                 View trace
               </span>
             </div>
-          </button>
-        );
-      })}
+          </Link>
+        ))}
+      </div>
+      <div className="flex justify-end">
+        <Link
+          to="/runs"
+          data-testid="view-all-runs"
+          className={buttonVariants({ variant: "outline", size: "sm" })}
+        >
+          View all runs
+        </Link>
+      </div>
     </div>
   );
 }
