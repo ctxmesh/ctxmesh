@@ -12,8 +12,10 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  TestTube2,
   Users,
   Wrench,
+  BookOpen,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -48,6 +50,10 @@ export const RES_AGENTS = "agentdeployments";
 export const RES_ROUTES = "modelroutes";
 export const RES_SECRETS = "secretbindings";
 export const RES_REGISTRIES = "agentregistries";
+export const RES_MEMORY = "memorybindings";
+export const RES_SCALING = "agentscalingpolicies";
+export const RES_EVALSUITES = "evalsuites";
+export const RES_PROMPTVERSIONS = "promptversions";
 
 export interface NavItem {
   id: string;
@@ -147,8 +153,45 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/tools/add-mcp",
         requiresWrite: { resource: RES_REGISTRIES, verb: "create" },
       },
-      { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
-      { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
+      {
+        // MCP approval queue (m17.9). Operator-only: lists pending MCP servers
+        // and lets the operator approve/reject them. Hidden from a viewer's nav
+        // (non-operators can't approve). Gates on update agentregistries.
+        id: "mcp-approvals",
+        label: "MCP approvals",
+        icon: Wrench,
+        milestone: "M17",
+        route: "/tools/approvals",
+        requiresWrite: { resource: RES_REGISTRIES, verb: "update" },
+      },
+      {
+        // Tool catalog (m17.10). The merged catalog of curated + user-added +
+        // pending-approval tools. Readable by anyone; bind wizard is gated on
+        // create mcptoolbindings. Uses BookOpen (distinct from Wrench above).
+        id: "tool-catalog",
+        label: "Tool catalog",
+        icon: BookOpen,
+        milestone: "M17",
+        route: "/tools/catalog",
+      },
+      {
+        // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
+        // textual diff. Readable by any authenticated caller; create/delete gated.
+        id: "prompts",
+        label: "Prompts",
+        icon: GitBranch,
+        milestone: "M17",
+        route: "/prompts",
+      },
+      {
+        // EvalSuite builder + results browser (m17.12). Lists EvalSuites + a
+        // wizard to create; results view is read-open; create gated.
+        id: "evals",
+        label: "Evals",
+        icon: TestTube2,
+        milestone: "M17",
+        route: "/evals",
+      },
     ],
   },
   {

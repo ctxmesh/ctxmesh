@@ -25,6 +25,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -82,6 +84,23 @@ type Server struct {
 	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
 	mcpRequireApproval bool
 
+	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
+	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
+	// PKCE code_verifier + the registering caller's token — NEVER surfaced to the
+	// browser. Always non-nil (initialized in NewServer) so the OAuth register +
+	// callback handlers can use it whenever MCP is enabled.
+	oauthFlows *pendingOAuthStore
+
+	// promptResolver is the OPTIONAL server-side seam for resolving a git-pointer
+	// PromptVersion (repo, ref, path) → prompt content (m17.8). It is nil by default
+	// (no prompt resolution configured). When nil, the diff endpoint returns an honest
+	// 501 ("prompt resolution not configured") rather than fabricating any content.
+	// The BFF never stores resolved prompt content beyond the lifetime of a diff
+	// request — git remains the source of truth (ADR 0008).
+	// Wire via Options.PromptResolver at construction time (e.g. a FixtureResolver
+	// in tests, a real go-git Resolver in production when available).
+	promptResolver prompt.Resolver
+
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
@@ -133,6 +152,12 @@ type Options struct {
 	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
 	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
 	MCPRequireApproval bool
+	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
+	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
+	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
+	// real go-git Resolver in production. The BFF never stores resolved prompt content
+	// beyond the diff response (ADR 0008).
+	PromptResolver prompt.Resolver
 	// Log is the structured logger.
 	Log logr.Logger
 }
@@ -151,6 +176,8 @@ func NewServer(opts Options) *Server {
 		platformGenerationModels: opts.PlatformGenerationModels,
 		mcpEnabled:               opts.MCPEnabled,
 		mcpRequireApproval:       opts.MCPRequireApproval,
+		oauthFlows:               newPendingOAuthStore(),
+		promptResolver:           opts.PromptResolver,
 		log:                      opts.Log,
 	}
 	if s.version == "" {
@@ -290,6 +317,112 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("agent registry update"))
 		}
 		authed.HandleFunc("DELETE /api/agentregistries/{ns}/{name}", s.handleDeleteAgentRegistry)
+		// ToolRegistry CRUD (m17.5): direct edit of the operator-curated tool catalog.
+		// Five endpoints following the list contract for GET /list and SSA for PUT/POST.
+		// IMPORTANT: the m14.6 GET /api/tools merged catalog (distinct route, distinct
+		// handler) is NOT affected — these routes are /api/toolregistries, not /api/tools.
+		// The PUT preserves each tool entry's approvalStatus (controller/approval-owned);
+		// the console CRUD edits the curated fields, never the approval state.
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes serve 501.
+		authed.HandleFunc("GET /api/toolregistries", s.handleListToolRegistries)
+		authed.HandleFunc("GET /api/toolregistries/{ns}/{name}", s.handleGetToolRegistry)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/toolregistries", s.handleCreateToolRegistry)
+			authed.HandleFunc("PUT /api/toolregistries/{ns}/{name}", s.handleUpdateToolRegistry)
+		} else {
+			authed.Handle("POST /api/toolregistries", notImplemented("tool registry create"))
+			authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("tool registry update"))
+		}
+		authed.HandleFunc("DELETE /api/toolregistries/{ns}/{name}", s.handleDeleteToolRegistry)
+		// MCPToolBinding CRUD (m17.5): direct edit of the tool-to-agent bindings.
+		// Five endpoints following the list contract + SSA. The detail DTO surfaces
+		// the HONEST hot-update propagation status: "propagated" only when the
+		// controller's Ready=True (tool registered, pin-matched, rendered + pushed to
+		// the discovery sidecar); failure reason when Ready=False (UnregisteredTool /
+		// RegistryMismatch); "pending" when the condition is absent. The console NEVER
+		// reports "propagated" unless the controller confirms it — the m16 honest-contract
+		// lesson. SSA never clobbles the controller's status/Ready condition.
+		authed.HandleFunc("GET /api/mcptoolbindings", s.handleListMCPToolBindings)
+		authed.HandleFunc("GET /api/mcptoolbindings/{ns}/{name}", s.handleGetMCPToolBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/mcptoolbindings", s.handleCreateMCPToolBinding)
+			authed.HandleFunc("PUT /api/mcptoolbindings/{ns}/{name}", s.handleUpdateMCPToolBinding)
+		} else {
+			authed.Handle("POST /api/mcptoolbindings", notImplemented("MCP tool binding create"))
+			authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("MCP tool binding update"))
+		}
+		authed.HandleFunc("DELETE /api/mcptoolbindings/{ns}/{name}", s.handleDeleteMCPToolBinding)
+		// MemoryBinding CRUD (m17.6): direct edit of memory backend bindings for
+		// AgentDeployments. Five endpoints following the list contract + SSA.
+		// agentRef is NOT CRD-immutable (no oldSelf XValidation) — a PUT that
+		// changes agentRef is accepted and applied by the API server. The BFF does
+		// not enforce immutability because the CRD does not.
+		// The scheme is needed for SSA (ensureGVK); when absent the write routes
+		// serve 501 honestly.
+		authed.HandleFunc("GET /api/memorybindings", s.handleListMemoryBindings)
+		authed.HandleFunc("GET /api/memorybindings/{ns}/{name}", s.handleGetMemoryBinding)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/memorybindings", s.handleCreateMemoryBinding)
+			authed.HandleFunc("PUT /api/memorybindings/{ns}/{name}", s.handleUpdateMemoryBinding)
+		} else {
+			authed.Handle("POST /api/memorybindings", notImplemented("memory binding create"))
+			authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("memory binding update"))
+		}
+		authed.HandleFunc("DELETE /api/memorybindings/{ns}/{name}", s.handleDeleteMemoryBinding)
+		// AgentScalingPolicy CRUD (m17.6): direct edit of elastic scaling rules for
+		// AgentDeployments. Five endpoints following the list contract + SSA.
+		// CRD XValidations (max>=min, schedule required when trigger=schedule) are
+		// enforced by the API server — rejections surface as honest 422 with the
+		// server's message. The BFF does not re-implement these rules.
+		// agentRef is NOT CRD-immutable — a PUT that changes agentRef is accepted
+		// and applied. The scheme is needed for SSA; absent → 501.
+		authed.HandleFunc("GET /api/agentscalingpolicies", s.handleListAgentScalingPolicies)
+		authed.HandleFunc("GET /api/agentscalingpolicies/{ns}/{name}", s.handleGetAgentScalingPolicy)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/agentscalingpolicies", s.handleCreateAgentScalingPolicy)
+			authed.HandleFunc("PUT /api/agentscalingpolicies/{ns}/{name}", s.handleUpdateAgentScalingPolicy)
+		} else {
+			authed.Handle("POST /api/agentscalingpolicies", notImplemented("agent scaling policy create"))
+			authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("agent scaling policy update"))
+		}
+		authed.HandleFunc("DELETE /api/agentscalingpolicies/{ns}/{name}", s.handleDeleteAgentScalingPolicy)
+		// EvalSuite CRUD (m17.7): direct edit of eval gate configurations.
+		// The detail DTO surfaces dataset/scorers/gate/threshold + the controller's
+		// status.conditions (gate/pass/block outcome). The /results sub-resource
+		// merges the CRD status with Langfuse scores honestly: scoresAvailable:false
+		// + reason when Langfuse is absent or traceId not supplied; real scores when
+		// both are present. Controller status.conditions are NEVER clobbered (SSA spec-only).
+		authed.HandleFunc("GET /api/evalsuites", s.handleListEvalSuites)
+		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}", s.handleGetEvalSuite)
+		// Results always wired: degrades honestly (scoresAvailable:false) when Langfuse absent.
+		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}/results", s.handleGetEvalSuiteResults)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/evalsuites", s.handleCreateEvalSuite)
+			authed.HandleFunc("PUT /api/evalsuites/{ns}/{name}", s.handleUpdateEvalSuite)
+		} else {
+			authed.Handle("POST /api/evalsuites", notImplemented("eval suite create"))
+			authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("eval suite update"))
+		}
+		authed.HandleFunc("DELETE /api/evalsuites/{ns}/{name}", s.handleDeleteEvalSuite)
+		// PromptVersion CRUD + diff (m17.8): direct edit of git-backed prompt pointers.
+		// The detail DTO surfaces git (repo/ref/path) + status.conditions.
+		// The /diff sub-resource resolves the two PromptVersions' git pointers via the
+		// optional prompt Resolver and returns a TEXTUAL line diff of the resolved content.
+		// If no resolver is configured → the diff endpoint returns an honest 501 (never
+		// fabricates content). ErrNotFound → 404; transient resolve failure → 502.
+		// Controller status.conditions are NEVER clobbered (SSA spec-only applies).
+		authed.HandleFunc("GET /api/promptversions", s.handleListPromptVersions)
+		authed.HandleFunc("GET /api/promptversions/{ns}/{name}", s.handleGetPromptVersion)
+		// Diff is always wired (degrades to 501 when no resolver configured).
+		authed.HandleFunc("GET /api/promptversions/{ns}/{name}/diff", s.handlePromptVersionDiff)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/promptversions", s.handleCreatePromptVersion)
+			authed.HandleFunc("PUT /api/promptversions/{ns}/{name}", s.handleUpdatePromptVersion)
+		} else {
+			authed.Handle("POST /api/promptversions", notImplemented("prompt version create"))
+			authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("prompt version update"))
+		}
+		authed.HandleFunc("DELETE /api/promptversions/{ns}/{name}", s.handleDeletePromptVersion)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -327,6 +460,38 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agentregistries", notImplemented("caller-scoped agent registry create"))
 		authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry update"))
 		authed.Handle("DELETE /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry delete"))
+		authed.Handle("GET /api/toolregistries", notImplemented("caller-scoped tool registry list"))
+		authed.Handle("GET /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry detail"))
+		authed.Handle("POST /api/toolregistries", notImplemented("caller-scoped tool registry create"))
+		authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry update"))
+		authed.Handle("DELETE /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry delete"))
+		authed.Handle("GET /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding list"))
+		authed.Handle("GET /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding detail"))
+		authed.Handle("POST /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding create"))
+		authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding update"))
+		authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding delete"))
+		authed.Handle("GET /api/memorybindings", notImplemented("caller-scoped memory binding list"))
+		authed.Handle("GET /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding detail"))
+		authed.Handle("POST /api/memorybindings", notImplemented("caller-scoped memory binding create"))
+		authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding update"))
+		authed.Handle("DELETE /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding delete"))
+		authed.Handle("GET /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy list"))
+		authed.Handle("GET /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy detail"))
+		authed.Handle("POST /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy create"))
+		authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy update"))
+		authed.Handle("DELETE /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy delete"))
+		authed.Handle("GET /api/evalsuites", notImplemented("caller-scoped eval suite list"))
+		authed.Handle("GET /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite detail"))
+		authed.Handle("GET /api/evalsuites/{ns}/{name}/results", notImplemented("caller-scoped eval suite results"))
+		authed.Handle("POST /api/evalsuites", notImplemented("caller-scoped eval suite create"))
+		authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite update"))
+		authed.Handle("DELETE /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite delete"))
+		authed.Handle("GET /api/promptversions", notImplemented("caller-scoped prompt version list"))
+		authed.Handle("GET /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version detail"))
+		authed.Handle("GET /api/promptversions/{ns}/{name}/diff", notImplemented("caller-scoped prompt version diff"))
+		authed.Handle("POST /api/promptversions", notImplemented("caller-scoped prompt version create"))
+		authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version update"))
+		authed.Handle("DELETE /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
@@ -452,14 +617,67 @@ func (s *Server) Handler() http.Handler {
 			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
 			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
 			authed.HandleFunc("GET /api/tools", s.handleListTools)
+			// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
+			// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
+			// their OWN grant. Both are CALLER-SCOPED — the invoking user's identity is
+			// resolved from their token (SelfSubjectReview) and the grant Secret writes
+			// run as that user, so a user can only touch their own grant. The consent
+			// POST starts the m17.2 PKCE flow (marked with the caller's hashed identity)
+			// and completes at the shared OAuth callback. The Go 1.22 ServeMux treats
+			// "POST /api/mcp/oauth/grant" and "DELETE /api/mcp/oauth/grant/{server}" as
+			// distinct patterns.
+			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
+			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
+			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
+			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
+			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
+			// pending→approved AND opens the per-server egress the register flow withheld —
+			// the ONLY transition that opens egress, preserving the m14.6 B1 invariant);
+			// POST .../{ns}/{name}/reject DENIES one (removes the pending catalog entry, so
+			// it stays non-bindable with no egress). All CALLER-SCOPED (ADR 0011): the
+			// approve UPDATE / reject DELETE run as the caller, so a non-operator's action
+			// is the API server's real 403 — no bypass. In self-serve mode nothing is
+			// pending, so the queue is empty/inert but the endpoints exist and behave
+			// honestly. The Go 1.22 ServeMux treats "POST .../{ns}/{name}" and
+			// "POST .../{ns}/{name}/reject" as DISTINCT patterns (the more specific
+			// "/reject" wins), and both are additive beside the "GET /api/mcp/approvals"
+			// list route.
+			authed.HandleFunc("GET /api/mcp/approvals", s.handleListMCPApprovals)
+			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}", s.handleApproveMCP)
+			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}/reject", s.handleRejectMCP)
 		} else {
 			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
 			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
 			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
+			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
+			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
+			authed.Handle("GET /api/mcp/approvals", notImplemented("caller-scoped MCP approval queue"))
+			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
+			authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", notImplemented("caller-scoped MCP reject"))
 		}
 	}
 
 	api.Handle("/api/", s.requireAuth(authed))
+
+	// MCP OAuth 2.1 callback (m17.2, ADR 0016). Registered on the `api` mux
+	// DIRECTLY (a more specific pattern than "/api/"), so it is NOT behind
+	// requireAuth's bearer gate — a top-level browser redirect from the
+	// authorization server carries no Authorization header. Its authentication is
+	// the unguessable, single-use `state` (CSRF token) that resolves the pending
+	// flow; the flow itself carries the registering user's token, so the resulting
+	// K8s writes run CALLER-SCOPED (ADR 0011). The BFF exchanges the code for tokens
+	// SERVER-SIDE and stores them in a Secret — tokens NEVER reach the browser. It
+	// is gated by the mcpEnabled kill-switch (like the other MCP routes) so a
+	// hardened (MCP-disabled) install serves 404 (the route is simply absent and
+	// falls through to the SPA). callerClients is required to complete the K8s
+	// writes; absent → honest 501.
+	if s.mcpEnabled {
+		if s.callerClients != nil {
+			api.HandleFunc("GET /api/mcp/oauth/callback", s.handleMCPOAuthCallback)
+		} else {
+			api.Handle("GET /api/mcp/oauth/callback", notImplemented("caller-scoped MCP OAuth callback"))
+		}
+	}
 
 	root := http.NewServeMux()
 	root.Handle("/api/", api)

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { CheckCircle2, Play, Rocket } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -15,7 +16,6 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
-import { TraceView } from "@/components/dashboard/trace-view";
 import { api, ApiError, type CreatedObject } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
@@ -28,16 +28,14 @@ import {
 } from "@/lib/config-form";
 
 // PlaygroundPage — the m12.7 surface: define + RUN a fully-traced agent, then see
-// its trace-tree summary + the embedded Langfuse deep-view, and EXPORT the same
+// its response and navigate to the native trace explorer, and EXPORT the same
 // definition to a CRD. It reuses the config-builder's define model (toAgentYAML +
-// validate) so define/run/export share ONE agent schema, and the dashboard's
-// TraceView (the shipped /api/traces/{id} → embedded iframe + link-out) so there
-// is no new trace plumbing. Every control composes design tokens; the embedded
-// Langfuse iframe (inside TraceView) is the one accepted off-theme surface (§4).
+// validate) so define/run/export share ONE agent schema. Every control composes
+// design tokens. The post-run trace affordance is a "View full trace" Link to
+// /traces/:id (native trace page, m16.7) — no embedded Langfuse iframe (m17.13).
 
 // Run is the lifecycle of a Playground invoke. On success we hold the returned
-// traceId — the hand-off we feed straight into TraceView (native trace-tree
-// summary + embedded deep-view + link-out).
+// traceId — the hand-off we link to the native /traces/:id (m16.7, m17.13).
 type Run =
   | { kind: "idle" }
   | { kind: "running" }
@@ -256,14 +254,14 @@ export function PlaygroundPage() {
           </CardContent>
         </Card>
 
-        {/* ── Trace-tree summary + embedded Langfuse deep-view ─────────── */}
+        {/* ── Run result + native trace link ────────────────────────────── */}
         <div className="space-y-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Run result</CardTitle>
               <CardDescription>
-                The agent's response. Select the trace below for the full
-                waterfall.
+                The agent's response. Use "View full trace" for the native
+                waterfall and span explorer.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -296,10 +294,19 @@ export function PlaygroundPage() {
             </CardContent>
           </Card>
 
-          {/* The native trace-tree summary + the embedded Langfuse deep-view +
-              link-out — all from the run's traceId via the SHIPPED TraceView
-              (GET /api/traces/{id}). No new trace plumbing. */}
-          {run.kind === "done" && <TraceView traceId={run.traceId} />}
+          {/* Post-run: link to the native trace explorer (/traces/:id, m16.7).
+              No embedded Langfuse iframe — link-out only (m17.13). */}
+          {run.kind === "done" && (
+            <div className="flex justify-start">
+              <Link
+                to={`/traces/${encodeURIComponent(run.traceId)}`}
+                data-testid="view-full-trace"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                View full trace
+              </Link>
+            </div>
+          )}
         </div>
       </div>
 

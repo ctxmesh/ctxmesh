@@ -4,9 +4,13 @@ import { Route, Routes, useParams } from "react-router-dom";
 import { AppShell } from "@/components/app-shell";
 import { AgentDetailPage } from "@/pages/agent-detail-page";
 import { AgentRegistriesPage } from "@/pages/agent-registries-page";
+import { EvalsPage } from "@/pages/evals-page";
+import { PromptsPage } from "@/pages/prompts-page";
 import { AgentRegistryDetailPage, NewAgentRegistryPage } from "@/pages/agent-registry-detail-page";
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
+import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
@@ -107,6 +111,10 @@ export function App() {
                 add-MCP flows, the first UI of the aha. */}
             <Route path="providers/connect" element={<ConnectProviderPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
+            {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
+            <Route path="tools/approvals" element={<McpApprovalsPage />} />
+            {/* m17.10: Tool catalog — merged curated + user-added + pending tools */}
+            <Route path="tools/catalog" element={<ToolCatalogPage />} />
             {/* m15.12: ModelRoute CRUD surfaces */}
             <Route path="routes" element={<ModelRoutesPage />} />
             <Route path="routes/new" element={<NewModelRoutePage />} />
@@ -128,6 +136,10 @@ export function App() {
             <Route path="traces/:id" element={<TracePage />} />
             {/* m16.10: cost drill-down — per-agent breakdown (recent window). */}
             <Route path="cost" element={<CostPage />} />
+            {/* m17.12: EvalSuite builder + results browser */}
+            <Route path="evals" element={<EvalsPage />} />
+            {/* m17.12: PromptVersion list + textual diff viewer */}
+            <Route path="prompts" element={<PromptsPage />} />
             {/* Not-yet-built IA destinations (Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { PlaygroundPage } from "@/pages/playground-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
@@ -7,9 +8,10 @@ import { NamespaceProvider } from "@/lib/namespace";
 
 // A recording fetch mock: it captures every request (url, method, body) and
 // answers /api/invoke, /api/traces/{id}, /api/expand, /api/agents. The tests
-// assert the RIGHT calls were made and the trace-tree + embedded Langfuse iframe
-// render from the RETURNED traceId — define → run → trace, and export → apply,
-// all with mocked fetch (tier0 determinism: no BFF, no cluster, no Langfuse).
+// assert the RIGHT calls were made and that a completed run offers a "View full
+// trace" Link → /traces/:id (no embedded Langfuse iframe — m17.13) — define →
+// run → native trace link, and export → apply, all with mocked fetch (tier0
+// determinism: no BFF, no cluster, no Langfuse).
 interface Captured {
   url: string;
   method: string;
@@ -86,12 +88,22 @@ function fill(label: RegExp | string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
 
+// PlaygroundPage uses <Link> (react-router-dom); wrap in MemoryRouter so tests
+// don't need the full app router (the pattern mirrors agents-page.test.tsx).
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <PlaygroundPage />
+    </MemoryRouter>,
+  );
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("PlaygroundPage", () => {
-  it("defines and runs an agent, then renders the trace-tree + embedded Langfuse iframe from the returned traceId", async () => {
+  it("defines and runs an agent, then offers a 'View full trace' Link → /traces/:id (no Langfuse iframe)", async () => {
     const calls = recordingFetch({
       invoke: () => ({
         ok: true,
@@ -99,7 +111,7 @@ describe("PlaygroundPage", () => {
       }),
     });
 
-    render(<PlaygroundPage />);
+    renderPage();
     fill("Agent name", "echo-agent");
     fill("Namespace", "prod");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
@@ -127,17 +139,12 @@ describe("PlaygroundPage", () => {
       "MOCK_OK",
     );
 
-    // The trace-tree summary + embedded Langfuse deep-view render from the RETURNED
-    // traceId: TraceView resolves /api/traces/trace-xyz and mounts the iframe +
-    // link-out (the shipped trace path — no new plumbing).
-    const iframe = await screen.findByTitle("Langfuse trace deep-view");
-    expect(iframe).toHaveAttribute("src", "https://lf.test/trace/trace-xyz");
-    const linkOut = screen.getByRole("link", { name: /Open in Langfuse/ });
-    expect(linkOut).toHaveAttribute("href", "https://lf.test/trace/trace-xyz");
-    expect(linkOut).toHaveAttribute("target", "_blank");
-
-    // The trace resolve went through the BFF's /api/traces/{id} (no hardcoded URL).
-    expect(calls.some((c) => c.url === "/api/traces/trace-xyz")).toBe(true);
+    // A completed run shows a "View full trace" link to the native /traces/:id (m17.13).
+    // There is NO Langfuse iframe anywhere in the playground (m17.13 promise: kill the
+    // second Langfuse login).
+    const traceLink = screen.getByTestId("view-full-trace");
+    expect(traceLink).toHaveAttribute("href", "/traces/trace-xyz");
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
   it("exports the definition to a CRD via expand → apply (the config-builder path)", async () => {
@@ -153,7 +160,7 @@ describe("PlaygroundPage", () => {
       }),
     });
 
-    render(<PlaygroundPage />);
+    renderPage();
     fill("Agent name", "echo-agent");
     fill("Namespace", "prod");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
@@ -182,7 +189,7 @@ describe("PlaygroundPage", () => {
 
   it("blocks a run on client-side validation and does not call /api/invoke", async () => {
     const calls = recordingFetch({});
-    render(<PlaygroundPage />);
+    renderPage();
     // Name + image empty → client validation fails.
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -195,7 +202,7 @@ describe("PlaygroundPage", () => {
       invoke: () => ({ ok: false, status: 403, json: { error: "forbidden: not allowed to read the requested agent" } }),
     });
 
-    render(<PlaygroundPage />);
+    renderPage();
     fill("Agent name", "echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
@@ -203,13 +210,14 @@ describe("PlaygroundPage", () => {
     // A 403 renders the ForbiddenInline explain-and-suggest primitive.
     expect(await screen.findByText(/forbidden: not allowed to read the requested agent/)).toBeInTheDocument();
     expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument();
-    // No trace panel mounts for a failed run.
-    expect(screen.queryByTitle("Langfuse trace deep-view")).toBeNull();
+    // No trace link or iframe mounts for a failed run (m17.13: no Langfuse iframe anywhere).
+    expect(screen.queryByTestId("view-full-trace")).toBeNull();
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
   it("rejects malformed JSON input before any round-trip", async () => {
     const calls = recordingFetch({});
-    render(<PlaygroundPage />);
+    renderPage();
     fill("Agent name", "echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fill("Input (JSON)", "{ not json");
@@ -249,11 +257,13 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
 
   function renderGated() {
     return render(
-      <NamespaceProvider>
-        <CapabilitiesProvider>
-          <PlaygroundPage />
-        </CapabilitiesProvider>
-      </NamespaceProvider>,
+      <MemoryRouter>
+        <NamespaceProvider>
+          <CapabilitiesProvider>
+            <PlaygroundPage />
+          </CapabilitiesProvider>
+        </NamespaceProvider>
+      </MemoryRouter>,
     );
   }
 
