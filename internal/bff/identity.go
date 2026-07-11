@@ -41,10 +41,16 @@ import (
 // for. Named so the string is defined once (the capabilities map keys off it and
 // tests reference it).
 const (
-	resAgentDeployments = "agentdeployments"
-	resModelRoutes      = "modelroutes"
-	resSecretBindings   = "secretbindings"
-	resAgentRegistries  = "agentregistries"
+	resAgentDeployments   = "agentdeployments"
+	resModelRoutes        = "modelroutes"
+	resSecretBindings     = "secretbindings"
+	resAgentRegistries    = "agentregistries"
+	resToolRegistries     = "toolregistries"
+	resMCPToolBindings    = "mcptoolbindings"
+	resMemoryBindings     = "memorybindings"
+	resAgentScalingPolicy = "agentscalingpolicies"
+	resEvalSuites         = "evalsuites"
+	resPromptVersions     = "promptversions"
 )
 
 // agentsAPIGroup is the API group all the golden CRD kinds live in.
@@ -61,6 +67,12 @@ var (
 		resModelRoutes,
 		resSecretBindings,
 		resAgentRegistries,
+		resToolRegistries,
+		resMCPToolBindings,
+		resMemoryBindings,
+		resAgentScalingPolicy,
+		resEvalSuites,
+		resPromptVersions,
 	}
 	goldenVerbs = []string{"get", "list", "create", "update", "delete"}
 )

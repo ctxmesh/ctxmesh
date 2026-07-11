@@ -1,7 +1,6 @@
 import * as React from "react";
 import { Check, KeyRound, PlugZap, ShieldAlert } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -22,7 +21,6 @@ import {
   api,
   ApiError,
   type ConnectProviderResponse,
-  type ProviderModel,
 } from "@/lib/api";
 
 // ConnectProviderPage — the FIRST UI of the aha (spec §5, ADR 0015). A guided
@@ -113,7 +111,7 @@ export function ConnectProviderPage() {
       toast({
         variant: "success",
         title: `Connected ${provider.name}`,
-        description: `${res.models.length} model${res.models.length === 1 ? "" : "s"} available`,
+        description: `${(res.provider.models ?? []).length} model${(res.provider.models ?? []).length === 1 ? "" : "s"} available`,
       });
     } catch (err) {
       if (err instanceof ApiError) {
@@ -337,31 +335,27 @@ function ReviewStep({ res }: { res: ConnectProviderResponse }) {
       <div className="flex items-center gap-2 text-success">
         <Check className="h-5 w-5" />
         <p className="text-sm font-medium text-foreground">
-          {res.provider} connected — {res.models.length} model
-          {res.models.length === 1 ? "" : "s"} available
+          {res.provider.displayName || res.provider.provider} connected —{" "}
+          {(res.provider.models ?? []).length} model
+          {(res.provider.models ?? []).length === 1 ? "" : "s"} available
         </p>
       </div>
       <div className="space-y-1.5">
         <p className="text-sm font-medium">Available models</p>
         <div className="space-y-2" data-testid="model-list">
-          {res.models.map((m: ProviderModel) => (
+          {(res.provider.models ?? []).map((m: string) => (
             <div
-              key={m.id}
+              key={m}
               className="flex items-center gap-3 rounded-md border bg-surface-2/40 px-3 py-2 text-sm"
             >
-              <span className="font-mono">{m.id}</span>
-              {m.modality && (
-                <Badge variant="secondary" className="ml-auto text-[10px]">
-                  {m.modality}
-                </Badge>
-              )}
+              <span className="font-mono">{m}</span>
             </div>
           ))}
         </div>
       </div>
       <div className="rounded-md border bg-surface-2/40 px-3 py-2 text-xs text-muted-foreground">
         Stored as{" "}
-        <span className="font-mono text-foreground">{res.secretName}</span> —
+        <span className="font-mono text-foreground">{res.provider.secretName}</span> —
         SecretBinding + ModelRoute created under your identity. The key is
         server-side; the browser only ever sees this reference.
       </div>
