@@ -218,3 +218,19 @@ jobs:
         # persistent dev cluster's predates it) — the fresh helm install gives the
         # current CRD. Runs LAST (heaviest: 4 images + 2 mock upstreams + browser).
         run: make -C agent-brain/harness tier2 SLICE=m14-ui
+      - name: M15 fleet-management e2e (grouped topology at 200 agents + CRUD round-trips)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The fleet-management 🧪 (§31): seeds a 200-agent scale fixture across 3
+        # namespaces × 3 registries (min-scale=0, no pods spin), then drives the
+        # deployed console headless — grouped topology (spec 70-topology-scale:
+        # groups render, not raw nodes; expand/collapse; search; NodeDetailDrawer;
+        # viewer-ForbiddenInline) and CRUD (spec 71-crud: find→inspect→edit wizard
+        # PUT round-trip→typed-name delete; viewer no write affordances + forced-403).
+        # The scale fixture is torn down at exit (cleanup trap). Extends the M14
+        # bring-up path (helm + persona RBAC + fixture MCP + tool-mock). Runs LAST
+        # (heaviest: M14 stack + scale fixture + 70/71 Playwright specs).
+        # ADR 0006 shared-cluster note: full headless slice on a FRESH CI cluster;
+        # locally provable without the cluster: tier0 + tsc --noEmit + playwright
+        # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies.)
+        run: make -C agent-brain/harness tier2 SLICE=m15-ui
