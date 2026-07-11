@@ -1,7 +1,8 @@
 import * as React from "react";
-import { Check, KeyRound, ShieldAlert, Wrench } from "lucide-react";
+import { Check, ExternalLink, KeyRound, ShieldAlert, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -24,13 +25,20 @@ import { api, ApiError, type AddMcpResponse, type DiscoveredTool } from "@/lib/a
 // AddMcpPage — the BYO-MCP wizard (spec §5, ADR 0016). A guided flow to add
 // your own MCP server so its tools land in the catalog:
 //
-//   1. Server  — a name + a remote URL (or an image) + optional bearer key.
-//                The step's forward action SUBMITS: the BFF probes the server,
-//                runs tools/list discovery, stores the key as a Secret
-//                (attached at the egress hop), and returns the discovered tools.
+//   1. Server  — a name + a remote URL (or an image) + auth mode (key or OAuth).
+//                The step's forward action SUBMITS: the BFF probes the server
+//                (key-auth) or starts the OAuth 2.1 flow (OAuth).
+//                Key-auth: runs tools/list discovery, stores the key as a Secret.
+//                OAuth: returns 202 + { authorizationURL, state } — the SPA
+//                REDIRECTS the browser to that URL (window.location.href). The
+//                OAuth provider's consent page runs, the BFF handles the callback
+//                server-side, and the user lands back with the MCP registered.
+//                The SPA NEVER sees, stores, or displays an OAuth token.
 //   2. Review  — the discovered tools (names + descriptions) + that they're now
 //                in the merged catalog. On a hardened install they render as
 //                pending-approval (an operator approves before binding).
+//                For an OAuth add, the SPA redirects before this step renders —
+//                the user lands back in the console via the callback.
 //
 // THE BEARER KEY NEVER LIVES CLIENT-SIDE AFTER SUBMIT — same discipline as the
 // provider connect: held only in the field until submit, snapshotted into the
@@ -38,17 +46,24 @@ import { api, ApiError, type AddMcpResponse, type DiscoveredTool } from "@/lib/a
 // / URL. After add, the UI only shows the discovered tools + their approval
 // state — the key is server-side.
 //
+// OAUTH TOKENS NEVER REACH THE SPA — only the authorization URL + the opaque
+// state handle. The full token exchange (auth-code → access-token → refresh)
+// happens server-side in the BFF callback (GET /api/mcp/oauth/callback).
+//
 // Honest failures (never swallowed):
 //   • probe failure (422/502) → a TEACHING error on the server step + retry.
 //   • viewer (403)            → ForbiddenInline (the API is the real gate).
 //   • kill-switch (404)       → the "BYO-MCP is disabled" fallback state.
+//   • OAuth init failure      → same error surface as probe failure.
 
 type SourceKind = "url" | "image";
+type AuthMode = "key" | "oauth";
 
 type Submit =
   | { kind: "idle" }
   | { kind: "adding" }
   | { kind: "added"; res: AddMcpResponse }
+  | { kind: "oauth-redirecting"; authorizationURL: string }
   | { kind: "error"; message: string; status?: number }
   | { kind: "forbidden"; message: string }
   | { kind: "killed" };
@@ -60,6 +75,7 @@ export function AddMcpPage() {
   const [current, setCurrent] = React.useState(STEP_SERVER);
   const [name, setName] = React.useState("");
   const [sourceKind, setSourceKind] = React.useState<SourceKind>("url");
+  const [authMode, setAuthMode] = React.useState<AuthMode>("key");
   const [url, setUrl] = React.useState("");
   const [image, setImage] = React.useState("");
   // ── The bearer key lives ONLY here — a local field value, cleared on submit.
@@ -76,6 +92,47 @@ export function AddMcpPage() {
 
   async function onAdd() {
     setSubmit({ kind: "adding" });
+
+    if (authMode === "oauth") {
+      // OAuth 2.1 flow: POST to /api/mcpservers with authType "oauth". The BFF
+      // returns 202 + { authorizationURL, state }. The SPA redirects the browser
+      // to the authorization URL — the ENTIRE token exchange is server-side.
+      // We NEVER receive, store, or display an OAuth token.
+      const req = {
+        name: name.trim(),
+        ...(sourceKind === "url" ? { url: url.trim() } : { image: image.trim() }),
+        authType: "oauth" as const,
+      };
+      try {
+        const oauthRes = await api.addMcpServerOAuth(req);
+        // Transition to the "redirecting" state so the UI renders a brief
+        // "redirecting to consent…" banner before the navigation fires.
+        setSubmit({ kind: "oauth-redirecting", authorizationURL: oauthRes.authorizationURL });
+        // Full-page redirect to the OAuth provider's authorization endpoint.
+        // The consent happens there; the BFF callback handles the code exchange.
+        // We use window.location.href because this is a correct OAuth redirect —
+        // NOT a client-side navigation (the consent page is a different origin).
+        window.location.href = oauthRes.authorizationURL;
+      } catch (err) {
+        if (err instanceof ApiError) {
+          if (err.isNotFound) { setSubmit({ kind: "killed" }); return; }
+          if (err.isForbidden) {
+            reprobe();
+            setSubmit({ kind: "forbidden", message: err.message });
+            return;
+          }
+          setSubmit({ kind: "error", message: err.message, status: err.status });
+          return;
+        }
+        setSubmit({
+          kind: "error",
+          message: err instanceof Error ? err.message : "OAuth initiation failed",
+        });
+      }
+      return;
+    }
+
+    // Key-auth (or no-auth) flow: probe immediately, discover tools.
     // Snapshot the key into the request body, then WIPE it from state — it never
     // survives the submit in any client-side store.
     const req = {
@@ -142,11 +199,48 @@ export function AddMcpPage() {
     );
   }
 
+  // OAuth redirecting: the SPA has the authorization URL and is about to redirect.
+  // Render a brief "redirecting to consent…" banner while window.location is set.
+  // The SPA NEVER holds a token here — only the URL we received and are navigating to.
+  if (submit.kind === "oauth-redirecting") {
+    return (
+      <PageFrame>
+        <div
+          className="rounded-lg border bg-card p-6 shadow-card"
+          data-testid="oauth-redirecting"
+        >
+          <div className="flex items-center gap-3">
+            <ExternalLink className="h-5 w-5 text-primary" />
+            <div>
+              <p className="font-medium">Redirecting to consent page…</p>
+              <p className="text-sm text-muted-foreground">
+                You&apos;re being redirected to the OAuth provider to authorize
+                this MCP server. After you consent, you&apos;ll return here with
+                the server registered.
+              </p>
+            </div>
+          </div>
+          <div className="mt-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { window.location.href = submit.authorizationURL; }}
+              data-testid="oauth-redirect-button"
+            >
+              <ExternalLink className="mr-2 h-3.5 w-3.5" />
+              Open consent page
+            </Button>
+          </div>
+        </div>
+      </PageFrame>
+    );
+  }
+
   const steps: WizardStep[] = [
     {
       id: "server",
       title: "Server",
-      description: "URL or image + optional key",
+      description: "URL or image + auth",
       content: (
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -193,26 +287,51 @@ export function AddMcpPage() {
             </div>
           )}
           <div className="space-y-1.5">
-            <Label htmlFor="mcp-key">Bearer key (optional)</Label>
-            <div className="relative">
-              <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                id="mcp-key"
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="If the server requires auth…"
-                className="pl-9 font-mono text-xs"
-              />
+            <Label htmlFor="mcp-auth-mode">Authentication</Label>
+            <Select
+              id="mcp-auth-mode"
+              value={authMode}
+              onChange={(e) => setAuthMode(e.target.value as AuthMode)}
+              data-testid="mcp-auth-mode"
+            >
+              <option value="key">Bearer key</option>
+              <option value="oauth">OAuth 2.1 (redirect to consent)</option>
+            </Select>
+          </div>
+          {authMode === "key" && (
+            <div className="space-y-1.5">
+              <Label htmlFor="mcp-key">Bearer key (optional)</Label>
+              <div className="relative">
+                <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  id="mcp-key"
+                  type="password"
+                  autoComplete="off"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="If the server requires auth…"
+                  className="pl-9 font-mono text-xs"
+                />
+              </div>
             </div>
-          </div>
-          <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
-            The BFF probes the server and runs <span className="font-medium">tools/list</span>{" "}
-            discovery. Any key is stored as a Secret and attached at the egress
-            hop — never by the browser, never inside the agent container. Egress
-            opens per approved server only.
-          </div>
+          )}
+          {authMode === "oauth" ? (
+            <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
+              OAuth 2.1 flow: clicking{" "}
+              <span className="font-medium">Connect via OAuth</span> sends the
+              server details to the BFF, which returns an authorization URL. Your
+              browser will redirect to the provider&apos;s consent page — the token
+              exchange happens entirely server-side. No tokens are stored in the
+              browser.
+            </div>
+          ) : (
+            <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
+              The BFF probes the server and runs <span className="font-medium">tools/list</span>{" "}
+              discovery. Any key is stored as a Secret and attached at the egress
+              hop — never by the browser, never inside the agent container. Egress
+              opens per approved server only.
+            </div>
+          )}
           {submit.kind === "error" && (
             <p
               className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
@@ -264,7 +383,13 @@ export function AddMcpPage() {
           onStepChange={onStepChange}
           canProceed={canProceed}
           busy={adding}
-          nextLabel={current === STEP_SERVER ? "Probe + discover" : "Continue"}
+          nextLabel={
+            current === STEP_SERVER
+              ? authMode === "oauth"
+                ? "Connect via OAuth"
+                : "Probe + discover"
+              : "Continue"
+          }
         />
       </div>
     </PageFrame>
