@@ -157,7 +157,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: "traces", label: "Traces", icon: ListTree, milestone: "M16" },
       { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16", route: "/runs" },
       { id: "feedback", label: "Feedback", icon: MessagesSquare, milestone: "M16" },
-      { id: "cost", label: "Cost", icon: Coins, milestone: "M16" },
+      { id: "cost", label: "Cost", icon: Coins, milestone: "M16", route: "/cost" },
     ],
   },
   {
