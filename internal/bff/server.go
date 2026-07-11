@@ -460,10 +460,23 @@ func (s *Server) Handler() http.Handler {
 			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
 			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
 			authed.HandleFunc("GET /api/tools", s.handleListTools)
+			// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
+			// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
+			// their OWN grant. Both are CALLER-SCOPED — the invoking user's identity is
+			// resolved from their token (SelfSubjectReview) and the grant Secret writes
+			// run as that user, so a user can only touch their own grant. The consent
+			// POST starts the m17.2 PKCE flow (marked with the caller's hashed identity)
+			// and completes at the shared OAuth callback. The Go 1.22 ServeMux treats
+			// "POST /api/mcp/oauth/grant" and "DELETE /api/mcp/oauth/grant/{server}" as
+			// distinct patterns.
+			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
+			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
 		} else {
 			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
 			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
 			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
+			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
+			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
 		}
 	}
 
