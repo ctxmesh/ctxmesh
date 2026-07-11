@@ -189,7 +189,7 @@ func (s *Server) mcpApprovalStatus() string {
 func parseRegisterMCPRequest(raw []byte) (RegisterMCPServerRequest, *createError) {
 	var req RegisterMCPServerRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return req, &createError{status: http.StatusBadRequest, msg: "invalid JSON body"}
+		return req, &createError{status: http.StatusBadRequest, msg: msgInvalidJSONBody}
 	}
 	if strings.TrimSpace(req.Name) == "" {
 		return req, &createError{status: http.StatusBadRequest, msg: "name is required"}
