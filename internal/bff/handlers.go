@@ -529,6 +529,11 @@ type errorBody struct {
 	Error string `json:"error"`
 }
 
+// msgInvalidJSONBody is the client-safe message for an unparseable request body,
+// shared by the createError-returning request parsers so goconst has one canonical
+// definition and the wording stays consistent.
+const msgInvalidJSONBody = "invalid JSON body"
+
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, errorBody{Error: msg})
 }
