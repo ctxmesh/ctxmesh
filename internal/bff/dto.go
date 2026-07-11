@@ -711,6 +711,22 @@ type MCPServerListResponse struct {
 	Items   []MCPServerSummary `json:"items"`
 }
 
+// MCPApprovalActionResponse is returned by the approval-queue reject action
+// (POST /api/mcp/approvals/{ns}/{name}/reject, m17.4, ADR 0016 §3): the identity of
+// the server acted on and the outcome. It carries NO secret material — only the
+// server name/namespace and the action status ("rejected"). The approve action
+// returns the full MCPServerSummary instead (the now-approved server), so a single
+// action DTO is not needed there.
+type MCPApprovalActionResponse struct {
+	// Server is the MCP server (ToolRegistry) name the action targeted.
+	Server string `json:"server"`
+	// Namespace the server's objects live in.
+	Namespace string `json:"namespace"`
+	// Status is the action outcome — "rejected" for the reject action (the pending
+	// catalog entry was removed; the server stays non-bindable with no egress).
+	Status string `json:"status"`
+}
+
 // MCPGrantConsentRequest is the POST /api/mcp/oauth/grant body (m17.3, ADR 0016 §5):
 // a user initiating per-user OAuth consent for an ALREADY-REGISTERED OAuth server.
 // It names the server + the namespace and carries the SAME OAuth client config as
