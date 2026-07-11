@@ -683,6 +683,161 @@ export interface MemoryBindingUpdateRequest {
   backend?: string;
 }
 
+// --- EvalSuite DTOs (m17.7) ---------------------------------------------------
+// An EvalSuite bundles a dataset reference + scorers + a gate/threshold.
+// Results come from GET /api/evalsuites/{ns}/{name}/results. The "honest
+// results" contract: scores are ONLY present when Langfuse is wired
+// (scoresAvailable=true); when absent scoresUnavailableReason explains why.
+// The gate outcome lives in `conditions` (the controller's gate condition).
+// NEVER fabricate scores — surface scoresUnavailableReason calmly.
+
+// EvalCondition mirrors one status.Condition on an EvalSuite result.
+export interface EvalCondition {
+  type: string;
+  // "True" | "False" | "Unknown"
+  status: string;
+  reason: string;
+  message: string;
+  lastTransitionTime: string;
+}
+
+// EvalScore is one scorer's result — name + value (numeric) or stringValue
+// (categorical). Only present when scoresAvailable=true.
+export interface EvalScore {
+  scorer: string;
+  value?: number;
+  stringValue?: string;
+}
+
+// EvalSuiteResults mirrors GET /api/evalsuites/{ns}/{name}/results. The honest
+// contract: `conditions` is the controller's gate outcome; `scores` is only
+// present when `scoresAvailable=true`; when false, `scoresUnavailableReason`
+// explains why (e.g. "Langfuse not configured"). NEVER fabricate scores.
+export interface EvalSuiteResults {
+  conditions: EvalCondition[];
+  scoresAvailable: boolean;
+  scores?: EvalScore[];
+  scoresUnavailableReason?: string;
+}
+
+export interface EvalSuiteSummary {
+  name: string;
+  namespace: string;
+  /** datasetRef is the reference to the evaluation dataset (name or URI). */
+  datasetRef: string;
+  /** scorers is the list of scorer names to run. */
+  scorers: string[];
+  /** gate/threshold: the pass/fail gate condition name and threshold value. */
+  gate?: string;
+  threshold?: number;
+  ready: boolean;
+}
+
+export interface EvalSuiteDetail {
+  name: string;
+  namespace: string;
+  datasetRef: string;
+  scorers: string[];
+  gate?: string;
+  threshold?: number;
+  ready: boolean;
+}
+
+export interface EvalSuiteListResponse {
+  items: EvalSuiteSummary[];
+  nextCursor: string;
+}
+
+export interface EvalSuiteListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+}
+
+export interface EvalSuiteCreateRequest {
+  name?: string;
+  namespace?: string;
+  datasetRef: string;
+  scorers: string[];
+  gate?: string;
+  threshold?: number;
+}
+
+export interface EvalSuiteUpdateRequest {
+  datasetRef?: string;
+  scorers?: string[];
+  gate?: string;
+  threshold?: number;
+}
+
+// --- PromptVersion DTOs (m17.8) -----------------------------------------------
+// A PromptVersion pins a named prompt to a version ref. The diff endpoint
+// returns a textual line diff (resolveMode="textual" — ALWAYS explicit).
+// Honest degrade contract:
+//   501 → "prompt resolution not configured" (calm state — NOT an error)
+//   404 → "version/ref not found"
+//   502 → "resolve failed (retry)" — real transient error
+// NEVER fabricate a diff.
+
+// PromptDiffLine is one line in the textual diff.
+export interface PromptDiffLine {
+  // op: "+" added, "-" removed, " " context (unchanged)
+  op: "+" | "-" | " ";
+  content: string;
+}
+
+// PromptDiffResponse mirrors GET /api/promptversions/{ns}/{name}/diff?from=.
+// resolveMode is ALWAYS "textual" (the only supported resolver). lines is the
+// line-level diff. NEVER present when the endpoint errors.
+export interface PromptDiffResponse {
+  resolveMode: "textual";
+  lines: PromptDiffLine[];
+}
+
+export interface PromptVersionSummary {
+  name: string;
+  namespace: string;
+  /** ref is the version identifier (git SHA, semver, tag, etc.). */
+  ref: string;
+  /** promptName is the logical prompt this version belongs to. */
+  promptName: string;
+  createdAt?: string;
+}
+
+export interface PromptVersionDetail {
+  name: string;
+  namespace: string;
+  ref: string;
+  promptName: string;
+  content?: string;
+  createdAt?: string;
+}
+
+export interface PromptVersionListResponse {
+  items: PromptVersionSummary[];
+  nextCursor: string;
+}
+
+export interface PromptVersionListParams {
+  limit?: number;
+  cursor?: string;
+  namespace?: string;
+  promptName?: string;
+}
+
+export interface PromptVersionCreateRequest {
+  name?: string;
+  namespace?: string;
+  ref: string;
+  promptName: string;
+  content?: string;
+}
+
+export interface PromptVersionUpdateRequest {
+  ref?: string;
+  content?: string;
+}
+
 // --- AgentScalingPolicy DTOs (m17.6) ------------------------------------------
 // An AgentScalingPolicy lets operators attach a custom scaling policy to an agent
 // (min/max replicas + an optional schedule). The controller validates:
@@ -2291,5 +2446,211 @@ export const api = {
         res.status,
       );
     }
+  },
+
+  // --- EvalSuite CRUD + results (m17.7) ----------------------------------------
+  // listEvalSuites reads one page window of EvalSuites.
+  listEvalSuites: (
+    params?: EvalSuiteListParams,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<EvalSuiteListResponse>(`/api/evalsuites${suffix}`, signal);
+  },
+
+  evalSuiteDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<EvalSuiteDetail>(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // createEvalSuite creates a new EvalSuite. A 403 (viewer), 409 (exists), or
+  // 422 (validation) surfaces as ApiError.
+  createEvalSuite: async (
+    req: EvalSuiteCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteDetail> => {
+    const res = await apiFetch("/api/evalsuites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalSuiteDetail;
+  },
+
+  updateEvalSuite: async (
+    ns: string,
+    name: string,
+    req: EvalSuiteUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<EvalSuiteDetail> => {
+    const res = await apiFetch(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalSuiteDetail;
+  },
+
+  removeEvalSuite: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete eval suite failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // evalSuiteResults reads the honest results for a suite (m17.7). The contract:
+  //   • conditions = controller gate outcome (always present)
+  //   • scores only when scoresAvailable=true (Langfuse wired)
+  //   • when false, scoresUnavailableReason explains calmly — NEVER fabricate
+  // A 404 = no such suite; 403 = can't read. Both surface as ApiError.
+  evalSuiteResults: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<EvalSuiteResults>(
+      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/results`,
+      signal,
+    ),
+
+  // --- PromptVersion CRUD + diff (m17.8) ----------------------------------------
+  // listPromptVersions reads one page window of PromptVersions.
+  listPromptVersions: (
+    params?: PromptVersionListParams,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionListResponse> => {
+    const qs = new URLSearchParams();
+    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.cursor) qs.set("cursor", params.cursor);
+    if (params?.namespace) qs.set("namespace", params.namespace);
+    if (params?.promptName) qs.set("promptName", params.promptName);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return getJSON<PromptVersionListResponse>(`/api/promptversions${suffix}`, signal);
+  },
+
+  promptVersionDetail: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<PromptVersionDetail>(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  createPromptVersion: async (
+    req: PromptVersionCreateRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionDetail> => {
+    const res = await apiFetch("/api/promptversions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptVersionDetail;
+  },
+
+  updatePromptVersion: async (
+    ns: string,
+    name: string,
+    req: PromptVersionUpdateRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptVersionDetail> => {
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptVersionDetail;
+  },
+
+  removePromptVersion: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `delete prompt version failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // promptVersionDiff fetches the textual line diff between two PromptVersion
+  // refs (m17.8). The honest degrade contract:
+  //   501 → returns null (calm state: "prompt resolution not configured")
+  //   404 → throws ApiError (isNotFound: "version/ref not found")
+  //   502 → throws ApiError ("resolve failed — retry")
+  //   200 → PromptDiffResponse with resolveMode="textual" (ALWAYS explicit)
+  // NEVER fabricate a diff. The null sentinel (501) is for calm degraded UX.
+  promptVersionDiff: async (
+    ns: string,
+    name: string,
+    fromRef: string,
+    signal?: AbortSignal,
+  ): Promise<PromptDiffResponse | null> => {
+    const qs = new URLSearchParams();
+    qs.set("from", fromRef);
+    const res = await apiFetch(
+      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/diff?${qs.toString()}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = no resolver configured — calm null sentinel (NOT an error toast).
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      // 404 = version/ref not found; 502 = resolver failed. Both throw — the
+      // UI renders distinct honest states for each (not fabricated diffs).
+      throw new ApiError(
+        await errorMessage(res, `diff failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PromptDiffResponse;
   },
 };
