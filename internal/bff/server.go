@@ -202,6 +202,20 @@ func (s *Server) Handler() http.Handler {
 		} else {
 			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
 		}
+		// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
+		// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
+		// Kubernetes; independent references (agentRef-only, no ownerRef) are left in
+		// place — orphan pruning is deferred. A viewer's DELETE surfaces the API
+		// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
+		// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
+		authed.HandleFunc("DELETE /api/agents/{ns}/{name}", s.handleDeleteAgent)
+		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
+		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
+		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
+		// (independent reference). The Go 1.22 ServeMux treats this sub-path pattern
+		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
+		// detail GET above.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
@@ -221,6 +235,8 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
 		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
 		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
+		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
+		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
