@@ -217,6 +217,20 @@ func (s *Server) Handler() http.Handler {
 		// detail GET above.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
+		// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
+		// annotation. Five endpoints following the list contract for GET /list and
+		// the SSA-under-console-field-manager pattern for PUT. The scheme is needed
+		// for SSA (ensureGVK); when absent the write routes serve 501 honestly.
+		authed.HandleFunc("GET /api/modelroutes", s.handleListModelRoutes)
+		authed.HandleFunc("GET /api/modelroutes/{ns}/{name}", s.handleGetModelRoute)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/modelroutes", s.handleCreateModelRoute)
+			authed.HandleFunc("PUT /api/modelroutes/{ns}/{name}", s.handleUpdateModelRoute)
+		} else {
+			authed.Handle("POST /api/modelroutes", notImplemented("model route create"))
+			authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("model route update"))
+		}
+		authed.HandleFunc("DELETE /api/modelroutes/{ns}/{name}", s.handleDeleteModelRoute)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -238,6 +252,11 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
 		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
+		authed.Handle("GET /api/modelroutes", notImplemented("caller-scoped model route list"))
+		authed.Handle("GET /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route detail"))
+		authed.Handle("POST /api/modelroutes", notImplemented("caller-scoped model route create"))
+		authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route update"))
+		authed.Handle("DELETE /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))

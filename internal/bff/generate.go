@@ -314,7 +314,7 @@ func getErrorToCreateError(err error, what string) *createError {
 	case apierrors.IsForbidden(err):
 		return &createError{status: http.StatusForbidden, msg: "forbidden: not allowed to read the " + what}
 	case apierrors.IsUnauthorized(err):
-		return &createError{status: http.StatusUnauthorized, msg: "unauthorized: token rejected by the API server"}
+		return &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
 	case apierrors.IsNotFound(err):
 		return &createError{status: http.StatusNotFound, msg: what + " not found"}
 	default:
