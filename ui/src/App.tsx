@@ -19,6 +19,7 @@ import { PlaygroundPage } from "@/pages/playground-page";
 import { SecretBindingDetailPage, NewSecretBindingPage } from "@/pages/secret-binding-detail-page";
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
+import { TracePage } from "@/pages/trace-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
 import { NAV_ITEMS } from "@/lib/nav";
@@ -118,6 +119,9 @@ export function App() {
             <Route path="registries/:ns/:name" element={<AgentRegistryDetailPage />} />
             {/* m15.13: Topology v2 — grouped/searchable/list↔graph */}
             <Route path="topology" element={<TopologyPage />} />
+            {/* m16.7: native trace page — full one-trace view with TraceExplorer
+                + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
+            <Route path="traces/:id" element={<TracePage />} />
             {/* Not-yet-built IA destinations (Tools, Traces, … ,
                 Settings) render their milestone placeholder — the full approved
                 nav is walkable without pulling later features forward. */}

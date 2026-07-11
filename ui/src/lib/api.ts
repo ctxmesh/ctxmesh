@@ -207,6 +207,11 @@ export interface SpanSummary {
   output: string;
   inputRedacted: boolean;
   outputRedacted: boolean;
+  // m16.2 — DFS-ordering additions (additive, optional for backward compat).
+  // nestingDepth is the span's depth in the DFS tree (0 = root); rootSpanId
+  // names the trace root so callers can skip the parentId-walk when they just
+  // need the root. Both absent = pre-m16.2 response (UI falls back gracefully).
+  nestingDepth?: number;
 }
 
 // TraceRollup is the trace-level header the inspector renders (name + totals).
@@ -223,9 +228,33 @@ export interface TraceRollup {
 // TraceDetailResponse mirrors GET /api/traces/{id}/detail — the run SUMMARY
 // (rollup + FLAT spans). Distinct from GET /api/traces/{id} (the Langfuse embed
 // URL). Spans is non-null on the wire ([] not null).
+// m16.2: rootSpanId is the trace-root span id (additive — absent on pre-m16.2
+// responses; the UI falls back to the first parentId-less span).
 export interface TraceDetailResponse {
   rollup: TraceRollup;
   spans: SpanSummary[];
+  rootSpanId?: string;
+}
+
+// --- Feedback (GET /api/feedback?traceId=<id>, m16.4) ------------------------
+// Per-trace feedback scores from Langfuse. The endpoint returns 501 when
+// Langfuse is not wired — the UI MUST degrade calmly (disabled state, not an
+// error toast). A 502 means Langfuse is configured but unreachable — also calm.
+// Both are sentinel null from the api.feedback() method.
+
+// FeedbackScore is one score observation on a trace (mirrors BFF's FeedbackScore
+// DTO). value and stringValue are mutually exclusive (numeric vs categorical).
+export interface FeedbackScore {
+  id: string;
+  name: string;
+  value?: number;
+  stringValue?: string;
+  comment?: string;
+  source?: string;
+}
+
+export interface FeedbackResponse {
+  scores: FeedbackScore[];
 }
 
 // --- Capabilities (GET /api/capabilities?namespace=) ------------------------
@@ -1564,6 +1593,29 @@ export const api = {
         res.status,
       );
     }
+  },
+
+  // feedback reads the per-trace feedback scores from Langfuse (m16.4). Like
+  // agentRuns, a 501 (Langfuse not configured) or 502 (Langfuse unreachable) is
+  // NOT an error — the caller renders a calm disabled state. Returns null as the
+  // sentinel for "not available" so callers distinguish from "empty list".
+  feedback: async (
+    traceId: string,
+    signal?: AbortSignal,
+  ): Promise<FeedbackResponse | null> => {
+    const res = await apiFetch(
+      `/api/feedback?traceId=${encodeURIComponent(traceId)}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    // 501 = Langfuse not configured; 502 = Langfuse unreachable — both calm.
+    if (res.status === 501 || res.status === 502) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `feedback failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as FeedbackResponse;
   },
 
   // agentRuns reads the bounded per-agent run list (m15.11). The endpoint
