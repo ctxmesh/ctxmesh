@@ -175,7 +175,7 @@ func seriesLabel(labels map[string]string) string {
 		return v
 	}
 	if len(labels) == 0 {
-		return "value"
+		return "value" //nolint:goconst // "value" is the Prometheus fallback label name, not a duplicated constant
 	}
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
