@@ -18,7 +18,7 @@ import { api, ApiError, type TraceDetailResponse } from "@/lib/api";
 //     (the Langfuse deep link, resolved server-side) in a new tab.
 //     NOTE: the embedded iframe from the old TraceView is NOT on this page —
 //     Langfuse is link-out only on this surface (m16.7 demotion).
-//   • FeedbackPanel: per-trace scores (m16.9, calm 501/502 degrade).
+//   • FeedbackPanel: per-trace scores (m16.9, 501-calm / 502-error).
 //
 // data-testid contract:
 //   trace-page              — root container
