@@ -130,6 +130,82 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newAgentDetail(&ad, toolBindings, memoryBindings, versions, managedOutsideUI, drift))
 }
 
+// defaultAgentRunLimit is the bounded per-agent run count when ?limit is absent.
+const defaultAgentRunLimit = 20
+
+// maxAgentRunLimit caps ?limit so one request can never ask Langfuse for an
+// unbounded page. A larger ?limit is clamped down; a smaller one is honored.
+const maxAgentRunLimit = 100
+
+// handleAgentRuns serves GET /api/agents/{ns}/{name}/runs — the bounded recent-runs
+// list for ONE agent (the agent detail page's per-agent run history, m15.9). It is
+// CALLER-SCOPED (ADR 0011) for the EXISTENCE check: the caller must be able to `get`
+// the AgentDeployment through their OWN client (K8s RBAC), exactly like the detail
+// route. A viewer who can read the agent gets its runs; a not-found is 404; a
+// Forbidden on the agent is 403 — never a swallowed empty body.
+//
+// The runs themselves come from Langfuse through the server-side adapter (its own
+// keys, like the m14.8 run inspector — NOT the caller's token; Langfuse has no K8s
+// RBAC), filtered to the `agent:<ns>/<name>` trace identity tag so a same-named
+// agent in another namespace can never leak in (the cross-namespace correctness
+// property). Redaction-honest: this is trace METADATA only (traceId/name/timestamp/
+// cost/tokens/latency), never payload content.
+//
+// The route is registered only when BOTH the caller-client factory AND the Langfuse
+// adapter are wired; when Langfuse is absent the route seam serves an honest 501
+// (the m14.8 degrade pattern), never a 500. ?limit bounds the page (default 20,
+// capped at 100).
+func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	ns := strings.TrimSpace(r.PathValue("ns"))
+	name := strings.TrimSpace(r.PathValue("name"))
+	if ns == "" || name == "" {
+		writeError(w, http.StatusBadRequest, "namespace and name are required")
+		return
+	}
+
+	// Caller-scoped existence + authorization gate: verify the caller can `get` the
+	// agent BEFORE fetching any runs. A denial/absence surfaces honestly (403/404)
+	// and no run metadata is returned for an agent the caller may not see.
+	var ad agentsv1alpha1.AgentDeployment
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
+		s.writeGetError(w, err, "agent")
+		return
+	}
+
+	limit := parseAgentRunLimit(r.URL.Query().Get("limit"))
+
+	runs, err := s.adapters.Langfuse.RunsForAgent(r.Context(), ns, name, limit)
+	if err != nil {
+		s.log.Error(err, "fetch agent runs failed", "namespace", ns, "agent", name)
+		writeError(w, http.StatusBadGateway, "failed to fetch agent runs")
+		return
+	}
+	if runs == nil {
+		runs = []RunSummary{}
+	}
+	writeJSON(w, http.StatusOK, AgentRunsResponse{Namespace: ns, Name: name, Runs: runs})
+}
+
+// parseAgentRunLimit resolves ?limit to a bounded page size: absent/invalid/non-
+// positive → defaultAgentRunLimit; a value above maxAgentRunLimit is clamped down.
+func parseAgentRunLimit(raw string) int {
+	n := defaultAgentRunLimit
+	if raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			n = v
+		}
+	}
+	if n > maxAgentRunLimit {
+		n = maxAgentRunLimit
+	}
+	return n
+}
+
 // handleAgentLogs serves GET /api/agents/{ns}/{name}/logs — the live SSE pod-log
 // tail (first-agent-flow.md §3). It is CALLER-SCOPED via the `pods/log`
 // subresource (ADR 0011): the log stream is opened with the CALLER'S token, so the

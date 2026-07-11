@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,11 @@ type lfTrace struct {
 	LatencyMs   float64  `json:"latency"`
 	Usage       *lfUsage `json:"usage,omitempty"`
 	TotalTokens int64    `json:"totalTokens"`
+	// Tags are the trace's Langfuse tags (the launcher stamps agent:<ns>/<name>).
+	// Read so RunsForAgent can DEFENSIVELY confirm the per-agent identity even if
+	// the upstream tags filter is loose — cross-namespace correctness must not
+	// depend solely on the server honoring the query param.
+	Tags []string `json:"tags,omitempty"`
 }
 
 type lfUsage struct {
@@ -138,6 +144,76 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		})
 	}
 	return runs, nil
+}
+
+// agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
+// launcher stamps on every agent.invoke trace (cmd/launcher/proxy.go). It is the
+// UNAMBIGUOUS per-agent filter key: two agents that share a bare NAME in different
+// namespaces get distinct tags, so a filter on one can never match the other. It
+// mirrors the launcher's agentIdentityTag() — keep the two in sync.
+func agentRunTag(namespace, name string) string {
+	ns := strings.TrimSpace(namespace)
+	n := strings.TrimSpace(name)
+	if ns == "" {
+		return "agent:" + n
+	}
+	return "agent:" + ns + "/" + n
+}
+
+// RunsForAgent fetches the most recent traces (newest first) for ONE agent and
+// projects them onto RunSummary. It filters on the Langfuse-native tags query
+// (`?tags=agent:<ns>/<name>`) so the upstream returns only this agent's runs, then
+// DEFENSIVELY re-checks each trace's own tags before including it — so a loose or
+// unsupported server-side filter can never leak another agent's runs (the
+// cross-namespace correctness property: default/foo excludes other/foo). Returns a
+// non-nil slice.
+func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name string, limit int) ([]RunSummary, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("langfuse: empty agent name")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	tag := agentRunTag(namespace, name)
+
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("orderBy", "timestamp.desc")
+	// Langfuse's public traces API filters by tag; the launcher stamps exactly this
+	// value as the trace's identity tag.
+	q.Set("tags", tag)
+
+	var body lfTracesResponse
+	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+		return nil, err
+	}
+
+	runs := make([]RunSummary, 0, len(body.Data))
+	for _, t := range body.Data {
+		// Defence in depth: only include a trace we can POSITIVELY confirm belongs to
+		// this agent by its own tags. This guarantees cross-namespace correctness even
+		// if the upstream ignored/loosened the tags filter — never trust the server to
+		// have scoped the list for us.
+		if !traceHasTag(t, tag) {
+			continue
+		}
+		runs = append(runs, RunSummary{
+			TraceID:   t.ID,
+			Name:      t.Name,
+			Timestamp: t.Timestamp,
+			CostUSD:   t.TotalCost,
+			Tokens:    traceTokens(t),
+			LatencyMs: t.LatencyMs,
+		})
+	}
+	return runs, nil
+}
+
+// traceHasTag reports whether the trace carries the given tag (exact match). Used
+// by RunsForAgent to positively confirm each trace's agent identity before
+// including it in the per-agent run list.
+func traceHasTag(t lfTrace, tag string) bool {
+	return slices.Contains(t.Tags, tag)
 }
 
 // CostUsage aggregates the recent traces into the dashboard cost rollup. We

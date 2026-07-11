@@ -187,6 +187,18 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
+		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
+		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
+		// `agent:<ns>/<name>` trace identity tag (cross-namespace correct). The Go 1.22
+		// ServeMux treats ".../{name}/runs" as MORE SPECIFIC than "GET .../{ns}/{name}"
+		// so it never shadows the detail GET. Wired only when the Langfuse adapter is
+		// present; absent → an honest 501 (m14.8 degrade), never a 500.
+		if s.adapters.Langfuse != nil {
+			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleAgentRuns)
+		} else {
+			authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("Langfuse per-agent runs adapter"))
+		}
 		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
 		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
 		// console-managed agent, a degraded safe-field SSA patch for an annotation-
@@ -295,6 +307,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
 		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
 		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
+		authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("caller-scoped agent runs"))
 		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
 		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
 		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))

@@ -294,15 +294,23 @@ func TestMemoryBinding_UnbindDropsEnvAndRollsRevision(t *testing.T) {
 	assert.NotEqual(t, revNameBound, revNameUnbound,
 		"revision name must change on unbind (env drop is structural)")
 
-	// ALL memory-related env vars must be gone — including the controller-injected
-	// AGENT_NAME (it exists only to serve the memory key layout; the operator did
-	// not set it in spec.env).
+	// The memory-SPECIFIC env vars must be gone on unbind (they existed only to
+	// serve the Valkey key layout).
 	envMapUnbound := envByName(ksvcUnbound.Spec.Template.Spec.Containers[0].Env)
 	assert.NotContains(t, envMapUnbound, "MEMORY_BACKEND_ADDR")
 	assert.NotContains(t, envMapUnbound, "MEMORY_PORT")
 	assert.NotContains(t, envMapUnbound, "MEMORY_KEY_NAMESPACE")
-	assert.NotContains(t, envMapUnbound, "AGENT_NAME",
-		"controller-injected AGENT_NAME must be dropped on unbind")
+	// AGENT_NAME + POD_NAMESPACE, by contrast, PERSIST after unbind: as of m15.9
+	// they are the agent's UNCONDITIONAL trace identity (the base env), no longer a
+	// memory-only artifact. The memory path merely reused an AGENT_NAME the base env
+	// now always injects. Their persistence is correct — the launcher still needs
+	// the <namespace>/<name> identity to tag traces after the memory binding is gone.
+	assert.Contains(t, envMapUnbound, "AGENT_NAME",
+		"AGENT_NAME is the base trace identity (m15.9) and must survive a memory unbind")
+	assert.Equal(t, agentName, envMapUnbound["AGENT_NAME"])
+	assert.Contains(t, envMapUnbound, "POD_NAMESPACE",
+		"POD_NAMESPACE is the base trace identity (m15.9) and must survive a memory unbind")
+	assert.Equal(t, namespace, envMapUnbound["POD_NAMESPACE"])
 }
 
 // TestMemoryBinding_AddrChangeRollsRevision verifies that changing the backend

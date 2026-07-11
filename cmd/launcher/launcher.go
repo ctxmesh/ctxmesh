@@ -71,6 +71,16 @@ type Config struct {
 	AgentVersion string
 	AgentRoute   string
 
+	// AgentNamespace is the agent's Kubernetes namespace (POD_NAMESPACE). It is
+	// NOT a display attribute — together with AgentName it forms the UNAMBIGUOUS
+	// per-agent trace identity `<namespace>/<name>` the launcher stamps as the
+	// Langfuse trace-level tag `agent:<ns>/<name>` (see proxy.go). Two agents that
+	// share a bare NAME in different namespaces get distinct tags, so the BFF can
+	// filter a run list to exactly one agent without cross-namespace bleed. Env:
+	// POD_NAMESPACE (injected by the controller). Empty ⇒ the tag falls back to
+	// the bare name (a visible-but-non-fatal misconfiguration, never a crash).
+	AgentNamespace string
+
 	// PromptVersion is the resolved git-pointer prompt identifier (M9), injected
 	// as static env PROMPT_VERSION by the controller when the agent has a
 	// spec.promptRef. It is surfaced as the prompt.version span attribute so
@@ -178,19 +188,20 @@ func loadConfig(lookup func(string) string) (Config, error) {
 	}
 
 	return Config{
-		Argv:          argv,
-		ProxyPort:     proxyPort,
-		UpstreamPort:  upstreamPort,
-		OTLPEndpoint:  otlpEndpoint,
-		AgentName:     agentName,
-		AgentVersion:  lookup("AGENT_VERSION"),
-		AgentRoute:    lookup("AGENT_ROUTE"),
-		PromptVersion: lookup("PROMPT_VERSION"),
-		Memory:        mem,
-		A2A:           a2a,
-		ObjectStore:   objStore,
-		Gateway:       gw,
-		Feedback:      fb,
+		Argv:           argv,
+		ProxyPort:      proxyPort,
+		UpstreamPort:   upstreamPort,
+		OTLPEndpoint:   otlpEndpoint,
+		AgentName:      agentName,
+		AgentVersion:   lookup("AGENT_VERSION"),
+		AgentRoute:     lookup("AGENT_ROUTE"),
+		AgentNamespace: lookup("POD_NAMESPACE"),
+		PromptVersion:  lookup("PROMPT_VERSION"),
+		Memory:         mem,
+		A2A:            a2a,
+		ObjectStore:    objStore,
+		Gateway:        gw,
+		Feedback:       fb,
 	}, nil
 }
 
