@@ -5,11 +5,9 @@ import {
   GitBranch,
   KeyRound,
   LayoutDashboard,
-  ListTree,
   MessagesSquare,
   Network,
   PlugZap,
-  Settings,
   SlidersHorizontal,
   Sparkles,
   TestTube2,
@@ -197,9 +195,11 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Observe",
     items: [
-      { id: "traces", label: "Traces", icon: ListTree, milestone: "M16" },
+      // Runs IS the trace list — each run row drills into the native trace
+      // explorer at /traces/:id (m16.7), which embeds the inline feedback panel
+      // (m16.9). There is deliberately no standalone "Traces"/"Feedback" nav
+      // destination; both are reached by drilling into a run.
       { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16", route: "/runs" },
-      { id: "feedback", label: "Feedback", icon: MessagesSquare, milestone: "M16" },
       { id: "cost", label: "Cost", icon: Coins, milestone: "M16", route: "/cost" },
     ],
   },
@@ -240,12 +240,6 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M15",
         route: "/secrets",
       },
-    ],
-  },
-  {
-    heading: "Settings",
-    items: [
-      { id: "settings", label: "Settings", icon: Settings, milestone: "M13" },
     ],
   },
 ];

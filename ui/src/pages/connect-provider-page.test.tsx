@@ -47,11 +47,21 @@ function recordingFetch(opts: {
           ? opts.connect(body)
           : {
               ok: true,
+              // The REAL BFF shape: provider details NESTED under `provider`
+              // (a ProviderSummary) with `models` as plain string IDs + `created`.
               json: {
-                provider: "anthropic",
-                models: [{ id: "claude-opus-4", modality: "chat" }, { id: "claude-sonnet-4", modality: "chat" }],
-                secretName: "anthropic-key",
-                ready: true,
+                provider: {
+                  name: "anthropic",
+                  namespace: "default",
+                  provider: "anthropic",
+                  displayName: "Anthropic",
+                  models: ["claude-opus-4", "claude-sonnet-4"],
+                  secretName: "anthropic-key",
+                  ready: true,
+                },
+                created: [
+                  { kind: "Secret", name: "anthropic", namespace: "default" },
+                ],
               },
             };
         return Promise.resolve({
