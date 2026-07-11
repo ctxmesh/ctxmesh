@@ -135,6 +135,9 @@ func TestListAgentsProjection(t *testing.T) {
 
 	assert.Equal(t, AgentSummary{
 		Name: "echo", Namespace: "prod", Image: "echo:1.2.3", Phase: "Ready", Ready: true,
+		// No source-spec annotation on this fixture agent → managed outside the UI
+		// (the m18.11 fleet flag); no console spec to compare, so no drift.
+		ManagedOutsideUI: true,
 	}, byName["echo"])
 	assert.Equal(t, "Pending", byName["wip"].Phase)
 	assert.False(t, byName["wip"].Ready)

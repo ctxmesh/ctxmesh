@@ -108,6 +108,73 @@ prompt:
 	}
 }
 
+// TestExpandRoleAllowedCallers proves the within-registry A2A fields round-trip:
+// role + allowedCallers on the agent.yaml land on the AgentDeployment spec (m18.3).
+func TestExpandRoleAllowedCallers(t *testing.T) {
+	in := []byte(`name: worker-agent
+image: ghcr.io/ctxmesh/worker:v1
+role: reviewer
+allowedCallers:
+  - orchestrator-agent
+  - auditor-agent
+`)
+	got, err := Expand(in)
+	if err != nil {
+		t.Fatalf("Expand: unexpected error: %v", err)
+	}
+	out := string(got)
+	for _, want := range []string{
+		"kind: AgentDeployment",
+		"role: reviewer",
+		"allowedCallers:",
+		"orchestrator-agent",
+		"auditor-agent",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expanded output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// TestExpandPromptRefReferencesExisting proves a top-level promptRef sets
+// spec.promptRef WITHOUT emitting a PromptVersion — referencing an existing prompt
+// (the console composing an existing PromptVersion into a new agent, m18.6).
+func TestExpandPromptRefReferencesExisting(t *testing.T) {
+	in := []byte(`name: composed-agent
+image: ghcr.io/ctxmesh/x:v1
+promptRef: system-prompt-v2
+`)
+	got, err := Expand(in)
+	if err != nil {
+		t.Fatalf("Expand: unexpected error: %v", err)
+	}
+	out := string(got)
+	if !strings.Contains(out, "promptRef: system-prompt-v2") {
+		t.Errorf("expected spec.promptRef set to the referenced name, got:\n%s", out)
+	}
+	if strings.Contains(out, "kind: PromptVersion") {
+		t.Errorf("promptRef must NOT emit a PromptVersion manifest, got:\n%s", out)
+	}
+}
+
+// TestExpandPromptRefAndBlockConflict proves promptRef + a prompt: block together
+// is a validation error (reference an existing OR create a new one, not both).
+func TestExpandPromptRefAndBlockConflict(t *testing.T) {
+	in := []byte(`name: x
+image: img:1
+promptRef: existing
+prompt:
+  name: new-one
+  git:
+    repo: https://github.com/a/b
+    ref: main
+    path: p.txt
+`)
+	if _, err := Expand(in); err == nil {
+		t.Fatal("expected a validation error for promptRef + prompt block together")
+	}
+}
+
 // TestExpandManagedRuntime exercises the managed-runtime branch (ADR 0013)
 // through the public Expand() the BFF calls: image resolves when omitted,
 // systemPrompt → SYSTEM_PROMPT env, tools → MCPToolBinding docs; the custom path

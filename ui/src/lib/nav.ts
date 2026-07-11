@@ -5,11 +5,9 @@ import {
   GitBranch,
   KeyRound,
   LayoutDashboard,
-  ListTree,
   MessagesSquare,
   Network,
   PlugZap,
-  Settings,
   SlidersHorizontal,
   Sparkles,
   TestTube2,
@@ -197,9 +195,11 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Observe",
     items: [
-      { id: "traces", label: "Traces", icon: ListTree, milestone: "M16" },
+      // Runs IS the trace list — each run row drills into the native trace
+      // explorer at /traces/:id (m16.7), which embeds the inline feedback panel
+      // (m16.9). There is deliberately no standalone "Traces"/"Feedback" nav
+      // destination; both are reached by drilling into a run.
       { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16", route: "/runs" },
-      { id: "feedback", label: "Feedback", icon: MessagesSquare, milestone: "M16" },
       { id: "cost", label: "Cost", icon: Coins, milestone: "M16", route: "/cost" },
     ],
   },
@@ -207,17 +207,15 @@ export const NAV_SECTIONS: NavSection[] = [
     heading: "Platform",
     items: [
       {
-        // Connect-provider wizard (m14.9). Connecting a provider creates a
-        // Secret + SecretBinding + ModelRoute — a WRITE surface, hidden from a
-        // viewer's nav. Gates on create secretbindings (the key-storage seam).
-        // The full connected-providers LIST page is a later task; this entry
-        // opens the connect wizard directly.
+        // Connected-providers LIST page (m18.5). Read-only for everyone (a viewer
+        // sees connected providers); the write actions (Connect / Rotate key /
+        // Disconnect) are gated IN the page on secretbindings create/update/delete.
+        // The connect wizard is reached via the page's "Connect provider" CTA.
         id: "providers",
         label: "Providers",
         icon: PlugZap,
         milestone: "M14",
-        route: "/providers/connect",
-        requiresWrite: { resource: RES_SECRETS, verb: "create" },
+        route: "/providers",
       },
       {
         id: "registries",
@@ -240,12 +238,6 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M15",
         route: "/secrets",
       },
-    ],
-  },
-  {
-    heading: "Settings",
-    items: [
-      { id: "settings", label: "Settings", icon: Settings, milestone: "M13" },
     ],
   },
 ];

@@ -31,6 +31,21 @@ export interface AgentSummary {
   image: string;
   phase: string;
   ready: boolean;
+  // Fleet-health flags (m18.11): managedOutsideUI = kubectl-created (no console
+  // source-spec); drift = a console-managed agent whose live spec diverged. Both
+  // drive the SRE fleet drift badges (m18.12). Optional for backward-compat.
+  drift?: boolean;
+  managedOutsideUI?: boolean;
+}
+
+// CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):
+// an agent's per-agent custom redaction rules (name + RE2 pattern). No secrets.
+export interface CustomDetector {
+  name: string;
+  pattern: string;
+}
+export interface TracePolicyResponse {
+  customDetectors: CustomDetector[];
 }
 
 // AgentListResponse mirrors the BFF's list-contract DTO (internal/bff/dto.go).
@@ -97,6 +112,10 @@ export interface AgentDetailResponse {
   image: string;
   executionModel: string;
   role: string;
+  // promptRef / modelRoute — the composed resources, surfaced so the detail page
+  // can link to them (the used-by graph, m18.9). Empty when unset.
+  promptRef: string;
+  modelRoute: string;
   scaling: AgentScaling;
   phase: string;
   ready: boolean;
@@ -518,26 +537,34 @@ export interface ConnectProviderRequest {
   baseURL?: string;
 }
 
-// ConnectProviderResponse mirrors the BFF DTO: the created resources' identities
-// + the live model list (pre-create, from the just-validated key). It carries NO
-// secret material — only the `secretName` REFERENCE.
-export interface ConnectProviderResponse {
+// ProviderSummary is the BFF's connected-provider projection: the route name +
+// provider + the live model list (plain model-id strings, NOT objects) + the
+// secretName REFERENCE (never key material). Both connect + list return it.
+export interface ProviderSummary {
+  name: string;
+  namespace: string;
   provider: string;
-  models: ProviderModel[];
+  displayName: string;
+  models: string[];
   secretName: string;
   ready: boolean;
 }
 
-// ConnectedProvider is one already-connected provider (GET /api/providers). No
-// secrets — names/models only.
-export interface ConnectedProvider {
-  provider: string;
-  displayName: string;
-  models: ProviderModel[];
+// ConnectProviderResponse mirrors the REAL BFF DTO: the provider details are
+// NESTED under `provider` (a ProviderSummary) with the created object identities
+// under `created` — NOT a flat {provider, models}. Carries no secret material.
+export interface ConnectProviderResponse {
+  provider: ProviderSummary;
+  created?: { kind: string; name: string; namespace: string }[];
 }
 
+// ProviderListResponse mirrors the REAL BFF DTO (GET /api/providers): `providers`
+// and `items` are the SAME ProviderSummary[] under two keys (the console reads
+// `items`; older callers read `providers`). `models` are plain string ids, never
+// objects — the shape is pinned by the m18.4 contract fixture. No secret material.
 export interface ProviderListResponse {
-  providers: ConnectedProvider[];
+  providers: ProviderSummary[];
+  items: ProviderSummary[];
 }
 
 // --- BYO-MCP (POST/GET /api/mcpservers, GET /api/tools) ----------------------
@@ -604,7 +631,12 @@ export interface McpApproval {
 }
 
 export interface McpApprovalsResponse {
-  approvals: McpApproval[];
+  // The BFF (MCPServerListResponse) returns the pending servers under BOTH
+  // `servers` (semantic) and `items` (the list-contract key), carrying the same
+  // MCPServerSummary rows. Read `items` (with a `servers` fallback); there is no
+  // top-level `approvals` field (a fixed integration-shape bug).
+  servers: McpApproval[];
+  items: McpApproval[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
@@ -1363,6 +1395,17 @@ export interface ModelRouteListResponse {
   nextCursor: string;
 }
 
+// UsedByRef / UsedByResponse mirror the m18.8 reverse-lookup DTO (GET /api/usedby):
+// the resources that reference the queried object. items is non-nil ([] not null).
+export interface UsedByRef {
+  kind: string;
+  name: string;
+  namespace: string;
+}
+export interface UsedByResponse {
+  items: UsedByRef[];
+}
+
 export interface ModelRouteCreateRequest {
   name: string;
   namespace?: string;
@@ -1708,10 +1751,48 @@ export const api = {
   // server-side via the stored Secret). Not on the connect happy path (the POST
   // response already carries them) — kept for a re-connect / refresh.
   providerModels: (name: string, signal?: AbortSignal) =>
-    getJSON<{ models: ProviderModel[] }>(
+    // The real BFF DTO is { provider, models: string[] } — NOT ProviderModel[]
+    // objects (the m18.4 fixture pins the connect/list shapes; this matches them).
+    getJSON<{ provider: string; models: string[] }>(
       `/api/providers/${encodeURIComponent(name)}/models`,
       signal,
     ),
+
+  // rotateProviderKey rewrites the stored provider key server-side, validated with
+  // one live probe first (a bad key → 401, the stored key unchanged; ADR 0018).
+  // The new key lives ONLY in the POST body; the response is the refreshed summary,
+  // no secret material. 403 = viewer-can't-update, 404 = no such provider.
+  rotateProviderKey: (
+    name: string,
+    apiKey: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ) =>
+    postJSON<{ apiKey: string; namespace?: string }, ProviderSummary>(
+      `/api/providers/${encodeURIComponent(name)}/rotate`,
+      { apiKey, namespace },
+      signal,
+    ),
+
+  // disconnectProvider removes the connected provider's ModelRoute + SecretBinding
+  // + Secret (caller-scoped; ADR 0018). 204 on success; 403 = viewer-can't-delete.
+  disconnectProvider: async (
+    name: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+    const res = await apiFetch(
+      `/api/providers/${encodeURIComponent(name)}${qs}`,
+      { method: "DELETE", headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `disconnect failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
 
   // addMcpServer probes the MCP server + runs tools/list discovery, storing an
   // optional bearer key server-side (ADR 0016). The response carries the
@@ -1871,6 +1952,40 @@ export const api = {
     return (await res.json()) as UpdateAgentResponse;
   },
 
+  // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =
+  // viewer-can't-read; 404 = no such agent — both typed ApiError.
+  getTracePolicy: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<TracePolicyResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/tracepolicy`,
+      signal,
+    ),
+
+  // updateTracePolicy replaces the agent's custom redaction detectors. A 403 =
+  // viewer-can't-update; a 422 = an invalid detector name/regex (CRD validation).
+  updateTracePolicy: async (
+    ns: string,
+    name: string,
+    body: TracePolicyResponse,
+    signal?: AbortSignal,
+  ): Promise<TracePolicyResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/tracepolicy`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as TracePolicyResponse;
+  },
+
   // deleteAgent removes an agent via DELETE /api/agents/{ns}/{name} (m15.11).
   // A 403 (viewer), 404 (already gone), or 409 (conflict) surfaces via ApiError.
   // The caller should show the delete-impact preview (agentReferences) BEFORE
@@ -1903,6 +2018,22 @@ export const api = {
   agentReferences: (ns: string, name: string, signal?: AbortSignal) =>
     getJSON<AgentReferencesResponse>(
       `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/references`,
+      signal,
+    ),
+
+  // usedBy reads the reverse-lookup (m18.8): which resources reference the given
+  // object. kind = "modelroute" | "promptversion" (→ referencing agents) or
+  // "secretbinding" (→ referencing model routes). Powers the "Used by" sections.
+  usedBy: (
+    kind: "modelroute" | "promptversion" | "secretbinding",
+    name: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ) =>
+    getJSON<UsedByResponse>(
+      `/api/usedby?kind=${kind}&name=${encodeURIComponent(name)}${
+        namespace ? `&namespace=${encodeURIComponent(namespace)}` : ""
+      }`,
       signal,
     ),
 

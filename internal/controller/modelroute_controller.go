@@ -45,6 +45,13 @@ const (
 	// sbEnvPrefix is the env-var prefix for SecretBinding credentials on the
 	// gateway Deployment. Must match gateway.EnvVarName's prefix.
 	sbEnvPrefix = "SB_"
+
+	// gatewaySyncLabel marks a Secret in the gateway namespace as a controller-
+	// managed MIRROR of a provider Secret that lives in another namespace, so the
+	// gateway Deployment's SB_* secretKeyRefs (which resolve in the gateway
+	// namespace) can mount it. Mirrors are GC'd when no route references them.
+	gatewaySyncLabel = "agents.ctxmesh.ai/gateway-secret-sync"
+	gatewaySyncValue = "true"
 )
 
 // ModelRouteReconciler reconciles ModelRoute objects.
@@ -64,7 +71,7 @@ type ModelRouteReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=secretbindings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
@@ -103,6 +110,10 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 	// ── 2. Resolve SecretBindings and Secrets ─────────────────────────────────
 	bindings := make(map[string]agentsv1alpha1.SecretBinding)
 	secretRVs := make(map[string]string)
+	// mirrors: provider Secrets (keyed by their bare name) to sync into the gateway
+	// namespace so the Deployment's SB_* secretKeyRefs can mount a provider connected
+	// in another namespace (ADR 0018).
+	mirrors := make(map[string]corev1.Secret)
 
 	for i := range mrList.Items {
 		mr := &mrList.Items[i]
@@ -148,7 +159,17 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 				continue
 			}
 			secretRVs[secretKey] = secret.ResourceVersion
+			// Mirror the resolved Secret into the gateway namespace unless it already
+			// lives there — otherwise the gateway pod's secretKeyRef can't mount it.
+			if mr.Namespace != gateway.GatewayNamespace {
+				mirrors[sb.Spec.SecretRef.Name] = secret
+			}
 		}
+	}
+
+	// ── 2b. Mirror provider Secrets into the gateway namespace ────────────────
+	if err := r.syncGatewaySecrets(ctx, mirrors); err != nil {
+		return ctrl.Result{}, fmt.Errorf("syncing gateway secrets: %w", err)
 	}
 
 	// ── 3. Render config ──────────────────────────────────────────────────────
@@ -238,6 +259,66 @@ func (r *ModelRouteReconciler) resolveOTelConfig(ctx context.Context) gateway.OT
 		AuthHeader: telemetry.BasicAuthHeader(
 			string(sec.Data["public-key"]), string(sec.Data["secret-key"])),
 	}
+}
+
+// syncGatewaySecrets mirrors each resolved provider Secret (mirrors, keyed by bare
+// name) into the gateway namespace so the gateway Deployment's SB_* secretKeyRefs —
+// which resolve in the gateway namespace — can mount a provider connected in ANY
+// namespace (ADR 0018). Each mirror is labelled for GC: a previously-synced Secret
+// no longer referenced by any route is removed. A pre-existing NON-synced Secret of
+// the same name is never clobbered (the mirror is skipped and logged).
+//
+// NOTE: mirror names are the bare SecretRef name (matching the render's
+// secretKeyRef), so two routes in different namespaces that share a secret name
+// collide in the shared gateway (last-writer-wins) — the same global-uniqueness
+// assumption the gateway render already makes.
+func (r *ModelRouteReconciler) syncGatewaySecrets(ctx context.Context, mirrors map[string]corev1.Secret) error {
+	log := logf.FromContext(ctx)
+	referenced := make(map[string]bool, len(mirrors))
+	for name, src := range mirrors {
+		referenced[name] = true
+		// Never clobber a pre-existing Secret in the gateway namespace we don't own.
+		var cur corev1.Secret
+		err := r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: name}, &cur)
+		switch {
+		case err == nil && cur.Labels[gatewaySyncLabel] != gatewaySyncValue:
+			log.Info("gateway namespace already has an un-synced Secret of this name; skipping mirror", "name", name)
+			continue
+		case err != nil && !apierrors.IsNotFound(err):
+			return fmt.Errorf("checking gateway Secret %s: %w", name, err)
+		}
+		data := src.Data
+		m := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gateway.GatewayNamespace}}
+		if _, err := ctrl.CreateOrUpdate(ctx, r.Client, m, func() error {
+			if m.Labels == nil {
+				m.Labels = map[string]string{}
+			}
+			m.Labels[gatewaySyncLabel] = gatewaySyncValue
+			m.Type = corev1.SecretTypeOpaque
+			m.Data = data
+			return nil
+		}); err != nil {
+			return fmt.Errorf("mirroring gateway Secret %s: %w", name, err)
+		}
+	}
+
+	// GC: remove synced mirrors no longer referenced by any route.
+	var existing corev1.SecretList
+	if err := r.List(ctx, &existing,
+		client.InNamespace(gateway.GatewayNamespace),
+		client.MatchingLabels{gatewaySyncLabel: gatewaySyncValue}); err != nil {
+		return fmt.Errorf("listing synced gateway Secrets: %w", err)
+	}
+	for i := range existing.Items {
+		s := &existing.Items[i]
+		if referenced[s.Name] {
+			continue
+		}
+		if err := r.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("gc gateway Secret %s: %w", s.Name, err)
+		}
+	}
+	return nil
 }
 
 // syncGatewayDeployment patches the gateway Deployment with the config-hash

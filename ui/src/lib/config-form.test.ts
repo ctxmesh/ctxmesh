@@ -177,3 +177,42 @@ describe("config-form toAgentYAML", () => {
     expect(yaml).toContain("path: prompts/system.txt");
   });
 });
+
+describe("config-form composition (m18.6)", () => {
+  it("serializes role, allowedCallers, and a referenced promptRef", () => {
+    const yaml = toAgentYAML(
+      form({
+        name: "composed",
+        runtime: "managed",
+        modelRoute: "anthropic",
+        role: "reviewer",
+        allowedCallers: "orchestrator, auditor",
+        promptVersionRef: "system-prompt-v2",
+      }),
+    );
+    expect(yaml).toContain("route: anthropic");
+    expect(yaml).toContain("role: reviewer");
+    expect(yaml).toContain("allowedCallers:");
+    expect(yaml).toContain("- orchestrator");
+    expect(yaml).toContain("- auditor");
+    expect(yaml).toContain("promptRef: system-prompt-v2");
+    // Referencing an existing PromptVersion must NOT emit a git-backed block.
+    expect(yaml).not.toContain("git:");
+  });
+
+  it("rejects referencing a prompt AND creating a git-backed one", () => {
+    const errors = validate(
+      form({
+        name: "x",
+        runtime: "managed",
+        promptVersionRef: "existing",
+        promptEnabled: true,
+        promptName: "new-one",
+        promptRepo: "https://github.com/a/b",
+        promptRef: "main",
+        promptPath: "p.txt",
+      }),
+    );
+    expect(errors.promptVersionRef).toBeTruthy();
+  });
+});

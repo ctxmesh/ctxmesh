@@ -1,5 +1,7 @@
 import * as React from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+
+import { UsedBySection } from "@/components/used-by-section";
 import { GitBranch, Pencil, Plus, Trash2, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -241,6 +243,14 @@ function RouteDetailContent({
           </div>
         )}
       </div>
+
+      {/* Reverse-lookup: the agents that route through this ModelRoute (m18.9). */}
+      <UsedBySection
+        kind="modelroute"
+        name={detail.name}
+        namespace={detail.namespace}
+        title="Used by agents"
+      />
 
       {/* Edit wizard */}
       <DetailDrawer
