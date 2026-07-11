@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +96,17 @@ func (a *langfuseAdapter) TraceURL(traceID string) (string, error) {
 // only the fields the flat RunSummary needs and ignore the rest, so a Langfuse
 // schema addition does not break the projection.
 type lfTracesResponse struct {
-	Data []lfTrace `json:"data"`
+	Data []lfTrace   `json:"data"`
+	Meta *lfPageMeta `json:"meta,omitempty"`
+}
+
+// lfPageMeta is the Langfuse pagination metadata returned alongside each page.
+// The TotalPages field lets FilteredRuns know whether a next page exists.
+type lfPageMeta struct {
+	Page       int `json:"page"`
+	Limit      int `json:"limit"`
+	TotalItems int `json:"totalItems"`
+	TotalPages int `json:"totalPages"`
 }
 
 type lfTrace struct {
@@ -214,6 +225,206 @@ func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name stri
 // including it in the per-agent run list.
 func traceHasTag(t lfTrace, tag string) bool {
 	return slices.Contains(t.Tags, tag)
+}
+
+// RunFilter parameterises a FilteredRuns request. Zero values mean "no
+// restriction" on that dimension. Limit 0 defaults to defaultRunLimit.
+//
+// Server-side filters (sent to Langfuse as query params):
+//   - Agent     → tags=agent:<ns>/<name>   (Langfuse-native tag filter)
+//   - From/To   → fromTimestamp/toTimestamp (RFC3339)
+//   - Limit     → limit (page size)
+//   - Cursor    → page number (1-indexed, opaque to the caller)
+//
+// Client-side filters (applied in-process after the Langfuse response):
+//   - Q         → name substring match (Langfuse `name=` is an exact match;
+//     substring is applied post-fetch so partial names still work). Because it
+//     runs AFTER Langfuse paging, a page may come back short and NextCursor is
+//     derived from the unfiltered page count — a caller must not infer "no more
+//     results" from a single short page when Q is set.
+//
+// NOTE on status: NOT supported on the runs list and REJECTED with ErrBadParam.
+// The Langfuse /api/public/traces list carries no per-trace error/ok field (only
+// the full TraceDetail's observation.level does), so list-level status filtering
+// would need a detail fetch per trace — prohibitively expensive and a breach of
+// the metadata-only/bounded contract. Rather than accept the param and silently
+// return everything (a filter that lies), FilteredRuns rejects any non-empty
+// status. Status is inspected on the trace DETAIL, not the runs list.
+type RunFilter struct {
+	// Agent is "namespace/name" (e.g. "default/my-agent"). Empty → no tag filter.
+	Agent string
+	// From/To are RFC3339 timestamps (or ""). Both optional. Malformed values
+	// cause FilteredRuns to return a 400-class error via ErrBadParam.
+	From string
+	To   string
+	// Status is "ok", "error", or "". NOT applied server-side (see NOTE above).
+	// Present here so the handler can 400 on unknown values (honest contract).
+	Status string
+	// Q is a substring filter on the trace name, applied client-side post-fetch.
+	Q string
+	// Limit is the page size. 0 → defaultRunLimit. Clamped to maxRunLimit.
+	Limit int
+	// Cursor is the opaque page token from a prior RunListPage.NextCursor. ""
+	// means "first page". The cursor encodes a Langfuse page number (1-indexed).
+	Cursor string
+}
+
+// maxRunLimit caps the page size so one request cannot exhaust Langfuse memory.
+const maxRunLimit = 100
+
+// RunListPage is the paginated result of FilteredRuns.
+type RunListPage struct {
+	Runs       []RunSummary
+	NextCursor string // "" when this is the last page
+}
+
+// ErrBadParam is returned by FilteredRuns when a request param is malformed
+// (e.g. non-RFC3339 timestamp). The handler maps it to 400.
+var ErrBadParam = errors.New("bad parameter")
+
+// FilteredRuns fetches traces matching RunFilter and returns them as a paginated
+// RunListPage. It is the engine behind GET /api/runs?agent=&from=&to=&q=&status=
+// &limit=&cursor=.
+//
+// Cursor encoding: Langfuse uses 1-indexed integer pages. FilteredRuns encodes
+// the NEXT page number as the opaque cursor (e.g. "2"). An empty cursor means
+// "start from page 1". "" NextCursor in the response means last page (current
+// page == totalPages, or the upstream returned no meta).
+//
+// Status filter: NOT applied (see RunFilter doc). All traces are returned
+// regardless of status. Callers that need status filtering should do it
+// client-side on the returned Runs.
+//
+// Q filter: applied client-side (substring match on Run.Name after Langfuse
+// returns the page). Langfuse's `name=` param is an exact match, which would
+// be too strict for a search box — we accept all names from Langfuse and
+// filter here.
+//
+// Agent filter: applied server-side via Langfuse tags= + defensive post-fetch
+// tag re-check (same cross-namespace correctness guarantee as RunsForAgent).
+func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+	if limit > maxRunLimit {
+		limit = maxRunLimit
+	}
+
+	// Decode cursor → Langfuse page number (1-indexed). "" = page 1.
+	page := 1
+	if f.Cursor != "" {
+		p, err := strconv.Atoi(f.Cursor)
+		if err != nil || p < 1 {
+			return RunListPage{}, fmt.Errorf("%w: cursor must be a positive integer, got %q", ErrBadParam, f.Cursor)
+		}
+		page = p
+	}
+
+	// Validate From/To timestamps before sending to Langfuse: catch malformed
+	// values early and return a 400-class error, not a silent wrong query.
+	if f.From != "" {
+		if _, ok := parseLangfuseTime(f.From); !ok {
+			return RunListPage{}, fmt.Errorf("%w: from must be RFC3339, got %q", ErrBadParam, f.From)
+		}
+	}
+	if f.To != "" {
+		if _, ok := parseLangfuseTime(f.To); !ok {
+			return RunListPage{}, fmt.Errorf("%w: to must be RFC3339, got %q", ErrBadParam, f.To)
+		}
+	}
+
+	// Status filtering is NOT supported on the runs LIST. The Langfuse trace-list
+	// response carries no per-trace status/level (only the full TraceDetail's
+	// observation.level does), so filtering here would need a detail fetch per
+	// trace — prohibitively expensive and a breach of the metadata-only/bounded
+	// contract. Rather than accept the param and silently return everything (a
+	// filter that lies), reject any non-empty status with a teaching error.
+	if f.Status != "" {
+		return RunListPage{}, fmt.Errorf("%w: status filtering is not supported on the runs list (the Langfuse trace list has no per-trace status); filter by status on the trace detail instead", ErrBadParam)
+	}
+
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("page", strconv.Itoa(page))
+	q.Set("orderBy", "timestamp.desc")
+
+	// Server-side filters.
+	var agentTag string
+	if f.Agent != "" {
+		// Agent is "namespace/name" or "name" (bare).
+		parts := strings.SplitN(f.Agent, "/", 2)
+		if len(parts) == 2 {
+			agentTag = agentRunTag(parts[0], parts[1])
+		} else {
+			agentTag = agentRunTag("", parts[0])
+		}
+		q.Set("tags", agentTag)
+	}
+	if f.From != "" {
+		q.Set("fromTimestamp", f.From)
+	}
+	if f.To != "" {
+		q.Set("toTimestamp", f.To)
+	}
+
+	var body lfTracesResponse
+	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+		return RunListPage{}, err
+	}
+
+	// Project and filter.
+	q2 := strings.ToLower(strings.TrimSpace(f.Q))
+	runs := make([]RunSummary, 0, len(body.Data))
+	for _, t := range body.Data {
+		// Agent defensive tag re-check (same guarantee as RunsForAgent).
+		if agentTag != "" && !traceHasTag(t, agentTag) {
+			continue
+		}
+		// Q: client-side substring filter on name.
+		if q2 != "" && !strings.Contains(strings.ToLower(t.Name), q2) {
+			continue
+		}
+		// NOTE: status filter is NOT applied here — see RunFilter doc.
+		runs = append(runs, RunSummary{
+			TraceID:   t.ID,
+			Name:      t.Name,
+			Timestamp: t.Timestamp,
+			CostUSD:   t.TotalCost,
+			Tokens:    traceTokens(t),
+			LatencyMs: t.LatencyMs,
+		})
+	}
+
+	// Sort for determinism: timestamp desc (newest first), then traceId as
+	// tie-break (stable secondary key when timestamps are equal — m16.2
+	// carry-forward). The Langfuse upstream returns timestamp.desc already, but
+	// client-side filtering may reorder ties; re-sorting ensures stability.
+	slices.SortStableFunc(runs, func(a, b RunSummary) int {
+		if a.Timestamp != b.Timestamp {
+			// Reverse chronological: b > a means b is newer, sort first.
+			if b.Timestamp > a.Timestamp {
+				return 1
+			}
+			return -1
+		}
+		// Tie-break by TraceID for a stable, deterministic order.
+		if a.TraceID < b.TraceID {
+			return -1
+		}
+		if a.TraceID > b.TraceID {
+			return 1
+		}
+		return 0
+	})
+
+	// Compute next cursor: encode (page+1) if there are more pages.
+	nextCursor := ""
+	if body.Meta != nil && page < body.Meta.TotalPages {
+		nextCursor = strconv.Itoa(page + 1)
+	}
+
+	return RunListPage{Runs: runs, NextCursor: nextCursor}, nil
 }
 
 // CostUsage aggregates the recent traces into the dashboard cost rollup. We

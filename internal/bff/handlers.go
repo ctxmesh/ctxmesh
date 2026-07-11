@@ -253,27 +253,65 @@ func parseTopologyExpandLimit(raw string) int {
 	return n
 }
 
-// handleRuns serves GET /api/runs — the dashboard's recent-runs list, sourced
-// from the Langfuse public API (server-side creds). Each run links to its trace
-// (via GET /api/traces/{id}). Only registered when the Langfuse adapter is wired
-// (otherwise the route serves 501).
+// handleRuns serves GET /api/runs — the filterable, cursor-paginated runs
+// browser (m16.3), sourced from the Langfuse public API (server-side creds).
+//
+// Supported query params:
+//
+//	?agent=ns/name   filter by agent identity tag (server-side, Langfuse tags=)
+//	?from=RFC3339    lower timestamp bound (server-side, Langfuse fromTimestamp)
+//	?to=RFC3339      upper timestamp bound (server-side, Langfuse toTimestamp)
+//	?q=string        name substring filter (CLIENT-SIDE post-fetch)
+//	?status=ok|error status filter; validated but NOT applied at list level —
+//	                  the Langfuse list API has no per-trace status field; all
+//	                  runs are returned regardless of status (honest degrade)
+//	?limit=N         page size (default 20, max 100)
+//	?cursor=TOKEN    opaque next-page token from a prior response's nextCursor
+//
+// Backward-compat: with no params the handler behaves exactly as before (recent
+// runs, limit 20, no filters) so the dashboard's existing consumption is
+// unaffected.
+//
+// Degrade honestly: Langfuse not wired → 501 (registered by server.go seam).
+// Upstream failure → 502. Bad param (malformed from/to, unknown status, bad
+// cursor) → 400 teaching error. Never a fabricated 200.
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
 	limit := defaultRunLimit
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			limit = n
+	if raw := qs.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
 		}
+		limit = n
 	}
-	runs, err := s.adapters.Langfuse.RecentRuns(r.Context(), limit)
+
+	f := RunFilter{
+		Agent:  strings.TrimSpace(qs.Get("agent")),
+		From:   strings.TrimSpace(qs.Get("from")),
+		To:     strings.TrimSpace(qs.Get("to")),
+		Status: strings.TrimSpace(qs.Get("status")),
+		Q:      strings.TrimSpace(qs.Get("q")),
+		Limit:  limit,
+		Cursor: strings.TrimSpace(qs.Get("cursor")),
+	}
+
+	page, err := s.adapters.Langfuse.FilteredRuns(r.Context(), f)
 	if err != nil {
-		s.log.Error(err, "fetch recent runs failed")
-		writeError(w, http.StatusBadGateway, "failed to fetch recent runs")
+		if errors.Is(err, ErrBadParam) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.log.Error(err, "fetch runs failed")
+		writeError(w, http.StatusBadGateway, "failed to fetch runs")
 		return
 	}
-	if runs == nil {
-		runs = []RunSummary{}
+	if page.Runs == nil {
+		page.Runs = []RunSummary{}
 	}
-	writeJSON(w, http.StatusOK, RunListResponse{Runs: runs})
+	writeJSON(w, http.StatusOK, RunListResponse(page))
 }
 
 // handleCost serves GET /api/cost — the dashboard's cost/usage view. It folds
