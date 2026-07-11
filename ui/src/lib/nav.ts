@@ -207,17 +207,15 @@ export const NAV_SECTIONS: NavSection[] = [
     heading: "Platform",
     items: [
       {
-        // Connect-provider wizard (m14.9). Connecting a provider creates a
-        // Secret + SecretBinding + ModelRoute — a WRITE surface, hidden from a
-        // viewer's nav. Gates on create secretbindings (the key-storage seam).
-        // The full connected-providers LIST page is a later task; this entry
-        // opens the connect wizard directly.
+        // Connected-providers LIST page (m18.5). Read-only for everyone (a viewer
+        // sees connected providers); the write actions (Connect / Rotate key /
+        // Disconnect) are gated IN the page on secretbindings create/update/delete.
+        // The connect wizard is reached via the page's "Connect provider" CTA.
         id: "providers",
         label: "Providers",
         icon: PlugZap,
         milestone: "M14",
-        route: "/providers/connect",
-        requiresWrite: { resource: RES_SECRETS, verb: "create" },
+        route: "/providers",
       },
       {
         id: "registries",

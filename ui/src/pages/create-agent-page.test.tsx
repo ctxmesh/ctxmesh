@@ -48,7 +48,7 @@ function recordingFetch(opts: {
       if (url.startsWith("/api/capabilities"))
         return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true } } });
       if (url === "/api/providers" && method === "GET")
-        return j({ providers: opts.providers ?? [{ provider: "anthropic", displayName: "Anthropic", models: [{ id: "claude-sonnet-4" }] }] });
+        return j({ providers: opts.providers ?? [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "anthropic", ready: true }] });
       if (url === "/api/tools")
         return j({ tools: opts.tools ?? [] });
       if (url === "/api/agents/generate" && method === "POST") {

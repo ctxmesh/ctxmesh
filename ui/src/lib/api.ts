@@ -539,16 +539,13 @@ export interface ConnectProviderResponse {
   created?: { kind: string; name: string; namespace: string }[];
 }
 
-// ConnectedProvider is one already-connected provider (GET /api/providers). No
-// secrets — names/models only.
-export interface ConnectedProvider {
-  provider: string;
-  displayName: string;
-  models: ProviderModel[];
-}
-
+// ProviderListResponse mirrors the REAL BFF DTO (GET /api/providers): `providers`
+// and `items` are the SAME ProviderSummary[] under two keys (the console reads
+// `items`; older callers read `providers`). `models` are plain string ids, never
+// objects — the shape is pinned by the m18.4 contract fixture. No secret material.
 export interface ProviderListResponse {
-  providers: ConnectedProvider[];
+  providers: ProviderSummary[];
+  items: ProviderSummary[];
 }
 
 // --- BYO-MCP (POST/GET /api/mcpservers, GET /api/tools) ----------------------
@@ -1728,6 +1725,42 @@ export const api = {
       `/api/providers/${encodeURIComponent(name)}/models`,
       signal,
     ),
+
+  // rotateProviderKey rewrites the stored provider key server-side, validated with
+  // one live probe first (a bad key → 401, the stored key unchanged; ADR 0018).
+  // The new key lives ONLY in the POST body; the response is the refreshed summary,
+  // no secret material. 403 = viewer-can't-update, 404 = no such provider.
+  rotateProviderKey: (
+    name: string,
+    apiKey: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ) =>
+    postJSON<{ apiKey: string; namespace?: string }, ProviderSummary>(
+      `/api/providers/${encodeURIComponent(name)}/rotate`,
+      { apiKey, namespace },
+      signal,
+    ),
+
+  // disconnectProvider removes the connected provider's ModelRoute + SecretBinding
+  // + Secret (caller-scoped; ADR 0018). 204 on success; 403 = viewer-can't-delete.
+  disconnectProvider: async (
+    name: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+    const res = await apiFetch(
+      `/api/providers/${encodeURIComponent(name)}${qs}`,
+      { method: "DELETE", headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `disconnect failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
 
   // addMcpServer probes the MCP server + runs tools/list discovery, storing an
   // optional bearer key server-side (ADR 0016). The response carries the

@@ -27,7 +27,7 @@ import {
   api,
   ApiError,
   type CatalogTool,
-  type ConnectedProvider,
+  type ProviderSummary,
   type CreatedObject,
   type GenerateAgentResponse,
 } from "@/lib/api";
@@ -124,7 +124,7 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
     const controller = new AbortController();
     api
       .listProviders(controller.signal)
-      .then((res: { providers: ConnectedProvider[] }) => {
+      .then((res: { providers: ProviderSummary[] }) => {
         if (controller.signal.aborted) return;
         setState(res.providers.length === 0 ? { kind: "gate" } : { kind: "ok" });
       })
@@ -216,7 +216,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   // The connected providers drive the model dropdown: default the connected
   // provider's model; if the operator pinned platform models or multiple
   // providers exist, the user can pick. A single provider ⇒ no dropdown noise.
-  const [providers, setProviders] = React.useState<ConnectedProvider[]>([]);
+  const [providers, setProviders] = React.useState<ProviderSummary[]>([]);
   React.useEffect(() => {
     const controller = new AbortController();
     api
@@ -236,7 +236,7 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   const modelChoices = React.useMemo(
     () =>
       providers.flatMap((p) =>
-        p.models.map((m) => ({ id: m.id, provider: p.provider })),
+        p.models.map((m) => ({ id: m, provider: p.provider })),
       ),
     [providers],
   );

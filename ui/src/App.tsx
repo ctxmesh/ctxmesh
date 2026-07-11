@@ -14,6 +14,7 @@ import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
+import { ProvidersPage } from "@/pages/providers-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
@@ -109,6 +110,7 @@ export function App() {
             {/* The M14 first-agent wizards (m14.9) — these nav destinations were
                 /soon placeholders; they're now the real connect-provider +
                 add-MCP flows, the first UI of the aha. */}
+            <Route path="providers" element={<ProvidersPage />} />
             <Route path="providers/connect" element={<ConnectProviderPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
