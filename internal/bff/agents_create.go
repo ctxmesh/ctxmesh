@@ -65,6 +65,15 @@ type createdObject struct {
 	Namespace string `json:"namespace"`
 }
 
+// decodedObject pairs an expand-emitted object with its Kind, resolved from the
+// scheme up front. The Kind is captured before Create (client-go may strip an
+// object's TypeMeta on write) and lets the source-spec stamp target the primary
+// AgentDeployment without re-resolving the Kind per object.
+type decodedObject struct {
+	obj  client.Object
+	kind string
+}
+
 // createAgentFromYAML expands a simplified agent.yaml through the SAME mapping
 // the CLI/preview use, decodes each emitted CRD document into a typed object via
 // the scheme, stamps the namespace, and creates each via the writer (client-go).
@@ -93,6 +102,16 @@ func createAgentFromYAML(
 		ns = defaultCreateNamespace
 	}
 
+	// Canonicalize the submitted simplified spec to the source-spec annotation
+	// value (ADR 0017) BEFORE any create: this rejects inline secrets and an
+	// oversize spec with a teaching 4xx so no object is created when the spec is
+	// unstorable. A console create always carries this annotation; kubectl-created
+	// agents won't, and are treated as "managed outside the UI" on edit.
+	sourceSpec, sErr := canonicalizeSourceSpec(agentYAML)
+	if sErr != nil {
+		return nil, sErr
+	}
+
 	manifests, err := expand.Expand(agentYAML)
 	if err != nil {
 		// A parse/validation failure is the caller's input problem → 400.
@@ -110,19 +129,20 @@ func createAgentFromYAML(
 		return nil, &createError{status: 500, msg: fmt.Sprintf("decoding expanded manifests: %v", err)}
 	}
 
+	// Stamp the source-spec annotation on the primary AgentDeployment only, before
+	// it is created, so the edit source of truth rides the object from birth.
+	stampSourceSpec(objs, sourceSpec)
+
 	created := make([]createdObject, 0, len(objs))
-	for _, obj := range objs {
-		// Capture the Kind BEFORE Create: client-go's create path may clear the
-		// object's TypeMeta, so we resolve the Kind from the scheme up front.
-		kind := kindOf(obj, scheme)
-		obj.SetNamespace(ns)
-		if cErr := w.Create(ctx, obj); cErr != nil {
-			return created, classifyCreateError(cErr, kind, obj.GetName())
+	for _, d := range objs {
+		d.obj.SetNamespace(ns)
+		if cErr := w.Create(ctx, d.obj); cErr != nil {
+			return created, classifyCreateError(cErr, d.kind, d.obj.GetName())
 		}
 		created = append(created, createdObject{
-			Kind:      kind,
-			Name:      obj.GetName(),
-			Namespace: obj.GetNamespace(),
+			Kind:      d.kind,
+			Name:      d.obj.GetName(),
+			Namespace: d.obj.GetNamespace(),
 		})
 	}
 	return created, nil
@@ -142,13 +162,14 @@ func kindOf(obj client.Object, scheme *runtime.Scheme) string {
 }
 
 // decodeManifests splits a multi-document YAML manifest set (the expand output)
-// into typed client.Objects using the scheme. The order is preserved so the
-// AgentDeployment is created after its referenced EvalSuite/PromptVersion.
-func decodeManifests(manifests []byte, scheme *runtime.Scheme) ([]client.Object, error) {
+// into typed client.Objects using the scheme, each paired with its Kind resolved
+// up front (client-go may strip TypeMeta on Create). The order is preserved so
+// the AgentDeployment is created after its referenced EvalSuite/PromptVersion.
+func decodeManifests(manifests []byte, scheme *runtime.Scheme) ([]decodedObject, error) {
 	dec := utilyaml.NewYAMLOrJSONDecoder(bufio.NewReader(bytes.NewReader(manifests)), 4096)
 	codec := serializerCodec(scheme)
 
-	var out []client.Object
+	var out []decodedObject
 	for {
 		var raw runtime.RawExtension
 		if err := dec.Decode(&raw); err != nil {
@@ -168,7 +189,7 @@ func decodeManifests(manifests []byte, scheme *runtime.Scheme) ([]client.Object,
 		if !ok {
 			return nil, fmt.Errorf("decoded object %T is not a client.Object", obj)
 		}
-		out = append(out, co)
+		out = append(out, decodedObject{obj: co, kind: kindOf(co, scheme)})
 	}
 	if len(out) == 0 {
 		return nil, errors.New("no manifests to create")
