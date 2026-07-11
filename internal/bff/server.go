@@ -255,6 +255,7 @@ func (s *Server) Handler() http.Handler {
 		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
 		// detail GET above.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
+		authed.HandleFunc("GET /api/usedby", s.handleUsedBy)
 		authed.HandleFunc("GET /api/topology", s.handleTopology)
 		// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
 		// annotation. Five endpoints following the list contract for GET /list and
