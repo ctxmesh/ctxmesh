@@ -430,6 +430,10 @@ type SpanSummary struct {
 	// marker over the span's structure rather than a blank field.
 	InputRedacted  bool `json:"inputRedacted"`
 	OutputRedacted bool `json:"outputRedacted"`
+	// NestingDepth is the span's depth in the parent/child tree (0 for a root
+	// span, +1 per level). Set by orderSpansDFS (m16.2) when the adapter produces
+	// a DFS-ordered span list; a flat/unordered list leaves this 0.
+	NestingDepth int `json:"nestingDepth"`
 }
 
 // TraceRollup is the trace-level summary the run inspector's header renders: the
@@ -447,21 +451,28 @@ type TraceRollup struct {
 }
 
 // TraceDetail is the adapter-level projection of one trace + its observations:
-// the rollup plus the FLAT span list. The handler wraps it in
-// TraceDetailResponse. Spans is non-nil ([] not null).
+// the rollup plus the DFS-ordered span list (m16.2). The handler wraps it in
+// TraceDetailResponse. Spans is non-nil ([] not null). RootSpanID is the id of
+// the root span (the earliest parentless observation); "" when no spans.
 type TraceDetail struct {
-	Rollup TraceRollup
-	Spans  []SpanSummary
+	Rollup     TraceRollup
+	Spans      []SpanSummary
+	RootSpanID string
 }
 
 // TraceDetailResponse is returned by GET /api/traces/{id}/detail — the run
-// inspector's flat span summary for one trace. Rollup is the trace-level header;
-// Spans is the FLAT list (parentId-linked; the UI builds the tree). Spans is
-// non-nil on the wire ([] not null). This is the run SUMMARY, distinct from the
-// embed-URL route (GET /api/traces/{id}) which returns only the link target.
+// inspector's DFS-ordered span summary for one trace (m16.2). Rollup is the
+// trace-level header; Spans is the DFS-ordered, depth-annotated flat list
+// (parentId-linked; the M14.11 UI still builds its own tree from parentId, and
+// the TraceExplorer (m16.6) renders by nestingDepth indentation). Spans is
+// non-nil on the wire ([] not null). RootSpanID is the id of the root span
+// (earliest by StartMs when multiple roots exist); "" when no spans. This is
+// the run SUMMARY, distinct from the embed-URL route (GET /api/traces/{id})
+// which returns only the link target.
 type TraceDetailResponse struct {
-	Rollup TraceRollup   `json:"rollup"`
-	Spans  []SpanSummary `json:"spans"`
+	Rollup     TraceRollup   `json:"rollup"`
+	Spans      []SpanSummary `json:"spans"`
+	RootSpanID string        `json:"rootSpanId"`
 }
 
 // --- Connect a provider (ADR 0015) ------------------------------------------
