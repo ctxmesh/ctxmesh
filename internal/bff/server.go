@@ -367,6 +367,24 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("agent scaling policy update"))
 		}
 		authed.HandleFunc("DELETE /api/agentscalingpolicies/{ns}/{name}", s.handleDeleteAgentScalingPolicy)
+		// EvalSuite CRUD (m17.7): direct edit of eval gate configurations.
+		// The detail DTO surfaces dataset/scorers/gate/threshold + the controller's
+		// status.conditions (gate/pass/block outcome). The /results sub-resource
+		// merges the CRD status with Langfuse scores honestly: scoresAvailable:false
+		// + reason when Langfuse is absent or traceId not supplied; real scores when
+		// both are present. Controller status.conditions are NEVER clobbered (SSA spec-only).
+		authed.HandleFunc("GET /api/evalsuites", s.handleListEvalSuites)
+		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}", s.handleGetEvalSuite)
+		// Results always wired: degrades honestly (scoresAvailable:false) when Langfuse absent.
+		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}/results", s.handleGetEvalSuiteResults)
+		if s.scheme != nil {
+			authed.HandleFunc("POST /api/evalsuites", s.handleCreateEvalSuite)
+			authed.HandleFunc("PUT /api/evalsuites/{ns}/{name}", s.handleUpdateEvalSuite)
+		} else {
+			authed.Handle("POST /api/evalsuites", notImplemented("eval suite create"))
+			authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("eval suite update"))
+		}
+		authed.HandleFunc("DELETE /api/evalsuites/{ns}/{name}", s.handleDeleteEvalSuite)
 		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
 		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
 		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
@@ -424,6 +442,12 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy create"))
 		authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy update"))
 		authed.Handle("DELETE /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy delete"))
+		authed.Handle("GET /api/evalsuites", notImplemented("caller-scoped eval suite list"))
+		authed.Handle("GET /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite detail"))
+		authed.Handle("GET /api/evalsuites/{ns}/{name}/results", notImplemented("caller-scoped eval suite results"))
+		authed.Handle("POST /api/evalsuites", notImplemented("caller-scoped eval suite create"))
+		authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite update"))
+		authed.Handle("DELETE /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite delete"))
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
