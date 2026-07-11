@@ -7,12 +7,18 @@ import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
 
-// The agent landing page (m14.11) closes the aha loop: it renders the detail
-// (header / status timeline / tabs / bindings / versions) from GET
-// /api/agents/{ns}/{name}, tails logs over a bearer-attached fetch-stream SSE,
-// runs the agent via POST /api/invoke, and opens the native run inspector on the
-// returned traceId. A recording fetch mock scripts each endpoint deterministically
-// (no cluster, no SSE server) — the /logs stream is a fetch-stream Response.
+// The agent landing page (m14.11 + m15.11). Tests cover:
+//   • m14.11: header / status timeline / tabs / bindings / versions / logs / run / inspector.
+//   • m15.11: drift + managedOutsideUI badges, Edit Wizard (full vs safe-field,
+//     drift-overwrite warning), typed-name Delete (with references impact), per-agent
+//     Runs (with 501-degrade), and RBAC awareness.
+//
+// A recording fetch mock scripts every endpoint deterministically — no cluster, no
+// SSE server. The new m15.11 endpoints:
+//   GET /api/agents/{ns}/{name}/references  — delete-impact preview
+//   GET /api/agents/{ns}/{name}/runs         — bounded per-agent runs (501-aware)
+//   PUT /api/agents/{ns}/{name}              — update (edit wizard submit)
+//   DELETE /api/agents/{ns}/{name}           — delete (confirm dialog)
 
 interface DetailOpts {
   detail?: unknown;
@@ -22,6 +28,13 @@ interface DetailOpts {
   caps?: Record<string, Record<string, boolean>>;
   invoke?: { ok: boolean; status?: number; body: unknown };
   spans?: unknown[];
+  // m15.11 additions
+  references?: unknown[] | null; // null → use default; undefined → 404 (not expected)
+  refsStatus?: number;
+  agentRuns?: unknown[] | null; // null → 501 (Langfuse not configured)
+  agentRunsStatus?: number;
+  updateResult?: { ok: boolean; status?: number; body?: unknown };
+  deleteResult?: { ok: boolean; status?: number; body?: unknown };
 }
 
 const DEFAULT_DETAIL = {
@@ -34,6 +47,8 @@ const DEFAULT_DETAIL = {
   ],
   bindings: [{ kind: "tool", name: "get-invoice-binding", detail: "get_invoice", ready: true }],
   versions: ["billing-v1", "billing-v2"],
+  managedOutsideUI: false,
+  drift: false,
 };
 
 function sseBody(chunks: string[]) {
@@ -65,7 +80,7 @@ function installFetch(opts: DetailOpts = {}) {
 
       if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
       if (url.startsWith("/api/capabilities"))
-        return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true } } });
+        return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true, update: true, delete: true } } });
       // The SSE log stream (fetch-stream). A pre-stream 403 → no body.
       if (url.includes("/logs")) {
         const status = opts.logStatus ?? 200;
@@ -91,7 +106,33 @@ function installFetch(opts: DetailOpts = {}) {
         return j(r.body, r.ok, r.status ?? (r.ok ? 200 : 400));
       }
       if (url === "/api/runs") return j({ runs: [] });
-      // Agent detail.
+
+      // m15.11: per-agent runs (GET .../runs)
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) {
+        // null → 501 (Langfuse not configured)
+        if (opts.agentRuns === null) {
+          return j({ error: "not implemented" }, false, opts.agentRunsStatus ?? 501);
+        }
+        const runs = opts.agentRuns ?? [];
+        return j({ runs }, true, 200);
+      }
+      // m15.11: references (GET .../references)
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) {
+        const status = opts.refsStatus ?? 200;
+        const refs = opts.references ?? [];
+        return j({ references: refs }, status < 400, status);
+      }
+      // m15.11: update (PUT .../agents/{ns}/{name})
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/) && method === "PUT") {
+        const r = opts.updateResult ?? { ok: true, body: { name: "billing", namespace: "prod" } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 400));
+      }
+      // m15.11: delete (DELETE .../agents/{ns}/{name})
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/) && method === "DELETE") {
+        const r = opts.deleteResult ?? { ok: true, body: { accepted: true } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 400));
+      }
+      // Agent detail (GET .../agents/{ns}/{name}).
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) {
         const status = opts.detailStatus ?? 200;
         return j(opts.detail ?? DEFAULT_DETAIL, status < 400, status);
@@ -110,6 +151,7 @@ function renderAt(path = "/agents/prod/billing") {
           <CapabilitiesProvider>
             <Routes>
               <Route path="/agents/:ns/:name" element={<AgentDetailPage />} />
+              <Route path="/agents" element={<div data-testid="agents-list-page">agents list</div>} />
             </Routes>
           </CapabilitiesProvider>
         </NamespaceProvider>
@@ -122,6 +164,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// ── m14.11 original tests ────────────────────────────────────────────────────
 describe("AgentDetailPage (landing page)", () => {
   it("renders the header, status timeline, tabs, bindings and versions", async () => {
     installFetch();
@@ -225,5 +268,301 @@ describe("AgentDetailPage (landing page)", () => {
     await screen.findByTestId("run-panel");
     fireEvent.click(screen.getByTestId("run-button"));
     await waitFor(() => expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument());
+  });
+});
+
+// ── m15.11 new tests ─────────────────────────────────────────────────────────
+
+describe("AgentDetailPage — drift + managedOutsideUI badges (m15.11)", () => {
+  it("shows NO badges for a normal console-managed agent without drift", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false, drift: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("managed-outside-badge")).toBeNull();
+    expect(screen.queryByTestId("drift-badge")).toBeNull();
+  });
+
+  it("shows the 'managed outside UI' badge when managedOutsideUI=true", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: true, drift: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("managed-outside-badge")).toBeInTheDocument();
+    expect(screen.queryByTestId("drift-badge")).toBeNull();
+  });
+
+  it("shows the 'drift' badge when drift=true", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false, drift: true } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("drift-badge")).toBeInTheDocument();
+    expect(screen.queryByTestId("managed-outside-badge")).toBeNull();
+  });
+
+  it("shows both badges when managedOutsideUI=true AND drift=true", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: true, drift: true } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("managed-outside-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("drift-badge")).toBeInTheDocument();
+  });
+});
+
+describe("AgentDetailPage — Edit Wizard (m15.11)", () => {
+  it("Edit button visible for a caller with update permission", async () => {
+    installFetch({ caps: { agentdeployments: { create: true, update: true, delete: true } } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("edit-agent-button")).toBeInTheDocument();
+  });
+
+  it("Edit button hidden for a viewer (no update permission)", async () => {
+    installFetch({ caps: { agentdeployments: { create: false, update: false, delete: false } } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("edit-agent-button")).toBeNull();
+  });
+
+  it("console-managed agent: Edit Wizard shows all fields (full round-trip)", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    // Safe fields always shown.
+    await screen.findByTestId("edit-image");
+    expect(screen.getByTestId("edit-scaling-min")).toBeInTheDocument();
+    expect(screen.getByTestId("edit-model-route")).toBeInTheDocument();
+    expect(screen.getByTestId("edit-system-prompt")).toBeInTheDocument();
+    // No "managed outside UI" note.
+    expect(screen.queryByTestId("managed-outside-note")).toBeNull();
+  });
+
+  it("managedOutsideUI agent: Edit Wizard shows safe-fields-only note + disables full-round-trip fields", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: true } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    // Safe fields shown with the managed-outside note.
+    await screen.findByTestId("managed-outside-note");
+    expect(screen.getByTestId("edit-image")).toBeInTheDocument();
+    // Navigate to the second step (for managedOutsideUI it's the review step).
+    // There's no full-fields step for outside-managed agents — the wizard has only
+    // [safeFields, review]. Verify no execution-model field visible.
+    expect(screen.queryByTestId("edit-execution-model")).toBeNull();
+  });
+
+  it("console-managed: advancing to the full-fields step shows execution-model (not readonly)", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    await screen.findByTestId("edit-image");
+    // Click Continue to advance to full-fields step.
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-execution-model");
+    expect(screen.getByTestId("edit-execution-model")).not.toBeDisabled();
+    expect(screen.queryByTestId("readonly-fields-note")).toBeNull();
+  });
+
+  it("submit calls PUT /api/agents/{ns}/{name} with the edited spec", async () => {
+    const calls = installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    await screen.findByTestId("edit-image");
+
+    // Edit the image.
+    fireEvent.change(screen.getByTestId("edit-image"), { target: { value: "ghcr.io/x/billing:2" } });
+
+    // Advance past safe-fields → full-fields → review.
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-execution-model");
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    // Now on review step — find Save changes.
+    await screen.findByTestId("edit-review");
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    // PUT should have been called.
+    await waitFor(() => {
+      const putCall = calls.find((c) => c.method === "PUT" && c.url.includes("/api/agents/prod/billing"));
+      expect(putCall).toBeDefined();
+      const body = JSON.parse(putCall!.body);
+      expect(body.image).toBe("ghcr.io/x/billing:2");
+    });
+  });
+
+  it("drift=true: the review step shows the drift-overwrite warning", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, managedOutsideUI: false, drift: true } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    await screen.findByTestId("edit-image");
+    // Advance to review.
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-execution-model");
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-review");
+    // Drift warning shown in the review step.
+    expect(screen.getByTestId("drift-overwrite-warning")).toBeInTheDocument();
+  });
+});
+
+describe("AgentDetailPage — Delete dialog (m15.11)", () => {
+  it("Delete button visible for a caller with delete permission", async () => {
+    installFetch({ caps: { agentdeployments: { create: true, update: true, delete: true } } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("delete-agent-button")).toBeInTheDocument();
+  });
+
+  it("Delete button hidden for a viewer (no delete permission)", async () => {
+    installFetch({ caps: { agentdeployments: { create: false, update: false, delete: false } } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("delete-agent-button")).toBeNull();
+  });
+
+  it("Delete dialog loads and shows agentReferences impact", async () => {
+    installFetch({
+      references: [
+        { kind: "MCPToolBinding", name: "invoice-binding", namespace: "prod", disposition: "gc" },
+        { kind: "MemoryBinding", name: "mem-binding", namespace: "prod", disposition: "orphan" },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("delete-agent-button"));
+    // References load and show disposition badges.
+    await screen.findByTestId("refs-list");
+    expect(screen.getByTestId("ref-invoice-binding")).toHaveTextContent("MCPToolBinding/invoice-binding");
+    expect(screen.getByTestId("ref-invoice-binding")).toHaveTextContent("will be deleted");
+    expect(screen.getByTestId("ref-mem-binding")).toHaveTextContent("will be orphaned");
+  });
+
+  it("Delete dialog requires typed name before confirming", async () => {
+    installFetch({ references: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("delete-agent-button"));
+    await screen.findByTestId("refs-empty");
+    // Confirm button should be disabled until the name is typed.
+    const confirmBtn = screen.getByRole("button", { name: /delete agent/i });
+    expect(confirmBtn).toBeDisabled();
+    // Type the agent name.
+    fireEvent.change(screen.getByPlaceholderText("billing"), { target: { value: "billing" } });
+    expect(confirmBtn).not.toBeDisabled();
+  });
+
+  it("confirmed delete calls DELETE /api/agents/{ns}/{name} and navigates to the list", async () => {
+    const calls = installFetch({ references: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("delete-agent-button"));
+    await screen.findByTestId("refs-empty");
+    // Type the name to unlock and confirm.
+    fireEvent.change(screen.getByPlaceholderText("billing"), { target: { value: "billing" } });
+    fireEvent.click(screen.getByRole("button", { name: /delete agent/i }));
+
+    // DELETE call should have been made.
+    await waitFor(() => {
+      const delCall = calls.find((c) => c.method === "DELETE" && c.url.includes("/api/agents/prod/billing"));
+      expect(delCall).toBeDefined();
+    });
+    // Should navigate to the agents list.
+    await screen.findByTestId("agents-list-page");
+  });
+});
+
+describe("AgentDetailPage — per-agent Runs tab (m15.11)", () => {
+  it("renders run rows from GET .../runs", async () => {
+    installFetch({
+      agentRuns: [
+        { traceId: "tr-abc", name: "billing", timestamp: "2026-07-11T00:00:00Z", costUSD: 0.005, tokens: 500, latencyMs: 1000 },
+        { traceId: "tr-def", name: "billing", timestamp: "2026-07-11T01:00:00Z", costUSD: 0.003, tokens: 300, latencyMs: 600 },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-runs"));
+
+    await screen.findByTestId("runs-tab");
+    expect(screen.getByText("tr-abc")).toBeInTheDocument();
+    expect(screen.getByText("tr-def")).toBeInTheDocument();
+  });
+
+  it("a 501 (Langfuse not configured) → calm 'runs unavailable' empty state, NOT an error", async () => {
+    installFetch({ agentRuns: null });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-runs"));
+
+    // The calm unavailable state — not an error toast, not an error state.
+    await screen.findByTestId("runs-unavailable");
+    expect(screen.getByTestId("runs-unavailable")).toHaveTextContent("tracing not configured");
+    // No error elements.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("clicking a run row opens the run inspector", async () => {
+    installFetch({
+      agentRuns: [
+        { traceId: "tr-abc", name: "billing", timestamp: "2026-07-11T00:00:00Z", costUSD: 0.005, tokens: 500, latencyMs: 1000 },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-runs"));
+    await screen.findByTestId("runs-tab");
+    // Click the row to open the inspector.
+    fireEvent.click(screen.getByText("tr-abc"));
+    await screen.findByTestId("run-inspector");
+  });
+});
+
+describe("AgentDetailPage — RBAC-aware affordances (m15.11)", () => {
+  it("a viewer (no write caps) sees NO edit or delete buttons", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: false, update: false, delete: false } },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("edit-agent-button")).toBeNull();
+    expect(screen.queryByTestId("delete-agent-button")).toBeNull();
+  });
+
+  it("a caller with only update sees Edit but NOT Delete", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: false, update: true, delete: false } },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("edit-agent-button")).toBeInTheDocument();
+    expect(screen.queryByTestId("delete-agent-button")).toBeNull();
+  });
+
+  it("a forced update 403 surfaces ForbiddenInline in the edit wizard, not a silent success", async () => {
+    installFetch({
+      detail: { ...DEFAULT_DETAIL, managedOutsideUI: false },
+      updateResult: { ok: false, status: 403, body: { error: "forbidden: cannot update" } },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("edit-agent-button"));
+    await screen.findByTestId("edit-image");
+    // Advance to review and submit.
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-execution-model");
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByTestId("edit-review");
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    // 403 renders ForbiddenInline in the review step.
+    await screen.findByText("Not allowed to edit this agent");
   });
 });
