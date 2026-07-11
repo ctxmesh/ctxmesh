@@ -147,6 +147,17 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/tools/add-mcp",
         requiresWrite: { resource: RES_REGISTRIES, verb: "create" },
       },
+      {
+        // MCP approval queue (m17.9). Operator-only: lists pending MCP servers
+        // and lets the operator approve/reject them. Hidden from a viewer's nav
+        // (non-operators can't approve). Gates on update agentregistries.
+        id: "mcp-approvals",
+        label: "MCP approvals",
+        icon: Wrench,
+        milestone: "M17",
+        route: "/tools/approvals",
+        requiresWrite: { resource: RES_REGISTRIES, verb: "update" },
+      },
       { id: "prompts", label: "Prompts", icon: GitBranch, milestone: "M17" },
       { id: "evals", label: "Evals", icon: FlaskConical, milestone: "M17" },
     ],

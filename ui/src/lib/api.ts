@@ -559,12 +559,17 @@ export interface DiscoveredTool {
 }
 
 // AddMcpRequest is the POST /api/mcpservers body — a remote URL OR an image, plus
-// an optional bearer key (held only until submit, per ADR 0016).
+// an optional bearer key (held only until submit, per ADR 0016). An OAuth server
+// omits apiKey; the BFF returns 202 + an authorization URL + a state handle (no
+// token exchange happens client-side — the SPA only sees the URL to redirect to).
 export interface AddMcpRequest {
   name: string;
   url?: string;
   image?: string;
   apiKey?: string;
+  // authType: "oauth" signals the BFF to start the OAuth 2.1 flow instead of
+  // immediate probe. The SPA never holds OAuth tokens — only the auth URL + state.
+  authType?: "key" | "oauth";
 }
 
 // AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're
@@ -573,6 +578,33 @@ export interface AddMcpResponse {
   name: string;
   tools: DiscoveredTool[];
   approvalStatus?: "approved" | "pending";
+}
+
+// OAuthInitResponse is the 202 body for an OAuth MCP add: the authorization URL
+// the browser should redirect to, plus the opaque state handle the BFF correlates
+// on callback. The SPA NEVER receives, stores, or displays a token — only this
+// URL + state. The full token exchange happens server-side via the BFF callback.
+export interface OAuthInitResponse {
+  // The authorization URL at the OAuth provider — the browser redirects here.
+  authorizationURL: string;
+  // Opaque state handle the BFF echoes on callback for CSRF protection.
+  state: string;
+}
+
+// McpApproval is one pending MCP server awaiting operator approval
+// (GET /api/mcp/approvals). The operator approves/rejects via
+// POST /api/mcp/approvals/{ns}/{name}[/reject].
+export interface McpApproval {
+  namespace: string;
+  name: string;
+  submittedBy?: string;
+  submittedAt?: string;
+  url?: string;
+  toolCount?: number;
+}
+
+export interface McpApprovalsResponse {
+  approvals: McpApproval[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
@@ -1348,6 +1380,87 @@ export const api = {
   // (ForbiddenInline), 404 = the kill-switch.
   addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
     postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
+
+  // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202
+  // + { authorizationURL, state } — the SPA redirects the browser to that URL and
+  // NEVER sees a token (the full exchange happens server-side on callback). A 403
+  // (RBAC) or 404 (kill-switch) surface as a typed ApiError.
+  //
+  // Unlike the key-auth variant (201 → body), this returns the OAuthInitResponse
+  // (202 body) directly. The SPA's only job is to redirect: window.location.href =
+  // result.authorizationURL. The BFF handles the callback at /api/mcp/oauth/callback.
+  addMcpServerOAuth: async (
+    req: AddMcpRequest,
+    signal?: AbortSignal,
+  ): Promise<OAuthInitResponse> => {
+    const res = await apiFetch("/api/mcpservers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    // 202 = OAuth flow initiated — body carries { authorizationURL, state }.
+    // No token is in the response; the SPA only reads the URL to redirect to.
+    if (res.status === 202) {
+      return (await res.json()) as OAuthInitResponse;
+    }
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `addMcpServerOAuth failed (${res.status})`),
+        res.status,
+      );
+    }
+    // A 200/201 means the BFF treated the OAuth request as key-auth (unexpected)
+    // — surface it as a protocol error so the caller doesn't silently mishandle.
+    throw new ApiError("unexpected 2xx status for OAuth initiation (expected 202)", res.status);
+  },
+
+  // mcpApprovals lists the pending MCP servers awaiting operator approval
+  // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
+  // caller can't list approvals (non-operator); a 501 = approval queue not enabled.
+  mcpApprovals: (signal?: AbortSignal) =>
+    getJSON<McpApprovalsResponse>("/api/mcp/approvals", signal),
+
+  // approveMcp approves a pending MCP server (POST /api/mcp/approvals/{ns}/{name}).
+  // Operator-only: a non-operator gets a real 403 from the API (display gating is
+  // additional UX, not the gate). A 404 = the approval is gone (already actioned).
+  approveMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+    const res = await apiFetch(
+      `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `approve failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // rejectMcp rejects (denies) a pending MCP server
+  // (POST /api/mcp/approvals/{ns}/{name}/reject). Same RBAC constraints as approveMcp.
+  rejectMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+    const res = await apiFetch(
+      `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/reject`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `reject failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
 
   // listTools reads the merged tool catalog (curated ToolRegistry + the caller's
   // BYO-MCP discoveries, m14.6) — the create-agent tool picker's source. A 403
