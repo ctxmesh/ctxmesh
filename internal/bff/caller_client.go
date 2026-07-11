@@ -99,6 +99,12 @@ func (s *Server) callerClient(w http.ResponseWriter, r *http.Request) (client.Cl
 	return c, true
 }
 
+// msgTokenRejected is the user-facing message for a K8s API-server Unauthorized
+// response — a stable string shared across all caller-scoped write/read paths so
+// goconst has one canonical definition (and client-facing wording stays
+// consistent).
+const msgTokenRejected = "unauthorized: token rejected by the API server"
+
 // classifyReadError maps a caller-scoped READ failure to an honest HTTP status
 // when it is an authz/authn rejection from the K8s API server, so a viewer/
 // unauthorized caller sees a real 403/401 instead of an empty list swallowed as
@@ -109,7 +115,7 @@ func classifyReadError(err error) (status int, msg string, isRBAC bool) {
 	case apierrors.IsForbidden(err):
 		return http.StatusForbidden, "forbidden: not allowed to read the requested resources", true
 	case apierrors.IsUnauthorized(err):
-		return http.StatusUnauthorized, "unauthorized: token rejected by the API server", true
+		return http.StatusUnauthorized, msgTokenRejected, true
 	default:
 		return 0, "", false
 	}
