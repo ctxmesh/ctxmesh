@@ -1064,8 +1064,12 @@ function SharedReview({
     setState({ kind: "creating" });
     try {
       const res = await api.createAgent(finalYAML, namespace);
-      setState({ kind: "created", created: res.created });
-      const agent = res.created.find((o) => o.kind === "AgentDeployment") ?? res.created[0];
+      // Transactional (m18.7): the POST succeeded, so the agent EXISTS. Default a
+      // missing/odd `created` to [] so the success screen + navigation can never
+      // crash into an error that hides a real create (the orphaned-objects bug).
+      const created = res.created ?? [];
+      setState({ kind: "created", created });
+      const agent = created.find((o) => o.kind === "AgentDeployment") ?? created[0];
       toast({
         variant: "success",
         title: "Agent created",

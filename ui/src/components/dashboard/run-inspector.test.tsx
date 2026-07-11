@@ -120,4 +120,13 @@ describe("RunInspector (native summary from flat spans)", () => {
       expect(screen.getByText("Not allowed to read this run")).toBeInTheDocument(),
     );
   });
+
+  it("shows the calm 'ingesting' state on a 404 (Langfuse lag), not a hard error", async () => {
+    // A freshly-completed run 404s until Langfuse ingests it (~20s). The inspector
+    // polls and shows a calm "still landing" state, never "couldn't load" (m18.7).
+    stubTrace([], false, 404);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
+    expect(await screen.findByTestId("run-inspector-ingesting")).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the run/i)).not.toBeInTheDocument();
+  });
 });

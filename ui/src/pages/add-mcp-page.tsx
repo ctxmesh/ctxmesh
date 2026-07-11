@@ -68,6 +68,20 @@ type Submit =
   | { kind: "forbidden"; message: string }
   | { kind: "killed" };
 
+// isValidHttpUrl guards the OAuth redirect (m18.7): only an absolute http(s) URL is
+// a safe `window.location.href` target. Rejects "", relative paths, and non-http
+// schemes (e.g. "javascript:") so a bad authorizationURL can never remount the SPA
+// into the login bounce.
+function isValidHttpUrl(u: string | undefined): boolean {
+  if (!u) return false;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 const STEP_SERVER = 0;
 const STEP_REVIEW = 1;
 
@@ -105,6 +119,19 @@ export function AddMcpPage() {
       };
       try {
         const oauthRes = await api.addMcpServerOAuth(req);
+        // GUARD (m18.7): only a well-formed absolute http(s) URL is a safe redirect
+        // target. A missing/malformed authorizationURL would otherwise navigate the
+        // SPA to a bad target, remount it, and bounce the user to /login (the
+        // shakedown bug). Degrade to an honest inline error, never a blind redirect.
+        if (!isValidHttpUrl(oauthRes.authorizationURL)) {
+          setSubmit({
+            kind: "error",
+            message:
+              "The MCP server did not return a valid OAuth authorization URL — it may not support OAuth 2.1. Nothing was changed.",
+            status: 502,
+          });
+          return;
+        }
         // Transition to the "redirecting" state so the UI renders a brief
         // "redirecting to consent…" banner before the navigation fires.
         setSubmit({ kind: "oauth-redirecting", authorizationURL: oauthRes.authorizationURL });
