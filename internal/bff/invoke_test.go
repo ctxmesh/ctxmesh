@@ -113,6 +113,85 @@ func TestInvokeReturnsTraceID(t *testing.T) {
 	assert.JSONEq(t, `{"prompt":"hi"}`, string(inv.gotBody))
 }
 
+// newDevInvokeServer builds the dev-mode substrate (ADR 0021): NO cluster
+// (CallerClients nil), DevMode on, and a fixed devInvokeEndpoint — so POST /api/invoke
+// targets the single local Compose agent directly through the given fake adapter.
+func newDevInvokeServer(t *testing.T, endpoint string, inv InvokeAdapter) *Server {
+	t.Helper()
+	return NewServer(Options{
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		DevMode:           true,
+		DevInvokeEndpoint: endpoint,
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "dev",
+		Log:               logr.Discard(),
+	})
+}
+
+// TestDevInvokeRunsLocalAgentNoCluster proves the dev Playground run (ADR 0021): with
+// no cluster, POST /api/invoke targets the fixed local endpoint directly — the agent/
+// namespace in the request are ignored (one local agent) and only Input flows through.
+func TestDevInvokeRunsLocalAgentNoCluster(t *testing.T) {
+	inv := &fakeInvokeAdapter{traceID: "devtrace", resp: []byte(`{"answer":"MOCK_OK"}`)}
+	s := newDevInvokeServer(t, "http://localhost:8080", inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{
+		Agent: "ignored-in-dev", Input: json.RawMessage(`{"prompt":"hi"}`),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	// AllowAll edge auth — dev mode is a single local developer, no token needed.
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body InvokeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "devtrace", body.TraceID)
+	assert.Contains(t, body.Response, "MOCK_OK")
+	// The run targeted the fixed LOCAL endpoint — no cluster resolution happened.
+	assert.True(t, inv.called)
+	assert.Equal(t, "http://localhost:8080", inv.gotEndpoint)
+	assert.JSONEq(t, `{"prompt":"hi"}`, string(inv.gotBody))
+}
+
+// TestDevInvokeNon2xxIs502 proves the dev path degrades honestly: a non-2xx from the
+// local agent is a 502 with the real reason + the traceId, never a fake success.
+func TestDevInvokeNon2xxIs502(t *testing.T) {
+	inv := &fakeInvokeAdapter{
+		traceID: "devtrace",
+		err:     &invokeError{status: http.StatusInternalServerError, body: []byte("boom")},
+	}
+	s := newDevInvokeServer(t, "http://localhost:8080", inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Input: json.RawMessage(`{}`)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	var body InvokeErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "devtrace", body.TraceID)
+	assert.Contains(t, body.Error, "500")
+}
+
+// TestDevInvokeWithoutEndpointIs501 proves the honest degrade: DevMode with no local
+// endpoint wired (and no cluster) serves 501, never a crash or a fabricated run.
+func TestDevInvokeWithoutEndpointIs501(t *testing.T) {
+	s := NewServer(Options{
+		Scheme:   testScheme(t),
+		Auth:     AllowAll{},
+		DevMode:  true,
+		Adapters: Adapters{Invoke: &fakeInvokeAdapter{}},
+		Log:      logr.Discard(),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader([]byte(`{}`)))
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
 // TestInvokeForbiddenIs403 proves a Forbidden on the caller-scoped agent lookup
 // surfaces as 403 and the agent is NEVER invoked — a viewer with no invoke rights
 // is denied by the API server (as the caller), not by an SA fallback.

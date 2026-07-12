@@ -51,6 +51,22 @@ type HealthResponse struct {
 	Version string `json:"version"`
 }
 
+// DevModeResponse is returned by GET /api/devmode (ADR 0021). true = the local
+// `agent-engine dev --ui` substrate (no login wall, cluster surfaces degraded).
+type DevModeResponse struct {
+	DevMode bool `json:"devMode"`
+}
+
+// AuthConfigResponse is returned by GET /api/authconfig (ADR 0020): whether console
+// SSO is available and, if so, the Dex issuer + public PKCE client id the SPA needs.
+// Issuer/ClientID are empty (omitted) when oidcEnabled is false — the SPA then uses
+// token login (ADR 0012). No client secret is ever included (the console is public).
+type AuthConfigResponse struct {
+	OIDCEnabled bool   `json:"oidcEnabled"`
+	Issuer      string `json:"issuer,omitempty"`
+	ClientID    string `json:"clientId,omitempty"`
+}
+
 // AgentSummary is the UI projection of a single AgentDeployment. It exposes only
 // what the dashboard/config-builder need; the rich detail views (m12.5+) fetch
 // more via dedicated endpoints. Keeping this flat decouples the SPA from the CRD

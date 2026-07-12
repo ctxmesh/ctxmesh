@@ -68,6 +68,29 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// handleDevMode serves GET /api/devmode (unauthenticated, ADR 0021): {devMode:true}
+// under `agent-engine dev --ui` (the local single-developer substrate — no login
+// wall, cluster surfaces honestly 501), false for the normal cluster BFF. The SPA
+// reads it before any session to decide login-gate vs dev chrome.
+func (s *Server) handleDevMode(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, DevModeResponse{DevMode: s.devMode})
+}
+
+// handleAuthConfig serves GET /api/authconfig (unauthenticated, ADR 0020): whether
+// console SSO is available and, if so, the Dex issuer + public PKCE client id the SPA
+// needs to start Auth-Code+PKCE. OIDC is only advertised when it is fully configured
+// (enabled AND an issuer AND a client id) — a half-config never sends the SPA down a
+// broken SSO path; it falls back to token login (ADR 0012). No secret is ever emitted.
+func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
+	oidc := s.oidcEnabled && s.oidcIssuer != "" && s.oidcClientID != ""
+	resp := AuthConfigResponse{OIDCEnabled: oidc}
+	if oidc {
+		resp.Issuer = s.oidcIssuer
+		resp.ClientID = s.oidcClientID
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleListAgents serves GET /api/agents — lists AgentDeployments through the
 // CALLER-SCOPED client (ADR 0011), so the list reflects exactly what the
 // caller's own RBAC permits: the K8s API server, not the BFF, decides what the

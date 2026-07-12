@@ -278,3 +278,27 @@ jobs:
         # ADR 0006: full headless slice on a FRESH CI cluster; locally provable —
         # tier0 + tsc --noEmit + playwright test --list + shellcheck.
         run: make -C agent-brain/harness tier2 SLICE=m18-ui
+      - name: M19 dev-ui smoke (agent-engine dev --ui — NO cluster, Docker Compose)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The dev-ui 🧪 (ADR 0021, spec dev-ui-and-sso): the ONLY slice with NO
+        # cluster. It brings up `agent-engine dev --ui` (the local Compose inner loop
+        # + the dev-mode console BFF) and drives the console headless — spec
+        # 110-dev-ui: GET /api/devmode=true, the console renders with NO login wall +
+        # the dev banner, config-preview (/api/expand) is live, a Playground run
+        # reaches the local agent (MOCK_OK), and cluster surfaces degrade to honest
+        # 501s. Gate-gracefully (ADR 0004): skips cleanly without a Docker daemon.
+        # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
+        # shellcheck; the full Compose run is deferred like the other slices.
+        run: make -C agent-brain/harness tier2 SLICE=m19-ui
+      - name: M19 console OIDC login (Auth-Code + PKCE via Dex)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The console SSO 🧪 (ADR 0020, spec dev-ui-and-sso): drives the REAL Auth-Code
+        # + PKCE flow — login page → Dex login → /auth/callback exchange → the console
+        # as the OIDC identity (RBAC bound via the demo binding), Playwright spec 111.
+        # The load-bearing apiserver-OIDC-trust is a DEDICATED-cluster setup (not the
+        # shared dev cluster), so the slice gate-gracefully SKIPs unless
+        # UI_E2E_OIDC_CONTEXT names such a cluster (ADR 0004). ADR 0006: locally
+        # provable — tsc --noEmit + playwright --list + shellcheck; live run deferred.
+        run: make -C agent-brain/harness tier2 SLICE=m19-oidc

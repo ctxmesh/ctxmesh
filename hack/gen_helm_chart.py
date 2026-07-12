@@ -94,6 +94,35 @@ MCP_REQUIRE_APPROVAL_ENV_HELM = (
     "          value: {{ .Values.bff.mcp.requireApproval | quote }}"
 )
 
+# The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
+# (OIDC_ENABLED "false", empty issuer/client — so `kustomize build`/`make deploy` stay
+# valid AND token login is the default); the chart templates them from the auth.oidc
+# values so `--set auth.oidc.enabled=true` (with an issuer + client) lights up SSO.
+# values.yaml ships enabled=false + the example issuer/client, but the BFF only
+# ADVERTISES OIDC when OIDC_ENABLED=true, so the default render == kustomize → no drift.
+# The BFF NEVER holds an OIDC secret — the console is a public PKCE client.
+OIDC_ENABLED_ENV_KUSTOMIZE = (
+    '        - name: OIDC_ENABLED\n' '          value: "false"'
+)
+OIDC_ENABLED_ENV_HELM = (
+    "        - name: OIDC_ENABLED\n"
+    "          value: {{ .Values.auth.oidc.enabled | quote }}"
+)
+OIDC_ISSUER_ENV_KUSTOMIZE = (
+    '        - name: OIDC_ISSUER\n' '          value: ""'
+)
+OIDC_ISSUER_ENV_HELM = (
+    "        - name: OIDC_ISSUER\n"
+    "          value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.issuer | quote }}{{ else }}\"\"{{ end }}"
+)
+OIDC_CLIENT_ID_ENV_KUSTOMIZE = (
+    '        - name: OIDC_CLIENT_ID\n' '          value: ""'
+)
+OIDC_CLIENT_ID_ENV_HELM = (
+    "        - name: OIDC_CLIENT_ID\n"
+    "          value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}\"\"{{ end }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -173,6 +202,12 @@ def substitute(doc: str) -> str:
         MCP_REQUIRE_APPROVAL_ENV_KUSTOMIZE,
         MCP_REQUIRE_APPROVAL_ENV_HELM,
     )
+    # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
+    # disabled (the default) all three render == the kustomize OFF literals (no drift);
+    # `--set auth.oidc.enabled=true` advertises the issuer + public PKCE client to the SPA.
+    doc = doc.replace(OIDC_ENABLED_ENV_KUSTOMIZE, OIDC_ENABLED_ENV_HELM)
+    doc = doc.replace(OIDC_ISSUER_ENV_KUSTOMIZE, OIDC_ISSUER_ENV_HELM)
+    doc = doc.replace(OIDC_CLIENT_ID_ENV_KUSTOMIZE, OIDC_CLIENT_ID_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
     return doc
