@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -64,6 +65,12 @@ const (
 	// endpoint the connect probe validated — important for OpenAI-compatible /
 	// self-hosted gateways. Not secret material.
 	annBaseURL = "agents.ctxmesh.ai/base-url"
+	// annProviderModels persists the FULL list of models the connect probe
+	// discovered (comma-separated), so a later model picker can offer EVERY model
+	// the provider serves — not just the one primaryModel() routes to. Without it
+	// the list projection only knows the single routed model (the "8 of 9 models
+	// vanished" gap). Not secret material — just model ids.
+	annProviderModels = "agents.ctxmesh.ai/provider-models"
 )
 
 // secretKeyAPIKey is the key within the created Secret's data map that holds the
@@ -276,13 +283,20 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 
 	// (c) ModelRoute — provider + model(s) + the SecretBinding ref. The route name
 	// is the model alias agents call. We register the first (sorted) discovered
-	// model as the route's primary entry; the picker can later re-point it.
+	// model as the route's primary entry; the picker can later re-point it. The FULL
+	// discovered model list is persisted as an annotation (annProviderModels) so the
+	// picker can offer every model, not just the routed one — route-only annotation.
+	routeAnnotations := make(map[string]string, len(annotations)+1)
+	maps.Copy(routeAnnotations, annotations)
+	if len(spec.models) > 0 {
+		routeAnnotations[annProviderModels] = strings.Join(spec.models, ",")
+	}
 	route := &agentsv1alpha1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
-			Annotations: annotations,
+			Annotations: routeAnnotations,
 		},
 		Spec: agentsv1alpha1.ModelRouteSpec{
 			Providers: []agentsv1alpha1.ProviderRef{{
@@ -403,16 +417,33 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 // never touched here — it lives in the Secret, which this read never opens.
 func providerSummaryFromRoute(mr *agentsv1alpha1.ModelRoute) ProviderSummary {
 	provider := mr.Labels[labelProvider]
-	models := make([]string, 0, len(mr.Spec.Providers))
+
+	// The full model list the connect probe discovered, persisted at connect time
+	// (annProviderModels), so the picker offers EVERY model — not just the routed one.
+	models := make([]string, 0)
+	if csv := strings.TrimSpace(mr.Annotations[annProviderModels]); csv != "" {
+		for m := range strings.SplitSeq(csv, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				models = append(models, m)
+			}
+		}
+	}
+
 	secretName := ""
 	for _, p := range mr.Spec.Providers {
-		if p.Model != "" {
-			models = append(models, p.Model)
-		}
 		if secretName == "" && p.SecretBindingRef != "" {
 			// The SecretBinding shares the route name in the connect flow; expose it
 			// as the reference (a NAME only, never the key).
 			secretName = p.SecretBindingRef
+		}
+	}
+	// Fall back to the routed model(s) for routes created before the annotation
+	// existed (or hand-authored routes), so the picker is never empty.
+	if len(models) == 0 {
+		for _, p := range mr.Spec.Providers {
+			if p.Model != "" {
+				models = append(models, p.Model)
+			}
 		}
 	}
 	ready := false

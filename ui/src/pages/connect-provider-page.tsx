@@ -1,14 +1,10 @@
 import * as React from "react";
+import { useNavigate } from "react-router-dom";
 import { Check, KeyRound, PlugZap, ShieldAlert } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ForbiddenInline,
   Wizard,
@@ -17,11 +13,7 @@ import {
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_SECRETS } from "@/lib/nav";
-import {
-  api,
-  ApiError,
-  type ConnectProviderResponse,
-} from "@/lib/api";
+import { api, ApiError, type ConnectProviderResponse } from "@/lib/api";
 
 // ConnectProviderPage — the FIRST UI of the aha (spec §5, ADR 0015). A guided
 // wizard that connects a provider by pasting a key ONCE:
@@ -76,6 +68,7 @@ const STEP_KEY = 1;
 const STEP_REVIEW = 2;
 
 export function ConnectProviderPage() {
+  const navigate = useNavigate();
   const [current, setCurrent] = React.useState(STEP_PROVIDER);
   const [providerId, setProviderId] = React.useState<ProviderId>("anthropic");
   // ── The key lives ONLY here — a local field value, cleared on submit. ──────
@@ -161,7 +154,7 @@ export function ConnectProviderPage() {
       <PageFrame>
         <ForbiddenInline
           title="Not allowed to connect a provider"
-          description="Connecting a provider creates a Secret, SecretBinding, and ModelRoute — your account can't create those in this cluster. Ask an operator to connect it, or reference an existing SecretBinding."
+          description="Connecting a provider securely stores your API key, which needs a permission your account doesn't have on this cluster. An admin can connect the provider for you, or grant your account that permission."
           detail={submit.message}
         />
       </PageFrame>
@@ -250,8 +243,8 @@ export function ConnectProviderPage() {
               data-testid="connect-error"
             >
               Couldn&apos;t connect: {submit.message}
-              {submit.status ? ` (${submit.status})` : ""}. Check the key and try
-              again.
+              {submit.status ? ` (${submit.status})` : ""}. Check the key and
+              try again.
             </p>
           )}
         </div>
@@ -263,7 +256,7 @@ export function ConnectProviderPage() {
       review: true,
       content:
         submit.kind === "connected" ? (
-          <ReviewStep res={submit.res} />
+          <ReviewStep res={submit.res} onDone={() => navigate("/providers")} />
         ) : (
           <p className="text-sm text-muted-foreground">
             Submit your key to validate it and list the provider&apos;s models.
@@ -273,13 +266,14 @@ export function ConnectProviderPage() {
   ];
 
   // Per-step forward gating. Provider → always; Key → a key (and base URL for
-  // custom) present AND the caller may create (display-only); Review → terminal.
+  // custom) present AND the caller may create (display-only); Review → active once
+  // connected, where the finish action is "Create an agent with this" (no dead button).
   const canProceed =
     current === STEP_PROVIDER
       ? true
       : current === STEP_KEY
         ? keyReady && canConnect
-        : false;
+        : submit.kind === "connected";
 
   return (
     <PageFrame>
@@ -288,9 +282,9 @@ export function ConnectProviderPage() {
           className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-center text-xs text-muted-foreground"
           data-testid="connect-readonly-note"
         >
-          You have read-only access — connecting a provider requires create
-          permission on SecretBindings. Ask an operator to connect one, or
-          reference an existing SecretBinding.
+          Your account doesn&apos;t have permission to connect a provider on
+          this cluster (it needs to store a credential). An admin can connect
+          one for you, or grant your account that permission.
         </p>
       )}
       <div className="rounded-lg border bg-card p-6 shadow-card">
@@ -302,6 +296,12 @@ export function ConnectProviderPage() {
           busy={connecting}
           // The KEY step's forward action IS the submit (intercepted above).
           nextLabel={current === STEP_KEY ? "Connect provider" : "Continue"}
+          // The Done step's finish keeps the momentum: straight into creating an
+          // agent that uses the model you just connected (the models are already
+          // in the create-agent picker). "Done" back to Providers is the secondary
+          // action inside ReviewStep.
+          finishLabel="Create an agent with this"
+          onFinish={() => navigate("/agents/new")}
         />
       </div>
     </PageFrame>
@@ -318,8 +318,8 @@ function PageFrame({ children }: { children: React.ReactNode }) {
           Connect a provider
         </h2>
         <p className="text-sm text-muted-foreground">
-          Paste a key once → validated server-side → pick a model. The first step
-          of running your first agent (no YAML, no kubectl).
+          Paste a key once → validated server-side → pick a model. The first
+          step of running your first agent (no YAML, no kubectl).
         </p>
       </div>
       {children}
@@ -329,7 +329,13 @@ function PageFrame({ children }: { children: React.ReactNode }) {
 
 // ReviewStep renders the LIVE model list from the connect response + the created
 // route reference. No secret material — only the `secretName` reference.
-function ReviewStep({ res }: { res: ConnectProviderResponse }) {
+function ReviewStep({
+  res,
+  onDone,
+}: {
+  res: ConnectProviderResponse;
+  onDone: () => void;
+}) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2 text-success">
@@ -354,11 +360,37 @@ function ReviewStep({ res }: { res: ConnectProviderResponse }) {
         </div>
       </div>
       <div className="rounded-md border bg-surface-2/40 px-3 py-2 text-xs text-muted-foreground">
-        Stored as{" "}
-        <span className="font-mono text-foreground">{res.provider.secretName}</span> —
-        SecretBinding + ModelRoute created under your identity. The key is
-        server-side; the browser only ever sees this reference.
+        Your key is stored securely under your identity and stays server-side —
+        the browser only ever sees the models above, never the key.
       </div>
+
+      {/* Storage plumbing is Advanced detail — collapsed by default so the happy
+          path reads as intent ("connected, models ready"), not Kubernetes nouns. */}
+      <details className="rounded-md border bg-surface-2/20 px-3 py-2 text-xs text-muted-foreground">
+        <summary className="cursor-pointer select-none font-medium text-foreground">
+          Advanced: how it&apos;s stored
+        </summary>
+        <p className="mt-2 leading-relaxed">
+          Stored as{" "}
+          <span className="font-mono text-foreground">
+            {res.provider.secretName}
+          </span>{" "}
+          — a Secret (the key), a SecretBinding (the reference), and a
+          ModelRoute (which provider serves which models), all created under
+          your identity. You never need to touch these for the common path.
+        </p>
+      </details>
+
+      {/* Secondary action — the primary "Create an agent with this" lives in the
+          wizard footer; "Done" just returns to Providers. */}
+      <button
+        type="button"
+        onClick={onDone}
+        data-testid="connect-done"
+        className="text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+      >
+        Done — back to Providers
+      </button>
     </div>
   );
 }
