@@ -40,6 +40,16 @@ data:
           {{- range $oidc.client.redirectURIs }}
           - {{ . | quote }}
           {{- end }}
+      {{- if $oidc.langfuse.enabled }}
+      # Langfuse shared-issuer client (m19.7): a CONFIDENTIAL client so the forensics
+      # link-out opens Langfuse without a second login. The secret is REQUIRED — the
+      # operator sets the same value on Langfuse (AUTH_DEX_CLIENT_SECRET).
+      - id: {{ $oidc.langfuse.clientId | quote }}
+        name: "Langfuse"
+        secret: {{ required "auth.oidc.langfuse.clientSecret is required when auth.oidc.langfuse.enabled=true (set it here AND on Langfuse; never commit a real secret)" $oidc.langfuse.clientSecret | quote }}
+        redirectURIs:
+          - {{ $oidc.langfuse.redirectURI | quote }}
+      {{- end }}
     {{- if $oidc.staticUser.enabled }}
     enablePasswordDB: true
     staticPasswords:

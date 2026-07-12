@@ -61,6 +61,15 @@ Console login — OIDC/SSO via Dex (m19.5, ADR 0020):
         to the operator persona. Enterprise: map real IdP groups to the personas
         (bind the groups claim), and set auth.oidc.demoBinding=false.
 {{- end }}
+{{- if .Values.auth.oidc.langfuse.enabled }}
+  Langfuse SSO (m19.7): Langfuse is registered as a Dex client ({{ .Values.auth.oidc.langfuse.clientId }})
+        so the forensics link-out opens WITHOUT a second login. Configure Langfuse
+        to trust THIS issuer (its env), using the SAME client secret you set here:
+          AUTH_DEX_ISSUER={{ .Values.auth.oidc.issuer }}
+          AUTH_DEX_CLIENT_ID={{ .Values.auth.oidc.langfuse.clientId }}
+          AUTH_DEX_CLIENT_SECRET=<the auth.oidc.langfuse.clientSecret you set>
+        Not configured → the link-out still works but Langfuse asks for its own login.
+{{- end }}
 {{- end }}
 
 Bundled dev data plane (dev/trial ONLY — PRD §23):
