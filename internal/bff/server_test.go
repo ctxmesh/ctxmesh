@@ -71,6 +71,29 @@ func TestHealthEndpoint(t *testing.T) {
 	assert.Equal(t, "test-1.2.3", body.Version)
 }
 
+func TestDevModeEndpoint(t *testing.T) {
+	// Default (the cluster BFF): devMode is false so the SPA renders the login gate.
+	s := newTestServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/devmode", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"devMode":false}`, rec.Body.String())
+
+	// The `dev --ui` substrate (ADR 0021): DevMode true, no cluster (CallerClients
+	// nil), AllowAll — and the probe is UNAUTHENTICATED so the SPA can read it before
+	// any session exists to decide dev chrome vs the login wall.
+	dev := NewServer(Options{
+		Scheme:  testScheme(t),
+		Auth:    AllowAll{},
+		DevMode: true,
+		Log:     logr.Discard(),
+	})
+	rec = httptest.NewRecorder()
+	dev.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/devmode", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"devMode":true}`, rec.Body.String())
+}
+
 func TestListAgentsEmpty(t *testing.T) {
 	// No agents in the fake cluster → the SPA must receive [] (not null).
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()

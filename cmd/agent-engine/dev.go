@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,7 +35,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/bff"
 )
 
 // devReadyTimeout bounds how long `dev` waits for /invoke to first answer
@@ -58,6 +65,9 @@ type devFlagValues struct {
 	realModel string
 	keyEnv    string
 	noWait    bool
+	ui        bool
+	uiPort    int
+	uiDist    string
 }
 
 // newDevCmd builds the cobra `dev` command.
@@ -116,6 +126,11 @@ Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error.`,
 		"upstream base URL for --provider real (optional; provider default otherwise)")
 	cmd.Flags().StringVar(&fv.keyEnv, "key-env", "", "name of the host env var holding the API key for --provider real")
 	cmd.Flags().BoolVar(&fv.noWait, "no-wait", false, "render + up the stack but do not block or run the readiness smoke")
+	cmd.Flags().BoolVar(&fv.ui, "ui", false,
+		"also serve the console UI (dev-mode BFF: config-preview + the local /invoke, no cluster, no login)")
+	cmd.Flags().IntVar(&fv.uiPort, "ui-port", 8888, "host port for the console UI when --ui is set")
+	cmd.Flags().StringVar(&fv.uiDist, "ui-dist", "ui/dist",
+		"directory of the built SPA (dist/) to serve with --ui; run `make build-ui` first")
 
 	return cmd
 }
@@ -165,6 +180,11 @@ func runDev(ctx context.Context, fv devFlagValues, out, errOut io.Writer) error 
 	flags, err := resolveDevFlags(fv)
 	if err != nil {
 		return err
+	}
+	// --ui needs the process to stay alive to serve the console; --no-wait exits
+	// immediately after `up`, so the two are mutually exclusive. Fail early, clearly.
+	if fv.ui && fv.noWait {
+		return validationErr("--ui cannot be combined with --no-wait (the UI needs the run to stay up)")
 	}
 
 	raw, err := os.ReadFile(flags.File)
@@ -242,11 +262,97 @@ func runDev(ctx context.Context, fv devFlagValues, out, errOut io.Writer) error 
 
 	statusf(out, "\nagent-engine dev: READY — POST to %s\n", plan.InvokeURL())
 	statusf(out, "  example: curl -s -X POST -d 'hello' %s\n", plan.InvokeURL())
+
+	// --ui: serve the console alongside the loop (ADR 0021). The dev-mode BFF is a
+	// local substrate — no cluster, no login — so only the K8s-free surfaces are live.
+	if fv.ui {
+		shutdownUI, err := serveDevUI(fv.uiPort, fv.uiDist, plan, out, errOut)
+		if err != nil {
+			return err
+		}
+		defer shutdownUI()
+	}
+
 	statusf(out, "  press Ctrl-C to stop.\n")
 
 	// Block until Ctrl-C / SIGTERM (or parent-ctx cancel). Teardown runs via defer.
 	<-runCtx.Done()
 	return nil
+}
+
+// serveDevUI starts the dev-mode console BFF (ADR 0021) on 127.0.0.1:uiPort and
+// serves the built SPA from uiDist. It is the LOCAL substrate: no cluster
+// (CallerClients nil → every cluster-backed endpoint answers an honest 501) and no
+// login wall (AllowAll). Only the K8s-free surfaces are live — config-preview
+// (/api/expand) and the local /invoke run — matching the `dev` inner loop. It
+// returns a shutdown func the caller defers; a nil error means the listener is up.
+func serveDevUI(uiPort int, uiDist string, plan *devPlan, out, errOut io.Writer) (func(), error) {
+	index := filepath.Join(uiDist, "index.html")
+	if _, err := os.Stat(index); err != nil {
+		return nil, validationErr(
+			"console UI build not found at %s (run `make build-ui` first, or pass --ui-dist): %v", uiDist, err,
+		)
+	}
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("building scheme: %w", err)
+	}
+	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("adding agents to scheme: %w", err)
+	}
+
+	srv := bff.NewServer(bff.Options{
+		DevMode:       true,
+		Auth:          bff.AllowAll{}, // single local developer — no login wall
+		CallerClients: nil,            // no cluster → cluster endpoints answer honest 501
+		Scheme:        scheme,
+		StaticDir:     uiDist,
+		Version:       "dev",
+		Adapters: bff.Adapters{
+			Expand: bff.NewExpandAdapter(),                          // config-preview (K8s-free)
+			Invoke: bff.NewInvokeAdapter(bff.InvokeAdapterConfig{}), // Playground → local /invoke
+		},
+		Log: logr.Discard(),
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", uiPort)
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	lisErr := make(chan error, 1)
+	go func() {
+		err := httpSrv.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			statusf(errOut, "agent-engine dev: console UI server error: %v\n", err)
+			lisErr <- err
+			return
+		}
+		lisErr <- nil
+	}()
+
+	// Give ListenAndServe a beat to fail fast on a bind error (e.g. a port clash) so
+	// we surface it as a startup error rather than a silent background death.
+	select {
+	case err := <-lisErr:
+		if err != nil {
+			return nil, fmt.Errorf("console UI failed to start on %s: %w", addr, err)
+		}
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	statusf(out, "\nagent-engine dev: console UI at http://%s\n", addr)
+	statusf(out, "  dev mode — no login; cluster surfaces disabled. Config-preview is live; "+
+		"the agent answers at %s\n", plan.InvokeURL())
+
+	shutdown := func() {
+		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shCtx)
+	}
+	return shutdown, nil
 }
 
 // composeEnv builds the extra environment passed to `docker compose` — the real
