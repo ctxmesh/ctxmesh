@@ -291,3 +291,14 @@ jobs:
         # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
+      - name: M19 console OIDC login (Auth-Code + PKCE via Dex)
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        # The console SSO 🧪 (ADR 0020, spec dev-ui-and-sso): drives the REAL Auth-Code
+        # + PKCE flow — login page → Dex login → /auth/callback exchange → the console
+        # as the OIDC identity (RBAC bound via the demo binding), Playwright spec 111.
+        # The load-bearing apiserver-OIDC-trust is a DEDICATED-cluster setup (not the
+        # shared dev cluster), so the slice gate-gracefully SKIPs unless
+        # UI_E2E_OIDC_CONTEXT names such a cluster (ADR 0004). ADR 0006: locally
+        # provable — tsc --noEmit + playwright --list + shellcheck; live run deferred.
+        run: make -C agent-brain/harness tier2 SLICE=m19-oidc
