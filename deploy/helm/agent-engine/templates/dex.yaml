@@ -1,0 +1,157 @@
+# ============================================================================
+# HAND-AUTHORED (NOT generated from config/). Dex — the bundled OIDC broker for
+# console login (m19.5, ADR 0020). Gated on .Values.auth.oidc.enabled: with the
+# default (false) this renders NOTHING, so the helm-verify no-drift default is
+# unchanged (helm-verify only diffs the kustomize-generated templates).
+#
+# Dex federates behind ONE issuer the console + API server trust: a static demo
+# user out of the box (dev/trial), or enterprise IdPs via connectors[] (Google/
+# Azure AD/Okta/GitHub/LDAP = OIDC, SAML = a Dex SAML connector). The API server
+# must be configured to trust the issuer (NOTES.txt) — this chart cannot do that.
+{{- if .Values.auth.oidc.enabled }}
+{{- $oidc := .Values.auth.oidc }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: agent-engine
+    control-plane: dex
+  name: agent-engine-dex-config
+  namespace: {{ .Values.namespace }}
+data:
+  config.yaml: |
+    issuer: {{ $oidc.issuer | quote }}
+    # In-memory storage: single-replica, dev/trial. For HA use Dex's kubernetes CRD
+    # storage (a ServiceAccount + RBAC) — documented in NOTES.txt; not the OSS default.
+    storage:
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    oauth2:
+      # The console is a first-party client — skip the consent screen for a clean login.
+      skipApprovalScreen: true
+    staticClients:
+      - id: {{ $oidc.client.id | quote }}
+        name: "agent-engine console"
+        # Public client: Auth-Code + PKCE, no client secret held in the browser.
+        public: true
+        redirectURIs:
+          {{- range $oidc.client.redirectURIs }}
+          - {{ . | quote }}
+          {{- end }}
+      {{- if $oidc.langfuse.enabled }}
+      # Langfuse shared-issuer client (m19.7): a CONFIDENTIAL client so the forensics
+      # link-out opens Langfuse without a second login. The secret is REQUIRED — the
+      # operator sets the same value on Langfuse (AUTH_DEX_CLIENT_SECRET).
+      - id: {{ $oidc.langfuse.clientId | quote }}
+        name: "Langfuse"
+        secret: {{ required "auth.oidc.langfuse.clientSecret is required when auth.oidc.langfuse.enabled=true (set it here AND on Langfuse; never commit a real secret)" $oidc.langfuse.clientSecret | quote }}
+        redirectURIs:
+          - {{ $oidc.langfuse.redirectURI | quote }}
+      {{- end }}
+    {{- if $oidc.staticUser.enabled }}
+    enablePasswordDB: true
+    staticPasswords:
+      - email: {{ $oidc.staticUser.email | quote }}
+        hash: {{ $oidc.staticUser.passwordHash | quote }}
+        username: {{ $oidc.staticUser.username | quote }}
+        userID: "agent-engine-static-admin"
+    {{- end }}
+    connectors:
+      {{- if $oidc.connectors }}
+      {{- toYaml $oidc.connectors | nindent 6 }}
+      {{- else }}
+      []
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: agent-engine
+    control-plane: dex
+  name: agent-engine-dex
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    control-plane: dex
+  ports:
+    - name: http
+      port: 5556
+      targetPort: 5556
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: agent-engine
+    control-plane: dex
+  name: agent-engine-dex
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: dex
+  template:
+    metadata:
+      labels:
+        control-plane: dex
+      annotations:
+        # Roll the pod when the Dex config changes (issuer/clients/user/connectors).
+        checksum/config: {{ toYaml $oidc | sha256sum }}
+    spec:
+      containers:
+        - name: dex
+          image: "{{ $oidc.image.repository }}:{{ $oidc.image.tag }}"
+          args: ["dex", "serve", "/etc/dex/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 5556
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5556
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: agent-engine-dex-config
+{{- if and $oidc.staticUser.enabled $oidc.demoBinding }}
+---
+# EXAMPLE binding (demo): map the static demo user's OIDC identity to the operator
+# persona so the zero-config login is immediately usable. The subject username MUST
+# match what the API server derives — <--oidc-username-prefix><email> (default
+# prefix "oidc:", see NOTES.txt). The enterprise path maps real IdP groups instead.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: agent-engine
+    control-plane: dex
+  name: agent-engine-dex-demo-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-engine-operator
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "{{ $oidc.usernamePrefix }}{{ $oidc.staticUser.email }}"
+{{- end }}
+{{- end }}

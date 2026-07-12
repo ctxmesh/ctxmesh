@@ -16,6 +16,23 @@ export interface HealthResponse {
   version: string;
 }
 
+// DevModeResponse mirrors the BFF's DevModeResponse (internal/bff/dto.go). true =
+// the local `agent-engine dev --ui` substrate (ADR 0021): no cluster, no login wall.
+// The endpoint is unauthenticated so the SPA can read it before any session exists.
+export interface DevModeResponse {
+  devMode: boolean;
+}
+
+// AuthConfigResponse mirrors the BFF's AuthConfigResponse (internal/bff/dto.go, ADR
+// 0020): whether console SSO is available and, if so, the Dex issuer + public PKCE
+// client id. When oidcEnabled is false the SPA uses token login (ADR 0012). No secret
+// is ever sent — the console is a public client. Unauthenticated (read before login).
+export interface AuthConfigResponse {
+  oidcEnabled: boolean;
+  issuer?: string;
+  clientId?: string;
+}
+
 // WhoAmI mirrors the BFF's WhoAmIResponse (internal/bff/dto.go): the caller's
 // identity from a SelfSubjectReview. `groups` is never null on the wire.
 export interface WhoAmI {
@@ -306,11 +323,7 @@ export interface NamespaceListResponse {
 // React Flow view builds its graph from these; the SPA never sees raw CRDs.
 
 export type TopologyNodeKind = "registry" | "agent" | "tool";
-export type TopologyHealth =
-  | "ready"
-  | "notReady"
-  | "pending"
-  | "unknown";
+export type TopologyHealth = "ready" | "notReady" | "pending" | "unknown";
 
 export interface TopologyNode {
   id: string;
@@ -1159,7 +1172,11 @@ async function getJSON<T>(
   signal?: AbortSignal,
   extras?: RequestExtras,
 ): Promise<T> {
-  const res = await apiFetch(path, { headers: { Accept: "application/json" }, signal }, extras);
+  const res = await apiFetch(
+    path,
+    { headers: { Accept: "application/json" }, signal },
+    extras,
+  );
   if (!res.ok) {
     throw new ApiError(
       await errorMessage(res, `${path} failed (${res.status})`),
@@ -1273,7 +1290,8 @@ export function openLogStream(
   const qs = new URLSearchParams();
   if (opts.follow) qs.set("follow", "true");
   if (opts.container) qs.set("container", opts.container);
-  if (opts.tailLines && opts.tailLines > 0) qs.set("tailLines", String(opts.tailLines));
+  if (opts.tailLines && opts.tailLines > 0)
+    qs.set("tailLines", String(opts.tailLines));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   const path = `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/logs${suffix}`;
 
@@ -1282,7 +1300,10 @@ export function openLogStream(
   const controller = new AbortController();
   if (opts.signal) {
     if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    else
+      opts.signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
   }
 
   void (async () => {
@@ -1294,14 +1315,19 @@ export function openLogStream(
       });
     } catch (err) {
       if (controller.signal.aborted) return; // unmounted — silent, no leak.
-      handlers.onError?.(err instanceof Error ? err.message : "log stream failed");
+      handlers.onError?.(
+        err instanceof Error ? err.message : "log stream failed",
+      );
       return;
     }
 
     // PRE-STREAM status: a non-2xx arrives as an HTTP status BEFORE any SSE frame.
     // 403 → forbidden state (NOT an in-stream error); anything else → onError.
     if (!res.ok) {
-      const message = await errorMessage(res, `log stream failed (${res.status})`);
+      const message = await errorMessage(
+        res,
+        `log stream failed (${res.status})`,
+      );
       if (res.status === 403) handlers.onForbidden?.(message);
       else handlers.onError?.(message, res.status);
       return;
@@ -1331,7 +1357,9 @@ export function openLogStream(
       }
     } catch (err) {
       if (controller.signal.aborted) return; // aborted on unmount — expected.
-      handlers.onError?.(err instanceof Error ? err.message : "log stream broke");
+      handlers.onError?.(
+        err instanceof Error ? err.message : "log stream broke",
+      );
     } finally {
       reader.releaseLock();
     }
@@ -1343,13 +1371,16 @@ export function openLogStream(
 // parseSSEFrame parses one SSE frame ("event: <t>\ndata: <l>\n[data: <l>...]")
 // into a typed event. Multiple data: lines re-join with "\n" (the SSE grammar).
 // Unknown event names map to "log" defensively (a data-only frame is a log line).
-function parseSSEFrame(frame: string): { type: LogEventType; data: string } | null {
+function parseSSEFrame(
+  frame: string,
+): { type: LogEventType; data: string } | null {
   let event = "log";
   const dataLines: string[] = [];
   for (const raw of frame.split("\n")) {
     const line = raw.replace(/\r$/, "");
     if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+    else if (line.startsWith("data:"))
+      dataLines.push(line.slice(5).replace(/^ /, ""));
   }
   if (dataLines.length === 0 && event === "log") return null; // blank/keep-alive.
   const type: LogEventType =
@@ -1567,6 +1598,15 @@ function listQuery(params: AgentListParams = {}): string {
 export const api = {
   health: (signal?: AbortSignal) =>
     getJSON<HealthResponse>("/api/health", signal),
+  // devMode probes whether the console runs under `agent-engine dev --ui` (ADR 0021).
+  // Unauthenticated, so it resolves before any login. Callers treat any failure as
+  // false (login wall stays on) — never accidentally drop auth on a real cluster.
+  devMode: (signal?: AbortSignal) =>
+    getJSON<DevModeResponse>("/api/devmode", signal),
+  // authConfig reports whether console SSO (OIDC/Dex, ADR 0020) is available + the
+  // issuer/clientId to start Auth-Code+PKCE. Unauthenticated (read on the login page).
+  authConfig: (signal?: AbortSignal) =>
+    getJSON<AuthConfigResponse>("/api/authconfig", signal),
   whoami: (signal?: AbortSignal) => whoami({ signal }),
 
   // listAgents reads one page window through the list contract (§4): it returns
@@ -1602,8 +1642,7 @@ export const api = {
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },
   cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),
-  runs: (signal?: AbortSignal) =>
-    getJSON<RunListResponse>("/api/runs", signal),
+  runs: (signal?: AbortSignal) => getJSON<RunListResponse>("/api/runs", signal),
 
   // runsFiltered reads one paginated window of runs from the global /api/runs
   // endpoint (m16.3) with server-side agent/from/to filters + client-side q
@@ -1624,10 +1663,10 @@ export const api = {
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    const res = await apiFetch(
-      `/api/runs${suffix}`,
-      { headers: { Accept: "application/json" }, signal },
-    );
+    const res = await apiFetch(`/api/runs${suffix}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
     // 501 = Langfuse not configured — calm null sentinel (not an error).
     // 502 = Langfuse configured but upstream fetch failed — real error, throw.
     if (res.status === 501) return null;
@@ -1833,7 +1872,10 @@ export const api = {
     }
     // A 200/201 means the BFF treated the OAuth request as key-auth (unexpected)
     // — surface it as a protocol error so the caller doesn't silently mishandle.
-    throw new ApiError("unexpected 2xx status for OAuth initiation (expected 202)", res.status);
+    throw new ApiError(
+      "unexpected 2xx status for OAuth initiation (expected 202)",
+      res.status,
+    );
   },
 
   // mcpApprovals lists the pending MCP servers awaiting operator approval
@@ -1845,7 +1887,11 @@ export const api = {
   // approveMcp approves a pending MCP server (POST /api/mcp/approvals/{ns}/{name}).
   // Operator-only: a non-operator gets a real 403 from the API (display gating is
   // additional UX, not the gate). A 404 = the approval is gone (already actioned).
-  approveMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+  approveMcp: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
     const res = await apiFetch(
       `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
       {
@@ -1865,7 +1911,11 @@ export const api = {
 
   // rejectMcp rejects (denies) a pending MCP server
   // (POST /api/mcp/approvals/{ns}/{name}/reject). Same RBAC constraints as approveMcp.
-  rejectMcp: async (ns: string, name: string, signal?: AbortSignal): Promise<void> => {
+  rejectMcp: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
     const res = await apiFetch(
       `/api/mcp/approvals/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/reject`,
       {
@@ -2042,7 +2092,10 @@ export const api = {
   // contract (§4): { items, nextCursor }. Pass limit/cursor/q/namespace to
   // page + scope + filter. A 403 surfaces as a typed ApiError (isForbidden).
   listModelRoutes: (params?: AgentListParams, signal?: AbortSignal) =>
-    getJSON<ModelRouteListResponse>(`/api/modelroutes${listQuery(params)}`, signal),
+    getJSON<ModelRouteListResponse>(
+      `/api/modelroutes${listQuery(params)}`,
+      signal,
+    ),
 
   // modelRouteDetail reads one ModelRoute's full detail projection. A 404 =
   // not-found; a 403 = viewer-can't-read; both surface as a typed ApiError.
@@ -2316,10 +2369,10 @@ export const api = {
     qs.set("by", "agent");
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
-    const res = await apiFetch(
-      `/api/cost/breakdown?${qs.toString()}`,
-      { headers: { Accept: "application/json" }, signal },
-    );
+    const res = await apiFetch(`/api/cost/breakdown?${qs.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
     // 501 = Langfuse not configured — calm null sentinel (not an error).
     // 502 = Langfuse configured but upstream fetch failed — real error, throw.
     if (res.status === 501) return null;
@@ -2369,12 +2422,16 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<MCPToolBindingListResponse> => {
     const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.limit && params.limit > 0)
+      qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
     if (params?.agentName) qs.set("agentName", params.agentName);
     if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<MCPToolBindingListResponse>(`/api/mcptoolbindings${suffix}`, signal);
+    return getJSON<MCPToolBindingListResponse>(
+      `/api/mcptoolbindings${suffix}`,
+      signal,
+    );
   },
 
   // createMcpToolBinding creates a new MCPToolBinding — attaching a catalog
@@ -2420,11 +2477,15 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<MemoryBindingListResponse> => {
     const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.limit && params.limit > 0)
+      qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
     if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<MemoryBindingListResponse>(`/api/memorybindings${suffix}`, signal);
+    return getJSON<MemoryBindingListResponse>(
+      `/api/memorybindings${suffix}`,
+      signal,
+    );
   },
 
   memoryBindingDetail: (ns: string, name: string, signal?: AbortSignal) =>
@@ -2503,11 +2564,15 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<AgentScalingPolicyListResponse> => {
     const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.limit && params.limit > 0)
+      qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
     if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<AgentScalingPolicyListResponse>(`/api/agentscalingpolicies${suffix}`, signal);
+    return getJSON<AgentScalingPolicyListResponse>(
+      `/api/agentscalingpolicies${suffix}`,
+      signal,
+    );
   },
 
   agentScalingPolicyDetail: (ns: string, name: string, signal?: AbortSignal) =>
@@ -2586,7 +2651,8 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<EvalSuiteListResponse> => {
     const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.limit && params.limit > 0)
+      qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
     if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
@@ -2679,12 +2745,16 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<PromptVersionListResponse> => {
     const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params?.limit && params.limit > 0)
+      qs.set("limit", String(params.limit));
     if (params?.cursor) qs.set("cursor", params.cursor);
     if (params?.namespace) qs.set("namespace", params.namespace);
     if (params?.promptName) qs.set("promptName", params.promptName);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<PromptVersionListResponse>(`/api/promptversions${suffix}`, signal);
+    return getJSON<PromptVersionListResponse>(
+      `/api/promptversions${suffix}`,
+      signal,
+    );
   },
 
   promptVersionDetail: (ns: string, name: string, signal?: AbortSignal) =>

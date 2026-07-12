@@ -70,14 +70,8 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxInvokeRequestBytes))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	var req InvokeRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	req, ok := parseInvokeRequest(w, r)
+	if !ok {
 		return
 	}
 	if strings.TrimSpace(req.Agent) == "" {
@@ -89,24 +83,57 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.writeInvokeResult(w, r, req.Agent, endpoint, []byte(req.Input))
+}
 
-	// The input is forwarded verbatim; an empty input becomes an empty JSON body
-	// the agent can accept or reject on its own.
-	input := []byte(req.Input)
+// handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).
+// There is no cluster to resolve an endpoint from, so the run targets the SINGLE local
+// Compose agent at the fixed devInvokeEndpoint; the request's agent/namespace are
+// ignored (the dev loop runs exactly one agent). The trace-id hand-off and the honest
+// 502-on-non-2xx behavior are identical to the caller-scoped path — a failed local run
+// is never reported as a success.
+func (s *Server) handleDevInvoke(w http.ResponseWriter, r *http.Request) {
+	req, ok := parseInvokeRequest(w, r)
+	if !ok {
+		return
+	}
+	s.writeInvokeResult(w, r, "dev", s.devInvokeEndpoint, []byte(req.Input))
+}
+
+// parseInvokeRequest reads and decodes the bounded POST /api/invoke body, writing the
+// right 400 and returning ok=false on a read/JSON error. Shared by the cluster and dev
+// invoke handlers.
+func parseInvokeRequest(w http.ResponseWriter, r *http.Request) (InvokeRequest, bool) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxInvokeRequestBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return InvokeRequest{}, false
+	}
+	var req InvokeRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return InvokeRequest{}, false
+	}
+	return req, true
+}
+
+// writeInvokeResult drives the InvokeAdapter against the resolved endpoint and writes
+// the response: 200 with {traceId,response} on success; 502 with the real reason + the
+// traceId when the agent answered non-2xx (a traced-but-failed run stays inspectable).
+// The input is forwarded verbatim — an empty input becomes an empty body the agent may
+// accept or reject on its own.
+func (s *Server) writeInvokeResult(w http.ResponseWriter, r *http.Request, agentLabel, endpoint string, input []byte) {
 	resp, traceID, err := s.adapters.Invoke.Invoke(r.Context(), endpoint, input)
 	if err != nil {
 		var ie *invokeError
 		if errors.As(err, &ie) {
-			// The agent answered non-2xx: surface its status as a 502 (an upstream
-			// failure) with the real reason, and still hand back the traceId so the
-			// user can inspect the failed run's trace.
 			writeJSON(w, http.StatusBadGateway, InvokeErrorResponse{
 				Error:   ie.Error(),
 				TraceID: traceID,
 			})
 			return
 		}
-		s.log.Error(err, "playground invoke failed", "agent", req.Agent)
+		s.log.Error(err, "playground invoke failed", "agent", agentLabel)
 		writeError(w, http.StatusBadGateway, "failed to invoke agent")
 		return
 	}

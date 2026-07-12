@@ -1,12 +1,21 @@
 import * as React from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { ArrowRight, Boxes, KeyRound, Loader2, TerminalSquare } from "lucide-react";
+import {
+  ArrowRight,
+  Boxes,
+  KeyRound,
+  Loader2,
+  LogIn,
+  TerminalSquare,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { login } from "@/lib/session";
 import { useSession } from "@/lib/use-session";
+import { api } from "@/lib/api";
+import { startLogin } from "@/lib/oidc";
 
 // LoginPage — the token login (ADR 0012), realized from the approved
 // auth-shell wireframe (design/wireframes/auth-shell.tsx `LoginCard`). The user
@@ -61,11 +70,43 @@ export function LoginPage() {
   const [token, setToken] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // SSO availability (ADR 0020) — probed from /api/authconfig. When on, SSO is the
+  // primary path and token login is the fallback. undefined = still probing.
+  const [ssoEnabled, setSsoEnabled] = React.useState<boolean | undefined>(
+    undefined,
+  );
+  const [ssoError, setSsoError] = React.useState<string | null>(null);
+  const [ssoRedirecting, setSsoRedirecting] = React.useState(false);
 
   // Already signed in (e.g. hit /login with a live session) → go to the console.
   React.useEffect(() => {
     if (session) navigate(target, { replace: true });
   }, [session, target, navigate]);
+
+  // Probe SSO availability once. A failure keeps token login (the safe default).
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .authConfig(ctrl.signal)
+      .then((c) => setSsoEnabled(c.oidcEnabled))
+      .catch(() => setSsoEnabled(false));
+    return () => ctrl.abort();
+  }, []);
+
+  const onSso = async () => {
+    if (ssoRedirecting) return;
+    setSsoError(null);
+    setSsoRedirecting(true);
+    try {
+      // Redirects the browser to Dex; the callback route completes the login.
+      await startLogin(target);
+    } catch (err) {
+      setSsoRedirecting(false);
+      setSsoError(
+        err instanceof Error ? err.message : "Could not start single sign-on.",
+      );
+    }
+  };
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,12 +145,46 @@ export function LoginPage() {
             Sign in to agent-engine
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Paste a Kubernetes bearer token. It&apos;s held for this session only
-            and sent as your identity on every request.
+            Paste a Kubernetes bearer token. It&apos;s held for this session
+            only and sent as your identity on every request.
           </p>
         </div>
 
         <div className="space-y-4">
+          {ssoEnabled && (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                className="w-full"
+                onClick={onSso}
+                disabled={ssoRedirecting}
+                data-testid="sso-login"
+              >
+                {ssoRedirecting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Redirecting to your identity provider…
+                  </>
+                ) : (
+                  <>
+                    <LogIn className="h-4 w-4" />
+                    Sign in with SSO
+                  </>
+                )}
+              </Button>
+              {ssoError && (
+                <p role="alert" className="text-xs text-destructive">
+                  {ssoError}
+                </p>
+              )}
+              <div className="flex items-center gap-2 pt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                or use a token
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             <Label htmlFor="token">Bearer token</Label>
             <div className="relative">
@@ -130,13 +205,21 @@ export function LoginPage() {
               />
             </div>
             {error && (
-              <p id="token-error" role="alert" className="text-xs text-destructive">
+              <p
+                id="token-error"
+                role="alert"
+                className="text-xs text-destructive"
+              >
                 {error}
               </p>
             )}
           </div>
 
-          <Button type="submit" className="w-full" disabled={submitting || !token.trim()}>
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={submitting || !token.trim()}
+          >
             {submitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -158,8 +241,10 @@ export function LoginPage() {
             <span className="font-mono">
               kubectl create token &lt;sa&gt; -n &lt;ns&gt;
             </span>
-            . The token expires on its own — paste a fresh one when it does. OIDC
-            single-sign-on arrives in M18.
+            . The token expires on its own — paste a fresh one when it does.
+            {ssoEnabled
+              ? " Or use Sign in with SSO above for your org identity."
+              : " Single sign-on (OIDC) is available when your cluster enables it."}
           </div>
         </div>
       </form>

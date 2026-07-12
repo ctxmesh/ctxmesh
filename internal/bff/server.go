@@ -54,6 +54,25 @@ type Server struct {
 	version       string
 	log           logr.Logger
 
+	// devMode is true when the BFF runs under `agent-engine dev --ui` (ADR 0021):
+	// a local, single-developer substrate with NO cluster (callerClients nil →
+	// cluster-only endpoints serve honest 501) and NO login wall. GET /api/devmode
+	// exposes it so the SPA renders dev-mode chrome instead of the login gate.
+	devMode bool
+	// devInvokeEndpoint is the base URL of the single local Compose agent under
+	// `dev --ui` (ADR 0021). When set, POST /api/invoke targets it directly (no
+	// cluster resolution) so the Playground run works locally. Empty otherwise.
+	devInvokeEndpoint string
+
+	// oidc* advertise the console SSO config (ADR 0020) at GET /api/authconfig so
+	// the SPA can run Auth-Code+PKCE against Dex. The BFF stays auth-transparent
+	// (ADR 0011): it holds NO OIDC secret (the console is a public PKCE client) and
+	// never validates tokens itself — it only tells the SPA the issuer + client id.
+	// When oidcEnabled is false the SPA uses token login (ADR 0012).
+	oidcEnabled  bool
+	oidcIssuer   string
+	oidcClientID string
+
 	// providerConnect is the ADR 0015 kill-switch. When false the connect
 	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
 	// NOT registered and serve 404 — the UI falls back to reference-existing.
@@ -128,6 +147,20 @@ type Options struct {
 	// StaticDir is the directory of the built SPA (dist/). Empty disables static
 	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
 	StaticDir string
+	// DevMode marks the local `agent-engine dev --ui` substrate (ADR 0021): no
+	// cluster (CallerClients nil), no login wall. Surfaced at GET /api/devmode so
+	// the SPA renders dev chrome instead of the login gate.
+	DevMode bool
+	// DevInvokeEndpoint is the base URL of the local Compose agent (dev mode). When
+	// set (with an Invoke adapter), POST /api/invoke targets it directly so the
+	// Playground run works with no cluster. Ignored unless DevMode is on.
+	DevInvokeEndpoint string
+	// OIDCEnabled advertises console SSO (ADR 0020) at GET /api/authconfig. When
+	// false the SPA uses token login (ADR 0012). OIDCIssuer/OIDCClientID are the Dex
+	// issuer + the public PKCE client id the SPA needs to start the flow.
+	OIDCEnabled  bool
+	OIDCIssuer   string
+	OIDCClientID string
 	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
 	// (the default for dev/trial) the connect endpoints are registered; when
 	// false (a hardened install) they serve 404 and the UI falls back to
@@ -171,6 +204,11 @@ func NewServer(opts Options) *Server {
 		auth:                     opts.Auth,
 		adapters:                 opts.Adapters,
 		version:                  opts.Version,
+		devMode:                  opts.DevMode,
+		devInvokeEndpoint:        opts.DevInvokeEndpoint,
+		oidcEnabled:              opts.OIDCEnabled,
+		oidcIssuer:               opts.OIDCIssuer,
+		oidcClientID:             opts.OIDCClientID,
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
 		platformGenerationModels: opts.PlatformGenerationModels,
@@ -196,6 +234,14 @@ func (s *Server) Handler() http.Handler {
 
 	// Health is unauthenticated (liveness/version probe; no cluster access).
 	api.HandleFunc("GET /api/health", s.handleHealth)
+	// Dev-mode probe (ADR 0021) — unauthenticated so the SPA can read it before any
+	// session exists. {devMode:true} → the `dev --ui` local substrate (no login wall,
+	// cluster surfaces honestly degraded); {devMode:false} → the normal cluster BFF.
+	api.HandleFunc("GET /api/devmode", s.handleDevMode)
+	// Auth config (ADR 0020) — unauthenticated so the login page can read it before a
+	// session. Tells the SPA whether OIDC/SSO is available (issuer + public PKCE client
+	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
+	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
@@ -543,13 +589,20 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
 	}
 	// Playground invoke (m12.7): run a deployed agent, traced, and return its
-	// traceId. Wired only when BOTH the InvokeAdapter (the pure-HTTP invoker) AND
-	// the caller-client factory are present — the run is CALLER-SCOPED (the agent
-	// lookup + dispatch act as the caller, ADR 0011), so it needs the caller-client
-	// seam and must never fall back to the BFF SA. Honest 501 otherwise.
-	if s.adapters.Invoke != nil && s.callerClients != nil {
+	// traceId. The CLUSTER path is wired only when BOTH the InvokeAdapter (the
+	// pure-HTTP invoker) AND the caller-client factory are present — the run is
+	// CALLER-SCOPED (the agent lookup + dispatch act as the caller, ADR 0011), so it
+	// needs the caller-client seam and must never fall back to the BFF SA.
+	//
+	// The DEV path (ADR 0021) has no cluster: when devMode + a devInvokeEndpoint are
+	// set, POST /api/invoke targets the single local Compose agent directly (no RBAC
+	// to scope — it's a single local developer). Honest 501 when neither is wired.
+	switch {
+	case s.devMode && s.adapters.Invoke != nil && s.devInvokeEndpoint != "":
+		authed.HandleFunc("POST /api/invoke", s.handleDevInvoke)
+	case s.adapters.Invoke != nil && s.callerClients != nil:
 		authed.HandleFunc("POST /api/invoke", s.handleInvoke)
-	} else {
+	default:
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
