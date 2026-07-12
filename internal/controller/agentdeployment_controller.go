@@ -621,7 +621,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	gatewayURL := litellmGatewayURL
 	if deploy.Spec.Budget != nil {
 		gatewayURL = budgetProxyURL
-		env = append(env,
+		env = append(
+			env,
 			corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL},
 			// Either cap may be empty (that dimension unenforced); softThreshold
 			// carries the CRD default (80) when unset because the field defaults
@@ -641,7 +642,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// langfuse-otlp Secret and the Langfuse Helm chart. Injected unconditionally:
 	// feedback is always available to the launcher; it is a thin relay, no CRD
 	// surface in v1 (the FeedbackStore CRD is phase 2).
-	env = append(env,
+	env = append(
+		env,
 		corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
 		corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
 		corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
@@ -738,7 +740,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
 	if hasMemoryBinding {
-		env = append(env,
+		env = append(
+			env,
 			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
 			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
 			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
@@ -775,7 +778,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
 	}
 	if membership.IsMember {
-		env = append(env,
+		env = append(
+			env,
 			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
@@ -828,7 +832,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
 		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
 		// async payloads pass through capped.
-		env = append(env,
+		env = append(
+			env,
 			corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
 			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
 			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
@@ -1124,7 +1129,8 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		langfuseEnv = []corev1.EnvVar{
 			{Name: "LANGFUSE_OTLP_ENDPOINT", Value: string(sec.Data["otlp-endpoint"])},
 			{Name: "LANGFUSE_OTLP_AUTH", Value: telemetry.BasicAuthHeader(
-				string(sec.Data["public-key"]), string(sec.Data["secret-key"]))},
+				string(sec.Data["public-key"]), string(sec.Data["secret-key"]),
+			)},
 		}
 	case apierrors.IsNotFound(err):
 		// debug-only; not an error.
@@ -1209,13 +1215,32 @@ func (r *AgentDeploymentReconciler) syncStatus(
 		ObservedGeneration: deploy.Generation,
 	})
 
-	if ksvc.Status.URL != nil {
-		deploy.Status.URL = ksvc.Status.URL.String()
+	if u := preferredAgentURL(ksvc); u != "" {
+		deploy.Status.URL = u
 	}
 	deploy.Status.LatestVersion = latestVersion
 	deploy.Status.ObservedGeneration = deploy.Generation
 
 	return r.Status().Update(ctx, deploy)
+}
+
+// preferredAgentURL picks the address recorded in AgentDeployment status.url. It
+// prefers the ksvc's CLUSTER-LOCAL address (status.address.url) over the external
+// route URL (status.url), because the primary consumer is the IN-CLUSTER BFF
+// Playground invoke (m12.7, ADR 0011): the external ksvc URL resolves to the ingress,
+// which is not hairpin-routable from inside the cluster (on kind it points at the
+// calling pod's own localhost) so dispatching there fails with a 502. The cluster-local
+// address is what an in-cluster caller must use, and it aligns serving with the eventing
+// execution model (which already records a cluster-local URL). Returns "" when the ksvc
+// has neither yet, so the caller leaves any existing status.url untouched.
+func preferredAgentURL(ksvc *servingv1.Service) string {
+	if ksvc.Status.Address != nil && ksvc.Status.Address.URL != nil {
+		return ksvc.Status.Address.URL.String()
+	}
+	if ksvc.Status.URL != nil {
+		return ksvc.Status.URL.String()
+	}
+	return ""
 }
 
 // setReadyFalse sets the Ready condition to False with the given reason and
