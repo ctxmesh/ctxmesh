@@ -133,6 +133,46 @@ func TestCreateAgentHandlerCreatesCRD(t *testing.T) {
 	assert.Equal(t, "ghcr.io/ctxmesh/echo:v1", got.Spec.Image)
 }
 
+// TestCreateAgentHandlerModelPickEnsuresRoute pins the m21 model-first create: a picked
+// (provider, model) → the BFF ensures a ModelRoute serving it AND the created agent
+// references THAT route (via the MODEL_ROUTE env expand emits) — the user picked a model,
+// the platform managed the route.
+func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	reqBody, _ := json.Marshal(CreateAgentRequest{
+		AgentYAML: sampleAgentYAML,
+		Namespace: "prod",
+		Model:     &ModelPick{Provider: "anthropic", Model: "claude-sonnet-5"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody))
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// The ensured ModelRoute was created for the picked (provider, model).
+	var mr agentsv1alpha1.ModelRoute
+	require.NoError(t, c.Get(context.Background(),
+		client.ObjectKey{Name: "anthropic-claude-sonnet-5", Namespace: "prod"}, &mr))
+	require.Len(t, mr.Spec.Providers, 1)
+	assert.Equal(t, "claude-sonnet-5", mr.Spec.Providers[0].Model)
+	assert.Equal(t, "anthropic", mr.Spec.Providers[0].SecretBindingRef)
+
+	// The created agent references THAT route (MODEL_ROUTE env from expand).
+	var agent agentsv1alpha1.AgentDeployment
+	require.NoError(t, c.Get(context.Background(),
+		client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &agent))
+	var route string
+	for _, e := range agent.Spec.Env {
+		if e.Name == "MODEL_ROUTE" {
+			route = e.Value
+		}
+	}
+	assert.Equal(t, "anthropic-claude-sonnet-5", route,
+		"the agent must reference the platform-ensured route for the picked model")
+}
+
 func TestCreateAgentHandlerMultiDoc(t *testing.T) {
 	// An agent.yaml with eval + prompt expands to EvalSuite + PromptVersion +
 	// AgentDeployment — all three must be created, in dependency order.

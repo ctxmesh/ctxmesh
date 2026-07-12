@@ -19,8 +19,10 @@ package bff
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
@@ -78,6 +80,18 @@ type CreateAgentRequest struct {
 	AgentYAML string `json:"agentYAML"`
 	// Namespace targets the create; empty → the default namespace.
 	Namespace string `json:"namespace"`
+	// Model, when set, is the (provider, model) the user PICKED (m21). The BFF ensures
+	// a ModelRoute serving it (ensureRouteForModel) and injects that route into the
+	// agent.yaml before expand — so the user picks a MODEL, never authors a route.
+	// Absent → the agent.yaml's own model.route is used (the Advanced path).
+	Model *ModelPick `json:"model,omitempty"`
+}
+
+// ModelPick is the picked (provider, model) a create request may carry instead of a
+// hand-set model.route (m21).
+type ModelPick struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // CreateAgentResponse is returned by POST /api/agents on success: the flat
@@ -118,7 +132,29 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := createAgentFromYAML(r.Context(), caller, s.scheme, []byte(req.AgentYAML), req.Namespace)
+	// m21: if the caller PICKED a (provider, model), ensure a ModelRoute serving it and
+	// inject that route into the agent.yaml — the user picks a model, the platform manages
+	// the route. Absent → the agent.yaml's own model.route is used (the Advanced path).
+	agentYAML := []byte(req.AgentYAML)
+	ns := req.Namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	if req.Model != nil && strings.TrimSpace(req.Model.Provider) != "" && strings.TrimSpace(req.Model.Model) != "" {
+		routeName, cerr := ensureRouteForModel(r.Context(), caller, s.scheme, ns, req.Model.Provider, req.Model.Model)
+		if cerr != nil {
+			writeError(w, cerr.status, cerr.msg)
+			return
+		}
+		injected, ierr := injectModelRoute(agentYAML, routeName)
+		if ierr != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("could not set the model route: %v", ierr))
+			return
+		}
+		agentYAML = injected
+	}
+
+	created, err := createAgentFromYAML(r.Context(), caller, s.scheme, agentYAML, ns)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {
