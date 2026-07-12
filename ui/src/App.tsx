@@ -6,7 +6,10 @@ import { AgentDetailPage } from "@/pages/agent-detail-page";
 import { AgentRegistriesPage } from "@/pages/agent-registries-page";
 import { EvalsPage } from "@/pages/evals-page";
 import { PromptsPage } from "@/pages/prompts-page";
-import { AgentRegistryDetailPage, NewAgentRegistryPage } from "@/pages/agent-registry-detail-page";
+import {
+  AgentRegistryDetailPage,
+  NewAgentRegistryPage,
+} from "@/pages/agent-registry-detail-page";
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
@@ -18,12 +21,18 @@ import { ProvidersPage } from "@/pages/providers-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
-import { ModelRouteDetailPage, NewModelRoutePage } from "@/pages/model-route-detail-page";
+import {
+  ModelRouteDetailPage,
+  NewModelRoutePage,
+} from "@/pages/model-route-detail-page";
 import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
-import { SecretBindingDetailPage, NewSecretBindingPage } from "@/pages/secret-binding-detail-page";
+import {
+  SecretBindingDetailPage,
+  NewSecretBindingPage,
+} from "@/pages/secret-binding-detail-page";
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
@@ -124,11 +133,17 @@ export function App() {
             {/* m15.12: SecretBinding CRUD surfaces */}
             <Route path="secrets" element={<SecretBindingsPage />} />
             <Route path="secrets/new" element={<NewSecretBindingPage />} />
-            <Route path="secrets/:ns/:name" element={<SecretBindingDetailPage />} />
+            <Route
+              path="secrets/:ns/:name"
+              element={<SecretBindingDetailPage />}
+            />
             {/* m15.12: AgentRegistry CRUD surfaces */}
             <Route path="registries" element={<AgentRegistriesPage />} />
             <Route path="registries/new" element={<NewAgentRegistryPage />} />
-            <Route path="registries/:ns/:name" element={<AgentRegistryDetailPage />} />
+            <Route
+              path="registries/:ns/:name"
+              element={<AgentRegistryDetailPage />}
+            />
             {/* m15.13: Topology v2 — grouped/searchable/list↔graph */}
             <Route path="topology" element={<TopologyPage />} />
             {/* m16.8: runs browser — paginated + filterable global run history. */}
