@@ -95,3 +95,56 @@ bff:
   mcp:
     enabled: true
     requireApproval: false
+
+# --- Console login: OIDC/SSO via a bundled Dex broker (m19.5, ADR 0020) --------
+# OFF by default: the OSS/dev default is token login (ADR 0012), so nothing here
+# renders and the helm-verify no-drift default is unchanged. Enable to bundle Dex
+# (a lightweight CNCF OIDC broker) so humans log in with an org identity instead of
+# a pasted token. Cluster-OIDC via Dex is OPEN-CORE; federated SAML/SCIM/multi-IdP
+# is enterprise (PRD §24) — the enterprise build populates connectors[], not a fork.
+#
+# THE LOAD-BEARING CLUSTER STEP (m19.5 risk): the K8s API server must be told to
+# TRUST the Dex issuer, or the ID token Dex mints won't authenticate and RBAC won't
+# bind. This chart ships Dex + the console client but CANNOT set apiserver flags
+# (that's cluster-admin) — see NOTES.txt for the exact --oidc-* flags. On a managed
+# cluster that can't set them, KEEP token login (ADR 0012); that is NOT a regression.
+auth:
+  oidc:
+    # Bundle Dex + the console OIDC client. Default false → no Dex renders.
+    enabled: false
+    # The Dex issuer URL: the PUBLIC address both browsers AND the API server reach
+    # Dex at. It MUST match the apiserver --oidc-issuer-url byte-for-byte. Override
+    # for your ingress / LoadBalancer host.
+    issuer: "https://dex.agent-engine.example.com"
+    image:
+      repository: ghcr.io/dexidp/dex
+      tag: "v2.41.1"
+    # The console OAuth client — Auth-Code + PKCE, a PUBLIC client (no secret in the
+    # browser; PKCE is the proof). redirectURIs is the SPA's callback origin(s).
+    client:
+      id: agent-engine-console
+      redirectURIs:
+        - "https://console.agent-engine.example.com/auth/callback"
+    # Zero-config demo login (DEV / TRIAL ONLY — PRD §23 deterministic dev creds,
+    # NEVER a real secret): a single static user so a fresh install logs in with no
+    # external IdP. OVERRIDE email + passwordHash for anything shared, or set
+    # enabled:false and add a real connector below. The default password is
+    # "agent-engine-dev" (the bcrypt hash below). Change it before exposing Dex.
+    staticUser:
+      enabled: true
+      email: "admin@agent-engine.local"
+      username: "admin"
+      # bcrypt("agent-engine-dev"). Regenerate with:
+      #   htpasswd -bnBC 10 "" <your-password> | tr -d ':\n'
+      passwordHash: "$2y$10$.wIDp8LyQ40/H.bdsuASxevjXyUk0gXCj9jaGQVJp.BnqiVxCxpj6"
+    # Federated IdP connectors (enterprise): each entry is a raw Dex connector object
+    # (type/id/name/config). Google/Azure AD/Okta/GitHub/LDAP = OIDC connectors;
+    # SAML = a Dex SAML connector. Empty = static-user-only (the OSS demo).
+    connectors: []
+    # Render an EXAMPLE ClusterRoleBinding mapping the demo user's OIDC identity to
+    # the operator persona, so the demo login is immediately usable. It binds
+    # User "<usernamePrefix><staticUser.email>" to ClusterRole agent-engine-operator.
+    # The prefix MUST match the apiserver --oidc-username-prefix (default below).
+    # Set false to manage RBAC out of band (the enterprise path maps IdP groups).
+    demoBinding: true
+    usernamePrefix: "oidc:"
