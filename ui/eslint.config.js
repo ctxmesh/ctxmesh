@@ -25,6 +25,16 @@ export default tseslint.config(
         "warn",
         { allowConstantExport: true },
       ],
+      // Honor the `_`-prefix convention for intentionally-unused bindings — e.g. a
+      // typed mock whose params exist only to shape `mock.calls[0]` (oidc.test.ts).
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
     },
   },
   {
