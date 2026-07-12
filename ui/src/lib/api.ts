@@ -23,6 +23,16 @@ export interface DevModeResponse {
   devMode: boolean;
 }
 
+// AuthConfigResponse mirrors the BFF's AuthConfigResponse (internal/bff/dto.go, ADR
+// 0020): whether console SSO is available and, if so, the Dex issuer + public PKCE
+// client id. When oidcEnabled is false the SPA uses token login (ADR 0012). No secret
+// is ever sent — the console is a public client. Unauthenticated (read before login).
+export interface AuthConfigResponse {
+  oidcEnabled: boolean;
+  issuer?: string;
+  clientId?: string;
+}
+
 // WhoAmI mirrors the BFF's WhoAmIResponse (internal/bff/dto.go): the caller's
 // identity from a SelfSubjectReview. `groups` is never null on the wire.
 export interface WhoAmI {
@@ -1593,6 +1603,10 @@ export const api = {
   // false (login wall stays on) — never accidentally drop auth on a real cluster.
   devMode: (signal?: AbortSignal) =>
     getJSON<DevModeResponse>("/api/devmode", signal),
+  // authConfig reports whether console SSO (OIDC/Dex, ADR 0020) is available + the
+  // issuer/clientId to start Auth-Code+PKCE. Unauthenticated (read on the login page).
+  authConfig: (signal?: AbortSignal) =>
+    getJSON<AuthConfigResponse>("/api/authconfig", signal),
   whoami: (signal?: AbortSignal) => whoami({ signal }),
 
   // listAgents reads one page window through the list contract (§4): it returns

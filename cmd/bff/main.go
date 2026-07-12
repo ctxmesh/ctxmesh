@@ -139,6 +139,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
 	}
 
+	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
+	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
+	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
+	oidcEnabled := envTrue(os.Getenv("OIDC_ENABLED"))
+	oidcIssuer := strings.TrimSpace(os.Getenv("OIDC_ISSUER"))
+	oidcClientID := strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID"))
+	if oidcEnabled {
+		log.Info("console SSO enabled (ADR 0020): advertising OIDC at /api/authconfig",
+			"issuer", oidcIssuer, "clientID", oidcClientID)
+	}
+
 	srv := bff.NewServer(bff.Options{
 		CallerClients:            callerClients,
 		Scheme:                   scheme,
@@ -150,6 +161,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		PlatformGenerationModels: platformGenModels,
 		MCPEnabled:               mcpEnabled,
 		MCPRequireApproval:       mcpRequireApproval,
+		OIDCEnabled:              oidcEnabled,
+		OIDCIssuer:               oidcIssuer,
+		OIDCClientID:             oidcClientID,
 		Log:                      ctrl.Log.WithName("bff.server"),
 	})
 

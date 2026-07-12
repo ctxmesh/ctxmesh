@@ -94,6 +94,45 @@ func TestDevModeEndpoint(t *testing.T) {
 	assert.JSONEq(t, `{"devMode":true}`, rec.Body.String())
 }
 
+func TestAuthConfigEndpoint(t *testing.T) {
+	// Default (no OIDC configured): SSO is not advertised → the SPA uses token login.
+	s := newTestServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/authconfig", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"oidcEnabled":false}`, rec.Body.String())
+
+	// Fully configured: advertise the issuer + public client id (unauthenticated, so
+	// the login page can read it before a session). No secret is ever included.
+	oidc := NewServer(Options{
+		Scheme:       testScheme(t),
+		Auth:         AllowAll{},
+		OIDCEnabled:  true,
+		OIDCIssuer:   "https://dex.example.com",
+		OIDCClientID: "agent-engine-console",
+		Log:          logr.Discard(),
+	})
+	rec = httptest.NewRecorder()
+	oidc.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/authconfig", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t,
+		`{"oidcEnabled":true,"issuer":"https://dex.example.com","clientId":"agent-engine-console"}`,
+		rec.Body.String())
+
+	// Half-config (enabled but no issuer): must NOT advertise SSO — never send the SPA
+	// down a broken flow; fall back to token login.
+	half := NewServer(Options{
+		Scheme:      testScheme(t),
+		Auth:        AllowAll{},
+		OIDCEnabled: true, // but issuer + clientID empty
+		Log:         logr.Discard(),
+	})
+	rec = httptest.NewRecorder()
+	half.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/authconfig", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"oidcEnabled":false}`, rec.Body.String())
+}
+
 func TestListAgentsEmpty(t *testing.T) {
 	// No agents in the fake cluster → the SPA must receive [] (not null).
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
