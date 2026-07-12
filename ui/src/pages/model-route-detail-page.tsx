@@ -22,6 +22,7 @@ import {
   ApiError,
   type ModelRouteDetail,
   type ModelRouteProviderDTO,
+  type ProviderSummary,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_ROUTES } from "@/lib/nav";
@@ -48,16 +49,28 @@ export function ModelRouteDetailPage() {
   const deleteOpen = searchParams.get("delete") === "1";
 
   function openEdit() {
-    setSearchParams((p) => { p.set("edit", "1"); return p; });
+    setSearchParams((p) => {
+      p.set("edit", "1");
+      return p;
+    });
   }
   function closeEdit() {
-    setSearchParams((p) => { p.delete("edit"); return p; });
+    setSearchParams((p) => {
+      p.delete("edit");
+      return p;
+    });
   }
   function openDelete() {
-    setSearchParams((p) => { p.set("delete", "1"); return p; });
+    setSearchParams((p) => {
+      p.set("delete", "1");
+      return p;
+    });
   }
   function closeDelete() {
-    setSearchParams((p) => { p.delete("delete"); return p; });
+    setSearchParams((p) => {
+      p.delete("delete");
+      return p;
+    });
   }
 
   const load = React.useCallback(() => {
@@ -74,7 +87,10 @@ export function ModelRouteDetailPage() {
         const apiErr = err instanceof ApiError ? err : null;
         setState({
           kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the model route",
+          message:
+            err instanceof Error
+              ? err.message
+              : "couldn't load the model route",
           status: apiErr?.status,
           forbidden: apiErr?.isForbidden ?? false,
         });
@@ -87,7 +103,10 @@ export function ModelRouteDetailPage() {
   if (state.kind === "loading") {
     return (
       <div className="mx-auto max-w-5xl">
-        <p className="text-sm text-muted-foreground" data-testid="route-detail-loading">
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="route-detail-loading"
+        >
           Loading {name}…
         </p>
       </div>
@@ -113,7 +132,10 @@ export function ModelRouteDetailPage() {
             icon={GitBranch}
             title="Model route not found"
             description={`No ModelRoute "${name}" in ${ns || "this namespace"}.`}
-            action={{ label: "Back to routes", onClick: () => navigate("/routes") }}
+            action={{
+              label: "Back to routes",
+              onClick: () => navigate("/routes"),
+            }}
           />
         </div>
       );
@@ -143,7 +165,10 @@ export function ModelRouteDetailPage() {
       onOpenDelete={openDelete}
       onCloseDelete={closeDelete}
       onDeleted={() => navigate("/routes")}
-      onSaved={() => { closeEdit(); load(); }}
+      onSaved={() => {
+        closeEdit();
+        load();
+      }}
       can={can}
     />
   );
@@ -177,15 +202,22 @@ function RouteDetailContent({
   const canDelete = can(RES_ROUTES, "delete");
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6" data-testid="route-detail-page">
+    <div
+      className="mx-auto max-w-5xl space-y-6"
+      data-testid="route-detail-page"
+    >
       {/* Header */}
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-2xl font-semibold tracking-tight">{detail.name}</h2>
+          <h2 className="text-2xl font-semibold tracking-tight">
+            {detail.name}
+          </h2>
           <Badge variant={detail.ready ? "success" : "warning"}>
             {detail.phase || (detail.ready ? "Ready" : "Pending")}
           </Badge>
-          <span className="text-sm text-muted-foreground">{detail.namespace}</span>
+          <span className="text-sm text-muted-foreground">
+            {detail.namespace}
+          </span>
           <div className="ml-auto flex items-center gap-2">
             {canEdit && (
               <Button
@@ -219,7 +251,9 @@ function RouteDetailContent({
         <p className="mb-3 text-sm font-medium">Providers</p>
         <div className="space-y-3">
           {detail.providers.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No providers configured.</p>
+            <p className="text-sm text-muted-foreground">
+              No providers configured.
+            </p>
           ) : (
             detail.providers.map((p, i) => (
               <div
@@ -228,10 +262,20 @@ function RouteDetailContent({
                 data-testid={`provider-row-${i}`}
               >
                 <KV k="Provider" v={p.provider} />
-                <KV k="Model" v={<span className="font-mono text-xs">{p.model}</span>} />
+                <KV
+                  k="Model"
+                  v={<span className="font-mono text-xs">{p.model}</span>}
+                />
                 <KV k="Priority" v={String(p.priority)} />
-                {p.secretBindingRef && <KV k="SecretBinding" v={p.secretBindingRef} />}
-                {p.apiBase && <KV k="API base" v={<span className="font-mono text-xs">{p.apiBase}</span>} />}
+                {p.secretBindingRef && (
+                  <KV k="SecretBinding" v={p.secretBindingRef} />
+                )}
+                {p.apiBase && (
+                  <KV
+                    k="API base"
+                    v={<span className="font-mono text-xs">{p.apiBase}</span>}
+                  />
+                )}
               </div>
             ))
           )}
@@ -305,7 +349,13 @@ type EditState =
   | { kind: "error"; message: string; forbidden: boolean };
 
 function emptyProvider(): ProviderForm {
-  return { provider: "", model: "", priority: "1", secretBindingRef: "", apiBase: "" };
+  return {
+    provider: "",
+    model: "",
+    priority: "1",
+    secretBindingRef: "",
+    apiBase: "",
+  };
 }
 
 function providerToForm(p: ModelRouteProviderDTO): ProviderForm {
@@ -316,6 +366,72 @@ function providerToForm(p: ModelRouteProviderDTO): ProviderForm {
     secretBindingRef: p.secretBindingRef ?? "",
     apiBase: p.apiBase ?? "",
   };
+}
+
+// useConnectedModels loads the connected providers so the route form can offer a
+// DROPDOWN of each provider's known models (via a <datalist>) instead of free-text —
+// the user picks "claude-sonnet-5" rather than typing a model id. It degrades to
+// free-text: a failed load (or a custom/unlisted model) still types through. Shared
+// by the edit wizard and the new-route form so both get the dropdown.
+function useConnectedModels(): {
+  providerNames: string[];
+  modelsForProvider: (provider: string) => string[];
+} {
+  const [connected, setConnected] = React.useState<ProviderSummary[]>([]);
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .listProviders(ctrl.signal)
+      .then((r) => setConnected(r.items ?? []))
+      .catch(() => {
+        // No providers / no permission → the fields stay free-text (no dropdown).
+      });
+    return () => ctrl.abort();
+  }, []);
+
+  const modelsByProvider = React.useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const p of connected) {
+      const merged = new Set([...(m.get(p.provider) ?? []), ...p.models]);
+      m.set(p.provider, [...merged]);
+    }
+    return m;
+  }, [connected]);
+
+  return {
+    providerNames: [...modelsByProvider.keys()],
+    modelsForProvider: (provider: string) =>
+      modelsByProvider.get(provider.trim()) ?? [],
+  };
+}
+
+// ProviderModelDatalists renders the shared <datalist>s a route form's provider +
+// model Inputs point at (via `list={...}`), so both become type-or-pick dropdowns.
+function ProviderModelDatalists({
+  idPrefix,
+  i,
+  providerNames,
+  models,
+}: {
+  idPrefix: string;
+  i: number;
+  providerNames: string[];
+  models: string[];
+}) {
+  return (
+    <>
+      <datalist id={`${idPrefix}-providers-${i}`}>
+        {providerNames.map((p) => (
+          <option key={p} value={p} />
+        ))}
+      </datalist>
+      <datalist id={`${idPrefix}-models-${i}`}>
+        {models.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+    </>
+  );
 }
 
 function RouteEditWizard({
@@ -329,6 +445,7 @@ function RouteEditWizard({
 }) {
   const { toast } = useToast();
   const { reprobe } = useCapabilities();
+  const { providerNames, modelsForProvider } = useConnectedModels();
   const [providers, setProviders] = React.useState<ProviderForm[]>(
     detail.providers.length > 0
       ? detail.providers.map(providerToForm)
@@ -361,16 +478,24 @@ function RouteEditWizard({
         provider: p.provider.trim(),
         model: p.model.trim(),
         priority: parseInt(p.priority, 10) || 1,
-        ...(p.secretBindingRef.trim() ? { secretBindingRef: p.secretBindingRef.trim() } : {}),
+        ...(p.secretBindingRef.trim()
+          ? { secretBindingRef: p.secretBindingRef.trim() }
+          : {}),
         ...(p.apiBase.trim() ? { apiBase: p.apiBase.trim() } : {}),
       }));
-      const rpmNum = rateLimitRpm.trim() ? parseInt(rateLimitRpm, 10) : undefined;
+      const rpmNum = rateLimitRpm.trim()
+        ? parseInt(rateLimitRpm, 10)
+        : undefined;
       await api.updateModelRoute(detail.namespace, detail.name, {
         name: detail.name,
         providers: providerDTOs,
         ...(rpmNum && rpmNum > 0 ? { rateLimit: { tenantRPM: rpmNum } } : {}),
       });
-      toast({ variant: "success", title: "Model route updated", description: `${detail.name} saved.` });
+      toast({
+        variant: "success",
+        title: "Model route updated",
+        description: `${detail.name} saved.`,
+      });
       onSaved();
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -415,21 +540,29 @@ function RouteEditWizard({
               <FormField id={`provider-${i}`} label="Provider">
                 <Input
                   id={`provider-${i}`}
+                  list={`edit-providers-${i}`}
                   value={p.provider}
                   onChange={(e) => setProvider(i, "provider", e.target.value)}
-                  placeholder="openai"
+                  placeholder="anthropic"
                   data-testid={`provider-name-${i}`}
                 />
               </FormField>
               <FormField id={`model-${i}`} label="Model">
                 <Input
                   id={`model-${i}`}
+                  list={`edit-models-${i}`}
                   value={p.model}
                   onChange={(e) => setProvider(i, "model", e.target.value)}
-                  placeholder="gpt-4o"
+                  placeholder="claude-sonnet-5"
                   data-testid={`provider-model-${i}`}
                 />
               </FormField>
+              <ProviderModelDatalists
+                idPrefix="edit"
+                i={i}
+                providerNames={providerNames}
+                models={modelsForProvider(p.provider)}
+              />
             </div>
             <FormField id={`priority-${i}`} label="Priority (≥1)">
               <Input
@@ -444,7 +577,9 @@ function RouteEditWizard({
               <Input
                 id={`secret-${i}`}
                 value={p.secretBindingRef}
-                onChange={(e) => setProvider(i, "secretBindingRef", e.target.value)}
+                onChange={(e) =>
+                  setProvider(i, "secretBindingRef", e.target.value)
+                }
                 placeholder="my-openai-binding"
                 data-testid={`provider-secretbinding-${i}`}
               />
@@ -479,7 +614,10 @@ function RouteEditWizard({
     description: "Optional per-tenant rate cap",
     content: (
       <div className="space-y-4">
-        <FormField id="rate-limit-rpm" label="Tenant RPM (leave blank to clear)">
+        <FormField
+          id="rate-limit-rpm"
+          label="Tenant RPM (leave blank to clear)"
+        >
           <Input
             id="rate-limit-rpm"
             inputMode="numeric"
@@ -508,7 +646,11 @@ function RouteEditWizard({
           />
         )}
         {saveState.kind === "error" && !saveState.forbidden && (
-          <p className="text-sm text-destructive" role="alert" data-testid="route-edit-error">
+          <p
+            className="text-sm text-destructive"
+            role="alert"
+            data-testid="route-edit-error"
+          >
             {saveState.message}
           </p>
         )}
@@ -518,12 +660,18 @@ function RouteEditWizard({
               <span className="font-medium">
                 {p.provider}/{p.model}
               </span>{" "}
-              <span className="text-muted-foreground">priority {p.priority}</span>
+              <span className="text-muted-foreground">
+                priority {p.priority}
+              </span>
               {p.secretBindingRef && (
-                <span className="ml-2 text-muted-foreground">→ {p.secretBindingRef}</span>
+                <span className="ml-2 text-muted-foreground">
+                  → {p.secretBindingRef}
+                </span>
               )}
               {p.apiBase && (
-                <span className="ml-2 font-mono text-muted-foreground">{p.apiBase}</span>
+                <span className="ml-2 font-mono text-muted-foreground">
+                  {p.apiBase}
+                </span>
               )}
             </div>
           ))}
@@ -544,7 +692,9 @@ function RouteEditWizard({
       current={current}
       onStepChange={setCurrent}
       busy={saveState.kind === "saving"}
-      onFinish={() => { void doSave(); }}
+      onFinish={() => {
+        void doSave();
+      }}
       finishLabel="Save changes"
       onCancel={onClose}
     />
@@ -570,7 +720,11 @@ function RouteDeleteDialog({
     setDeleting(true);
     try {
       await api.removeModelRoute(detail.namespace, detail.name);
-      toast({ variant: "success", title: "Model route deleted", description: `${detail.name} removed.` });
+      toast({
+        variant: "success",
+        title: "Model route deleted",
+        description: `${detail.name} removed.`,
+      });
       onDeleted();
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -602,7 +756,9 @@ function RouteDeleteDialog({
 
 export function NewModelRoutePage() {
   const navigate = useNavigate();
-  const [providers, setProviders] = React.useState<ProviderForm[]>([emptyProvider()]);
+  const [providers, setProviders] = React.useState<ProviderForm[]>([
+    emptyProvider(),
+  ]);
   const [routeName, setRouteName] = React.useState("");
   const [routeNs, setRouteNs] = React.useState("");
   const [rateLimitRpm, setRateLimitRpm] = React.useState("");
@@ -610,6 +766,7 @@ export function NewModelRoutePage() {
   const [saveState, setSaveState] = React.useState<EditState>({ kind: "idle" });
   const { toast } = useToast();
   const { reprobe } = useCapabilities();
+  const { providerNames, modelsForProvider } = useConnectedModels();
 
   function setProvider(i: number, field: keyof ProviderForm, val: string) {
     setProviders((prev) =>
@@ -632,18 +789,28 @@ export function NewModelRoutePage() {
         provider: p.provider.trim(),
         model: p.model.trim(),
         priority: parseInt(p.priority, 10) || 1,
-        ...(p.secretBindingRef.trim() ? { secretBindingRef: p.secretBindingRef.trim() } : {}),
+        ...(p.secretBindingRef.trim()
+          ? { secretBindingRef: p.secretBindingRef.trim() }
+          : {}),
         ...(p.apiBase.trim() ? { apiBase: p.apiBase.trim() } : {}),
       }));
-      const rpmNum = rateLimitRpm.trim() ? parseInt(rateLimitRpm, 10) : undefined;
+      const rpmNum = rateLimitRpm.trim()
+        ? parseInt(rateLimitRpm, 10)
+        : undefined;
       const created = await api.createModelRoute({
         name: routeName.trim(),
         namespace: routeNs.trim() || undefined,
         providers: providerDTOs,
         ...(rpmNum && rpmNum > 0 ? { rateLimit: { tenantRPM: rpmNum } } : {}),
       });
-      toast({ variant: "success", title: "Model route created", description: `${created.name} created.` });
-      navigate(`/routes/${encodeURIComponent(created.namespace)}/${encodeURIComponent(created.name)}`);
+      toast({
+        variant: "success",
+        title: "Model route created",
+        description: `${created.name} created.`,
+      });
+      navigate(
+        `/routes/${encodeURIComponent(created.namespace)}/${encodeURIComponent(created.name)}`,
+      );
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setSaveState({
@@ -695,7 +862,9 @@ export function NewModelRoutePage() {
             data-testid={`new-provider-entry-${i}`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">Provider {i + 1}</span>
+              <span className="text-xs font-medium text-muted-foreground">
+                Provider {i + 1}
+              </span>
               {providers.length > 1 && (
                 <Button
                   variant="ghost"
@@ -713,21 +882,29 @@ export function NewModelRoutePage() {
               <FormField id={`new-provider-${i}`} label="Provider">
                 <Input
                   id={`new-provider-${i}`}
+                  list={`new-providers-${i}`}
                   value={p.provider}
                   onChange={(e) => setProvider(i, "provider", e.target.value)}
-                  placeholder="openai"
+                  placeholder="anthropic"
                   data-testid={`new-provider-name-${i}`}
                 />
               </FormField>
               <FormField id={`new-model-${i}`} label="Model">
                 <Input
                   id={`new-model-${i}`}
+                  list={`new-models-${i}`}
                   value={p.model}
                   onChange={(e) => setProvider(i, "model", e.target.value)}
-                  placeholder="gpt-4o"
+                  placeholder="claude-sonnet-5"
                   data-testid={`new-provider-model-${i}`}
                 />
               </FormField>
+              <ProviderModelDatalists
+                idPrefix="new"
+                i={i}
+                providerNames={providerNames}
+                models={modelsForProvider(p.provider)}
+              />
             </div>
             <FormField id={`new-priority-${i}`} label="Priority (≥1)">
               <Input
@@ -742,7 +919,9 @@ export function NewModelRoutePage() {
               <Input
                 id={`new-secret-${i}`}
                 value={p.secretBindingRef}
-                onChange={(e) => setProvider(i, "secretBindingRef", e.target.value)}
+                onChange={(e) =>
+                  setProvider(i, "secretBindingRef", e.target.value)
+                }
                 placeholder="my-openai-binding"
                 data-testid={`new-provider-secretbinding-${i}`}
               />
@@ -758,7 +937,12 @@ export function NewModelRoutePage() {
             </FormField>
           </div>
         ))}
-        <Button variant="outline" size="sm" onClick={addProvider} data-testid="new-add-provider">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={addProvider}
+          data-testid="new-add-provider"
+        >
           <Plus className="h-4 w-4" />
           Add provider
         </Button>
@@ -799,7 +983,11 @@ export function NewModelRoutePage() {
           />
         )}
         {saveState.kind === "error" && !saveState.forbidden && (
-          <p className="text-sm text-destructive" role="alert" data-testid="new-route-error">
+          <p
+            className="text-sm text-destructive"
+            role="alert"
+            data-testid="new-route-error"
+          >
             {saveState.message}
           </p>
         )}
@@ -816,9 +1004,17 @@ export function NewModelRoutePage() {
           )}
           {providers.map((p, i) => (
             <div key={i} className="px-3 py-2 text-xs">
-              <span className="font-medium">{p.provider}/{p.model}</span>
-              <span className="ml-2 text-muted-foreground">priority {p.priority}</span>
-              {p.apiBase && <span className="ml-2 font-mono text-muted-foreground">{p.apiBase}</span>}
+              <span className="font-medium">
+                {p.provider}/{p.model}
+              </span>
+              <span className="ml-2 text-muted-foreground">
+                priority {p.priority}
+              </span>
+              {p.apiBase && (
+                <span className="ml-2 font-mono text-muted-foreground">
+                  {p.apiBase}
+                </span>
+              )}
             </div>
           ))}
           {rateLimitRpm && (
@@ -835,9 +1031,12 @@ export function NewModelRoutePage() {
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
-        <h2 className="text-2xl font-semibold tracking-tight">New Model Route</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">
+          New Model Route
+        </h2>
         <p className="text-sm text-muted-foreground">
-          A ModelRoute routes AI calls to one or more providers in priority order.
+          A ModelRoute routes AI calls to one or more providers in priority
+          order.
         </p>
       </div>
       <Wizard
@@ -845,7 +1044,9 @@ export function NewModelRoutePage() {
         current={current}
         onStepChange={setCurrent}
         busy={saveState.kind === "saving"}
-        onFinish={() => { void doCreate(); }}
+        onFinish={() => {
+          void doCreate();
+        }}
         finishLabel="Create route"
         onCancel={() => navigate("/routes")}
         dirty={routeName.trim() !== ""}
