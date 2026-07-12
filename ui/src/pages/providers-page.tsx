@@ -152,7 +152,9 @@ export function ProvidersPage() {
     {
       id: "name",
       header: "Name",
-      cell: (p) => <span className="font-medium">{p.displayName || p.name}</span>,
+      cell: (p) => (
+        <span className="font-medium">{p.displayName || p.name}</span>
+      ),
     },
     {
       id: "provider",
@@ -210,7 +212,11 @@ export function ProvidersPage() {
             data-testid={`use-${p.name}`}
             onClick={(e) => {
               e.stopPropagation();
-              navigate("/agents/new");
+              // m21: carry the provider so create-agent defaults its model picker to
+              // this provider's models (provider-as-model-home).
+              navigate(
+                `/agents/new?provider=${encodeURIComponent(p.provider)}`,
+              );
             }}
           >
             <Sparkles className="mr-1 h-3.5 w-3.5" />
@@ -261,8 +267,9 @@ export function ProvidersPage() {
           className="rounded-lg border bg-card p-8 text-center text-sm text-muted-foreground"
           data-testid="providers-disabled"
         >
-          Provider connect is disabled on this install (the Helm kill-switch). Ask
-          your operator, or reference an existing SecretBinding + ModelRoute directly.
+          Provider connect is disabled on this install (the Helm kill-switch).
+          Ask your operator, or reference an existing SecretBinding + ModelRoute
+          directly.
         </div>
       </div>
     );
@@ -274,8 +281,9 @@ export function ProvidersPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Providers</h2>
           <p className="text-sm text-muted-foreground">
-            LLM providers connected to the platform — each is a Secret + SecretBinding
-            + ModelRoute. Keys are stored server-side and never shown.
+            LLM providers connected to the platform — each is a Secret +
+            SecretBinding + ModelRoute. Keys are stored server-side and never
+            shown.
           </p>
         </div>
         {canConnect && (
@@ -367,7 +375,10 @@ function RotateKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const titleId = useId();
-  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onCancel });
+  const panelRef = useFocusTrap<HTMLDivElement>({
+    active: true,
+    onEscape: onCancel,
+  });
 
   return (
     <div
@@ -391,8 +402,8 @@ function RotateKeyDialog({
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Paste a new API key. It's validated against the provider, then stored
-          server-side — the old key is replaced. If the new key is invalid, nothing
-          changes.
+          server-side — the old key is replaced. If the new key is invalid,
+          nothing changes.
         </p>
         <div className="mt-4 space-y-1.5">
           <Label htmlFor="rotate-key">New API key</Label>
@@ -410,7 +421,11 @@ function RotateKeyDialog({
           />
         </div>
         {error && (
-          <p className="mt-3 text-sm text-destructive" role="alert" data-testid="rotate-error">
+          <p
+            className="mt-3 text-sm text-destructive"
+            role="alert"
+            data-testid="rotate-error"
+          >
             {error}
           </p>
         )}
