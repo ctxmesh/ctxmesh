@@ -141,6 +141,19 @@ auth:
     # (type/id/name/config). Google/Azure AD/Okta/GitHub/LDAP = OIDC connectors;
     # SAML = a Dex SAML connector. Empty = static-user-only (the OSS demo).
     connectors: []
+    # Langfuse shared-issuer client (m19.7, ADR 0020): register Langfuse as a second
+    # client of THIS Dex so the console's forensics link-out opens Langfuse without a
+    # SECOND login. OFF by default. Langfuse is a server-side app → a CONFIDENTIAL
+    # client, so clientSecret is REQUIRED when enabled (Helm errors if empty). Set the
+    # SAME secret on Langfuse (AUTH_DEX_CLIENT_SECRET) + point it at this issuer — see
+    # NOTES.txt. Absent → the link-out still works but Langfuse asks for its own login
+    # (honest degrade). NEVER commit a real secret; supply it at install via --set / a
+    # values file kept out of git.
+    langfuse:
+      enabled: false
+      clientId: "langfuse"
+      redirectURI: "https://langfuse.agent-engine.example.com/api/auth/callback/dex"
+      clientSecret: ""
     # Render an EXAMPLE ClusterRoleBinding mapping the demo user's OIDC identity to
     # the operator persona, so the demo login is immediately usable. It binds
     # User "<usernamePrefix><staticUser.email>" to ClusterRole agent-engine-operator.
