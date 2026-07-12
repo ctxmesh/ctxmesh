@@ -1728,12 +1728,20 @@ export const api = {
   createAgent: async (
     agentYAML: string,
     namespace: string,
+    // model (m21): the picked (provider, model). When set, the BFF ensures a
+    // ModelRoute serving it and points the agent at it — the user picks a MODEL,
+    // the platform manages the ROUTE. Absent → the YAML's own model.route is used.
+    model?: { provider: string; model: string },
     signal?: AbortSignal,
   ): Promise<CreateAgentResponse> => {
     const res = await apiFetch("/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agentYAML, namespace }),
+      body: JSON.stringify({
+        agentYAML,
+        namespace,
+        ...(model ? { model } : {}),
+      }),
       signal,
     });
     if (!res.ok) {
