@@ -597,7 +597,7 @@ function ConfigureFlow({
         /* soft miss: the prompt picker just stays hidden */
       });
     return () => c.abort();
-  }, []);
+  }, [initialProvider]);
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
