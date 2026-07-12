@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { AlertTriangle, Boxes, LogOut } from "lucide-react";
+import { AlertTriangle, Boxes, FlaskConical, LogOut } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,11 +7,9 @@ import { Select } from "@/components/ui/select";
 import { useToast } from "@/components/kit";
 import { logout } from "@/lib/session";
 import { useSession } from "@/lib/use-session";
+import { useDevMode } from "@/lib/dev-mode";
 import { NAV_SECTIONS, type NavItem } from "@/lib/nav";
-import {
-  CapabilitiesProvider,
-  useCapabilities,
-} from "@/lib/capabilities";
+import { CapabilitiesProvider, useCapabilities } from "@/lib/capabilities";
 import { NamespaceProvider, useNamespace } from "@/lib/namespace";
 import { ShellCommandPalette } from "@/components/command-palette-shell";
 import { cn } from "@/lib/utils";
@@ -47,9 +45,7 @@ function WhoAmIBadge({
         <p className="text-xs font-medium" data-testid="whoami-username">
           {username}
         </p>
-        {group && (
-          <p className="text-[10px] text-muted-foreground">{group}</p>
-        )}
+        {group && <p className="text-[10px] text-muted-foreground">{group}</p>}
       </div>
       <Badge variant="secondary" className="text-[9px]">
         {group ? "Member" : "Authenticated"}
@@ -107,7 +103,10 @@ function NamespacePicker() {
 // (reprobe() re-raises the loading→error cycle).
 function CapabilityBanner() {
   const { probeError } = useCapabilities();
-  if (!probeError) return null;
+  const devMode = useDevMode();
+  // In dev mode the capability probe is a cluster surface → it 501s by design; the
+  // DevModeBanner already explains that, so this would only add a redundant warning.
+  if (devMode || !probeError) return null;
   return (
     <div
       role="status"
@@ -124,6 +123,31 @@ function CapabilityBanner() {
   );
 }
 
+// DevModeBanner is the honest "you're on the local loop" notice (ADR 0021): under
+// `agent-engine dev --ui` the console runs against Docker Compose with NO cluster, so
+// the fleet/providers/topology/RBAC surfaces are unavailable (served as calm 501s) and
+// there is no login. This persistent banner names that plainly so a dev never reads the
+// missing cluster surfaces as a broken console. Shown only when the BFF confirms devMode.
+function DevModeBanner() {
+  const devMode = useDevMode();
+  if (!devMode) return null;
+  return (
+    <div
+      role="status"
+      data-testid="dev-mode-banner"
+      className="flex items-start gap-2.5 border-b border-primary/40 bg-primary/10 px-8 py-2.5 text-xs text-foreground"
+    >
+      <FlaskConical className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+      <p>
+        <span className="font-semibold">Dev mode</span> — running against your
+        local <code className="font-mono">agent-engine dev</code> loop, no
+        cluster. Define, config-preview, and run work here; fleet, providers,
+        topology, and RBAC are cluster features and aren&apos;t available.
+      </p>
+    </div>
+  );
+}
+
 // Sidebar renders the grouped IA. Write-only items (config-builder, Playground,
 // and later Platform surfaces) are HIDDEN when the caller lacks the gating right
 // (RBAC-aware chrome, §3) — a viewer sees a read-only nav by construction.
@@ -131,8 +155,7 @@ function Sidebar() {
   const { can } = useCapabilities();
 
   const visible = (it: NavItem): boolean =>
-    !it.requiresWrite ||
-    can(it.requiresWrite.resource, it.requiresWrite.verb);
+    !it.requiresWrite || can(it.requiresWrite.resource, it.requiresWrite.verb);
 
   return (
     <aside className="sticky top-0 h-screen overflow-y-auto border-r bg-card">
@@ -194,6 +217,7 @@ function NavItemLink({ item }: { item: NavItem }) {
 // capability providers (it reads both).
 function ShellChrome() {
   const session = useSession();
+  const devMode = useDevMode();
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -226,17 +250,21 @@ function ShellChrome() {
                   group={session.user.groups[0]}
                 />
               )}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onLogout}
-                aria-label="Sign out"
-              >
-                <LogOut className="h-4 w-4" />
-                Sign out
-              </Button>
+              {/* No session to sign out of in dev mode (no login wall, ADR 0021). */}
+              {!devMode && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onLogout}
+                  aria-label="Sign out"
+                >
+                  <LogOut className="h-4 w-4" />
+                  Sign out
+                </Button>
+              )}
             </div>
           </header>
+          <DevModeBanner />
           <CapabilityBanner />
           <main className="flex-1 p-8">
             <Outlet />
