@@ -17,25 +17,65 @@ function routeFetch(routes: Record<string, unknown>) {
       const body =
         routes[path] ??
         (path.startsWith("/api/traces/")
-          ? { traceId: path.slice("/api/traces/".length), url: "https://lf.test/trace/x" }
+          ? {
+              traceId: path.slice("/api/traces/".length),
+              url: "https://lf.test/trace/x",
+            }
           : undefined);
       if (body === undefined) {
-        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({}),
+        } as Response);
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      } as Response);
     }),
   );
 }
 
 const topology = {
   nodes: [
-    { id: "registry/prod/team", kind: "registry", name: "team-registry", namespace: "prod", health: "ready", detail: "team-a" },
-    { id: "agent/prod/echo", kind: "agent", name: "echo-agent", namespace: "prod", health: "ready", detail: "echo:1" },
-    { id: "tool/prod/echo-search", kind: "tool", name: "search-tool", namespace: "prod", health: "ready", detail: "remote" },
+    {
+      id: "registry/prod/team",
+      kind: "registry",
+      name: "team-registry",
+      namespace: "prod",
+      health: "ready",
+      detail: "team-a",
+    },
+    {
+      id: "agent/prod/echo",
+      kind: "agent",
+      name: "echo-agent",
+      namespace: "prod",
+      health: "ready",
+      detail: "echo:1",
+    },
+    {
+      id: "tool/prod/echo-search",
+      kind: "tool",
+      name: "search-tool",
+      namespace: "prod",
+      health: "ready",
+      detail: "remote",
+    },
   ],
   edges: [
-    { id: "registry/prod/team->agent/prod/echo", source: "registry/prod/team", target: "agent/prod/echo" },
-    { id: "agent/prod/echo->tool/prod/echo-search", source: "agent/prod/echo", target: "tool/prod/echo-search" },
+    {
+      id: "registry/prod/team->agent/prod/echo",
+      source: "registry/prod/team",
+      target: "agent/prod/echo",
+    },
+    {
+      id: "agent/prod/echo->tool/prod/echo-search",
+      source: "agent/prod/echo",
+      target: "tool/prod/echo-search",
+    },
   ],
 };
 
@@ -52,14 +92,27 @@ const cost = {
 
 const runs = {
   runs: [
-    { traceId: "t-abc", name: "checkout-flow", timestamp: "2026-07-01T00:00:00Z", costUSD: 0.5, tokens: 900, latencyMs: 120 },
+    {
+      traceId: "t-abc",
+      name: "checkout-flow",
+      timestamp: "2026-07-01T00:00:00Z",
+      costUSD: 0.5,
+      tokens: 900,
+      latencyMs: 120,
+    },
   ],
 };
 
 // A non-empty provider list — the default for the render-proof tests so the
 // first-run CTA does NOT show (a connected cluster, not a fresh install).
 const providersConnected = {
-  providers: [{ provider: "anthropic", displayName: "Anthropic", models: [{ id: "claude-opus-4" }] }],
+  providers: [
+    {
+      provider: "anthropic",
+      displayName: "Anthropic",
+      models: [{ id: "claude-opus-4" }],
+    },
+  ],
 };
 
 // renderDashboard wraps the page in a MemoryRouter — the empty-state CTA calls
@@ -78,7 +131,12 @@ afterEach(() => {
 
 describe("DashboardPage (render proof)", () => {
   it("renders topology, cost, and recent runs from mocked BFF data", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
 
     // Topology graph rendered a node for the agent (React Flow custom node).
@@ -92,8 +150,68 @@ describe("DashboardPage (render proof)", () => {
     expect(screen.getByText("t-abc")).toBeInTheDocument();
   });
 
+  it("degrades cost + runs CALMLY (not an error) when Langfuse is not configured (501)", async () => {
+    // m20.6: a 501 (adapter not wired) is not a failure — the dashboard shows a
+    // calm "not configured" state, never a red "Failed to load …" (the user's
+    // "Failed to load cost: … not implemented yet" complaint).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const path = (
+          typeof input === "string" ? input : input.toString()
+        ).split("?")[0];
+        if (path === "/api/cost" || path === "/api/runs") {
+          return Promise.resolve({
+            ok: false,
+            status: 501,
+            json: async () => ({
+              error: "Langfuse cost adapter is not implemented yet",
+            }),
+          } as Response);
+        }
+        const body =
+          path === "/api/topology"
+            ? topology
+            : path === "/api/providers"
+              ? providersConnected
+              : {};
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => body,
+        } as Response);
+      }),
+    );
+    renderDashboard();
+
+    expect(await screen.findByTestId("cost-unavailable")).toBeInTheDocument();
+    expect(screen.getByTestId("runs-unavailable")).toBeInTheDocument();
+    // NOT a destructive error.
+    expect(screen.queryByText(/Failed to load cost/)).toBeNull();
+    expect(screen.queryByText(/Failed to load runs/)).toBeNull();
+  });
+
+  it("links the dashboard topology to the full interactive /topology view (m20.7)", async () => {
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
+    renderDashboard();
+
+    await screen.findByText("echo-agent");
+    const link = screen.getByTestId("view-full-topology");
+    expect(link).toHaveAttribute("href", "/topology");
+  });
+
   it("does NOT render any Langfuse embedded iframe (m16.11: iframe demoted)", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
 
     // Wait for data to load.
@@ -111,7 +229,12 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("cost card links to the native /cost page (m16.11)", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
 
     // Wait for cost data to render.
@@ -124,7 +247,12 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("recent runs list has a View-all-runs link to /runs (m16.11)", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
 
     // Wait for runs to render.
@@ -137,7 +265,12 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("recent run rows link to /traces/:id (m16.11)", async () => {
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
 
     // Wait for the run row to appear.
@@ -149,9 +282,15 @@ describe("DashboardPage (render proof)", () => {
   });
 
   it("shows an error state when the topology fetch fails (e.g. RBAC 403)", async () => {
-    routeFetch({ "/api/cost": cost, "/api/runs": runs, "/api/providers": providersConnected }); // topology 404s
+    routeFetch({
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    }); // topology 404s
     renderDashboard();
-    expect(await screen.findByText(/Failed to load topology/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Failed to load topology/),
+    ).toBeInTheDocument();
   });
 });
 
@@ -167,8 +306,12 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
 
     // The guided 3-step checklist appears; the CTA leads to the first incomplete
     // step (connect a provider).
-    expect(await screen.findByTestId("first-run-checklist")).toBeInTheDocument();
-    expect(screen.getByTestId("first-run-cta")).toHaveTextContent(/Connect a provider/);
+    expect(
+      await screen.findByTestId("first-run-checklist"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("first-run-cta")).toHaveTextContent(
+      /Connect a provider/,
+    );
     // Step 0 (connect) is not done yet.
     expect(screen.getByTestId("first-run-step-0")).toBeInTheDocument();
   });
@@ -184,21 +327,21 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
 
     // Wait for the page to settle, then assert the CTA is absent.
     await screen.findByText("checkout-flow");
-    expect(
-      screen.queryByTestId("first-run-checklist"),
-    ).toBeNull();
+    expect(screen.queryByTestId("first-run-checklist")).toBeNull();
   });
 
   it("does NOT render the CTA when the providers list fails to load (no false invitation)", async () => {
     // /api/providers 404s (kill-switch or error) → not treated as 'empty'.
-    routeFetch({ "/api/topology": topology, "/api/cost": cost, "/api/runs": runs });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+    });
     renderDashboard();
 
     await screen.findByText("checkout-flow");
     await waitFor(() =>
-      expect(
-        screen.queryByTestId("first-run-checklist"),
-      ).toBeNull(),
+      expect(screen.queryByTestId("first-run-checklist")).toBeNull(),
     );
   });
 });
@@ -206,11 +349,21 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
 describe("CostPanel bar chart", () => {
   it("degrades to an empty-series hint when Prometheus is not wired", async () => {
     const costNoProm = {
-      summary: { totalCostUSD: 1, totalTokens: 10, observations: 1, byModel: [] },
+      summary: {
+        totalCostUSD: 1,
+        totalTokens: 10,
+        observations: 1,
+        byModel: [],
+      },
       latency: [],
       scale: [],
     };
-    routeFetch({ "/api/topology": topology, "/api/cost": costNoProm, "/api/runs": runs, "/api/providers": providersConnected });
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": costNoProm,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
     renderDashboard();
     const hints = await screen.findAllByText(/Prometheus not wired/);
     // One hint each for scale + latency.

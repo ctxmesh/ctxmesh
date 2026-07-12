@@ -199,10 +199,55 @@ func TestConnectCreatesAllThreeObjects(t *testing.T) {
 	assert.Equal(t, "anthropic", route.Spec.Providers[0].SecretBindingRef)
 	assert.Equal(t, "claude-opus-4-1", route.Spec.Providers[0].Model)
 
+	// m20.4b: the FULL discovered model list is persisted on the route (annotation),
+	// so a later model picker can offer EVERY model, not just the single routed one.
+	assert.Equal(t, "claude-opus-4-1,claude-sonnet-4-6", route.Annotations[annProviderModels])
+
 	// THE CRUX (ADR 0015): the key appears in the Secret ONLY — never in the
 	// response DTO and never in any log line.
 	assert.NotContains(t, rec.Body.String(), theTestKey, "the key must NEVER appear in the response DTO")
 	assert.NotContains(t, lb.String(), theTestKey, "the key must NEVER be logged")
+}
+
+// TestProviderSummaryModelsPreferAnnotation pins m20.4b: the provider projection
+// offers the FULL discovered model list from the annotation (so the picker shows
+// every connected model), falling back to the routed model(s) for older routes.
+func TestProviderSummaryModelsPreferAnnotation(t *testing.T) {
+	t.Run("annotation present → all discovered models", func(t *testing.T) {
+		mr := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "anthropic",
+				Namespace:   "default",
+				Labels:      map[string]string{labelProvider: "anthropic"},
+				Annotations: map[string]string{annProviderModels: "claude-fable-5,claude-sonnet-5,claude-opus-4-8"},
+			},
+			Spec: agentsv1alpha1.ModelRouteSpec{
+				Providers: []agentsv1alpha1.ProviderRef{{
+					Provider: "anthropic", Model: "claude-fable-5", SecretBindingRef: "anthropic",
+				}},
+			},
+		}
+		summary := providerSummaryFromRoute(mr)
+		assert.Equal(t, []string{"claude-fable-5", "claude-sonnet-5", "claude-opus-4-8"}, summary.Models)
+		assert.Equal(t, "anthropic", summary.SecretName)
+	})
+
+	t.Run("no annotation → fall back to the routed model(s)", func(t *testing.T) {
+		mr := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "openai",
+				Namespace: "default",
+				Labels:    map[string]string{labelProvider: "openai"},
+			},
+			Spec: agentsv1alpha1.ModelRouteSpec{
+				Providers: []agentsv1alpha1.ProviderRef{{
+					Provider: "openai", Model: "gpt-4o", SecretBindingRef: "openai",
+				}},
+			},
+		}
+		summary := providerSummaryFromRoute(mr)
+		assert.Equal(t, []string{"gpt-4o"}, summary.Models)
+	})
 }
 
 // TestConnectBadKeyIs401 proves a key the provider rejects (fake returns 401)
@@ -265,7 +310,8 @@ func TestConnectViewerForbiddenIs403(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 				return apierrors.NewForbidden(
-					schema.GroupResource{Resource: "secrets"}, "anthropic", assert.AnError)
+					schema.GroupResource{Resource: "secrets"}, "anthropic", assert.AnError,
+				)
 			},
 		}).
 		Build()
