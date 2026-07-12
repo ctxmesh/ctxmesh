@@ -88,6 +88,20 @@ spec:
             # `bff.mcp.requireApproval`, default renders "false" (no drift).
             - name: MCP_REQUIRE_APPROVAL
               value: "false"
+            # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
+            # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
+            # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).
+            # These literals keep `kustomize build`/`make deploy` valid; the Helm chart
+            # templates them from `auth.oidc.*` (values.yaml) so
+            # `--set auth.oidc.enabled=true` (with an issuer + client) lights up SSO —
+            # the generator substitutes them, default renders OFF (no drift). The BFF
+            # holds NO OIDC secret: the console is a public PKCE client.
+            - name: OIDC_ENABLED
+              value: "false"
+            - name: OIDC_ISSUER
+              value: ""
+            - name: OIDC_CLIENT_ID
+              value: ""
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:

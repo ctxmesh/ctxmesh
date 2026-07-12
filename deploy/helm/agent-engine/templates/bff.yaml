@@ -99,6 +99,12 @@ spec:
           value: {{ .Values.bff.mcp.enabled | quote }}
         - name: MCP_REQUIRE_APPROVAL
           value: {{ .Values.bff.mcp.requireApproval | quote }}
+        - name: OIDC_ENABLED
+          value: {{ .Values.auth.oidc.enabled | quote }}
+        - name: OIDC_ISSUER
+          value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.issuer | quote }}{{ else }}""{{ end }}
+        - name: OIDC_CLIENT_ID
+          value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}""{{ end }}
         envFrom:
         - secretRef:
             name: bff-adapters

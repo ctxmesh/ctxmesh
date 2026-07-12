@@ -21,6 +21,7 @@ import { ProvidersPage } from "@/pages/providers-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
+import { AuthCallbackPage } from "@/pages/auth-callback-page";
 import {
   ModelRouteDetailPage,
   NewModelRoutePage,
@@ -94,6 +95,8 @@ export function App() {
             />
           )}
           <Route path="login" element={<LoginPage />} />
+          {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
+          <Route path="auth/callback" element={<AuthCallbackPage />} />
           <Route
             element={
               <RequireAuth>
