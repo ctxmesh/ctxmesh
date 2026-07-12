@@ -302,13 +302,19 @@ func serveDevUI(uiPort int, uiDist string, plan *devPlan, out, errOut io.Writer)
 		return nil, fmt.Errorf("adding agents to scheme: %w", err)
 	}
 
+	// The local agent's /invoke is published on the host at plan.HostPort; the BFF
+	// (same host) reaches its BASE at http://localhost:<port> (the adapter appends
+	// /invoke). This is what the dev Playground run targets — no cluster resolution.
+	devInvokeBase := fmt.Sprintf("http://localhost:%d", plan.HostPort)
+
 	srv := bff.NewServer(bff.Options{
-		DevMode:       true,
-		Auth:          bff.AllowAll{}, // single local developer — no login wall
-		CallerClients: nil,            // no cluster → cluster endpoints answer honest 501
-		Scheme:        scheme,
-		StaticDir:     uiDist,
-		Version:       "dev",
+		DevMode:           true,
+		DevInvokeEndpoint: devInvokeBase,
+		Auth:              bff.AllowAll{}, // single local developer — no login wall
+		CallerClients:     nil,            // no cluster → cluster endpoints answer honest 501
+		Scheme:            scheme,
+		StaticDir:         uiDist,
+		Version:           "dev",
 		Adapters: bff.Adapters{
 			Expand: bff.NewExpandAdapter(),                          // config-preview (K8s-free)
 			Invoke: bff.NewInvokeAdapter(bff.InvokeAdapterConfig{}), // Playground → local /invoke

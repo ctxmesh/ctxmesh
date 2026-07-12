@@ -59,6 +59,10 @@ type Server struct {
 	// cluster-only endpoints serve honest 501) and NO login wall. GET /api/devmode
 	// exposes it so the SPA renders dev-mode chrome instead of the login gate.
 	devMode bool
+	// devInvokeEndpoint is the base URL of the single local Compose agent under
+	// `dev --ui` (ADR 0021). When set, POST /api/invoke targets it directly (no
+	// cluster resolution) so the Playground run works locally. Empty otherwise.
+	devInvokeEndpoint string
 
 	// providerConnect is the ADR 0015 kill-switch. When false the connect
 	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
@@ -138,6 +142,10 @@ type Options struct {
 	// cluster (CallerClients nil), no login wall. Surfaced at GET /api/devmode so
 	// the SPA renders dev chrome instead of the login gate.
 	DevMode bool
+	// DevInvokeEndpoint is the base URL of the local Compose agent (dev mode). When
+	// set (with an Invoke adapter), POST /api/invoke targets it directly so the
+	// Playground run works with no cluster. Ignored unless DevMode is on.
+	DevInvokeEndpoint string
 	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
 	// (the default for dev/trial) the connect endpoints are registered; when
 	// false (a hardened install) they serve 404 and the UI falls back to
@@ -182,6 +190,7 @@ func NewServer(opts Options) *Server {
 		adapters:                 opts.Adapters,
 		version:                  opts.Version,
 		devMode:                  opts.DevMode,
+		devInvokeEndpoint:        opts.DevInvokeEndpoint,
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
 		platformGenerationModels: opts.PlatformGenerationModels,
@@ -558,13 +567,20 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
 	}
 	// Playground invoke (m12.7): run a deployed agent, traced, and return its
-	// traceId. Wired only when BOTH the InvokeAdapter (the pure-HTTP invoker) AND
-	// the caller-client factory are present — the run is CALLER-SCOPED (the agent
-	// lookup + dispatch act as the caller, ADR 0011), so it needs the caller-client
-	// seam and must never fall back to the BFF SA. Honest 501 otherwise.
-	if s.adapters.Invoke != nil && s.callerClients != nil {
+	// traceId. The CLUSTER path is wired only when BOTH the InvokeAdapter (the
+	// pure-HTTP invoker) AND the caller-client factory are present — the run is
+	// CALLER-SCOPED (the agent lookup + dispatch act as the caller, ADR 0011), so it
+	// needs the caller-client seam and must never fall back to the BFF SA.
+	//
+	// The DEV path (ADR 0021) has no cluster: when devMode + a devInvokeEndpoint are
+	// set, POST /api/invoke targets the single local Compose agent directly (no RBAC
+	// to scope — it's a single local developer). Honest 501 when neither is wired.
+	switch {
+	case s.devMode && s.adapters.Invoke != nil && s.devInvokeEndpoint != "":
+		authed.HandleFunc("POST /api/invoke", s.handleDevInvoke)
+	case s.adapters.Invoke != nil && s.callerClients != nil:
 		authed.HandleFunc("POST /api/invoke", s.handleInvoke)
-	} else {
+	default:
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
