@@ -36,6 +36,33 @@ UI + Go BFF (spec §6):
                                the UI + /api/health still work.
 {{- end }}
 
+Console login — OIDC/SSO via Dex (m19.5, ADR 0020):
+  - enabled:                   {{ .Values.auth.oidc.enabled }}
+{{- if .Values.auth.oidc.enabled }}
+  - Dex broker:                Deployment/agent-engine-dex, Service/agent-engine-dex:5556
+  - issuer:                    {{ .Values.auth.oidc.issuer }}
+  - console client:            {{ .Values.auth.oidc.client.id }} (public, Auth-Code + PKCE)
+{{- if .Values.auth.oidc.staticUser.enabled }}
+  - demo login:                {{ .Values.auth.oidc.staticUser.email }} / password "agent-engine-dev"
+                               DEV/TRIAL ONLY — override auth.oidc.staticUser before exposing Dex.
+{{- end }}
+
+  REQUIRED cluster-admin step (this chart CANNOT do it): tell the API server to
+  TRUST the Dex issuer, or the ID token won't authenticate and RBAC won't bind:
+    --oidc-issuer-url={{ .Values.auth.oidc.issuer }}
+    --oidc-client-id={{ .Values.auth.oidc.client.id }}
+    --oidc-username-claim=email
+    --oidc-username-prefix={{ .Values.auth.oidc.usernamePrefix }}
+    --oidc-groups-claim=groups
+  On a MANAGED cluster that can't set apiserver flags, KEEP token login (ADR 0012)
+  — it stays as the fallback and is NOT a regression.
+{{- if and .Values.auth.oidc.staticUser.enabled .Values.auth.oidc.demoBinding }}
+  RBAC: a demo ClusterRoleBinding maps User "{{ .Values.auth.oidc.usernamePrefix }}{{ .Values.auth.oidc.staticUser.email }}"
+        to the operator persona. Enterprise: map real IdP groups to the personas
+        (bind the groups claim), and set auth.oidc.demoBinding=false.
+{{- end }}
+{{- end }}
+
 Bundled dev data plane (dev/trial ONLY — PRD §23):
   - enabled:                   {{ .Values.devDataPlane.enabled }}
 {{- if .Values.devDataPlane.enabled }}
