@@ -33,13 +33,20 @@ function recordingFetch(opts: {
       calls.push({ url, method, body });
 
       if (url.startsWith("/api/namespaces")) {
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({ namespaces: [] }) } as Response);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ namespaces: [] }),
+        } as Response);
       }
       if (url.startsWith("/api/capabilities")) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ namespace: "", allowed: opts.caps ?? { secretbindings: { create: true } } }),
+          json: async () => ({
+            namespace: "",
+            allowed: opts.caps ?? { secretbindings: { create: true } },
+          }),
         } as Response);
       }
       if (url === "/api/providers" && method === "POST") {
@@ -71,7 +78,11 @@ function recordingFetch(opts: {
           text: async () => JSON.stringify(r.json),
         } as Response);
       }
-      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+        json: async () => ({}),
+      } as Response);
     }),
   );
   return calls;
@@ -110,7 +121,9 @@ describe("ConnectProviderPage", () => {
     renderPage();
 
     await advanceToKeyStep();
-    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: SECRET_KEY } });
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
     fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
 
     // The review step renders the LIVE model list from the POST response.
@@ -120,25 +133,62 @@ describe("ConnectProviderPage", () => {
     expect(screen.getByText("anthropic-key")).toBeInTheDocument();
 
     // The POST carried the right body: provider + the pasted key.
-    const post = calls.find((c) => c.url === "/api/providers" && c.method === "POST");
+    const post = calls.find(
+      (c) => c.url === "/api/providers" && c.method === "POST",
+    );
     expect(post).toBeDefined();
-    const payload = JSON.parse(post!.body) as { provider: string; apiKey: string };
+    const payload = JSON.parse(post!.body) as {
+      provider: string;
+      apiKey: string;
+    };
     expect(payload.provider).toBe("anthropic");
     expect(payload.apiKey).toBe(SECRET_KEY);
   });
 
+  it("Done step: an ENABLED 'Create an agent with this' finish (no dead button) + a Done action + CRD nouns demoted to Advanced", async () => {
+    recordingFetch({});
+    renderPage();
+
+    await advanceToKeyStep();
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
+    await screen.findByText("claude-opus-4");
+
+    // The finish action is intent-first AND enabled — was a permanently-disabled
+    // "Create" (the m18/m20 dead-button class).
+    const finish = screen.getByRole("button", {
+      name: /Create an agent with this/,
+    });
+    expect(finish).toBeEnabled();
+    // A secondary "Done" returns to Providers.
+    expect(screen.getByTestId("connect-done")).toBeInTheDocument();
+    // The storage plumbing (Secret/SecretBinding/ModelRoute) is demoted to an
+    // Advanced disclosure — not the primary intent copy.
+    expect(screen.getByText(/how it.?s stored/i)).toBeInTheDocument();
+  });
+
   it("shows an honest inline error on a bad key (400) without crashing", async () => {
     recordingFetch({
-      connect: () => ({ ok: false, status: 400, json: { error: "invalid api key" } }),
+      connect: () => ({
+        ok: false,
+        status: 400,
+        json: { error: "invalid api key" },
+      }),
     });
     renderPage();
 
     await advanceToKeyStep();
-    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: "sk-bad" } });
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: "sk-bad" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
 
     // The inline error surfaces the API's real message; no review, no crash.
-    expect(await screen.findByTestId("connect-error")).toHaveTextContent(/invalid api key/);
+    expect(await screen.findByTestId("connect-error")).toHaveTextContent(
+      /invalid api key/,
+    );
     expect(screen.queryByTestId("model-list")).toBeNull();
   });
 
@@ -148,7 +198,9 @@ describe("ConnectProviderPage", () => {
     renderPage();
 
     await advanceToKeyStep();
-    const keyInput = screen.getByLabelText("Anthropic API key") as HTMLInputElement;
+    const keyInput = screen.getByLabelText(
+      "Anthropic API key",
+    ) as HTMLInputElement;
     fireEvent.change(keyInput, { target: { value: SECRET_KEY } });
     fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
 
@@ -171,16 +223,24 @@ describe("ConnectProviderPage", () => {
 
   it("falls back to reference-existing when the kill-switch 404s the endpoint", async () => {
     recordingFetch({
-      connect: () => ({ ok: false, status: 404, json: { error: "provider connect disabled" } }),
+      connect: () => ({
+        ok: false,
+        status: 404,
+        json: { error: "provider connect disabled" },
+      }),
     });
     renderPage();
 
     await advanceToKeyStep();
-    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: SECRET_KEY } });
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
     fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
 
     // The hardened-install fallback teaches reference-an-existing-SecretBinding.
-    expect(await screen.findByTestId("kill-switch-fallback")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("kill-switch-fallback"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/reference an existing/i)).toBeInTheDocument();
   });
 });
@@ -191,22 +251,32 @@ describe("ConnectProviderPage — RBAC-gated", () => {
     const calls = recordingFetch({
       caps: { secretbindings: { create: false } },
       // …and even a forced submit gets an honest 403 from the API.
-      connect: () => ({ ok: false, status: 403, json: { error: "forbidden: cannot create secretbindings" } }),
+      connect: () => ({
+        ok: false,
+        status: 403,
+        json: { error: "forbidden: cannot create secretbindings" },
+      }),
     });
     renderPage();
 
     // The read-only note appears (the display-only gate).
-    expect(await screen.findByTestId("connect-readonly-note")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("connect-readonly-note"),
+    ).toBeInTheDocument();
 
     await advanceToKeyStep();
-    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: SECRET_KEY } });
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
 
     // The forward action is disabled for a viewer (canProceed gates on create)…
     const connectBtn = screen.getByRole("button", { name: /Connect provider/ });
     await waitFor(() => expect(connectBtn).toBeDisabled());
     // …but if the API is forced (stale cache), a 403 → ForbiddenInline.
     // Simulate the forced path directly: no POST happened while disabled.
-    expect(calls.find((c) => c.url === "/api/providers" && c.method === "POST")).toBeUndefined();
+    expect(
+      calls.find((c) => c.url === "/api/providers" && c.method === "POST"),
+    ).toBeUndefined();
   });
 
   it("renders ForbiddenInline when the connect POST returns 403 (the real gate)", async () => {
@@ -214,15 +284,25 @@ describe("ConnectProviderPage — RBAC-gated", () => {
     // "yes" surprise path: 403 → ForbiddenInline.
     recordingFetch({
       caps: { secretbindings: { create: true } },
-      connect: () => ({ ok: false, status: 403, json: { error: "forbidden: cannot create secretbindings" } }),
+      connect: () => ({
+        ok: false,
+        status: 403,
+        json: { error: "forbidden: cannot create secretbindings" },
+      }),
     });
     renderPage();
 
     await advanceToKeyStep();
-    fireEvent.change(screen.getByLabelText("Anthropic API key"), { target: { value: SECRET_KEY } });
+    fireEvent.change(screen.getByLabelText("Anthropic API key"), {
+      target: { value: SECRET_KEY },
+    });
     fireEvent.click(screen.getByRole("button", { name: /Connect provider/ }));
 
-    expect(await screen.findByText("Not allowed to connect a provider")).toBeInTheDocument();
-    expect(screen.getByText(/forbidden: cannot create secretbindings/)).toBeInTheDocument();
+    expect(
+      await screen.findByText("Not allowed to connect a provider"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/forbidden: cannot create secretbindings/),
+    ).toBeInTheDocument();
   });
 });
