@@ -203,13 +203,23 @@ export function DashboardPage() {
           );
         })()}
 
-      {/* 1. Live topology */}
+      {/* 1. Live topology — a clickable preview (m20.7: nodes navigate; pan/zoom
+          on). The full grouped/searchable interactive graph is the /topology page. */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Network className="h-4 w-4 text-primary" />
-            Live topology
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Network className="h-4 w-4 text-primary" />
+              Live topology
+            </CardTitle>
+            <Link
+              to="/topology"
+              data-testid="view-full-topology"
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
+              Open full topology
+            </Link>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="h-[26rem] overflow-hidden rounded-md border">
