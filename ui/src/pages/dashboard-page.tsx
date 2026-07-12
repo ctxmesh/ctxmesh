@@ -3,17 +3,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { CheckCircle2, Circle, Coins, Network, RefreshCw } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TopologyGraph } from "@/components/dashboard/topology-graph";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
 import {
   api,
+  ApiError,
   type CostResponse,
   type ProviderListResponse,
   type RunListResponse,
@@ -32,7 +28,17 @@ import {
 type Loadable<T> =
   | { kind: "loading" }
   | { kind: "error"; message: string }
+  // "unavailable" = the backing observability adapter (Langfuse) isn't configured
+  // (a 501, not an error). Cost/runs render a calm "not configured" state, not a
+  // red "Failed to load" — an unwired optional integration is not a failure.
+  | { kind: "unavailable" }
   | { kind: "ready"; data: T };
+
+// isNotConfigured is true for a 501 (the adapter is deliberately not wired) — the
+// signal to degrade calmly rather than surface a destructive error.
+function isNotConfigured(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 501;
+}
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : "request failed";
@@ -79,14 +85,22 @@ export function DashboardPage() {
       .then((data) => setCost({ kind: "ready", data }))
       .catch((err: unknown) => {
         if (signal?.aborted) return;
-        setCost({ kind: "error", message: messageOf(err) });
+        setCost(
+          isNotConfigured(err)
+            ? { kind: "unavailable" }
+            : { kind: "error", message: messageOf(err) },
+        );
       });
     api
       .runs(signal)
       .then((data) => setRuns({ kind: "ready", data }))
       .catch((err: unknown) => {
         if (signal?.aborted) return;
-        setRuns({ kind: "error", message: messageOf(err) });
+        setRuns(
+          isNotConfigured(err)
+            ? { kind: "unavailable" }
+            : { kind: "error", message: messageOf(err) },
+        );
       });
   }, []);
 
@@ -134,7 +148,11 @@ export function DashboardPage() {
           const hasRun = runs.data.runs.length > 0;
           if (hasProvider && hasAgent && hasRun) return null; // fully set up
           const steps = [
-            { label: "Connect a provider", done: hasProvider, to: "/providers/connect" },
+            {
+              label: "Connect a provider",
+              done: hasProvider,
+              to: "/providers/connect",
+            },
             { label: "Create an agent", done: hasAgent, to: "/agents/new" },
             { label: "Run your agent", done: hasRun, to: "/agents" },
           ];
@@ -146,8 +164,8 @@ export function DashboardPage() {
             >
               <p className="text-sm font-medium">Get started</p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Three steps to your first running agent — paste a key once, describe an
-                agent, run it. No YAML, no kubectl.
+                Three steps to your first running agent — paste a key once,
+                describe an agent, run it. No YAML, no kubectl.
               </p>
               <ol className="mt-3 space-y-2">
                 {steps.map((s, i) => (
@@ -161,7 +179,11 @@ export function DashboardPage() {
                     ) : (
                       <Circle className="h-4 w-4 shrink-0 text-muted-foreground" />
                     )}
-                    <span className={s.done ? "text-muted-foreground line-through" : ""}>
+                    <span
+                      className={
+                        s.done ? "text-muted-foreground line-through" : ""
+                      }
+                    >
                       {s.label}
                     </span>
                   </li>
@@ -217,6 +239,18 @@ export function DashboardPage() {
           </CardContent>
         </Card>
       )}
+      {cost.kind === "unavailable" && (
+        <Card>
+          <CardContent
+            className="py-10 text-center text-sm text-muted-foreground"
+            data-testid="cost-unavailable"
+          >
+            Cost &amp; usage isn&apos;t configured — connect an observability
+            backend (Langfuse) to see spend here. Everything else works without
+            it.
+          </CardContent>
+        </Card>
+      )}
       {cost.kind === "error" && (
         <Card>
           <CardContent className="py-10 text-center text-sm text-destructive">
@@ -256,6 +290,17 @@ export function DashboardPage() {
             </CardContent>
           </Card>
         )}
+        {runs.kind === "unavailable" && (
+          <Card>
+            <CardContent
+              className="py-8 text-center text-sm text-muted-foreground"
+              data-testid="runs-unavailable"
+            >
+              Run history isn&apos;t configured — connect an observability
+              backend (Langfuse) to see recent runs here.
+            </CardContent>
+          </Card>
+        )}
         {runs.kind === "error" && (
           <Card>
             <CardContent className="py-8 text-center text-sm text-destructive">
@@ -263,9 +308,7 @@ export function DashboardPage() {
             </CardContent>
           </Card>
         )}
-        {runs.kind === "ready" && (
-          <RecentRuns runs={runs.data.runs} />
-        )}
+        {runs.kind === "ready" && <RecentRuns runs={runs.data.runs} />}
       </div>
     </div>
   );
