@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	"gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -62,8 +63,6 @@ func routeNameForModel(provider, model string) string {
 //   - Caller-scoped (ADR 0011): the get + create run as the caller, so RBAC is enforced
 //     (a caller who can't create ModelRoutes gets an honest 403).
 //   - Labelled managedByModelPicker so it is NOT mistaken for a connected provider.
-//
-//nolint:unparam // namespace varies once m21.3 wires this into the create/generate handler.
 func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runtime.Scheme, namespace, provider, model string) (string, *createError) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	model = strings.TrimSpace(model)
@@ -121,4 +120,25 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 		return "", classifyCreateError(cerr, modelRouteKind, name)
 	}
 	return name, nil
+}
+
+// injectModelRoute sets model.route in a simplified agent.yaml to the given route, so
+// a picked model's ensured route (ensureRouteForModel) becomes the agent's runtime
+// model route BEFORE expand — the m21 seam that turns "pick a model" into a working
+// route. It round-trips through a generic map so unrelated fields are preserved; the
+// modelYAML schema is just {route}, so replacing the model block is complete.
+func injectModelRoute(agentYAML []byte, routeName string) ([]byte, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(agentYAML, &doc); err != nil {
+		return nil, fmt.Errorf("parsing agent.yaml: %w", err)
+	}
+	if doc == nil {
+		doc = map[string]any{}
+	}
+	doc["model"] = map[string]any{"route": routeName}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("re-serializing agent.yaml: %w", err)
+	}
+	return out, nil
 }

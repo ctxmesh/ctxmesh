@@ -7,11 +7,28 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
+
+func TestInjectModelRoute(t *testing.T) {
+	in := []byte("name: my-agent\nimage: echo:1\nmodel:\n  route: old-route\n")
+	out, err := injectModelRoute(in, "anthropic-claude-sonnet-5")
+	require.NoError(t, err)
+
+	var doc map[string]any
+	require.NoError(t, yaml.Unmarshal(out, &doc))
+	// Unrelated fields are preserved…
+	assert.Equal(t, "my-agent", doc["name"])
+	assert.Equal(t, "echo:1", doc["image"])
+	// …and model.route is set to the ensured route (overriding any prior value).
+	m, ok := doc["model"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "anthropic-claude-sonnet-5", m["route"])
+}
 
 func TestRouteNameForModel(t *testing.T) {
 	assert.Equal(t, "anthropic-claude-sonnet-5",
