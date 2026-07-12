@@ -191,6 +191,20 @@ describe("DashboardPage (render proof)", () => {
     expect(screen.queryByText(/Failed to load runs/)).toBeNull();
   });
 
+  it("links the dashboard topology to the full interactive /topology view (m20.7)", async () => {
+    routeFetch({
+      "/api/topology": topology,
+      "/api/cost": cost,
+      "/api/runs": runs,
+      "/api/providers": providersConnected,
+    });
+    renderDashboard();
+
+    await screen.findByText("echo-agent");
+    const link = screen.getByTestId("view-full-topology");
+    expect(link).toHaveAttribute("href", "/topology");
+  });
+
   it("does NOT render any Langfuse embedded iframe (m16.11: iframe demoted)", async () => {
     routeFetch({
       "/api/topology": topology,

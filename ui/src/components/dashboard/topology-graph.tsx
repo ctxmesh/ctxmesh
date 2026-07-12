@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, type MouseEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Background,
   Controls,
@@ -121,8 +122,29 @@ function toFlow(topology: TopologyResponse): { nodes: Node[]; edges: Edge[] } {
   return { nodes, edges };
 }
 
+// pathForNode maps a topology node id ("<kind>/<namespace>/<name>") to the surface
+// that node lives on, so clicking a node on the dashboard navigates there (agents +
+// registries have detail pages; everything else opens the full topology view).
+function pathForNode(id: string): string {
+  const [kind, ns, name] = id.split("/");
+  if (kind === "agent" && ns && name)
+    return `/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`;
+  if (kind === "registry" && ns && name)
+    return `/registries/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`;
+  return "/topology";
+}
+
 export function TopologyGraph({ topology }: { topology: TopologyResponse }) {
+  const navigate = useNavigate();
   const { nodes, edges } = useMemo(() => toFlow(topology), [topology]);
+
+  // Interactive: clicking a node navigates to it (the dashboard graph was static
+  // before — m20.7). Pan/zoom are on by default; nodes stay non-draggable (it's a
+  // read-only preview of the full /topology graph).
+  const onNodeClick = useCallback(
+    (_: MouseEvent, node: Node) => navigate(pathForNode(node.id)),
+    [navigate],
+  );
 
   if (topology.nodes.length === 0) {
     return (
@@ -141,6 +163,7 @@ export function TopologyGraph({ topology }: { topology: TopologyResponse }) {
       proOptions={{ hideAttribution: true }}
       nodesDraggable={false}
       nodesConnectable={false}
+      onNodeClick={onNodeClick}
     >
       <Background className="text-border" />
       <Controls showInteractive={false} />
