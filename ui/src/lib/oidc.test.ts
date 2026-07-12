@@ -75,8 +75,9 @@ describe("completeLogin", () => {
 
   it("exchanges the code for an id_token and clears the one-shot flow", async () => {
     seedFlow();
+    // Typed params so mock.calls[0] is inferred as [url, init] (not an empty tuple).
     const fetchMock = vi.fn(
-      async () =>
+      async (_url: string | URL, _init?: RequestInit) =>
         ({
           ok: true,
           status: 200,
@@ -93,10 +94,10 @@ describe("completeLogin", () => {
     // One-shot: the pending flow is consumed so a replay can't reuse it.
     expect(sessionStorage.getItem(FLOW_KEY)).toBeNull();
     // Exchanged at the token endpoint with the PKCE verifier + auth-code grant.
-    const [u, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(u).toBe("https://dex.example.com/token");
-    expect(String(init.body)).toContain("code_verifier=the-verifier");
-    expect(String(init.body)).toContain("grant_type=authorization_code");
+    const [u, init] = fetchMock.mock.calls[0];
+    expect(String(u)).toBe("https://dex.example.com/token");
+    expect(String(init?.body)).toContain("code_verifier=the-verifier");
+    expect(String(init?.body)).toContain("grant_type=authorization_code");
   });
 
   it("rejects a state mismatch (anti-CSRF) without exchanging", async () => {
