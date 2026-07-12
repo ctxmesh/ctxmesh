@@ -23,8 +23,8 @@ import (
 	"net/http"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -38,10 +38,12 @@ const secretBindingKind = "SecretBinding"
 // --- DTOs --------------------------------------------------------------------
 //
 // SECURITY INVARIANT: the SecretBinding DTO projects ONLY the ref metadata
-// (which Kubernetes Secret name, which key within it) and the status phase.
-// It MUST NEVER include the secret value/data. The BFF does not read the
-// referenced Kubernetes Secret at all — it only reads the SecretBinding CRD
-// object itself, which stores a reference (name + key), not the credential.
+// (which Kubernetes Secret name, which key within it) and a derived readiness
+// phase. It MUST NEVER include, log, or return the secret value/data. Readiness
+// is derived from the referenced Secret's EXISTENCE + key PRESENCE only — a
+// caller-scoped Get whose `Data[key]` is tested for presence and immediately
+// discarded (never read, never projected). SecretBinding has no controller (it is
+// a pure reference), so readiness is projection-derived, not condition-driven.
 
 // SecretRefDTO is the flat projection of a SecretKeyRef (the pointer into the
 // Kubernetes Secret). It carries only the identifying metadata — the Secret
@@ -122,25 +124,42 @@ type SecretBindingUpdateRequest struct {
 	SecretRef SecretRefDTO `json:"secretRef"`
 }
 
-// --- phase helpers -----------------------------------------------------------
+// --- readiness resolver ------------------------------------------------------
 
-// phaseFromSecretBindingConditions derives the (ready, phase) pair from a
-// SecretBinding's "Resolved" condition. SecretBinding uses "Resolved" (not
-// "Ready") to signal that the referenced Kubernetes Secret exists and has the
-// specified key. Absent condition → (false, Pending).
-func phaseFromSecretBindingConditions(conds []metav1.Condition) (bool, string) {
-	c := apimeta.FindStatusCondition(conds, "Resolved")
-	if c == nil {
+// secretBindingReadiness derives the (ready, phase) pair for a SecretBinding by
+// checking whether the referenced Kubernetes Secret EXISTS and carries the named
+// key. A SecretBinding has no controller (it is a pure reference), so there is no
+// "Resolved" condition to read — readiness is projection-derived here:
+//
+//   - Secret exists AND has the key → (true, Ready)   — the reference resolves.
+//   - Secret missing, or key absent → (false, NotReady) — the reference dangles.
+//   - Any other error (notably Forbidden — the caller may not read Secrets, or a
+//     transient failure) → (false, Pending) — we cannot determine it as this caller,
+//     so we do NOT assert a false Ready/NotReady.
+//
+// Caller-scoped (ADR 0011): the Get runs as the caller, so it reflects only what
+// the caller may see. SECURITY: it tests `Data[key]` for PRESENCE and discards it —
+// the value is never read into a variable, logged, or projected.
+func (s *Server) secretBindingReadiness(ctx context.Context, caller client.Client, sb *agentsv1alpha1.SecretBinding) (bool, string) {
+	backend := sb.Spec.Backend
+	if backend == "" {
+		backend = secretBackendKubernetes
+	}
+	// Only the kubernetes backend stores its material in a Secret we can probe.
+	if backend != secretBackendKubernetes || sb.Spec.SecretRef.Name == "" {
 		return false, phasePending
 	}
-	switch c.Status {
-	case metav1.ConditionTrue:
-		return true, phaseReady
-	case metav1.ConditionFalse:
+	var secret corev1.Secret
+	if err := caller.Get(ctx, client.ObjectKey{Namespace: sb.Namespace, Name: sb.Spec.SecretRef.Name}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, phaseNotReady
+		}
+		return false, phasePending
+	}
+	if _, ok := secret.Data[sb.Spec.SecretRef.Key]; !ok {
 		return false, phaseNotReady
-	default:
-		return false, phasePending
 	}
+	return true, phaseReady
 }
 
 // --- adapter helpers ---------------------------------------------------------
@@ -161,9 +180,9 @@ func listSecretBindings(ctx context.Context, r AgentReader, opts ...client.ListO
 // SecretBinding CRD's own fields.
 
 // newSecretBindingSummary projects a SecretBinding onto the compact list DTO.
-// Only the ref metadata and derived status are included — never secret data.
-func newSecretBindingSummary(sb *agentsv1alpha1.SecretBinding) SecretBindingSummary {
-	ready, phase := phaseFromSecretBindingConditions(sb.Status.Conditions)
+// Only the ref metadata and the caller-derived readiness are included — never
+// secret data. The (ready, phase) pair is computed by secretBindingReadiness.
+func newSecretBindingSummary(sb *agentsv1alpha1.SecretBinding, ready bool, phase string) SecretBindingSummary {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
@@ -182,9 +201,9 @@ func newSecretBindingSummary(sb *agentsv1alpha1.SecretBinding) SecretBindingSumm
 }
 
 // newSecretBindingDetail projects a SecretBinding onto the full detail DTO.
-// Only the ref metadata and derived status are included — never secret data.
-func newSecretBindingDetail(sb *agentsv1alpha1.SecretBinding) SecretBindingDetail {
-	ready, phase := phaseFromSecretBindingConditions(sb.Status.Conditions)
+// Only the ref metadata and the caller-derived readiness are included — never
+// secret data. The (ready, phase) pair is computed by secretBindingReadiness.
+func newSecretBindingDetail(sb *agentsv1alpha1.SecretBinding, ready bool, phase string) SecretBindingDetail {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
@@ -271,11 +290,14 @@ func (s *Server) handleListSecretBindings(w http.ResponseWriter, r *http.Request
 	// filters only the fetched window — a case-insensitive substring match on name.
 	items := make([]SecretBindingSummary, 0, len(list.Items))
 	for i := range list.Items {
-		summary := newSecretBindingSummary(&list.Items[i])
-		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
+		sb := &list.Items[i]
+		// Filter on name BEFORE the per-binding readiness Get, so a windowed query
+		// doesn't probe the Secret of every binding it will discard.
+		if q != "" && !strings.Contains(strings.ToLower(sb.Name), q) {
 			continue
 		}
-		items = append(items, summary)
+		ready, phase := s.secretBindingReadiness(r.Context(), caller, sb)
+		items = append(items, newSecretBindingSummary(sb, ready, phase))
 	}
 
 	writeJSON(w, http.StatusOK, SecretBindingListResponse{
@@ -311,7 +333,8 @@ func (s *Server) handleGetSecretBinding(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newSecretBindingDetail(&sb))
+	ready, phase := s.secretBindingReadiness(r.Context(), caller, &sb)
+	writeJSON(w, http.StatusOK, newSecretBindingDetail(&sb, ready, phase))
 }
 
 // --- POST /api/secretbindings ------------------------------------------------
@@ -397,7 +420,8 @@ func (s *Server) handleCreateSecretBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, newSecretBindingDetail(sb))
+	ready, phase := s.secretBindingReadiness(r.Context(), caller, sb)
+	writeJSON(w, http.StatusCreated, newSecretBindingDetail(sb, ready, phase))
 }
 
 // --- PUT /api/secretbindings/{ns}/{name} -------------------------------------
@@ -506,7 +530,8 @@ func (s *Server) handleUpdateSecretBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newSecretBindingDetail(&live))
+	ready, phase := s.secretBindingReadiness(r.Context(), caller, &live)
+	writeJSON(w, http.StatusOK, newSecretBindingDetail(&live, ready, phase))
 }
 
 // --- DELETE /api/secretbindings/{ns}/{name} ----------------------------------

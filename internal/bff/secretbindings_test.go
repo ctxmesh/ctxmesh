@@ -30,6 +30,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -60,21 +61,6 @@ func mockSecretBinding(name, ns, secretName, secretKey string) *agentsv1alpha1.S
 			},
 		},
 	}
-}
-
-// resolvedSB sets the "Resolved" condition on a SecretBinding (simulates a
-// reconciled object where the referenced Secret exists and has the key).
-func resolvedSB(sb *agentsv1alpha1.SecretBinding) *agentsv1alpha1.SecretBinding {
-	sb.Status.Conditions = []metav1.Condition{
-		{
-			Type:               "Resolved",
-			Status:             metav1.ConditionTrue,
-			Reason:             "SecretFound",
-			Message:            "referenced secret found",
-			LastTransitionTime: metav1.Now(),
-		},
-	}
-	return sb
 }
 
 // --- request helpers ---------------------------------------------------------
@@ -333,7 +319,8 @@ func TestListSecretBindingsForbiddenIs403(t *testing.T) {
 			List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "secretbindings"},
-					"", errors.New("viewer denied"))
+					"", errors.New("viewer denied"),
+				)
 			},
 		}).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -350,9 +337,21 @@ func TestListSecretBindingsForbiddenIs403(t *testing.T) {
 // TestGetSecretBindingReturnsDetail proves a seeded SecretBinding is returned
 // with all ref fields projected correctly — name, secretRef.name, secretRef.key,
 // backend, phase, ready. The referenced Secret's data is NEVER in the response.
+// secretWithKey builds a corev1.Secret (in sbNS) carrying the given key with a
+// placeholder value — the BFF only tests key PRESENCE, never the value.
+func secretWithKey(name, key string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sbNS},
+		Data:       map[string][]byte{key: []byte("placeholder")},
+	}
+}
+
 func TestGetSecretBindingReturnsDetail(t *testing.T) {
-	sb := resolvedSB(mockSecretBinding("my-binding", sbNS, "my-secret", "api-key"))
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(sb).Build()
+	// Readiness is derived from the referenced Secret existing with the key (m20.3),
+	// not from a controller condition — so seed the Secret it points at.
+	sb := mockSecretBinding("my-binding", sbNS, "my-secret", "api-key")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(sb, secretWithKey("my-secret", "api-key")).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
 	detail, code, body := getSecretBinding(t, s, "my-binding")
@@ -363,23 +362,60 @@ func TestGetSecretBindingReturnsDetail(t *testing.T) {
 	assert.Equal(t, "kubernetes", detail.Backend)
 	assert.Equal(t, "my-secret", detail.SecretRef.Name, "secretRef.name must be the Secret name")
 	assert.Equal(t, "api-key", detail.SecretRef.Key, "secretRef.key must be the key within the Secret")
-	assert.True(t, detail.Ready, "Resolved condition → ready=true")
+	assert.True(t, detail.Ready, "referenced Secret+key exists → ready=true")
 	assert.Equal(t, phaseReady, detail.Phase)
 }
 
-// TestGetSecretBindingNoValueInResponse is THE NO-ECHO ASSERTION. It proves
-// that even if a Kubernetes Secret with matching name exists in the fake store,
-// the BFF response NEVER includes a "value", "data", or "credential" field.
-// The BFF reads only the SecretBinding CRD — it never fetches the Secret object.
+// TestSecretBindingReadiness pins the projection-derived readiness (m20.3): a
+// SecretBinding has no controller, so readiness comes from whether the referenced
+// Secret exists with the key — Ready when it does, NotReady when the Secret or key
+// is missing (a dangling reference), never a stuck "Pending".
+func TestSecretBindingReadiness(t *testing.T) {
+	t.Run("secret + key present → Ready", func(t *testing.T) {
+		sb := mockSecretBinding("b", sbNS, "s", "api-key")
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+			WithObjects(sb, secretWithKey("s", "api-key")).Build()
+		s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		detail, code, _ := getSecretBinding(t, s, "b")
+		require.Equal(t, http.StatusOK, code)
+		assert.True(t, detail.Ready)
+		assert.Equal(t, phaseReady, detail.Phase)
+	})
+
+	t.Run("secret missing → NotReady (dangling reference, not Pending)", func(t *testing.T) {
+		sb := mockSecretBinding("b", sbNS, "s", "api-key")
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(sb).Build()
+		s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		detail, code, _ := getSecretBinding(t, s, "b")
+		require.Equal(t, http.StatusOK, code)
+		assert.False(t, detail.Ready)
+		assert.Equal(t, phaseNotReady, detail.Phase)
+	})
+
+	t.Run("secret exists but key absent → NotReady", func(t *testing.T) {
+		sb := mockSecretBinding("b", sbNS, "s", "api-key")
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+			WithObjects(sb, secretWithKey("s", "other-key")).Build()
+		s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		detail, code, _ := getSecretBinding(t, s, "b")
+		require.Equal(t, http.StatusOK, code)
+		assert.False(t, detail.Ready)
+		assert.Equal(t, phaseNotReady, detail.Phase)
+	})
+}
+
+// TestGetSecretBindingNoValueInResponse is THE NO-ECHO ASSERTION. It proves the
+// BFF response NEVER includes a "value", "data", or "credential" field. The BFF
+// fetches the referenced Secret ONLY to test key PRESENCE for readiness (m20.3) —
+// it tests `Data[key]` and discards it, never projecting the value. Here the Secret
+// exists with the key, so readiness resolves AND the value still never appears.
 func TestGetSecretBindingNoValueInResponse(t *testing.T) {
 	sb := mockSecretBinding("my-binding", sbNS, "my-secret", "api-key")
 
-	// NOTE: we do NOT add a corev1.Secret to the fake client. If the handler
-	// were to try fetching it and return its data, the test would prove it fails
-	// (no Secret in store → error). But more importantly: we assert the JSON
-	// shape itself never contains a value/data/credential field — regardless of
-	// whether a Secret exists or not.
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(sb).Build()
+	// The Secret exists (readiness → Ready); the assertion below proves its value
+	// is nonetheless never echoed into the response JSON.
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(sb, secretWithKey("my-secret", "api-key")).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
 	rec := httptest.NewRecorder()
@@ -465,7 +501,8 @@ func TestGetSecretBindingForbiddenIs403(t *testing.T) {
 			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "secretbindings"},
-					"my-binding", errors.New("viewer denied"))
+					"my-binding", errors.New("viewer denied"),
+				)
 			},
 		}).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -610,7 +647,8 @@ func TestCreateSecretBindingForbiddenIs403(t *testing.T) {
 			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "secretbindings"},
-					obj.GetName(), errors.New("viewer cannot create"))
+					obj.GetName(), errors.New("viewer cannot create"),
+				)
 			},
 		}).Build()
 	factory := &fakeCallerClientFactory{client: c}
@@ -770,7 +808,8 @@ func TestUpdateSecretBindingForbiddenIs403(t *testing.T) {
 			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "secretbindings"},
-					obj.GetName(), errors.New("viewer cannot update"))
+					obj.GetName(), errors.New("viewer cannot update"),
+				)
 			},
 		}).Build()
 	factory := &fakeCallerClientFactory{client: c}
@@ -846,7 +885,8 @@ func TestDeleteSecretBindingForbiddenIs403(t *testing.T) {
 			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "secretbindings"},
-					obj.GetName(), errors.New("viewer cannot delete"))
+					obj.GetName(), errors.New("viewer cannot delete"),
+				)
 			},
 		}).Build()
 	factory := &fakeCallerClientFactory{client: c}
