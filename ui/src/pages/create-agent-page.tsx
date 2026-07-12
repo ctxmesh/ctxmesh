@@ -18,7 +18,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { EmptyState, ForbiddenInline, Wizard, useToast, type WizardStep } from "@/components/kit";
+import {
+  EmptyState,
+  ForbiddenInline,
+  Wizard,
+  useToast,
+  type WizardStep,
+} from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -102,8 +108,12 @@ export function CreateAgentPage() {
       </div>
       <ProviderGate>
         {mode === "entrance" && <Entrance onPick={setMode} />}
-        {mode === "describe" && <DescribeFlow onBack={() => setMode("entrance")} />}
-        {mode === "configure" && <ConfigureFlow onBack={() => setMode("entrance")} />}
+        {mode === "describe" && (
+          <DescribeFlow onBack={() => setMode("entrance")} />
+        )}
+        {mode === "configure" && (
+          <ConfigureFlow onBack={() => setMode("entrance")} />
+        )}
       </ProviderGate>
     </div>
   );
@@ -126,7 +136,9 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
       .listProviders(controller.signal)
       .then((res: { providers: ProviderSummary[] }) => {
         if (controller.signal.aborted) return;
-        setState(res.providers.length === 0 ? { kind: "gate" } : { kind: "ok" });
+        setState(
+          res.providers.length === 0 ? { kind: "gate" } : { kind: "ok" },
+        );
       })
       .catch(() => {
         // A probe failure is not "no provider" — don't block on it.
@@ -137,7 +149,10 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
 
   if (state.kind === "loading") {
     return (
-      <p className="text-sm text-muted-foreground" data-testid="provider-gate-loading">
+      <p
+        className="text-sm text-muted-foreground"
+        data-testid="provider-gate-loading"
+      >
         Checking connected providers…
       </p>
     );
@@ -177,8 +192,9 @@ function Entrance({ onPick }: { onPick: (m: Mode) => void }) {
         </div>
         <p className="text-base font-semibold">Describe it</p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Say what it should do in a sentence. We generate a validated config you
-          review before creating. <span className="font-medium text-primary">Recommended</span>.
+          Say what it should do in a sentence. We generate a validated config
+          you review before creating.{" "}
+          <span className="font-medium text-primary">Recommended</span>.
         </p>
       </button>
       <button
@@ -192,8 +208,8 @@ function Entrance({ onPick }: { onPick: (m: Mode) => void }) {
         </div>
         <p className="text-base font-semibold">Configure it</p>
         <p className="mt-1 text-sm text-muted-foreground">
-          A guided multi-step form — full control over runtime, model, prompt, and
-          tools.
+          A guided multi-step form — full control over runtime, model, prompt,
+          and tools.
         </p>
       </button>
     </div>
@@ -255,7 +271,8 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
       if (res.regenerate) {
         setStage({
           kind: "regenerate",
-          reason: res.reason ?? res.error ?? "The generated config didn't validate.",
+          reason:
+            res.reason ?? res.error ?? "The generated config didn't validate.",
           rawYAML: res.agentYAML ?? "",
         });
         return;
@@ -287,6 +304,17 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
         initialTools={parseToolsFromYAML(stage.gen.agentYAML)}
         summary={summarizeYAML(stage.gen.agentYAML)}
         advancedYAML={stage.gen.expanded ?? stage.gen.agentYAML}
+        // m21: run the agent on the SAME model the user picked to generate — the BFF
+        // ensures a route for it (so any connected model works, not just the primary).
+        modelPick={
+          model
+            ? {
+                provider:
+                  modelChoices.find((c) => c.id === model)?.provider ?? "",
+                model,
+              }
+            : undefined
+        }
         onBack={() => setStage({ kind: "review", gen: stage.gen })}
         header={
           <GenerationReviewHeader
@@ -314,10 +342,12 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-brand-2 text-primary-foreground shadow-elevated">
               <Sparkles className="h-7 w-7" />
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight">Describe your agent</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Describe your agent
+            </h1>
             <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-              Say what it should do in a sentence. We generate a validated config
-              you review before anything is created.
+              Say what it should do in a sentence. We generate a validated
+              config you review before anything is created.
             </p>
             <div className="mx-auto mt-6 max-w-xl text-left">
               <Label htmlFor="agent-description" className="sr-only">
@@ -392,14 +422,20 @@ function GenerationReviewHeader({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-success">
           <Sparkles className="h-5 w-5" />
-          <p className="text-sm font-medium text-foreground">Here&apos;s what we&apos;ll build</p>
+          <p className="text-sm font-medium text-foreground">
+            Here&apos;s what we&apos;ll build
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={onRegenerate}>
           <Sparkles className="h-4 w-4" /> Regenerate
         </Button>
       </div>
       {gen.model && (
-        <Badge variant="secondary" className="text-[10px]" data-testid="gen-model-tag">
+        <Badge
+          variant="secondary"
+          className="text-[10px]"
+          data-testid="gen-model-tag"
+        >
           generated with {gen.model}
         </Badge>
       )}
@@ -434,7 +470,10 @@ function RegenerateState({
   onEdit: () => void;
 }) {
   return (
-    <div className="rounded-lg border bg-card p-6 shadow-card" data-testid="regenerate-state">
+    <div
+      className="rounded-lg border bg-card p-6 shadow-card"
+      data-testid="regenerate-state"
+    >
       <div className="mb-3 flex items-center gap-2 text-warning">
         <Sparkles className="h-5 w-5" />
         <p className="text-sm font-medium text-foreground">
@@ -466,7 +505,11 @@ function RegenerateState({
         <Button variant="ghost" onClick={onEdit} disabled={busy}>
           Edit the description
         </Button>
-        <Button onClick={onRegenerate} disabled={busy} data-testid="regenerate-button">
+        <Button
+          onClick={onRegenerate}
+          disabled={busy}
+          data-testid="regenerate-button"
+        >
           <Sparkles className="h-4 w-4" />
           {busy ? "Regenerating…" : "Regenerate"}
         </Button>
@@ -496,6 +539,12 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
   // pickers pull the real lists so the user SELECTS instead of typing a ref.
   const [routes, setRoutes] = React.useState<string[]>([]);
   const [prompts, setPrompts] = React.useState<string[]>([]);
+  // m21: the intent-first model picker — a flat list of the connected providers'
+  // models. Picking one sends it as `model` on create; the BFF ensures the route.
+  const [connectedModels, setConnectedModels] = React.useState<
+    { provider: string; model: string }[]
+  >([]);
+  const [pickedModel, setPickedModel] = React.useState("");
   React.useEffect(() => {
     const c = new AbortController();
     api
@@ -505,6 +554,19 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
       })
       .catch(() => {
         /* soft miss: fall back to a free-text route */
+      });
+    api
+      .listProviders(c.signal)
+      .then((r) => {
+        if (c.signal.aborted) return;
+        setConnectedModels(
+          (r.items ?? []).flatMap((p) =>
+            p.models.map((m) => ({ provider: p.provider, model: m })),
+          ),
+        );
+      })
+      .catch(() => {
+        /* soft miss: no model picker, the Advanced route picker still works */
       });
     api
       .listPromptVersions({ limit: 100 }, c.signal)
@@ -550,6 +612,18 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
         initialTools={form.tools}
         summary={summarizeYAML(toAgentYAML(form))}
         advancedYAML={toAgentYAML(form)}
+        // m21: the picked model → the BFF ensures its route. If the user instead used
+        // the Advanced "existing route" field, modelPick is empty and that route wins.
+        modelPick={
+          pickedModel
+            ? {
+                provider:
+                  connectedModels.find((c) => c.model === pickedModel)
+                    ?.provider ?? "",
+                model: pickedModel,
+              }
+            : undefined
+        }
         onBack={() => setDone(false)}
       />
     );
@@ -564,7 +638,12 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
       description: "Name + runtime",
       content: (
         <div className="space-y-4">
-          <FormField id="cfg-name" label="Name" error={errors.name} hint="DNS label, ≤ 44 chars.">
+          <FormField
+            id="cfg-name"
+            label="Name"
+            error={errors.name}
+            hint="DNS label, ≤ 44 chars."
+          >
             <Input
               id="cfg-name"
               value={form.name}
@@ -597,7 +676,9 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
                 }`}
               >
                 <p className="text-sm font-medium">Custom image</p>
-                <p className="text-xs text-muted-foreground">Bring your own container</p>
+                <p className="text-xs text-muted-foreground">
+                  Bring your own container
+                </p>
               </button>
             </div>
           </div>
@@ -613,8 +694,8 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
           )}
           {managed && form.image.trim() === "" && (
             <p className="text-xs text-muted-foreground">
-              A managed agent runs the platform&apos;s stock image — no image to build
-              or push.
+              A managed agent runs the platform&apos;s stock image — no image to
+              build or push.
             </p>
           )}
         </div>
@@ -661,10 +742,33 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
               </Select>
             </FormField>
           )}
+          {/* m21: the intent-first picker — choose a MODEL; the platform manages the
+              route. The raw ModelRoute picker below is the Advanced fallback. */}
+          {connectedModels.length > 0 && (
+            <FormField
+              id="cfg-model"
+              label="Model"
+              hint="The model this agent runs on. We create the route for you."
+            >
+              <Select
+                id="cfg-model"
+                value={pickedModel}
+                onChange={(e) => setPickedModel(e.target.value)}
+                data-testid="cfg-model-select"
+              >
+                <option value="">— pick a model —</option>
+                {connectedModels.map((c) => (
+                  <option key={`${c.provider}/${c.model}`} value={c.model}>
+                    {c.provider} / {c.model}
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+          )}
           <FormField
             id="cfg-model-route"
-            label="Model route"
-            hint="ModelRoute alias for the agent's LLM calls (optional)."
+            label="Advanced: use an existing model route"
+            hint="Pick a pre-built ModelRoute instead of a model above (optional)."
           >
             {routes.length > 0 ? (
               <Select
@@ -693,7 +797,10 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
               id="cfg-execution-model"
               value={form.executionModel}
               onChange={(e) =>
-                set("executionModel", e.target.value as ConfigForm["executionModel"])
+                set(
+                  "executionModel",
+                  e.target.value as ConfigForm["executionModel"],
+                )
               }
             >
               <option value="serving">serving (request-driven)</option>
@@ -753,7 +860,11 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
             </FormField>
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <FormField id="cfg-min" label="Min replicas" error={errors.scalingMin}>
+            <FormField
+              id="cfg-min"
+              label="Min replicas"
+              error={errors.scalingMin}
+            >
               <Input
                 id="cfg-min"
                 inputMode="numeric"
@@ -762,7 +873,11 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
                 placeholder="0"
               />
             </FormField>
-            <FormField id="cfg-max" label="Max replicas" error={errors.scalingMax}>
+            <FormField
+              id="cfg-max"
+              label="Max replicas"
+              error={errors.scalingMax}
+            >
               <Input
                 id="cfg-max"
                 inputMode="numeric"
@@ -779,9 +894,7 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
       id: "optional",
       title: "Optional",
       description: "Budget · eval · prompt",
-      content: (
-        <OptionalStep form={form} set={set} errors={errors} />
-      ),
+      content: <OptionalStep form={form} set={set} errors={errors} />,
     },
     {
       id: "review",
@@ -792,8 +905,8 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
           <p className="text-sm font-medium">Ready to review + attach tools</p>
           <p className="text-sm text-muted-foreground">
             Finish to open the shared review — the same review + tool picker the
-            &ldquo;Describe it&rdquo; path lands on. You&apos;ll pick tools, preview
-            the CRD, and create there.
+            &ldquo;Describe it&rdquo; path lands on. You&apos;ll pick tools,
+            preview the CRD, and create there.
           </p>
           <FriendlySummary summary={summarizeYAML(toAgentYAML(form))} />
         </div>
@@ -804,12 +917,13 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
   // Forward gating: only the basics step hard-gates (name + image); later steps
   // are optional-until-review (the review re-runs the full validate).
   const canProceed =
-    current === STEP_BASICS
-      ? Object.keys(basicsErrors).length === 0
-      : true;
+    current === STEP_BASICS ? Object.keys(basicsErrors).length === 0 : true;
 
   return (
-    <div className="rounded-lg border bg-card p-6 shadow-card" data-testid="configure-flow">
+    <div
+      className="rounded-lg border bg-card p-6 shadow-card"
+      data-testid="configure-flow"
+    >
       <Wizard
         steps={steps}
         current={current}
@@ -885,7 +999,11 @@ function OptionalStep({
         enabled={form.promptEnabled}
         onToggle={(v) => set("promptEnabled", v)}
       >
-        <FormField id="cfg-prompt-name" label="Prompt name" error={errors.promptName}>
+        <FormField
+          id="cfg-prompt-name"
+          label="Prompt name"
+          error={errors.promptName}
+        >
           <Input
             id="cfg-prompt-name"
             value={form.promptName}
@@ -893,7 +1011,11 @@ function OptionalStep({
             placeholder="system-prompt"
           />
         </FormField>
-        <FormField id="cfg-prompt-repo" label="Git repo" error={errors.promptRepo}>
+        <FormField
+          id="cfg-prompt-repo"
+          label="Git repo"
+          error={errors.promptRepo}
+        >
           <Input
             id="cfg-prompt-repo"
             value={form.promptRepo}
@@ -910,7 +1032,11 @@ function OptionalStep({
               placeholder="main"
             />
           </FormField>
-          <FormField id="cfg-prompt-path" label="Path" error={errors.promptPath}>
+          <FormField
+            id="cfg-prompt-path"
+            label="Path"
+            error={errors.promptPath}
+          >
             <Input
               id="cfg-prompt-path"
               value={form.promptPath}
@@ -927,7 +1053,11 @@ function OptionalStep({
         onToggle={(v) => set("evalEnabled", v)}
       >
         <div className="grid grid-cols-2 gap-4">
-          <FormField id="cfg-eval-suite" label="Suite name" error={errors.evalSuite}>
+          <FormField
+            id="cfg-eval-suite"
+            label="Suite name"
+            error={errors.evalSuite}
+          >
             <Input
               id="cfg-eval-suite"
               value={form.evalSuite}
@@ -935,7 +1065,11 @@ function OptionalStep({
               placeholder="quality"
             />
           </FormField>
-          <FormField id="cfg-eval-dataset" label="Dataset ref" error={errors.evalDataset}>
+          <FormField
+            id="cfg-eval-dataset"
+            label="Dataset ref"
+            error={errors.evalDataset}
+          >
             <Input
               id="cfg-eval-dataset"
               value={form.evalDataset}
@@ -944,7 +1078,11 @@ function OptionalStep({
             />
           </FormField>
         </div>
-        <FormField id="cfg-eval-threshold" label="Threshold" error={errors.evalThreshold}>
+        <FormField
+          id="cfg-eval-threshold"
+          label="Threshold"
+          error={errors.evalThreshold}
+        >
           <Input
             id="cfg-eval-threshold"
             value={form.evalThreshold}
@@ -972,7 +1110,10 @@ function ToggleSection({
 }) {
   return (
     <div className="rounded-md border p-4">
-      <label htmlFor={id} className="flex items-center gap-2 text-sm font-medium">
+      <label
+        htmlFor={id}
+        className="flex items-center gap-2 text-sm font-medium"
+      >
         <input
           id={id}
           type="checkbox"
@@ -996,6 +1137,7 @@ function SharedReview({
   advancedYAML,
   header,
   onBack,
+  modelPick,
 }: {
   baseYAML: string;
   initialTools: string[];
@@ -1003,6 +1145,11 @@ function SharedReview({
   advancedYAML: string;
   header?: React.ReactNode;
   onBack: () => void;
+  // modelPick (m21): the (provider, model) the user picked. When set, the create
+  // sends it so the BFF ensures a ModelRoute serving it and points the agent at it —
+  // the user picked a MODEL, the platform manages the ROUTE. Absent → the YAML's
+  // own model.route is used (the Advanced path).
+  modelPick?: { provider: string; model: string };
 }) {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -1021,7 +1168,9 @@ function SharedReview({
   // degrades to an empty catalog + note (the user can still create with the
   // pre-selected tools); it is never a hard dead-end.
   const [catalog, setCatalog] = React.useState<
-    { kind: "loading" } | { kind: "ready"; tools: CatalogTool[] } | { kind: "error"; message: string }
+    | { kind: "loading" }
+    | { kind: "ready"; tools: CatalogTool[] }
+    | { kind: "error"; message: string }
   >({ kind: "loading" });
   React.useEffect(() => {
     const controller = new AbortController();
@@ -1035,7 +1184,10 @@ function SharedReview({
         if (controller.signal.aborted) return;
         setCatalog({
           kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the tool catalog",
+          message:
+            err instanceof Error
+              ? err.message
+              : "couldn't load the tool catalog",
         });
       });
     return () => controller.abort();
@@ -1063,13 +1215,20 @@ function SharedReview({
   async function onCreate() {
     setState({ kind: "creating" });
     try {
-      const res = await api.createAgent(finalYAML, namespace);
+      const res = await api.createAgent(
+        finalYAML,
+        namespace,
+        modelPick && modelPick.provider && modelPick.model
+          ? modelPick
+          : undefined,
+      );
       // Transactional (m18.7): the POST succeeded, so the agent EXISTS. Default a
       // missing/odd `created` to [] so the success screen + navigation can never
       // crash into an error that hides a real create (the orphaned-objects bug).
       const created = res.created ?? [];
       setState({ kind: "created", created });
-      const agent = created.find((o) => o.kind === "AgentDeployment") ?? created[0];
+      const agent =
+        created.find((o) => o.kind === "AgentDeployment") ?? created[0];
       toast({
         variant: "success",
         title: "Agent created",
@@ -1088,7 +1247,9 @@ function SharedReview({
   // if — defensively — no AgentDeployment came back, fall back to the list.
   React.useEffect(() => {
     if (state.kind !== "created") return;
-    const agent = state.created.find((o) => o.kind === "AgentDeployment") ?? state.created[0];
+    const agent =
+      state.created.find((o) => o.kind === "AgentDeployment") ??
+      state.created[0];
     const t = setTimeout(() => {
       if (agent) {
         navigate(
@@ -1102,13 +1263,19 @@ function SharedReview({
   }, [state, navigate]);
 
   if (state.kind === "created") {
-    const agent = state.created.find((o) => o.kind === "AgentDeployment") ?? state.created[0];
+    const agent =
+      state.created.find((o) => o.kind === "AgentDeployment") ??
+      state.created[0];
     return (
-      <div className="rounded-lg border bg-card p-6 shadow-card" data-testid="create-success">
+      <div
+        className="rounded-lg border bg-card p-6 shadow-card"
+        data-testid="create-success"
+      >
         <div className="flex items-center gap-2 text-success">
           <CheckCircle2 className="h-5 w-5" />
           <p className="text-sm font-medium text-foreground">
-            {agent ? `${agent.name} created` : "Agent created"} — opening its page…
+            {agent ? `${agent.name} created` : "Agent created"} — opening its
+            page…
           </p>
         </div>
         <div className="mt-3 grid gap-2">
@@ -1135,7 +1302,9 @@ function SharedReview({
   return (
     <div className="space-y-4" data-testid="shared-review">
       {header && (
-        <div className="rounded-lg border bg-card p-5 shadow-card">{header}</div>
+        <div className="rounded-lg border bg-card p-5 shadow-card">
+          {header}
+        </div>
       )}
 
       {/* Friendly summary — the primary review surface (raw behind Advanced). */}
@@ -1149,7 +1318,9 @@ function SharedReview({
           aria-expanded={advanced}
           data-testid="advanced-toggle"
         >
-          <ChevronRight className={`h-4 w-4 transition-transform ${advanced ? "rotate-90" : ""}`} />
+          <ChevronRight
+            className={`h-4 w-4 transition-transform ${advanced ? "rotate-90" : ""}`}
+          />
           Advanced — view the generated agent.yaml / CRDs
         </button>
         {advanced && (
@@ -1158,9 +1329,7 @@ function SharedReview({
             data-testid="advanced-yaml"
             readOnly
             className="mt-3 min-h-[14rem] font-mono text-xs"
-            value={
-              state.kind === "preview" ? state.manifest : advancedYAML
-            }
+            value={state.kind === "preview" ? state.manifest : advancedYAML}
           />
         )}
       </div>
@@ -1191,7 +1360,11 @@ function SharedReview({
           />
         ) : (
           state.kind === "error" && (
-            <p className="mb-3 text-sm text-destructive" role="alert" data-testid="create-error">
+            <p
+              className="mb-3 text-sm text-destructive"
+              role="alert"
+              data-testid="create-error"
+            >
               {state.message}
               {state.status ? ` (${state.status})` : ""}
             </p>
@@ -1207,7 +1380,11 @@ function SharedReview({
             </Button>
           </div>
           {canCreate ? (
-            <Button onClick={onCreate} disabled={busy} data-testid="create-button">
+            <Button
+              onClick={onCreate}
+              disabled={busy}
+              data-testid="create-button"
+            >
               {state.kind === "creating" ? (
                 <>Creating…</>
               ) : (
@@ -1314,7 +1491,9 @@ function ToolPicker({
               <div className="min-w-0 flex-1">
                 <p className="font-mono text-sm">{t.name}</p>
                 {t.description && (
-                  <p className="truncate text-xs text-muted-foreground">{t.description}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {t.description}
+                  </p>
                 )}
               </div>
               {hasSchema && (
@@ -1353,18 +1532,37 @@ interface YAMLSummary {
 
 function FriendlySummary({ summary }: { summary: YAMLSummary }) {
   const rows: { k: string; v: React.ReactNode }[] = [
-    { k: "Name", v: summary.name || <span className="text-muted-foreground">—</span> },
+    {
+      k: "Name",
+      v: summary.name || <span className="text-muted-foreground">—</span>,
+    },
     {
       k: "Runtime",
-      v: <Badge variant="secondary" className="text-[10px]">{summary.runtime}</Badge>,
+      v: (
+        <Badge variant="secondary" className="text-[10px]">
+          {summary.runtime}
+        </Badge>
+      ),
     },
   ];
-  if (summary.image) rows.push({ k: "Image", v: <span className="font-mono text-xs">{summary.image}</span> });
-  if (summary.model) rows.push({ k: "Model route", v: <span className="font-mono text-xs">{summary.model}</span> });
+  if (summary.image)
+    rows.push({
+      k: "Image",
+      v: <span className="font-mono text-xs">{summary.image}</span>,
+    });
+  if (summary.model)
+    rows.push({
+      k: "Model route",
+      v: <span className="font-mono text-xs">{summary.model}</span>,
+    });
   if (summary.systemPrompt)
     rows.push({
       k: "System prompt",
-      v: <span className="text-muted-foreground">&ldquo;{truncate(summary.systemPrompt, 80)}&rdquo;</span>,
+      v: (
+        <span className="text-muted-foreground">
+          &ldquo;{truncate(summary.systemPrompt, 80)}&rdquo;
+        </span>
+      ),
     });
   rows.push({
     k: "Tools",
@@ -1379,7 +1577,10 @@ function FriendlySummary({ summary }: { summary: YAMLSummary }) {
   return (
     <dl className="divide-y rounded-md border" data-testid="friendly-summary">
       {rows.map((r) => (
-        <div key={r.k} className="flex items-start justify-between gap-4 px-3 py-2 text-sm">
+        <div
+          key={r.k}
+          className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
+        >
           <dt className="text-muted-foreground">{r.k}</dt>
           <dd className="text-right">{r.v}</dd>
         </div>
