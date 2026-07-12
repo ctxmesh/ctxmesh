@@ -33,13 +33,7 @@ import type { LucideIcon } from "lucide-react";
 
 // Milestone is duplicated from design/scaffold to keep this module independent of
 // the design gallery (the wireframes' own tag type). It is display-only.
-export type Milestone =
-  | "M13"
-  | "M14"
-  | "M15"
-  | "M16"
-  | "M17"
-  | "M18";
+export type Milestone = "M13" | "M14" | "M15" | "M16" | "M17" | "M18";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -92,7 +86,13 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M13",
         route: "/",
       },
-      { id: "topology", label: "Topology", icon: Network, milestone: "M15", route: "/topology" },
+      {
+        id: "topology",
+        label: "Topology",
+        icon: Network,
+        milestone: "M15",
+        route: "/topology",
+      },
     ],
   },
   {
@@ -199,8 +199,20 @@ export const NAV_SECTIONS: NavSection[] = [
       // explorer at /traces/:id (m16.7), which embeds the inline feedback panel
       // (m16.9). There is deliberately no standalone "Traces"/"Feedback" nav
       // destination; both are reached by drilling into a run.
-      { id: "runs", label: "Runs", icon: MessagesSquare, milestone: "M16", route: "/runs" },
-      { id: "cost", label: "Cost", icon: Coins, milestone: "M16", route: "/cost" },
+      {
+        id: "runs",
+        label: "Runs",
+        icon: MessagesSquare,
+        milestone: "M16",
+        route: "/runs",
+      },
+      {
+        id: "cost",
+        label: "Cost",
+        icon: Coins,
+        milestone: "M16",
+        route: "/cost",
+      },
     ],
   },
   {
@@ -217,6 +229,17 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M14",
         route: "/providers",
       },
+    ],
+  },
+  {
+    // Advanced (m20.8) — the raw Kubernetes objects that back the intent surfaces.
+    // A user connects a provider and picks a model per agent; they never NEED these.
+    // They live here (bottom, under "Advanced") for operators who want to inspect or
+    // hand-author the AgentRegistry / ModelRoute / SecretBinding objects directly,
+    // rather than sitting in the primary nav next to Providers (the object-shaped IA
+    // the console used to expose). The pages are unchanged — only their placement.
+    heading: "Advanced",
+    items: [
       {
         id: "registries",
         label: "Registries",
