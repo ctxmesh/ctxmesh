@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Boxes,
   CheckCircle2,
@@ -94,7 +94,13 @@ type CreateState =
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 export function CreateAgentPage() {
-  const [mode, setMode] = React.useState<Mode>("entrance");
+  const [params] = useSearchParams();
+  // m21: arriving from Providers ("Use") carries ?provider= (provider-as-model-home):
+  // jump straight to Configure with that provider's model pre-picked.
+  const initialProvider = params.get("provider") ?? "";
+  const [mode, setMode] = React.useState<Mode>(
+    initialProvider ? "configure" : "entrance",
+  );
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -112,7 +118,10 @@ export function CreateAgentPage() {
           <DescribeFlow onBack={() => setMode("entrance")} />
         )}
         {mode === "configure" && (
-          <ConfigureFlow onBack={() => setMode("entrance")} />
+          <ConfigureFlow
+            onBack={() => setMode("entrance")}
+            initialProvider={initialProvider}
+          />
         )}
       </ProviderGate>
     </div>
@@ -523,7 +532,13 @@ function RegenerateState({
 const STEP_BASICS = 0;
 const STEP_OPTIONAL = 3;
 
-function ConfigureFlow({ onBack }: { onBack: () => void }) {
+function ConfigureFlow({
+  onBack,
+  initialProvider = "",
+}: {
+  onBack: () => void;
+  initialProvider?: string;
+}) {
   // Seed a MANAGED agent (the aha default — no Docker build); the user can flip
   // to a custom image in step 1. Reuses the shared ConfigForm model + validate +
   // toAgentYAML (NOT rewritten) — the tools are picked at the shared review.
@@ -559,11 +574,16 @@ function ConfigureFlow({ onBack }: { onBack: () => void }) {
       .listProviders(c.signal)
       .then((r) => {
         if (c.signal.aborted) return;
-        setConnectedModels(
-          (r.items ?? []).flatMap((p) =>
-            p.models.map((m) => ({ provider: p.provider, model: m })),
-          ),
+        const flat = (r.items ?? []).flatMap((p) =>
+          p.models.map((m) => ({ provider: p.provider, model: m })),
         );
+        setConnectedModels(flat);
+        // m21 (provider-as-model-home): arriving from Providers "Use" pre-picks the
+        // first model of that provider so the user lands ready to create.
+        if (initialProvider) {
+          const first = flat.find((x) => x.provider === initialProvider);
+          if (first) setPickedModel((prev) => prev || first.model);
+        }
       })
       .catch(() => {
         /* soft miss: no model picker, the Advanced route picker still works */
