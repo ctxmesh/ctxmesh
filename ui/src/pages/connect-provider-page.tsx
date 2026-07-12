@@ -154,7 +154,7 @@ export function ConnectProviderPage() {
       <PageFrame>
         <ForbiddenInline
           title="Not allowed to connect a provider"
-          description="Connecting a provider creates a Secret, SecretBinding, and ModelRoute — your account can't create those in this cluster. Ask an operator to connect it, or reference an existing SecretBinding."
+          description="Connecting a provider securely stores your API key, which needs a permission your account doesn't have on this cluster. An admin can connect the provider for you, or grant your account that permission."
           detail={submit.message}
         />
       </PageFrame>
@@ -282,9 +282,9 @@ export function ConnectProviderPage() {
           className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-center text-xs text-muted-foreground"
           data-testid="connect-readonly-note"
         >
-          You have read-only access — connecting a provider requires create
-          permission on SecretBindings. Ask an operator to connect one, or
-          reference an existing SecretBinding.
+          Your account doesn&apos;t have permission to connect a provider on
+          this cluster (it needs to store a credential). An admin can connect
+          one for you, or grant your account that permission.
         </p>
       )}
       <div className="rounded-lg border bg-card p-6 shadow-card">
