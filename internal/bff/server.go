@@ -54,6 +54,12 @@ type Server struct {
 	version       string
 	log           logr.Logger
 
+	// devMode is true when the BFF runs under `agent-engine dev --ui` (ADR 0021):
+	// a local, single-developer substrate with NO cluster (callerClients nil →
+	// cluster-only endpoints serve honest 501) and NO login wall. GET /api/devmode
+	// exposes it so the SPA renders dev-mode chrome instead of the login gate.
+	devMode bool
+
 	// providerConnect is the ADR 0015 kill-switch. When false the connect
 	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
 	// NOT registered and serve 404 — the UI falls back to reference-existing.
@@ -128,6 +134,10 @@ type Options struct {
 	// StaticDir is the directory of the built SPA (dist/). Empty disables static
 	// serving; the SPA is then served elsewhere (e.g. an nginx sidecar).
 	StaticDir string
+	// DevMode marks the local `agent-engine dev --ui` substrate (ADR 0021): no
+	// cluster (CallerClients nil), no login wall. Surfaced at GET /api/devmode so
+	// the SPA renders dev chrome instead of the login gate.
+	DevMode bool
 	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
 	// (the default for dev/trial) the connect endpoints are registered; when
 	// false (a hardened install) they serve 404 and the UI falls back to
@@ -171,6 +181,7 @@ func NewServer(opts Options) *Server {
 		auth:                     opts.Auth,
 		adapters:                 opts.Adapters,
 		version:                  opts.Version,
+		devMode:                  opts.DevMode,
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
 		platformGenerationModels: opts.PlatformGenerationModels,
@@ -196,6 +207,10 @@ func (s *Server) Handler() http.Handler {
 
 	// Health is unauthenticated (liveness/version probe; no cluster access).
 	api.HandleFunc("GET /api/health", s.handleHealth)
+	// Dev-mode probe (ADR 0021) — unauthenticated so the SPA can read it before any
+	// session exists. {devMode:true} → the `dev --ui` local substrate (no login wall,
+	// cluster surfaces honestly degraded); {devMode:false} → the normal cluster BFF.
+	api.HandleFunc("GET /api/devmode", s.handleDevMode)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC

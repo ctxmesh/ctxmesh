@@ -51,6 +51,12 @@ type HealthResponse struct {
 	Version string `json:"version"`
 }
 
+// DevModeResponse is returned by GET /api/devmode (ADR 0021). true = the local
+// `agent-engine dev --ui` substrate (no login wall, cluster surfaces degraded).
+type DevModeResponse struct {
+	DevMode bool `json:"devMode"`
+}
+
 // AgentSummary is the UI projection of a single AgentDeployment. It exposes only
 // what the dashboard/config-builder need; the rich detail views (m12.5+) fetch
 // more via dedicated endpoints. Keeping this flat decouples the SPA from the CRD
