@@ -62,6 +62,7 @@ func routeNameForModel(provider, model string) string {
 //   - Caller-scoped (ADR 0011): the get + create run as the caller, so RBAC is enforced
 //     (a caller who can't create ModelRoutes gets an honest 403).
 //   - Labelled managedByModelPicker so it is NOT mistaken for a connected provider.
+//
 //nolint:unparam // namespace varies once m21.3 wires this into the create/generate handler.
 func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runtime.Scheme, namespace, provider, model string) (string, *createError) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
