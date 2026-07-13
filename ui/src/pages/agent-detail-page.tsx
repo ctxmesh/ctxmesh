@@ -31,6 +31,7 @@ import {
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { RunInspector } from "@/components/dashboard/run-inspector";
+import { UseAgentPanel } from "@/components/dashboard/use-agent-panel";
 import {
   api,
   ApiError,
@@ -873,6 +874,12 @@ function OverviewTab({
           <BindingsList bindings={detail.bindings} />
         </div>
       </div>
+
+      <UseAgentPanel
+        name={detail.name}
+        executionModel={detail.executionModel}
+        url={detail.url}
+      />
 
       <RunPanel
         ns={detail.namespace}
