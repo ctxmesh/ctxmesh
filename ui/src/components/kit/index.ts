@@ -32,6 +32,9 @@ export type { ForbiddenInlineProps } from "./forbidden-inline";
 
 export { ComboSelect } from "./combo-select";
 
+export { ResourceLink, resourcePath } from "./resource-link";
+export type { ResourceKind } from "./resource-link";
+
 export {
   Skeleton,
   SkeletonText,
