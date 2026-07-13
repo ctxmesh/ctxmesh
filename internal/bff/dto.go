@@ -345,6 +345,12 @@ type CostResponse struct {
 	Summary CostSummary   `json:"summary"`
 	Latency []MetricPoint `json:"latency"`
 	Scale   []MetricPoint `json:"scale"`
+	// Notice is a human-readable degrade message, present ONLY when the cost data
+	// could not be loaded because the observability backend is transiently
+	// unavailable (slow/circuit-broken trace store). The SPA renders it as a calm
+	// "temporarily unavailable" banner over an empty view instead of a red error.
+	// Omitted (absent on the wire) on the normal path — a backward-compatible field.
+	Notice string `json:"notice,omitempty"`
 }
 
 // --- Cost breakdown by agent (GET /api/cost/breakdown?by=agent) --------------
@@ -379,6 +385,9 @@ type CostBreakdownResponse struct {
 	Agents     []AgentCostItem `json:"agents"`
 	Total      CostSummary     `json:"total"`
 	NextCursor string          `json:"nextCursor"`
+	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
+	// is transiently unavailable. Omitted on the normal path (backward-compatible).
+	Notice string `json:"notice,omitempty"`
 }
 
 // --- Recent runs (GET /api/runs) --------------------------------------------
@@ -402,6 +411,10 @@ type RunSummary struct {
 type RunListResponse struct {
 	Runs       []RunSummary `json:"runs"`
 	NextCursor string       `json:"nextCursor"`
+	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
+	// is transiently unavailable (slow/circuit-broken). Omitted on the normal path
+	// (backward-compatible), so the existing recent-runs consumption is unaffected.
+	Notice string `json:"notice,omitempty"`
 }
 
 // AgentRunsResponse is returned by GET /api/agents/{ns}/{name}/runs — the bounded

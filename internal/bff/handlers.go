@@ -40,6 +40,13 @@ const (
 // defaultRunLimit bounds GET /api/runs when the caller passes no ?limit.
 const defaultRunLimit = 20
 
+// noticeObservabilityDegraded is the calm degrade message the cost/runs handlers
+// return (with a 200 + empty result) when the Langfuse adapter reports
+// ErrUpstreamUnavailable — the trace store is transiently slow/circuit-broken.
+// The SPA renders it as a "temporarily unavailable" banner rather than treating an
+// empty result as "no data" or a red error (honest degrade, ADR 0005).
+const noticeObservabilityDegraded = "Observability is temporarily unavailable — the trace store is slow to respond. Try again shortly, or narrow the time range."
+
 // The list-contract page bounds (ui-foundation §4) applied to GET /api/agents:
 // ?limit defaults to defaultListLimit and is capped at maxListLimit so a single
 // request can never ask the API server for an unbounded page.
@@ -330,6 +337,15 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if errors.Is(err, ErrUpstreamUnavailable) {
+			// The trace store is transiently slow/circuit-broken (Langfuse 422). Degrade
+			// calmly: a 200 with an empty list + a notice, NOT a red 502.
+			s.log.Info("runs list degraded: trace store temporarily unavailable")
+			writeJSON(w, http.StatusOK, RunListResponse{
+				Runs: []RunSummary{}, NextCursor: "", Notice: noticeObservabilityDegraded,
+			})
+			return
+		}
 		s.log.Error(err, "fetch runs failed")
 		writeError(w, http.StatusBadGateway, "failed to fetch runs")
 		return
@@ -337,7 +353,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if page.Runs == nil {
 		page.Runs = []RunSummary{}
 	}
-	writeJSON(w, http.StatusOK, RunListResponse(page))
+	writeJSON(w, http.StatusOK, RunListResponse{Runs: page.Runs, NextCursor: page.NextCursor})
 }
 
 // handleCost serves GET /api/cost — the dashboard's cost/usage view. It folds
@@ -350,6 +366,18 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 
 	summary, err := s.adapters.Langfuse.CostUsage(ctx)
 	if err != nil {
+		if errors.Is(err, ErrUpstreamUnavailable) {
+			// Trace store transiently unavailable — calm 200 with an empty rollup +
+			// notice rather than a red 502 (honest degrade).
+			s.log.Info("cost view degraded: trace store temporarily unavailable")
+			writeJSON(w, http.StatusOK, CostResponse{
+				Summary: CostSummary{ByModel: []MetricPoint{}},
+				Latency: []MetricPoint{},
+				Scale:   []MetricPoint{},
+				Notice:  noticeObservabilityDegraded,
+			})
+			return
+		}
 		s.log.Error(err, "fetch cost usage failed")
 		writeError(w, http.StatusBadGateway, "failed to fetch cost usage")
 		return
@@ -428,6 +456,18 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrBadParam) {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, ErrUpstreamUnavailable) {
+			// Trace store transiently unavailable — calm 200 with an empty breakdown +
+			// notice rather than a red 502 (honest degrade).
+			s.log.Info("cost breakdown degraded: trace store temporarily unavailable")
+			writeJSON(w, http.StatusOK, CostBreakdownResponse{
+				Agents:     []AgentCostItem{},
+				Total:      CostSummary{ByModel: []MetricPoint{}},
+				NextCursor: "",
+				Notice:     noticeObservabilityDegraded,
+			})
 			return
 		}
 		s.log.Error(err, "cost breakdown failed")

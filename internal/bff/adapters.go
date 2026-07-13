@@ -176,6 +176,17 @@ type LangfuseAdapter interface {
 // a 502 — an honest degrade, never a 500.
 var ErrTraceNotFound = errors.New("trace not found")
 
+// ErrUpstreamUnavailable is returned by the Langfuse adapter when the backend
+// reports a TRANSIENT self-protective failure — specifically the legacy
+// trace-list endpoint's 422 "Request timed out" / circuit-break on a slow
+// ClickHouse (Langfuse OSS v3: the list API scans and times out, then fast-fails
+// subsequent calls; a v2 Observations API that would avoid this is Cloud/v4-only).
+// The handler maps it to a CALM 200 with an empty result + a `notice` — the
+// console degrades honestly ("observability temporarily unavailable") instead of
+// flashing a red 502. This is NOT a config error (that stays the nil-adapter 501)
+// and NOT a bad request (that stays ErrBadParam 400); it is "the store is busy."
+var ErrUpstreamUnavailable = errors.New("upstream temporarily unavailable")
+
 // PrometheusAdapter queries Prometheus for cost/latency/scale metrics that back
 // the native dashboard charts (m12.5). The Prometheus endpoint/credentials stay
 // server-side (injected env); the browser only receives the flat MetricPoints.
