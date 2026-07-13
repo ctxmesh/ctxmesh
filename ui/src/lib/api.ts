@@ -545,6 +545,9 @@ export interface ProviderModel {
 // never in a store/localStorage/sessionStorage/URL (ADR 0015).
 export interface ConnectProviderRequest {
   provider: string;
+  // connection (m22/ADR 0026): the named connection this key belongs to, so a
+  // user can hold multiple keys per provider type. Optional; defaults to provider.
+  connection?: string;
   displayName: string;
   apiKey: string;
   baseURL?: string;
@@ -1735,10 +1738,11 @@ export const api = {
   createAgent: async (
     agentYAML: string,
     namespace: string,
-    // model (m21): the picked (provider, model). When set, the BFF ensures a
-    // ModelRoute serving it and points the agent at it — the user picks a MODEL,
-    // the platform manages the ROUTE. Absent → the YAML's own model.route is used.
-    model?: { provider: string; model: string },
+    // model (m21; connection added m22/ADR 0026): the picked (connection, provider,
+    // model). When set, the BFF ensures a ModelRoute serving it on that connection
+    // and points the agent at it — the user picks a MODEL, the platform manages the
+    // ROUTE. Absent → the YAML's own model.route is used.
+    model?: { connection?: string; provider: string; model: string },
     signal?: AbortSignal,
   ): Promise<CreateAgentResponse> => {
     const res = await apiFetch("/api/agents", {
