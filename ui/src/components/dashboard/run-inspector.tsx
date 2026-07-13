@@ -111,6 +111,7 @@ function fmtCost(usd: number): string {
 type State =
   | { kind: "loading" }
   | { kind: "ingesting" } // 404 → Langfuse ingestion lag; polling, not a failure
+  | { kind: "unconfigured" } // 501 → no trace backend wired; calm degrade, not a failure
   | { kind: "ready"; detail: TraceDetailResponse }
   | { kind: "error"; message: string; forbidden: boolean };
 
@@ -148,6 +149,13 @@ export function RunInspector({ traceId }: { traceId: string }) {
           if (err instanceof ApiError && err.isNotFound && i < ingestBackoffMs.length) {
             setState({ kind: "ingesting" });
             timer = setTimeout(() => attempt(i + 1), ingestBackoffMs[i]);
+            return;
+          }
+          // 501 → no trace backend wired (Langfuse absent). An unwired optional
+          // integration is NOT a failure — degrade calmly; the run's result is
+          // still shown by the Run panel (spec console-usability, U1).
+          if (err instanceof ApiError && err.isNotImplemented) {
+            setState({ kind: "unconfigured" });
             return;
           }
           const forbidden = err instanceof ApiError && err.isForbidden;
@@ -223,6 +231,23 @@ export function RunInspector({ traceId }: { traceId: string }) {
       >
         <span>The trace is still landing…</span>
         <span className="text-xs">Traces take ~20s to ingest after a run completes.</span>
+      </div>
+    );
+  }
+
+  if (state.kind === "unconfigured") {
+    // 501: no trace backend wired. Calm "not configured" — never a red error. The
+    // run itself succeeded; its result is shown by the Run panel above.
+    return (
+      <div
+        className="flex h-40 flex-col items-center justify-center gap-1 rounded-lg border bg-card text-sm text-muted-foreground shadow-card"
+        data-testid="run-inspector-unconfigured"
+      >
+        <span>Trace view not configured</span>
+        <span className="text-xs">
+          No trace backend is wired in this cluster, so the step-by-step trace
+          isn't available. The run completed — its result is shown above.
+        </span>
       </div>
     );
   }

@@ -129,4 +129,15 @@ describe("RunInspector (native summary from flat spans)", () => {
     expect(await screen.findByTestId("run-inspector-ingesting")).toBeInTheDocument();
     expect(screen.queryByText(/couldn't load the run/i)).not.toBeInTheDocument();
   });
+
+  it("degrades calmly on a 501 (no trace backend), never a hard error (m22.2/U1)", async () => {
+    // 501 = the Langfuse trace adapter isn't wired — an unwired optional
+    // integration is NOT a failure. Show a calm "not configured" state; the run's
+    // result is still shown by the Run panel (spec console-usability).
+    stubTrace([], false, 501);
+    render(<MemoryRouter><RunInspector traceId="t1" /></MemoryRouter>);
+    expect(await screen.findByTestId("run-inspector-unconfigured")).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the run/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not implemented/i)).not.toBeInTheDocument();
+  });
 });
