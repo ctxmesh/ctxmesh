@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ComboSelect,
   ConfirmDialog,
   DetailDrawer,
   EmptyState,
@@ -376,8 +377,10 @@ function providerToForm(p: ModelRouteProviderDTO): ProviderForm {
 function useConnectedModels(): {
   providerNames: string[];
   modelsForProvider: (provider: string) => string[];
+  secretBindingNames: string[];
 } {
   const [connected, setConnected] = React.useState<ProviderSummary[]>([]);
+  const [bindingNames, setBindingNames] = React.useState<string[]>([]);
   React.useEffect(() => {
     const ctrl = new AbortController();
     api
@@ -385,6 +388,14 @@ function useConnectedModels(): {
       .then((r) => setConnected(r.items ?? []))
       .catch(() => {
         // No providers / no permission → the fields stay free-text (no dropdown).
+      });
+    // The SecretBindings the caller can see → a dropdown for secretBindingRef
+    // instead of free-text (M22/U2). Degrades to Custom… on failure.
+    api
+      .listSecretBindings({ limit: 100 }, ctrl.signal)
+      .then((r) => setBindingNames((r.items ?? []).map((b) => b.name)))
+      .catch(() => {
+        /* no bindings / no permission → secretBindingRef stays type-able. */
       });
     return () => ctrl.abort();
   }, []);
@@ -402,37 +413,10 @@ function useConnectedModels(): {
     providerNames: [...modelsByProvider.keys()],
     modelsForProvider: (provider: string) =>
       modelsByProvider.get(provider.trim()) ?? [],
+    secretBindingNames: [...new Set(bindingNames)],
   };
 }
 
-// ProviderModelDatalists renders the shared <datalist>s a route form's provider +
-// model Inputs point at (via `list={...}`), so both become type-or-pick dropdowns.
-function ProviderModelDatalists({
-  idPrefix,
-  i,
-  providerNames,
-  models,
-}: {
-  idPrefix: string;
-  i: number;
-  providerNames: string[];
-  models: string[];
-}) {
-  return (
-    <>
-      <datalist id={`${idPrefix}-providers-${i}`}>
-        {providerNames.map((p) => (
-          <option key={p} value={p} />
-        ))}
-      </datalist>
-      <datalist id={`${idPrefix}-models-${i}`}>
-        {models.map((m) => (
-          <option key={m} value={m} />
-        ))}
-      </datalist>
-    </>
-  );
-}
 
 function RouteEditWizard({
   detail,
@@ -445,7 +429,8 @@ function RouteEditWizard({
 }) {
   const { toast } = useToast();
   const { reprobe } = useCapabilities();
-  const { providerNames, modelsForProvider } = useConnectedModels();
+  const { providerNames, modelsForProvider, secretBindingNames } =
+    useConnectedModels();
   const [providers, setProviders] = React.useState<ProviderForm[]>(
     detail.providers.length > 0
       ? detail.providers.map(providerToForm)
@@ -538,31 +523,30 @@ function RouteEditWizard({
             </div>
             <div className="grid grid-cols-2 gap-3">
               <FormField id={`provider-${i}`} label="Provider">
-                <Input
+                {/* Real dropdown of connected providers (+ Custom… for unknown /
+                    mock providers) — not a datalist that filters to the typed
+                    value (M22/U2). */}
+                <ComboSelect
                   id={`provider-${i}`}
-                  list={`edit-providers-${i}`}
                   value={p.provider}
-                  onChange={(e) => setProvider(i, "provider", e.target.value)}
-                  placeholder="anthropic"
-                  data-testid={`provider-name-${i}`}
+                  options={providerNames}
+                  onChange={(v) => setProvider(i, "provider", v)}
+                  placeholder="— provider —"
+                  customPlaceholder="anthropic"
+                  testId={`provider-name-${i}`}
                 />
               </FormField>
               <FormField id={`model-${i}`} label="Model">
-                <Input
+                <ComboSelect
                   id={`model-${i}`}
-                  list={`edit-models-${i}`}
                   value={p.model}
-                  onChange={(e) => setProvider(i, "model", e.target.value)}
-                  placeholder="claude-sonnet-5"
-                  data-testid={`provider-model-${i}`}
+                  options={modelsForProvider(p.provider)}
+                  onChange={(v) => setProvider(i, "model", v)}
+                  placeholder="— model —"
+                  customPlaceholder="claude-sonnet-5"
+                  testId={`provider-model-${i}`}
                 />
               </FormField>
-              <ProviderModelDatalists
-                idPrefix="edit"
-                i={i}
-                providerNames={providerNames}
-                models={modelsForProvider(p.provider)}
-              />
             </div>
             <FormField id={`priority-${i}`} label="Priority (≥1)">
               <Input
@@ -574,14 +558,14 @@ function RouteEditWizard({
               />
             </FormField>
             <FormField id={`secret-${i}`} label="Secret binding ref">
-              <Input
+              <ComboSelect
                 id={`secret-${i}`}
                 value={p.secretBindingRef}
-                onChange={(e) =>
-                  setProvider(i, "secretBindingRef", e.target.value)
-                }
-                placeholder="my-openai-binding"
-                data-testid={`provider-secretbinding-${i}`}
+                options={secretBindingNames}
+                onChange={(v) => setProvider(i, "secretBindingRef", v)}
+                placeholder="— secret binding —"
+                customPlaceholder="my-openai-binding"
+                testId={`provider-secretbinding-${i}`}
               />
             </FormField>
             <FormField id={`apibase-${i}`} label="API base (optional override)">
@@ -766,7 +750,8 @@ export function NewModelRoutePage() {
   const [saveState, setSaveState] = React.useState<EditState>({ kind: "idle" });
   const { toast } = useToast();
   const { reprobe } = useCapabilities();
-  const { providerNames, modelsForProvider } = useConnectedModels();
+  const { providerNames, modelsForProvider, secretBindingNames } =
+    useConnectedModels();
 
   function setProvider(i: number, field: keyof ProviderForm, val: string) {
     setProviders((prev) =>
@@ -880,31 +865,27 @@ export function NewModelRoutePage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <FormField id={`new-provider-${i}`} label="Provider">
-                <Input
+                <ComboSelect
                   id={`new-provider-${i}`}
-                  list={`new-providers-${i}`}
                   value={p.provider}
-                  onChange={(e) => setProvider(i, "provider", e.target.value)}
-                  placeholder="anthropic"
-                  data-testid={`new-provider-name-${i}`}
+                  options={providerNames}
+                  onChange={(v) => setProvider(i, "provider", v)}
+                  placeholder="— provider —"
+                  customPlaceholder="anthropic"
+                  testId={`new-provider-name-${i}`}
                 />
               </FormField>
               <FormField id={`new-model-${i}`} label="Model">
-                <Input
+                <ComboSelect
                   id={`new-model-${i}`}
-                  list={`new-models-${i}`}
                   value={p.model}
-                  onChange={(e) => setProvider(i, "model", e.target.value)}
-                  placeholder="claude-sonnet-5"
-                  data-testid={`new-provider-model-${i}`}
+                  options={modelsForProvider(p.provider)}
+                  onChange={(v) => setProvider(i, "model", v)}
+                  placeholder="— model —"
+                  customPlaceholder="claude-sonnet-5"
+                  testId={`new-provider-model-${i}`}
                 />
               </FormField>
-              <ProviderModelDatalists
-                idPrefix="new"
-                i={i}
-                providerNames={providerNames}
-                models={modelsForProvider(p.provider)}
-              />
             </div>
             <FormField id={`new-priority-${i}`} label="Priority (≥1)">
               <Input
@@ -916,14 +897,14 @@ export function NewModelRoutePage() {
               />
             </FormField>
             <FormField id={`new-secret-${i}`} label="Secret binding ref">
-              <Input
+              <ComboSelect
                 id={`new-secret-${i}`}
                 value={p.secretBindingRef}
-                onChange={(e) =>
-                  setProvider(i, "secretBindingRef", e.target.value)
-                }
-                placeholder="my-openai-binding"
-                data-testid={`new-provider-secretbinding-${i}`}
+                options={secretBindingNames}
+                onChange={(v) => setProvider(i, "secretBindingRef", v)}
+                placeholder="— secret binding —"
+                customPlaceholder="my-openai-binding"
+                testId={`new-provider-secretbinding-${i}`}
               />
             </FormField>
             <FormField id={`new-apibase-${i}`} label="API base">
