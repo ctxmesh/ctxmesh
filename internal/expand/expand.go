@@ -62,10 +62,13 @@ const AnnotationSourceSpec = "agents.ctxmesh.ai/source-spec"
 
 const (
 	// DefaultManagedImage is the pinned managed-agent image ref used when an
-	// agent sets `runtime: managed` and omits `image`. Override at deploy time
-	// via the Helm value managedAgent.image (surfaced to expand as the
-	// MANAGED_AGENT_IMAGE env). This is the image built by
-	// `make docker-build-managed`.
+	// agent sets `runtime: managed` and omits `image`. Override at deploy time by
+	// setting the MANAGED_AGENT_IMAGE env on the BFF — currently via the optional
+	// `bff-adapters` Secret (envFrom, config/bff/deployment.yaml); the dev
+	// bring-up wires it to the loaded dev.local/managed-agent:e2e ref (note: the
+	// ghcr default is NOT resolvable in a local kind cluster — Knative resolves
+	// the tag→digest against ghcr.io before pulling — so dev MUST override it).
+	// This is the image built by `make docker-build-managed`.
 	DefaultManagedImage = "ghcr.io/ctxmesh/managed-agent:latest"
 
 	// DefaultManagedToolRegistry is the ToolRegistry the generated MCPToolBindings
