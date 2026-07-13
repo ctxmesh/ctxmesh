@@ -144,6 +144,32 @@ func connectBody(t *testing.T, provider, key, baseURL, ns string) []byte {
 
 // --- POST /api/providers: the connect flow -----------------------------------
 
+// TestPrimaryModelPrefersFlagship pins the M22/ADR-0026 default-model fix: the
+// connection's default route model is a FLAGSHIP, not the alphabetically-first
+// (which surfaced small/experimental tiers like claude-fable-5).
+func TestPrimaryModelPrefersFlagship(t *testing.T) {
+	// Alphabetically sorted (as discovery returns them): fable + haiku sort first,
+	// but the default must skip those small tiers for a flagship (opus/sonnet).
+	anthropic := []string{
+		"claude-fable-5", "claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-8",
+		"claude-sonnet-4-6", "claude-sonnet-5",
+	}
+	assert.Equal(t, "claude-opus-4-5", primaryModel(anthropic),
+		"must default to a flagship (opus/sonnet), never claude-fable-5")
+
+	// OpenAI: skip mini, prefer a gpt-4/5 flagship.
+	assert.Equal(t, "gpt-4o", primaryModel([]string{"gpt-4o", "gpt-4o-mini"}))
+
+	// No flagship keyword but not small-tier → the first mid-tier model.
+	assert.Equal(t, "some-model", primaryModel([]string{"some-model", "other"}))
+
+	// All small-tier → fall back to the first (better than the schema default).
+	assert.Equal(t, "haiku-only", primaryModel([]string{"haiku-only"}))
+
+	// Empty → the schema-valid fallback.
+	assert.Equal(t, defaultPrimaryModel, primaryModel(nil))
+}
+
 // TestConnectCreatesAllThreeObjects proves the happy path: a valid key is
 // validated against the (fake) provider, then a Secret + SecretBinding +
 // ModelRoute are created with the CALLER'S client — and the key is present ONLY
