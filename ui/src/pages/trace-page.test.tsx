@@ -168,6 +168,18 @@ describe("TracePage (m16.7)", () => {
     expect(screen.queryByTestId("trace-page")).toBeNull();
   });
 
+  it("degrades calmly on a 501 (no trace backend), not an error (m22.2/U1)", async () => {
+    // 501 = the trace adapter isn't wired: a calm "not configured" state, never
+    // the red "Couldn't load the trace" error (spec console-usability).
+    installFetch({ detailOk: false, detailStatus: 501 });
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("trace-page-unconfigured")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("trace-page-error")).toBeNull();
+  });
+
   it("includes the FeedbackPanel (feedback-panel testid)", async () => {
     installFetch();
     renderPage();

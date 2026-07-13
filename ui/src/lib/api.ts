@@ -1087,6 +1087,13 @@ export class ApiError extends Error {
   get isNotFound(): boolean {
     return this.status === 404;
   }
+
+  /** True for a 501 — an OPTIONAL integration isn't wired (e.g. the Langfuse
+   *  trace/cost/runs adapter). Surfaces MUST honest-degrade to a calm "not
+   *  configured" state on 501, never a red error (spec console-usability). */
+  get isNotImplemented(): boolean {
+    return this.status === 501;
+  }
 }
 
 // --- Session seam -----------------------------------------------------------
