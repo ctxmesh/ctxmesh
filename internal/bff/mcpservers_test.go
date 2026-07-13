@@ -319,9 +319,13 @@ func TestRegisterMCPNonMCPEndpointIs4xx(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a non-MCP endpoint is a 422 teaching error")
 }
 
-// TestRegisterMCPBadKeyIs401 proves a keyed server that rejects the bearer surfaces
-// a clean 401 (not a 500), and no objects are created.
-func TestRegisterMCPBadKeyIs401(t *testing.T) {
+// TestRegisterMCPBadKeyIs422 proves a keyed TARGET server that rejects the bearer
+// surfaces a 422 probe error (NOT a 401), and no objects are created. A 401 here
+// would be catastrophic: the SPA treats any mid-session 401 as the CALLER's own
+// session expiring and logs them out — so probing an auth-required MCP server must
+// never return 401 (M23/U-mcp-401). The caller-auth 401 tests (anon register) are
+// unaffected — this is only the upstream target-server rejection.
+func TestRegisterMCPBadKeyIs422(t *testing.T) {
 	mcp := fakeMCPServer(t, true) // requires theMCPKey
 	createCalled := false
 	c := fake.NewClientBuilder().
@@ -336,7 +340,8 @@ func TestRegisterMCPBadKeyIs401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+		"a target-server auth rejection must be 422, never a session-401")
 	assert.False(t, createCalled, "a rejected key creates NO objects")
 	assert.NotContains(t, rec.Body.String(), "wrong-bearer")
 	assert.NotContains(t, lb.String(), "wrong-bearer")
