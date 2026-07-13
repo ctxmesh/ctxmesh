@@ -34,3 +34,25 @@ describe("intent-shaped nav (m20.8)", () => {
     expect(labels).not.toContain("Secret bindings");
   });
 });
+
+// The m23.7 consolidation (audit B3/B5): ONE primary create entry ("New agent"),
+// with the raw hand-authoring "Config builder" demoted to Advanced; and the three
+// MCP/tool surfaces grouped into a dedicated "Tools" section out of "Build".
+describe("nav consolidation (m23.7)", () => {
+  const buildLabels = () =>
+    NAV_SECTIONS.find((s) => s.heading === "Build")?.items.map((i) => i.label) ??
+    [];
+
+  it("keeps 'New agent' as the one create entry in Build; Config builder is Advanced", () => {
+    expect(buildLabels()).toContain("New agent");
+    expect(buildLabels()).not.toContain("Config builder");
+    expect(sectionOf("Config builder")).toBe("Advanced");
+  });
+
+  it("groups the MCP/tool surfaces into a dedicated Tools section (not Build)", () => {
+    expect(sectionOf("Add MCP server")).toBe("Tools");
+    expect(sectionOf("MCP approvals")).toBe("Tools");
+    expect(sectionOf("Tool catalog")).toBe("Tools");
+    expect(buildLabels()).not.toContain("Add MCP server");
+  });
+});
