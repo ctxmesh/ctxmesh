@@ -118,16 +118,6 @@ export const NAV_SECTIONS: NavSection[] = [
         requiresWrite: { resource: RES_AGENTS, verb: "create" },
       },
       {
-        // The re-housed config-builder — a WRITE surface (it applies CRDs), so
-        // it is hidden from a viewer's nav. It gates on create agentdeployments.
-        id: "config",
-        label: "Config builder",
-        icon: SlidersHorizontal,
-        milestone: "M13",
-        route: "/config",
-        requiresWrite: { resource: RES_AGENTS, verb: "create" },
-      },
-      {
         // The re-housed Playground — running an agent is a create/invoke-shaped
         // op; a viewer's chrome hides it (they still get an honest 403 if they
         // reach it directly). Gated on create agentdeployments (the run path).
@@ -138,6 +128,32 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/playground",
         requiresWrite: { resource: RES_AGENTS, verb: "create" },
       },
+      {
+        // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
+        // textual diff. Readable by any authenticated caller; create/delete gated.
+        id: "prompts",
+        label: "Prompts",
+        icon: GitBranch,
+        milestone: "M17",
+        route: "/prompts",
+      },
+      {
+        // EvalSuite builder + results browser (m17.12). Lists EvalSuites + a
+        // wizard to create; results view is read-open; create gated.
+        id: "evals",
+        label: "Evals",
+        icon: TestTube2,
+        milestone: "M17",
+        route: "/evals",
+      },
+    ],
+  },
+  {
+    // Tools (m23.7) — the three MCP/tool surfaces grouped into ONE area, out of
+    // the "Build" agent-lifecycle flow they used to clutter (the audit B5): add a
+    // BYO MCP server, approve pending ones, and browse the merged catalog.
+    heading: "Tools",
+    items: [
       {
         // Add-an-MCP wizard (m14.9). Registering a BYO MCP server creates a
         // ToolRegistry entry (+ a Secret for its key) — a WRITE surface, hidden
@@ -171,24 +187,6 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: BookOpen,
         milestone: "M17",
         route: "/tools/catalog",
-      },
-      {
-        // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
-        // textual diff. Readable by any authenticated caller; create/delete gated.
-        id: "prompts",
-        label: "Prompts",
-        icon: GitBranch,
-        milestone: "M17",
-        route: "/prompts",
-      },
-      {
-        // EvalSuite builder + results browser (m17.12). Lists EvalSuites + a
-        // wizard to create; results view is read-open; create gated.
-        id: "evals",
-        label: "Evals",
-        icon: TestTube2,
-        milestone: "M17",
-        route: "/evals",
       },
     ],
   },
@@ -240,6 +238,19 @@ export const NAV_SECTIONS: NavSection[] = [
     // the console used to expose). The pages are unchanged — only their placement.
     heading: "Advanced",
     items: [
+      {
+        // The config-builder — the raw agent.yaml → CRD-apply surface. Moved out
+        // of "Build" (m23.7 / audit B3): "New agent" is the ONE primary create
+        // entry; this hand-authoring path lives under Advanced for power users who
+        // want to edit the YAML directly. Unchanged page — placement only. A WRITE
+        // surface (applies CRDs), hidden from a viewer's nav.
+        id: "config",
+        label: "Config builder",
+        icon: SlidersHorizontal,
+        milestone: "M13",
+        route: "/config",
+        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+      },
       {
         id: "registries",
         label: "Registries",
