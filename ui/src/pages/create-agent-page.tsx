@@ -1173,7 +1173,20 @@ function SharedReview({
 }) {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { namespace } = useNamespace();
+  const { namespace, list } = useNamespace();
+  // Target namespace = a populated dropdown of the caller's ACCESSIBLE namespaces
+  // (M22/Theme 2), defaulting to the shell scope (or "default" when scope is
+  // "all"). No more silently creating in "default" with no picker (U-namespace).
+  const nsOptions =
+    list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
+  const [targetNs, setTargetNs] = React.useState(namespace || "default");
+  // When the accessible list loads and doesn't include the current target, snap
+  // to the first namespace the caller CAN use (access-scoped, not a dead default).
+  React.useEffect(() => {
+    if (list.kind !== "ready") return;
+    const names = list.namespaces.map((n) => n.name);
+    if (names.length > 0 && !names.includes(targetNs)) setTargetNs(names[0]);
+  }, [list, targetNs]);
   // RBAC-aware chrome (§3, display-only): Create gates on agentdeployments.create.
   // A viewer sees no Create affordance; a forced 403 (stale "yes") → reprobe +
   // ForbiddenInline (the API is the real gate, ADR 0011).
@@ -1237,7 +1250,7 @@ function SharedReview({
     try {
       const res = await api.createAgent(
         finalYAML,
-        namespace,
+        targetNs,
         modelPick && modelPick.provider && modelPick.model
           ? modelPick
           : undefined,
@@ -1389,6 +1402,22 @@ function SharedReview({
               {state.status ? ` (${state.status})` : ""}
             </p>
           )
+        )}
+        {canCreate && nsOptions.length > 0 && (
+          <FormField id="create-namespace" label="Namespace">
+            <Select
+              id="create-namespace"
+              value={nsOptions.includes(targetNs) ? targetNs : ""}
+              onChange={(e) => setTargetNs(e.target.value)}
+              data-testid="create-namespace-select"
+            >
+              {nsOptions.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </Select>
+          </FormField>
         )}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
