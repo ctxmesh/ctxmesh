@@ -4,7 +4,7 @@ import { CheckCircle2, Circle, Coins, Network, RefreshCw } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { TopologyGraph } from "@/components/dashboard/topology-graph";
+import { TopologySummary } from "@/components/dashboard/topology-summary";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
 import {
@@ -203,8 +203,10 @@ export function DashboardPage() {
           );
         })()}
 
-      {/* 1. Live topology — a clickable preview (m20.7: nodes navigate; pan/zoom
-          on). The full grouped/searchable interactive graph is the /topology page. */}
+      {/* 1. Live topology — a scale-first SUMMARY (m22.6/U5): counts + health
+          rollups + hotspots that need attention, not a node graph that becomes an
+          unreadable wall at scale. The full grouped/searchable interactive graph
+          is the /topology page. */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -222,7 +224,7 @@ export function DashboardPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="h-[26rem] overflow-hidden rounded-md border">
+          <div className="min-h-[16rem] overflow-hidden rounded-md border p-4">
             {topology.kind === "loading" && (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 Loading topology…
@@ -234,7 +236,7 @@ export function DashboardPage() {
               </div>
             )}
             {topology.kind === "ready" && (
-              <TopologyGraph topology={topology.data} />
+              <TopologySummary topology={topology.data} />
             )}
           </div>
         </CardContent>

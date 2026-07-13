@@ -261,7 +261,11 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   const modelChoices = React.useMemo(
     () =>
       providers.flatMap((p) =>
-        p.models.map((m) => ({ id: m, provider: p.provider })),
+        p.models.map((m) => ({
+          id: m,
+          provider: p.provider,
+          connection: p.name,
+        })),
       ),
     [providers],
   );
@@ -315,15 +319,12 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
         advancedYAML={stage.gen.expanded ?? stage.gen.agentYAML}
         // m21: run the agent on the SAME model the user picked to generate — the BFF
         // ensures a route for it (so any connected model works, not just the primary).
-        modelPick={
-          model
-            ? {
-                provider:
-                  modelChoices.find((c) => c.id === model)?.provider ?? "",
-                model,
-              }
-            : undefined
-        }
+        modelPick={(() => {
+          const hit = modelChoices.find((c) => c.id === model);
+          return hit
+            ? { connection: hit.connection, provider: hit.provider, model }
+            : undefined;
+        })()}
         onBack={() => setStage({ kind: "review", gen: stage.gen })}
         header={
           <GenerationReviewHeader
@@ -556,9 +557,13 @@ function ConfigureFlow({
   const [prompts, setPrompts] = React.useState<string[]>([]);
   // m21: the intent-first model picker — a flat list of the connected providers'
   // models. Picking one sends it as `model` on create; the BFF ensures the route.
+  // m22 (named connections, ADR 0026): a pick is a (connection, provider, model).
+  // `connection` is the connect object's name — multiple connections may share a
+  // provider type, so the pick must carry the connection, not just the type.
   const [connectedModels, setConnectedModels] = React.useState<
-    { provider: string; model: string }[]
+    { connection: string; provider: string; model: string }[]
   >([]);
+  // pickedModel is the composite key `connection|model` (unique per pick).
   const [pickedModel, setPickedModel] = React.useState("");
   React.useEffect(() => {
     const c = new AbortController();
@@ -575,14 +580,21 @@ function ConfigureFlow({
       .then((r) => {
         if (c.signal.aborted) return;
         const flat = (r.items ?? []).flatMap((p) =>
-          p.models.map((m) => ({ provider: p.provider, model: m })),
+          p.models.map((m) => ({
+            connection: p.name,
+            provider: p.provider,
+            model: m,
+          })),
         );
         setConnectedModels(flat);
-        // m21 (provider-as-model-home): arriving from Providers "Use" pre-picks the
-        // first model of that provider so the user lands ready to create.
+        // m21/m22 (provider-as-model-home): arriving from Providers "Use" pre-picks
+        // the first model of that connection so the user lands ready to create.
         if (initialProvider) {
-          const first = flat.find((x) => x.provider === initialProvider);
-          if (first) setPickedModel((prev) => prev || first.model);
+          const first = flat.find(
+            (x) => x.connection === initialProvider || x.provider === initialProvider,
+          );
+          if (first)
+            setPickedModel((prev) => prev || `${first.connection}|${first.model}`);
         }
       })
       .catch(() => {
@@ -634,16 +646,18 @@ function ConfigureFlow({
         advancedYAML={toAgentYAML(form)}
         // m21: the picked model → the BFF ensures its route. If the user instead used
         // the Advanced "existing route" field, modelPick is empty and that route wins.
-        modelPick={
-          pickedModel
+        modelPick={(() => {
+          const hit = connectedModels.find(
+            (c) => `${c.connection}|${c.model}` === pickedModel,
+          );
+          return hit
             ? {
-                provider:
-                  connectedModels.find((c) => c.model === pickedModel)
-                    ?.provider ?? "",
-                model: pickedModel,
+                connection: hit.connection,
+                provider: hit.provider,
+                model: hit.model,
               }
-            : undefined
-        }
+            : undefined;
+        })()}
         onBack={() => setDone(false)}
       />
     );
@@ -778,8 +792,11 @@ function ConfigureFlow({
               >
                 <option value="">— pick a model —</option>
                 {connectedModels.map((c) => (
-                  <option key={`${c.provider}/${c.model}`} value={c.model}>
-                    {c.provider} / {c.model}
+                  <option
+                    key={`${c.connection}|${c.model}`}
+                    value={`${c.connection}|${c.model}`}
+                  >
+                    {c.connection} / {c.model}
                   </option>
                 ))}
               </Select>
@@ -1169,11 +1186,24 @@ function SharedReview({
   // sends it so the BFF ensures a ModelRoute serving it and points the agent at it —
   // the user picked a MODEL, the platform manages the ROUTE. Absent → the YAML's
   // own model.route is used (the Advanced path).
-  modelPick?: { provider: string; model: string };
+  modelPick?: { connection?: string; provider: string; model: string };
 }) {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { namespace } = useNamespace();
+  const { namespace, list } = useNamespace();
+  // Target namespace = a populated dropdown of the caller's ACCESSIBLE namespaces
+  // (M22/Theme 2), defaulting to the shell scope (or "default" when scope is
+  // "all"). No more silently creating in "default" with no picker (U-namespace).
+  const nsOptions =
+    list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
+  const [targetNs, setTargetNs] = React.useState(namespace || "default");
+  // When the accessible list loads and doesn't include the current target, snap
+  // to the first namespace the caller CAN use (access-scoped, not a dead default).
+  React.useEffect(() => {
+    if (list.kind !== "ready") return;
+    const names = list.namespaces.map((n) => n.name);
+    if (names.length > 0 && !names.includes(targetNs)) setTargetNs(names[0]);
+  }, [list, targetNs]);
   // RBAC-aware chrome (§3, display-only): Create gates on agentdeployments.create.
   // A viewer sees no Create affordance; a forced 403 (stale "yes") → reprobe +
   // ForbiddenInline (the API is the real gate, ADR 0011).
@@ -1237,7 +1267,7 @@ function SharedReview({
     try {
       const res = await api.createAgent(
         finalYAML,
-        namespace,
+        targetNs,
         modelPick && modelPick.provider && modelPick.model
           ? modelPick
           : undefined,
@@ -1389,6 +1419,22 @@ function SharedReview({
               {state.status ? ` (${state.status})` : ""}
             </p>
           )
+        )}
+        {canCreate && nsOptions.length > 0 && (
+          <FormField id="create-namespace" label="Namespace">
+            <Select
+              id="create-namespace"
+              value={nsOptions.includes(targetNs) ? targetNs : ""}
+              onChange={(e) => setTargetNs(e.target.value)}
+              data-testid="create-namespace-select"
+            >
+              {nsOptions.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </Select>
+          </FormField>
         )}
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">

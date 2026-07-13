@@ -10,6 +10,7 @@ import {
   DetailDrawer,
   EmptyState,
   ForbiddenInline,
+  ResourceLink,
   Wizard,
   type WizardStep,
   useToast,
@@ -258,7 +259,15 @@ function RegistryDetailContent({
           <ul className="space-y-1.5">
             {detail.status.members.map((m) => (
               <li key={m} className="flex items-center gap-2 text-sm">
-                <span className="font-mono text-xs">{m}</span>
+                {/* U4/Theme 1: a member is an AgentDeployment in this registry's
+                    namespace — link to its detail, never dead-end text. */}
+                <ResourceLink
+                  kind="agent"
+                  namespace={detail.namespace}
+                  name={m}
+                  className="font-mono text-xs"
+                  testId={`member-link-${m}`}
+                />
               </li>
             ))}
           </ul>

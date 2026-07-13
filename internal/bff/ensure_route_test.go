@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -88,5 +89,41 @@ func TestEnsureRouteForModel(t *testing.T) {
 		_, cerr := ensureRouteForModel(ctx, c, scheme, "default", "anthropic", "")
 		require.NotNil(t, cerr)
 		assert.Equal(t, 400, cerr.status)
+	})
+
+	t.Run("named connection: resolves the provider TYPE + binding from the connection route (ADR 0026)", func(t *testing.T) {
+		scheme := testScheme(t)
+		// A named connection "anthropic-prod" of provider type "anthropic", with its
+		// own SecretBinding (named after the connection by the connect flow).
+		connRoute := &agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "anthropic-prod",
+				Namespace: "default",
+				Labels:    map[string]string{labelManagedBy: managedByConnect},
+			},
+			Spec: agentsv1alpha1.ModelRouteSpec{
+				Providers: []agentsv1alpha1.ProviderRef{{
+					Provider:         "anthropic",
+					Model:            "claude-opus-4-8",
+					Priority:         1,
+					SecretBindingRef: "anthropic-prod",
+				}},
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(connRoute).Build()
+
+		name, cerr := ensureRouteForModel(ctx, c, scheme, "default", "anthropic-prod", "claude-sonnet-5")
+		require.Nil(t, cerr)
+		// The route name keys on the CONNECTION, not the provider type.
+		assert.Equal(t, "anthropic-prod-claude-sonnet-5", name)
+
+		var mr agentsv1alpha1.ModelRoute
+		require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &mr))
+		require.Len(t, mr.Spec.Providers, 1)
+		// The ensured route serves the connection's provider TYPE...
+		assert.Equal(t, "anthropic", mr.Spec.Providers[0].Provider)
+		assert.Equal(t, "claude-sonnet-5", mr.Spec.Providers[0].Model)
+		// ...and reuses the CONNECTION's binding (not a per-type one).
+		assert.Equal(t, "anthropic-prod", mr.Spec.Providers[0].SecretBindingRef)
 	})
 }

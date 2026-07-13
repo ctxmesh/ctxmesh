@@ -35,11 +35,12 @@ import (
 // connect label) never mistakes an auto route for a connected provider.
 const managedByModelPicker = "agent-engine-model-picker"
 
-// routeNameForModel derives a DETERMINISTIC RFC-1123 route name for a (provider, model)
+// routeNameForModel derives a DETERMINISTIC RFC-1123 route name for a (connection, model)
 // pair, so the same model always maps to the same route (idempotent reuse). e.g.
-// (anthropic, claude-sonnet-5) → "anthropic-claude-sonnet-5". Capped at 63 chars.
-func routeNameForModel(provider, model string) string {
-	base := strings.ToLower(strings.TrimSpace(provider)) + "-" +
+// (anthropic, claude-sonnet-5) → "anthropic-claude-sonnet-5"; a named connection
+// (anthropic-prod, claude-sonnet-5) → "anthropic-prod-claude-sonnet-5". Capped at 63 chars.
+func routeNameForModel(connection, model string) string {
+	base := strings.ToLower(strings.TrimSpace(connection)) + "-" +
 		strings.ToLower(strings.TrimSpace(model))
 	base = rfc1123Invalid.ReplaceAllString(base, "-")
 	base = strings.Trim(base, "-")
@@ -52,28 +53,55 @@ func routeNameForModel(provider, model string) string {
 	return base
 }
 
-// ensureRouteForModel get-or-creates a ModelRoute serving the given (provider, model),
-// reusing the provider's connect SecretBinding, and returns the route name. It is the
-// m21 seam that lets a user pick a MODEL and have the platform manage the ROUTE:
+// ensureRouteForModel get-or-creates a ModelRoute serving the given (connection, model),
+// reusing the CONNECTION's SecretBinding + provider type, and returns the route name. It
+// is the m21 seam (extended for named connections, ADR 0026) that lets a user pick a
+// MODEL on a CONNECTION and have the platform manage the ROUTE:
 //
 //   - Idempotent — a route with the deterministic name already existing is REUSED, never
-//     duplicated, so N agents on the same model share ONE route.
-//   - Reuses the provider's SecretBinding (named after the provider by the connect flow);
-//     it creates NO new Secret/binding — only a route.
-//   - Caller-scoped (ADR 0011): the get + create run as the caller, so RBAC is enforced
-//     (a caller who can't create ModelRoutes gets an honest 403).
+//     duplicated, so N agents on the same connection+model share ONE route.
+//   - Resolves the provider TYPE + SecretBinding from the connection's connect route, so
+//     the ensured route serves the right provider and reuses the connection's binding —
+//     NO new Secret/binding, only a route. Falls back to treating the connection name AS
+//     the provider type (the default/back-compat connection, or a mock/apiBase route).
+//   - Caller-scoped (ADR 0011): the gets + create run as the caller, so RBAC is enforced.
 //   - Labelled managedByModelPicker so it is NOT mistaken for a connected provider.
-func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runtime.Scheme, namespace, provider, model string) (string, *createError) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
+func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runtime.Scheme, namespace, connection, model string) (string, *createError) {
+	connection = strings.ToLower(strings.TrimSpace(connection))
 	model = strings.TrimSpace(model)
-	if provider == "" || model == "" {
-		return "", &createError{status: 400, msg: "provider and model are required to route a model"}
+	if connection == "" || model == "" {
+		return "", &createError{status: 400, msg: "connection and model are required to route a model"}
 	}
 	ns := namespace
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
-	name := routeNameForModel(provider, model)
+
+	// Resolve the connection's provider TYPE + SecretBinding from its connect route
+	// (ADR 0026). Fallback (NotFound): the connection name IS the provider type — the
+	// default connection, or a route predating named connections.
+	providerType := connection
+	bindingRef := providerRouteName(connection)
+	var connRoute agentsv1alpha1.ModelRoute
+	switch gerr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerRouteName(connection)}, &connRoute); {
+	case gerr == nil:
+		if len(connRoute.Spec.Providers) > 0 {
+			if p := connRoute.Spec.Providers[0]; p.Provider != "" {
+				providerType = strings.ToLower(p.Provider)
+				if p.SecretBindingRef != "" {
+					bindingRef = p.SecretBindingRef
+				}
+			}
+		}
+	case apierrors.IsNotFound(gerr):
+		// fall through with connection-as-type
+	case apierrors.IsForbidden(gerr):
+		return "", &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to read connection %q", connection)}
+	default:
+		return "", &createError{status: 502, msg: fmt.Sprintf("failed to read connection %q: %v", connection, gerr)}
+	}
+
+	name := routeNameForModel(connection, model)
 
 	// Reuse if the route already exists (idempotent — the common repeat case).
 	var existing agentsv1alpha1.ModelRoute
@@ -95,17 +123,15 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 			Namespace: ns,
 			Labels: map[string]string{
 				labelManagedBy: managedByModelPicker,
-				labelProvider:  provider,
+				labelProvider:  providerType,
 			},
 		},
 		Spec: agentsv1alpha1.ModelRouteSpec{
 			Providers: []agentsv1alpha1.ProviderRef{{
-				Provider: provider,
-				Model:    model,
-				Priority: 1,
-				// The connect flow names the provider's SecretBinding after the provider
-				// route name; reuse it so no new Secret/binding is created — only a route.
-				SecretBindingRef: providerRouteName(provider),
+				Provider:         providerType,
+				Model:            model,
+				Priority:         1,
+				SecretBindingRef: bindingRef,
 			}},
 			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
 		},

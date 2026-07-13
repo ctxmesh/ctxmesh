@@ -159,7 +159,10 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 
 	// (3) Create the three objects with the CALLER'S client. The key goes ONLY
 	// into the Secret; it is dropped from the request struct immediately after.
-	name := providerRouteName(req.Provider)
+	// Objects are named by the CONNECTION (ADR 0026), so a second key for the same
+	// provider type under a different connection name is a NEW connection, not a
+	// rotation of the first.
+	name := providerRouteName(req.connectionName())
 	created, cErr := createProviderObjects(r.Context(), caller, providerCreateSpec{
 		name:        name,
 		namespace:   ns,
@@ -191,10 +194,20 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// displayNameOrDefault returns the display name, defaulting to the provider id.
+// displayNameOrDefault returns the display name, defaulting to the connection id.
 func (req *ConnectProviderRequest) displayNameOrDefault() string {
 	if d := strings.TrimSpace(req.DisplayName); d != "" {
 		return d
+	}
+	return req.connectionName()
+}
+
+// connectionName returns the named connection (ADR 0026), defaulting to the
+// provider type when the caller didn't name it — so the existing single
+// connection stays a connection named after its provider type (migration-free).
+func (req *ConnectProviderRequest) connectionName() string {
+	if c := strings.TrimSpace(req.Connection); c != "" {
+		return strings.ToLower(c)
 	}
 	return strings.ToLower(strings.TrimSpace(req.Provider))
 }
@@ -362,14 +375,43 @@ func upsertObject(ctx context.Context, w client.Client, obj client.Object) error
 // literal is required so the ModelRoute stays schema-valid (Model MinLength).
 const defaultPrimaryModel = "default"
 
-// primaryModel picks the route's primary model from the discovered list. When
-// the provider returned no models (rare — an authenticated empty list), it falls
-// back to the provider id so the ModelRoute stays schema-valid (Model MinLength).
+// smallTierRe / flagshipRe classify a model name for picking a sensible DEFAULT
+// (M22 / U-default-model). The discovered list arrives sorted, so the old
+// `models[0]` defaulted to whatever sorted first — e.g. `claude-fable-5`, a
+// small/experimental tier — not a flagship. These heuristics avoid that.
+var (
+	smallTierRe = regexp.MustCompile(`(?i)(haiku|fable|mini|nano|small|lite|flash|embed|tiny|instant)`)
+	flagshipRe  = regexp.MustCompile(`(?i)(opus|sonnet|gpt-5|gpt-4|large|ultra|pro|max)`)
+)
+
+// primaryModel picks the connection's DEFAULT route model from the discovered
+// list — a **flagship**, not the alphabetically-first (M22, ADR 0026). The picker
+// still lets any connected model be chosen per-agent (ADR 0025), so this only sets
+// the connection's default. Falls back to the provider id when the list is empty
+// (rare — an authenticated empty list) so the ModelRoute stays schema-valid.
 func primaryModel(models []string) string {
-	if len(models) > 0 {
-		return models[0]
+	if len(models) == 0 {
+		return defaultPrimaryModel
 	}
-	return defaultPrimaryModel
+	var flagship, midTier string
+	for _, m := range models {
+		switch {
+		case smallTierRe.MatchString(m):
+			continue // never default to a small/experimental tier
+		case flagshipRe.MatchString(m) && flagship == "":
+			flagship = m
+		case midTier == "":
+			midTier = m
+		}
+	}
+	switch {
+	case flagship != "":
+		return flagship
+	case midTier != "":
+		return midTier
+	default:
+		return models[0] // all small-tier — better than nothing
+	}
 }
 
 // handleListProviders serves GET /api/providers — the connected providers, read

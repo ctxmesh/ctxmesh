@@ -87,11 +87,24 @@ type CreateAgentRequest struct {
 	Model *ModelPick `json:"model,omitempty"`
 }
 
-// ModelPick is the picked (provider, model) a create request may carry instead of a
-// hand-set model.route (m21).
+// ModelPick is the picked (connection, model) a create request may carry instead of a
+// hand-set model.route (m21; connection added for named connections, ADR 0026).
 type ModelPick struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	// Connection is the named connection the model runs on (ADR 0026). Optional;
+	// falls back to Provider, which for the default connection equals the provider
+	// type — so older clients sending only `provider` keep working.
+	Connection string `json:"connection"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+}
+
+// connectionOrProvider returns the connection the pick targets, defaulting to the
+// provider type (back-compat).
+func (m *ModelPick) connectionOrProvider() string {
+	if c := strings.TrimSpace(m.Connection); c != "" {
+		return c
+	}
+	return strings.TrimSpace(m.Provider)
 }
 
 // CreateAgentResponse is returned by POST /api/agents on success: the flat
@@ -140,8 +153,8 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
-	if req.Model != nil && strings.TrimSpace(req.Model.Provider) != "" && strings.TrimSpace(req.Model.Model) != "" {
-		routeName, cerr := ensureRouteForModel(r.Context(), caller, s.scheme, ns, req.Model.Provider, req.Model.Model)
+	if req.Model != nil && req.Model.connectionOrProvider() != "" && strings.TrimSpace(req.Model.Model) != "" {
+		routeName, cerr := ensureRouteForModel(r.Context(), caller, s.scheme, ns, req.Model.connectionOrProvider(), req.Model.Model)
 		if cerr != nil {
 			writeError(w, cerr.status, cerr.msg)
 			return

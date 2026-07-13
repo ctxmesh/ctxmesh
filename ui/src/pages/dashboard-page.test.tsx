@@ -139,8 +139,9 @@ describe("DashboardPage (render proof)", () => {
     });
     renderDashboard();
 
-    // Topology graph rendered a node for the agent (React Flow custom node).
-    expect(await screen.findByText("echo-agent")).toBeInTheDocument();
+    // Topology renders as a scale-first SUMMARY card (m22.6/U5) — counts +
+    // health rollup, not a node-per-agent graph.
+    expect(await screen.findByTestId("topology-summary")).toBeInTheDocument();
     // Cost cards rendered the Langfuse rollup (headline stat + the by-model chart).
     expect(screen.getByText("Total cost")).toBeInTheDocument();
     expect(screen.getByText("Cost by model")).toBeInTheDocument();
@@ -200,7 +201,7 @@ describe("DashboardPage (render proof)", () => {
     });
     renderDashboard();
 
-    await screen.findByText("echo-agent");
+    await screen.findByTestId("topology-summary");
     const link = screen.getByTestId("view-full-topology");
     expect(link).toHaveAttribute("href", "/topology");
   });
