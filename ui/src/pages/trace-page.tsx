@@ -27,6 +27,7 @@ import { api, ApiError, type TraceDetailResponse } from "@/lib/api";
 
 type PageState =
   | { kind: "loading" }
+  | { kind: "unconfigured" } // 501 → no trace backend wired; calm degrade, not a failure
   | { kind: "ready"; detail: TraceDetailResponse; langfuseUrl: string | null }
   | { kind: "error"; message: string; forbidden: boolean };
 
@@ -69,6 +70,11 @@ export function TracePage() {
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
+        // 501 → no trace backend wired: calm "not configured", never a red error.
+        if (err instanceof ApiError && err.isNotImplemented) {
+          setState({ kind: "unconfigured" });
+          return;
+        }
         const forbidden = err instanceof ApiError && err.isForbidden;
         setState({
           kind: "error",
@@ -85,6 +91,25 @@ export function TracePage() {
       <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
         <SkeletonCard />
         <SkeletonCard />
+      </div>
+    );
+  }
+
+  if (state.kind === "unconfigured") {
+    // 501: no trace backend wired. Calm empty state, never a red error.
+    return (
+      <div
+        className="mx-auto max-w-5xl px-4 py-6"
+        data-testid="trace-page-unconfigured"
+      >
+        <div className="rounded-lg border bg-card p-6 text-sm text-muted-foreground shadow-card">
+          <p className="font-medium text-foreground">Trace view not configured</p>
+          <p className="mt-1">
+            No trace backend is wired in this cluster, so per-run traces aren't
+            available. Runs still execute and return their results — wire a trace
+            backend (Langfuse) to see the step-by-step trace here.
+          </p>
+        </div>
       </div>
     );
   }

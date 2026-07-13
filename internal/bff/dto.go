@@ -553,6 +553,12 @@ type TraceDetailResponse struct {
 type ConnectProviderRequest struct {
 	// Provider is the LiteLLM provider prefix, e.g. "anthropic" or "openai".
 	Provider string `json:"provider"`
+	// Connection is the NAMED connection this key belongs to (ADR 0026) — the
+	// object identity (Secret/SecretBinding/ModelRoute all share it), so a user
+	// can hold MULTIPLE keys per provider type (e.g. "anthropic-prod",
+	// "anthropic-team-x"). Optional; defaults to Provider (back-compat: the
+	// existing single connection is a connection named after its provider type).
+	Connection string `json:"connection"`
 	// DisplayName is a human label for the connected provider (optional; defaults
 	// to Provider). It is stored as a label/annotation, never as a secret.
 	DisplayName string `json:"displayName"`

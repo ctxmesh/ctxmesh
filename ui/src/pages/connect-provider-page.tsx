@@ -74,6 +74,10 @@ export function ConnectProviderPage() {
   // ── The key lives ONLY here — a local field value, cleared on submit. ──────
   const [apiKey, setApiKey] = React.useState("");
   const [baseURL, setBaseURL] = React.useState("");
+  // m22 (named connections, ADR 0026): an optional connection NAME lets a user
+  // hold multiple keys per provider type (anthropic-prod, anthropic-team-x).
+  // Empty → defaults to the provider type (the existing single-connection behavior).
+  const [connection, setConnection] = React.useState("");
   const [submit, setSubmit] = React.useState<Submit>({ kind: "idle" });
 
   const { toast } = useToast();
@@ -92,7 +96,8 @@ export function ConnectProviderPage() {
     // immediately — it never survives the submit in any client-side store.
     const req = {
       provider: providerId,
-      displayName: provider.name,
+      ...(connection.trim() ? { connection: connection.trim() } : {}),
+      displayName: connection.trim() || provider.name,
       apiKey,
       ...(provider.needsBaseURL && baseURL ? { baseURL } : {}),
     };
@@ -231,6 +236,23 @@ export function ConnectProviderPage() {
               />
             </div>
           )}
+          <div className="space-y-1.5">
+            <Label htmlFor="provider-connection">Connection name (optional)</Label>
+            <Input
+              id="provider-connection"
+              value={connection}
+              onChange={(e) => setConnection(e.target.value)}
+              placeholder={providerId}
+              className="font-mono text-xs"
+              data-testid="connect-connection-name"
+            />
+            <p className="text-xs text-muted-foreground">
+              Name this connection to hold <em>multiple keys</em> for the same
+              provider (e.g. <code>{providerId}-prod</code>,{" "}
+              <code>{providerId}-team-x</code>). Leave blank to use{" "}
+              <code>{providerId}</code>.
+            </p>
+          </div>
           <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
             The key goes straight to the BFF, which validates it against the
             provider and stores it as a Kubernetes Secret under <em>your</em>{" "}
