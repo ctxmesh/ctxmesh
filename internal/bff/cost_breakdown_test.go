@@ -258,6 +258,51 @@ func TestHandlerCostBreakdownUpstream502(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 }
 
+// TestHandlerCostBreakdownDegradesCalmly: ErrUpstreamUnavailable (the trace store
+// is slow/circuit-broken) → a CALM 200 with empty agents + a notice, NOT a red 502
+// (m23.6 — the whole reason wiring Langfuse must not flash red errors).
+func TestHandlerCostBreakdownDegradesCalmly(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: ErrUpstreamUnavailable}})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	require.Equal(t, http.StatusOK, w.Code, "a transient upstream stall must degrade calmly, not 502")
+
+	var resp CostBreakdownResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.NotNil(t, resp.Agents)
+	assert.Empty(t, resp.Agents)
+	assert.NotEmpty(t, resp.Notice, "a degrade notice must be present for the SPA to render")
+}
+
+// TestHandlerRunsDegradesCalmly: ErrUpstreamUnavailable on the runs list → 200 with
+// empty runs + notice, not 502.
+func TestHandlerRunsDegradesCalmly(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{filteredErr: ErrUpstreamUnavailable}})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp RunListResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.NotNil(t, resp.Runs)
+	assert.Empty(t, resp.Runs)
+	assert.NotEmpty(t, resp.Notice)
+}
+
+// TestHandlerCostDegradesCalmly: ErrUpstreamUnavailable on the cost rollup → 200
+// with an empty summary + notice, not 502.
+func TestHandlerCostDegradesCalmly(t *testing.T) {
+	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{err: ErrUpstreamUnavailable}})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp CostResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.NotNil(t, resp.Summary.ByModel)
+	assert.NotEmpty(t, resp.Notice)
+}
+
 // TestHandlerCostBreakdownEmpty200: empty breakdown → {agents:[], ...} 200.
 func TestHandlerCostBreakdownEmpty200(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
