@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func seedGrant(server, username, access, refresh, tokenEndpoint string, expiry t
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantSecretName(server, userHash),
 			Namespace: ns,
-			Labels:    grantSecretLabels(server, userHash),
+			Labels:    grantSecretLabels(server, userHash, ""),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
@@ -504,4 +505,78 @@ func TestMCPGrantRevokeForbiddenIs403(t *testing.T) {
 
 	rec := revokeGrant(t, s, server, "viewer-token")
 	assert.Equal(t, http.StatusForbidden, rec.Code, "a denied delete must surface a 403")
+}
+
+// TestUserGrantHashHMAC pins the m25.1 security property (ADR 0029 §7, advisor R5):
+// with a per-cluster key the user-identity hash is HMAC-SHA256 — salted by the key so
+// it cannot be confirmed offline against a low-entropy email/username — while staying
+// deterministic for lookup; without a key it degrades to the legacy unsalted SHA-256
+// so already-hardened callers and dev clusters both keep working. The hash is one-way
+// and fixed-format regardless, so a raw username never lands in cluster metadata.
+func TestUserGrantHashHMAC(t *testing.T) {
+	// grantHMACKey is package-global; restore the default (nil ⇒ legacy) for every
+	// other test in the package, whatever this one leaves it at.
+	defer setGrantHMACKey(nil)
+
+	const user = "alice@example.com"
+
+	setGrantHMACKey(nil)
+	legacy := userGrantHash(user)
+	assert.Equal(t, legacy, userGrantHash(user), "no key: deterministic")
+	assert.Regexp(t, `^u-[0-9a-f]{40}$`, legacy, "fixed one-way format, no raw username")
+
+	setGrantHMACKey([]byte("cluster-key-one"))
+	k1 := userGrantHash(user)
+	assert.Regexp(t, `^u-[0-9a-f]{40}$`, k1)
+	assert.NotEqual(t, legacy, k1, "a key must salt the hash away from the unsalted digest")
+	assert.Equal(t, k1, userGrantHash(user), "same key + user: deterministic (lookup stable)")
+
+	setGrantHMACKey([]byte("cluster-key-two"))
+	assert.NotEqual(t, k1, userGrantHash(user), "a different cluster key must yield a different hash")
+
+	setGrantHMACKey([]byte("cluster-key-one"))
+	assert.Equal(t, k1, userGrantHash(user), "the same key reproduces the same hash (re-key = re-consent, not drift)")
+	assert.NotEqual(t, k1, userGrantHash("bob@example.com"), "distinct users stay distinct under one key")
+}
+
+// TestGrantSecretCoordinates pins the m25.1a key shape (ADR 0029 §7): legacy mode is
+// byte-for-byte the pre-m25.1 (namespace, name) so nothing migrates until a locked
+// credential namespace is configured; locked mode consolidates every grant into that
+// one namespace while folding the source namespace into the object name so grants
+// from different namespaces never collide there.
+func TestGrantSecretCoordinates(t *testing.T) {
+	const server, hash = "gh", "u-abcdef0123456789"
+
+	// Legacy (no credential namespace): unchanged (source ns, original name).
+	ns, name := grantSecretCoordinates("", "team-a", server, hash)
+	assert.Equal(t, "team-a", ns, "legacy: grant stays in its source namespace")
+	assert.Equal(t, grantSecretName(server, hash), name, "legacy: original name, no migration")
+
+	// Locked: the credential namespace, source ns folded into the name.
+	lockedNS, lockedName := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	assert.Equal(t, "ae-credentials", lockedNS, "locked: all grants land in the credential namespace")
+	assert.True(t, strings.HasPrefix(lockedName, grantSecretName(server, hash)+"-"),
+		"locked: name extends the legacy base with the source-ns hash")
+	assert.LessOrEqual(t, len(lockedName), 253, "object name stays within the k8s limit")
+
+	// Same (server, user) from a DIFFERENT namespace → a distinct object (no collision).
+	_, otherName := grantSecretCoordinates("ae-credentials", "team-b", server, hash)
+	assert.NotEqual(t, lockedName, otherName, "locked: different source namespaces never collide")
+
+	// A different server in the same namespace is also a distinct object.
+	_, otherServer := grantSecretCoordinates("ae-credentials", "team-a", "jira", hash)
+	assert.NotEqual(t, lockedName, otherServer, "locked: different servers never collide")
+
+	// A different user (hash) for the same server + namespace is a distinct object too.
+	_, otherUser := grantSecretCoordinates("ae-credentials", "team-a", server, "u-999888777666")
+	assert.NotEqual(t, lockedName, otherUser, "locked: different users never collide")
+
+	// Deterministic (lookup must be stable across write/read/refresh).
+	_, again := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	assert.Equal(t, lockedName, again, "locked: coordinates are deterministic")
+
+	// The source namespace is the authoritative label match key in locked mode.
+	assert.Equal(t, "team-a", grantSecretLabels(server, hash, "team-a")[labelMCPGrantSourceNS])
+	_, hasNS := grantSecretLabels(server, hash, "")[labelMCPGrantSourceNS]
+	assert.False(t, hasNS, "legacy labels carry no source-namespace")
 }
