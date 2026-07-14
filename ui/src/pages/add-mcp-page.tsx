@@ -104,68 +104,67 @@ export function AddMcpPage() {
   const { can, reprobe } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
 
+  // connectViaOAuth runs the zero-config OAuth 2.1 connect (m24.7, ADR 0028): POST
+  // the NESTED auth block the BFF routes on (req.auth.type == "oauth") with
+  // autoDiscover so the BFF discovers the endpoints + registers a client (DCR) — the
+  // user enters NO endpoints or client id. The BFF returns 202 + an authorization
+  // URL; the ENTIRE token exchange is server-side (we never hold a token). Reused by
+  // the OAuth-mode submit AND the "Continue with OAuth" offer on a key-probe 401.
+  async function connectViaOAuth() {
+    setSubmit({ kind: "adding" });
+    const req = {
+      name: name.trim(),
+      ...(sourceKind === "url" ? { url: url.trim() } : { image: image.trim() }),
+      authType: "oauth" as const,
+      auth: {
+        type: "oauth" as const,
+        autoDiscover: true,
+        // redirectUri is this console's OAuth callback (same origin as the BFF that
+        // serves us); DCR registers it so the auth server accepts it.
+        redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+      },
+    };
+    try {
+      const oauthRes = await api.addMcpServerOAuth(req);
+      // GUARD (m18.7): only a well-formed absolute http(s) URL is a safe redirect
+      // target. A missing/malformed authorizationURL would otherwise navigate the
+      // SPA to a bad target, remount it, and bounce the user to /login. Degrade to an
+      // honest inline error, never a blind redirect.
+      if (!isValidHttpUrl(oauthRes.authorizationURL)) {
+        setSubmit({
+          kind: "error",
+          message:
+            "The MCP server did not return a valid OAuth authorization URL — it may not support OAuth 2.1. Nothing was changed.",
+          status: 502,
+        });
+        return;
+      }
+      setSubmit({ kind: "oauth-redirecting", authorizationURL: oauthRes.authorizationURL });
+      // A correct OAuth redirect (a different origin) — NOT a client-side navigation.
+      window.location.href = oauthRes.authorizationURL;
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.isNotFound) { setSubmit({ kind: "killed" }); return; }
+        if (err.isForbidden) {
+          reprobe();
+          setSubmit({ kind: "forbidden", message: err.message });
+          return;
+        }
+        setSubmit({ kind: "error", message: err.message, status: err.status });
+        return;
+      }
+      setSubmit({
+        kind: "error",
+        message: err instanceof Error ? err.message : "OAuth initiation failed",
+      });
+    }
+  }
+
   async function onAdd() {
     setSubmit({ kind: "adding" });
 
     if (authMode === "oauth") {
-      // OAuth 2.1 flow: POST to /api/mcpservers with authType "oauth". The BFF
-      // returns 202 + { authorizationURL, state }. The SPA redirects the browser
-      // to the authorization URL — the ENTIRE token exchange is server-side.
-      // We NEVER receive, store, or display an OAuth token.
-      // Zero-config OAuth (m24.7, ADR 0028): send the NESTED auth block the BFF
-      // routes on (req.auth.type == "oauth"), with autoDiscover so the BFF discovers
-      // the endpoints + registers a client (DCR) — the user enters NO endpoints or
-      // client id. redirectUri is this console's OAuth callback (same origin as the
-      // BFF that serves us); DCR registers it so the auth server accepts it.
-      const req = {
-        name: name.trim(),
-        ...(sourceKind === "url" ? { url: url.trim() } : { image: image.trim() }),
-        authType: "oauth" as const,
-        auth: {
-          type: "oauth" as const,
-          autoDiscover: true,
-          redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
-        },
-      };
-      try {
-        const oauthRes = await api.addMcpServerOAuth(req);
-        // GUARD (m18.7): only a well-formed absolute http(s) URL is a safe redirect
-        // target. A missing/malformed authorizationURL would otherwise navigate the
-        // SPA to a bad target, remount it, and bounce the user to /login (the
-        // shakedown bug). Degrade to an honest inline error, never a blind redirect.
-        if (!isValidHttpUrl(oauthRes.authorizationURL)) {
-          setSubmit({
-            kind: "error",
-            message:
-              "The MCP server did not return a valid OAuth authorization URL — it may not support OAuth 2.1. Nothing was changed.",
-            status: 502,
-          });
-          return;
-        }
-        // Transition to the "redirecting" state so the UI renders a brief
-        // "redirecting to consent…" banner before the navigation fires.
-        setSubmit({ kind: "oauth-redirecting", authorizationURL: oauthRes.authorizationURL });
-        // Full-page redirect to the OAuth provider's authorization endpoint.
-        // The consent happens there; the BFF callback handles the code exchange.
-        // We use window.location.href because this is a correct OAuth redirect —
-        // NOT a client-side navigation (the consent page is a different origin).
-        window.location.href = oauthRes.authorizationURL;
-      } catch (err) {
-        if (err instanceof ApiError) {
-          if (err.isNotFound) { setSubmit({ kind: "killed" }); return; }
-          if (err.isForbidden) {
-            reprobe();
-            setSubmit({ kind: "forbidden", message: err.message });
-            return;
-          }
-          setSubmit({ kind: "error", message: err.message, status: err.status });
-          return;
-        }
-        setSubmit({
-          kind: "error",
-          message: err instanceof Error ? err.message : "OAuth initiation failed",
-        });
-      }
+      await connectViaOAuth();
       return;
     }
 
@@ -370,16 +369,36 @@ export function AddMcpPage() {
             </div>
           )}
           {submit.kind === "error" && (
-            <p
-              className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
-              role="alert"
-              data-testid="probe-error"
-            >
-              Couldn&apos;t reach that server: {submit.message}
-              {submit.status ? ` (${submit.status})` : ""}. Check the URL is a
-              reachable MCP endpoint (and the bearer key if it needs auth), then
-              try again.
-            </p>
+            <div className="space-y-2">
+              <p
+                className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-warning-foreground"
+                role="alert"
+                data-testid="probe-error"
+              >
+                Couldn&apos;t reach that server: {submit.message}
+                {submit.status ? ` (${submit.status})` : ""}. Check the URL is a
+                reachable MCP endpoint (and the bearer key if it needs auth), then
+                try again.
+              </p>
+              {/* One-click OAuth (m24.7): an auth-required probe (422) on a URL
+                  server is very likely an OAuth server. Offer to connect via OAuth
+                  right here — the BFF discovers the endpoints + registers a client
+                  (DCR), so the user needs no key and no OAuth config. */}
+              {submit.status === 422 && sourceKind === "url" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="continue-with-oauth"
+                  onClick={() => {
+                    setAuthMode("oauth");
+                    void connectViaOAuth();
+                  }}
+                >
+                  Continue with OAuth
+                </Button>
+              )}
+            </div>
           )}
         </div>
       ),
