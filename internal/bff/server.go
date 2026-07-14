@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
@@ -102,6 +103,18 @@ type Server struct {
 	// pending-approval; the approval queue itself is M17 (here we only mark the
 	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
 	mcpRequireApproval bool
+
+	// credentialNamespace + credentialClient move MCP grant Secrets out of the
+	// per-request (agent) namespace into ONE RBAC-locked platform namespace (m25.1b,
+	// ADR 0029 §7). When both are set, grant write/read/delete route through the
+	// privileged, namespace-scoped credentialClient against credentialNamespace — a
+	// bounded, deliberate exception to "the BFF SA never acts on user objects"
+	// (cmd/bff/main.go): it touches ONLY Secrets in this locked namespace, keyed by
+	// the authenticated caller's OWN identity, never a user CRD. When unset the BFF
+	// keeps the legacy caller-scoped, per-namespace grant path (ADR 0011). Wired from
+	// MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
+	credentialNamespace string
+	credentialClient    client.Client
 
 	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
 	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
@@ -194,6 +207,16 @@ type Options struct {
 	// MCP_GRANT_HMAC_KEY in cmd/bff/main.go. Immutable after start-up (changing it
 	// re-keys all grants ⇒ re-consent).
 	MCPGrantHMACKey []byte
+	// MCPCredentialNamespace is the locked platform namespace that holds every MCP
+	// grant Secret when set (m25.1b, ADR 0029 §7). Empty ⇒ legacy per-request-namespace
+	// grants. Wired from MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
+	MCPCredentialNamespace string
+	// CredentialClient is the privileged, namespace-scoped client used to write/read/
+	// delete grant Secrets in MCPCredentialNamespace (the BFF's own SA — tenants have
+	// no RBAC there). Built in cmd/bff/main.go only when MCPCredentialNamespace is set;
+	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
+	// why this bounded SA use does not reopen the confused-deputy gap.
+	CredentialClient client.Client
 	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
 	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
 	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
@@ -223,6 +246,8 @@ func NewServer(opts Options) *Server {
 		platformGenerationModels: opts.PlatformGenerationModels,
 		mcpEnabled:               opts.MCPEnabled,
 		mcpRequireApproval:       opts.MCPRequireApproval,
+		credentialNamespace:      opts.MCPCredentialNamespace,
+		credentialClient:         opts.CredentialClient,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		log:                      opts.Log,
@@ -242,7 +267,51 @@ func NewServer(opts Options) *Server {
 		opts.Log.Info("mcp: MCP_GRANT_HMAC_KEY not set — user-identity hashes use legacy unsalted SHA-256; " +
 			"set a per-cluster HMAC key before production (ADR 0029 §7). Changing it later re-keys grants (re-consent).")
 	}
+	if s.mcpEnabled && s.credentialNamespace == "" {
+		opts.Log.Info("mcp: MCP_CREDENTIAL_NAMESPACE not set — MCP grant Secrets are stored in the per-request " +
+			"(agent) namespace (legacy); set a locked platform namespace before production (ADR 0029 §7) so a " +
+			"tenant cannot read another user's grant tokens.")
+	}
 	return s
+}
+
+// lockedCredentials reports whether grant Secrets are consolidated into the RBAC-locked
+// credential namespace (m25.1b): true only when BOTH a namespace and its privileged
+// client are wired, so the coordinate + client decisions can never disagree. False ⇒
+// the legacy caller-scoped, per-request-namespace grant path (ADR 0011).
+func (s *Server) lockedCredentials() bool {
+	return s.credentialNamespace != "" && s.credentialClient != nil
+}
+
+// grantCoordinates resolves a grant Secret's (namespace, name) for the current mode
+// (locked → the credential namespace with the source ns folded in; legacy → the source
+// namespace, original name). The single call the write/delete paths share so they land
+// on the exact object the OBO resolver will later read.
+func (s *Server) grantCoordinates(sourceNs, server, userHash string) (namespace, name string) {
+	credNs := ""
+	if s.lockedCredentials() {
+		credNs = s.credentialNamespace
+	}
+	return grantSecretCoordinates(credNs, sourceNs, server, userHash)
+}
+
+// grantClient returns the client that writes/reads/deletes a grant Secret: the
+// privileged credential-component client in locked mode (tenants have no RBAC in the
+// credential namespace), else the caller-scoped client (legacy, ADR 0011).
+func (s *Server) grantClient(caller client.Client) client.Client {
+	if s.lockedCredentials() {
+		return s.credentialClient
+	}
+	return caller
+}
+
+// grantSourceNSLabel is the source-namespace label value to stamp: the origin
+// namespace in locked mode (the authoritative match key there), "" in legacy mode.
+func (s *Server) grantSourceNSLabel(sourceNs string) string {
+	if s.lockedCredentials() {
+		return sourceNs
+	}
+	return ""
 }
 
 // Handler returns the fully-wired http.Handler: the /api mux (auth-gated) plus

@@ -193,14 +193,15 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 // 403. The response DTO carries the (user, server) identity + the server, never a
 // token.
 func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter, caller client.Client, flow pendingOAuthFlow, toks oauthTokens) {
-	// sourceNs is "" here (legacy per-namespace mode): the grant is written in
-	// flow.namespace. m25.1b will pass flow.namespace when a locked credential
-	// namespace is configured, folding it into the coordinates + this label.
-	labels := grantSecretLabels(flow.serverName, flow.grantUserHash, "")
+	// In locked mode the grant lands in the credential namespace with the source ns
+	// folded into the coordinates + the source-namespace label; in legacy mode it stays
+	// in flow.namespace under the original name (sourceNs label "").
+	grantNS, grantName := s.grantCoordinates(flow.namespace, flow.serverName, flow.grantUserHash)
+	labels := grantSecretLabels(flow.serverName, flow.grantUserHash, s.grantSourceNSLabel(flow.namespace))
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      grantSecretName(flow.serverName, flow.grantUserHash),
-			Namespace: flow.namespace,
+			Name:      grantName,
+			Namespace: grantNS,
 			Labels:    labels,
 			// The server URL is non-secret and useful to the refresh path; the tokens
 			// are NEVER here — only in Data (oauthSecretData).
@@ -212,8 +213,9 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 
 	// Upsert: a re-consent for the SAME (user, server) replaces the stored grant
 	// (rotated tokens) rather than failing on AlreadyExists — re-consent is a valid,
-	// idempotent user action.
-	if err := s.upsertGrantSecret(ctx, caller, secret); err != nil {
+	// idempotent user action. The write runs as the privileged credential client in
+	// locked mode (tenants have no RBAC there), else caller-scoped (ADR 0011).
+	if err := s.upsertGrantSecret(ctx, s.grantClient(caller), secret); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -271,15 +273,43 @@ func (s *Server) handleRevokeMCPGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	userHash := userGrantHash(username)
 
-	// Delete ONLY the caller's own (user, server) grant. The name embeds the
-	// caller's hash, so this can never name another user's grant.
+	// Delete ONLY the caller's own (user, server) grant. The name embeds the caller's
+	// hash, so it can never NAME another user's grant; in locked mode the write ran as
+	// the privileged credential client, so the delete does too.
+	grantNS, grantName := s.grantCoordinates(ns, server, userHash)
+	gc := s.grantClient(caller)
+
+	// Defence in depth for the privileged, shared-namespace delete: verify the target's
+	// labels match THIS caller before removing it, so a truncated-name collision can
+	// never delete another user's grant (the resolver's findGrant guards reads the same
+	// way). The legacy caller-scoped delete relies on the caller's own RBAC + the
+	// hash-embedded name and skips the extra read (behaviour unchanged).
+	if s.lockedCredentials() {
+		var existing corev1.Secret
+		if gErr := gc.Get(r.Context(), client.ObjectKey{Namespace: grantNS, Name: grantName}, &existing); gErr != nil {
+			if apierrors.IsNotFound(gErr) {
+				writeError(w, http.StatusNotFound, "no per-user grant exists for this server")
+				return
+			}
+			s.log.Error(gErr, "read MCP per-user grant for revoke failed", "server", server)
+			writeError(w, http.StatusInternalServerError, "failed to revoke the per-user grant")
+			return
+		}
+		if existing.Labels[labelMCPGrantUser] != userHash ||
+			existing.Labels[labelMCPGrantServer] != server ||
+			existing.Labels[labelMCPGrantSourceNS] != ns {
+			writeError(w, http.StatusNotFound, "no per-user grant exists for this server")
+			return
+		}
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      grantSecretName(server, userHash),
-			Namespace: ns,
+			Name:      grantName,
+			Namespace: grantNS,
 		},
 	}
-	if err := caller.Delete(r.Context(), secret); err != nil {
+	if err := gc.Delete(r.Context(), secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// No grant to revoke → honest 404, not a false success (there is nothing
 			// to re-consent away). The caller learns they had no grant here.
