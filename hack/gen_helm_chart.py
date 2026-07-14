@@ -94,6 +94,19 @@ MCP_REQUIRE_APPROVAL_ENV_HELM = (
     "          value: {{ .Values.bff.mcp.requireApproval | quote }}"
 )
 
+# MCP_CREDENTIAL_NAMESPACE (m25.1b, ADR 0029 §7): config/bff hardcodes "" (unset — the
+# legacy per-namespace grant path, so `kustomize build`/`make deploy` stay valid with
+# no extra namespace/RBAC). The chart templates it from `bff.mcp.credentialNamespace`;
+# setting it renders the dedicated namespace + RBAC (templates/mcp-credentials.yaml) and
+# routes grants there. values.yaml ships "" so the DEFAULT render == kustomize (no drift).
+MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE = (
+    '        - name: MCP_CREDENTIAL_NAMESPACE\n' '          value: ""'
+)
+MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
+    "        - name: MCP_CREDENTIAL_NAMESPACE\n"
+    "          value: {{ .Values.bff.mcp.credentialNamespace | quote }}"
+)
+
 # The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
 # (OIDC_ENABLED "false", empty issuer/client — so `kustomize build`/`make deploy` stay
 # valid AND token login is the default); the chart templates them from the auth.oidc
@@ -201,6 +214,13 @@ def substitute(doc: str) -> str:
     doc = doc.replace(
         MCP_REQUIRE_APPROVAL_ENV_KUSTOMIZE,
         MCP_REQUIRE_APPROVAL_ENV_HELM,
+    )
+    # BFF locked credential namespace -> Helm value (m25.1b, ADR 0029 §7). Default
+    # renders "" == kustomize (no drift); `--set bff.mcp.credentialNamespace=...` routes
+    # MCP grants to the dedicated namespace (templates/mcp-credentials.yaml).
+    doc = doc.replace(
+        MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE,
+        MCP_CREDENTIAL_NAMESPACE_ENV_HELM,
     )
     # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
     # disabled (the default) all three render == the kustomize OFF literals (no drift);

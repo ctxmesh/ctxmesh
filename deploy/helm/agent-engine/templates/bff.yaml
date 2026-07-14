@@ -99,6 +99,8 @@ spec:
           value: {{ .Values.bff.mcp.enabled | quote }}
         - name: MCP_REQUIRE_APPROVAL
           value: {{ .Values.bff.mcp.requireApproval | quote }}
+        - name: MCP_CREDENTIAL_NAMESPACE
+          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER
