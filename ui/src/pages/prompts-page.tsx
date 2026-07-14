@@ -208,7 +208,11 @@ export function PromptsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Prompts</h2>
           <p className="text-sm text-muted-foreground">
-            Browse prompt versions and compare them with a textual line diff.
+            Reusable, versioned prompts you can attach to an agent — pick one under{" "}
+            <span className="font-medium">Prompt version</span> when you{" "}
+            <span className="font-medium">Configure</span> an agent, then roll a new
+            version here and the agent picks it up (safe, reviewable prompt changes).
+            Compare any two versions with a line diff below.
           </p>
         </div>
         <div className="flex items-center gap-2">

@@ -235,8 +235,10 @@ export function SecretBindingsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Secret Bindings</h2>
           <p className="text-sm text-muted-foreground">
-            SecretBinding CRDs — refs to K8s Secrets (never the values). The
-            filter is windowed to the loaded page.
+            How the platform references your stored provider secrets (a pointer to
+            a Kubernetes Secret — never its contents). Connecting a provider
+            creates one for you; this page is here for operators who want to
+            inspect them directly.
           </p>
         </div>
         {canCreate && (

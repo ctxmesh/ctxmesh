@@ -90,6 +90,42 @@ func fakeLangfuseBreakdown(t *testing.T, traces []lfTrace) *httptest.Server {
 	return srv
 }
 
+// TestCostBreakdownTotalFromDailyMetrics: the Cost page's window TOTAL comes from
+// the SAME daily-metrics aggregation the dashboard uses (m24.4 — so the two cost
+// surfaces never contradict), while the per-agent breakdown stays trace-derived.
+func TestCostBreakdownTotalFromDailyMetrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/public/traces": // per-agent source: one agent trace at 0.10
+			_ = json.NewEncoder(w).Encode(lfTracesResponse{Data: []lfTrace{
+				{ID: "t1", Name: "run", TotalCost: 0.10, Tags: []string{"agent:default/echo"}},
+			}})
+		case "/api/public/metrics/daily": // the window total the dashboard sees: 7.50
+			_ = json.NewEncoder(w).Encode(lfDailyMetricsResponse{Data: []lfDailyMetric{
+				{
+					Date: "2026-07-01", CountObservations: 3, TotalCost: 7.50,
+					Usage: []lfDailyModelUsage{{Model: "claude", TotalUsage: 900, TotalCost: 7.50}},
+				},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	require.NoError(t, err)
+	// TOTAL tracks metrics/daily (7.50), NOT the trace sum (0.10) — reconciled.
+	assert.InDelta(t, 7.50, resp.Total.TotalCostUSD, 1e-9)
+	assert.Equal(t, int64(900), resp.Total.TotalTokens)
+	// Per-agent breakdown is still trace-derived.
+	require.Len(t, resp.Agents, 1)
+	assert.Equal(t, "echo", resp.Agents[0].AgentName)
+	assert.InDelta(t, 0.10, resp.Agents[0].TotalCostUSD, 1e-9)
+}
+
 // TestCostBreakdownGroupsMixedCorpus is the core correctness test: 2 named
 // agents across namespaces plus 1 untagged trace → correct per-agent
 // aggregates, the "(untagged)" bucket, the window total, and cost-desc sort.

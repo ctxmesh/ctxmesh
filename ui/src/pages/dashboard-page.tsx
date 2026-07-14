@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TopologySummary } from "@/components/dashboard/topology-summary";
 import { CostPanel } from "@/components/dashboard/cost-panel";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
+import { useNamespace } from "@/lib/namespace";
 import {
   api,
   ApiError,
@@ -46,6 +47,9 @@ function messageOf(err: unknown): string {
 
 export function DashboardPage() {
   const navigate = useNavigate();
+  // The header namespace scope now filters the dashboard topology, not just the
+  // agents list (m24.3) — "" = all namespaces the caller can see.
+  const { namespace } = useNamespace();
   const [topology, setTopology] = useState<Loadable<TopologyResponse>>({
     kind: "loading",
   });
@@ -74,7 +78,7 @@ export function DashboardPage() {
         setProviders({ kind: "error", message: messageOf(err) });
       });
     api
-      .topology(undefined, signal)
+      .topology({ namespace: namespace || undefined }, signal)
       .then((data) => setTopology({ kind: "ready", data }))
       .catch((err: unknown) => {
         if (signal?.aborted) return;
@@ -102,7 +106,8 @@ export function DashboardPage() {
             : { kind: "error", message: messageOf(err) },
         );
       });
-  }, []);
+    // Refetch when the header namespace scope changes (m24.3).
+  }, [namespace]);
 
   useEffect(() => {
     const controller = new AbortController();

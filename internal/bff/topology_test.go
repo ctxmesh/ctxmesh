@@ -142,6 +142,36 @@ func TestBuildTopologyGraph(t *testing.T) {
 	assert.True(t, edgeSet["agent/prod/echo|tool/prod/echo-search"], "agent→tool edge")
 }
 
+// TestTopologyNamespaceScope proves ?namespace=<ns> filters the graph to that
+// namespace — the header namespace picker now scopes the dashboard/topology, not
+// just the agents list (m24.3).
+func TestTopologyNamespaceScope(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		&agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "prod-agent", Namespace: "prod"},
+			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "a:1"},
+			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+		},
+		&agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "staging-agent", Namespace: "staging"},
+			Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "b:1"},
+			Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: readyCond()},
+		},
+	).Build()
+	s := newTestServer(t, c)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/topology?namespace=prod", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var graph TopologyResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &graph))
+	// Only the prod agent — the staging agent is filtered out server-side.
+	require.Len(t, graph.Nodes, 1)
+	assert.Equal(t, "prod", graph.Nodes[0].Namespace)
+	assert.Equal(t, "prod-agent", graph.Nodes[0].Name)
+}
+
 func TestTopologyHealthDerivation(t *testing.T) {
 	s := topologyFixtureServer(t)
 	rec := httptest.NewRecorder()
