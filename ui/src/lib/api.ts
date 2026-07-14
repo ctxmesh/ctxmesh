@@ -385,6 +385,7 @@ export interface TopologyParams {
   group?: "registry" | "namespace" | "";
   q?: string;
   expand?: string[]; // group ids to emit as member nodes
+  namespace?: string; // scope the graph to one namespace ("" = cluster-wide) (m24.3)
 }
 
 // --- Cost / usage (GET /api/cost) -------------------------------------------
@@ -1663,6 +1664,7 @@ export const api = {
     if (params?.group) qs.set("group", params.group);
     if (params?.q) qs.set("q", params.q);
     if (params?.expand?.length) qs.set("expand", params.expand.join(","));
+    if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },

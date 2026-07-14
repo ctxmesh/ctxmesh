@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
@@ -36,16 +38,19 @@ import (
 // belong to no registry are still surfaced as nodes (unrooted) so the operator
 // sees every workload. The output is deterministic (nodes/edges sorted by id)
 // so the graph and the tests are stable; both slices are non-nil.
-func buildTopology(ctx context.Context, r AgentReader) (TopologyResponse, error) {
-	registries, err := listAgentRegistries(ctx, r)
+// opts scope the three list calls; handleTopology passes client.InNamespace(ns)
+// when a namespace is selected in the header (m24.3 — the scope now filters the
+// dashboard/topology, not just the agents list), or nothing for cluster-wide.
+func buildTopology(ctx context.Context, r AgentReader, opts ...client.ListOption) (TopologyResponse, error) {
+	registries, err := listAgentRegistries(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list AgentRegistries: %w", err)
 	}
-	deployments, err := listAgentDeployments(ctx, r)
+	deployments, err := listAgentDeployments(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list AgentDeployments: %w", err)
 	}
-	bindings, err := listMCPToolBindings(ctx, r)
+	bindings, err := listMCPToolBindings(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list MCPToolBindings: %w", err)
 	}
@@ -222,16 +227,16 @@ func selectMembers(acc *groupAcc, spec topologyGroupSpec) []groupedAgent {
 // group, never the truncated view.
 //
 // It reads the same three CRDs caller-scoped (ADR 0011) as buildTopology.
-func buildGroupedTopology(ctx context.Context, r AgentReader, spec topologyGroupSpec) (TopologyResponse, error) {
-	registries, err := listAgentRegistries(ctx, r)
+func buildGroupedTopology(ctx context.Context, r AgentReader, spec topologyGroupSpec, opts ...client.ListOption) (TopologyResponse, error) {
+	registries, err := listAgentRegistries(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list AgentRegistries: %w", err)
 	}
-	deployments, err := listAgentDeployments(ctx, r)
+	deployments, err := listAgentDeployments(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list AgentDeployments: %w", err)
 	}
-	bindings, err := listMCPToolBindings(ctx, r)
+	bindings, err := listMCPToolBindings(ctx, r, opts...)
 	if err != nil {
 		return TopologyResponse{}, fmt.Errorf("list MCPToolBindings: %w", err)
 	}

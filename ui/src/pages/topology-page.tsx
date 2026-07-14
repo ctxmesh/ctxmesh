@@ -32,6 +32,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DetailDrawer, EmptyState, ForbiddenInline } from "@/components/kit";
+import { useNamespace } from "@/lib/namespace";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -333,6 +334,8 @@ function NodeDetailDrawer({
 
 export function TopologyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  // The header namespace scope filters the graph (m24.3) — "" = cluster-wide.
+  const { namespace } = useNamespace();
   const [state, setState] = React.useState<LoadState>({ kind: "loading" });
   const [view, setView] = React.useState<ViewMode>("graph");
   const [searchInput, setSearchInput] = React.useState("");
@@ -367,6 +370,7 @@ export function TopologyPage() {
           group: "registry",
           q: q || undefined,
           expand: expandedGroups.size > 0 ? Array.from(expandedGroups) : undefined,
+          namespace: namespace || undefined,
         },
         controller.signal,
       )
@@ -384,7 +388,7 @@ export function TopologyPage() {
         });
       });
     return () => controller.abort();
-  }, [q, expandedGroups]);
+  }, [q, expandedGroups, namespace]);
 
   React.useEffect(() => load(), [load]);
 
