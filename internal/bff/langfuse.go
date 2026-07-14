@@ -128,11 +128,47 @@ type lfUsage struct {
 	TotalTokens int64 `json:"totalTokens"`
 }
 
+// lfDailyMetricsResponse is the shape of GET /api/public/metrics/daily we
+// consume: one row per day, each carrying a per-model usage[] breakdown. This is
+// a purpose-built AGGREGATION endpoint (fast + reliable) — unlike the legacy
+// trace-list scan it does not time out on a slow ClickHouse, so it is the right
+// source for the cost rollup (m23.6). We map only the fields the CostSummary
+// needs; a schema addition does not break the projection.
+type lfDailyMetricsResponse struct {
+	Data []lfDailyMetric `json:"data"`
+}
+
+type lfDailyMetric struct {
+	Date              string              `json:"date"`
+	CountTraces       int64               `json:"countTraces"`
+	CountObservations int64               `json:"countObservations"`
+	TotalCost         float64             `json:"totalCost"`
+	Usage             []lfDailyModelUsage `json:"usage"`
+}
+
+// lfDailyModelUsage is one per-model usage/cost aggregate within a daily row.
+type lfDailyModelUsage struct {
+	Model      string  `json:"model"`
+	TotalUsage int64   `json:"totalUsage"`
+	TotalCost  float64 `json:"totalCost"`
+}
+
+// costWindowDays bounds the cost rollup to a recent window so the aggregation
+// stays cheap and the totals are honestly "recent" (matching the run-list's
+// recent-window framing), not an unbounded all-time scan.
+const costWindowDays = 30
+
 // RecentRuns fetches the most recent traces (newest first) from the Langfuse
 // public API and projects them onto RunSummary. Returns a non-nil slice.
 func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSummary, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if limit > maxRunLimit {
+		// The Langfuse traces list hard-caps limit at 100 (a larger value is a 400
+		// "too big"); clamp so a caller's oversized request degrades to the max page
+		// rather than erroring.
+		limit = maxRunLimit
 	}
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(limit))
@@ -209,6 +245,10 @@ func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name stri
 	}
 	if limit <= 0 {
 		limit = 20
+	}
+	if limit > maxRunLimit {
+		// Clamp to the Langfuse traces-list hard cap (see RecentRuns).
+		limit = maxRunLimit
 	}
 	tag := agentRunTag(namespace, name)
 
@@ -452,53 +492,69 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	return RunListPage{Runs: runs, NextCursor: nextCursor}, nil
 }
 
-// CostUsage aggregates the recent traces into the dashboard cost rollup. We
-// aggregate client-side over the same recent window so the summary and the
-// recent-runs list are consistent (one source, one call shape). ByModel is a
-// per-trace-name breakdown the native cost chart plots — a stable, non-nil
-// projection (Langfuse exposes cost by name/model via the same traces feed).
+// CostUsage aggregates recent cost/usage into the dashboard cost rollup via the
+// Langfuse daily-metrics AGGREGATION endpoint (/api/public/metrics/daily), NOT a
+// trace scan. The metrics endpoint is fast and reliable where the legacy
+// trace-list times out on a slow ClickHouse (m23.6); it returns per-day rows with
+// a per-MODEL usage[] breakdown, so ByModel here is a per-model cost breakdown
+// (more meaningful than the old per-trace-name one) — a stable, non-nil projection.
+// The window is bounded to costWindowDays so the totals are honestly "recent".
 func (a *langfuseAdapter) CostUsage(ctx context.Context) (CostSummary, error) {
 	q := url.Values{}
-	q.Set("limit", "100")
-	q.Set("orderBy", "timestamp.desc")
+	q.Set("fromTimestamp", costWindowStart(time.Now()))
 
-	var body lfTracesResponse
-	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+	var body lfDailyMetricsResponse
+	if err := a.getJSON(ctx, "/api/public/metrics/daily", q, &body); err != nil {
 		return CostSummary{}, err
 	}
 
 	var totalCost float64
 	var totalTokens int64
-	byName := map[string]float64{}
-	for _, t := range body.Data {
-		totalCost += t.TotalCost
-		totalTokens += traceTokens(t)
-		name := t.Name
-		if name == "" {
-			name = "unnamed"
+	var totalObs int64
+	byModel := map[string]float64{}
+	for _, d := range body.Data {
+		totalCost += d.TotalCost
+		totalObs += d.CountObservations
+		for _, u := range d.Usage {
+			totalTokens += u.TotalUsage
+			model := u.Model
+			if model == "" {
+				model = "unknown"
+			}
+			byModel[model] += u.TotalCost
 		}
-		byName[name] += t.TotalCost
 	}
 
-	byModel := make([]MetricPoint, 0, len(byName))
-	for name, cost := range byName {
-		byModel = append(byModel, MetricPoint{Label: name, Value: cost})
+	points := make([]MetricPoint, 0, len(byModel))
+	for model, cost := range byModel {
+		points = append(points, MetricPoint{Label: model, Value: cost})
 	}
 	// Deterministic order for stable rendering + tests.
-	sortMetricPoints(byModel)
+	sortMetricPoints(points)
 
 	return CostSummary{
 		TotalCostUSD: totalCost,
 		TotalTokens:  totalTokens,
-		Observations: int64(len(body.Data)),
-		ByModel:      byModel,
+		Observations: totalObs,
+		ByModel:      points,
 	}, nil
+}
+
+// costWindowStart returns the RFC3339 fromTimestamp for the bounded cost window
+// (now - costWindowDays), the lower bound sent to the daily-metrics endpoint.
+func costWindowStart(now time.Time) string {
+	return now.UTC().Add(-time.Duration(costWindowDays) * 24 * time.Hour).Format(time.RFC3339)
 }
 
 // costBreakdownWindowLimit is the number of recent traces fetched for the
 // CostBreakdown rollup. This is a bounded window, NOT a full historical scan —
-// the rollup is honest about being recent-window only.
-const costBreakdownWindowLimit = 200
+// the rollup is honest about being recent-window only. It is pinned to the
+// Langfuse traces-list hard cap (maxRunLimit = 100): a larger value is rejected
+// 400 "too big" (the m23.6 bug — it was 200). The per-agent breakdown needs the
+// trace tags, which the daily-metrics endpoint does not carry, so this path stays
+// a bounded trace-scan (it degrades calmly via ErrUpstreamUnavailable when the
+// list endpoint is slow, rather than erroring).
+const costBreakdownWindowLimit = maxRunLimit
 
 // agentCostKey is the per-agent accumulator key used inside CostBreakdown to
 // group traces before sorting and paginating.
@@ -991,6 +1047,16 @@ func (a *langfuseAdapter) getJSON(ctx context.Context, apiPath string, q url.Val
 		// upstream failure (which the handler serves as 502, never a 500).
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("langfuse: %s returned 404: %s: %w", apiPath, strings.TrimSpace(string(snippet)), ErrTraceNotFound)
+		}
+		// A 422 from the legacy trace-list endpoint is Langfuse's TRANSIENT
+		// self-protection: the query timed out on ClickHouse ("Request timed out" /
+		// "narrow your request"), and it fast-fails subsequent identical calls
+		// (circuit-break). This is not the caller's fault and not a permanent error —
+		// wrap the sentinel so the handler degrades calmly (200 + notice) instead of a
+		// red 502. (The recommended replacement, /api/public/v2/observations, is
+		// Cloud/v4-only, so on OSS v3 there is no faster list API to switch to.)
+		if resp.StatusCode == http.StatusUnprocessableEntity {
+			return fmt.Errorf("langfuse: %s returned 422 (upstream slow/circuit-broken): %s: %w", apiPath, strings.TrimSpace(string(snippet)), ErrUpstreamUnavailable)
 		}
 		return fmt.Errorf("langfuse: %s returned %d: %s", apiPath, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}

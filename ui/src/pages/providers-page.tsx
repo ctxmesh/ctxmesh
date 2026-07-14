@@ -173,17 +173,10 @@ export function ProvidersPage() {
         </span>
       ),
     },
-    {
-      id: "secret",
-      header: "Secret",
-      hideOnMobile: true,
-      cell: (p) => (
-        // The Secret NAME as a reference — never the key material.
-        <span className="font-mono text-xs text-muted-foreground">
-          {p.secretName || "—"}
-        </span>
-      ),
-    },
+    // The Secret NAME column was removed here (m23.7 / audit B7): it is a raw
+    // object-model detail (a Secret reference) that led the providers LIST with a
+    // CRD noun. The connection is identified by Name/Provider/Models; the backing
+    // Secret is a storage detail, not something a user reasons about in the list.
     {
       id: "status",
       header: "Status",
@@ -268,8 +261,8 @@ export function ProvidersPage() {
           data-testid="providers-disabled"
         >
           Provider connect is disabled on this install (the Helm kill-switch).
-          Ask your operator, or reference an existing SecretBinding + ModelRoute
-          directly.
+          Ask your operator to connect a provider for you (or wire the underlying
+          objects directly).
         </div>
       </div>
     );
@@ -281,9 +274,9 @@ export function ProvidersPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Providers</h2>
           <p className="text-sm text-muted-foreground">
-            LLM providers connected to the platform — each is a Secret +
-            SecretBinding + ModelRoute. Keys are stored server-side and never
-            shown.
+            LLM providers connected to the platform. Connect a provider once and
+            its models are available to your agents. Keys are stored server-side
+            and never shown.
           </p>
         </div>
         {canConnect && (

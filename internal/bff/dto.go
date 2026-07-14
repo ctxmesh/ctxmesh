@@ -77,6 +77,13 @@ type AgentSummary struct {
 	Image     string `json:"image"`
 	Phase     string `json:"phase"`
 	Ready     bool   `json:"ready"`
+	// Reason / Message carry the "Ready" condition's reason + human message when
+	// the agent is NOT ready (e.g. reason "RevisionMissing"), so the agents list
+	// can show WHY inline instead of forcing a click into the detail page (m23.7b).
+	// Empty when the agent is Ready or the condition is absent — omitted on the
+	// wire (backward-compatible: existing consumers ignore the absent fields).
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 	// Drift / ManagedOutsideUI are the fleet-health flags (m18.11, ADR 0017):
 	// managedOutsideUI = the agent has no console source-spec (kubectl-created);
 	// drift = a console-managed agent whose live spec diverged from its source-spec.
@@ -345,6 +352,12 @@ type CostResponse struct {
 	Summary CostSummary   `json:"summary"`
 	Latency []MetricPoint `json:"latency"`
 	Scale   []MetricPoint `json:"scale"`
+	// Notice is a human-readable degrade message, present ONLY when the cost data
+	// could not be loaded because the observability backend is transiently
+	// unavailable (slow/circuit-broken trace store). The SPA renders it as a calm
+	// "temporarily unavailable" banner over an empty view instead of a red error.
+	// Omitted (absent on the wire) on the normal path — a backward-compatible field.
+	Notice string `json:"notice,omitempty"`
 }
 
 // --- Cost breakdown by agent (GET /api/cost/breakdown?by=agent) --------------
@@ -379,6 +392,9 @@ type CostBreakdownResponse struct {
 	Agents     []AgentCostItem `json:"agents"`
 	Total      CostSummary     `json:"total"`
 	NextCursor string          `json:"nextCursor"`
+	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
+	// is transiently unavailable. Omitted on the normal path (backward-compatible).
+	Notice string `json:"notice,omitempty"`
 }
 
 // --- Recent runs (GET /api/runs) --------------------------------------------
@@ -402,6 +418,10 @@ type RunSummary struct {
 type RunListResponse struct {
 	Runs       []RunSummary `json:"runs"`
 	NextCursor string       `json:"nextCursor"`
+	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
+	// is transiently unavailable (slow/circuit-broken). Omitted on the normal path
+	// (backward-compatible), so the existing recent-runs consumption is unaffected.
+	Notice string `json:"notice,omitempty"`
 }
 
 // AgentRunsResponse is returned by GET /api/agents/{ns}/{name}/runs — the bounded
@@ -963,6 +983,7 @@ type FeedbackResponse struct {
 func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 	ready := false
 	phase := phasePending
+	var reason, message string
 	if c := apimeta.FindStatusCondition(ad.Status.Conditions, "Ready"); c != nil {
 		ready = c.Status == metav1.ConditionTrue
 		switch c.Status {
@@ -973,6 +994,12 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		default:
 			phase = phasePending
 		}
+		// Surface WHY only when not ready — a Ready agent needs no reason, and
+		// carrying the "Ready/AsExpected" boilerplate would just be noise inline.
+		if c.Status != metav1.ConditionTrue {
+			reason = c.Reason
+			message = c.Message
+		}
 	}
 	return AgentSummary{
 		Name:      ad.Name,
@@ -980,6 +1007,8 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Image:     ad.Spec.Image,
 		Phase:     phase,
 		Ready:     ready,
+		Reason:    reason,
+		Message:   message,
 	}
 }
 
