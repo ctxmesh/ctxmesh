@@ -43,6 +43,36 @@ func fakeLangfuse(t *testing.T, tracesJSON string) (*httptest.Server, *recordedR
 			_, _ = w.Write([]byte(tracesJSON))
 			return
 		}
+		// CostUsage sources the daily-metrics aggregation (m23.6); serve an empty
+		// window by default so traces-focused tests that also touch cost get a
+		// clean empty rollup rather than a 404.
+		if r.URL.Path == "/api/public/metrics/daily" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+// fakeLangfuseMetrics spins a stub Langfuse public API serving ONLY the
+// daily-metrics aggregation endpoint (/api/public/metrics/daily) with the given
+// JSON — the source CostUsage now reads (m23.6). It records the last request so a
+// test can assert the path/window/creds.
+func fakeLangfuseMetrics(t *testing.T, metricsJSON string) (*httptest.Server, *recordedRequest) {
+	t.Helper()
+	rec := &recordedRequest{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.path = r.URL.Path
+		rec.query = r.URL.RawQuery
+		rec.user, rec.pass, rec.hadAuth = r.BasicAuth()
+		if r.URL.Path == "/api/public/metrics/daily" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(metricsJSON))
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
@@ -115,26 +145,80 @@ func TestLangfuseRecentRuns(t *testing.T) {
 }
 
 func TestLangfuseCostUsage(t *testing.T) {
+	// CostUsage now sources the daily-metrics AGGREGATION endpoint (m23.6), not a
+	// trace scan: per-day rows, each with a per-MODEL usage[] breakdown.
 	body := `{"data":[
-		{"id":"t1","name":"chat","totalCost":0.50,"usage":{"totalTokens":900}},
-		{"id":"t2","name":"chat","totalCost":0.25,"usage":{"totalTokens":100}},
-		{"id":"t3","name":"summarize","totalCost":1.00,"usage":{"totalTokens":500}}
+		{"date":"2026-07-01","countTraces":3,"countObservations":5,"totalCost":1.25,"usage":[
+			{"model":"claude","totalUsage":1000,"totalCost":0.75},
+			{"model":"gpt","totalUsage":400,"totalCost":0.50}
+		]},
+		{"date":"2026-07-02","countTraces":1,"countObservations":2,"totalCost":0.50,"usage":[
+			{"model":"claude","totalUsage":500,"totalCost":0.50}
+		]}
 	]}`
-	srv, _ := fakeLangfuse(t, body)
+	srv, rec := fakeLangfuseMetrics(t, body)
 	a := newTestLangfuse(t, srv.URL)
 
 	sum, err := a.CostUsage(context.Background())
 	require.NoError(t, err)
-	assert.InDelta(t, 1.75, sum.TotalCostUSD, 1e-9)
-	assert.Equal(t, int64(1500), sum.TotalTokens)
-	assert.Equal(t, int64(3), sum.Observations)
+	assert.InDelta(t, 1.75, sum.TotalCostUSD, 1e-9) // 1.25 + 0.50
+	assert.Equal(t, int64(1900), sum.TotalTokens)   // 1000 + 400 + 500
+	assert.Equal(t, int64(7), sum.Observations)     // countObservations: 5 + 2
 
-	// ByModel groups by name and is deterministic ([] not null, sorted by label).
+	// ByModel groups by MODEL now (deterministic ([] not null), sorted by label).
 	require.Len(t, sum.ByModel, 2)
-	assert.Equal(t, "chat", sum.ByModel[0].Label)
-	assert.InDelta(t, 0.75, sum.ByModel[0].Value, 1e-9)
-	assert.Equal(t, "summarize", sum.ByModel[1].Label)
-	assert.InDelta(t, 1.00, sum.ByModel[1].Value, 1e-9)
+	assert.Equal(t, "claude", sum.ByModel[0].Label)
+	assert.InDelta(t, 1.25, sum.ByModel[0].Value, 1e-9) // 0.75 + 0.50
+	assert.Equal(t, "gpt", sum.ByModel[1].Label)
+	assert.InDelta(t, 0.50, sum.ByModel[1].Value, 1e-9)
+
+	// It hit the aggregation endpoint with a bounded window + server-side Basic auth.
+	assert.Equal(t, "/api/public/metrics/daily", rec.path)
+	assert.Contains(t, rec.query, "fromTimestamp=")
+	assert.True(t, rec.hadAuth, "public-API creds must be sent as Basic auth")
+	assert.Equal(t, "pk-test", rec.user)
+	assert.Equal(t, "sk-secret", rec.pass)
+}
+
+// TestLangfuseCostUsageDegradesOn422 proves the 422 "Request timed out" /
+// circuit-break from the metrics endpoint surfaces as ErrUpstreamUnavailable so
+// the handler can degrade calmly (m23.6) rather than as a generic error.
+func TestLangfuseCostUsageDegradesOn422(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"Request timed out"}`, http.StatusUnprocessableEntity)
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.CostUsage(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUpstreamUnavailable, "a 422 must map to ErrUpstreamUnavailable for a calm degrade")
+}
+
+// TestLangfuseRunsDegradeOn422 proves the same for the trace-list runs path — the
+// legacy list endpoint's 422 circuit-break becomes ErrUpstreamUnavailable.
+func TestLangfuseRunsDegradeOn422(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"Request timed out"}`, http.StatusUnprocessableEntity)
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.RecentRuns(context.Background(), 20)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUpstreamUnavailable)
+}
+
+// TestLangfuseRunLimitClamped proves an oversized caller limit is clamped to the
+// Langfuse traces-list hard cap (100) rather than sent verbatim (→ a 400 "too
+// big"). The stub echoes the limit query it received.
+func TestLangfuseRunLimitClamped(t *testing.T) {
+	srv, rec := fakeLangfuse(t, `{"data":[]}`)
+	a := newTestLangfuse(t, srv.URL)
+
+	_, err := a.RecentRuns(context.Background(), 5000)
+	require.NoError(t, err)
+	assert.Contains(t, rec.query, "limit="+strconv.Itoa(maxRunLimit), "oversized limit must be clamped to maxRunLimit")
 }
 
 func TestLangfuseEmptyIsNonNil(t *testing.T) {

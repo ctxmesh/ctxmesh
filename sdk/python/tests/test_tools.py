@@ -242,3 +242,34 @@ def test_list_falls_back_to_tools_json(tmp_path):
     c = agent.from_config(cfg)
     tools = c.tools.list()
     assert [t.name for t in tools] == ["local"]
+
+
+def test_list_no_sidecar_no_tools_json_is_empty(tmp_path):
+    # A managed agent with NO tools bound has neither a discovery sidecar
+    # (localhost:2999) nor a tools.json ConfigMap mounted: the controller injects
+    # both only when the agent has bindings. list() must return an empty manifest
+    # (no tools), NOT raise — "no tools" is a first-class chat agent, not a broken
+    # one (spec console-runs U-run-manifest). Without this, a zero-tools managed
+    # agent 502s on every invoke with "tool manifest unavailable".
+    missing = tmp_path / "no-such-dir" / "tools.json"  # a path that does not exist
+    cfg = PlaneConfig.for_test(
+        discovery_base_url="http://127.0.0.1:1",  # dead port → sidecar unreachable
+        tools_json_path=str(missing),
+    )
+    c = agent.from_config(cfg)
+    assert c.tools.list() == []
+
+
+def test_list_broken_tools_json_raises(tmp_path):
+    # A tools.json that EXISTS but is malformed is a genuinely broken manifest —
+    # surface it loudly (EndpointError), do NOT silently degrade to no-tools. This
+    # is the distinction from an absent file (which is a valid zero-tools agent).
+    tools_json = tmp_path / "tools.json"
+    tools_json.write_text("{ this is not valid json")
+    cfg = PlaneConfig.for_test(
+        discovery_base_url="http://127.0.0.1:1",  # dead port → sidecar unreachable
+        tools_json_path=str(tools_json),
+    )
+    c = agent.from_config(cfg)
+    with pytest.raises(EndpointError):
+        c.tools.list()

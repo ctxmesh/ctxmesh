@@ -290,11 +290,14 @@ func mcpPost(ctx context.Context, c *http.Client, url, apiKey, sessionID string,
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// The server rejected the bearer key (or requires one). An honest 401 so
-		// the UI can say "that key was rejected / this server needs a key".
+		// The TARGET MCP server rejected the credential (or requires one). This must
+		// NOT surface as a 401 from the BFF: the SPA treats any mid-session 401 as
+		// the CALLER's own session expiring and logs them out (api.ts). Return 422
+		// (a probe validation failure) with a clear message so the add-MCP form shows
+		// a probe error instead of kicking the user to the login screen (M23/U-mcp-401).
 		return nil, newSession, &mcpError{
-			status: http.StatusUnauthorized,
-			msg:    "the MCP server rejected the credential (check the key)",
+			status: http.StatusUnprocessableEntity,
+			msg:    "the MCP server requires authentication or rejected the credential — provide a valid bearer key (or use OAuth)",
 		}
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {

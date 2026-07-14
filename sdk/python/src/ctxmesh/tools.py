@@ -40,6 +40,12 @@ _MANIFEST_TIMEOUT = 2.0
 #: Tool-call timeout — a remote MCP round-trip may be slower than a localhost op.
 _TOOL_CALL_TIMEOUT = 30.0
 
+#: The manifest returned when a managed agent has NO tools bound: no discovery
+#: sidecar and no tools.json are present, so there is simply nothing to discover.
+#: "No tools" is a first-class agent (a plain chat agent), not a broken one, so
+#: this is a valid empty manifest — not an error (spec console-runs U-run-manifest).
+_EMPTY_MANIFEST: Dict[str, Any] = {"tools": []}
+
 
 class Tool:
     """One entry of the discovery manifest (mcp-tools.md manifest shape).
@@ -118,12 +124,26 @@ class ToolsClient:
                 data = json.load(fh)
             if isinstance(data, dict):
                 return data
+        except FileNotFoundError:
+            # Neither a discovery sidecar (localhost:2999) NOR a tools.json is
+            # present. For a managed agent with NO tools bound this is the
+            # EXPECTED state, not a failure: the controller injects the discovery
+            # sidecar + tools ConfigMap only when the agent has bindings
+            # (toolinject.go `hasBindings`), so a zero-tools agent has nothing to
+            # discover. Return an empty manifest so the managed loop advertises no
+            # tools and answers like a plain chat agent (managed.py: "Absent/empty
+            # is fine"). A tools-bound agent always has the ConfigMap mounted, so
+            # this branch never silently drops its tools.
+            return _EMPTY_MANIFEST
         except (OSError, json.JSONDecodeError):
+            # A tools.json that EXISTS but cannot be read or parsed (bad mount,
+            # corrupt JSON) is a genuinely broken manifest — surface it loudly
+            # rather than silently running tool-less.
             pass
 
         raise EndpointError(
-            f"tool manifest unavailable: neither {url} nor "
-            f"{self._config.tools_json_path} could be read"
+            f"tool manifest unavailable: {url} was unreachable and "
+            f"{self._config.tools_json_path} could not be read"
         )
 
     def _find(self, name: str) -> Tool:

@@ -802,33 +802,44 @@ function ConfigureFlow({
               </Select>
             </FormField>
           )}
-          <FormField
-            id="cfg-model-route"
-            label="Advanced: use an existing model route"
-            hint="Pick a pre-built ModelRoute instead of a model above (optional)."
-          >
-            {routes.length > 0 ? (
-              <Select
+          {/* m23.7b (audit B6): the raw ModelRoute picker is collapsed behind a
+              disclosure. It competes with the Model picker above and is silently
+              overridden by it, so it should not sit inline as a co-equal field —
+              it is an advanced escape hatch for pre-built routes. */}
+          <details className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+            <summary className="cursor-pointer select-none text-sm text-muted-foreground">
+              Advanced: use an existing model route
+            </summary>
+            <div className="mt-3">
+              <FormField
                 id="cfg-model-route"
-                value={form.modelRoute}
-                onChange={(e) => set("modelRoute", e.target.value)}
+                label="Existing model route"
+                hint="Pick a pre-built ModelRoute instead of the model above. If you also picked a model above, that model takes precedence."
               >
-                <option value="">— none (registry default) —</option>
-                {routes.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </Select>
-            ) : (
-              <Input
-                id="cfg-model-route"
-                value={form.modelRoute}
-                onChange={(e) => set("modelRoute", e.target.value)}
-                placeholder="connect a provider to create a route"
-              />
-            )}
-          </FormField>
+                {routes.length > 0 ? (
+                  <Select
+                    id="cfg-model-route"
+                    value={form.modelRoute}
+                    onChange={(e) => set("modelRoute", e.target.value)}
+                  >
+                    <option value="">— none (registry default) —</option>
+                    {routes.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  <Input
+                    id="cfg-model-route"
+                    value={form.modelRoute}
+                    onChange={(e) => set("modelRoute", e.target.value)}
+                    placeholder="connect a provider to create a route"
+                  />
+                )}
+              </FormField>
+            </div>
+          </details>
           <FormField id="cfg-execution-model" label="Execution model">
             <Select
               id="cfg-execution-model"

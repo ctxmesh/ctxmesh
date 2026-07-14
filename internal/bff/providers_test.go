@@ -276,9 +276,10 @@ func TestProviderSummaryModelsPreferAnnotation(t *testing.T) {
 	})
 }
 
-// TestConnectBadKeyIs401 proves a key the provider rejects (fake returns 401)
-// surfaces as a clean 401 — NOT a 500 — and NO objects are created.
-func TestConnectBadKeyIs401(t *testing.T) {
+// TestConnectBadKeyIs422 proves a key the PROVIDER rejects (fake returns 401)
+// surfaces as a 422 — NOT a bare 401 (which the SPA would treat as the caller's
+// session expiring → logout, ADR 0027) and NOT a 500 — and NO objects are created.
+func TestConnectBadKeyIs422(t *testing.T) {
 	prov := fakeProvider(t, "claude-sonnet-4-6")
 	createCalled := false
 	c := fake.NewClientBuilder().
@@ -293,7 +294,8 @@ func TestConnectBadKeyIs401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code, "a bad key is a clean 401, not a 500")
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+		"a provider-rejected key is a 422 (never a session-401), not a 500")
 	assert.False(t, createCalled, "a bad key must create NO objects")
 	// Even the (wrong) key must not leak into the response or logs.
 	assert.NotContains(t, rec.Body.String(), "wrong-key")
@@ -681,15 +683,16 @@ func TestConnectNilFactoryIs501(t *testing.T) {
 
 // --- provider client unit (validation → model list) --------------------------
 
-// TestProviderModelsProbeBadKey proves the low-level probe maps a provider 401
-// to a *providerError with status 401 (the honest-error contract), not a 500.
+// TestProviderModelsProbeBadKey proves the low-level probe maps a provider 401/403
+// to a *providerError with status 422 (an UPSTREAM auth failure — never a bare 401
+// that the SPA would read as the caller's session expiring, ADR 0027), not a 500.
 func TestProviderModelsProbeBadKey(t *testing.T) {
 	prov := fakeProvider(t, "m1")
 	_, err := providerModels(context.Background(), &http.Client{}, "openai", "nope", prov.URL)
 	require.Error(t, err)
 	pe, ok := isProviderError(err)
 	require.True(t, ok)
-	assert.Equal(t, http.StatusUnauthorized, pe.status)
+	assert.Equal(t, http.StatusUnprocessableEntity, pe.status)
 }
 
 // TestProviderModelsProbeUnsupported proves an unknown provider is a 400.
@@ -757,10 +760,11 @@ func TestRotateProviderKeyRotatesInPlace(t *testing.T) {
 	assert.NotContains(t, lb.String(), theTestKey, "the key never appears in any log line")
 }
 
-// TestRotateProviderKeyBadKeyIs401NoChange proves a bad NEW key is rejected by the
-// live probe (401) and the stored key is left UNCHANGED — never a silent rotate to
-// a broken credential.
-func TestRotateProviderKeyBadKeyIs401NoChange(t *testing.T) {
+// TestRotateProviderKeyBadKeyIs422NoChange proves a bad NEW key is rejected by the
+// live probe (422 — a provider auth failure, never a session-401 that would log the
+// user out, ADR 0027) and the stored key is left UNCHANGED — never a silent rotate
+// to a broken credential.
+func TestRotateProviderKeyBadKeyIs422NoChange(t *testing.T) {
 	prov := fakeProvider(t, "claude-sonnet-4-6") // accepts only theTestKey
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(seedConnectedProvider(prov.URL, theTestKey)...).Build()
@@ -773,7 +777,7 @@ func TestRotateProviderKeyBadKeyIs401NoChange(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	var got corev1.Secret
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "anthropic", Namespace: "prod"}, &got))

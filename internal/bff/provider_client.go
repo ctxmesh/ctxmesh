@@ -156,8 +156,9 @@ func providerBaseURL(override, def string) string {
 
 // doModelList executes the model-list request and maps the outcome to model IDs
 // or a typed providerError. The key already sits on req's headers; this function
-// never reads or logs it. Auth rejections (401/403) become a clean 401 with an
-// honest message; any other non-2xx or transport error becomes a 502.
+// never reads or logs it. An UPSTREAM auth rejection (401/403) becomes a 422 — NOT
+// a bare 401, which the SPA would treat as the caller's own session expiring and
+// log them out (ADR 0027). Any other non-2xx or transport error becomes a 502.
 func doModelList(c *http.Client, req *http.Request, provider string) ([]string, error) {
 	resp, err := c.Do(req)
 	if err != nil {
@@ -172,10 +173,12 @@ func doModelList(c *http.Client, req *http.Request, provider string) ([]string, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// The provider rejected the key — the single most common connect failure.
-		// Surface an honest 401 so the UI can say "that key was rejected", NOT a 500.
+		// The provider rejected the key — the most common connect failure. This is an
+		// UPSTREAM auth failure, NOT the caller's session: return 422 so the connect
+		// form shows "that key was rejected" inline and the user is NEVER logged out
+		// (ADR 0027; the same class as the MCP-probe 401→logout bug).
 		return nil, &providerError{
-			status: http.StatusUnauthorized,
+			status: http.StatusUnprocessableEntity,
 			msg:    fmt.Sprintf("the %s API rejected the key (check the key and try again)", provider),
 		}
 	}
