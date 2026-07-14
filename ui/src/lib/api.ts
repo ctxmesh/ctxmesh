@@ -405,6 +405,10 @@ export interface CostResponse {
   summary: CostSummary;
   latency: MetricPoint[];
   scale: MetricPoint[];
+  // notice is present ONLY when the observability backend is transiently
+  // unavailable (slow/circuit-broken trace store, m23.6). The page must render it
+  // as a "temporarily unavailable — retry" state, NOT a true-empty "no data".
+  notice?: string;
 }
 
 // --- Cost breakdown (GET /api/cost/breakdown, m16.10) -----------------------
@@ -433,6 +437,9 @@ export interface CostBreakdownResponse {
   agents: AgentCostItem[];
   total: CostSummary;
   nextCursor: string;
+  // notice — see CostResponse.notice: transient "temporarily unavailable" degrade
+  // (m23.6). Distinguish from a true-empty breakdown.
+  notice?: string;
 }
 
 // CostBreakdownParams are the query params for GET /api/cost/breakdown:
@@ -461,6 +468,9 @@ export interface RunSummary {
 export interface RunListResponse {
   runs: RunSummary[];
   nextCursor?: string;
+  // notice — see CostResponse.notice: transient "temporarily unavailable" degrade
+  // (m23.6). Distinguish from a true-empty run list.
+  notice?: string;
 }
 
 // RunsFilteredParams are the query params for GET /api/runs (m16.3):
