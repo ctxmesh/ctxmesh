@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Coins } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type AgentCostItem, type CostSummary } from "@/lib/api";
@@ -91,6 +92,7 @@ type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; agents: AgentCostItem[]; total: CostSummary; nextCursor: string }
   | { kind: "unavailable" } // 501 — Langfuse not configured
+  | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
 
 // emptyCostSummary is the zero-value CostSummary used while loading.
@@ -127,6 +129,13 @@ export function CostPage() {
         // null = 501 (Langfuse not configured) — calm degrade, NOT an error.
         if (res === null) {
           setLoadState({ kind: "unavailable" });
+          return;
+        }
+        // A `notice` means the trace store is transiently down (200 + empty, m23.6):
+        // show a "temporarily unavailable — retry" state, NOT the misleading "no cost
+        // data yet" empty (which implies zero activity when the source just timed out).
+        if (res.notice) {
+          setLoadState({ kind: "degraded", message: res.notice });
           return;
         }
         setLoadState({
@@ -240,6 +249,31 @@ export function CostPage() {
           data-testid="cost-unavailable"
         >
           Cost data unavailable — tracing not configured (Langfuse not wired).
+        </div>
+      </div>
+    );
+  }
+
+  // 200 + notice — the trace store is transiently unavailable (slow/circuit-broken).
+  // Honest degrade: distinct from "no data" so the user knows to retry, not that
+  // there is zero activity (m24 — the notice was previously dropped).
+  if (loadState.kind === "degraded") {
+    return (
+      <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
+          <p className="text-sm text-muted-foreground">
+            Per-agent cost breakdown from recent activity.
+          </p>
+        </div>
+        <div
+          className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          data-testid="cost-degraded"
+        >
+          <span>{loadState.message}</span>
+          <Button variant="outline" size="sm" onClick={load}>
+            Retry
+          </Button>
         </div>
       </div>
     );

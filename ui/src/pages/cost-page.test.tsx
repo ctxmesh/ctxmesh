@@ -105,6 +105,28 @@ describe("CostPage — basic rendering (m16.10)", () => {
     expect(screen.getByRole("table", { name: "Cost breakdown" })).toBeInTheDocument();
   });
 
+  it("renders a 'temporarily unavailable' degrade state when the API returns a notice (m24)", async () => {
+    // 200 + notice = the trace store is transiently down (m23.6). The page must show
+    // the notice + a retry, NOT the misleading "No cost data yet" empty table.
+    installFetch(() => ({
+      ok: true,
+      body: {
+        agents: [],
+        total: summary(),
+        nextCursor: "",
+        notice: "Observability is temporarily unavailable — the trace store is slow to respond.",
+      },
+    }));
+
+    renderPage();
+
+    const degraded = await screen.findByTestId("cost-degraded");
+    expect(degraded).toHaveTextContent(/temporarily unavailable/i);
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    // NOT the true-empty "no cost data" table.
+    expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
+  });
+
   it("summary card renders total cost and tokens from window total", async () => {
     installFetch(() => ({
       ok: true,

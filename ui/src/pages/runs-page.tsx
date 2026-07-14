@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
 
@@ -145,6 +146,7 @@ type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; runs: RunSummary[]; nextCursor: string }
   | { kind: "unavailable" } // 501 — Langfuse not configured
+  | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
 
 export function RunsPage() {
@@ -193,6 +195,12 @@ export function RunsPage() {
         // null = 501 (Langfuse not configured) — calm degrade, NOT an error.
         if (res === null) {
           setLoadState({ kind: "unavailable" });
+          return;
+        }
+        // A `notice` means the trace store is transiently down (200 + empty, m23.6):
+        // show "temporarily unavailable — retry", NOT the misleading "No runs yet".
+        if (res.notice) {
+          setLoadState({ kind: "degraded", message: res.notice });
           return;
         }
         setLoadState({
@@ -334,6 +342,31 @@ export function RunsPage() {
           data-testid="runs-unavailable"
         >
           Runs unavailable — tracing not configured (Langfuse not wired).
+        </div>
+      </div>
+    );
+  }
+
+  // 200 + notice — the trace store is transiently unavailable (slow/circuit-broken).
+  // Honest degrade: distinct from "No runs yet" so the user knows to retry, not that
+  // there is zero activity (m24 — the notice was previously dropped).
+  if (loadState.kind === "degraded") {
+    return (
+      <div className="mx-auto max-w-5xl space-y-6" data-testid="runs-page">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
+          <p className="text-sm text-muted-foreground">
+            Global run history — all traces across all agents.
+          </p>
+        </div>
+        <div
+          className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          data-testid="runs-degraded"
+        >
+          <span>{loadState.message}</span>
+          <Button variant="outline" size="sm" onClick={load}>
+            Retry
+          </Button>
         </div>
       </div>
     );
