@@ -202,6 +202,31 @@ func authFor(o *fakeOAuthServer) *MCPAuthRequest {
 	}
 }
 
+// TestMCPOAuthAutoDiscoverRegister proves the zero-config path (m24.7, ADR 0028):
+// a register with auth.autoDiscover=true (no endpoints/clientId) makes the BFF walk
+// the discovery chain + DCR, then start the SAME PKCE flow — returning a 202 whose
+// authorization URL points at the DISCOVERED endpoint with the DCR-issued client id.
+func TestMCPOAuthAutoDiscoverRegister(t *testing.T) {
+	disco, dcrHit := oauthDiscoveryStub(t, false)
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newMCPServer(t, c, false)
+
+	rec, pending := registerOAuth(t, s, "Auto OAuth MCP", disco.URL+"/mcp", &MCPAuthRequest{
+		Type:         "oauth",
+		AutoDiscover: true,
+		RedirectURI:  "https://console.example/api/mcp/oauth/callback",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "authorization_required", pending.Status)
+	require.NotEmpty(t, pending.AuthorizationURL)
+	// The authorization URL targets the DISCOVERED authorize endpoint + the
+	// DCR-issued client id — the caller supplied neither.
+	assert.Contains(t, pending.AuthorizationURL, disco.URL+"/authorize")
+	assert.Contains(t, pending.AuthorizationURL, "client_id=dyn-client-123")
+	assert.True(t, *dcrHit, "the register must have performed Dynamic Client Registration")
+}
+
 // --- the full OAuth flow -----------------------------------------------------
 
 // TestMCPOAuthFullFlow is the happy path: register (OAuth) → an authorization URL

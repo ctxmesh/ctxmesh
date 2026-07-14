@@ -629,6 +629,20 @@ export interface AddMcpRequest {
   // authType: "oauth" signals the BFF to start the OAuth 2.1 flow instead of
   // immediate probe. The SPA never holds OAuth tokens — only the auth URL + state.
   authType?: "key" | "oauth";
+  // auth is the NESTED OAuth block the BFF actually routes on (req.auth.type ==
+  // "oauth"). For zero-config OAuth (m24.7, ADR 0028) set autoDiscover + redirectUri
+  // only — the BFF discovers the endpoints + registers a client (DCR); no
+  // hand-entered authorizationEndpoint/tokenEndpoint/clientId.
+  auth?: {
+    type: "oauth";
+    autoDiscover?: boolean;
+    resourceMetadataUrl?: string;
+    redirectUri?: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+    clientId?: string;
+    scope?: string;
+  };
 }
 
 // AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're

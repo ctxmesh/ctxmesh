@@ -50,12 +50,32 @@ import (
 // pending flow here so the callback's Secret/CRD writes run as the SAME user. A
 // token-less caller is already rejected at callerClient (401) before this runs.
 func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, req RegisterMCPServerRequest, name, ns string) {
-	cfg := mcpOAuthConfig{
-		AuthorizationEndpoint: strings.TrimSpace(req.Auth.AuthorizationEndpoint),
-		TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
-		ClientID:              strings.TrimSpace(req.Auth.ClientID),
-		Scope:                 strings.TrimSpace(req.Auth.Scope),
-		RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
+	var cfg mcpOAuthConfig
+	if req.Auth.AutoDiscover {
+		// Zero-config OAuth (ADR 0028, m24.7): discover the authorize/token/
+		// registration endpoints from the MCP server's spec metadata and register an
+		// ephemeral client via DCR — the caller supplies NO endpoints/client id, only
+		// the redirect URI. A discovery/DCR failure is a connect-validation outcome
+		// (ADR 0027) → 422 shown inline, never a bare 401/500.
+		discovered, dErr := discoverMCPOAuthConfig(
+			r.Context(), nil,
+			strings.TrimSpace(req.URL),
+			strings.TrimSpace(req.Auth.ResourceMetadataURL),
+			strings.TrimSpace(req.Auth.RedirectURI),
+		)
+		if dErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, dErr.Error())
+			return
+		}
+		cfg = discovered
+	} else {
+		cfg = mcpOAuthConfig{
+			AuthorizationEndpoint: strings.TrimSpace(req.Auth.AuthorizationEndpoint),
+			TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
+			ClientID:              strings.TrimSpace(req.Auth.ClientID),
+			Scope:                 strings.TrimSpace(req.Auth.Scope),
+			RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
+		}
 	}
 	if cErr := cfg.validate(); cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
