@@ -112,10 +112,20 @@ export function AddMcpPage() {
       // returns 202 + { authorizationURL, state }. The SPA redirects the browser
       // to the authorization URL — the ENTIRE token exchange is server-side.
       // We NEVER receive, store, or display an OAuth token.
+      // Zero-config OAuth (m24.7, ADR 0028): send the NESTED auth block the BFF
+      // routes on (req.auth.type == "oauth"), with autoDiscover so the BFF discovers
+      // the endpoints + registers a client (DCR) — the user enters NO endpoints or
+      // client id. redirectUri is this console's OAuth callback (same origin as the
+      // BFF that serves us); DCR registers it so the auth server accepts it.
       const req = {
         name: name.trim(),
         ...(sourceKind === "url" ? { url: url.trim() } : { image: image.trim() }),
         authType: "oauth" as const,
+        auth: {
+          type: "oauth" as const,
+          autoDiscover: true,
+          redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+        },
       };
       try {
         const oauthRes = await api.addMcpServerOAuth(req);

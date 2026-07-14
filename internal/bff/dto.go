@@ -705,6 +705,16 @@ type MCPAuthRequest struct {
 	// RedirectURI is the callback URL the authorization server redirects back to.
 	// It must resolve to the BFF's GET /api/mcp/oauth/callback route.
 	RedirectURI string `json:"redirectUri"`
+	// AutoDiscover requests ZERO-CONFIG OAuth (ADR 0028, m24.7): the BFF discovers
+	// the authorization/token/registration endpoints from the MCP server's spec
+	// metadata and registers an ephemeral client via DCR, so the caller supplies
+	// NO authorizationEndpoint/tokenEndpoint/clientId — only Type + RedirectURI (and
+	// optionally ResourceMetadataURL). Ignored unless Type == "oauth".
+	AutoDiscover bool `json:"autoDiscover"`
+	// ResourceMetadataURL is the RFC 9728 protected-resource-metadata URL from the
+	// probe's WWW-Authenticate challenge; used verbatim when present, else derived
+	// from the server URL. Only meaningful with AutoDiscover.
+	ResourceMetadataURL string `json:"resourceMetadataUrl"`
 }
 
 // OAuthPendingResponse is returned by POST /api/mcpservers (HTTP 202) when the
