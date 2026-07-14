@@ -442,15 +442,10 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	require.NotEmpty(t, pending.State)
 	oauth.expectChallenge = "" // pass PKCE; assert grant storage
 
+	// The callback is browser-facing → 303 back to the console catalog, not JSON.
 	crec := callback(t, s, oauth.validCode, pending.State)
-	require.Equal(t, http.StatusCreated, crec.Code, "body: %s", crec.Body.String())
-
-	var resp MCPGrantResponse
-	require.NoError(t, json.Unmarshal(crec.Body.Bytes(), &resp))
-	assert.Equal(t, "granted", resp.Status)
-	assert.Equal(t, server, resp.Server)
-	// The response carries the HASHED user, never the raw username, never a token.
-	assert.Equal(t, userGrantHash("user:alice-token"), resp.User)
+	q := assertCallbackRedirect(t, crec, "/tools/catalog")
+	assert.Equal(t, server, q.Get("mcp_connected"), "the redirect names the consented server")
 
 	// The grant Secret exists, labeled (user, server), with the token ONLY in Data.
 	var grant corev1.Secret

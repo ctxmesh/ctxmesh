@@ -192,7 +192,7 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 // scoped (the token captured at consent-begin); a viewer's denied write surfaces a
 // 403. The response DTO carries the (user, server) identity + the server, never a
 // token.
-func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter, caller client.Client, flow pendingOAuthFlow, toks oauthTokens) {
+func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter, r *http.Request, caller client.Client, flow pendingOAuthFlow, toks oauthTokens) {
 	// In locked mode the grant lands in the credential namespace with the source ns
 	// folded into the coordinates + the source-namespace label; in legacy mode it stays
 	// in flow.namespace under the original name (sourceNs label "").
@@ -216,12 +216,12 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 	// idempotent user action. The write runs as the privileged credential client in
 	// locked mode (tenants have no RBAC there), else caller-scoped (ADR 0011).
 	if err := s.upsertGrantSecret(ctx, s.grantClient(caller), secret); err != nil {
-		if status, msg, isRBAC := classifyReadError(err); isRBAC {
-			writeError(w, status, msg)
+		if _, msg, isRBAC := classifyReadError(err); isRBAC {
+			oauthCallbackError(w, r, msg)
 			return
 		}
 		s.log.Error(err, "store MCP per-user grant failed", "server", flow.serverName)
-		writeError(w, http.StatusInternalServerError, "failed to store the per-user grant")
+		oauthCallbackError(w, r, "failed to store the per-user grant")
 		return
 	}
 
@@ -232,13 +232,9 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 		namespace: flow.namespace,
 	})
 
-	// The response carries the (user, server) identity + the server — NEVER a token.
-	writeJSON(w, http.StatusCreated, MCPGrantResponse{
-		Status:    "granted",
-		Server:    flow.serverName,
-		Namespace: flow.namespace,
-		User:      flow.grantUserHash,
-	})
+	// This callback is browser-facing (the OAuth redirect target): send the user back
+	// to the tool catalog with a success toast, not JSON. No token is ever in the URL.
+	oauthCallbackConnected(w, r, flow.serverName)
 }
 
 // handleRevokeMCPGrant serves DELETE /api/mcp/oauth/grant/{server} — a user
