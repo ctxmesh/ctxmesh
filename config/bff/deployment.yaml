@@ -88,6 +88,15 @@ spec:
             # `bff.mcp.requireApproval`, default renders "false" (no drift).
             - name: MCP_REQUIRE_APPROVAL
               value: "false"
+            # MCP_CREDENTIAL_NAMESPACE is the m25.1b locked platform namespace that
+            # holds every MCP grant Secret (ADR 0029 §7). Empty (the default) keeps the
+            # legacy per-request-namespace grant path (ADR 0011) so `kustomize build`/
+            # `make deploy` stay valid with no extra namespace/RBAC. The Helm chart
+            # templates it from `bff.mcp.credentialNamespace`; setting it renders the
+            # dedicated namespace + credential-component RBAC (templates/mcp-credentials
+            # .yaml) and routes grants there. Default renders "" (no drift).
+            - name: MCP_CREDENTIAL_NAMESPACE
+              value: ""
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).
