@@ -171,7 +171,7 @@ func TestOBOResolverPerUserIsolation(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(oauthToolRegistry(server, "http://weather/mcp"), aliceSecret, bobSecret).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	alice, err := r.Resolve(context.Background(), ns, server, "alice@example.com")
 	require.NoError(t, err)
@@ -189,6 +189,89 @@ func TestOBOResolverPerUserIsolation(t *testing.T) {
 	// The two users' grants are DISTINCT objects (different names + user labels).
 	assert.NotEqual(t, aliceSecret.Name, bobSecret.Name)
 	assert.NotEqual(t, aliceSecret.Labels[labelMCPGrantUser], bobSecret.Labels[labelMCPGrantUser])
+}
+
+// seedLockedGrant builds a grant Secret AS IT LIVES in the locked credential namespace
+// (m25.1b): named by grantSecretCoordinates (source ns folded in) + carrying the
+// source-namespace label, in credNS rather than the agent namespace.
+func seedLockedGrant(credNS, sourceNs, server, username, access string, expiry time.Time) *corev1.Secret {
+	userHash := userGrantHash(username)
+	_, name := grantSecretCoordinates(credNS, sourceNs, server, userHash)
+	data := map[string][]byte{
+		secretKeyOAuthAccessToken:   []byte(access),
+		secretKeyOAuthTokenEndpoint: []byte("https://x/token"),
+		secretKeyOAuthClientID:      []byte(theOAuthClientID),
+	}
+	if !expiry.IsZero() {
+		data[secretKeyOAuthExpiry] = []byte(expiry.UTC().Format(time.RFC3339))
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: credNS,
+			Labels:    grantSecretLabels(server, userHash, sourceNs),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}
+}
+
+// TestServerGrantRoutingModes pins the m25.1b mode switch: the write/read/delete paths
+// route to the locked credential namespace via the privileged client only when BOTH a
+// namespace and a client are wired, and stay on the legacy caller-scoped per-namespace
+// path otherwise (fail-safe: a namespace without a client does NOT enter locked mode).
+func TestServerGrantRoutingModes(t *testing.T) {
+	caller := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	cred := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	locked := &Server{credentialNamespace: "ae-credentials", credentialClient: cred}
+	require.True(t, locked.lockedCredentials())
+	ns, name := locked.grantCoordinates("prod", "gh", "u-abc")
+	assert.Equal(t, "ae-credentials", ns, "locked: grant lands in the credential namespace")
+	assert.NotEqual(t, grantSecretName("gh", "u-abc"), name, "locked: name folds the source ns")
+	assert.True(t, locked.grantClient(caller) == cred, "locked: writes go through the privileged client")
+	assert.Equal(t, "prod", locked.grantSourceNSLabel("prod"))
+
+	legacy := &Server{}
+	require.False(t, legacy.lockedCredentials())
+	lns, lname := legacy.grantCoordinates("prod", "gh", "u-abc")
+	assert.Equal(t, "prod", lns, "legacy: grant stays in the source namespace")
+	assert.Equal(t, grantSecretName("gh", "u-abc"), lname, "legacy: original name")
+	assert.True(t, legacy.grantClient(caller) == caller, "legacy: caller-scoped write")
+	assert.Empty(t, legacy.grantSourceNSLabel("prod"))
+
+	half := &Server{credentialNamespace: "ae-credentials"}
+	assert.False(t, half.lockedCredentials(), "a namespace without a privileged client must stay legacy (fail-safe)")
+}
+
+// TestOBOResolverLockedNamespace proves the resolver reads a grant from the locked
+// credential namespace (not the agent namespace) AND that a grant is bound to its
+// source namespace — the same (user, server) from a different namespace does not
+// resolve it (the source-namespace label is an authoritative match key in locked mode).
+func TestOBOResolverLockedNamespace(t *testing.T) {
+	const credNS, sourceNs, server = "ae-credentials", "prod", "weather-mcp"
+	future := time.Now().Add(time.Hour)
+	grant := seedLockedGrant(credNS, sourceNs, server, "alice@example.com", "ALICE-locked-token", future)
+	require.Equal(t, credNS, grant.Namespace, "the grant physically lives in the locked namespace")
+
+	// The ToolRegistry (metadata) stays in the AGENT namespace; only the grant moves.
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(oauthToolRegistry(server, "http://weather/mcp"), grant).Build()
+	r := NewOBOCredentialResolver(c, credNS, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+
+	got, err := r.Resolve(context.Background(), sourceNs, server, "alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "ALICE-locked-token", got.Value, "resolve reads the grant from the credential namespace")
+
+	// Cross-namespace isolation at the lookup seam: the same (user, server) keyed to a
+	// DIFFERENT source namespace does not match alice's prod grant.
+	res := &oboCredentialResolver{reader: c, credentialNamespace: credNS}
+	_, found, err := res.findGrant(context.Background(), sourceNs, server, userGrantHash("alice@example.com"))
+	require.NoError(t, err)
+	assert.True(t, found, "the grant resolves for its own source namespace")
+	_, foundOther, err := res.findGrant(context.Background(), "staging", server, userGrantHash("alice@example.com"))
+	require.NoError(t, err)
+	assert.False(t, foundOther, "a grant bound to source ns 'prod' must not resolve for 'staging'")
 }
 
 // TestOBOResolverAbsentGrantIsConsentRequired proves that an OAuth server with NO
@@ -211,7 +294,7 @@ func TestOBOResolverAbsentGrantIsConsentRequired(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(oauthToolRegistry(server, "http://oauth/mcp"), shared, binding).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	cred, err := r.Resolve(context.Background(), ns, server, "carol@example.com")
 	assert.True(t, isConsentRequired(err), "an OAuth server with no user grant must signal consent-required, got %v", err)
@@ -237,7 +320,7 @@ func TestOBOResolverBackwardCompatSharedMode(t *testing.T) {
 	tr := &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: server, Namespace: ns}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(shared, binding, tr).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	// Two different users get the SAME shared key (M14 semantics) — per-user is off
 	// for a non-OAuth server.
@@ -262,7 +345,7 @@ func TestOBOResolverRefreshesNearExpiryGrant(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 	s.oauthFlows.now = func() time.Time { return base }
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "dana@example.com")
 	require.NoError(t, err)
 	assert.Equal(t, theRotatedAccess, cred.Value, "a near-expiry per-user grant refreshes")
@@ -286,7 +369,7 @@ func TestOBOResolverExpiredNoRefreshIsConsentRequired(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 	s.oauthFlows.now = func() time.Time { return base }
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "erin@example.com")
 	assert.True(t, isConsentRequired(err), "an unrefreshable near-expiry grant must signal consent-required, got %v", err)
 	assert.Empty(t, cred.Value)
@@ -447,7 +530,7 @@ func TestMCPGrantRevokeThenConsentRequired(t *testing.T) {
 	s, lb := newGrantServer(t, c)
 
 	// The grant resolves before revoke.
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "user:alice-token")
 	require.NoError(t, err)
 	assert.Equal(t, theOAuthAccessToken, cred.Value)

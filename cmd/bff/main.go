@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -144,6 +146,22 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// platform Secret here; absent, the BFF warns and degrades to unsalted SHA-256.
 	mcpGrantHMACKey := []byte(os.Getenv("MCP_GRANT_HMAC_KEY"))
 
+	// Locked platform namespace for MCP grant Secrets (m25.1b, ADR 0029 §7). When set,
+	// grant write/read/delete route through a PRIVILEGED, namespace-scoped client built
+	// from the BFF's own in-cluster config (its SA) — a bounded, deliberate exception to
+	// the confused-deputy stance above: it touches ONLY Secrets in this locked namespace
+	// (which tenants cannot read), keyed by the authenticated caller's own identity,
+	// never a user CRD. Absent, the BFF keeps the legacy per-request-namespace grant
+	// path (ADR 0011) and warns. RBAC for the namespace ships in the Helm chart.
+	mcpCredentialNamespace := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
+	var credentialClient client.Client
+	if mcpCredentialNamespace != "" {
+		credentialClient, err = client.New(cfg, client.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("build privileged credential client: %w", err)
+		}
+	}
+
 	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
 	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
 	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
@@ -167,6 +185,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		MCPEnabled:               mcpEnabled,
 		MCPRequireApproval:       mcpRequireApproval,
 		MCPGrantHMACKey:          mcpGrantHMACKey,
+		MCPCredentialNamespace:   mcpCredentialNamespace,
+		CredentialClient:         credentialClient,
 		OIDCEnabled:              oidcEnabled,
 		OIDCIssuer:               oidcIssuer,
 		OIDCClientID:             oidcClientID,

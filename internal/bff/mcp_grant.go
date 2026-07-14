@@ -202,6 +202,12 @@ func shortNamespaceHash(ns string) string {
 type oboCredentialResolver struct {
 	// reader reads + refreshes the grant Secret. Supplied by the egress hop.
 	reader client.Client
+	// credentialNamespace consolidates grant READS into the locked platform namespace
+	// (m25.1b) when set — it MUST mirror the write side's MCP_CREDENTIAL_NAMESPACE so a
+	// read lands on the object the consent write created. "" ⇒ legacy per-request-
+	// namespace reads. In locked mode the source namespace is also matched on the
+	// mcp.ctxmesh.ai/source-namespace label (many namespaces' grants coexist there).
+	credentialNamespace string
 	// shared is the M14 shared-credential resolver, used for non-OAuth servers so
 	// the shared mode is preserved (backward compatibility).
 	shared MCPCredentialResolver
@@ -214,15 +220,24 @@ type oboCredentialResolver struct {
 }
 
 // NewOBOCredentialResolver returns the M17.3 per-user resolver. reader reads the
-// grant Secret server-side; shared is the M14 fallback for non-OAuth servers;
-// refresh rotates a near-expiry grant; audit records use (may be nil).
+// grant Secret server-side; credentialNamespace is the locked platform namespace grant
+// reads consolidate into ("" ⇒ legacy per-request-namespace, must mirror the write
+// side); shared is the M14 fallback for non-OAuth servers; refresh rotates a near-
+// expiry grant; audit records use (may be nil).
 func NewOBOCredentialResolver(
 	reader client.Client,
+	credentialNamespace string,
 	shared MCPCredentialResolver,
 	refresh func(ctx context.Context, c client.Client, ns, secretName string) (string, error),
 	audit *grantAuditor,
 ) MCPCredentialResolver {
-	return &oboCredentialResolver{reader: reader, shared: shared, refresher: refresh, audit: audit}
+	return &oboCredentialResolver{
+		reader:              reader,
+		credentialNamespace: credentialNamespace,
+		shared:              shared,
+		refresher:           refresh,
+		audit:               audit,
+	}
 }
 
 // Resolve implements MCPCredentialResolver for the per-user case (ADR 0016 §5):
@@ -260,8 +275,10 @@ func (r *oboCredentialResolver) Resolve(ctx context.Context, ns, server, user st
 
 	// The user has a grant. Refresh (rotate if near expiry) server-side and attach
 	// the fresh access token. errNoRefreshToken from the refresher means the grant
-	// cannot be rotated and is at/near expiry → the user must re-consent.
-	access, rErr := r.refresh(ctx, ns, secret.Name)
+	// cannot be rotated and is at/near expiry → the user must re-consent. Refresh
+	// against the Secret's ACTUAL namespace (the credential namespace in locked mode)
+	// so the rotated-token writeback lands on the same object.
+	access, rErr := r.refresh(ctx, secret.Namespace, secret.Name)
 	if rErr != nil {
 		if errors.Is(rErr, errNoRefreshToken) {
 			return MCPCredential{}, errConsentRequired
@@ -294,8 +311,10 @@ func (r *oboCredentialResolver) refresh(ctx context.Context, ns, secretName stri
 // consent-required vs shared-fallback.
 func (r *oboCredentialResolver) findGrant(ctx context.Context, ns, server, userHash string) (*corev1.Secret, bool, error) {
 	var secret corev1.Secret
-	name := grantSecretName(server, userHash)
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &secret); err != nil {
+	// Read from wherever the write put it: the locked credential namespace with the
+	// source ns folded into the name (locked mode) or the request namespace (legacy).
+	readNS, name := grantSecretCoordinates(r.credentialNamespace, ns, server, userHash)
+	if err := r.reader.Get(ctx, client.ObjectKey{Name: name, Namespace: readNS}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, false, nil
 		}
@@ -305,6 +324,12 @@ func (r *oboCredentialResolver) findGrant(ctx context.Context, ns, server, userH
 	// name-only match without this check could, under a truncated-hash name
 	// collision, hand user A user B's grant — the isolation invariant forbids that.
 	if secret.Labels[labelMCPGrantUser] != userHash || secret.Labels[labelMCPGrantServer] != server {
+		return nil, false, nil
+	}
+	// In locked mode many namespaces' grants coexist in one namespace, so the source
+	// namespace is also an authoritative match key (the name's short ns-hash alone is
+	// not enough — a hash collision must never cross the namespace boundary).
+	if r.credentialNamespace != "" && secret.Labels[labelMCPGrantSourceNS] != ns {
 		return nil, false, nil
 	}
 	return &secret, true, nil
