@@ -222,6 +222,14 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	group := strings.TrimSpace(r.URL.Query().Get("group"))
 
+	// ?namespace=<ns> scopes the graph to one namespace — the header namespace
+	// picker now filters the dashboard/topology, not just the agents list (m24.3).
+	// Empty = cluster-wide (every namespace the caller's RBAC permits).
+	var scope []client.ListOption
+	if ns := strings.TrimSpace(r.URL.Query().Get("namespace")); ns != "" {
+		scope = append(scope, client.InNamespace(ns))
+	}
+
 	var (
 		graph TopologyResponse
 		err   error
@@ -230,14 +238,14 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	case "":
 		// Raw mode: preserve the exact M12 response. q is only meaningful under a
 		// grouping axis, so it is ignored here (raw mode already emits every node).
-		graph, err = buildTopology(r.Context(), caller)
+		graph, err = buildTopology(r.Context(), caller, scope...)
 	case groupKindRegistry, groupKindNamespace:
 		graph, err = buildGroupedTopology(r.Context(), caller, topologyGroupSpec{
 			group:  group,
 			q:      q,
 			expand: parseExpandSet(r.URL.Query().Get("expand")),
 			cap:    parseTopologyExpandLimit(r.URL.Query().Get("limit")),
-		})
+		}, scope...)
 	default:
 		writeError(w, http.StatusBadRequest,
 			`invalid group: must be "registry", "namespace", or empty for the raw graph`)
