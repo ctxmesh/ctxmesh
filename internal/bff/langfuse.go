@@ -500,6 +500,16 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 // (more meaningful than the old per-trace-name one) — a stable, non-nil projection.
 // The window is bounded to costWindowDays so the totals are honestly "recent".
 func (a *langfuseAdapter) CostUsage(ctx context.Context) (CostSummary, error) {
+	return a.costSummaryFromDailyMetrics(ctx)
+}
+
+// costSummaryFromDailyMetrics builds the recent-window CostSummary from the fast
+// daily-metrics aggregation. It is the SINGLE cost-total source shared by the
+// dashboard (CostUsage) AND the Cost page's window total (CostBreakdown), so the
+// two surfaces can never contradict each other (m24.4 — Anuj's "is the cost page
+// reflecting the actual data?"). The per-agent breakdown still comes from the
+// trace-scan because daily-metrics carries no agent tag.
+func (a *langfuseAdapter) costSummaryFromDailyMetrics(ctx context.Context) (CostSummary, error) {
 	q := url.Values{}
 	q.Set("fromTimestamp", costWindowStart(time.Now()))
 
@@ -685,27 +695,32 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 		return 0
 	})
 
-	// Build the total summary over the window (same as CostUsage, minus ByModel).
-	// We reuse the ByModel breakdown here (by trace name) to stay consistent.
-	byName := map[string]float64{}
-	for _, t := range body.Data {
-		name := t.Name
-		if name == "" {
-			name = "unnamed"
+	// Window total from the SAME daily-metrics aggregation the dashboard cost card
+	// uses, so the Cost page total and the dashboard never contradict (m24.4). The
+	// per-agent breakdown above stays trace-derived (daily metrics carries no agent
+	// tag). If the aggregation call fails, fall back to the trace-derived total so
+	// the breakdown is never made WORSE than before.
+	total, mErr := a.costSummaryFromDailyMetrics(ctx)
+	if mErr != nil {
+		byName := map[string]float64{}
+		for _, t := range body.Data {
+			name := t.Name
+			if name == "" {
+				name = "unnamed"
+			}
+			byName[name] += t.TotalCost
 		}
-		byName[name] += t.TotalCost
-	}
-	byModel := make([]MetricPoint, 0, len(byName))
-	for n, cost := range byName {
-		byModel = append(byModel, MetricPoint{Label: n, Value: cost})
-	}
-	sortMetricPoints(byModel)
-
-	total := CostSummary{
-		TotalCostUSD: totalCost,
-		TotalTokens:  totalTokens,
-		Observations: int64(len(body.Data)),
-		ByModel:      byModel,
+		byModel := make([]MetricPoint, 0, len(byName))
+		for n, cost := range byName {
+			byModel = append(byModel, MetricPoint{Label: n, Value: cost})
+		}
+		sortMetricPoints(byModel)
+		total = CostSummary{
+			TotalCostUSD: totalCost,
+			TotalTokens:  totalTokens,
+			Observations: int64(len(body.Data)),
+			ByModel:      byModel,
+		}
 	}
 
 	// Paginate the agent list.
