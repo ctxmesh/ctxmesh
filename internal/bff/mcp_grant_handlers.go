@@ -193,7 +193,10 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 // 403. The response DTO carries the (user, server) identity + the server, never a
 // token.
 func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter, caller client.Client, flow pendingOAuthFlow, toks oauthTokens) {
-	labels := grantSecretLabels(flow.serverName, flow.grantUserHash)
+	// sourceNs is "" here (legacy per-namespace mode): the grant is written in
+	// flow.namespace. m25.1b will pass flow.namespace when a locked credential
+	// namespace is configured, folding it into the coordinates + this label.
+	labels := grantSecretLabels(flow.serverName, flow.grantUserHash, "")
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantSecretName(flow.serverName, flow.grantUserHash),

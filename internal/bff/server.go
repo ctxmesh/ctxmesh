@@ -185,6 +185,15 @@ type Options struct {
 	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
 	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
 	MCPRequireApproval bool
+	// MCPGrantHMACKey is the per-cluster key that salts the one-way user-identity hash
+	// used as the grant Secret label + mcp-owner annotation (m25.1, ADR 0029 §7). When
+	// non-empty, userGrantHash is HMAC-SHA256(user, key) — offline confirmation of a
+	// low-entropy username/email is infeasible without the key. When empty (dev /
+	// not-yet-hardened), it degrades to legacy unsalted SHA-256 with a start-up warning.
+	// A production cluster MUST set it (a per-cluster platform Secret); wired from
+	// MCP_GRANT_HMAC_KEY in cmd/bff/main.go. Immutable after start-up (changing it
+	// re-keys all grants ⇒ re-consent).
+	MCPGrantHMACKey []byte
 	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
 	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
 	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
@@ -223,6 +232,15 @@ func NewServer(opts Options) *Server {
 	}
 	if opts.StaticDir != "" {
 		s.static = os.DirFS(opts.StaticDir)
+	}
+	// Wire the per-cluster HMAC key that salts the one-way user-identity hash used for
+	// grant Secret labels + the mcp-owner annotation (m25.1, ADR 0029 §7). Package-level
+	// because userGrantHash is also called by the runtime resolver (not a *Server); the
+	// key is cluster-global and set once. Empty ⇒ legacy unsalted SHA-256 (warned below).
+	setGrantHMACKey(opts.MCPGrantHMACKey)
+	if s.mcpEnabled && len(opts.MCPGrantHMACKey) == 0 {
+		opts.Log.Info("mcp: MCP_GRANT_HMAC_KEY not set — user-identity hashes use legacy unsalted SHA-256; " +
+			"set a per-cluster HMAC key before production (ADR 0029 §7). Changing it later re-keys grants (re-consent).")
 	}
 	return s
 }

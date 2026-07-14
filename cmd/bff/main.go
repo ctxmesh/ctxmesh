@@ -139,6 +139,11 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
 	}
 
+	// Per-cluster HMAC key for the one-way user-identity hash on grant Secrets +
+	// the mcp-owner annotation (m25.1, ADR 0029 §7). A production cluster mounts a
+	// platform Secret here; absent, the BFF warns and degrades to unsalted SHA-256.
+	mcpGrantHMACKey := []byte(os.Getenv("MCP_GRANT_HMAC_KEY"))
+
 	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
 	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
 	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
@@ -161,6 +166,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		PlatformGenerationModels: platformGenModels,
 		MCPEnabled:               mcpEnabled,
 		MCPRequireApproval:       mcpRequireApproval,
+		MCPGrantHMACKey:          mcpGrantHMACKey,
 		OIDCEnabled:              oidcEnabled,
 		OIDCIssuer:               oidcIssuer,
 		OIDCClientID:             oidcClientID,
