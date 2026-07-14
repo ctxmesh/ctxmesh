@@ -106,6 +106,51 @@ func TestDiscoverMCPOAuthConfigPrefersCIMD(t *testing.T) {
 	assert.Nil(t, cfg.validate())
 }
 
+func TestDiscoverMCPOAuthConfigLocalhostFallsBackToDCR(t *testing.T) {
+	// CIMD is advertised, but our console is at http://localhost (a kubectl
+	// port-forward): the auth server could never dereference an http://localhost
+	// client_id (invalid_client_metadata_url), so discovery must fall back to DCR
+	// rather than hand out an unusable CIMD URL. Scalekit is exactly this shape
+	// (advertises BOTH CIMD and a registration_endpoint).
+	srv, dcrHit := oauthDiscoveryStub(t, false, true) // CIMD + DCR both available
+	redirect := "http://localhost:9090/api/mcp/oauth/callback"
+
+	cfg, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", redirect)
+	require.NoError(t, err)
+	assert.Equal(t, "dyn-client-123", cfg.ClientID, "a localhost origin cannot use CIMD → DCR issues the client id")
+	assert.True(t, *dcrHit, "DCR must be called when CIMD is unusable from a localhost origin")
+	assert.Nil(t, cfg.validate())
+}
+
+func TestDiscoverMCPOAuthConfigCIMDOnlyLocalhostIsHonestError(t *testing.T) {
+	// CIMD advertised, NO DCR, and a localhost origin → CIMD can't work and there is
+	// no fallback: an honest message (not the cryptic upstream invalid_client_metadata_url).
+	srv, _ := oauthDiscoveryStub(t, true, true) // CIMD only (no registration_endpoint)
+	_, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "",
+		"http://localhost:9090/api/mcp/oauth/callback")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public https")
+}
+
+func TestClientMetadataURLPubliclyReachable(t *testing.T) {
+	cases := map[string]bool{
+		"https://console.example/api/mcp/oauth/client-metadata": true,
+		"https://console.example:8443/x":                        true,
+		"http://console.example/x":                              false, // http, not https
+		"http://localhost:9090/x":                               false, // localhost
+		"https://localhost/x":                                   false,
+		"https://127.0.0.1/x":                                   false, // loopback
+		"https://10.1.2.3/x":                                    false, // private
+		"https://192.168.1.5/x":                                 false, // private
+		"https://foo.local/x":                                   false, // mDNS
+		"not-a-url":                                             false,
+		"":                                                      false,
+	}
+	for in, want := range cases {
+		assert.Equalf(t, want, clientMetadataURLPubliclyReachable(in), "input %q", in)
+	}
+}
+
 func TestDiscoverMCPOAuthConfigUsesExplicitResourceMetadataURL(t *testing.T) {
 	// When the probe hands an explicit resource_metadata URL (from WWW-Authenticate),
 	// discovery uses it directly rather than deriving from the MCP URL.
