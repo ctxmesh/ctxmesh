@@ -161,6 +161,13 @@ describe("RunsPage — filters issue correct query params (m16.8)", () => {
     await waitFor(() =>
       expect(captured.some((u) => u.includes("from="))).toBe(true),
     );
+    // m24 fix: the datetime-local value ("2026-07-01T00:00", no seconds/tz) must be
+    // sent as RFC3339, not raw — the BFF 400s on a non-RFC3339 `from` ("Something
+    // went wrong: from must be RFC3339"). The sent value carries seconds + a zone.
+    const url = captured.find((u) => u.includes("from="))!;
+    const sentFrom = decodeURIComponent(new URL(url, "http://x").searchParams.get("from")!);
+    expect(sentFrom).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(sentFrom).not.toBe("2026-07-01T00:00");
   });
 
   it("to filter sends ?to= to the API", async () => {
