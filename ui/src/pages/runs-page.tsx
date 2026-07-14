@@ -131,6 +131,16 @@ function fmtTimestamp(ts: string): string {
   }
 }
 
+// toRFC3339 converts a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
+// LOCAL time, no seconds/timezone) into a UTC RFC3339 string the BFF's runs
+// filter accepts. Returns "" for empty/unparseable input (so the caller omits the
+// param rather than sending a malformed one — the m24 fix for the Runs 400).
+function toRFC3339(dtLocal: string): string {
+  if (!dtLocal) return "";
+  const d = new Date(dtLocal);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; runs: RunSummary[]; nextCursor: string }
@@ -161,12 +171,18 @@ export function RunsPage() {
     abortRef.current = controller;
     setLoadState({ kind: "loading" });
 
+    // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
+    // (no seconds, no timezone) — the BFF's runs filter requires RFC3339, so
+    // sending it raw 400s ("from must be RFC3339"). Convert local -> UTC RFC3339.
+    const fromRfc = toRFC3339(fromFilter);
+    const toRfc = toRFC3339(toFilter);
+
     const params: RunsFilteredParams = {
       limit: PAGE_LIMIT,
       ...(cursor ? { cursor } : {}),
       ...(agentFilter ? { agent: agentFilter } : {}),
-      ...(fromFilter ? { from: fromFilter } : {}),
-      ...(toFilter ? { to: toFilter } : {}),
+      ...(fromRfc ? { from: fromRfc } : {}),
+      ...(toRfc ? { to: toRfc } : {}),
       ...(query ? { q: query } : {}),
     };
 
