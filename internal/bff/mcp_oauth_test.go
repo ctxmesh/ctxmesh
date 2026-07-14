@@ -202,6 +202,55 @@ func authFor(o *fakeOAuthServer) *MCPAuthRequest {
 	}
 }
 
+// TestMCPOAuthAutoDiscoverRegister proves the zero-config path (m24.7, ADR 0028):
+// a register with auth.autoDiscover=true (no endpoints/clientId) makes the BFF walk
+// the discovery chain + DCR, then start the SAME PKCE flow — returning a 202 whose
+// authorization URL points at the DISCOVERED endpoint with the DCR-issued client id.
+func TestMCPOAuthAutoDiscoverRegister(t *testing.T) {
+	disco, dcrHit := oauthDiscoveryStub(t, false, false)
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newMCPServer(t, c, false)
+
+	rec, pending := registerOAuth(t, s, "Auto OAuth MCP", disco.URL+"/mcp", &MCPAuthRequest{
+		Type:         "oauth",
+		AutoDiscover: true,
+		RedirectURI:  "https://console.example/api/mcp/oauth/callback",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "authorization_required", pending.Status)
+	require.NotEmpty(t, pending.AuthorizationURL)
+	// The authorization URL targets the DISCOVERED authorize endpoint + the
+	// DCR-issued client id — the caller supplied neither.
+	assert.Contains(t, pending.AuthorizationURL, disco.URL+"/authorize")
+	assert.Contains(t, pending.AuthorizationURL, "client_id=dyn-client-123")
+	assert.True(t, *dcrHit, "the register must have performed Dynamic Client Registration")
+}
+
+// TestMCPOAuthClientMetadataDoc proves the CIMD (Client ID Metadata Document, ADR
+// 0028) endpoint serves a public client metadata doc whose client_id equals its own
+// URL (the CIMD invariant) and which is a public PKCE client (no secret). It is
+// unauthenticated — the authorization server, not the caller, dereferences it.
+func TestMCPOAuthClientMetadataDoc(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newMCPServer(t, c, false)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/mcp/oauth/client-metadata", nil)
+	req.Host = "console.example" // no Authorization header — must still serve
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &doc))
+	assert.Equal(t, "http://console.example/api/mcp/oauth/client-metadata", doc["client_id"],
+		"CIMD invariant: client_id MUST equal the document's own URL")
+	assert.Equal(t, "none", doc["token_endpoint_auth_method"], "a public PKCE client — no secret")
+	rus, _ := doc["redirect_uris"].([]any)
+	require.Len(t, rus, 1)
+	assert.Equal(t, "http://console.example/api/mcp/oauth/callback", rus[0])
+}
+
 // --- the full OAuth flow -----------------------------------------------------
 
 // TestMCPOAuthFullFlow is the happy path: register (OAuth) → an authorization URL

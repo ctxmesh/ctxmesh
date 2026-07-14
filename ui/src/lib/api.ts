@@ -385,6 +385,7 @@ export interface TopologyParams {
   group?: "registry" | "namespace" | "";
   q?: string;
   expand?: string[]; // group ids to emit as member nodes
+  namespace?: string; // scope the graph to one namespace ("" = cluster-wide) (m24.3)
 }
 
 // --- Cost / usage (GET /api/cost) -------------------------------------------
@@ -405,6 +406,10 @@ export interface CostResponse {
   summary: CostSummary;
   latency: MetricPoint[];
   scale: MetricPoint[];
+  // notice is present ONLY when the observability backend is transiently
+  // unavailable (slow/circuit-broken trace store, m23.6). The page must render it
+  // as a "temporarily unavailable — retry" state, NOT a true-empty "no data".
+  notice?: string;
 }
 
 // --- Cost breakdown (GET /api/cost/breakdown, m16.10) -----------------------
@@ -433,6 +438,9 @@ export interface CostBreakdownResponse {
   agents: AgentCostItem[];
   total: CostSummary;
   nextCursor: string;
+  // notice — see CostResponse.notice: transient "temporarily unavailable" degrade
+  // (m23.6). Distinguish from a true-empty breakdown.
+  notice?: string;
 }
 
 // CostBreakdownParams are the query params for GET /api/cost/breakdown:
@@ -461,6 +469,9 @@ export interface RunSummary {
 export interface RunListResponse {
   runs: RunSummary[];
   nextCursor?: string;
+  // notice — see CostResponse.notice: transient "temporarily unavailable" degrade
+  // (m23.6). Distinguish from a true-empty run list.
+  notice?: string;
 }
 
 // RunsFilteredParams are the query params for GET /api/runs (m16.3):
@@ -618,6 +629,20 @@ export interface AddMcpRequest {
   // authType: "oauth" signals the BFF to start the OAuth 2.1 flow instead of
   // immediate probe. The SPA never holds OAuth tokens — only the auth URL + state.
   authType?: "key" | "oauth";
+  // auth is the NESTED OAuth block the BFF actually routes on (req.auth.type ==
+  // "oauth"). For zero-config OAuth (m24.7, ADR 0028) set autoDiscover + redirectUri
+  // only — the BFF discovers the endpoints + registers a client (DCR); no
+  // hand-entered authorizationEndpoint/tokenEndpoint/clientId.
+  auth?: {
+    type: "oauth";
+    autoDiscover?: boolean;
+    resourceMetadataUrl?: string;
+    redirectUri?: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+    clientId?: string;
+    scope?: string;
+  };
 }
 
 // AddMcpResponse mirrors the BFF DTO: the discovered tools + whether they're
@@ -1653,6 +1678,7 @@ export const api = {
     if (params?.group) qs.set("group", params.group);
     if (params?.q) qs.set("q", params.q);
     if (params?.expand?.length) qs.set("expand", params.expand.join(","));
+    if (params?.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },

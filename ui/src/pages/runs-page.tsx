@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
 
@@ -131,10 +132,21 @@ function fmtTimestamp(ts: string): string {
   }
 }
 
+// toRFC3339 converts a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
+// LOCAL time, no seconds/timezone) into a UTC RFC3339 string the BFF's runs
+// filter accepts. Returns "" for empty/unparseable input (so the caller omits the
+// param rather than sending a malformed one — the m24 fix for the Runs 400).
+function toRFC3339(dtLocal: string): string {
+  if (!dtLocal) return "";
+  const d = new Date(dtLocal);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; runs: RunSummary[]; nextCursor: string }
   | { kind: "unavailable" } // 501 — Langfuse not configured
+  | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
 
 export function RunsPage() {
@@ -161,12 +173,18 @@ export function RunsPage() {
     abortRef.current = controller;
     setLoadState({ kind: "loading" });
 
+    // The <input type="datetime-local"> value is "YYYY-MM-DDTHH:MM" in LOCAL time
+    // (no seconds, no timezone) — the BFF's runs filter requires RFC3339, so
+    // sending it raw 400s ("from must be RFC3339"). Convert local -> UTC RFC3339.
+    const fromRfc = toRFC3339(fromFilter);
+    const toRfc = toRFC3339(toFilter);
+
     const params: RunsFilteredParams = {
       limit: PAGE_LIMIT,
       ...(cursor ? { cursor } : {}),
       ...(agentFilter ? { agent: agentFilter } : {}),
-      ...(fromFilter ? { from: fromFilter } : {}),
-      ...(toFilter ? { to: toFilter } : {}),
+      ...(fromRfc ? { from: fromRfc } : {}),
+      ...(toRfc ? { to: toRfc } : {}),
       ...(query ? { q: query } : {}),
     };
 
@@ -177,6 +195,12 @@ export function RunsPage() {
         // null = 501 (Langfuse not configured) — calm degrade, NOT an error.
         if (res === null) {
           setLoadState({ kind: "unavailable" });
+          return;
+        }
+        // A `notice` means the trace store is transiently down (200 + empty, m23.6):
+        // show "temporarily unavailable — retry", NOT the misleading "No runs yet".
+        if (res.notice) {
+          setLoadState({ kind: "degraded", message: res.notice });
           return;
         }
         setLoadState({
@@ -318,6 +342,31 @@ export function RunsPage() {
           data-testid="runs-unavailable"
         >
           Runs unavailable — tracing not configured (Langfuse not wired).
+        </div>
+      </div>
+    );
+  }
+
+  // 200 + notice — the trace store is transiently unavailable (slow/circuit-broken).
+  // Honest degrade: distinct from "No runs yet" so the user knows to retry, not that
+  // there is zero activity (m24 — the notice was previously dropped).
+  if (loadState.kind === "degraded") {
+    return (
+      <div className="mx-auto max-w-5xl space-y-6" data-testid="runs-page">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Runs</h2>
+          <p className="text-sm text-muted-foreground">
+            Global run history — all traces across all agents.
+          </p>
+        </div>
+        <div
+          className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          data-testid="runs-degraded"
+        >
+          <span>{loadState.message}</span>
+          <Button variant="outline" size="sm" onClick={load}>
+            Retry
+          </Button>
         </div>
       </div>
     );

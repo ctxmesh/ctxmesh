@@ -50,12 +50,32 @@ import (
 // pending flow here so the callback's Secret/CRD writes run as the SAME user. A
 // token-less caller is already rejected at callerClient (401) before this runs.
 func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, req RegisterMCPServerRequest, name, ns string) {
-	cfg := mcpOAuthConfig{
-		AuthorizationEndpoint: strings.TrimSpace(req.Auth.AuthorizationEndpoint),
-		TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
-		ClientID:              strings.TrimSpace(req.Auth.ClientID),
-		Scope:                 strings.TrimSpace(req.Auth.Scope),
-		RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
+	var cfg mcpOAuthConfig
+	if req.Auth.AutoDiscover {
+		// Zero-config OAuth (ADR 0028, m24.7): discover the authorize/token/
+		// registration endpoints from the MCP server's spec metadata and register an
+		// ephemeral client via DCR — the caller supplies NO endpoints/client id, only
+		// the redirect URI. A discovery/DCR failure is a connect-validation outcome
+		// (ADR 0027) → 422 shown inline, never a bare 401/500.
+		discovered, dErr := discoverMCPOAuthConfig(
+			r.Context(), nil,
+			strings.TrimSpace(req.URL),
+			strings.TrimSpace(req.Auth.ResourceMetadataURL),
+			strings.TrimSpace(req.Auth.RedirectURI),
+		)
+		if dErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, dErr.Error())
+			return
+		}
+		cfg = discovered
+	} else {
+		cfg = mcpOAuthConfig{
+			AuthorizationEndpoint: strings.TrimSpace(req.Auth.AuthorizationEndpoint),
+			TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
+			ClientID:              strings.TrimSpace(req.Auth.ClientID),
+			Scope:                 strings.TrimSpace(req.Auth.Scope),
+			RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
+		}
 	}
 	if cErr := cfg.validate(); cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
@@ -97,6 +117,35 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 			AuthType:  oauthAuthType,
 		},
 	})
+}
+
+// handleMCPOAuthClientMetadata serves GET /api/mcp/oauth/client-metadata — the CIMD
+// (Client ID Metadata Document, ADR 0028) that a CIMD-capable authorization server
+// dereferences to identify this console as an OAuth client. The client_id IS this
+// URL; the document is PUBLIC and carries NO secret (a public PKCE client —
+// token_endpoint_auth_method "none"). Preferred over DCR because it needs no
+// per-server registration state — one stable, self-describing identity.
+func (s *Server) handleMCPOAuthClientMetadata(w http.ResponseWriter, r *http.Request) {
+	origin := requestOrigin(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_id":                  origin + clientMetadataPath, // MUST equal this URL
+		"client_name":                oauthClientName,
+		"redirect_uris":              []string{origin + "/api/mcp/oauth/callback"},
+		"grant_types":                []string{oauthGrantAuthCode, oauthGrantRefresh},
+		"response_types":             []string{oauthResponseTypeCode},
+		"token_endpoint_auth_method": oauthAuthMethodNone,
+	})
+}
+
+// requestOrigin reconstructs the PUBLIC scheme://host origin of an incoming request,
+// honoring a reverse proxy's X-Forwarded-Proto — so the CIMD client_id + redirect
+// URIs are the externally-reachable ones the auth server will use.
+func requestOrigin(r *http.Request) string {
+	scheme := schemeHTTP
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), schemeHTTPS) {
+		scheme = schemeHTTPS
+	}
+	return scheme + "://" + r.Host
 }
 
 // handleMCPOAuthCallback serves GET /api/mcp/oauth/callback?code=&state=. It:
