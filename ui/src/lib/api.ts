@@ -48,6 +48,11 @@ export interface AgentSummary {
   image: string;
   phase: string;
   ready: boolean;
+  // Reason/message from the "Ready" condition when the agent is NOT ready
+  // (e.g. reason "RevisionFailed"), so the list can show WHY inline without a
+  // click-in (m23.7b). Absent/empty when the agent is Ready.
+  reason?: string;
+  message?: string;
   // Fleet-health flags (m18.11): managedOutsideUI = kubectl-created (no console
   // source-spec); drift = a console-managed agent whose live spec diverged. Both
   // drive the SRE fleet drift badges (m18.12). Optional for backward-compat.

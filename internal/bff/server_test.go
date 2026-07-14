@@ -170,9 +170,10 @@ func TestListAgentsProjection(t *testing.T) {
 		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "broken:0"},
 		Status: agentsv1alpha1.AgentDeploymentStatus{
 			Conditions: []metav1.Condition{{
-				Type:   "Ready",
-				Status: metav1.ConditionFalse,
-				Reason: "RevisionFailed",
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "RevisionFailed",
+				Message: "Revision \"broken-0001\" failed to become ready",
 			}},
 		},
 	}
@@ -205,6 +206,13 @@ func TestListAgentsProjection(t *testing.T) {
 	assert.False(t, byName["wip"].Ready)
 	assert.Equal(t, "NotReady", byName["broken"].Phase)
 	assert.False(t, byName["broken"].Ready)
+	// A NotReady agent carries WHY inline (m23.7b) so the list shows it without a
+	// click-in: the Ready condition's reason + message.
+	assert.Equal(t, "RevisionFailed", byName["broken"].Reason)
+	assert.Contains(t, byName["broken"].Message, "failed to become ready")
+	// A Ready agent carries no reason/message (they are only meaningful when down).
+	assert.Empty(t, byName["echo"].Reason)
+	assert.Empty(t, byName["echo"].Message)
 }
 
 func TestListAgentsClientError(t *testing.T) {

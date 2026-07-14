@@ -224,6 +224,19 @@ export function AgentsPage() {
           <Badge variant={a.ready ? "success" : "warning"}>
             {a.phase || (a.ready ? "Ready" : "Pending")}
           </Badge>
+          {/* Inline the NotReady reason (m23.7b) so a user sees WHY (e.g.
+              "RevisionFailed") without clicking into the detail page. Only shown
+              when not ready and a reason is present; the full message is the
+              hover title. */}
+          {!a.ready && a.reason && (
+            <span
+              className="text-xs text-muted-foreground"
+              data-testid={`agent-reason-${a.name}`}
+              title={a.message || a.reason}
+            >
+              {a.reason}
+            </span>
+          )}
           {/* Fleet-health badges (m18.12) from the m18.11 flags. */}
           {a.drift && (
             <Badge
