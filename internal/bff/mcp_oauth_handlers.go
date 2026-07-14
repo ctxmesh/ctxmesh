@@ -119,6 +119,35 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleMCPOAuthClientMetadata serves GET /api/mcp/oauth/client-metadata — the CIMD
+// (Client ID Metadata Document, ADR 0028) that a CIMD-capable authorization server
+// dereferences to identify this console as an OAuth client. The client_id IS this
+// URL; the document is PUBLIC and carries NO secret (a public PKCE client —
+// token_endpoint_auth_method "none"). Preferred over DCR because it needs no
+// per-server registration state — one stable, self-describing identity.
+func (s *Server) handleMCPOAuthClientMetadata(w http.ResponseWriter, r *http.Request) {
+	origin := requestOrigin(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_id":                  origin + clientMetadataPath, // MUST equal this URL
+		"client_name":                oauthClientName,
+		"redirect_uris":              []string{origin + "/api/mcp/oauth/callback"},
+		"grant_types":                []string{oauthGrantAuthCode, oauthGrantRefresh},
+		"response_types":             []string{oauthResponseTypeCode},
+		"token_endpoint_auth_method": oauthAuthMethodNone,
+	})
+}
+
+// requestOrigin reconstructs the PUBLIC scheme://host origin of an incoming request,
+// honoring a reverse proxy's X-Forwarded-Proto — so the CIMD client_id + redirect
+// URIs are the externally-reachable ones the auth server will use.
+func requestOrigin(r *http.Request) string {
+	scheme := schemeHTTP
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), schemeHTTPS) {
+		scheme = schemeHTTPS
+	}
+	return scheme + "://" + r.Host
+}
+
 // handleMCPOAuthCallback serves GET /api/mcp/oauth/callback?code=&state=. It:
 //  1. validates `state` against the SERVER-SIDE pending-flow store (CSRF): an
 //     unknown/expired/mismatched state → a teaching 4xx with NO token exchange;

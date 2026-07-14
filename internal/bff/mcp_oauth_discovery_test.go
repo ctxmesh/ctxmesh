@@ -30,8 +30,9 @@ import (
 // oauthDiscoveryStub serves the RFC 9728 / 8414 / 7591 discovery chain from ONE
 // httptest server so a test can exercise discoverMCPOAuthConfig end to end. When
 // noDCR is set, the auth-server metadata omits registration_endpoint (the manual-
-// fallback path). It records whether the DCR endpoint was hit.
-func oauthDiscoveryStub(t *testing.T, noDCR bool) (*httptest.Server, *bool) {
+// fallback path). When cimd is set, the metadata advertises Client ID Metadata
+// Documents. It records whether the DCR endpoint was hit.
+func oauthDiscoveryStub(t *testing.T, noDCR, cimd bool) (*httptest.Server, *bool) {
 	t.Helper()
 	dcrHit := false
 	mux := http.NewServeMux()
@@ -46,10 +47,11 @@ func oauthDiscoveryStub(t *testing.T, noDCR bool) (*httptest.Server, *bool) {
 	})
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
 		meta := oauthServerMeta{
-			Issuer:                srv.URL,
-			AuthorizationEndpoint: srv.URL + "/authorize",
-			TokenEndpoint:         srv.URL + "/token",
-			ScopesSupported:       []string{"mcp.read", "mcp.write"},
+			Issuer:                            srv.URL,
+			AuthorizationEndpoint:             srv.URL + "/authorize",
+			TokenEndpoint:                     srv.URL + "/token",
+			ScopesSupported:                   []string{"mcp.read", "mcp.write"},
+			ClientIDMetadataDocumentSupported: cimd,
 		}
 		if !noDCR {
 			meta.RegistrationEndpoint = srv.URL + "/register"
@@ -72,7 +74,7 @@ func oauthDiscoveryStub(t *testing.T, noDCR bool) (*httptest.Server, *bool) {
 }
 
 func TestDiscoverMCPOAuthConfigFullChain(t *testing.T) {
-	srv, dcrHit := oauthDiscoveryStub(t, false)
+	srv, dcrHit := oauthDiscoveryStub(t, false, false) // DCR available, no CIMD
 	redirect := "https://console.example/api/mcp/oauth/callback"
 
 	cfg, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", redirect)
@@ -89,10 +91,25 @@ func TestDiscoverMCPOAuthConfigFullChain(t *testing.T) {
 	assert.Nil(t, cfg.validate(), "the discovered config must satisfy the OAuth flow's validation")
 }
 
+func TestDiscoverMCPOAuthConfigPrefersCIMD(t *testing.T) {
+	// When the auth server advertises CIMD, the client_id is OUR hosted metadata-doc
+	// URL (derived from the redirect origin) and DCR is NOT called — the preferred,
+	// no-registration-state path (ADR 0028).
+	srv, dcrHit := oauthDiscoveryStub(t, false, true) // DCR also available, but CIMD wins
+	redirect := "https://console.example/api/mcp/oauth/callback"
+
+	cfg, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", redirect)
+	require.NoError(t, err)
+	assert.Equal(t, "https://console.example/api/mcp/oauth/client-metadata", cfg.ClientID,
+		"CIMD client_id is the BFF's hosted metadata-doc URL at the redirect origin")
+	assert.False(t, *dcrHit, "CIMD is preferred — DCR must NOT be called when the AS supports it")
+	assert.Nil(t, cfg.validate())
+}
+
 func TestDiscoverMCPOAuthConfigUsesExplicitResourceMetadataURL(t *testing.T) {
 	// When the probe hands an explicit resource_metadata URL (from WWW-Authenticate),
 	// discovery uses it directly rather than deriving from the MCP URL.
-	srv, _ := oauthDiscoveryStub(t, false)
+	srv, _ := oauthDiscoveryStub(t, false, false)
 	cfg, err := discoverMCPOAuthConfig(
 		context.Background(), srv.Client(),
 		"https://unrelated.example/mcp", // MCP URL is NOT where the metadata lives
@@ -104,9 +121,9 @@ func TestDiscoverMCPOAuthConfigUsesExplicitResourceMetadataURL(t *testing.T) {
 }
 
 func TestDiscoverMCPOAuthConfigNoDCRFallsBack(t *testing.T) {
-	// An authorization server without a registration_endpoint → an honest error
-	// telling the caller to provide a client id manually (not a crash).
-	srv, _ := oauthDiscoveryStub(t, true)
+	// An authorization server with NEITHER CIMD NOR a registration_endpoint → an
+	// honest error telling the caller to provide a client id manually (not a crash).
+	srv, _ := oauthDiscoveryStub(t, true, false)
 	_, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", "https://console.example/cb")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dynamic client registration")

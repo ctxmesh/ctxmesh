@@ -735,6 +735,11 @@ func (s *Server) Handler() http.Handler {
 	// falls through to the SPA). callerClients is required to complete the K8s
 	// writes; absent → honest 501.
 	if s.mcpEnabled {
+		// The CIMD (Client ID Metadata Document, ADR 0028) is a PUBLIC static doc a
+		// CIMD-capable authorization server dereferences to identify this console as
+		// an OAuth client (client_id == this URL). No caller auth — the auth server
+		// fetches it, not the user — and no callerClients needed (it writes nothing).
+		api.HandleFunc("GET /api/mcp/oauth/client-metadata", s.handleMCPOAuthClientMetadata)
 		if s.callerClients != nil {
 			api.HandleFunc("GET /api/mcp/oauth/callback", s.handleMCPOAuthCallback)
 		} else {

@@ -71,7 +71,30 @@ type oauthServerMeta struct {
 	TokenEndpoint         string   `json:"token_endpoint"`
 	RegistrationEndpoint  string   `json:"registration_endpoint"`
 	ScopesSupported       []string `json:"scopes_supported"`
+	// ClientIDMetadataDocumentSupported advertises CIMD (OAuth Client ID Metadata
+	// Documents) — when true the client_id may be an HTTPS URL to a hosted client
+	// metadata doc, so we skip DCR and present our stable CIMD URL instead (the
+	// MCP-preferred client identity; ADR 0028).
+	ClientIDMetadataDocumentSupported bool `json:"client_id_metadata_document_supported"`
 }
+
+// clientMetadataPath is where the BFF hosts its CIMD (Client ID Metadata Document);
+// the client_id used with a CIMD-capable auth server IS this absolute URL.
+const clientMetadataPath = "/api/mcp/oauth/client-metadata"
+
+// OAuth public-PKCE-client registration constants, shared by the DCR request and
+// the CIMD document so both describe the SAME client (a public Auth-Code + PKCE
+// client with no secret).
+const (
+	oauthAuthMethodNone   = "none" // token_endpoint_auth_method: public client, PKCE
+	oauthGrantAuthCode    = "authorization_code"
+	oauthGrantRefresh     = "refresh_token"
+	oauthResponseTypeCode = "code"
+	oauthClientName       = "agent-engine console"
+
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
 
 // dcrRequest is the RFC 7591 Dynamic Client Registration request for a PUBLIC
 // client using Auth-Code + PKCE (no client secret — PKCE replaces it).
@@ -129,15 +152,29 @@ func discoverMCPOAuthConfig(
 	if asMeta.AuthorizationEndpoint == "" || asMeta.TokenEndpoint == "" {
 		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "the authorization server metadata is missing its authorize/token endpoints"}
 	}
-	if asMeta.RegistrationEndpoint == "" {
-		// No DCR — fall back to the manual OAuth path (the user must supply a client id).
-		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "this authorization server does not support dynamic client registration — provide an OAuth client id manually"}
-	}
 
 	scope := strings.Join(asMeta.ScopesSupported, " ")
-	clientID, err := dynamicClientRegister(ctx, c, asMeta.RegistrationEndpoint, redirectURI, scope)
-	if err != nil {
-		return mcpOAuthConfig{}, err
+
+	// Obtain a client_id, PREFERRING CIMD (a stable hosted metadata URL — no
+	// per-server registration state) over DCR (an ephemeral registration), per
+	// ADR 0028. Neither → honest error telling the caller to supply one manually.
+	var clientID string
+	switch {
+	case asMeta.ClientIDMetadataDocumentSupported:
+		// CIMD: our client_id IS the URL of the metadata doc we host; the auth
+		// server dereferences it. Derived from the redirect URI's origin (same BFF).
+		clientID = deriveClientMetadataURL(redirectURI)
+		if clientID == "" {
+			return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "could not derive the client metadata document URL from the redirect URI"}
+		}
+	case asMeta.RegistrationEndpoint != "":
+		var derr error
+		clientID, derr = dynamicClientRegister(ctx, c, asMeta.RegistrationEndpoint, redirectURI, scope)
+		if derr != nil {
+			return mcpOAuthConfig{}, derr
+		}
+	default:
+		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "this authorization server supports neither client-id metadata documents nor dynamic client registration — provide an OAuth client id manually"}
 	}
 
 	return mcpOAuthConfig{
@@ -149,16 +186,13 @@ func discoverMCPOAuthConfig(
 	}, nil
 }
 
-// deriveProtectedResourceMetadataURL builds the RFC 9728 well-known URL from an
-// MCP server URL: <scheme>://<host>/.well-known/oauth-protected-resource. Returns
+// originOf returns the scheme://host[:port] origin of an absolute http(s) URL, or
 // "" when the input is not a usable absolute http(s) URL.
-func deriveProtectedResourceMetadataURL(mcpServerURL string) string {
-	s := strings.TrimSpace(mcpServerURL)
-	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+func originOf(rawURL string) string {
+	scheme, rest, ok := strings.Cut(strings.TrimSpace(rawURL), "://")
+	if !ok || (scheme != schemeHTTP && scheme != schemeHTTPS) {
 		return ""
 	}
-	// Origin only (scheme://host[:port]) — the well-known lives at the root.
-	rest := s[strings.Index(s, "://")+3:]
 	host := rest
 	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
 		host = rest[:i]
@@ -166,8 +200,29 @@ func deriveProtectedResourceMetadataURL(mcpServerURL string) string {
 	if host == "" {
 		return ""
 	}
-	scheme := s[:strings.Index(s, "://")]
-	return scheme + "://" + host + "/.well-known/oauth-protected-resource"
+	return scheme + "://" + host
+}
+
+// deriveProtectedResourceMetadataURL builds the RFC 9728 well-known URL from an
+// MCP server URL: <origin>/.well-known/oauth-protected-resource. "" when unusable.
+func deriveProtectedResourceMetadataURL(mcpServerURL string) string {
+	origin := originOf(mcpServerURL)
+	if origin == "" {
+		return ""
+	}
+	return origin + "/.well-known/oauth-protected-resource"
+}
+
+// deriveClientMetadataURL builds the BFF's CIMD (client metadata document) URL from
+// the redirect URI's origin (the SPA passes the console origin as the redirect, and
+// the CIMD doc is hosted by the same BFF): <origin>/api/mcp/oauth/client-metadata.
+// "" when the redirect URI is not a usable absolute http(s) URL.
+func deriveClientMetadataURL(redirectURI string) string {
+	origin := originOf(redirectURI)
+	if origin == "" {
+		return ""
+	}
+	return origin + clientMetadataPath
 }
 
 // fetchProtectedResourceMetadata GETs the RFC 9728 metadata document.
@@ -198,10 +253,10 @@ func fetchAuthServerMetadata(ctx context.Context, c *http.Client, authServer str
 func dynamicClientRegister(ctx context.Context, c *http.Client, registrationEndpoint, redirectURI, scope string) (string, error) {
 	body := dcrRequest{
 		RedirectURIs:            []string{redirectURI},
-		TokenEndpointAuthMethod: "none", // public client — PKCE, no secret
-		GrantTypes:              []string{"authorization_code", "refresh_token"},
-		ResponseTypes:           []string{"code"},
-		ClientName:              "agent-engine console",
+		TokenEndpointAuthMethod: oauthAuthMethodNone,
+		GrantTypes:              []string{oauthGrantAuthCode, oauthGrantRefresh},
+		ResponseTypes:           []string{oauthResponseTypeCode},
+		ClientName:              oauthClientName,
 		Scope:                   scope,
 	}
 	raw, err := json.Marshal(body)
