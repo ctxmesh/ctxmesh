@@ -9,7 +9,6 @@ import {
   Network,
   PlugZap,
   SlidersHorizontal,
-  Sparkles,
   TestTube2,
   Users,
   Wrench,
@@ -105,18 +104,10 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M13",
         route: "/agents",
       },
-      {
-        // The create-agent wizard (m14.10) — the aha's heart: Describe it /
-        // Configure it → one review + tool picker → Create. A WRITE surface
-        // (it creates AgentDeployments), hidden from a viewer's nav; gates on
-        // create agentdeployments. This is the primary "new agent" entry point.
-        id: "new-agent",
-        label: "New agent",
-        icon: Sparkles,
-        milestone: "M14",
-        route: "/agents/new",
-        requiresWrite: { resource: RES_AGENTS, verb: "create" },
-      },
+      // "New agent" is NOT a nav item (m25 S8) — it lives as the primary action
+      // (top-right button) ON the Agents page, next to the list it creates into,
+      // rather than duplicating an agent-lifecycle entry in the sidebar. The
+      // /agents/new route still exists; the button navigates to it.
       {
         // The re-housed Playground — running an agent is a create/invoke-shaped
         // op; a viewer's chrome hides it (they still get an honest 403 if they
@@ -155,17 +146,15 @@ export const NAV_SECTIONS: NavSection[] = [
     heading: "Tools",
     items: [
       {
-        // Add-an-MCP wizard (m14.9). Registering a BYO MCP server creates a
-        // ToolRegistry entry (+ a Secret for its key) — a WRITE surface, hidden
-        // from a viewer's nav. Gates on create agentregistries (the catalog seam
-        // the discovered tools land in). The full tool CATALOG page is a later
-        // task; this entry opens the add-server wizard directly.
-        id: "tools",
-        label: "Add MCP server",
+        // MCP Servers LIST page (m25 S10) — lists every registered BYO MCP server
+        // with an "Add MCP server" button ON the page (the add wizard is reached via
+        // that CTA, not a separate add-only nav item). Read-open so a viewer sees the
+        // servers; the Add button in-page is gated on create agentregistries.
+        id: "mcp-servers",
+        label: "MCP Servers",
         icon: Wrench,
         milestone: "M14",
-        route: "/tools/add-mcp",
-        requiresWrite: { resource: RES_REGISTRIES, verb: "create" },
+        route: "/tools/mcp-servers",
       },
       {
         // MCP approval queue (m17.9). Operator-only: lists pending MCP servers

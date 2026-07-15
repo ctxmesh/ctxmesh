@@ -689,6 +689,26 @@ export interface McpApprovalsResponse {
   items: McpApproval[];
 }
 
+// McpServerSummary is one registered BYO-MCP server (GET /api/mcpservers) — the
+// MCP Servers list page's row. authType is "oauth" for an OAuth server, else "" for
+// a key/no-auth server; secretName is the (reference-only) Secret name when it has one.
+export interface McpServerSummary {
+  name: string;
+  namespace: string;
+  url: string;
+  toolCount: number;
+  status: string;
+  secretName?: string;
+  authType?: string;
+}
+
+export interface McpServerListResponse {
+  // The BFF returns the same rows under both keys (list-contract); read `items`
+  // with a `servers` fallback, defaulting to [] so an odd shape never crashes.
+  servers?: McpServerSummary[];
+  items?: McpServerSummary[];
+}
+
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
 // The merged tool catalog — curated ToolRegistry entries + the user's own
 // BYO-MCP discoveries (ADR 0016). It's the create-agent tool picker's source:
@@ -1931,6 +1951,11 @@ export const api = {
       res.status,
     );
   },
+
+  // listMcpServers lists the registered BYO-MCP servers (GET /api/mcpservers) for
+  // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
+  listMcpServers: (signal?: AbortSignal) =>
+    getJSON<McpServerListResponse>("/api/mcpservers", signal),
 
   // mcpApprovals lists the pending MCP servers awaiting operator approval
   // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
