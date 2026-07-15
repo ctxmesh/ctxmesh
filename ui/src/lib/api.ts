@@ -2142,7 +2142,11 @@ export const api = {
         res.status,
       );
     }
-    return (await res.json()) as DeleteAgentResponse;
+    // A delete may legitimately return 204 No Content or an empty body — reading it
+    // as JSON would throw "Unexpected end of JSON input" even though the delete
+    // SUCCEEDED (m25 S19). Tolerate an empty body: treat a 2xx as accepted.
+    const text = await res.text();
+    return (text ? JSON.parse(text) : { accepted: true }) as DeleteAgentResponse;
   },
 
   // agentReferences reads the delete-impact preview for an agent (m15.11):
