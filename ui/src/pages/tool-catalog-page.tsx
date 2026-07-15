@@ -26,6 +26,7 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
+import { groupToolsBySource } from "@/lib/tool-groups";
 import { useNamespace } from "@/lib/namespace";
 import {
   api,
@@ -65,26 +66,6 @@ function toolState(t: CatalogTool): ToolState {
   // source absent. We use the presence of a source as the user-added signal.
   if (t.source) return "user-added";
   return "curated";
-}
-
-// groupToolsBySource groups catalog tools by their MCP server (the `source` field),
-// returning [source, tools] pairs sorted alphabetically with curated tools (no source)
-// last under "Curated tools" (m25 S11 — the catalog groups by server so it's obvious
-// which server a tool came from).
-function groupToolsBySource(tools: CatalogTool[]): [string, CatalogTool[]][] {
-  const curated = "Curated tools";
-  const groups = new Map<string, CatalogTool[]>();
-  for (const t of tools) {
-    const key = t.source && t.source.trim() ? t.source.trim() : curated;
-    const arr = groups.get(key);
-    if (arr) arr.push(t);
-    else groups.set(key, [t]);
-  }
-  return [...groups.entries()].sort((a, b) => {
-    if (a[0] === curated) return 1;
-    if (b[0] === curated) return -1;
-    return a[0].localeCompare(b[0]);
-  });
 }
 
 type FilterState = "all" | ToolState;

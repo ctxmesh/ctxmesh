@@ -7,6 +7,7 @@ import {
   PlugZap,
   Rocket,
   Search,
+  Server,
   Sparkles,
   Terminal,
   Wrench,
@@ -44,6 +45,7 @@ import {
   type ConfigForm,
   type FieldErrors,
 } from "@/lib/config-form";
+import { groupToolsBySource } from "@/lib/tool-groups";
 
 // CreateAgentPage — the create-agent wizard, the HEART of the aha (spec §5, ADR
 // 0013/0014). TWO entrances converge on ONE review:
@@ -1407,6 +1409,13 @@ function SharedReview({
                 s.includes(name) ? s.filter((t) => t !== name) : [...s, name],
               )
             }
+            onSelectMany={(names, on) =>
+              setSelected((s) => {
+                if (on) return [...new Set([...s, ...names])];
+                const drop = new Set(names);
+                return s.filter((t) => !drop.has(t));
+              })
+            }
           />
         </div>
       )}
@@ -1494,6 +1503,7 @@ function ToolPicker({
   catalog,
   selected,
   onToggle,
+  onSelectMany,
 }: {
   catalog:
     | { kind: "loading" }
@@ -1501,6 +1511,8 @@ function ToolPicker({
     | { kind: "error"; message: string };
   selected: string[];
   onToggle: (name: string) => void;
+  // onSelectMany selects/clears a whole server's tools at once (m25 S12 "add all").
+  onSelectMany: (names: string[], on: boolean) => void;
 }) {
   const [query, setQuery] = React.useState("");
 
@@ -1544,51 +1556,74 @@ function ToolPicker({
           className="pl-9"
         />
       </div>
-      <div className="space-y-2" data-testid="tool-picker-list">
+      {/* Grouped by MCP server (m25 S13), each with an "Add all"/"Clear" so a whole
+          server's tools attach in one click (m25 S12). The per-row source badge is
+          dropped — the group header names the server. */}
+      <div className="space-y-3" data-testid="tool-picker-list">
         {filtered.length === 0 && (
           <p className="text-sm text-muted-foreground">No tools match.</p>
         )}
-        {filtered.map((t) => {
-          const on = selected.includes(t.name);
-          const pending = t.approvalStatus === "pending";
-          const hasSchema = t.inputSchema != null;
+        {groupToolsBySource(filtered).map(([source, groupTools]) => {
+          const names = groupTools.map((t) => t.name);
+          const allOn = names.every((n) => selected.includes(n));
           return (
-            <label
-              key={t.name}
-              className="flex items-center gap-3 rounded-md border bg-surface-2/40 px-3 py-2"
-            >
-              <input
-                type="checkbox"
-                checked={on}
-                onChange={() => onToggle(t.name)}
-                className="h-4 w-4 rounded border-input accent-primary"
-                aria-label={`Bind ${t.name}`}
-              />
-              <Wrench className="h-4 w-4 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
-                <p className="font-mono text-sm">{t.name}</p>
-                {t.description && (
-                  <p className="truncate text-xs text-muted-foreground">
-                    {t.description}
-                  </p>
-                )}
-              </div>
-              {hasSchema && (
+            <div key={source} className="overflow-hidden rounded-md border">
+              <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
+                <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate text-xs font-medium">{source}</span>
                 <Badge variant="secondary" className="text-[10px]">
-                  schema
+                  {groupTools.length}
                 </Badge>
-              )}
-              {t.source && (
-                <Badge variant="outline" className="text-[10px]">
-                  {t.source}
-                </Badge>
-              )}
-              {pending && (
-                <Badge variant="warning" className="text-[10px]">
-                  pending approval
-                </Badge>
-              )}
-            </label>
+                <button
+                  type="button"
+                  className="ml-auto text-xs font-medium text-primary hover:underline"
+                  onClick={() => onSelectMany(names, !allOn)}
+                  data-testid={`tool-group-selectall-${source}`}
+                >
+                  {allOn ? "Clear" : "Add all"}
+                </button>
+              </div>
+              <div className="divide-y">
+                {groupTools.map((t) => {
+                  const on = selected.includes(t.name);
+                  const pending = t.approvalStatus === "pending";
+                  const hasSchema = t.inputSchema != null;
+                  return (
+                    <label
+                      key={t.name}
+                      className="flex items-center gap-3 bg-surface-2/40 px-3 py-2"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => onToggle(t.name)}
+                        className="h-4 w-4 rounded border-input accent-primary"
+                        aria-label={`Bind ${t.name}`}
+                      />
+                      <Wrench className="h-4 w-4 text-muted-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-mono text-sm">{t.name}</p>
+                        {t.description && (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {t.description}
+                          </p>
+                        )}
+                      </div>
+                      {hasSchema && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          schema
+                        </Badge>
+                      )}
+                      {pending && (
+                        <Badge variant="warning" className="text-[10px]">
+                          pending approval
+                        </Badge>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           );
         })}
       </div>
