@@ -182,10 +182,23 @@ func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, ca
 
 	url := strings.TrimSpace(deploy.Status.URL)
 	if url == "" {
-		// The agent exists but has no assigned endpoint yet (not Ready). A run
+		// A job agent has NO live endpoint by design (executionModel: job → a one-shot
+		// Kubernetes Job, not a request-driven Service), so "run with a prompt" here can
+		// never resolve one. Say that plainly instead of the misleading "not ready yet",
+		// which would wrongly imply waiting will help (m25 S4).
+		if deploy.Spec.ExecutionModel == executionModelJob {
+			writeError(w, http.StatusConflict,
+				"this is a job agent (executionModel: job) — it runs as a one-shot Kubernetes Job, not a live endpoint, so it can't be invoked with a prompt here")
+			return "", false
+		}
+		// Otherwise the agent exists but has no assigned endpoint yet (not Ready). A run
 		// cannot be dispatched — surface it as a conflict, not a fake success.
 		writeError(w, http.StatusConflict, "agent is not ready (no endpoint assigned yet)")
 		return "", false
 	}
 	return url, true
 }
+
+// executionModelJob is the AgentDeployment executionModel that runs as a one-shot
+// Kubernetes Job (no serving endpoint) — see api/v1alpha1 AgentDeploymentSpec.
+const executionModelJob = "job"
