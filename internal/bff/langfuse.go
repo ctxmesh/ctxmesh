@@ -170,8 +170,13 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		// rather than erroring.
 		limit = maxRunLimit
 	}
+	// Fetch a FULL page and keep only actual agent RUNS (traces the launcher stamped
+	// with an agent:<ns>/<name> tag), then return up to `limit`. The traces endpoint
+	// otherwise mixes in gateway/proxy/LLM-SDK traces ("Received Proxy Server Request",
+	// "ChatCompletion", "RunnableSequence", unnamed spans) that are NOT runs and were
+	// polluting the runs list (m25 S15). Over-fetching compensates for the filtering.
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(limit))
+	q.Set("limit", strconv.Itoa(maxRunLimit))
 	q.Set("orderBy", "timestamp.desc")
 
 	var body lfTracesResponse
@@ -179,8 +184,11 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		return nil, err
 	}
 
-	runs := make([]RunSummary, 0, len(body.Data))
+	runs := make([]RunSummary, 0, limit)
 	for _, t := range body.Data {
+		if !hasAgentTag(t.Tags) {
+			continue // not an agent run — a gateway/proxy/LLM trace, never a "run"
+		}
 		runs = append(runs, RunSummary{
 			TraceID:   t.ID,
 			Name:      t.Name,
@@ -189,8 +197,22 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			Tokens:    traceTokens(t),
 			LatencyMs: t.LatencyMs,
 		})
+		if len(runs) >= limit {
+			break
+		}
 	}
 	return runs, nil
+}
+
+// hasAgentTag reports whether a trace carries an agent:<ns>/<name> identity tag —
+// i.e. it is an agent RUN the launcher produced, not an incidental gateway/LLM trace.
+func hasAgentTag(tags []string) bool {
+	for _, tag := range tags {
+		if _, _, ok := parseAgentTag(tag); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the

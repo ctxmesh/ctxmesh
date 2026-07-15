@@ -118,16 +118,22 @@ func TestLangfuseTraceURL(t *testing.T) {
 }
 
 func TestLangfuseRecentRuns(t *testing.T) {
+	// Only traces carrying an agent:<ns>/<name> tag are RUNS (m25 S15). The middle
+	// trace is a gateway/proxy trace with no agent tag and MUST be filtered out.
 	body := `{"data":[
-		{"id":"t1","name":"chat","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900}},
-		{"id":"t2","name":"summarize","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400}
+		{"id":"t1","name":"chat","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]},
+		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0},
+		{"id":"t2","name":"summarize","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]}
 	]}`
 	srv, rec := fakeLangfuse(t, body)
 	a := newTestLangfuse(t, srv.URL)
 
 	runs, err := a.RecentRuns(context.Background(), 10)
 	require.NoError(t, err)
-	require.Len(t, runs, 2)
+	require.Len(t, runs, 2, "the non-agent proxy trace must be filtered out")
+	for _, r := range runs {
+		assert.NotEqual(t, "noise", r.TraceID, "a gateway/proxy trace is not a run")
+	}
 
 	assert.Equal(t, "t1", runs[0].TraceID)
 	assert.Equal(t, "chat", runs[0].Name)
