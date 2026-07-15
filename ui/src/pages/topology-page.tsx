@@ -424,21 +424,13 @@ export function TopologyPage() {
   // groups it is "namespace/<ns>". The node ids are
   // "<kind>/<ns>/<name>" — we derive the group key from the kind/ns of the node.
   function nodesForGroup(group: TopologyGroup, nodes: TopologyNode[]): TopologyNode[] {
-    // Registry group: group id = "registry/<ns>/<name>" — match agents whose
-    // namespace = group.namespace. For namespace group: match agents in that ns.
-    // Simplest: an expanded group's agent nodes have namespace = group.namespace
-    // and were returned because the group is in expand. We match by namespace +
-    // the fact that the node is an agent (kind=agent).
-    // Note: in registry mode multiple groups may share a namespace; we use the
-    // group.id (echoed back as the prefix of each node's id) to partition.
-    // The BFF prefixes registry-group nodes with "agent/<ns>/<name>" — we match
-    // by checking that the group was requested AND the agent namespace matches.
-    if (group.kind === "registry") {
-      return nodes.filter(
-        (n) => n.kind === "agent" && n.namespace === group.namespace,
-      );
+    // Partition members by the AUTHORITATIVE group id the BFF stamped on each node
+    // (node.group). Namespace matching is wrong when two registries share a namespace
+    // — both would then claim every agent in it (the m25 shakedown bug). Fall back to
+    // namespace only for older payloads that predate node.group.
+    if (nodes.some((n) => n.group)) {
+      return nodes.filter((n) => n.kind === "agent" && n.group === group.id);
     }
-    // namespace group
     return nodes.filter((n) => n.kind === "agent" && n.namespace === group.namespace);
   }
 
