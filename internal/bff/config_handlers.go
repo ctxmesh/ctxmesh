@@ -167,7 +167,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		agentYAML = injected
 	}
 
-	created, err := createAgentFromYAML(r.Context(), caller, s.scheme, agentYAML, ns)
+	created, err := createAgentFromYAML(r.Context(), caller, caller, s.scheme, agentYAML, ns)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {
