@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +32,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
@@ -90,6 +93,7 @@ type decodedObject struct {
 func createAgentFromYAML(
 	ctx context.Context,
 	w AgentWriter,
+	reader AgentReader,
 	scheme *runtime.Scheme,
 	agentYAML []byte,
 	namespace string,
@@ -129,6 +133,13 @@ func createAgentFromYAML(
 		return nil, &createError{status: 500, msg: fmt.Sprintf("decoding expanded manifests: %v", err)}
 	}
 
+	// Point each generated MCPToolBinding at the ToolRegistry its tool ACTUALLY lives
+	// in (m25 S18): expand hardcodes a single default registry ("default-tools"), but
+	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
+	// default reference is RegistryNotFound and the binding never goes Ready. Best-
+	// effort: a tool not found in any registry keeps expand's default.
+	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, reader, ns))
+
 	// Stamp the source-spec annotation on the primary AgentDeployment only, before
 	// it is created, so the edit source of truth rides the object from birth.
 	stampSourceSpec(objs, sourceSpec)
@@ -146,6 +157,55 @@ func createAgentFromYAML(
 		})
 	}
 	return created, nil
+}
+
+// toolRegistryIndex lists the namespace's ToolRegistries and maps each tool NAME to
+// the registry that catalogs it, so a generated MCPToolBinding can reference the
+// registry the tool actually lives in (m25 S18). Registries are sorted by name so a
+// tool name present in more than one registry resolves deterministically (first wins;
+// bare-name collisions are unavoidable and rare given per-server registries). A list
+// error → nil map (the caller keeps expand's default rather than failing the create).
+func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[string]string {
+	if reader == nil {
+		return nil
+	}
+	var list agentsv1alpha1.ToolRegistryList
+	if err := reader.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return nil
+	}
+	regs := list.Items
+	slices.SortFunc(regs, func(a, b agentsv1alpha1.ToolRegistry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	idx := make(map[string]string)
+	for i := range regs {
+		for _, t := range regs[i].Spec.Tools {
+			if _, seen := idx[t.Name]; !seen {
+				idx[t.Name] = regs[i].Name
+			}
+		}
+	}
+	return idx
+}
+
+// rewriteBindingRegistries points each generated MCPToolBinding at the registry its
+// tool actually lives in (m25 S18), overriding expand's hardcoded default so the
+// binding can go Ready. A tool absent from every registry keeps the default (the
+// binding will still be RegistryNotFound, but that is now an honest "no such tool"
+// rather than a systemic mis-reference).
+func rewriteBindingRegistries(objs []decodedObject, idx map[string]string) {
+	if len(idx) == 0 {
+		return
+	}
+	for _, d := range objs {
+		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		if !ok {
+			continue
+		}
+		if reg, found := idx[binding.Spec.ToolName]; found {
+			binding.Spec.RegistryRef = reg
+		}
+	}
 }
 
 // kindOf resolves an object's Kind: its own TypeMeta first (populated by the

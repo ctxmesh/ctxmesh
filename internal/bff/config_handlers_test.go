@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -477,4 +478,40 @@ func TestExpandSeamNotWiredServes501(t *testing.T) {
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString("{}")))
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+// TestBindingRegistryResolution pins the m25 S18 fix: a generated MCPToolBinding is
+// pointed at the registry its tool ACTUALLY lives in, so it isn't RegistryNotFound
+// against expand's hardcoded default. Ambiguity resolves first-wins (sorted); an
+// unknown tool keeps the default.
+func TestBindingRegistryResolution(t *testing.T) {
+	scalekit := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "scalekit-mcp-server", Namespace: "default"},
+		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
+			{Name: "create_organization"}, {Name: "list_environments"},
+		}},
+	}
+	acme := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme-mcp", Namespace: "default"},
+		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "search"}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(scalekit, acme).Build()
+
+	idx := toolRegistryIndex(context.Background(), c, "default")
+	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"])
+	assert.Equal(t, "acme-mcp", idx["search"])
+
+	// A binding expand generated with the wrong default is rewritten to the real registry.
+	good := &agentsv1alpha1.MCPToolBinding{
+		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "create_organization", RegistryRef: "default-tools"},
+	}
+	unknown := &agentsv1alpha1.MCPToolBinding{
+		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "nope", RegistryRef: "default-tools"},
+	}
+	rewriteBindingRegistries([]decodedObject{
+		{obj: good, kind: mcpToolBindingKind},
+		{obj: unknown, kind: mcpToolBindingKind},
+	}, idx)
+	assert.Equal(t, "scalekit-mcp-server", good.Spec.RegistryRef, "resolved to the tool's real registry")
+	assert.Equal(t, "default-tools", unknown.Spec.RegistryRef, "an unknown tool keeps the default")
 }
