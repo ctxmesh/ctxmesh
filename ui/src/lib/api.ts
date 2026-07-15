@@ -724,6 +724,10 @@ export interface McpServerListResponse {
 export interface CatalogTool {
   name: string;
   description?: string;
+  // registry is the MCP server / ToolRegistry the tool belongs to (e.g.
+  // "scalekit-mcp-server") — the grouping key for "group tools by MCP server".
+  registry?: string;
+  // source is the ORIGIN CLASS ("user-added" | "curated"), not the server name.
   source?: string;
   approvalStatus?: "approved" | "pending";
   inputSchema?: unknown;

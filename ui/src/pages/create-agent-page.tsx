@@ -45,7 +45,7 @@ import {
   type ConfigForm,
   type FieldErrors,
 } from "@/lib/config-form";
-import { groupToolsBySource } from "@/lib/tool-groups";
+import { groupToolsByServer } from "@/lib/tool-groups";
 
 // CreateAgentPage — the create-agent wizard, the HEART of the aha (spec §5, ADR
 // 0013/0014). TWO entrances converge on ONE review:
@@ -1515,6 +1515,11 @@ function ToolPicker({
   onSelectMany: (names: string[], on: boolean) => void;
 }) {
   const [query, setQuery] = React.useState("");
+  // Which MCP servers are expanded to reveal their tools (m25 S13). Collapsed by
+  // default so the list starts as just the servers.
+  const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set());
+  // Which tools have their inputSchema revealed (m25 S17 — clicking "schema").
+  const [schemaOpen, setSchemaOpen] = React.useState<Set<string>>(() => new Set());
 
   if (catalog.kind === "loading") {
     return (
@@ -1556,73 +1561,128 @@ function ToolPicker({
           className="pl-9"
         />
       </div>
-      {/* Grouped by MCP server (m25 S13), each with an "Add all"/"Clear" so a whole
-          server's tools attach in one click (m25 S12). The per-row source badge is
-          dropped — the group header names the server. */}
-      <div className="space-y-3" data-testid="tool-picker-list">
+      {/* A collapsible tree (m25 S13): the list shows MCP SERVERS, each with a
+          checkbox; expanding a server reveals its individual tools for granular
+          picking. The server checkbox selects/clears the whole server (m25 S12) and
+          shows an indeterminate state when only some of its tools are picked. */}
+      <div className="space-y-2" data-testid="tool-picker-list">
         {filtered.length === 0 && (
           <p className="text-sm text-muted-foreground">No tools match.</p>
         )}
-        {groupToolsBySource(filtered).map(([source, groupTools]) => {
+        {groupToolsByServer(filtered).map(([server, groupTools]) => {
           const names = groupTools.map((t) => t.name);
-          const allOn = names.every((n) => selected.includes(n));
+          const selectedCount = names.filter((n) => selected.includes(n)).length;
+          const allOn = selectedCount === names.length;
+          const someOn = selectedCount > 0 && !allOn;
+          const isOpen = expanded.has(server);
           return (
-            <div key={source} className="overflow-hidden rounded-md border">
-              <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
-                <Server className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 truncate text-xs font-medium">{source}</span>
-                <Badge variant="secondary" className="text-[10px]">
-                  {groupTools.length}
-                </Badge>
+            <div key={server} className="overflow-hidden rounded-md border">
+              {/* Server row: [select-all checkbox] [expand toggle: chevron + name]. */}
+              <div className="flex items-center gap-2 bg-muted/40 px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={allOn}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someOn;
+                  }}
+                  onChange={() => onSelectMany(names, !allOn)}
+                  className="h-4 w-4 rounded border-input accent-primary"
+                  aria-label={`Select all tools from ${server}`}
+                  data-testid={`tool-server-checkbox-${server}`}
+                />
                 <button
                   type="button"
-                  className="ml-auto text-xs font-medium text-primary hover:underline"
-                  onClick={() => onSelectMany(names, !allOn)}
-                  data-testid={`tool-group-selectall-${source}`}
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  onClick={() =>
+                    setExpanded((s) => {
+                      const next = new Set(s);
+                      if (next.has(server)) next.delete(server);
+                      else next.add(server);
+                      return next;
+                    })
+                  }
+                  aria-expanded={isOpen}
+                  data-testid={`tool-server-toggle-${server}`}
                 >
-                  {allOn ? "Clear" : "Add all"}
+                  <ChevronRight
+                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                  />
+                  <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 truncate text-sm font-medium">{server}</span>
+                  <Badge variant="secondary" className="text-[10px]">
+                    {selectedCount > 0
+                      ? `${selectedCount}/${groupTools.length}`
+                      : groupTools.length}
+                  </Badge>
                 </button>
               </div>
-              <div className="divide-y">
-                {groupTools.map((t) => {
-                  const on = selected.includes(t.name);
-                  const pending = t.approvalStatus === "pending";
-                  const hasSchema = t.inputSchema != null;
-                  return (
-                    <label
-                      key={t.name}
-                      className="flex items-center gap-3 bg-surface-2/40 px-3 py-2"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() => onToggle(t.name)}
-                        className="h-4 w-4 rounded border-input accent-primary"
-                        aria-label={`Bind ${t.name}`}
-                      />
-                      <Wrench className="h-4 w-4 text-muted-foreground" />
-                      <div className="min-w-0 flex-1">
-                        <p className="font-mono text-sm">{t.name}</p>
-                        {t.description && (
-                          <p className="truncate text-xs text-muted-foreground">
-                            {t.description}
-                          </p>
+              {isOpen && (
+                <div className="divide-y border-t">
+                  {groupTools.map((t) => {
+                    const on = selected.includes(t.name);
+                    const pending = t.approvalStatus === "pending";
+                    const hasSchema = t.inputSchema != null;
+                    const schemaShown = schemaOpen.has(t.name);
+                    return (
+                      <div key={t.name} className="bg-surface-2/40 py-2 pl-9 pr-3">
+                        <label className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => onToggle(t.name)}
+                            className="h-4 w-4 rounded border-input accent-primary"
+                            aria-label={`Bind ${t.name}`}
+                          />
+                          <Wrench className="h-4 w-4 text-muted-foreground" />
+                          <div className="min-w-0 flex-1">
+                            <p className="font-mono text-sm">{t.name}</p>
+                            {t.description && (
+                              <p className="truncate text-xs text-muted-foreground">
+                                {t.description}
+                              </p>
+                            )}
+                          </div>
+                          {hasSchema && (
+                            <button
+                              type="button"
+                              // Inside the checkbox label — stop the click from toggling
+                              // the checkbox; it only reveals the schema (m25 S17).
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setSchemaOpen((s) => {
+                                  const next = new Set(s);
+                                  if (next.has(t.name)) next.delete(t.name);
+                                  else next.add(t.name);
+                                  return next;
+                                });
+                              }}
+                              data-testid={`tool-schema-toggle-${t.name}`}
+                            >
+                              <Badge
+                                variant="secondary"
+                                className="cursor-pointer text-[10px] hover:bg-muted"
+                              >
+                                {schemaShown ? "hide schema" : "schema"}
+                              </Badge>
+                            </button>
+                          )}
+                          {pending && (
+                            <Badge variant="warning" className="text-[10px]">
+                              pending approval
+                            </Badge>
+                          )}
+                        </label>
+                        {schemaShown && hasSchema && (
+                          <pre className="mt-2 max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
+                            {JSON.stringify(t.inputSchema, null, 2)}
+                          </pre>
                         )}
                       </div>
-                      {hasSchema && (
-                        <Badge variant="secondary" className="text-[10px]">
-                          schema
-                        </Badge>
-                      )}
-                      {pending && (
-                        <Badge variant="warning" className="text-[10px]">
-                          pending approval
-                        </Badge>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         })}

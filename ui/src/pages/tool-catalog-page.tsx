@@ -26,7 +26,7 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
-import { groupToolsBySource } from "@/lib/tool-groups";
+import { groupToolsByServer } from "@/lib/tool-groups";
 import { useNamespace } from "@/lib/namespace";
 import {
   api,
@@ -270,7 +270,7 @@ export function ToolCatalogPage() {
             // a header naming the server, so it's obvious which server a tool comes
             // from. Curated tools (no source) group last under "Curated tools".
             <div className="space-y-4" data-testid="catalog-tool-list">
-              {groupToolsBySource(displayedTools).map(([source, tools]) => (
+              {groupToolsByServer(displayedTools).map(([source, tools]) => (
                 <div
                   key={source}
                   className="overflow-hidden rounded-lg border bg-card shadow-card"
@@ -320,6 +320,8 @@ interface ToolRowProps {
 function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
   const state = toolState(tool);
   const isPending = state === "pending-approval";
+  const hasSchema = tool.inputSchema !== undefined && tool.inputSchema !== null;
+  const [showSchema, setShowSchema] = React.useState(false);
 
   return (
     <div
@@ -331,25 +333,38 @@ function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">{tool.name}</span>
           <ToolStateBadge state={state} toolName={tool.name} />
-          {tool.inputSchema !== undefined && (
-            <Badge variant="outline" className="text-[10px]">
-              <Code2 className="mr-1 h-2.5 w-2.5" />
-              schema
-            </Badge>
+          {hasSchema && (
+            <button
+              type="button"
+              onClick={() => setShowSchema((s) => !s)}
+              data-testid={`catalog-schema-toggle-${tool.name}`}
+              aria-expanded={showSchema}
+            >
+              <Badge
+                variant="outline"
+                className="cursor-pointer text-[10px] hover:bg-muted"
+              >
+                <Code2 className="mr-1 h-2.5 w-2.5" />
+                {showSchema ? "hide schema" : "schema"}
+              </Badge>
+            </button>
           )}
         </div>
         {tool.description && (
           <p className="text-sm text-muted-foreground">{tool.description}</p>
         )}
-        {tool.source && (
-          <p className="font-mono text-xs text-muted-foreground">
-            source: {tool.source}
-          </p>
-        )}
         {isPending && (
           <p className="text-xs text-warning-foreground">
             Awaiting operator approval — cannot bind until approved.
           </p>
+        )}
+        {showSchema && hasSchema && (
+          <pre
+            className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 text-xs"
+            data-testid={`catalog-schema-${tool.name}`}
+          >
+            {JSON.stringify(tool.inputSchema, null, 2)}
+          </pre>
         )}
       </div>
       <div className="shrink-0">
