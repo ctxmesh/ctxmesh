@@ -267,6 +267,28 @@ func TestInvokeNotReadyIs409(t *testing.T) {
 	assert.False(t, inv.called)
 }
 
+// TestInvokeJobAgentIsAccurate409 proves a job agent (no serving endpoint by design)
+// gets an ACCURATE conflict — not the misleading "not ready (no endpoint assigned
+// yet)", which would imply waiting helps (m25 S4).
+func TestInvokeJobAgentIsAccurate409(t *testing.T) {
+	agent := readyAgent("batch", "jobs", "") // no status.url; distinct ns
+	agent.Spec.ExecutionModel = "job"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "unused"}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "batch", Namespace: "jobs"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "job agent", "a job agent gets an accurate message")
+	assert.NotContains(t, rec.Body.String(), "no endpoint assigned yet")
+	assert.False(t, inv.called)
+}
+
 // TestInvokeAgentNotFoundIs404 proves a missing agent yields 404.
 func TestInvokeAgentNotFoundIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
