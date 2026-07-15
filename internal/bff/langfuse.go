@@ -451,6 +451,11 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("page", strconv.Itoa(page))
 	q.Set("orderBy", "timestamp.desc")
+	// A RUN is the agent.invoke boundary trace; ask Langfuse to return ONLY those so
+	// the proxy's per-request spans / LLM-SDK traces / unnamed spans don't clutter the
+	// list AND pagination stays correct (m25 S15). We still re-check client-side below
+	// in case an upstream ignores the name filter.
+	q.Set("name", agentInvokeTraceName)
 
 	// Server-side filters.
 	var agentTag string
@@ -480,18 +485,26 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	q2 := strings.ToLower(strings.TrimSpace(f.Q))
 	runs := make([]RunSummary, 0, len(body.Data))
 	for _, t := range body.Data {
+		// Only the agent.invoke boundary trace is a RUN (defensive re-check of the
+		// server-side name filter, m25 S15).
+		if t.Name != agentInvokeTraceName {
+			continue
+		}
 		// Agent defensive tag re-check (same guarantee as RunsForAgent).
 		if agentTag != "" && !traceHasTag(t, agentTag) {
 			continue
 		}
-		// Q: client-side substring filter on name.
-		if q2 != "" && !strings.Contains(strings.ToLower(t.Name), q2) {
+		// Name the run by its agent so the list reads as meaningful runs, not a wall of
+		// identical "agent.invoke".
+		display := runDisplayName(t)
+		// Q: client-side substring filter on the (agent) name.
+		if q2 != "" && !strings.Contains(strings.ToLower(display), q2) {
 			continue
 		}
 		// NOTE: status filter is NOT applied here — see RunFilter doc.
 		runs = append(runs, RunSummary{
 			TraceID:   t.ID,
-			Name:      t.Name,
+			Name:      display,
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
