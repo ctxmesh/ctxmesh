@@ -337,6 +337,10 @@ export interface TopologyNode {
   namespace: string;
   health: TopologyHealth;
   detail: string;
+  // group is the id of the group this node belongs to in grouped mode — the
+  // authoritative partition key so agents render only under their own registry
+  // (not every registry sharing their namespace). Absent in flat mode.
+  group?: string;
 }
 
 export interface TopologyEdge {
