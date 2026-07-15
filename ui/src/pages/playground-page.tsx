@@ -57,7 +57,7 @@ export function PlaygroundPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [namespace, setNamespace] = useState("");
-  const [input, setInput] = useState('{\n  "prompt": "Hello, agent"\n}');
+  const [input, setInput] = useState('{\n  "input": "Hello, agent"\n}');
   const [run, setRun] = useState<Run>({ kind: "idle" });
   const [exp, setExp] = useState<Export>({ kind: "idle" });
   // RBAC-aware chrome (§3): running an agent and applying a CRD are both
