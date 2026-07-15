@@ -186,12 +186,21 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 
 	runs := make([]RunSummary, 0, limit)
 	for _, t := range body.Data {
-		if !hasAgentTag(t.Tags) {
-			continue // not an agent run — a gateway/proxy/LLM trace, never a "run"
+		// A RUN is the `agent.invoke` boundary trace the launcher opens per invocation
+		// (cmd/launcher). Every other top-level trace — the proxy's per-request server
+		// span ("Received Proxy Server Request"), LLM-SDK spans ("ChatCompletion",
+		// "RunnableSequence"), unnamed spans — is NOT a run and was cluttering the list
+		// (m25 S15). The agent tag alone can't discriminate: the launcher stamps it on
+		// the proxy spans too, so we key on the boundary span NAME.
+		if t.Name != agentInvokeTraceName {
+			continue
 		}
 		runs = append(runs, RunSummary{
-			TraceID:   t.ID,
-			Name:      t.Name,
+			TraceID: t.ID,
+			// Name the run by its AGENT (from the identity tag) so the list reads as
+			// meaningful runs, not a wall of identical "agent.invoke". Falls back to the
+			// trace name when no agent tag is present.
+			Name:      runDisplayName(t),
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
@@ -204,15 +213,22 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 	return runs, nil
 }
 
-// hasAgentTag reports whether a trace carries an agent:<ns>/<name> identity tag —
-// i.e. it is an agent RUN the launcher produced, not an incidental gateway/LLM trace.
-func hasAgentTag(tags []string) bool {
-	for _, tag := range tags {
-		if _, _, ok := parseAgentTag(tag); ok {
-			return true
+// agentInvokeTraceName is the launcher's per-invocation boundary span name — the one
+// trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
+const agentInvokeTraceName = "agent.invoke"
+
+// runDisplayName names a run by its agent identity (from the agent:<ns>/<name> tag),
+// e.g. "prod/chatbot" or "chatbot", falling back to the trace name when untagged.
+func runDisplayName(t lfTrace) string {
+	for _, tag := range t.Tags {
+		if ns, name, ok := parseAgentTag(tag); ok {
+			if ns == "" {
+				return name
+			}
+			return ns + "/" + name
 		}
 	}
-	return false
+	return t.Name
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
