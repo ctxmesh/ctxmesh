@@ -488,22 +488,29 @@ func TestBindingRegistryResolution(t *testing.T) {
 	scalekit := &agentsv1alpha1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "scalekit-mcp-server", Namespace: "default"},
 		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
-			{Name: "create_organization"}, {Name: "list_environments"},
+			{Name: "create_organization", URL: "https://mcp.scalekit.com/"},
+			{Name: "list_environments", URL: "https://mcp.scalekit.com/"},
 		}},
 	}
 	acme := &agentsv1alpha1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "acme-mcp", Namespace: "default"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "search"}}},
+		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "search", URL: "https://acme/mcp"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(scalekit, acme).Build()
 
 	idx := toolRegistryIndex(context.Background(), c, "default")
-	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"])
-	assert.Equal(t, "acme-mcp", idx["search"])
+	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
+	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
+	assert.Equal(t, "acme-mcp", idx["search"].registry)
 
-	// A binding expand generated with the wrong default is rewritten to the real registry.
+	// A binding expand generated with the wrong default + placeholder URL is rewritten
+	// to the real registry AND the registry's pinned URL (so the controller pin check
+	// passes, not RegistryMismatch).
 	good := &agentsv1alpha1.MCPToolBinding{
-		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "create_organization", RegistryRef: "default-tools"},
+		Spec: agentsv1alpha1.MCPToolBindingSpec{
+			ToolName: "create_organization", RegistryRef: "default-tools", Mode: "remote",
+			Server: agentsv1alpha1.ToolServer{URL: "http://create-organization.mcp.svc.cluster.local/mcp"},
+		},
 	}
 	unknown := &agentsv1alpha1.MCPToolBinding{
 		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "nope", RegistryRef: "default-tools"},
@@ -513,5 +520,6 @@ func TestBindingRegistryResolution(t *testing.T) {
 		{obj: unknown, kind: mcpToolBindingKind},
 	}, idx)
 	assert.Equal(t, "scalekit-mcp-server", good.Spec.RegistryRef, "resolved to the tool's real registry")
+	assert.Equal(t, "https://mcp.scalekit.com/", good.Spec.Server.URL, "server URL matches the registry pin")
 	assert.Equal(t, "default-tools", unknown.Spec.RegistryRef, "an unknown tool keeps the default")
 }

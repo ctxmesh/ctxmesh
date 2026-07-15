@@ -159,13 +159,23 @@ func createAgentFromYAML(
 	return created, nil
 }
 
+// toolLoc is where a catalog tool actually lives: its ToolRegistry and the server
+// URL/image the registry PINS it to (ToolEntry.URL/Image). A generated binding must
+// match both the registry AND the pin, or the controller reports RegistryNotFound /
+// RegistryMismatch (m25 S18).
+type toolLoc struct {
+	registry string
+	url      string
+	image    string
+}
+
 // toolRegistryIndex lists the namespace's ToolRegistries and maps each tool NAME to
-// the registry that catalogs it, so a generated MCPToolBinding can reference the
-// registry the tool actually lives in (m25 S18). Registries are sorted by name so a
-// tool name present in more than one registry resolves deterministically (first wins;
+// its registry + pinned URL/image, so a generated MCPToolBinding can reference the
+// registry the tool actually lives in AND the pin it must use. Registries are sorted
+// by name so a tool present in more than one resolves deterministically (first wins;
 // bare-name collisions are unavoidable and rare given per-server registries). A list
 // error → nil map (the caller keeps expand's default rather than failing the create).
-func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[string]string {
+func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[string]toolLoc {
 	if reader == nil {
 		return nil
 	}
@@ -177,11 +187,11 @@ func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[s
 	slices.SortFunc(regs, func(a, b agentsv1alpha1.ToolRegistry) int {
 		return strings.Compare(a.Name, b.Name)
 	})
-	idx := make(map[string]string)
+	idx := make(map[string]toolLoc)
 	for i := range regs {
 		for _, t := range regs[i].Spec.Tools {
 			if _, seen := idx[t.Name]; !seen {
-				idx[t.Name] = regs[i].Name
+				idx[t.Name] = toolLoc{registry: regs[i].Name, url: t.URL, image: t.Image}
 			}
 		}
 	}
@@ -189,11 +199,11 @@ func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[s
 }
 
 // rewriteBindingRegistries points each generated MCPToolBinding at the registry its
-// tool actually lives in (m25 S18), overriding expand's hardcoded default so the
-// binding can go Ready. A tool absent from every registry keeps the default (the
-// binding will still be RegistryNotFound, but that is now an honest "no such tool"
-// rather than a systemic mis-reference).
-func rewriteBindingRegistries(objs []decodedObject, idx map[string]string) {
+// tool actually lives in AND the URL/image that registry pins (m25 S18), overriding
+// expand's hardcoded default + placeholder server so the binding can go Ready. A tool
+// absent from every registry keeps expand's defaults (an honest "no such tool" rather
+// than a systemic mis-reference).
+func rewriteBindingRegistries(objs []decodedObject, idx map[string]toolLoc) {
 	if len(idx) == 0 {
 		return
 	}
@@ -202,8 +212,18 @@ func rewriteBindingRegistries(objs []decodedObject, idx map[string]string) {
 		if !ok {
 			continue
 		}
-		if reg, found := idx[binding.Spec.ToolName]; found {
-			binding.Spec.RegistryRef = reg
+		loc, found := idx[binding.Spec.ToolName]
+		if !found {
+			continue
+		}
+		binding.Spec.RegistryRef = loc.registry
+		// Match the registry's pin so the controller's pin check passes: an empty pin
+		// means "any", so only override when the registry actually pins a value.
+		if loc.url != "" {
+			binding.Spec.Server.URL = loc.url
+		}
+		if loc.image != "" {
+			binding.Spec.Server.Image = loc.image
 		}
 	}
 }
