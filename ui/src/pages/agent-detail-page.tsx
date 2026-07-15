@@ -978,7 +978,7 @@ function RunPanel({
 }) {
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
-  const [input, setInput] = React.useState('{\n  "prompt": "Hello, agent"\n}');
+  const [input, setInput] = React.useState('{\n  "input": "Hello, agent"\n}');
   const [run, setRun] = React.useState<RunState>({ kind: "idle" });
 
   async function onRun() {
