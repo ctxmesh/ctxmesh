@@ -104,6 +104,19 @@ export function ToolCatalogPage() {
   const [filter, setFilter] = React.useState<FilterState>("all");
   const [q, setQ] = React.useState("");
   const [wizard, setWizard] = React.useState<WizardState>({ kind: "closed" });
+  // MCP-server grouping (m25 S11) is collapsible; browse defaults to EXPANDED (the
+  // grouping is visible up front) so we track which servers the user COLLAPSED.
+  const [collapsedServers, setCollapsedServers] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleServer = React.useCallback((server: string) => {
+    setCollapsedServers((s) => {
+      const next = new Set(s);
+      if (next.has(server)) next.delete(server);
+      else next.add(server);
+      return next;
+    });
+  }, []);
 
   const { can } = useCapabilities();
   // Binding is a write op — gated on mcptoolbindings/create. Display-only;
@@ -266,33 +279,47 @@ export function ToolCatalogPage() {
               intent="filtered"
             />
           ) : (
-            // Group the catalog by MCP server (m25 S11): each server's tools sit under
-            // a header naming the server, so it's obvious which server a tool comes
-            // from. Curated tools (no source) group last under "Curated tools".
-            <div className="space-y-4" data-testid="catalog-tool-list">
-              {groupToolsByServer(displayedTools).map(([source, tools]) => (
-                <div
-                  key={source}
-                  className="overflow-hidden rounded-lg border bg-card shadow-card"
-                  data-testid={`catalog-group-${source}`}
-                >
-                  <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-2">
-                    <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 truncate text-sm font-medium">{source}</span>
-                    <Badge variant="secondary">{tools.length}</Badge>
-                  </div>
-                  <div className="divide-y">
-                    {tools.map((tool) => (
-                      <ToolRow
-                        key={`${source}/${tool.name}`}
-                        tool={tool}
-                        canBind={canBind}
-                        onBind={() => setWizard({ kind: "open", tool })}
+            // Group the catalog by MCP server (m25 S11) as a COLLAPSIBLE tree: the
+            // catalog shows the servers; click one to reveal its tools. Curated tools
+            // (no registry) group last under "Curated tools".
+            <div className="space-y-3" data-testid="catalog-tool-list">
+              {groupToolsByServer(displayedTools).map(([server, tools]) => {
+                const isOpen = !collapsedServers.has(server);
+                return (
+                  <div
+                    key={server}
+                    className="overflow-hidden rounded-lg border bg-card shadow-card"
+                    data-testid={`catalog-group-${server}`}
+                  >
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 bg-muted/40 px-4 py-2.5 text-left hover:bg-muted/60"
+                      onClick={() => toggleServer(server)}
+                      aria-expanded={isOpen}
+                      data-testid={`catalog-group-toggle-${server}`}
+                    >
+                      <ChevronRight
+                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
                       />
-                    ))}
+                      <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 truncate text-sm font-medium">{server}</span>
+                      <Badge variant="secondary">{tools.length}</Badge>
+                    </button>
+                    {isOpen && (
+                      <div className="divide-y border-t">
+                        {tools.map((tool) => (
+                          <ToolRow
+                            key={`${server}/${tool.name}`}
+                            tool={tool}
+                            canBind={canBind}
+                            onBind={() => setWizard({ kind: "open", tool })}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </>
