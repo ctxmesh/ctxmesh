@@ -12,6 +12,7 @@ import {
 } from "@/pages/agent-registry-detail-page";
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
+import { McpServersPage } from "@/pages/mcp-servers-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
 import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
@@ -124,6 +125,8 @@ export function App() {
                 add-MCP flows, the first UI of the aha. */}
             <Route path="providers" element={<ProvidersPage />} />
             <Route path="providers/connect" element={<ConnectProviderPage />} />
+            {/* m25 S10: MCP Servers list — the primary MCP surface (Add is in-page) */}
+            <Route path="tools/mcp-servers" element={<McpServersPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
             {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
             <Route path="tools/approvals" element={<McpApprovalsPage />} />
