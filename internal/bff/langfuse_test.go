@@ -118,25 +118,26 @@ func TestLangfuseTraceURL(t *testing.T) {
 }
 
 func TestLangfuseRecentRuns(t *testing.T) {
-	// Only traces carrying an agent:<ns>/<name> tag are RUNS (m25 S15). The middle
-	// trace is a gateway/proxy trace with no agent tag and MUST be filtered out.
+	// Only the `agent.invoke` boundary trace is a RUN (m25 S15). The proxy trace is
+	// NOT a run (even though the launcher tags it) and MUST be filtered out; runs are
+	// named by their agent identity, not the generic "agent.invoke".
 	body := `{"data":[
-		{"id":"t1","name":"chat","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]},
-		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0},
-		{"id":"t2","name":"summarize","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]}
+		{"id":"t1","name":"agent.invoke","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]},
+		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0,"tags":["agent:prod/chatbot"]},
+		{"id":"t2","name":"agent.invoke","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]}
 	]}`
 	srv, rec := fakeLangfuse(t, body)
 	a := newTestLangfuse(t, srv.URL)
 
 	runs, err := a.RecentRuns(context.Background(), 10)
 	require.NoError(t, err)
-	require.Len(t, runs, 2, "the non-agent proxy trace must be filtered out")
+	require.Len(t, runs, 2, "the proxy trace must be filtered out even though it is agent-tagged")
 	for _, r := range runs {
 		assert.NotEqual(t, "noise", r.TraceID, "a gateway/proxy trace is not a run")
 	}
 
 	assert.Equal(t, "t1", runs[0].TraceID)
-	assert.Equal(t, "chat", runs[0].Name)
+	assert.Equal(t, "prod/chatbot", runs[0].Name, "runs are named by their agent, not 'agent.invoke'")
 	assert.InDelta(t, 0.5, runs[0].CostUSD, 1e-9)
 	assert.Equal(t, int64(900), runs[0].Tokens, "prefers usage.totalTokens")
 	assert.InDelta(t, 120.0, runs[0].LatencyMs, 1e-9)
