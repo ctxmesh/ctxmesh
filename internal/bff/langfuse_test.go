@@ -300,9 +300,9 @@ func traceHasAllTags(tr lfTrace, want []string) bool {
 // RunsForAgent(default, foo) must return ONLY default/foo's runs, never other/foo's.
 func TestLangfuseRunsForAgentFiltersCrossNamespace(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "d1", Name: "run", Timestamp: "2026-07-01T00:02:00Z", TotalCost: 0.5, Tags: []string{"agent:default/foo"}},
-		{ID: "d2", Name: "run", Timestamp: "2026-07-01T00:01:00Z", TotalCost: 0.3, Tags: []string{"agent:default/foo"}},
-		{ID: "o1", Name: "run", Timestamp: "2026-07-01T00:03:00Z", TotalCost: 9.9, Tags: []string{"agent:other/foo"}},
+		{ID: "d1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", TotalCost: 0.5, Tags: []string{"agent:default/foo"}},
+		{ID: "d2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", TotalCost: 0.3, Tags: []string{"agent:default/foo"}},
+		{ID: "o1", Name: "agent.invoke", Timestamp: "2026-07-01T00:03:00Z", TotalCost: 9.9, Tags: []string{"agent:other/foo"}},
 	}
 	srv, rec := fakeLangfuseTagged(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -465,9 +465,9 @@ func fakeLangfuseFiltered(t *testing.T, all []lfTrace) (*httptest.Server, *recor
 // excluded; the outbound query carries the correct tags= param.
 func TestFilteredRunsByAgent(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "d1", Name: "run", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:default/foo"}},
-		{ID: "d2", Name: "run", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:default/foo"}},
-		{ID: "o1", Name: "run", Timestamp: "2026-07-01T00:03:00Z", Tags: []string{"agent:other/foo"}},
+		{ID: "d1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "d2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "o1", Name: "agent.invoke", Timestamp: "2026-07-01T00:03:00Z", Tags: []string{"agent:other/foo"}},
 	}
 	srv, rec := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -488,9 +488,9 @@ func TestFilteredRunsByAgent(t *testing.T) {
 // fromTimestamp/toTimestamp query params.
 func TestFilteredRunsFromToTimestamps(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "early", Name: "run", Timestamp: "2026-06-30T00:00:00Z"},
-		{ID: "mid", Name: "run", Timestamp: "2026-07-01T12:00:00Z"},
-		{ID: "late", Name: "run", Timestamp: "2026-07-02T00:00:00Z"},
+		{ID: "early", Name: "agent.invoke", Timestamp: "2026-06-30T00:00:00Z"},
+		{ID: "mid", Name: "agent.invoke", Timestamp: "2026-07-01T12:00:00Z"},
+		{ID: "late", Name: "agent.invoke", Timestamp: "2026-07-02T00:00:00Z"},
 	}
 	srv, rec := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -512,10 +512,12 @@ func TestFilteredRunsFromToTimestamps(t *testing.T) {
 // TestFilteredRunsQSubstringClientSide: q applies a client-side substring
 // filter on the run name AFTER the Langfuse response — not a server-side param.
 func TestFilteredRunsQSubstringClientSide(t *testing.T) {
+	// Runs are agent.invoke traces named by their agent (m25 S15); q filters those
+	// agent names client-side.
 	corpus := []lfTrace{
-		{ID: "t1", Name: "chat-session", Timestamp: "2026-07-01T00:02:00Z"},
-		{ID: "t2", Name: "summarize-doc", Timestamp: "2026-07-01T00:01:00Z"},
-		{ID: "t3", Name: "chat-batch", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "t1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:prod/chat-session"}},
+		{ID: "t2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:prod/summarize-doc"}},
+		{ID: "t3", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z", Tags: []string{"agent:prod/chat-batch"}},
 	}
 	srv, rec := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -523,13 +525,15 @@ func TestFilteredRunsQSubstringClientSide(t *testing.T) {
 	page, err := a.FilteredRuns(context.Background(), RunFilter{Q: "chat", Limit: 20})
 	require.NoError(t, err)
 
-	// Only the two "chat" traces survive the client-side filter.
+	// Only the two "chat" agents survive the client-side filter.
 	require.Len(t, page.Runs, 2)
 	for _, r := range page.Runs {
-		assert.Contains(t, r.Name, "chat", "non-chat names must be filtered out")
+		assert.Contains(t, r.Name, "chat", "non-chat agents must be filtered out")
 	}
-	// "name" should NOT appear as a Langfuse query param (client-side only).
-	assert.NotContains(t, rec.query, "name=", "q must NOT be forwarded as a server-side name= param")
+	// The server-side name filter is the RUN-boundary filter (name=agent.invoke), NOT
+	// q: q ("chat") must never be forwarded to Langfuse.
+	assert.Contains(t, rec.query, "name=agent.invoke", "the run-boundary name filter is sent")
+	assert.NotContains(t, rec.query, "chat", "q must NOT be forwarded to Langfuse")
 }
 
 // TestFilteredRunsStatusErrorClientSide: status filter is validated but NOT
@@ -578,10 +582,10 @@ func TestFilteredRunsMalformedFromErrors(t *testing.T) {
 func TestFilteredRunsCursorPagination(t *testing.T) {
 	// 4 traces with distinct timestamps → 2 pages of 2.
 	corpus := []lfTrace{
-		{ID: "t1", Name: "run", Timestamp: "2026-07-01T00:04:00Z"},
-		{ID: "t2", Name: "run", Timestamp: "2026-07-01T00:03:00Z"},
-		{ID: "t3", Name: "run", Timestamp: "2026-07-01T00:02:00Z"},
-		{ID: "t4", Name: "run", Timestamp: "2026-07-01T00:01:00Z"},
+		{ID: "t1", Name: "agent.invoke", Timestamp: "2026-07-01T00:04:00Z"},
+		{ID: "t2", Name: "agent.invoke", Timestamp: "2026-07-01T00:03:00Z"},
+		{ID: "t3", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z"},
+		{ID: "t4", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z"},
 	}
 	srv, _ := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -613,9 +617,9 @@ func TestFilteredRunsStableOrderTieBreak(t *testing.T) {
 	// All same timestamp: order must be by TraceID ascending (after asc sort the
 	// slice, since we sort desc-timestamp then asc-ID).
 	corpus := []lfTrace{
-		{ID: "zzz", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
-		{ID: "aaa", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
-		{ID: "mmm", Name: "run", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "zzz", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "aaa", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "mmm", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z"},
 	}
 	srv, _ := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -633,8 +637,8 @@ func TestFilteredRunsStableOrderTieBreak(t *testing.T) {
 // no tag filter, no time bounds, empty cursor.
 func TestFilteredRunsNoParamsBackwardCompat(t *testing.T) {
 	corpus := []lfTrace{
-		{ID: "t1", Name: "chat", Timestamp: "2026-07-01T00:01:00Z"},
-		{ID: "t2", Name: "summarize", Timestamp: "2026-07-01T00:00:00Z"},
+		{ID: "t1", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z"},
+		{ID: "t2", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z"},
 	}
 	srv, rec := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
