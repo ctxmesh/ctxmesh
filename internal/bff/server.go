@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -115,6 +116,14 @@ type Server struct {
 	// MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
 	credentialNamespace string
 	credentialClient    client.Client
+
+	// capabilitySigner mints the short-lived RUN CAPABILITY (runcap, ADR 0030 §2) at an
+	// authenticated /invoke: an EdDSA-signed JWT carrying the invoking user's hashed
+	// identity that the credential plane verifies to resolve THAT user's OBO credential.
+	// nil ⇒ minting DISABLED (no platform capability key configured) — the invoke carries
+	// no capability and a downstream tool call resolves as unattended (org/public only),
+	// never another user's grant. Built in NewServer from MCP_CAPABILITY_PRIVATE_KEY.
+	capabilitySigner *runcap.Signer
 
 	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
 	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
@@ -217,6 +226,15 @@ type Options struct {
 	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
 	// why this bounded SA use does not reopen the confused-deputy gap.
 	CredentialClient client.Client
+	// MCPCapabilityPrivateSeedB64 is the base64-encoded Ed25519 private seed the BFF signs
+	// run capabilities with (runcap, ADR 0030 §2/§5) — a per-cluster platform Secret. Empty
+	// ⇒ capability minting is DISABLED (an /invoke carries no capability header). Wired from
+	// MCP_CAPABILITY_PRIVATE_KEY in cmd/bff/main.go.
+	MCPCapabilityPrivateSeedB64 string
+	// MCPCapabilityAudience is the credential-plane audience minted capabilities target
+	// (their `aud`); the sidecar / central token service verify against the same value.
+	// Defaults to defaultCapabilityAudience when empty. Wired from MCP_CAPABILITY_AUDIENCE.
+	MCPCapabilityAudience string
 	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
 	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
 	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
@@ -271,6 +289,24 @@ func NewServer(opts Options) *Server {
 		opts.Log.Info("mcp: MCP_CREDENTIAL_NAMESPACE not set — MCP grant Secrets are stored in the per-request " +
 			"(agent) namespace (legacy); set a locked platform namespace before production (ADR 0029 §7) so a " +
 			"tenant cannot read another user's grant tokens.")
+	}
+	// Build the run-capability signer from the per-cluster platform key (runcap, ADR 0030
+	// §2). Absent ⇒ minting stays disabled (an /invoke carries no capability). A malformed
+	// seed is a hard misconfiguration surfaced at start-up, never a silent wrong-key.
+	if seed := opts.MCPCapabilityPrivateSeedB64; seed != "" {
+		priv, decErr := runcap.DecodePrivateSeed(seed)
+		if decErr != nil {
+			opts.Log.Error(decErr, "mcp: MCP_CAPABILITY_PRIVATE_KEY is set but invalid — run-capability minting DISABLED")
+		} else {
+			aud := opts.MCPCapabilityAudience
+			if aud == "" {
+				aud = defaultCapabilityAudience
+			}
+			s.capabilitySigner = runcap.NewSigner(priv, aud, nil)
+		}
+	} else if s.mcpEnabled {
+		opts.Log.Info("mcp: MCP_CAPABILITY_PRIVATE_KEY not set — run capabilities are NOT minted; a tool call " +
+			"resolves as unattended (org/public only) until the platform capability key + egress sidecar are deployed (ADR 0030).")
 	}
 	return s
 }

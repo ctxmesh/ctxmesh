@@ -162,6 +162,14 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		}
 	}
 
+	// Per-cluster platform keypair for the run capability (runcap, ADR 0030 §2/§5): the
+	// base64-encoded Ed25519 private seed the BFF signs run capabilities with, plus the
+	// credential-plane audience they target (verifiers check it). A prod cluster mounts a
+	// platform Secret here; absent, capability minting is disabled and a tool call resolves
+	// as unattended (org/public only).
+	mcpCapabilitySeed := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PRIVATE_KEY"))
+	mcpCapabilityAudience := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE"))
+
 	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
 	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
 	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
@@ -174,23 +182,25 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	}
 
 	srv := bff.NewServer(bff.Options{
-		CallerClients:            callerClients,
-		Scheme:                   scheme,
-		Auth:                     bff.BearerAuthenticator{},
-		Adapters:                 adapters,
-		Version:                  version,
-		StaticDir:                staticDir,
-		ProviderConnect:          providerConnect,
-		PlatformGenerationModels: platformGenModels,
-		MCPEnabled:               mcpEnabled,
-		MCPRequireApproval:       mcpRequireApproval,
-		MCPGrantHMACKey:          mcpGrantHMACKey,
-		MCPCredentialNamespace:   mcpCredentialNamespace,
-		CredentialClient:         credentialClient,
-		OIDCEnabled:              oidcEnabled,
-		OIDCIssuer:               oidcIssuer,
-		OIDCClientID:             oidcClientID,
-		Log:                      ctrl.Log.WithName("bff.server"),
+		CallerClients:               callerClients,
+		Scheme:                      scheme,
+		Auth:                        bff.BearerAuthenticator{},
+		Adapters:                    adapters,
+		Version:                     version,
+		StaticDir:                   staticDir,
+		ProviderConnect:             providerConnect,
+		PlatformGenerationModels:    platformGenModels,
+		MCPEnabled:                  mcpEnabled,
+		MCPRequireApproval:          mcpRequireApproval,
+		MCPGrantHMACKey:             mcpGrantHMACKey,
+		MCPCredentialNamespace:      mcpCredentialNamespace,
+		CredentialClient:            credentialClient,
+		MCPCapabilityPrivateSeedB64: mcpCapabilitySeed,
+		MCPCapabilityAudience:       mcpCapabilityAudience,
+		OIDCEnabled:                 oidcEnabled,
+		OIDCIssuer:                  oidcIssuer,
+		OIDCClientID:                oidcClientID,
+		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{
