@@ -28,6 +28,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ctxmesh import _http
+from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
 
@@ -194,6 +195,12 @@ def _mcp_headers(session_id: Optional[str]) -> Dict[str, str]:
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
+    # Relay the invoking user's run capability (ADR 0030 §3) on every tool-call egress so
+    # the egress sidecar can resolve THAT user's credential. Bound per-request in a
+    # ContextVar (managed.run_managed_loop); absent ⇒ an unattended run (org/public only).
+    capability = current_capability()
+    if capability:
+        headers[CAPABILITY_HEADER] = capability
     return headers
 
 
