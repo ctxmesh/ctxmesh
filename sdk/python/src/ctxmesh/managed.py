@@ -35,6 +35,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import ConfigError
 
@@ -179,7 +180,10 @@ def run_managed_loop(
     ]
     tools_called: List[str] = []
 
-    with client.trace.loop("managed-agent", headers=headers) as root:
+    # Bind the invoking user's run capability (ADR 0030 §3) from the inbound headers for
+    # the whole turn, so every MCP tool call this loop dispatches relays it to the egress
+    # sidecar. Request-scoped (a ContextVar) — no cross-user bleed between concurrent runs.
+    with capability_scope(headers), client.trace.loop("managed-agent", headers=headers) as root:
         root.set_input(user_input)
 
         for step in range(1, config.max_steps + 1):
