@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // maxInvokeRequestBytes bounds the Playground input body. A run's input is a
@@ -83,7 +84,49 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Mint the invoking user's run capability and carry it on the request context so the
+	// adapter attaches it to the agent's /invoke (runcap, ADR 0030 §2). Best-effort: a
+	// mint failure never fails the run — it just proceeds without a capability (unattended).
+	r = s.attachRunCapability(r, caller, req.Agent, req.Namespace)
 	s.writeInvokeResult(w, r, req.Agent, endpoint, []byte(req.Input))
+}
+
+// attachRunCapability mints a run capability for the authenticated caller and returns r
+// carrying it on its context for the InvokeAdapter to attach (runcap, ADR 0030 §2). It is
+// BEST-EFFORT: when minting is disabled (no platform key) or the caller identity cannot be
+// resolved, it returns r unchanged and the run proceeds WITHOUT a capability — a downstream
+// tool call then resolves as unattended (org/public only), never another user's grant. The
+// capability is the invoking user's HASHED identity (`sub`), the agent as the RFC 8693
+// actor, scoped to a fresh run id — the agent only ever relays it, never forges it.
+func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agent, namespace string) *http.Request {
+	if s.capabilitySigner == nil {
+		return r // minting disabled — no platform capability key configured
+	}
+	username, err := callerUsername(r.Context(), caller)
+	if err != nil || strings.TrimSpace(username) == "" {
+		s.log.Error(err, "run-capability: could not resolve caller identity; proceeding without a capability")
+		return r
+	}
+	runID, err := randToken(16)
+	if err != nil {
+		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+		return r
+	}
+	ns := namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
+		User:  userGrantHash(username),
+		Agent: ns + "/" + agent,
+		RunID: runID,
+		TTL:   runCapabilityTTL,
+	})
+	if err != nil {
+		s.log.Error(err, "run-capability: mint failed; proceeding without a capability")
+		return r
+	}
+	return r.WithContext(contextWithRunCapability(r.Context(), token))
 }
 
 // handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).
