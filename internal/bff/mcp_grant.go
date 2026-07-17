@@ -17,15 +17,8 @@ limitations under the License.
 package bff
 
 import (
-	"context"
-	"errors"
-
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -62,16 +55,6 @@ const (
 // so a consent flow's callback and a later refresh have the endpoint without a
 // second read. It mirrors annMCPURL on the register objects.
 const annMCPGrantServerURL = annMCPURL
-
-// errConsentRequired is the distinct signal the OBO resolver returns when the
-// invoking user has NO grant for an OAuth server: the caller must prompt the user
-// to consent (the m17.2 flow), NOT fall back to a shared credential and NOT fail
-// silently. It is a sentinel the egress/loop layer maps to a consent prompt.
-var errConsentRequired = credresolve.ErrConsentRequired
-
-// isConsentRequired reports whether err is (or wraps) errConsentRequired — the
-// caller uses it to branch to a consent prompt rather than an error surface.
-func isConsentRequired(err error) bool { return errors.Is(err, errConsentRequired) }
 
 // grantHMACKey is the per-cluster HMAC key that salts the user-identity hash so it
 // cannot be confirmed offline (a rainbow-table of low-entropy usernames/emails) by
@@ -138,166 +121,6 @@ func grantSecretCoordinates(credNs, sourceNs, server, userHash string) (namespac
 	return credresolve.SecretCoordinates(credNs, sourceNs, server, userHash)
 }
 
-// oboCredentialResolver is the M17.3 per-user (server, user) resolver. For an OAuth
-// server it resolves the INVOKING user's own grant Secret and returns their fresh
-// access token; when the user has no grant it returns errConsentRequired. For a
-// non-OAuth server (or when per-user is not in play) it delegates to the M14
-// shared resolver so the shared-credential mode keeps working unchanged.
-//
-// The read + refresh run with whichever client the caller supplies (the tool
-// proxy's control-plane credential identity at the egress hop, or a caller-scoped
-// client). The grant Secret is the SAME trust domain as the shared credentials
-// (ADR 0016): readable only by the credential component.
-type oboCredentialResolver struct {
-	// reader reads + refreshes the grant Secret. Supplied by the egress hop.
-	reader client.Client
-	// credentialNamespace consolidates grant READS into the locked platform namespace
-	// (m25.1b) when set — it MUST mirror the write side's MCP_CREDENTIAL_NAMESPACE so a
-	// read lands on the object the consent write created. "" ⇒ legacy per-request-
-	// namespace reads. In locked mode the source namespace is also matched on the
-	// mcp.ctxmesh.ai/source-namespace label (many namespaces' grants coexist there).
-	credentialNamespace string
-	// shared is the M14 shared-credential resolver, used for non-OAuth servers so
-	// the shared mode is preserved (backward compatibility).
-	shared MCPCredentialResolver
-	// refresher rotates a near-expiry grant token server-side (the m17.2 helper).
-	// It is *Server.refreshMCPOAuthToken in production; a seam so this resolver is
-	// unit-testable without a full Server. It returns the fresh access token.
-	refresher func(ctx context.Context, c client.Client, ns, secretName string) (string, error)
-	// audit records grant use (never the token). Nil → no-op.
-	audit *grantAuditor
-}
-
-// NewOBOCredentialResolver returns the M17.3 per-user resolver. reader reads the
-// grant Secret server-side; credentialNamespace is the locked platform namespace grant
-// reads consolidate into ("" ⇒ legacy per-request-namespace, must mirror the write
-// side); shared is the M14 fallback for non-OAuth servers; refresh rotates a near-
-// expiry grant; audit records use (may be nil).
-func NewOBOCredentialResolver(
-	reader client.Client,
-	credentialNamespace string,
-	shared MCPCredentialResolver,
-	refresh func(ctx context.Context, c client.Client, ns, secretName string) (string, error),
-	audit *grantAuditor,
-) MCPCredentialResolver {
-	return &oboCredentialResolver{
-		reader:              reader,
-		credentialNamespace: credentialNamespace,
-		shared:              shared,
-		refresher:           refresh,
-		audit:               audit,
-	}
-}
-
-// Resolve implements MCPCredentialResolver for the per-user case (ADR 0016 §5):
-//
-//   - the server has a per-user grant for THIS user → refresh it (rotate if near
-//     expiry) and return the fresh access token as a bearer credential, auditing
-//     the use (never the token);
-//   - the server is an OAuth server but this user has NO grant → errConsentRequired
-//     (a distinct signal, NOT a shared-credential fallback and NOT a silent
-//     failure);
-//   - the server is not an OAuth server → delegate to the M14 shared resolver so
-//     shared-credential mode is preserved.
-//
-// Per-user isolation: the grant is selected by BOTH the server name AND the
-// invoking user's hash, so user A can never resolve user B's grant.
-func (r *oboCredentialResolver) Resolve(ctx context.Context, ns, server, user string) (MCPCredential, error) {
-	userHash := userGrantHash(user)
-
-	// Look up THIS user's grant for THIS server (server + user-hash — the pair is
-	// the isolation guarantee). A read failure that is NOT "not found" is a real
-	// error the caller surfaces.
-	secret, found, err := r.findGrant(ctx, ns, server, userHash)
-	if err != nil {
-		return MCPCredential{}, err
-	}
-	if !found {
-		// No grant for this (user, server). If a shared credential exists for the
-		// server (a non-OAuth / M14 server), fall through to it; otherwise the OAuth
-		// server needs this user's consent.
-		if r.serverIsOAuth(ctx, ns, server) {
-			return MCPCredential{}, errConsentRequired
-		}
-		return r.shared.Resolve(ctx, ns, server, user)
-	}
-
-	// The user has a grant. Refresh (rotate if near expiry) server-side and attach
-	// the fresh access token. errNoRefreshToken from the refresher means the grant
-	// cannot be rotated and is at/near expiry → the user must re-consent. Refresh
-	// against the Secret's ACTUAL namespace (the credential namespace in locked mode)
-	// so the rotated-token writeback lands on the same object.
-	access, rErr := r.refresh(ctx, secret.Namespace, secret.Name)
-	if rErr != nil {
-		if errors.Is(rErr, errNoRefreshToken) {
-			return MCPCredential{}, errConsentRequired
-		}
-		return MCPCredential{}, rErr
-	}
-
-	r.audit.record(grantAuditEntry{action: grantActionUse, server: server, userHash: userHash, namespace: ns})
-	return MCPCredential{Kind: credentialKindBearer, Value: access}, nil
-}
-
-// refresh calls the injected refresher (the m17.2 refreshMCPOAuthToken) if wired,
-// else reads the current access token directly. Keeping it behind the field makes
-// the resolver testable without a *Server.
-func (r *oboCredentialResolver) refresh(ctx context.Context, ns, secretName string) (string, error) {
-	if r.refresher != nil {
-		return r.refresher(ctx, r.reader, ns, secretName)
-	}
-	var secret corev1.Secret
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, &secret); err != nil {
-		return "", err
-	}
-	return string(secret.Data[secretKeyOAuthAccessToken]), nil
-}
-
-// findGrant returns the (user, server) grant Secret for the given namespace by its
-// deterministic name, verifying the labels match the requested (user-hash, server)
-// so a name collision can NEVER return another user's grant (the label is the
-// authoritative match). A missing Secret is (nil, false, nil) — the caller decides
-// consent-required vs shared-fallback.
-func (r *oboCredentialResolver) findGrant(ctx context.Context, ns, server, userHash string) (*corev1.Secret, bool, error) {
-	var secret corev1.Secret
-	// Read from wherever the write put it: the locked credential namespace with the
-	// source ns folded into the name (locked mode) or the request namespace (legacy).
-	readNS, name := grantSecretCoordinates(r.credentialNamespace, ns, server, userHash)
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: name, Namespace: readNS}, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	// Defence in depth: the labels MUST match the requested (user, server). A
-	// name-only match without this check could, under a truncated-hash name
-	// collision, hand user A user B's grant — the isolation invariant forbids that.
-	if secret.Labels[labelMCPGrantUser] != userHash || secret.Labels[labelMCPGrantServer] != server {
-		return nil, false, nil
-	}
-	// In locked mode many namespaces' grants coexist in one namespace, so the source
-	// namespace is also an authoritative match key (the name's short ns-hash alone is
-	// not enough — a hash collision must never cross the namespace boundary).
-	if r.credentialNamespace != "" && secret.Labels[labelMCPGrantSourceNS] != ns {
-		return nil, false, nil
-	}
-	return &secret, true, nil
-}
-
-// serverIsOAuth reports whether the named server was registered as an OAuth server
-// (so an absent grant is "consent required" rather than "no credential"). It reads
-// the register-managed ToolRegistry's non-secret auth-type annotation. A read
-// failure is treated as "not OAuth" (conservative: fall through to shared, which
-// itself returns errNoMCPCredential for an open server) so a transient error never
-// masquerades as a consent prompt.
-func (r *oboCredentialResolver) serverIsOAuth(ctx context.Context, ns, server string) bool {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
-		return false
-	}
-	return tr.Annotations[annMCPAuthType] == oauthAuthType
-}
-
 // --- audit (M11 vocabulary, BFF-side) ---------------------------------------
 //
 // The M11 audit seam (internal/audit) is a CONTROLLER-side informer over CRD
@@ -312,8 +135,6 @@ type grantAction string
 const (
 	// grantActionCreate records a user consenting → their grant is stored.
 	grantActionCreate grantAction = "grant.create"
-	// grantActionUse records the resolver attaching a user's grant to a tool call.
-	grantActionUse grantAction = "grant.use"
 	// grantActionRevoke records a user revoking their own grant.
 	grantActionRevoke grantAction = "grant.revoke"
 )
