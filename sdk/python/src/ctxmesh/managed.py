@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
-from ctxmesh.errors import ConfigError
+from ctxmesh.errors import ConfigError, ConsentRequiredError
 
 #: A sane default bound: enough for a few tool round-trips, low enough that a
 #: runaway (a model that keeps calling tools) trips it quickly. Overridable via
@@ -82,6 +82,10 @@ class ManagedResult:
     steps: int
     #: The catalog names of the tools dispatched, in call order.
     tools_called: List[str]
+    #: MCP servers a tool call hit that the invoking user has not connected an account to
+    #: (ADR 0029 §2 / m25.9). Non-empty ⇒ the run needs a "Connect your account" CTA; the
+    #: model was told to report + stop rather than retry.
+    consent_required: List[str] = field(default_factory=list)
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -179,6 +183,7 @@ def run_managed_loop(
         {"role": "user", "content": user_input},
     ]
     tools_called: List[str] = []
+    consent_required: List[str] = []
 
     # Bind the invoking user's run capability (ADR 0030 §3) from the inbound headers for
     # the whole turn, so every MCP tool call this loop dispatches relays it to the egress
@@ -199,7 +204,10 @@ def run_managed_loop(
                     turn.set_output(resp.text)
                     root.set_output(resp.text)
                     return ManagedResult(
-                        output=resp.text, steps=step, tools_called=tools_called
+                        output=resp.text,
+                        steps=step,
+                        tools_called=tools_called,
+                        consent_required=consent_required,
                     )
 
                 # A tool-calling turn: append the assistant message verbatim
@@ -219,11 +227,23 @@ def run_managed_loop(
                         # crashing the run on a hallucinated tool name.
                         content = f"error: tool {name!r} is not bound to this agent"
                     else:
-                        with client.trace.tool(name, input=args) as tool_span:
-                            result = client.tools.call(name, **args)
-                            tool_span.set_output(result)
-                        content = _tool_result_content(result)
-                        tools_called.append(name)
+                        try:
+                            with client.trace.tool(name, input=args) as tool_span:
+                                result = client.tools.call(name, **args)
+                                tool_span.set_output(result)
+                            content = _tool_result_content(result)
+                            tools_called.append(name)
+                        except ConsentRequiredError as exc:
+                            # The invoking user has not connected their account to this MCP
+                            # server (ADR 0029 §2). Record it for the run's "Connect your
+                            # account" CTA and tell the model to report + stop, not retry.
+                            if exc.server and exc.server not in consent_required:
+                                consent_required.append(exc.server)
+                            content = (
+                                f"consent_required: the user must connect their account for "
+                                f"the {exc.server!r} MCP server before this tool can run. "
+                                f"Report this to the user and stop — do not retry."
+                            )
 
                     messages.append(
                         {

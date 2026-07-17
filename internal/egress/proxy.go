@@ -137,9 +137,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, credresolve.ErrNoCredential):
 		// An open server — forward with no Authorization (cred stays empty).
 	case errors.Is(err, credresolve.ErrConsentRequired):
-		// The user must connect their own account. Honest structured error (the full
-		// consent contract — connect URL + run status — lands in m25.9).
-		writeError(w, http.StatusForbidden, "consent_required", "connect your account to use this tool")
+		// The user must connect their own account (ADR 0029 §2). The structured error names
+		// the SERVER so the runtime can surface a "Connect your account for <server>" CTA
+		// (m25.9 consent contract) — the SDK maps it to a distinct consent_required outcome.
+		writeConsentRequired(w, route.Name)
 		return
 	default:
 		p.cfg.Log.Error(err, "egress: credential resolution failed", "server", route.Name)
@@ -157,10 +158,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // errorBody is the sidecar's structured error surface — a machine-readable code + a short
-// message. It NEVER carries token material.
+// message (+ the server, for consent_required). It NEVER carries token material.
 type errorBody struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
+	Server  string `json:"server,omitempty"`
 }
 
 // writeError writes a JSON structured error with the given status.
@@ -168,4 +170,16 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorBody{Error: code, Message: message})
+}
+
+// writeConsentRequired writes the structured consent_required error, naming the server the
+// user must connect their account to (the m25.9 consent contract).
+func writeConsentRequired(w http.ResponseWriter, server string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(errorBody{
+		Error:   "consent_required",
+		Message: "connect your account to use this tool",
+		Server:  server,
+	})
 }
