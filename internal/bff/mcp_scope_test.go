@@ -87,6 +87,32 @@ func listServersAs(t *testing.T, objs []*agentsv1alpha1.ToolRegistry, username s
 	return names
 }
 
+func TestCheckBindingOwnership(t *testing.T) {
+	aliceHash := userGrantHash("alice@example.com")
+	bobHash := userGrantHash("bob@example.com")
+	idx := map[string]toolLoc{
+		"alice_tool":  {registry: "alice-mcp", scope: scopePersonal, owner: aliceHash},
+		"public_tool": {registry: "open-mcp", scope: scopePublic},
+		"org_tool":    {registry: "shared-mcp", scope: scopeOrg},
+	}
+	bind := func(tool string) []decodedObject {
+		return []decodedObject{{obj: &agentsv1alpha1.MCPToolBinding{Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: tool}}}}
+	}
+
+	// The owner may bind their personal server's tool.
+	assert.Nil(t, checkBindingOwnership(bind("alice_tool"), idx, aliceHash))
+	// A non-owner (or unresolved caller) is refused — an honest 403.
+	for _, owner := range []string{bobHash, ""} {
+		err := checkBindingOwnership(bind("alice_tool"), idx, owner)
+		require.NotNil(t, err)
+		assert.Equal(t, 403, err.status)
+	}
+	// Public / org tools + tools absent from the index are unrestricted.
+	assert.Nil(t, checkBindingOwnership(bind("public_tool"), idx, bobHash))
+	assert.Nil(t, checkBindingOwnership(bind("org_tool"), idx, bobHash))
+	assert.Nil(t, checkBindingOwnership(bind("unknown_tool"), idx, ""))
+}
+
 func TestListMCPServersOwnerFiltered(t *testing.T) {
 	aliceHash := userGrantHash("alice@example.com")
 	objs := []*agentsv1alpha1.ToolRegistry{

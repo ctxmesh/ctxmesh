@@ -97,6 +97,7 @@ func createAgentFromYAML(
 	scheme *runtime.Scheme,
 	agentYAML []byte,
 	namespace string,
+	callerOwner string,
 ) ([]createdObject, error) {
 	if scheme == nil {
 		return nil, &createError{status: 500, msg: "server misconfigured: no scheme"}
@@ -138,7 +139,14 @@ func createAgentFromYAML(
 	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
 	// default reference is RegistryNotFound and the binding never goes Ready. Best-
 	// effort: a tool not found in any registry keeps expand's default.
-	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, reader, ns))
+	idx := toolRegistryIndex(ctx, reader, ns)
+	rewriteBindingRegistries(objs, idx)
+	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
+	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
+	// they cannot even see. Refused before any object is created.
+	if gErr := checkBindingOwnership(objs, idx, callerOwner); gErr != nil {
+		return nil, gErr
+	}
 
 	// Stamp the source-spec annotation on the primary AgentDeployment only, before
 	// it is created, so the edit source of truth rides the object from birth.
@@ -167,6 +175,11 @@ type toolLoc struct {
 	registry string
 	url      string
 	image    string
+	// scope / owner mirror the registry's visibility labels (ADR 0029 §1) so the create
+	// flow can enforce the bind-time owner guard: a personal server may be bound only by
+	// its owner (a non-owner invoker gets an honest terminal error, not a consent CTA).
+	scope string
+	owner string
 }
 
 // toolRegistryIndex lists the namespace's ToolRegistries and maps each tool NAME to
@@ -191,11 +204,39 @@ func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[s
 	for i := range regs {
 		for _, t := range regs[i].Spec.Tools {
 			if _, seen := idx[t.Name]; !seen {
-				idx[t.Name] = toolLoc{registry: regs[i].Name, url: t.URL, image: t.Image}
+				idx[t.Name] = toolLoc{
+					registry: regs[i].Name, url: t.URL, image: t.Image,
+					scope: regs[i].Labels[labelMCPScope], owner: regs[i].Labels[labelMCPOwner],
+				}
 			}
 		}
 	}
 	return idx
+}
+
+// checkBindingOwnership enforces the bind-time owner guard (ADR 0029 edge case): a binding
+// whose tool lives on a PERSONAL server may be created only by that server's owner. It
+// returns a 403 createError on the first violation, naming the offending tool. callerOwner
+// is the creator's userGrantHash ("" when unresolved — then any personal bind is refused,
+// fail-closed). Public / org / grandfathered (no scope) servers are unrestricted.
+func checkBindingOwnership(objs []decodedObject, idx map[string]toolLoc, callerOwner string) *createError {
+	for _, d := range objs {
+		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		if !ok {
+			continue
+		}
+		loc, found := idx[binding.Spec.ToolName]
+		if !found || loc.scope != scopePersonal {
+			continue
+		}
+		if callerOwner == "" || loc.owner != callerOwner {
+			return &createError{
+				status: 403,
+				msg:    fmt.Sprintf("tool %q is on a personal MCP server you do not own — only its owner can bind it", binding.Spec.ToolName),
+			}
+		}
+	}
+	return nil
 }
 
 // rewriteBindingRegistries points each generated MCPToolBinding at the registry its
