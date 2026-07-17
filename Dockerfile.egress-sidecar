@@ -1,0 +1,25 @@
+# Dockerfile.egress-sidecar — the per-pod injecting egress proxy (ADR 0030 §1).
+#
+# Builds only the egress-sidecar binary (cmd/egress-sidecar) as a distroless/static
+# image. The controller injects it as a SEPARATE container beside the agent (user)
+# container (m25.8); the agent's MCP tool calls are pointed at it on localhost. It
+# verifies the run capability, resolves the invoking user's OBO credential, injects it
+# as a bearer, and forwards to the real MCP server — so the agent holds neither the
+# token nor the real URL.
+
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o egress-sidecar ./cmd/egress-sidecar
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/egress-sidecar /egress-sidecar
+USER 65532:65532
+ENTRYPOINT ["/egress-sidecar"]

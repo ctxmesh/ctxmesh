@@ -209,6 +209,10 @@ docker-build: ## Build docker image with the manager.
 docker-build-launcher: ## Build the launcher image (launcher:latest) from Dockerfile.launcher.
 	$(CONTAINER_TOOL) build -t launcher:latest -f Dockerfile.launcher .
 
+.PHONY: docker-build-egress-sidecar
+docker-build-egress-sidecar: ## Build the egress-sidecar image (egress-sidecar:latest) from Dockerfile.egress-sidecar (ADR 0030 §1).
+	$(CONTAINER_TOOL) build -t egress-sidecar:latest -f Dockerfile.egress-sidecar .
+
 .PHONY: docker-build-bff
 docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (build-time Node) + Go BFF; serves static assets, NO Node runtime.
 	$(CONTAINER_TOOL) build -t bff:latest -f Dockerfile.bff .
