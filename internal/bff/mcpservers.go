@@ -60,6 +60,23 @@ const (
 	// managedByMCP marks an object as created by the BYO-MCP register flow. It is
 	// the value of labelManagedBy (shared with the connect flow's constant).
 	managedByMCP = "agent-engine-mcp"
+
+	// labelMCPScope / labelMCPOwner stamp the server's SCOPE + OWNER as LABELS at
+	// register (ADR 0029 §1/§3). scope ∈ {public, personal, org} is a visibility +
+	// whose-credential axis, orthogonal to auth; owner is the registrant's userGrantHash
+	// (personal only). They are metadata-only — a resolve/revoke NEVER keys on them (the
+	// credential path keys on the invoker's hash + Secret RBAC), so tampering can hide/
+	// show a listing but can never redirect a credential.
+	labelMCPScope = "mcp.ctxmesh.ai/scope"
+	labelMCPOwner = "mcp.ctxmesh.ai/owner"
+
+	// The scope values. personal is the default for a user-added server (visible only to
+	// its owner); public is a no-auth / deliberately-open server (visible to all); org is
+	// an admin-shared server (visible to all). A server with NO scope label is
+	// grandfathered as org (behavior-preserving for pre-m25 servers).
+	scopePublic   = "public"
+	scopePersonal = "personal"
+	scopeOrg      = "org"
 	// annMCPURL persists the registered server's URL on the ToolRegistry so the
 	// list projection can surface it (non-secret).
 	annMCPURL = "agents.ctxmesh.ai/mcp-url"
@@ -141,6 +158,20 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	// names make a re-register a clean AlreadyExists → 409 (documented idempotency,
 	// like the m14.4 provider orphan note).
 	status := s.mcpApprovalStatus()
+	// Scope + owner (ADR 0029 §1/§3): a no-auth server is public (open to all); a keyed
+	// server is personal to the registrant, owned by the caller's HMAC'd identity.
+	scope := scopePersonal
+	owner := ""
+	if strings.TrimSpace(req.APIKey) == "" {
+		scope = scopePublic
+	} else if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		owner = userGrantHash(username)
+	} else {
+		// A keyed server is personal, owned by the registrant. If the identity can't be
+		// resolved (never in prod — the same caller client would then also fail the object
+		// create below), register without an owner label rather than failing the whole flow.
+		s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
+	}
 	created, cErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
 		name:      name,
 		namespace: ns,
@@ -148,6 +179,8 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 		apiKey:    req.APIKey,
 		tools:     tools,
 		status:    status,
+		scope:     scope,
+		owner:     owner,
 	})
 	if cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
@@ -234,6 +267,11 @@ type mcpCreateSpec struct {
 	// INSTEAD of a bearer key. It is the ONLY place the tokens land — never a DTO,
 	// log, annotation, or label. Mutually exclusive with a non-empty apiKey.
 	oauthSecretData map[string][]byte
+	// scope / owner stamp the server's visibility + ownership (ADR 0029 §1). scope ∈
+	// {public, personal, org}; owner is the registrant's userGrantHash (personal only).
+	// Empty scope stamps nothing (the object is then grandfathered as org on read).
+	scope string
+	owner string
 }
 
 // createMCPObjects creates, with the caller's client and in dependency order:
@@ -251,6 +289,14 @@ type mcpCreateSpec struct {
 func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme, spec mcpCreateSpec) ([]createdObject, *createError) {
 	labels := map[string]string{
 		labelManagedBy: managedByMCP,
+	}
+	// Scope + owner (ADR 0029 §1/§3) — metadata-only visibility labels. A resolve/revoke
+	// never keys on these, so they can hide/show a listing but never redirect a credential.
+	if spec.scope != "" {
+		labels[labelMCPScope] = spec.scope
+	}
+	if spec.owner != "" {
+		labels[labelMCPOwner] = spec.owner
 	}
 	hasKey := strings.TrimSpace(spec.apiKey) != ""
 	hasOAuth := len(spec.oauthSecretData) > 0
@@ -598,13 +644,34 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Owner-filtered visibility (ADR 0029 §3): public + org (+ grandfathered) are shown to
+	// all; a personal server only to its owner. A caller-identity lookup failure yields an
+	// empty owner, which hides every personal server (fail-closed, never leak another's).
+	callerOwner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
 	summaries := make([]MCPServerSummary, 0, len(registries.Items))
 	for i := range registries.Items {
+		if !mcpScopeVisibleTo(&registries.Items[i], callerOwner) {
+			continue
+		}
 		summaries = append(summaries, mcpServerSummaryFromRegistry(&registries.Items[i]))
 	}
 	slices.SortFunc(summaries, func(a, b MCPServerSummary) int { return strings.Compare(a.Name, b.Name) })
 
 	writeJSON(w, http.StatusOK, MCPServerListResponse{Servers: summaries, Items: summaries})
+}
+
+// mcpScopeVisibleTo reports whether a register-managed server is visible to the caller
+// identified by callerOwner (their userGrantHash), per ADR 0029 §3: public + org are
+// visible to all; a personal server only to its owner; a server with NO scope label is
+// grandfathered as org (visible to all) — behavior-preserving for pre-m25 servers (R7).
+func mcpScopeVisibleTo(tr *agentsv1alpha1.ToolRegistry, callerOwner string) bool {
+	if tr.Labels[labelMCPScope] == scopePersonal {
+		return callerOwner != "" && tr.Labels[labelMCPOwner] == callerOwner
+	}
+	return true // public, org, or absent (grandfathered org)
 }
 
 // mcpServerSummaryFromRegistry projects a register-managed ToolRegistry onto the
@@ -655,9 +722,19 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Owner-filtered visibility (ADR 0029 §3): a personal MCP server's tools show only to
+	// its owner; public/org/curated (no scope) show to all. Fail-closed on an identity
+	// lookup failure (empty owner hides every personal server).
+	callerOwner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
 	tools := make([]ToolCatalogEntry, 0)
 	for ri := range registries.Items {
 		tr := &registries.Items[ri]
+		if !mcpScopeVisibleTo(tr, callerOwner) {
+			continue
+		}
 		tools = append(tools, toolCatalogEntriesFromRegistry(tr)...)
 	}
 	// Deterministic order for stable rendering + tests: by registry then tool name.
