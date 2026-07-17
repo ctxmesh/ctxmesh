@@ -769,6 +769,9 @@ type MCPServerSummary struct {
 	// "oauth" for an OAuth 2.1 server (m17.2). Non-secret — it only names the
 	// scheme, never any credential. Omitted on the wire when empty.
 	AuthType string `json:"authType,omitempty"`
+	// Scope is the visibility/credential scope (ADR 0029): "public", "personal", or
+	// "org". Absent-label servers are grandfathered to "org" here (visibility only).
+	Scope string `json:"scope"`
 }
 
 // RegisterMCPServerResponse is returned by POST /api/mcpservers on success: the

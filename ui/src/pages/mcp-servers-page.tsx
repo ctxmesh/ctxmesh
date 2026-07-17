@@ -1,15 +1,18 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Plus, Trash2, Wrench } from "lucide-react";
+import { ExternalLink, Plus, Trash2, Users, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   ConfirmDialog,
   EmptyState,
   ErrorState,
   ForbiddenInline,
   SkeletonTable,
+  useFocusTrap,
   useToast,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
@@ -37,9 +40,13 @@ export function McpServersPage() {
   const { can } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
   const canDelete = can(RES_REGISTRIES, "delete");
+  // Promoting a server to org scope UPDATES its ToolRegistry — the RBAC admin gate.
+  const canPromote = can(RES_REGISTRIES, "update");
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   // The server currently queued for deletion (its ConfirmDialog is open).
   const [toDelete, setToDelete] = React.useState<McpServerSummary | null>(null);
+  // The server currently being shared org-wide (its org-credential dialog is open).
+  const [toOrg, setToOrg] = React.useState<McpServerSummary | null>(null);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
@@ -145,6 +152,14 @@ export function McpServersPage() {
                     {s.status === "pending" && (
                       <Badge variant="outline">Pending approval</Badge>
                     )}
+                    {s.scope && (
+                      <Badge
+                        variant={s.scope === "org" ? "warning" : "outline"}
+                        data-testid={`scope-${s.name}`}
+                      >
+                        {s.scope}
+                      </Badge>
+                    )}
                   </div>
                   <p className="truncate text-xs text-muted-foreground">{s.url}</p>
                   <p className="text-xs text-muted-foreground">{s.namespace}</p>
@@ -161,6 +176,17 @@ export function McpServersPage() {
                     <ExternalLink className="mr-1 h-3.5 w-3.5" />
                     Tools
                   </Button>
+                  {canPromote && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setToOrg(s)}
+                      data-testid={`org-cred-${s.name}`}
+                      aria-label={`Share ${s.name} with your org`}
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   {canDelete && (
                     <Button
                       variant="outline"
@@ -189,6 +215,124 @@ export function McpServersPage() {
           }}
         />
       )}
+
+      {toOrg && (
+        <SetOrgCredentialDialog
+          server={toOrg}
+          onClose={() => setToOrg(null)}
+          onDone={() => {
+            setToOrg(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// SetOrgCredentialDialog (m26.5, ADR 0029 §7) — promote a server to ORG scope and set
+// its shared credential (the fully-headless path: one admin-set credential every user's
+// runs inject, no per-user consent). The credential is a password-type input, wiped from
+// state before the round-trip, sent ONLY in the request body → a Secret server-side; it
+// is never displayed, logged, or persisted client-side.
+function SetOrgCredentialDialog({
+  server,
+  onClose,
+  onDone,
+}: {
+  server: McpServerSummary;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const [credential, setCredential] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
+
+  async function onSet() {
+    if (!credential.trim() || busy) return;
+    setBusy(true);
+    const cred = credential;
+    setCredential(""); // wipe before the round-trip — the secret never lingers in state
+    try {
+      await api.setOrgCredential({
+        server: server.name,
+        namespace: server.namespace,
+        credential: cred,
+      });
+      toast({
+        variant: "success",
+        title: "Org credential set",
+        description: `${server.name} is now shared org-wide.`,
+      });
+      onDone();
+    } catch (err) {
+      toast({
+        variant: "error",
+        title: "Couldn't set org credential",
+        description: err instanceof Error ? err.message : "failed",
+      });
+      setBusy(false);
+      onClose();
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Share ${server.name} with your org`}
+    >
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
+      >
+        <h2 className="text-lg font-semibold tracking-snug">
+          Share {server.name} with your org
+        </h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Promote this server to <span className="font-medium">org</span> scope and set one
+          shared credential. Every user&apos;s runs then use it — no per-user connect. The
+          credential is stored server-side only.
+        </p>
+        <div className="mt-4 space-y-1.5">
+          <Label htmlFor="org-cred">Shared credential (bearer token)</Label>
+          <Input
+            id="org-cred"
+            type="password"
+            autoComplete="off"
+            value={credential}
+            onChange={(e) => setCredential(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void onSet();
+              }
+            }}
+            placeholder="paste the org's token"
+            data-testid="org-cred-input"
+          />
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => void onSet()}
+            disabled={!credential.trim() || busy}
+            data-testid="org-cred-submit"
+          >
+            {busy ? "Setting…" : "Set org credential"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -187,6 +187,23 @@ func TestMCPServerReferencesListsDependentBindings(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: server}, &tr))
 }
 
+// TestMCPServerSummaryScope (m26.5): the server list projects the scope label so the UI
+// can show it + gate the org-credential action; an absent label grandfathers to org
+// (ADR 0029, visibility only).
+func TestMCPServerSummaryScope(t *testing.T) {
+	mk := func(scope string) *agentsv1alpha1.ToolRegistry {
+		labels := map[string]string{labelManagedBy: managedByMCP}
+		if scope != "" {
+			labels[labelMCPScope] = scope
+		}
+		return &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "prod", Labels: labels}}
+	}
+	assert.Equal(t, scopeOrg, mcpServerSummaryFromRegistry(mk(scopeOrg)).Scope)
+	assert.Equal(t, scopePersonal, mcpServerSummaryFromRegistry(mk(scopePersonal)).Scope)
+	assert.Equal(t, scopePublic, mcpServerSummaryFromRegistry(mk(scopePublic)).Scope)
+	assert.Equal(t, scopeOrg, mcpServerSummaryFromRegistry(mk("")).Scope, "absent label grandfathers to org")
+}
+
 // TestDeleteMCPServerUnknownIs404 (m26.3): deleting an unregistered server is a 404.
 func TestDeleteMCPServerUnknownIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()

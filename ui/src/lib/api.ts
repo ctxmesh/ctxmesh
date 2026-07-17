@@ -704,6 +704,16 @@ export interface McpServerSummary {
   status: string;
   secretName?: string;
   authType?: string;
+  // Visibility/credential scope (ADR 0029): "public" | "personal" | "org".
+  scope?: string;
+}
+
+// SetOrgCredentialResponse reports the outcome of promoting a server to org scope +
+// setting its shared credential — NO credential material on the wire.
+export interface SetOrgCredentialResponse {
+  status: string;
+  server: string;
+  namespace: string;
 }
 
 // McpServerReference is one object that depends on an MCP server — an MCPToolBinding
@@ -2010,6 +2020,28 @@ export const api = {
   // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
   listMcpServers: (signal?: AbortSignal) =>
     getJSON<McpServerListResponse>("/api/mcpservers", signal),
+
+  // setOrgCredential promotes an MCP server to ORG scope and sets its shared
+  // credential (m25.9/m26.5, ADR 0029 §7) — the fully-headless path: every user's runs
+  // inject this one admin-set credential, no per-user consent. The credential goes ONLY
+  // in the request body → a Secret server-side; it is never returned, logged, or stored
+  // client-side. A 403 = the caller can't promote the server (the RBAC admin gate).
+  setOrgCredential: async (
+    req: { server: string; namespace?: string; credential: string },
+  ): Promise<SetOrgCredentialResponse> => {
+    const res = await apiFetch("/api/mcp/org-credential", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    if (res.ok) {
+      return (await res.json()) as SetOrgCredentialResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `setOrgCredential failed (${res.status})`),
+      res.status,
+    );
+  },
 
   // mcpServerReferences returns the delete-impact for an MCP server (m26.3) — the
   // dependent MCPToolBindings that would go RegistryNotFound if the server is deleted.
