@@ -286,6 +286,59 @@ func TestCreateAgentHandlerAlreadyExistsIs409(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code)
 }
 
+// idemAgentYAML is a managed agent with one tool, so expand generates an AgentDeployment
+// PLUS an MCPToolBinding — the two-object create the idempotent-adopt path needs.
+const idemAgentYAML = `name: idem-agent
+runtime: managed
+systemPrompt: be helpful
+tools:
+  - echo_tool
+`
+
+func postAgent(t *testing.T, s *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: idemAgentYAML, Namespace: "prod"})
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+	return rec
+}
+
+// TestCreateAgentIdempotentAdoptsLeftoverBinding (m26.6): recreating an agent whose
+// binding was left orphaned (agent deleted, binding not cascaded — the pre-m26fix state)
+// must NOT 409-wedge on the leftover binding. The leftover — a generated binding of the
+// SAME agent — is idempotently skipped and the create succeeds.
+func TestCreateAgentIdempotentAdoptsLeftoverBinding(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	require.Equal(t, http.StatusCreated, postAgent(t, s).Code, "first create")
+	var bindings agentsv1alpha1.MCPToolBindingList
+	require.NoError(t, c.List(context.Background(), &bindings, client.InNamespace("prod")))
+	require.Len(t, bindings.Items, 1, "the managed agent generated one binding")
+
+	// Orphan the binding: delete the AgentDeployment, leave the binding behind.
+	require.NoError(t, c.Delete(context.Background(), &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "idem-agent", Namespace: "prod"},
+	}))
+
+	// Recreate: the leftover binding is adopted (skipped), not a 409.
+	require.Equal(t, http.StatusCreated, postAgent(t, s).Code,
+		"recreate must skip the leftover binding, not 409")
+}
+
+// TestCreateAgentExistingAgentStill409 (m26.6): the idempotent path is scoped to leftover
+// bindings — an AgentDeployment that already exists is a REAL conflict and still 409s (we
+// never silently overwrite a live agent).
+func TestCreateAgentExistingAgentStill409(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newConfigServer(t, c)
+
+	require.Equal(t, http.StatusCreated, postAgent(t, s).Code, "first create")
+	// Recreate WITHOUT deleting the agent → the AgentDeployment itself collides.
+	require.Equal(t, http.StatusConflict, postAgent(t, s).Code,
+		"an existing agent is a real conflict, not idempotently skipped")
+}
+
 // --- Source-spec annotation (ADR 0017, m15.2) -------------------------------
 
 // TestCreateAgentStampsSourceSpec proves a console create persists the exact
