@@ -95,6 +95,16 @@ bff:
   mcp:
     enabled: true
     requireApproval: false
+    # credentialNamespace is the LOCKED platform namespace that holds every MCP grant
+    # Secret (m25.1b, ADR 0029 §7). Empty (the default) keeps the legacy
+    # per-request-namespace grant path (ADR 0011) — no extra namespace/RBAC renders, so
+    # the default chart == kustomize (helm-verify no-drift). Set it (e.g.
+    # `agent-engine-credentials`) to render the dedicated namespace + a
+    # credential-component-only Role/RoleBinding (templates/mcp-credentials.yaml) and
+    # route grants there, so a tenant sharing the cluster cannot read another user's
+    # OAuth tokens. Pair it with a per-cluster MCP_GRANT_HMAC_KEY (bff-adapters Secret).
+    # Changing it later re-keys grants (dev re-consent). PRODUCTION SHOULD SET THIS.
+    credentialNamespace: ""
 
 # --- Console login: OIDC/SSO via a bundled Dex broker (m19.5, ADR 0020) --------
 # OFF by default: the OSS/dev default is token login (ADR 0012), so nothing here

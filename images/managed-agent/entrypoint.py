@@ -156,6 +156,9 @@ class Handler(BaseHTTPRequestHandler):
                     "output": result.output,
                     "steps": result.steps,
                     "tools_called": result.tools_called,
+                    # MCP servers the user must connect an account to (ADR 0029 §2 / m25.9) —
+                    # non-empty drives the console "Connect your account" CTA.
+                    "consent_required": result.consent_required,
                 },
             )
         except Exception as exc:  # noqa: BLE001

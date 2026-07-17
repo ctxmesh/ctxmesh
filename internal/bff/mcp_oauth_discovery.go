@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -157,22 +159,31 @@ func discoverMCPOAuthConfig(
 
 	// Obtain a client_id, PREFERRING CIMD (a stable hosted metadata URL — no
 	// per-server registration state) over DCR (an ephemeral registration), per
-	// ADR 0028. Neither → honest error telling the caller to supply one manually.
+	// ADR 0028. CIMD is only usable when our client-metadata URL is one the auth
+	// server can actually dereference: a PUBLIC https URL. From a localhost / http
+	// dev origin (a port-forwarded console) the auth server cannot fetch it and
+	// rejects the flow (invalid_client_metadata_url), so there we fall back to DCR
+	// — the server issues the client_id, no reachable hosted document required.
+	clientMetadataURL := deriveClientMetadataURL(redirectURI)
+	cimdUsable := asMeta.ClientIDMetadataDocumentSupported && clientMetadataURLPubliclyReachable(clientMetadataURL)
+
 	var clientID string
 	switch {
-	case asMeta.ClientIDMetadataDocumentSupported:
+	case cimdUsable:
 		// CIMD: our client_id IS the URL of the metadata doc we host; the auth
 		// server dereferences it. Derived from the redirect URI's origin (same BFF).
-		clientID = deriveClientMetadataURL(redirectURI)
-		if clientID == "" {
-			return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "could not derive the client metadata document URL from the redirect URI"}
-		}
+		clientID = clientMetadataURL
 	case asMeta.RegistrationEndpoint != "":
 		var derr error
 		clientID, derr = dynamicClientRegister(ctx, c, asMeta.RegistrationEndpoint, redirectURI, scope)
 		if derr != nil {
 			return mcpOAuthConfig{}, derr
 		}
+	case asMeta.ClientIDMetadataDocumentSupported:
+		// CIMD is advertised but our console isn't reachable at a public https URL
+		// (dev / localhost) and the server offers no DCR fallback. Say so plainly.
+		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "this server uses client-id metadata documents, which need the console reachable at a public https URL; " +
+			"it is currently local (" + originOf(redirectURI) + "). Expose the console over https, or register an OAuth client id manually."}
 	default:
 		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "this authorization server supports neither client-id metadata documents nor dynamic client registration — provide an OAuth client id manually"}
 	}
@@ -203,6 +214,30 @@ func originOf(rawURL string) string {
 	return scheme + "://" + host
 }
 
+// clientMetadataURLPubliclyReachable reports whether a CIMD client-id URL is one an
+// EXTERNAL authorization server can actually dereference: it must be https (the CIMD
+// requirement — an http client_id is rejected on scheme alone) and not a
+// loopback/localhost/private/link-local host (which only resolves inside the console's
+// own network — the common dev / kubectl-port-forward case, where the server returns
+// invalid_client_metadata_url). When false, the caller falls back to DCR.
+func clientMetadataURLPubliclyReachable(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme != schemeHTTPS {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || host == "localhost" ||
+		strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return true
+}
+
 // deriveProtectedResourceMetadataURL builds the RFC 9728 well-known URL from an
 // MCP server URL: <origin>/.well-known/oauth-protected-resource. "" when unusable.
 func deriveProtectedResourceMetadataURL(mcpServerURL string) string {
@@ -226,9 +261,9 @@ func deriveClientMetadataURL(redirectURI string) string {
 }
 
 // fetchProtectedResourceMetadata GETs the RFC 9728 metadata document.
-func fetchProtectedResourceMetadata(ctx context.Context, c *http.Client, url string) (oauthProtectedResourceMeta, error) {
+func fetchProtectedResourceMetadata(ctx context.Context, c *http.Client, metadataURL string) (oauthProtectedResourceMeta, error) {
 	var out oauthProtectedResourceMeta
-	if err := getOAuthJSON(ctx, c, url, &out); err != nil {
+	if err := getOAuthJSON(ctx, c, metadataURL, &out); err != nil {
 		return oauthProtectedResourceMeta{}, err
 	}
 	return out, nil
@@ -292,8 +327,8 @@ func dynamicClientRegister(ctx context.Context, c *http.Client, registrationEndp
 
 // getOAuthJSON GETs url and decodes a small JSON metadata body, with bounded read
 // + a client-safe error. Non-2xx / parse failures map to oauthDiscoveryError.
-func getOAuthJSON(ctx context.Context, c *http.Client, url string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func getOAuthJSON(ctx context.Context, c *http.Client, endpoint string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return &oauthDiscoveryError{msg: "failed to build the OAuth metadata request"}
 	}

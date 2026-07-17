@@ -58,6 +58,9 @@ const (
 // equal to a live object at the default (no false drift / no false rejection).
 const defaultExecutionModel = "serving"
 
+// modelRouteKey is the simplified agent.yaml key for the model route (model.route).
+const modelRouteKey = "route"
+
 // safeEnvVars is the set of env-var names the degraded edit path is allowed to
 // set. Any env var NOT in this set is hand-set outside the console and must be
 // left intact by a degraded patch.
@@ -125,26 +128,151 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, consoleManaged := live.Annotations[expand.AnnotationSourceSpec]
+	stored, consoleManaged := live.Annotations[expand.AnnotationSourceSpec]
+
+	// Derive the edited simplified spec. A full agentYAML wins; otherwise the field
+	// edits are merged onto the stored source spec (console-managed, so `tools` and
+	// anything unedited are preserved) or shaped into a minimal spec for the degraded
+	// safe-field patch (an outside-managed agent has no source spec to merge onto).
+	editedYAML := body.AgentYAML
+	if strings.TrimSpace(editedYAML) == "" {
+		if consoleManaged {
+			merged, mErr := mergeEditOntoSourceSpec(stored, body)
+			if mErr != nil {
+				writeError(w, mErr.status, mErr.msg)
+				return
+			}
+			editedYAML = merged
+		} else {
+			editedYAML = body.fieldEditYAML(name)
+		}
+	}
+
 	if consoleManaged {
-		s.editRoundTrip(w, r, caller, ns, name, body.AgentYAML)
+		s.editRoundTrip(w, r, caller, caller, ns, name, editedYAML)
 		return
 	}
-	s.editDegraded(w, r, caller, &live, body.AgentYAML)
+	s.editDegraded(w, r, caller, &live, editedYAML)
 }
 
-// UpdateAgentRequest is the PUT /api/agents/{ns}/{name} body: the edited
-// simplified agent.yaml (the SAME shape create/expand consume). The browser never
-// sends raw CRDs — only the simplified spec — so an edit cannot diverge from what
-// the user previewed, exactly like create.
+// mergeEditOntoSourceSpec overlays the request's structured field edits onto the
+// agent's STORED source spec (canonical JSON) and returns the merged spec (JSON, which
+// expand consumes as YAML). A map overlay — not a typed struct — preserves every field
+// the edit form doesn't model (crucially `tools`) so a field edit never silently drops
+// them. See applyFieldEdits for the field→key mapping.
+func mergeEditOntoSourceSpec(stored string, req UpdateAgentRequest) (string, *createError) {
+	if strings.TrimSpace(stored) == "" {
+		return "", &createError{status: http.StatusConflict, msg: "this agent has no stored source spec to merge an edit onto; re-create it from the console or send a full agentYAML"}
+	}
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(stored), &spec); err != nil {
+		return "", &createError{status: http.StatusInternalServerError, msg: "the stored source spec could not be read"}
+	}
+	applyFieldEdits(spec, req)
+	out, err := json.Marshal(spec)
+	if err != nil {
+		return "", &createError{status: http.StatusInternalServerError, msg: "re-encoding the edited spec failed"}
+	}
+	return string(out), nil
+}
+
+// fieldEditYAML shapes the request's field edits into a minimal simplified spec (JSON)
+// carrying the agent's name, for the degraded safe-field patch (which compares the
+// submitted spec to the live object and ignores unmodeled fields).
+func (req UpdateAgentRequest) fieldEditYAML(name string) string {
+	spec := map[string]any{"name": name}
+	applyFieldEdits(spec, req)
+	out, _ := json.Marshal(spec)
+	return string(out)
+}
+
+// applyFieldEdits overlays the provided field edits onto a simplified-spec map, using
+// the agent.yaml key names (model.route nesting, scaling.min/max). A nil pointer leaves
+// the stored value; an empty Role/ModelRoute/ExecutionModel clears it. Image "" is
+// treated as "leave as stored" — an agent always has an image, and the form pre-fills
+// the current one.
+func applyFieldEdits(spec map[string]any, req UpdateAgentRequest) {
+	if req.Image != nil && *req.Image != "" {
+		spec["image"] = *req.Image
+	}
+	if req.SystemPrompt != nil {
+		spec["systemPrompt"] = *req.SystemPrompt
+	}
+	if req.Role != nil {
+		if *req.Role == "" {
+			delete(spec, "role")
+		} else {
+			spec["role"] = *req.Role
+		}
+	}
+	if req.ExecutionModel != nil {
+		if *req.ExecutionModel == "" || *req.ExecutionModel == defaultExecutionModel {
+			delete(spec, "executionModel")
+		} else {
+			spec["executionModel"] = *req.ExecutionModel
+		}
+	}
+	if req.ModelRoute != nil {
+		if *req.ModelRoute == "" {
+			delete(spec, "model")
+		} else {
+			spec["model"] = map[string]any{modelRouteKey: *req.ModelRoute}
+		}
+	}
+	if req.Scaling != nil {
+		sc, _ := spec["scaling"].(map[string]any)
+		if sc == nil {
+			sc = map[string]any{}
+		}
+		if req.Scaling.Min != nil {
+			sc["min"] = *req.Scaling.Min
+		}
+		if req.Scaling.Max != nil {
+			sc["max"] = *req.Scaling.Max
+		}
+		spec["scaling"] = sc
+	}
+}
+
+// UpdateAgentRequest is the PUT /api/agents/{ns}/{name} body. It accepts EITHER a
+// full edited simplified agent.yaml (AgentYAML — the raw-editor path, the SAME shape
+// create/expand consume) OR a set of structured FIELD edits (the console edit form,
+// which only knows the safe fields — image/model/prompt/scaling/executionModel/role).
+// When only fields are sent they are MERGED onto the agent's stored source spec
+// (console-managed) so an edit never has to resend `tools`/`name` it didn't change —
+// the m25 "agentYAML is required" bug was the form sending fields while the endpoint
+// demanded a full YAML. The browser never sends raw CRDs either way.
 type UpdateAgentRequest struct {
-	// AgentYAML is the edited simplified agent.yaml.
+	// AgentYAML is a full edited simplified agent.yaml. When present it wins and the
+	// field edits below are ignored (the raw-editor / power path).
 	AgentYAML string `json:"agentYAML"`
+	// Field edits (all optional; a nil pointer means "leave as stored"). These mirror
+	// AgentSimplifiedSpec on the SPA. An empty string on Role/ModelRoute/ExecutionModel
+	// clears that field; Image "" is treated as "leave as stored" (an agent always has
+	// an image).
+	Image          *string          `json:"image,omitempty"`
+	ModelRoute     *string          `json:"modelRoute,omitempty"`
+	SystemPrompt   *string          `json:"systemPrompt,omitempty"`
+	Scaling        *editScalingSpec `json:"scaling,omitempty"`
+	ExecutionModel *string          `json:"executionModel,omitempty"`
+	Role           *string          `json:"role,omitempty"`
+}
+
+type editScalingSpec struct {
+	Min *int `json:"min"`
+	Max *int `json:"max"`
+}
+
+// hasFieldEdits reports whether any structured field edit was supplied.
+func (req UpdateAgentRequest) hasFieldEdits() bool {
+	return req.Image != nil || req.ModelRoute != nil || req.SystemPrompt != nil ||
+		req.Scaling != nil || req.ExecutionModel != nil || req.Role != nil
 }
 
 // readEditBody reads + JSON-decodes the PUT body under the shared size bound and
-// validates the agentYAML is present. It returns a client-safe error message for
-// a 400 on any failure so the handler never surfaces server internals.
+// validates that SOME edit was provided (a full agentYAML or at least one field). It
+// returns a client-safe error message for a 400 on any failure so the handler never
+// surfaces server internals.
 func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 	var req UpdateAgentRequest
 	body, err := readLimitedBody(r)
@@ -154,8 +282,8 @@ func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return req, errors.New("invalid JSON body")
 	}
-	if strings.TrimSpace(req.AgentYAML) == "" {
-		return req, errors.New("agentYAML is required")
+	if strings.TrimSpace(req.AgentYAML) == "" && !req.hasFieldEdits() {
+		return req, errors.New("no edit provided: send agentYAML or at least one editable field")
 	}
 	return req, nil
 }
@@ -171,8 +299,8 @@ func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 // Carry-forward (NOT this task): objects a prior version of expand emitted but the
 // new spec no longer emits (e.g. a removed tool's MCPToolBinding) are left in
 // place — orphan pruning is a later concern; this path never deletes anything.
-func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, ns, name, editedYAML string) {
-	if err := applyEditedSpec(r.Context(), applier, s.scheme, []byte(editedYAML), ns, name); err != nil {
+func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, reader AgentReader, ns, name, editedYAML string) {
+	if err := applyEditedSpec(r.Context(), applier, reader, s.scheme, []byte(editedYAML), ns, name); err != nil {
 		s.writeEditError(w, err)
 		return
 	}
@@ -184,7 +312,7 @@ func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier A
 // SSA-apply every manifest under the console field-manager. It refuses to apply a
 // spec whose AgentDeployment name does not match the object being edited so a PUT
 // can never rename/re-target the agent (the {name} in the URL is authoritative).
-func applyEditedSpec(ctx context.Context, applier AgentApplier, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
+func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentReader, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
 	if scheme == nil {
 		return &createError{status: 500, msg: "server misconfigured: no scheme"}
 	}
@@ -221,6 +349,11 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, scheme *runtime.
 			}
 		}
 	}
+
+	// Point regenerated MCPToolBindings at the registry their tool actually lives in
+	// (m25 S18) — same fix as create: expand's hardcoded default registry doesn't
+	// exist for BYO-MCP tools, so the binding would be RegistryNotFound forever.
+	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, reader, ns))
 
 	// Re-stamp the NEW source-spec on the AgentDeployment so the next edit
 	// round-trips from the just-submitted intent (ADR 0017 §1).

@@ -72,6 +72,9 @@ type MCPToolBindingReconciler struct {
 	Scheme *runtime.Scheme
 	// Pusher pushes manifests to discovery sidecars. Nil → a default Pusher.
 	Pusher *toolpush.Pusher
+	// OBOEgress configures OBO egress-sidecar injection (ADR 0030). Disabled (default)
+	// ⇒ no manifest rewrite — remote endpoints stay verbatim (no drift).
+	OBOEgress OBOEgressConfig
 }
 
 // pusher returns the configured pusher or a lazily-created default.
@@ -155,6 +158,11 @@ func (r *MCPToolBindingReconciler) syncAgent(
 
 	// ── Manifest render (valid bindings only) ────────────────────────────────
 	manifest, _ := toolmanifest.Render(valid)
+	if r.OBOEgress.Enabled {
+		// OBO egress (ADR 0030): redirect remote tool endpoints through the per-pod
+		// egress sidecar so the agent never holds the real MCP URL or the credential.
+		manifest, _ = toolmanifest.RewriteRemoteForEgress(manifest, valid, egressSidecarBaseURL)
+	}
 
 	// ── Durable backing: CreateOrUpdate <agent>-tools ConfigMap ──────────────
 	if err := r.syncToolsConfigMap(ctx, namespace, agentName, manifest); err != nil {

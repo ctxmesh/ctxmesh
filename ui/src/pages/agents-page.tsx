@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Boxes, Pencil, Trash2 } from "lucide-react";
+import { Boxes, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -291,12 +291,27 @@ export function AgentsPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
-        <p className="text-sm text-muted-foreground">
-          AgentDeployments listed via the BFF (client-go, RBAC-scoped). The
-          filter is windowed to the loaded page.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
+          <p className="text-sm text-muted-foreground">
+            AgentDeployments listed via the BFF (client-go, RBAC-scoped). The
+            filter is windowed to the loaded page.
+          </p>
+        </div>
+        {/* New agent is a page action, not a nav item (m25 S8): the primary
+            create entry point lives with the list it creates into. Hidden from a
+            viewer's chrome — gated on create agentdeployments. */}
+        {can(RES_AGENTS, "create") && (
+          <Button
+            onClick={() => navigate("/agents/new")}
+            data-testid="new-agent-button"
+            className="shrink-0"
+          >
+            <Sparkles className="mr-1.5 h-4 w-4" />
+            New agent
+          </Button>
+        )}
       </div>
 
       <DataTable<AgentSummary>
@@ -324,8 +339,8 @@ export function AgentsPage() {
           title: "No agents yet",
           description:
             namespace
-              ? `No AgentDeployments in ${namespace}. Create one in the config builder or Playground.`
-              : "No AgentDeployments visible. Create one in the config builder or Playground.",
+              ? `No AgentDeployments in ${namespace}. Use “New agent” above to create one.`
+              : "No AgentDeployments visible. Use “New agent” above to create one.",
         }}
       />
     </div>

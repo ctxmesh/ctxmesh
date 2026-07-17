@@ -284,8 +284,8 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
   async function reachReviewViaGenerate(overrides: Parameters<typeof recordingFetch>[0] = {}) {
     const calls = recordingFetch({
       tools: [
-        { name: "get_order", description: "Fetch order", source: "acme-mcp", approvalStatus: "approved", inputSchema: {} },
-        { name: "refund", description: "Refund", source: "acme-mcp", approvalStatus: "pending" },
+        { name: "get_order", description: "Fetch order", registry: "acme-mcp", source: "user-added", approvalStatus: "approved", inputSchema: {} },
+        { name: "refund", description: "Refund", registry: "acme-mcp", source: "user-added", approvalStatus: "pending" },
       ],
       generate: () => ({ ok: true, json: { agentYAML: "name: rev-agent\nruntime: managed\ntools:\n  - get_order\n", expanded: "kind: AgentDeployment\n", model: "m" } }),
       ...overrides,
@@ -304,16 +304,19 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
     // Both tools render; the pending one carries the honest badge; a schema tool
     // shows the schema badge.
     const list = await screen.findByTestId("tool-picker-list");
+    // The list shows the MCP server collapsed; its tools appear once expanded.
+    expect(list).toHaveTextContent("acme-mcp");
+    fireEvent.click(screen.getByTestId("tool-server-toggle-acme-mcp"));
     expect(list).toHaveTextContent("get_order");
     expect(list).toHaveTextContent("refund");
     expect(list).toHaveTextContent("pending approval");
     expect(list).toHaveTextContent("schema");
-    expect(list).toHaveTextContent("acme-mcp");
   });
 
   it("selected tools flow into the created agent.yaml on Create → POST /api/agents", async () => {
     const calls = await reachReviewViaGenerate();
-    // Add `refund` to the pre-selected `get_order`.
+    // Add `refund` to the pre-selected `get_order` — expand the server to reach it.
+    fireEvent.click(screen.getByTestId("tool-server-toggle-acme-mcp"));
     fireEvent.click(screen.getByLabelText("Bind refund"));
     fireEvent.click(screen.getByTestId("create-button"));
 

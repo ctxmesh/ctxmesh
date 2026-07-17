@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // maxInvokeResponseBytes bounds the agent response the Playground reads back. An
@@ -36,6 +38,34 @@ const maxInvokeResponseBytes = 4 << 20 // 4 MiB
 // invokePath is appended to an agent's base endpoint (status.url) to reach its
 // traced /invoke route (the launcher proxy opens the agent.invoke span there).
 const invokePath = "/invoke"
+
+// defaultCapabilityAudience is the credential-plane audience a run capability targets
+// when MCP_CAPABILITY_AUDIENCE is unset — the value the sidecar / central token service
+// verify against by default (runcap, ADR 0030 §2).
+const defaultCapabilityAudience = "ctxmesh-credential-plane"
+
+// runCapabilityTTL bounds a minted run capability's lifetime — comfortably longer than a
+// single run (which may cold-start + call an LLM) yet short enough that a leaked
+// capability expires quickly (ADR 0029 §5). Kept above the invoke round-trip timeout.
+const runCapabilityTTL = 5 * time.Minute
+
+// runCapabilityCtxKey carries the minted run capability from the /invoke handler to the
+// InvokeAdapter through the request context (like the handler-supplied traceparent seed),
+// so the pure-HTTP adapter attaches it without the handler reaching into the adapter.
+type runCapabilityCtxKey struct{}
+
+// contextWithRunCapability returns ctx carrying the run-capability token for the adapter
+// to attach as the runcap header on the outbound /invoke.
+func contextWithRunCapability(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, runCapabilityCtxKey{}, token)
+}
+
+// runCapabilityFromContext returns the run-capability token carried on ctx, or "" when
+// none was minted (minting disabled, or an unattended/dev path).
+func runCapabilityFromContext(ctx context.Context) string {
+	token, _ := ctx.Value(runCapabilityCtxKey{}).(string)
+	return token
+}
 
 // httpInvokeAdapter is the concrete InvokeAdapter (m12.7). It is a PURE HTTP
 // invoker: it holds no Kubernetes client and never resolves an agent's address —
@@ -115,6 +145,14 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	// (01). The launcher's prop.Extract continues THIS trace, so the span it
 	// exports carries traceID — the id we hand back for the trace-tree/deep-view.
 	req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", traceID, spanID))
+	// Run capability (runcap, ADR 0030 §2): when the caller-scoped handler minted one, it
+	// travels here on the context. Attach it as the runcap header — the launcher passes it
+	// through to the agent (like traceparent), the SDK relays it on each tool call, and the
+	// egress sidecar verifies it to resolve THIS user's OBO credential. Absent ⇒ the run
+	// carries no capability (unattended / dev / minting-disabled).
+	if capToken := runCapabilityFromContext(ctx); capToken != "" {
+		req.Header.Set(runcap.HeaderName, capToken)
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {

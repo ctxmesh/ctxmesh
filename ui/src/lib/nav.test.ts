@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NAV_SECTIONS } from "@/lib/nav";
+import { NAV_SECTIONS, NAV_ITEMS } from "@/lib/nav";
 
 // The intent-shaped IA (m20.8): the object-shaped CRD surfaces (Model routes,
 // Secret bindings, Registries) are demoted OUT of the primary nav into an "Advanced"
@@ -43,16 +43,22 @@ describe("nav consolidation (m23.7)", () => {
     NAV_SECTIONS.find((s) => s.heading === "Build")?.items.map((i) => i.label) ??
     [];
 
-  it("keeps 'New agent' as the one create entry in Build; Config builder is Advanced", () => {
-    expect(buildLabels()).toContain("New agent");
+  it("does NOT put 'New agent' in the nav (m25 S8 — it's a page action); Config builder is Advanced", () => {
+    // New agent moved to a top-right button ON the Agents page, so it is no longer a
+    // sidebar item (in Build or anywhere).
+    expect(buildLabels()).not.toContain("New agent");
+    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("New agent");
     expect(buildLabels()).not.toContain("Config builder");
     expect(sectionOf("Config builder")).toBe("Advanced");
   });
 
   it("groups the MCP/tool surfaces into a dedicated Tools section (not Build)", () => {
-    expect(sectionOf("Add MCP server")).toBe("Tools");
+    // m25 S10: the MCP entry is a list page "MCP Servers" (Add is in-page), not
+    // "Add MCP server".
+    expect(sectionOf("MCP Servers")).toBe("Tools");
     expect(sectionOf("MCP approvals")).toBe("Tools");
     expect(sectionOf("Tool catalog")).toBe("Tools");
-    expect(buildLabels()).not.toContain("Add MCP server");
+    expect(buildLabels()).not.toContain("MCP Servers");
+    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
   });
 });

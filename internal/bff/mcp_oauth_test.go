@@ -293,16 +293,11 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	// the PKCE check in the exchange is meaningful.
 	oauth.expectChallenge = q.Get("code_challenge")
 
-	// --- callback (leg 2): valid code + state → 201, tokens in Secret ---
+	// --- callback (leg 2): valid code + state → 303 back to the console catalog,
+	// tokens in Secret (the callback is browser-facing, so it redirects, not JSON) ---
 	crec := callback(t, s, oauth.validCode, pending.State)
-	require.Equal(t, http.StatusCreated, crec.Code, "body: %s", crec.Body.String())
-
-	var resp RegisterMCPServerResponse
-	require.NoError(t, json.Unmarshal(crec.Body.Bytes(), &resp))
-	assert.Equal(t, "my-oauth-mcp", resp.Server.Name)
-	assert.Equal(t, oauthAuthType, resp.Server.AuthType)
-	assert.Equal(t, "my-oauth-mcp", resp.Server.SecretName)
-	require.Len(t, resp.Tools, 2, "tools/list is probed with the fresh access token")
+	cq := assertCallbackRedirect(t, crec, "/tools/catalog")
+	assert.Equal(t, "my-oauth-mcp", cq.Get("mcp_connected"), "the catalog redirect names the connected server")
 
 	// The token endpoint received the PKCE verifier + the auth code (server-side).
 	assert.Equal(t, "authorization_code", oauth.gotGrant)
@@ -330,6 +325,7 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	// The ToolRegistry carries the non-secret auth-type annotation, NEVER a token.
 	var tr agentsv1alpha1.ToolRegistry
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "my-oauth-mcp", Namespace: "prod"}, &tr))
+	require.Len(t, tr.Spec.Tools, 2, "tools/list is probed with the fresh access token and cataloged")
 	assert.Equal(t, oauthAuthType, tr.Annotations[annMCPAuthType])
 	for _, v := range tr.Annotations {
 		assert.NotContains(t, v, theOAuthAccessToken)
@@ -358,6 +354,21 @@ func callback(t *testing.T, s *Server, code, state string) *httptest.ResponseRec
 	return rec
 }
 
+// assertCallbackRedirect asserts the browser-facing OAuth callback redirected (303
+// See Other) to the given console SPA path — the callback is reached by an
+// authorization-server browser redirect, so it must redirect, never return JSON. It
+// returns the Location query so a test can check mcp_connected / mcp_error.
+func assertCallbackRedirect(t *testing.T, rec *httptest.ResponseRecorder, wantPath string) url.Values {
+	t.Helper()
+	require.Equal(t, http.StatusSeeOther, rec.Code, "callback must redirect the browser; body: %s", rec.Body.String())
+	loc := rec.Header().Get("Location")
+	require.NotEmpty(t, loc, "a callback redirect must set Location")
+	u, err := url.Parse(loc)
+	require.NoError(t, err)
+	assert.Equal(t, wantPath, u.Path, "redirect path")
+	return u.Query()
+}
+
 // assertNoOAuthSecretsInBody fails if any secret token value appears in a body.
 func assertNoOAuthSecretsInBody(t *testing.T, body string) {
 	t.Helper()
@@ -378,7 +389,8 @@ func TestMCPOAuthCallbackUnknownStateIs4xxNoExchange(t *testing.T) {
 
 	// No register happened → no pending flow exists for this state.
 	crec := callback(t, s, oauth.validCode, "totally-unknown-state")
-	assert.Equal(t, http.StatusBadRequest, crec.Code)
+	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
+	assert.NotEmpty(t, q.Get("mcp_error"), "a bad state redirects back with an error")
 	assert.Empty(t, oauth.gotGrant, "a bad state must NOT trigger a token exchange")
 }
 
@@ -396,7 +408,7 @@ func TestMCPOAuthCallbackMismatchedStateIs4xx(t *testing.T) {
 
 	// Tamper: submit a state that is NOT the issued one.
 	crec := callback(t, s, oauth.validCode, pending.State+"-tampered")
-	assert.Equal(t, http.StatusBadRequest, crec.Code)
+	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.Empty(t, oauth.gotGrant, "a mismatched state must NOT trigger a token exchange")
 }
 
@@ -416,7 +428,7 @@ func TestMCPOAuthCallbackExpiredStateIs4xx(t *testing.T) {
 	// Advance past the TTL so the pending flow is expired at callback time.
 	s.oauthFlows.now = func() time.Time { return base.Add(pendingFlowTTL + time.Minute) }
 	crec := callback(t, s, oauth.validCode, pending.State)
-	assert.Equal(t, http.StatusBadRequest, crec.Code)
+	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 	assert.Empty(t, oauth.gotGrant, "an expired state must NOT trigger a token exchange")
 }
 
@@ -429,12 +441,12 @@ func TestMCPOAuthCallbackReplayIsRejected(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 
 	_, pending := registerOAuth(t, s, "replay-mcp", mcp.URL, authFor(oauth))
-	// First callback succeeds.
+	// First callback succeeds → redirect to the catalog.
 	first := callback(t, s, oauth.validCode, pending.State)
-	require.Equal(t, http.StatusCreated, first.Code, "body: %s", first.Body.String())
-	// Replay with the SAME state → the flow was consumed → 4xx.
+	assertCallbackRedirect(t, first, "/tools/catalog")
+	// Replay with the SAME state → the flow was consumed → error redirect (no re-exchange).
 	second := callback(t, s, oauth.validCode, pending.State)
-	assert.Equal(t, http.StatusBadRequest, second.Code, "a replayed state must be rejected")
+	assertCallbackRedirect(t, second, "/tools/add-mcp")
 }
 
 // TestMCPOAuthCallbackErrorRedirectIs4xx proves an authorization-server error
@@ -451,11 +463,12 @@ func TestMCPOAuthCallbackErrorRedirectIs4xx(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/mcp/oauth/callback?error=access_denied&state="+url.QueryEscape(pending.State), nil)
 	s.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	q := assertCallbackRedirect(t, rec, "/tools/add-mcp")
+	assert.Contains(t, q.Get("mcp_error"), "not granted", "a declined consent redirects back with a teaching error")
 
-	// The flow is consumed: a subsequent valid callback with the same state → 4xx.
+	// The flow is consumed: a subsequent valid callback with the same state → error redirect.
 	crec := callback(t, s, oauth.validCode, pending.State)
-	assert.Equal(t, http.StatusBadRequest, crec.Code)
+	assertCallbackRedirect(t, crec, "/tools/add-mcp")
 }
 
 // --- PKCE --------------------------------------------------------------------
@@ -479,9 +492,9 @@ func TestMCPOAuthWrongVerifierIsHonestError(t *testing.T) {
 	oauth.expectChallenge = s256("some-other-verifier-entirely")
 
 	crec := callback(t, s, oauth.validCode, pending.State)
-	assert.Equal(t, http.StatusBadRequest, crec.Code, "a rejected PKCE verifier is an honest 4xx, not a 500")
+	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
+	assert.Contains(t, q.Get("mcp_error"), "invalid_grant", "a rejected PKCE verifier surfaces the honest error, not a 500")
 	assert.False(t, createCalled, "a failed token exchange must create NO objects")
-	assert.Contains(t, crec.Body.String(), "invalid_grant")
 }
 
 // TestMCPOAuthBadCodeIsHonestError proves a bad/expired authorization code
@@ -500,7 +513,8 @@ func TestMCPOAuthBadCodeIsHonestError(t *testing.T) {
 	oauth.expectChallenge = "" // pass PKCE; fail on the code instead
 
 	crec := callback(t, s, "not-the-real-code", pending.State)
-	assert.Equal(t, http.StatusBadRequest, crec.Code)
+	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
+	assert.NotEmpty(t, q.Get("mcp_error"), "a bad code surfaces as an error redirect")
 	assert.False(t, createCalled)
 }
 
@@ -587,10 +601,10 @@ func TestMCPOAuthRefreshNoRefreshTokenSignals(t *testing.T) {
 
 // --- caller-scoping + kill-switch --------------------------------------------
 
-// TestMCPOAuthCallbackViewerForbiddenIs403 proves the callback's K8s writes run
-// caller-scoped: when the caller's token cannot create the objects, the callback
-// surfaces a 403 (not a swallowed success).
-func TestMCPOAuthCallbackViewerForbiddenIs403(t *testing.T) {
+// TestMCPOAuthCallbackViewerForbiddenSurfacesError proves the callback's K8s writes
+// run caller-scoped: when the caller's token cannot create the objects, the callback
+// redirects back with the denial as an error (not a swallowed success).
+func TestMCPOAuthCallbackViewerForbiddenSurfacesError(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	mcp := fakeMCPServerRequiringToken(t, theOAuthAccessToken)
 	c := fake.NewClientBuilder().
@@ -615,7 +629,8 @@ func TestMCPOAuthCallbackViewerForbiddenIs403(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pending))
 
 	crec := callback(t, s, oauth.validCode, pending.State)
-	assert.Equal(t, http.StatusForbidden, crec.Code, "a viewer's denied create must surface a 403")
+	q := assertCallbackRedirect(t, crec, "/tools/add-mcp")
+	assert.NotEmpty(t, q.Get("mcp_error"), "a viewer's denied create must surface as an error, not a swallowed success")
 }
 
 // TestMCPOAuthRegisterMissingFieldsAre400 proves an OAuth register missing a
@@ -659,9 +674,10 @@ func TestMCPOAuthCallbackKillSwitchOffIs404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestMCPOAuthMissingCodeOrStateIs400 proves a callback missing code or state is a
-// 400 (before any store lookup / exchange).
-func TestMCPOAuthMissingCodeOrStateIs400(t *testing.T) {
+// TestMCPOAuthMissingCodeOrStateRedirectsWithError proves a callback missing code or
+// state redirects the browser back to add-MCP with an error (before any store lookup /
+// exchange) rather than dumping a JSON 400 into the tab.
+func TestMCPOAuthMissingCodeOrStateRedirectsWithError(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
 	for _, tc := range []struct{ name, target string }{
@@ -671,7 +687,8 @@ func TestMCPOAuthMissingCodeOrStateIs400(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.target, nil))
-			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			q := assertCallbackRedirect(t, rec, "/tools/add-mcp")
+			assert.NotEmpty(t, q.Get("mcp_error"))
 		})
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // fakeInvokeAdapter is the test double for InvokeAdapter. It records the endpoint
@@ -48,13 +49,15 @@ type fakeInvokeAdapter struct {
 	err         error
 	gotEndpoint string
 	gotBody     []byte
+	gotCtx      context.Context
 	called      bool
 }
 
-func (f *fakeInvokeAdapter) Invoke(_ context.Context, endpoint string, body []byte) ([]byte, string, error) {
+func (f *fakeInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []byte) ([]byte, string, error) {
 	f.called = true
 	f.gotEndpoint = endpoint
 	f.gotBody = body
+	f.gotCtx = ctx
 	return f.resp, f.traceID, f.err
 }
 
@@ -111,6 +114,119 @@ func TestInvokeReturnsTraceID(t *testing.T) {
 	assert.True(t, inv.called)
 	assert.Equal(t, "http://echo.prod.svc.cluster.local", inv.gotEndpoint)
 	assert.JSONEq(t, `{"prompt":"hi"}`, string(inv.gotBody))
+}
+
+// TestInvokeSurfacesConsentRequired proves /invoke lifts the agent's structured
+// consent_required (m25.9) onto the response DTO so the console can render a CTA.
+func TestInvokeSurfacesConsentRequired(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{
+		traceID: "t",
+		resp:    []byte(`{"output":"connect your account","tools_called":[],"consent_required":["scalekit-mcp-server"]}`),
+	}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body InvokeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []string{"scalekit-mcp-server"}, body.ConsentRequired)
+
+	// A plain result carries no consent_required (no CTA).
+	assert.Nil(t, parseConsentRequired([]byte(`{"output":"done","tools_called":["x"]}`)))
+	assert.Nil(t, parseConsentRequired([]byte(`not json`)))
+}
+
+// TestInvokeMintsAndAttachesRunCapability proves the authenticated /invoke mints the
+// invoking user's run capability (runcap, ADR 0030 §2) and carries it on the adapter's
+// context: it verifies under the platform public key with the caller's hashed identity as
+// `sub` and the agent as the actor — never a value the agent supplied.
+func TestInvokeMintsAndAttachesRunCapability(t *testing.T) {
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(agent).
+		WithInterceptorFuncs(ssrInterceptor("alice@example.com", nil)).
+		Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{}`)}
+	s := NewServer(Options{
+		CallerClients:               newFakeFactory(c),
+		Scheme:                      testScheme(t),
+		Auth:                        AllowAll{},
+		Adapters:                    Adapters{Invoke: inv},
+		Version:                     "test",
+		MCPEnabled:                  true,
+		MCPCapabilityPrivateSeedB64: runcap.EncodePrivateSeed(priv),
+		MCPCapabilityAudience:       "test-plane",
+		Log:                         logr.Discard(),
+	})
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{"prompt":"hi"}`)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NotNil(t, inv.gotCtx)
+	token := runCapabilityFromContext(inv.gotCtx)
+	require.NotEmpty(t, token, "an authenticated /invoke with a signer must mint + attach a capability")
+
+	capb, err := runcap.NewVerifier(pub, "test-plane", nil).Verify(token)
+	require.NoError(t, err, "the minted capability must verify under the platform public key")
+	assert.Equal(t, userGrantHash("alice@example.com"), capb.User, "sub is the caller's HASHED identity")
+	assert.Equal(t, "prod/echo", capb.Agent, "the act claim is the invoked agent")
+	assert.NotEmpty(t, capb.RunID)
+}
+
+// TestInvokeWithoutSignerAttachesNoCapability proves the default (no platform capability
+// key) mints nothing — the run proceeds without a capability (unattended / org-public).
+func TestInvokeWithoutSignerAttachesNoCapability(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(agent).
+		WithInterceptorFuncs(ssrInterceptor("alice@example.com", nil)).
+		Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, runCapabilityFromContext(inv.gotCtx), "no signer ⇒ no capability minted")
+}
+
+// TestInvokeAdapterAttachesCapabilityHeader proves the pure-HTTP adapter attaches the
+// run-capability header (from the request context) on the outbound /invoke — the hop that
+// carries the capability from the BFF, through the launcher, to the agent.
+func TestInvokeAdapterAttachesCapabilityHeader(t *testing.T) {
+	var gotCap string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCap = r.Header.Get(runcap.HeaderName)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithRunCapability(context.Background(), "cap-token-xyz"), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "cap-token-xyz", gotCap, "the adapter attaches the capability from the context")
+
+	gotCap = ""
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, gotCap, "no capability on the context ⇒ no header")
 }
 
 // newDevInvokeServer builds the dev-mode substrate (ADR 0021): NO cluster
@@ -264,6 +380,28 @@ func TestInvokeNotReadyIs409(t *testing.T) {
 	s.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.False(t, inv.called)
+}
+
+// TestInvokeJobAgentIsAccurate409 proves a job agent (no serving endpoint by design)
+// gets an ACCURATE conflict — not the misleading "not ready (no endpoint assigned
+// yet)", which would imply waiting helps (m25 S4).
+func TestInvokeJobAgentIsAccurate409(t *testing.T) {
+	agent := readyAgent("batch", "jobs", "") // no status.url; distinct ns
+	agent.Spec.ExecutionModel = "job"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "unused"}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "batch", Namespace: "jobs"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "job agent", "a job agent gets an accurate message")
+	assert.NotContains(t, rec.Body.String(), "no endpoint assigned yet")
 	assert.False(t, inv.called)
 }
 

@@ -261,6 +261,11 @@ type TopologyNode struct {
 	// Detail is a short, kind-specific descriptor (image for an agent, tool
 	// mode for a tool, registryId for a registry). Optional; "" when absent.
 	Detail string `json:"detail"`
+	// Group is the id of the group this node was folded into in grouped mode (the
+	// registry or namespace group). It is the AUTHORITATIVE partition key: the SPA
+	// renders a node under exactly this group, so two registries sharing a namespace
+	// no longer both claim every agent in it. Empty in flat mode.
+	Group string `json:"group,omitempty"`
 }
 
 // TopologyEdge connects two nodes by their ids (registry→agent membership,

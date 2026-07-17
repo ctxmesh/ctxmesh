@@ -161,7 +161,7 @@ func injectModelRoute(agentYAML []byte, routeName string) ([]byte, error) {
 	if doc == nil {
 		doc = map[string]any{}
 	}
-	doc["model"] = map[string]any{"route": routeName}
+	doc["model"] = map[string]any{modelRouteKey: routeName}
 	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("re-serializing agent.yaml: %w", err)

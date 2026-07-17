@@ -170,8 +170,13 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		// rather than erroring.
 		limit = maxRunLimit
 	}
+	// Fetch a FULL page and keep only actual agent RUNS (traces the launcher stamped
+	// with an agent:<ns>/<name> tag), then return up to `limit`. The traces endpoint
+	// otherwise mixes in gateway/proxy/LLM-SDK traces ("Received Proxy Server Request",
+	// "ChatCompletion", "RunnableSequence", unnamed spans) that are NOT runs and were
+	// polluting the runs list (m25 S15). Over-fetching compensates for the filtering.
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(limit))
+	q.Set("limit", strconv.Itoa(maxRunLimit))
 	q.Set("orderBy", "timestamp.desc")
 
 	var body lfTracesResponse
@@ -179,18 +184,51 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		return nil, err
 	}
 
-	runs := make([]RunSummary, 0, len(body.Data))
+	runs := make([]RunSummary, 0, limit)
 	for _, t := range body.Data {
+		// A RUN is the `agent.invoke` boundary trace the launcher opens per invocation
+		// (cmd/launcher). Every other top-level trace — the proxy's per-request server
+		// span ("Received Proxy Server Request"), LLM-SDK spans ("ChatCompletion",
+		// "RunnableSequence"), unnamed spans — is NOT a run and was cluttering the list
+		// (m25 S15). The agent tag alone can't discriminate: the launcher stamps it on
+		// the proxy spans too, so we key on the boundary span NAME.
+		if t.Name != agentInvokeTraceName {
+			continue
+		}
 		runs = append(runs, RunSummary{
-			TraceID:   t.ID,
-			Name:      t.Name,
+			TraceID: t.ID,
+			// Name the run by its AGENT (from the identity tag) so the list reads as
+			// meaningful runs, not a wall of identical "agent.invoke". Falls back to the
+			// trace name when no agent tag is present.
+			Name:      runDisplayName(t),
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
 			LatencyMs: t.LatencyMs,
 		})
+		if len(runs) >= limit {
+			break
+		}
 	}
 	return runs, nil
+}
+
+// agentInvokeTraceName is the launcher's per-invocation boundary span name — the one
+// trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
+const agentInvokeTraceName = "agent.invoke"
+
+// runDisplayName names a run by its agent identity (from the agent:<ns>/<name> tag),
+// e.g. "prod/chatbot" or "chatbot", falling back to the trace name when untagged.
+func runDisplayName(t lfTrace) string {
+	for _, tag := range t.Tags {
+		if ns, name, ok := parseAgentTag(tag); ok {
+			if ns == "" {
+				return name
+			}
+			return ns + "/" + name
+		}
+	}
+	return t.Name
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
@@ -413,6 +451,11 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("page", strconv.Itoa(page))
 	q.Set("orderBy", "timestamp.desc")
+	// A RUN is the agent.invoke boundary trace; ask Langfuse to return ONLY those so
+	// the proxy's per-request spans / LLM-SDK traces / unnamed spans don't clutter the
+	// list AND pagination stays correct (m25 S15). We still re-check client-side below
+	// in case an upstream ignores the name filter.
+	q.Set("name", agentInvokeTraceName)
 
 	// Server-side filters.
 	var agentTag string
@@ -442,18 +485,26 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	q2 := strings.ToLower(strings.TrimSpace(f.Q))
 	runs := make([]RunSummary, 0, len(body.Data))
 	for _, t := range body.Data {
+		// Only the agent.invoke boundary trace is a RUN (defensive re-check of the
+		// server-side name filter, m25 S15).
+		if t.Name != agentInvokeTraceName {
+			continue
+		}
 		// Agent defensive tag re-check (same guarantee as RunsForAgent).
 		if agentTag != "" && !traceHasTag(t, agentTag) {
 			continue
 		}
-		// Q: client-side substring filter on name.
-		if q2 != "" && !strings.Contains(strings.ToLower(t.Name), q2) {
+		// Name the run by its agent so the list reads as meaningful runs, not a wall of
+		// identical "agent.invoke".
+		display := runDisplayName(t)
+		// Q: client-side substring filter on the (agent) name.
+		if q2 != "" && !strings.Contains(strings.ToLower(display), q2) {
 			continue
 		}
 		// NOTE: status filter is NOT applied here — see RunFilter doc.
 		runs = append(runs, RunSummary{
 			TraceID:   t.ID,
-			Name:      t.Name,
+			Name:      display,
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),

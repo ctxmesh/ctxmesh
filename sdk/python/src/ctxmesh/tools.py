@@ -28,8 +28,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ctxmesh import _http
+from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh.config import PlaneConfig
-from ctxmesh.errors import ConfigError, EndpointError
+from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
 
 #: MCP protocol version the SDK negotiates (the version the M4 fixture speaks).
 _MCP_PROTOCOL_VERSION = "2025-03-26"
@@ -194,7 +195,34 @@ def _mcp_headers(session_id: Optional[str]) -> Dict[str, str]:
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
+    # Relay the invoking user's run capability (ADR 0030 §3) on every tool-call egress so
+    # the egress sidecar can resolve THAT user's credential. Bound per-request in a
+    # ContextVar (managed.run_managed_loop); absent ⇒ an unattended run (org/public only).
+    capability = current_capability()
+    if capability:
+        headers[CAPABILITY_HEADER] = capability
     return headers
+
+
+def _raise_if_consent_required(exc: EndpointError) -> None:
+    """Re-raise *exc* as a ConsentRequiredError naming the server when it is the egress
+    sidecar's structured consent_required (a 403 whose JSON body carries
+    ``{"error":"consent_required","server":...}``); otherwise return so the caller re-raises
+    the original error. String-free detection — keys on the status + machine-readable code."""
+    if exc.status != 403 or not exc.body:
+        return
+    try:
+        parsed = json.loads(exc.body)
+    except (ValueError, TypeError):
+        return
+    if isinstance(parsed, dict) and parsed.get("error") == "consent_required":
+        server = str(parsed.get("server", ""))
+        raise ConsentRequiredError(
+            f"consent required: connect your account for MCP server {server!r}",
+            server=server,
+            status=exc.status,
+            body=exc.body,
+        )
 
 
 def _mcp_post(
@@ -205,14 +233,20 @@ def _mcp_post(
     expect_body: bool,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """POST one JSON-RPC message; return (parsed-result, session-id-header)."""
-    resp = _http.request(
-        "POST",
-        endpoint,
-        body=_http.json_body(payload),
-        headers=_mcp_headers(session_id),
-        timeout=_TOOL_CALL_TIMEOUT,
-        expect=(200, 202),
-    )
+    try:
+        resp = _http.request(
+            "POST",
+            endpoint,
+            body=_http.json_body(payload),
+            headers=_mcp_headers(session_id),
+            timeout=_TOOL_CALL_TIMEOUT,
+            expect=(200, 202),
+        )
+    except EndpointError as exc:
+        # The egress sidecar (ADR 0029 §2 / m25.9) may answer any forwarded request with a
+        # structured consent_required — turn it into a distinct, catchable outcome.
+        _raise_if_consent_required(exc)
+        raise
     new_session = resp.headers.get("mcp-session-id")
     if not expect_body:
         return None, new_session

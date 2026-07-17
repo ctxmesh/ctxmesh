@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -477,4 +478,48 @@ func TestExpandSeamNotWiredServes501(t *testing.T) {
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewBufferString("{}")))
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
+// TestBindingRegistryResolution pins the m25 S18 fix: a generated MCPToolBinding is
+// pointed at the registry its tool ACTUALLY lives in, so it isn't RegistryNotFound
+// against expand's hardcoded default. Ambiguity resolves first-wins (sorted); an
+// unknown tool keeps the default.
+func TestBindingRegistryResolution(t *testing.T) {
+	scalekit := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "scalekit-mcp-server", Namespace: "default"},
+		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
+			{Name: "create_organization", URL: "https://mcp.scalekit.com/"},
+			{Name: "list_environments", URL: "https://mcp.scalekit.com/"},
+		}},
+	}
+	acme := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "acme-mcp", Namespace: "default"},
+		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "search", URL: "https://acme/mcp"}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(scalekit, acme).Build()
+
+	idx := toolRegistryIndex(context.Background(), c, "default")
+	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
+	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
+	assert.Equal(t, "acme-mcp", idx["search"].registry)
+
+	// A binding expand generated with the wrong default + placeholder URL is rewritten
+	// to the real registry AND the registry's pinned URL (so the controller pin check
+	// passes, not RegistryMismatch).
+	good := &agentsv1alpha1.MCPToolBinding{
+		Spec: agentsv1alpha1.MCPToolBindingSpec{
+			ToolName: "create_organization", RegistryRef: "default-tools", Mode: "remote",
+			Server: agentsv1alpha1.ToolServer{URL: "http://create-organization.mcp.svc.cluster.local/mcp"},
+		},
+	}
+	unknown := &agentsv1alpha1.MCPToolBinding{
+		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "nope", RegistryRef: "default-tools"},
+	}
+	rewriteBindingRegistries([]decodedObject{
+		{obj: good, kind: mcpToolBindingKind},
+		{obj: unknown, kind: mcpToolBindingKind},
+	}, idx)
+	assert.Equal(t, "scalekit-mcp-server", good.Spec.RegistryRef, "resolved to the tool's real registry")
+	assert.Equal(t, "https://mcp.scalekit.com/", good.Spec.Server.URL, "server URL matches the registry pin")
+	assert.Equal(t, "default-tools", unknown.Spec.RegistryRef, "an unknown tool keeps the default")
 }

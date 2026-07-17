@@ -371,6 +371,15 @@ func TestTopologyExpandGroup(t *testing.T) {
 	// A non-expanded group stays collapsed.
 	assert.False(t, ids["agent/prod/scribe"], "non-expanded group stays collapsed")
 
+	// m25 S6: every emitted agent node is stamped with its OWN group id, so the SPA
+	// renders it under exactly team-a — not under every registry sharing its namespace
+	// (the shakedown bug where two registries in `default` both listed all agents).
+	for _, n := range graph.Nodes {
+		if n.Kind == nodeKindAgent {
+			assert.Equal(t, "registry/prod/team-a", n.Group, "agent node %s must carry its group id", n.ID)
+		}
+	}
+
 	// agent→tool edge is present for the expanded member.
 	edgeSet := map[string]bool{}
 	for _, e := range graph.Edges {

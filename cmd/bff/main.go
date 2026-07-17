@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -139,6 +141,35 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("BYO-MCP hardened: registered MCP tools are marked pending-approval (MCP_REQUIRE_APPROVAL=true)")
 	}
 
+	// Per-cluster HMAC key for the one-way user-identity hash on grant Secrets +
+	// the mcp-owner annotation (m25.1, ADR 0029 §7). A production cluster mounts a
+	// platform Secret here; absent, the BFF warns and degrades to unsalted SHA-256.
+	mcpGrantHMACKey := []byte(os.Getenv("MCP_GRANT_HMAC_KEY"))
+
+	// Locked platform namespace for MCP grant Secrets (m25.1b, ADR 0029 §7). When set,
+	// grant write/read/delete route through a PRIVILEGED, namespace-scoped client built
+	// from the BFF's own in-cluster config (its SA) — a bounded, deliberate exception to
+	// the confused-deputy stance above: it touches ONLY Secrets in this locked namespace
+	// (which tenants cannot read), keyed by the authenticated caller's own identity,
+	// never a user CRD. Absent, the BFF keeps the legacy per-request-namespace grant
+	// path (ADR 0011) and warns. RBAC for the namespace ships in the Helm chart.
+	mcpCredentialNamespace := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
+	var credentialClient client.Client
+	if mcpCredentialNamespace != "" {
+		credentialClient, err = client.New(cfg, client.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("build privileged credential client: %w", err)
+		}
+	}
+
+	// Per-cluster platform keypair for the run capability (runcap, ADR 0030 §2/§5): the
+	// base64-encoded Ed25519 private seed the BFF signs run capabilities with, plus the
+	// credential-plane audience they target (verifiers check it). A prod cluster mounts a
+	// platform Secret here; absent, capability minting is disabled and a tool call resolves
+	// as unattended (org/public only).
+	mcpCapabilitySeed := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PRIVATE_KEY"))
+	mcpCapabilityAudience := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE"))
+
 	// Console SSO advertisement (ADR 0020). OIDC_ENABLED=true + an issuer + a client
 	// id → GET /api/authconfig tells the SPA to run Auth-Code+PKCE against Dex; else
 	// the SPA uses token login (ADR 0012). The BFF holds NO OIDC secret (public client).
@@ -151,20 +182,25 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	}
 
 	srv := bff.NewServer(bff.Options{
-		CallerClients:            callerClients,
-		Scheme:                   scheme,
-		Auth:                     bff.BearerAuthenticator{},
-		Adapters:                 adapters,
-		Version:                  version,
-		StaticDir:                staticDir,
-		ProviderConnect:          providerConnect,
-		PlatformGenerationModels: platformGenModels,
-		MCPEnabled:               mcpEnabled,
-		MCPRequireApproval:       mcpRequireApproval,
-		OIDCEnabled:              oidcEnabled,
-		OIDCIssuer:               oidcIssuer,
-		OIDCClientID:             oidcClientID,
-		Log:                      ctrl.Log.WithName("bff.server"),
+		CallerClients:               callerClients,
+		Scheme:                      scheme,
+		Auth:                        bff.BearerAuthenticator{},
+		Adapters:                    adapters,
+		Version:                     version,
+		StaticDir:                   staticDir,
+		ProviderConnect:             providerConnect,
+		PlatformGenerationModels:    platformGenModels,
+		MCPEnabled:                  mcpEnabled,
+		MCPRequireApproval:          mcpRequireApproval,
+		MCPGrantHMACKey:             mcpGrantHMACKey,
+		MCPCredentialNamespace:      mcpCredentialNamespace,
+		CredentialClient:            credentialClient,
+		MCPCapabilityPrivateSeedB64: mcpCapabilitySeed,
+		MCPCapabilityAudience:       mcpCapabilityAudience,
+		OIDCEnabled:                 oidcEnabled,
+		OIDCIssuer:                  oidcIssuer,
+		OIDCClientID:                oidcClientID,
+		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 
 	httpSrv := &http.Server{

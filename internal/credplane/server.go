@@ -1,0 +1,121 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package credplane
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/go-logr/logr"
+
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
+)
+
+// maxRequestBytes bounds a delegation request body (a few short strings).
+const maxRequestBytes = 1 << 16
+
+// Server is the central token service's HTTP handler: it wraps a single credresolve
+// backend so its cache + singleflight + writeback are GLOBAL across every delegating
+// sidecar. Only platform sidecars reach it (mTLS + NetworkPolicy) — it trusts the
+// already-hashed userHash the caller presents (the sidecar derived it from a verified
+// capability; the central service is one hop removed from that verification).
+type Server struct {
+	resolver credresolve.CredentialResolver
+	log      logr.Logger
+}
+
+// NewServer builds a Server over the given (single, shared) resolver.
+func NewServer(resolver credresolve.CredentialResolver, log logr.Logger) *Server {
+	return &Server{resolver: resolver, log: log}
+}
+
+// Handler returns the HTTP mux for the internal API + health probes.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(pathResolve, s.handleResolve)
+	mux.HandleFunc(pathRevoke, s.handleRevoke)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	return mux
+}
+
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req resolveRequest
+	if !decode(w, r, &req) {
+		return
+	}
+
+	cred, err := s.resolver.Resolve(r.Context(), req.Namespace, req.Server, req.UserHash)
+	switch {
+	case err == nil:
+		writeJSON(w, resolveResponse{Kind: cred.Kind, Value: cred.Value})
+	case errors.Is(err, credresolve.ErrConsentRequired):
+		writeJSON(w, resolveResponse{Error: errCodeConsentRequired})
+	case errors.Is(err, credresolve.ErrNoCredential):
+		writeJSON(w, resolveResponse{Error: errCodeNoCredential})
+	default:
+		// Log the real cause centrally; return only a stable code (never internals/token).
+		s.log.Error(err, "credplane: resolve failed", "server", req.Server, "namespace", req.Namespace)
+		writeJSON(w, resolveResponse{Error: errCodeInternal})
+	}
+}
+
+func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req revokeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.resolver.Revoke(r.Context(), req.Namespace, req.Server, req.UserHash); err != nil {
+		s.log.Error(err, "credplane: revoke failed", "server", req.Server, "namespace", req.Namespace)
+		writeJSON(w, revokeResponse{Error: errCodeInternal})
+		return
+	}
+	writeJSON(w, revokeResponse{})
+}
+
+// decode reads a bounded JSON body into v, writing a 400 and returning false on failure.
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return false
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// writeJSON writes v as a 200 JSON response. The RPC always answers 200 — a SEMANTIC error
+// (consent_required / no_credential / internal) is carried in the body's error field, so the
+// client distinguishes "the RPC failed" (non-200 / transport) from "the answer is an error".
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(v)
+}

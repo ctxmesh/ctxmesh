@@ -18,11 +18,7 @@ package bff
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
 // Per-user on-behalf-of (OBO) MCP grants (m17.3, ADR 0016 §5) — the FILL-IN of the
@@ -48,26 +45,17 @@ import (
 // a label value must be a bounded, non-PII, DNS-1123-safe token, and the raw
 // username is none of those.
 
-// Grant-Secret label/annotation keys + Secret name prefix (ADR 0016 §5). The user
-// label value is a HASH of the username (userGrantHash); the server label is the
-// register-flow server name. Neither is secret — they are lookup keys only.
+// Grant-Secret label keys + Secret name prefix now live in internal/credresolve — the
+// SINGLE SOURCE of the grant wire format (ADR 0030), shared by the BFF consent WRITER
+// here and every credential READER (the sidecar / central token service). These aliases
+// keep the existing bff references working while credresolve owns the authoritative
+// values; a divergence is impossible because both sides resolve to the same constant.
 const (
-	// labelMCPGrantUser holds the HASHED invoking-user identity (userGrantHash). It
-	// is a lookup key, never PII: the raw username (which may be an email) is never
-	// placed here. Two grants for the same server differ ONLY by this label.
-	labelMCPGrantUser = "mcp.ctxmesh.ai/user"
-	// labelMCPGrantServer holds the register-flow server name the grant is for. With
-	// labelMCPGrantUser it uniquely selects one (user, server) grant Secret.
-	labelMCPGrantServer = "mcp.ctxmesh.ai/server"
-	// managedByMCPGrant marks a Secret as an OBO per-user grant (the value of
-	// labelManagedBy), distinguishing it from a shared register-flow Secret so a
-	// grant lookup + a grant revoke never touch a shared credential.
-	managedByMCPGrant = "agent-engine-mcp-grant"
-	// mcpGrantSecretPrefix prefixes the deterministic (user, server) grant Secret
-	// name so it is visibly a grant and never collides with the shared server Secret
-	// (named after the server). The name embeds the server + a short user-hash so a
-	// re-consent for the SAME (user, server) collides cleanly (idempotent upsert).
-	mcpGrantSecretPrefix = "mcp-grant"
+	labelMCPGrantUser     = credresolve.LabelGrantUser
+	labelMCPGrantServer   = credresolve.LabelGrantServer
+	labelMCPGrantSourceNS = credresolve.LabelGrantSourceNS
+	managedByMCPGrant     = credresolve.ManagedByGrant
+	mcpGrantSecretPrefix  = credresolve.SecretPrefix
 )
 
 // annMCPGrantServerURL persists the MCP server URL on the grant Secret (non-secret)
@@ -79,26 +67,41 @@ const annMCPGrantServerURL = annMCPURL
 // invoking user has NO grant for an OAuth server: the caller must prompt the user
 // to consent (the m17.2 flow), NOT fall back to a shared credential and NOT fail
 // silently. It is a sentinel the egress/loop layer maps to a consent prompt.
-var errConsentRequired = errors.New("mcp: per-user consent required for this OAuth server")
+var errConsentRequired = credresolve.ErrConsentRequired
 
 // isConsentRequired reports whether err is (or wraps) errConsentRequired — the
 // caller uses it to branch to a consent prompt rather than an error surface.
 func isConsentRequired(err error) bool { return errors.Is(err, errConsentRequired) }
 
+// grantHMACKey is the per-cluster HMAC key that salts the user-identity hash so it
+// cannot be confirmed offline (a rainbow-table of low-entropy usernames/emails) by
+// anyone who can read the grant Secret labels or the mcp-owner annotation (m25.1,
+// ADR 0029 §7 / advisor R5). Set once at BFF start-up from the MCP_GRANT_HMAC_KEY
+// env (a per-cluster platform Secret). When empty, userGrantHash falls back to the
+// legacy unsalted SHA-256 — a DOCUMENTED PRODUCTION PREREQUISITE (like etcd
+// encryption-at-rest, ADR 0016): a prod cluster MUST set the key. Immutable after
+// start-up; changing it re-keys all grants (⇒ re-consent).
+var grantHMACKey []byte
+
+// setGrantHMACKey wires the per-cluster HMAC key at BFF construction (from Options).
+func setGrantHMACKey(key []byte) { grantHMACKey = key }
+
 // userGrantHash derives a stable, non-PII, DNS-1123-safe LABEL VALUE from a raw
-// username. The raw username (e.g. "alice@example.com" or a
-// "system:serviceaccount:ns:sa" string) may be PII and is not label-safe, so we
-// hash it: SHA-256 → hex, truncated to 40 chars (well under the 63-char label
-// limit) and prefixed "u-" so it is a valid RFC-1123 label value.
+// username (e.g. "alice@example.com" or a "system:serviceaccount:ns:sa" string),
+// which may be PII and is not label-safe. With a per-cluster HMAC key it is
+// HMAC-SHA256; without one it degrades to unsalted SHA-256 (dev / not-yet-hardened
+// clusters). Either way the result is hex, truncated to 40 chars (well under the
+// 63-char label limit) and prefixed "u-" for a valid RFC-1123 label value.
 //
-// The hash is one-way: the grant Secret's owner is identified by matching the
-// same hash at resolve/revoke time, so the raw username is never needed to look a
-// grant up and never lands in cluster metadata. Two distinct usernames collide
-// only under a SHA-256 preimage collision (infeasible), so per-user isolation
-// holds: user A and user B hash to different label values and never share a grant.
+// It is deterministic (same user → same hash, so resolve/revoke re-hash to match)
+// and one-way (the raw username is never needed for lookup and never lands in cluster
+// metadata). Two distinct usernames collide only under a hash preimage collision
+// (infeasible), so per-user isolation holds: user A and B hash differently and never
+// share a grant. The key additionally blocks OFFLINE confirmation of a guessed
+// username against a leaked hash — the extra guarantee the mcp-owner annotation
+// (a wider audience) needs before m25.1b spreads the hash to it.
 func userGrantHash(username string) string {
-	sum := sha256.Sum256([]byte(username))
-	return "u-" + hex.EncodeToString(sum[:])[:40]
+	return credresolve.UserHash(grantHMACKey, username)
 }
 
 // grantSecretName is the deterministic name of the (user, server) grant Secret. It
@@ -109,23 +112,30 @@ func userGrantHash(username string) string {
 // label (the authoritative match key), so the short-slice collision risk only
 // affects the NAME, and the label is still checked on read.
 func grantSecretName(server, userHash string) string {
-	short := strings.TrimPrefix(userHash, "u-")
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	return fmt.Sprintf("%s-%s-%s", mcpGrantSecretPrefix, server, short)
+	return credresolve.SecretName(server, userHash)
 }
 
 // grantSecretLabels builds the lookup labels for a (user, server) grant Secret.
-// They carry ONLY the hashed user + the server name + the managed-by marker —
-// never any token material (the m17.2 discipline). These are what a resolve/revoke
-// matches on.
-func grantSecretLabels(server, userHash string) map[string]string {
-	return map[string]string{
-		labelManagedBy:      managedByMCPGrant,
-		labelMCPGrantUser:   userHash,
-		labelMCPGrantServer: server,
-	}
+// They carry ONLY the hashed user + the server name + the managed-by marker (+ the
+// source namespace when grants are consolidated into the locked credential namespace)
+// — never any token material (the m17.2 discipline). These are what a resolve/revoke
+// matches on. sourceNs is "" in legacy per-namespace mode.
+func grantSecretLabels(server, userHash, sourceNs string) map[string]string {
+	return credresolve.SecretLabels(server, userHash, sourceNs)
+}
+
+// grantSecretCoordinates resolves WHERE the (sourceNs, server, userHash) grant Secret
+// lives and what it is named — the single source of truth shared by the consent
+// write, the OBO read, the revoke delete, and the refresh path so all four agree.
+//
+//   - LOCKED mode (credNs != "", m25.1b): every tenant's grant lives in the one
+//     RBAC-isolated credential namespace, so the source namespace is folded into the
+//     NAME (via a short hash) to keep (ns, server, user) grants distinct there, and
+//     mirrored in the labelMCPGrantSourceNS label (the authoritative match on read).
+//   - LEGACY mode (credNs == ""): the grant stays in its source namespace under the
+//     original (server, user) name — pre-m25.1 clusters, dev, and envtest, unchanged.
+func grantSecretCoordinates(credNs, sourceNs, server, userHash string) (namespace, name string) {
+	return credresolve.SecretCoordinates(credNs, sourceNs, server, userHash)
 }
 
 // oboCredentialResolver is the M17.3 per-user (server, user) resolver. For an OAuth
@@ -141,6 +151,12 @@ func grantSecretLabels(server, userHash string) map[string]string {
 type oboCredentialResolver struct {
 	// reader reads + refreshes the grant Secret. Supplied by the egress hop.
 	reader client.Client
+	// credentialNamespace consolidates grant READS into the locked platform namespace
+	// (m25.1b) when set — it MUST mirror the write side's MCP_CREDENTIAL_NAMESPACE so a
+	// read lands on the object the consent write created. "" ⇒ legacy per-request-
+	// namespace reads. In locked mode the source namespace is also matched on the
+	// mcp.ctxmesh.ai/source-namespace label (many namespaces' grants coexist there).
+	credentialNamespace string
 	// shared is the M14 shared-credential resolver, used for non-OAuth servers so
 	// the shared mode is preserved (backward compatibility).
 	shared MCPCredentialResolver
@@ -153,15 +169,24 @@ type oboCredentialResolver struct {
 }
 
 // NewOBOCredentialResolver returns the M17.3 per-user resolver. reader reads the
-// grant Secret server-side; shared is the M14 fallback for non-OAuth servers;
-// refresh rotates a near-expiry grant; audit records use (may be nil).
+// grant Secret server-side; credentialNamespace is the locked platform namespace grant
+// reads consolidate into ("" ⇒ legacy per-request-namespace, must mirror the write
+// side); shared is the M14 fallback for non-OAuth servers; refresh rotates a near-
+// expiry grant; audit records use (may be nil).
 func NewOBOCredentialResolver(
 	reader client.Client,
+	credentialNamespace string,
 	shared MCPCredentialResolver,
 	refresh func(ctx context.Context, c client.Client, ns, secretName string) (string, error),
 	audit *grantAuditor,
 ) MCPCredentialResolver {
-	return &oboCredentialResolver{reader: reader, shared: shared, refresher: refresh, audit: audit}
+	return &oboCredentialResolver{
+		reader:              reader,
+		credentialNamespace: credentialNamespace,
+		shared:              shared,
+		refresher:           refresh,
+		audit:               audit,
+	}
 }
 
 // Resolve implements MCPCredentialResolver for the per-user case (ADR 0016 §5):
@@ -199,8 +224,10 @@ func (r *oboCredentialResolver) Resolve(ctx context.Context, ns, server, user st
 
 	// The user has a grant. Refresh (rotate if near expiry) server-side and attach
 	// the fresh access token. errNoRefreshToken from the refresher means the grant
-	// cannot be rotated and is at/near expiry → the user must re-consent.
-	access, rErr := r.refresh(ctx, ns, secret.Name)
+	// cannot be rotated and is at/near expiry → the user must re-consent. Refresh
+	// against the Secret's ACTUAL namespace (the credential namespace in locked mode)
+	// so the rotated-token writeback lands on the same object.
+	access, rErr := r.refresh(ctx, secret.Namespace, secret.Name)
 	if rErr != nil {
 		if errors.Is(rErr, errNoRefreshToken) {
 			return MCPCredential{}, errConsentRequired
@@ -233,8 +260,10 @@ func (r *oboCredentialResolver) refresh(ctx context.Context, ns, secretName stri
 // consent-required vs shared-fallback.
 func (r *oboCredentialResolver) findGrant(ctx context.Context, ns, server, userHash string) (*corev1.Secret, bool, error) {
 	var secret corev1.Secret
-	name := grantSecretName(server, userHash)
-	if err := r.reader.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &secret); err != nil {
+	// Read from wherever the write put it: the locked credential namespace with the
+	// source ns folded into the name (locked mode) or the request namespace (legacy).
+	readNS, name := grantSecretCoordinates(r.credentialNamespace, ns, server, userHash)
+	if err := r.reader.Get(ctx, client.ObjectKey{Name: name, Namespace: readNS}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, false, nil
 		}
@@ -244,6 +273,12 @@ func (r *oboCredentialResolver) findGrant(ctx context.Context, ns, server, userH
 	// name-only match without this check could, under a truncated-hash name
 	// collision, hand user A user B's grant — the isolation invariant forbids that.
 	if secret.Labels[labelMCPGrantUser] != userHash || secret.Labels[labelMCPGrantServer] != server {
+		return nil, false, nil
+	}
+	// In locked mode many namespaces' grants coexist in one namespace, so the source
+	// namespace is also an authoritative match key (the name's short ns-hash alone is
+	// not enough — a hash collision must never cross the namespace boundary).
+	if r.credentialNamespace != "" && secret.Labels[labelMCPGrantSourceNS] != ns {
 		return nil, false, nil
 	}
 	return &secret, true, nil
