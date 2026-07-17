@@ -167,7 +167,14 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		agentYAML = injected
 	}
 
-	created, err := createAgentFromYAML(r.Context(), caller, caller, s.scheme, agentYAML, ns)
+	// The creator's identity, for the bind-time owner guard (ADR 0029): a personal MCP
+	// server may be bound only by its owner. Non-fatal — an unresolved identity ("") just
+	// refuses any personal bind (fail-closed), never another user's.
+	callerOwner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
+	created, err := createAgentFromYAML(r.Context(), caller, caller, s.scheme, agentYAML, ns, callerOwner)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {
