@@ -195,6 +195,7 @@ func TestEgressConsentRequired(t *testing.T) {
 	rec := h.call(t, "/"+testServer, h.mint(t, "u-alice", testAgent))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "consent_required")
+	assert.Contains(t, rec.Body.String(), testServer, "the consent error names the server to connect")
 	assert.Equal(t, 0, h.up.hits, "no upstream call when the user must consent")
 }
 

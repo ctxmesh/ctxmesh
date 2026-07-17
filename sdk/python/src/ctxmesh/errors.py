@@ -45,3 +45,19 @@ class EndpointError(CtxmeshError):
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+class ConsentRequiredError(EndpointError):
+    """A tool call reached an MCP server the invoking user has not connected an account to.
+
+    The injecting egress sidecar (ADR 0029 §2) returned a structured ``consent_required``:
+    the user must connect their OWN account to ``server`` before the agent can call the tool
+    on their behalf. The managed loop turns this into a run OUTCOME (a "Connect your account"
+    signal the console renders as a CTA), not a crash — the model is told to report + stop.
+    """
+
+    def __init__(
+        self, message: str, *, server: str, status: int | None = None, body: str | None = None
+    ):
+        super().__init__(message, status=status, body=body)
+        self.server = server
