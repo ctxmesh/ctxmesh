@@ -1961,13 +1961,21 @@ export const api = {
   // token — the exchange happens server-side on the callback, which stores the
   // invoking user's grant. Used by the Playground's inline "Connect" affordance.
   beginMcpGrant: async (
-    req: { server: string; namespace?: string },
+    req: { server: string; namespace?: string; redirectUri?: string },
     signal?: AbortSignal,
   ): Promise<OAuthInitResponse> => {
+    // A server registered before config persistence (m26.1b) has no stored OAuth config;
+    // the BFF then re-discovers it, which needs the console's callback redirect — only the
+    // browser knows its origin. Supply it via the auth block; servers with stored config
+    // ignore it and connect from just { server, namespace }.
+    const body: Record<string, unknown> = { server: req.server, namespace: req.namespace };
+    if (req.redirectUri) {
+      body.auth = { type: "oauth", redirectUri: req.redirectUri };
+    }
     const res = await apiFetch("/api/mcp/oauth/grant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req),
+      body: JSON.stringify(body),
       signal,
     });
     if (res.status === 202) {

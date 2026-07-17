@@ -194,10 +194,17 @@ describe("PlaygroundPage", () => {
       expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeDefined();
     });
     const grantCall = calls.find((c) => c.url === "/api/mcp/oauth/grant")!;
-    const grantBody = JSON.parse(grantCall.body) as { server: string; namespace: string };
+    const grantBody = JSON.parse(grantCall.body) as {
+      server: string;
+      namespace: string;
+      auth?: { type?: string; redirectUri?: string };
+    };
     expect(grantBody.server).toBe("scalekit-mcp-server");
     expect(grantBody.namespace).toBe("prod");
-    expect(grantBody).not.toHaveProperty("auth");
+    // The SPA supplies its own callback redirect so the BFF can re-discover a legacy
+    // server's OAuth config (m26.1b); servers with stored config ignore it.
+    expect(grantBody.auth?.type).toBe("oauth");
+    expect(grantBody.auth?.redirectUri).toContain("/api/mcp/oauth/callback");
     expect(openSpy).toHaveBeenCalledWith(
       "https://as.example/authorize?x=1",
       "ctxmesh-oauth-connect",

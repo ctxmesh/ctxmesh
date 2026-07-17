@@ -140,6 +140,24 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg = overlayOAuthConfig(cfg, req.Auth)
+
+	// Legacy backfill (m26.1b): a server registered before config persistence has no
+	// endpoints/clientId to recover. Re-run discovery/DCR from the stored URL — register's
+	// own path — to complete the config, then persist the annotations so it is a ONE-TIME
+	// recovery (subsequent connects read them). The SPA supplies the redirectURI (only the
+	// browser knows its origin); discovery needs it. A discovery failure is a
+	// connect-validation outcome (ADR 0027) → 422, not a 500.
+	if oauthConfigIncomplete(cfg) {
+		discovered, dErr := discoverMCPOAuthConfig(r.Context(), nil, serverURL, "", cfg.RedirectURI)
+		if dErr != nil {
+			writeError(w, http.StatusUnprocessableEntity,
+				"could not recover this server's OAuth config automatically: "+dErr.Error())
+			return
+		}
+		cfg = fillEmptyOAuthConfig(cfg, discovered)
+		s.backfillMCPOAuthConfig(r.Context(), caller, ns, server, cfg) // best-effort
+	}
+
 	if vErr := cfg.validate(); vErr != nil {
 		writeError(w, vErr.status, vErr.msg)
 		return
@@ -414,6 +432,66 @@ func overlayOAuthConfig(base mcpOAuthConfig, auth *MCPAuthRequest) mcpOAuthConfi
 		base.RedirectURI = v
 	}
 	return base
+}
+
+// oauthConfigIncomplete reports whether the recovered config is missing an endpoint or the
+// client id — the case for a server registered before config persistence (m26.1b), which
+// then needs a discovery/DCR backfill before consent can begin.
+func oauthConfigIncomplete(c mcpOAuthConfig) bool {
+	return strings.TrimSpace(c.AuthorizationEndpoint) == "" ||
+		strings.TrimSpace(c.TokenEndpoint) == "" ||
+		strings.TrimSpace(c.ClientID) == ""
+}
+
+// fillEmptyOAuthConfig fills base's EMPTY fields from src, keeping base's non-empty values
+// (e.g. a caller-supplied redirectURI). Used to complete a legacy server's recovered config
+// with the discovered endpoints + client id.
+func fillEmptyOAuthConfig(base, src mcpOAuthConfig) mcpOAuthConfig {
+	if strings.TrimSpace(base.AuthorizationEndpoint) == "" {
+		base.AuthorizationEndpoint = src.AuthorizationEndpoint
+	}
+	if strings.TrimSpace(base.TokenEndpoint) == "" {
+		base.TokenEndpoint = src.TokenEndpoint
+	}
+	if strings.TrimSpace(base.ClientID) == "" {
+		base.ClientID = src.ClientID
+	}
+	if strings.TrimSpace(base.Scope) == "" {
+		base.Scope = src.Scope
+	}
+	if strings.TrimSpace(base.RedirectURI) == "" {
+		base.RedirectURI = src.RedirectURI
+	}
+	return base
+}
+
+// backfillMCPOAuthConfig persists the recovered OAuth client config as the annMCPOAuth*
+// annotations on the server's ToolRegistry (m26.1b), so a legacy server's inline connect
+// recovers from annotations next time instead of re-running discovery/DCR. Best-effort: a
+// failed read/write is logged, never fatal — the current consent still proceeds. Runs
+// caller-scoped (a viewer who cannot update the registry just skips the backfill).
+func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Client, ns, server string, cfg mcpOAuthConfig) {
+	var tr agentsv1alpha1.ToolRegistry
+	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: server}, &tr); err != nil {
+		s.log.Info("oauth-config backfill skipped: could not read ToolRegistry", "server", server)
+		return
+	}
+	if tr.Annotations == nil {
+		tr.Annotations = map[string]string{}
+	}
+	set := func(k, v string) {
+		if strings.TrimSpace(v) != "" {
+			tr.Annotations[k] = v
+		}
+	}
+	set(annMCPOAuthAuthEndpoint, cfg.AuthorizationEndpoint)
+	set(annMCPOAuthTokenEndpoint, cfg.TokenEndpoint)
+	set(annMCPOAuthClientID, cfg.ClientID)
+	set(annMCPOAuthScope, cfg.Scope)
+	set(annMCPOAuthRedirectURI, cfg.RedirectURI)
+	if err := caller.Update(ctx, &tr); err != nil {
+		s.log.Info("oauth-config backfill skipped: could not persist annotations (non-fatal)", "server", server)
+	}
 }
 
 // grantAudit returns the server's grant auditor (constructed on demand over the

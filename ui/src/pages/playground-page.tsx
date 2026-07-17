@@ -123,7 +123,12 @@ export function PlaygroundPage() {
     setConnecting(server);
     let authorizationURL: string;
     try {
-      const res = await api.beginMcpGrant({ server, namespace: namespace.trim() });
+      const res = await api.beginMcpGrant({
+        server,
+        namespace: namespace.trim(),
+        // The console's OAuth callback — needed for a legacy server the BFF must re-discover.
+        redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+      });
       authorizationURL = res.authorizationURL;
     } catch (err) {
       setConnecting(null);
