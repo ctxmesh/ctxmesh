@@ -153,9 +153,45 @@ func createAgentFromYAML(
 	stampSourceSpec(objs, sourceSpec)
 
 	created := make([]createdObject, 0, len(objs))
+	agentName := agentDeploymentName(objs)
+
+	// Lazily-loaded name→agentRef of the namespace's existing MCPToolBindings — fetched
+	// ONLY if a create 409s, so the common fresh-create path never pays for the List.
+	var existingBindingRefs map[string]string
+	bindingAgentRef := func(name string) (string, *createError) {
+		if existingBindingRefs == nil {
+			list, lErr := listMCPToolBindings(ctx, reader, client.InNamespace(ns))
+			if lErr != nil {
+				return "", &createError{status: 502, msg: fmt.Sprintf("failed to check existing bindings: %v", lErr)}
+			}
+			existingBindingRefs = make(map[string]string, len(list.Items))
+			for i := range list.Items {
+				existingBindingRefs[list.Items[i].Name] = list.Items[i].Spec.AgentRef
+			}
+		}
+		return existingBindingRefs[name], nil
+	}
+
 	for _, d := range objs {
 		d.obj.SetNamespace(ns)
 		if cErr := w.Create(ctx, d.obj); cErr != nil {
+			// Idempotent adopt (m26.6): a leftover generated MCPToolBinding from a prior
+			// create of THIS agent is SAFE to skip rather than 409-abort the whole create
+			// (the recreate-after-orphan wedge). Its EXISTING copy must target the same
+			// agent; anything else — the primary AgentDeployment, or a binding targeting a
+			// DIFFERENT agent — is a real conflict and still fails.
+			if apierrors.IsAlreadyExists(cErr) && agentName != "" {
+				if _, isBinding := d.obj.(*agentsv1alpha1.MCPToolBinding); isBinding {
+					ref, rErr := bindingAgentRef(d.obj.GetName())
+					if rErr != nil {
+						return created, rErr
+					}
+					if ref == agentName {
+						created = append(created, createdObject{Kind: d.kind, Name: d.obj.GetName(), Namespace: ns})
+						continue
+					}
+				}
+			}
 			return created, classifyCreateError(cErr, d.kind, d.obj.GetName())
 		}
 		created = append(created, createdObject{
@@ -165,6 +201,18 @@ func createAgentFromYAML(
 		})
 	}
 	return created, nil
+}
+
+// agentDeploymentName returns the name of the AgentDeployment among the decoded objects
+// (the agent being created), or "" when none is present. Used to recognize a leftover
+// MCPToolBinding of the SAME agent for idempotent create (m26.6).
+func agentDeploymentName(objs []decodedObject) string {
+	for _, d := range objs {
+		if ad, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
+			return ad.Name
+		}
+	}
+	return ""
 }
 
 // toolLoc is where a catalog tool actually lives: its ToolRegistry and the server
