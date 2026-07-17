@@ -45,7 +45,11 @@ func parseGrantConsentRequest(raw []byte) (MCPGrantConsentRequest, *createError)
 	if strings.TrimSpace(req.Server) == "" {
 		return req, &createError{status: http.StatusBadRequest, msg: "server is required (the registered MCP server to consent to)"}
 	}
-	if req.Auth == nil || !strings.EqualFold(strings.TrimSpace(req.Auth.Type), oauthAuthType) {
+	// Auth is OPTIONAL (ADR 0031): the server's OAuth client config is recovered from the
+	// registration, so the caller (e.g. the Playground) begins consent from just the
+	// server name. When an auth block IS supplied (a legacy server, or an override) and
+	// names a type, that type must be oauth.
+	if req.Auth != nil && strings.TrimSpace(req.Auth.Type) != "" && !strings.EqualFold(strings.TrimSpace(req.Auth.Type), oauthAuthType) {
 		return req, &createError{status: http.StatusBadRequest, msg: `auth.type must be "oauth" for per-user consent`}
 	}
 	return req, nil
@@ -87,18 +91,20 @@ func callerUsername(ctx context.Context, caller client.Client) (string, error) {
 // beginMCPGrantConsent serves POST /api/mcp/oauth/grant — a user initiating OAuth
 // consent for an ALREADY-REGISTERED OAuth server so their per-user grant is stored
 // (m17.3, ADR 0016 §5). It:
-//  1. resolves the caller's identity (SelfSubjectReview, caller-scoped) — the grant
+//  1. recovers the server's OAuth client config from the register-time annotations
+//     (ADR 0031) — so the caller begins consent from just {server, ns}; this also
+//     confirms the server is a registered OAuth server (a non-OAuth / absent /
+//     unreadable server → an honest 4xx);
+//  2. resolves the caller's identity (SelfSubjectReview, caller-scoped) — the grant
 //     is keyed to THIS user, never a client-supplied user field;
-//  2. confirms the named server is a registered OAuth server (caller-scoped read of
-//     its ToolRegistry) — a non-OAuth / absent / unreadable server → an honest 4xx;
-//  3. starts the m17.2 Auth-Code + PKCE flow with the supplied OAuth config, marked
+//  3. starts the m17.2 Auth-Code + PKCE flow with the recovered OAuth config, marked
 //     with the caller's HASHED identity so the shared callback stores a
 //     (user, server) grant Secret.
 //
 // It returns 202 + the authorization URL + state (the m17.2 pending shape) — NO
-// token, NO verifier. The request carries the SAME OAuth client config as register
-// (endpoints + public client id + redirect); no secret material is in the request
-// or the response.
+// token, NO verifier. The request carries only {server, ns} (an optional auth block
+// overlays the recovered config for legacy servers); no secret material is in the
+// request or the response.
 func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -122,15 +128,20 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	server := mcpServerName(req.Server)
 
-	cfg := mcpOAuthConfig{
-		AuthorizationEndpoint: strings.TrimSpace(req.Auth.AuthorizationEndpoint),
-		TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
-		ClientID:              strings.TrimSpace(req.Auth.ClientID),
-		Scope:                 strings.TrimSpace(req.Auth.Scope),
-		RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
-	}
-	if cErr := cfg.validate(); cErr != nil {
+	// Recover the server's OAuth client config from the registration (ADR 0031) — the
+	// caller (e.g. the Playground) need not, and cannot, supply it. This also confirms the
+	// server is a registered OAuth server (caller-scoped): a non-OAuth / absent /
+	// unreadable server → an honest 4xx. A caller MAY still pass an explicit auth block (a
+	// legacy server registered before config persistence, or an override its own origin's
+	// redirect); non-empty request fields overlay the recovered base.
+	cfg, serverURL, cErr := s.recoverRegisteredOAuth(r.Context(), caller, ns, server)
+	if cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
+		return
+	}
+	cfg = overlayOAuthConfig(cfg, req.Auth)
+	if vErr := cfg.validate(); vErr != nil {
+		writeError(w, vErr.status, vErr.msg)
 		return
 	}
 
@@ -143,15 +154,6 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Error(uErr, "resolve caller identity for MCP grant consent failed")
 		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity")
-		return
-	}
-
-	// Confirm the server is a registered OAuth server (caller-scoped). A non-OAuth /
-	// absent / unreadable server → an honest 4xx, so a grant is never started for a
-	// server that cannot use one. Recover its URL for the callback's grant metadata.
-	serverURL, cErr := s.confirmOAuthServer(r.Context(), caller, ns, server)
-	if cErr != nil {
-		writeError(w, cErr.status, cErr.msg)
 		return
 	}
 
@@ -357,27 +359,61 @@ func (s *Server) upsertGrantSecret(ctx context.Context, caller client.Client, se
 }
 
 // confirmOAuthServer confirms the named server is a registered OAuth server and
-// returns its URL, reading the register-managed ToolRegistry CALLER-SCOPED. A
-// non-OAuth server, an absent server, or one the caller cannot read → an honest
-// 4xx (never a silently-started consent for a server that cannot use one). The
-// OAuth client config (endpoints + client id) is supplied on the consent request
-// (validated in the handler) — the same shape as register — so this only gates
-// that per-user consent applies at all.
-func (s *Server) confirmOAuthServer(ctx context.Context, caller client.Client, ns, server string) (string, *createError) {
+// recovers its OAuth client config + URL from the register-time annotations (ADR
+// 0031), reading the register-managed ToolRegistry CALLER-SCOPED. A non-OAuth
+// server, an absent server, or one the caller cannot read → an honest 4xx (never a
+// silently-started consent for a server that cannot use one). The recovered config's
+// fields may be EMPTY for a legacy server registered before config persistence — the
+// caller then overlays an explicitly-supplied config (or fails validation), so a
+// one-click Playground connect works for new servers and legacy stays connectable.
+func (s *Server) recoverRegisteredOAuth(ctx context.Context, caller client.Client, ns, server string) (mcpOAuthConfig, string, *createError) {
 	var tr agentsv1alpha1.ToolRegistry
 	if err := caller.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", &createError{status: http.StatusNotFound, msg: "no such registered MCP server"}
+			return mcpOAuthConfig{}, "", &createError{status: http.StatusNotFound, msg: "no such registered MCP server"}
 		}
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
-			return "", &createError{status: status, msg: msg}
+			return mcpOAuthConfig{}, "", &createError{status: status, msg: msg}
 		}
-		return "", &createError{status: http.StatusInternalServerError, msg: "failed to read the MCP server"}
+		return mcpOAuthConfig{}, "", &createError{status: http.StatusInternalServerError, msg: "failed to read the MCP server"}
 	}
 	if tr.Annotations[annMCPAuthType] != oauthAuthType {
-		return "", &createError{status: http.StatusBadRequest, msg: "this MCP server is not an OAuth server; per-user consent does not apply"}
+		return mcpOAuthConfig{}, "", &createError{status: http.StatusBadRequest, msg: "this MCP server is not an OAuth server; per-user consent does not apply"}
 	}
-	return tr.Annotations[annMCPURL], nil
+	cfg := mcpOAuthConfig{
+		AuthorizationEndpoint: tr.Annotations[annMCPOAuthAuthEndpoint],
+		TokenEndpoint:         tr.Annotations[annMCPOAuthTokenEndpoint],
+		ClientID:              tr.Annotations[annMCPOAuthClientID],
+		Scope:                 tr.Annotations[annMCPOAuthScope],
+		RedirectURI:           tr.Annotations[annMCPOAuthRedirectURI],
+	}
+	return cfg, tr.Annotations[annMCPURL], nil
+}
+
+// overlayOAuthConfig overlays any non-empty fields of an explicitly-supplied auth block
+// over the recovered base. It lets a legacy server (no persisted config) still be
+// connected by supplying the config, and lets a caller override a single field (e.g. its
+// own origin's redirectUri). A nil auth block is a no-op.
+func overlayOAuthConfig(base mcpOAuthConfig, auth *MCPAuthRequest) mcpOAuthConfig {
+	if auth == nil {
+		return base
+	}
+	if v := strings.TrimSpace(auth.AuthorizationEndpoint); v != "" {
+		base.AuthorizationEndpoint = v
+	}
+	if v := strings.TrimSpace(auth.TokenEndpoint); v != "" {
+		base.TokenEndpoint = v
+	}
+	if v := strings.TrimSpace(auth.ClientID); v != "" {
+		base.ClientID = v
+	}
+	if v := strings.TrimSpace(auth.Scope); v != "" {
+		base.Scope = v
+	}
+	if v := strings.TrimSpace(auth.RedirectURI); v != "" {
+		base.RedirectURI = v
+	}
+	return base
 }
 
 // grantAudit returns the server's grant auditor (constructed on demand over the

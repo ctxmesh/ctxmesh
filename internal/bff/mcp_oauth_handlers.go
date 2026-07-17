@@ -283,6 +283,9 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		status:          flow.status,
 		authType:        oauthAuthType,
 		oauthSecretData: oauthSecretData(flow.oauth, toks),
+		// Persist the OAuth client config (non-secret) so a per-user grant can later be
+		// begun from just {server, ns} (ADR 0031). Token material stays in oauthSecretData.
+		oauthConfig: flow.oauth,
 		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
 		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
 		scope: scopePersonal,

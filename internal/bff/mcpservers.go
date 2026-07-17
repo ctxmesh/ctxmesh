@@ -86,6 +86,16 @@ const (
 	// annMCPSecret persists the Secret NAME (a reference, never the key) when the
 	// server was registered with a key.
 	annMCPSecret = "agents.ctxmesh.ai/mcp-secret"
+	// annMCPOAuth* persist the discovered OAuth CLIENT config on the ToolRegistry so a
+	// per-user grant can be BEGUN from just {server, ns} — the authorization endpoint is
+	// otherwise discovered at register (ADR 0028) and thrown away (ADR 0031). All are
+	// NON-SECRET: the public authorization/token endpoints, the public (PKCE) client id,
+	// the requested scope, and the registered redirect URI. NO token material ever.
+	annMCPOAuthAuthEndpoint  = "agents.ctxmesh.ai/mcp-oauth-authorization-endpoint"
+	annMCPOAuthTokenEndpoint = "agents.ctxmesh.ai/mcp-oauth-token-endpoint"
+	annMCPOAuthClientID      = "agents.ctxmesh.ai/mcp-oauth-client-id"
+	annMCPOAuthScope         = "agents.ctxmesh.ai/mcp-oauth-scope"
+	annMCPOAuthRedirectURI   = "agents.ctxmesh.ai/mcp-oauth-redirect-uri"
 )
 
 // networkPolicyMCPSuffix names the per-server egress NetworkPolicy derived from
@@ -272,6 +282,11 @@ type mcpCreateSpec struct {
 	// Empty scope stamps nothing (the object is then grandfathered as org on read).
 	scope string
 	owner string
+	// oauthConfig, when authType == oauthAuthType, is the discovered OAuth CLIENT config
+	// (endpoints + public clientId + scope + redirect). It is persisted as NON-SECRET
+	// annotations so a per-user grant can later be begun from {server, ns} (ADR 0031).
+	// No token material — those live only in oauthSecretData.
+	oauthConfig mcpOAuthConfig
 }
 
 // createMCPObjects creates, with the caller's client and in dependency order:
@@ -313,6 +328,22 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 	}
 	if hasSecret {
 		annotations[annMCPSecret] = spec.name
+	}
+	// Persist the OAuth client config (NON-SECRET) so a per-user grant can later be begun
+	// from just {server, ns} (ADR 0031) — the authorization endpoint is otherwise lost
+	// after register. Stamped only for OAuth servers; token material never lands here.
+	if spec.authType == oauthAuthType {
+		for k, v := range map[string]string{
+			annMCPOAuthAuthEndpoint:  spec.oauthConfig.AuthorizationEndpoint,
+			annMCPOAuthTokenEndpoint: spec.oauthConfig.TokenEndpoint,
+			annMCPOAuthClientID:      spec.oauthConfig.ClientID,
+			annMCPOAuthScope:         spec.oauthConfig.Scope,
+			annMCPOAuthRedirectURI:   spec.oauthConfig.RedirectURI,
+		} {
+			if tv := strings.TrimSpace(v); tv != "" {
+				annotations[k] = tv
+			}
+		}
 	}
 
 	// Build the ToolRegistry entries, storing each tool's inputSchema verbatim so

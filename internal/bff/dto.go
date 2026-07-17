@@ -816,7 +816,9 @@ type MCPGrantConsentRequest struct {
 	// Namespace scopes the server + the grant Secret; empty → the default namespace.
 	Namespace string `json:"namespace"`
 	// Auth is the OAuth 2.1 client config for the consent flow (endpoints + public
-	// client id + redirect), the same shape register uses. Required, and its Type
+	// client id + redirect), the same shape register uses. OPTIONAL (ADR 0031): the
+	// config is recovered from the registration, so a caller begins from just {server,
+	// ns}. When supplied (a legacy server, or a single-field override) its Type, if set,
 	// must be "oauth". Carries no secret material.
 	Auth *MCPAuthRequest `json:"auth"`
 }
