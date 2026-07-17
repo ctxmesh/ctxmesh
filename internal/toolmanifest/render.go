@@ -72,6 +72,14 @@ type Binding struct {
 	// schema (curated/legacy entries) — the manifest then omits inputSchema and
 	// the SDK falls back to a permissive schema (m14.6b).
 	InputSchema json.RawMessage
+	// ServerName is the MCP server (ToolRegistry) this tool belongs to — the
+	// credential-resolution key for OBO egress (ADR 0030). When OBO egress is on,
+	// the rewrite keys the sidecar route + the grant lookup on it. Empty when OBO
+	// egress is not in play (the manifest keeps the verbatim remote URL).
+	ServerName string
+	// OAuth records whether ServerName authenticates via OAuth, so the egress
+	// sidecar returns consent-required (not "open, no credential") on a missing grant.
+	OAuth bool
 }
 
 // SidecarTool describes an assigned sidecar-mode tool container: which image to
