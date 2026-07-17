@@ -148,6 +148,60 @@ func TestResolveOpenServerNoGrant(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoCredential)
 }
 
+func TestResolveOrgCredentialWhenNoPersonalGrant(t *testing.T) {
+	ctx := context.Background()
+	orgCalls := 0
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build() // no personal grant
+	b := NewK8sBackend(K8sBackendConfig{
+		Client:          cl,
+		Now:             func() time.Time { return fixedNow },
+		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
+		OrgCredential: func(context.Context, string, string) (Credential, error) {
+			orgCalls++
+			return Credential{Kind: KindBearer, Value: "ORG-SHARED"}, nil
+		},
+	})
+	got, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, "bob@example.com"))
+	require.NoError(t, err)
+	assert.Equal(t, "ORG-SHARED", got.Value, "an org-scoped server resolves the shared org credential")
+	assert.Equal(t, 1, orgCalls)
+}
+
+func TestResolvePersonalBeforeOrg(t *testing.T) {
+	ctx := context.Background()
+	orgCalls := 0
+	grant := grantSecret(oauthData("ALICE-AT", "RT", fixedNow.Add(time.Hour)))
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(grant).Build()
+	b := NewK8sBackend(K8sBackendConfig{
+		Client:          cl,
+		Now:             func() time.Time { return fixedNow },
+		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
+		OrgCredential: func(context.Context, string, string) (Credential, error) {
+			orgCalls++
+			return Credential{Value: "ORG"}, nil
+		},
+	})
+	got, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, testUser))
+	require.NoError(t, err)
+	assert.Equal(t, "ALICE-AT", got.Value, "a personal grant overrides the org credential")
+	assert.Equal(t, 0, orgCalls, "the org credential is not consulted when a personal grant exists")
+}
+
+func TestResolveOrgNoCredentialFallsThroughToConsent(t *testing.T) {
+	ctx := context.Background()
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	b := NewK8sBackend(K8sBackendConfig{
+		Client:          cl,
+		Now:             func() time.Time { return fixedNow },
+		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
+		OrgCredential: func(context.Context, string, string) (Credential, error) {
+			return Credential{}, ErrNoCredential // not org-scoped / no org credential
+		},
+	})
+	_, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, "bob@example.com"))
+	assert.ErrorIs(t, err, ErrConsentRequired, "no org credential + OAuth server → consent")
+}
+
 func TestResolveStillValidSkipsRefresh(t *testing.T) {
 	ctx := context.Background()
 	ex := &fakeExchanger{}

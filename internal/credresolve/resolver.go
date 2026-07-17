@@ -88,6 +88,8 @@ type CredentialClass string
 const (
 	// ClassPersonalGrant — the invoking user's own OBO grant token.
 	ClassPersonalGrant CredentialClass = "personal-grant"
+	// ClassOrgCredential — the admin-set shared org credential (no per-user consent).
+	ClassOrgCredential CredentialClass = "org-credential"
 	// ClassNone — an open server; no credential attached.
 	ClassNone CredentialClass = "none"
 )
