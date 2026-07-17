@@ -69,6 +69,12 @@ type K8sBackendConfig struct {
 	// supplies the lookup. A nil seam, or a lookup error, is treated conservatively as
 	// "not OAuth" so a transient failure never masquerades as a consent prompt.
 	AuthTypeIsOAuth func(ctx context.Context, ns, server string) (bool, error)
+	// OrgCredential resolves the ADMIN-SET SHARED org credential for a server (ADR 0029 §2):
+	// consulted when the invoking user has NO personal grant. It returns the shared bearer
+	// when the server is org-scoped and an org credential is set, else ErrNoCredential (so
+	// resolution falls through to personal-consent / public). nil ⇒ never resolve org.
+	// Personal-before-org holds: this is only reached when no personal grant was found.
+	OrgCredential func(ctx context.Context, ns, server string) (Credential, error)
 	// Audit records credential-plane actions (never a token). Nil ⇒ no-op.
 	Audit func(AuditEvent)
 }
@@ -101,8 +107,21 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, server, userHash string) (
 		return Credential{}, err
 	}
 	if !found {
-		// No grant for this (user, server). An OAuth server needs this user's consent; an
-		// open server needs no credential.
+		// No personal grant. Try the admin-set shared ORG credential (ADR 0029 §2) —
+		// personal-before-org holds because we only reach here when the invoker has none.
+		if b.cfg.OrgCredential != nil {
+			cred, oErr := b.cfg.OrgCredential(ctx, ns, server)
+			switch {
+			case oErr == nil:
+				b.audit(ActionUse, server, userHash, ns, ClassOrgCredential)
+				return cred, nil
+			case errors.Is(oErr, ErrNoCredential):
+				// Not org-scoped / no org credential set — fall through to consent/open.
+			default:
+				return Credential{}, oErr
+			}
+		}
+		// An OAuth (personal) server needs this user's consent; an open server needs none.
 		if b.authTypeIsOAuth(ctx, ns, server) {
 			return Credential{}, ErrConsentRequired
 		}
