@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/egress"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
@@ -52,6 +53,7 @@ const (
 	defaultListenAddr   = "127.0.0.1:8081"
 	readHeaderTimeout   = 10 * time.Second
 	shutdownGracePeriod = 10 * time.Second
+	delegationTimeout   = 20 * time.Second
 )
 
 func main() {
@@ -106,39 +108,14 @@ func run(log logr.Logger) error {
 		listenAddr = defaultListenAddr
 	}
 
-	// In-cluster client to read grant Secrets (the sidecar SA is RBAC-scoped to Secret get
-	// in the credential namespace — Helm, m25.8).
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("build scheme: %w", err)
-	}
-	restCfg, err := ctrl.GetConfig()
+	resolver, err := buildResolver(log, routes, credentialNS)
 	if err != nil {
-		return fmt.Errorf("in-cluster config: %w", err)
+		return err
 	}
-	k8sClient, err := client.New(restCfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("build client: %w", err)
-	}
-
-	backend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
-		Client:              k8sClient,
-		CredentialNamespace: credentialNS,
-		Exchanger:           &credresolve.HTTPTokenExchanger{},
-		AuthTypeIsOAuth: func(_ context.Context, _, server string) (bool, error) {
-			route, ok := routes[server]
-			return ok && route.OAuth, nil
-		},
-		Audit: func(e credresolve.AuditEvent) {
-			// Credential-class provenance (never a token) — ADR 0029 §7 R8.
-			log.Info("egress grant use",
-				"action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
-		},
-	})
 
 	proxy := egress.NewProxy(egress.ProxyConfig{
 		Verifier:      runcap.NewVerifier(pub, audience, nil),
-		Resolver:      backend,
+		Resolver:      resolver,
 		Namespace:     podNS,
 		ExpectedAgent: expectedAgent,
 		Routes:        routes,
@@ -172,4 +149,84 @@ func run(log logr.Logger) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// buildResolver returns the sidecar's credential resolver: a DELEGATING client to the
+// central token service when TOKEN_SERVICE_URL is set (the scaling split — the global
+// singleflight + refresh live there, ADR 0030 §1), else an EMBEDDED credresolve backend
+// that reads grants directly (the first working cut). Both satisfy the same interface, so
+// the proxy is unchanged either way.
+func buildResolver(
+	log logr.Logger, routes egress.RouteTable, credentialNS string,
+) (credresolve.CredentialResolver, error) {
+	if tokenServiceURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tokenServiceURL != "" {
+		httpClient, err := delegatingHTTPClient(log)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("egress-sidecar delegating resolution to the central token service", "url", tokenServiceURL)
+		return credplane.NewClient(tokenServiceURL, httpClient), nil
+	}
+
+	// Embedded: read grants directly (the sidecar SA is RBAC-scoped to Secret get in the
+	// credential namespace — Helm, m25.8).
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("build scheme: %w", err)
+	}
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	k8sClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("build client: %w", err)
+	}
+	log.Info("egress-sidecar using an embedded credential backend (set TOKEN_SERVICE_URL to delegate)")
+	return credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+		Client:              k8sClient,
+		CredentialNamespace: credentialNS,
+		Exchanger:           &credresolve.HTTPTokenExchanger{},
+		AuthTypeIsOAuth: func(_ context.Context, _, server string) (bool, error) {
+			route, ok := routes[server]
+			return ok && route.OAuth, nil
+		},
+		Audit: func(e credresolve.AuditEvent) {
+			// Credential-class provenance (never a token) — ADR 0029 §7 R8.
+			log.Info("egress grant use",
+				"action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
+		},
+	}), nil
+}
+
+// delegatingHTTPClient builds the HTTP client the sidecar uses to reach the central token
+// service: mTLS from mounted certs when configured (EGRESS_MTLS_* + TOKEN_SERVICE_SERVER_NAME),
+// else a plain client with a loud warning (dev only).
+func delegatingHTTPClient(log logr.Logger) (*http.Client, error) {
+	certFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_CERT_FILE"))
+	keyFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_KEY_FILE"))
+	caFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_CA_FILE"))
+	serverName := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_SERVER_NAME"))
+	if certFile == "" || keyFile == "" || caFile == "" {
+		log.Info("WARNING: delegating to the token service WITHOUT mTLS (no EGRESS_MTLS_* files) — " +
+			"provision platform certs before production (ADR 0030 §1)")
+		return &http.Client{Timeout: delegationTimeout}, nil
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read mTLS CA: %w", err)
+	}
+	tlsCfg, err := credplane.ClientTLSConfig(certPEM, keyPEM, caPEM, serverName)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: delegationTimeout}, nil
 }

@@ -213,6 +213,10 @@ docker-build-launcher: ## Build the launcher image (launcher:latest) from Docker
 docker-build-egress-sidecar: ## Build the egress-sidecar image (egress-sidecar:latest) from Dockerfile.egress-sidecar (ADR 0030 §1).
 	$(CONTAINER_TOOL) build -t egress-sidecar:latest -f Dockerfile.egress-sidecar .
 
+.PHONY: docker-build-token-service
+docker-build-token-service: ## Build the token-service image (token-service:latest) from Dockerfile.token-service (ADR 0030 §1 central service).
+	$(CONTAINER_TOOL) build -t token-service:latest -f Dockerfile.token-service .
+
 .PHONY: docker-build-bff
 docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (build-time Node) + Go BFF; serves static assets, NO Node runtime.
 	$(CONTAINER_TOOL) build -t bff:latest -f Dockerfile.bff .
