@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
+import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 
 // A recording fetch mock: it captures every request (url, method, body) and
 // answers /api/invoke, /api/traces/{id}, /api/expand, /api/agents. The tests
@@ -78,6 +79,15 @@ function recordingFetch(opts: {
           text: async () => JSON.stringify(r.json),
         } as Response);
       }
+      if (path === "/api/mcp/oauth/grant") {
+        // Inline consent begin (ADR 0031): 202 + an authorization URL to pop open.
+        return Promise.resolve({
+          ok: true,
+          status: 202,
+          json: async () => ({ authorizationURL: "https://as.example/authorize?x=1", state: "st" }),
+          text: async () => "",
+        } as Response);
+      }
       return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
     }),
   );
@@ -145,6 +155,68 @@ describe("PlaygroundPage", () => {
     const traceLink = screen.getByTestId("view-full-trace");
     expect(traceLink).toHaveAttribute("href", "/traces/trace-xyz");
     expect(document.querySelector("iframe")).toBeNull();
+  });
+
+  it("consent_required → inline Connect begins the grant from {server,ns}, pops OAuth, and re-runs on connect (m26.2)", async () => {
+    const popup = { closed: false } as Window;
+    const openSpy = vi.fn(() => popup);
+    vi.stubGlobal("open", openSpy);
+
+    const calls = recordingFetch({
+      invoke: () => ({
+        ok: true,
+        json: {
+          traceId: "trace-xyz",
+          response: "please connect your account",
+          consentRequired: ["scalekit-mcp-server"],
+        },
+      }),
+    });
+
+    renderPage();
+    fill("Agent name", "sk-agent");
+    fill("Namespace", "prod");
+    fill("Image", "ghcr.io/ctxmesh/sk:v1");
+    fill("Input (JSON)", '{"prompt":"list orgs"}');
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    // The consent banner surfaces an inline Connect button for the named server —
+    // NOT a dead-end link (the m26.2 fix).
+    const connectBtn = await screen.findByTestId("connect-scalekit-mcp-server");
+    expect(connectBtn).toHaveTextContent("Connect scalekit-mcp-server");
+    expect(document.querySelector('a[href="/tools/mcp-servers"]')).toBeNull();
+
+    fireEvent.click(connectBtn);
+
+    // It begins the grant from just {server, ns} (config recovered server-side) and
+    // opens the authorization URL in a popup — the SPA supplies NO OAuth config.
+    await waitFor(() => {
+      expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeDefined();
+    });
+    const grantCall = calls.find((c) => c.url === "/api/mcp/oauth/grant")!;
+    const grantBody = JSON.parse(grantCall.body) as { server: string; namespace: string };
+    expect(grantBody.server).toBe("scalekit-mcp-server");
+    expect(grantBody.namespace).toBe("prod");
+    expect(grantBody).not.toHaveProperty("auth");
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://as.example/authorize?x=1",
+      "ctxmesh-oauth-connect",
+      expect.stringContaining("width="),
+    );
+
+    const invokesBefore = calls.filter((c) => c.url === "/api/invoke").length;
+
+    // The popup reports back (auto-close bridge) → the run resumes in place: a second
+    // invoke, with no user re-typing.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: MCP_OAUTH_MESSAGE, server: "scalekit-mcp-server", error: "" },
+        origin: window.location.origin,
+      }),
+    );
+    await waitFor(() => {
+      expect(calls.filter((c) => c.url === "/api/invoke").length).toBe(invokesBefore + 1);
+    });
   });
 
   it("exports the definition to a CRD via expand → apply (the config-builder path)", async () => {
