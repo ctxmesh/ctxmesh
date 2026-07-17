@@ -283,6 +283,10 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		status:          flow.status,
 		authType:        oauthAuthType,
 		oauthSecretData: oauthSecretData(flow.oauth, toks),
+		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
+		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
+		scope: scopePersonal,
+		owner: flow.grantUserHash,
 	}); crErr != nil {
 		oauthCallbackError(w, r, crErr.msg)
 		return
