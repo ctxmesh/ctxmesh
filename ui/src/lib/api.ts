@@ -540,6 +540,10 @@ export interface InvokeResponse {
   traceId: string;
   // response is the agent's raw response body as a string.
   response: string;
+  // consentRequired names the MCP servers a tool call hit that the invoking user has not
+  // connected an account to (ADR 0029 §2 / m25.9). Non-empty ⇒ show a "Connect your account"
+  // prompt; the model already told the user to connect. Absent on a normal run.
+  consentRequired?: string[];
 }
 
 // --- Provider connect (POST/GET /api/providers, GET .../models) -------------
