@@ -54,6 +54,13 @@ import (
 const (
 	mcpAuthTypeAnnotation = "agents.ctxmesh.ai/mcp-auth-type"
 	oauthAuthType         = "oauth"
+	// mcpScopeLabel / scopeOrgValue MUST match internal/bff.labelMCPScope + its "org" value:
+	// the visibility/ownership label the register + admin-promote flows stamp. An org-scoped
+	// server resolves the admin-set shared credential (ADR 0029 §2). Only an EXPLICIT org
+	// label counts here (a grandfathered/absent label is not org for resolution — it falls
+	// through to per-user consent, preserving today's behavior).
+	mcpScopeLabel = "mcp.ctxmesh.ai/scope"
+	scopeOrgValue = "org"
 )
 
 const (
@@ -107,6 +114,19 @@ func run(log logr.Logger) error {
 			}
 			return tr.Annotations[mcpAuthTypeAnnotation] == oauthAuthType, nil
 		},
+		// Org-scope resolution (ADR 0029 §2): when the invoker has no personal grant and the
+		// server is EXPLICITLY org-scoped, resolve the admin-set shared credential.
+		OrgCredential: credresolve.NewOrgCredentialFunc(k8sClient, credentialNS,
+			func(ctx context.Context, ns, server string) (bool, error) {
+				var tr agentsv1alpha1.ToolRegistry
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
+					if apierrors.IsNotFound(err) {
+						return false, nil
+					}
+					return false, err
+				}
+				return tr.Labels[mcpScopeLabel] == scopeOrgValue, nil
+			}),
 		Audit: func(e credresolve.AuditEvent) {
 			log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
 		},

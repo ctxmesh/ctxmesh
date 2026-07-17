@@ -814,6 +814,10 @@ func (s *Server) Handler() http.Handler {
 			// distinct patterns.
 			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
 			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
+			// Admin org-credential (m25.9, ADR 0029 §7): promote a server to org scope + set
+			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
+			// scope change is written caller-scoped (a viewer can't update it → 403).
+			authed.HandleFunc("POST /api/mcp/org-credential", s.handleSetOrgCredential)
 			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
 			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
 			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
