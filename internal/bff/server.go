@@ -802,6 +802,13 @@ func (s *Server) Handler() http.Handler {
 		if s.callerClients != nil {
 			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
 			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
+			// Deregister an MCP server (m26.3): tear down the whole register bundle
+			// (Secret + SecretBinding + ToolRegistry + NetworkPolicy) caller-scoped, with
+			// a personal-owner guard; the references route previews the delete-impact
+			// (dependent bindings). The Go 1.22 ServeMux treats these as distinct from the
+			// bare "GET/POST /api/mcpservers" (the more specific {ns}/{name} pattern wins).
+			authed.HandleFunc("DELETE /api/mcpservers/{ns}/{name}", s.handleDeleteMCPServer)
+			authed.HandleFunc("GET /api/mcpservers/{ns}/{name}/references", s.handleMCPServerReferences)
 			authed.HandleFunc("GET /api/tools", s.handleListTools)
 			// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
 			// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
@@ -838,6 +845,8 @@ func (s *Server) Handler() http.Handler {
 		} else {
 			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
 			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
+			authed.Handle("DELETE /api/mcpservers/{ns}/{name}", notImplemented("caller-scoped MCP deregister"))
+			authed.Handle("GET /api/mcpservers/{ns}/{name}/references", notImplemented("caller-scoped MCP references"))
 			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
 			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
 			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
