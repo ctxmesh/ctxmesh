@@ -192,6 +192,76 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	assertBindingReady(t, binding.Name, ns, metav1.ConditionTrue, reasonBound)
 }
 
+// TestBinding_AdoptedByAgent_OwnerReferenceSet: after reconcile a binding carries
+// a controller ownerReference to its AgentDeployment, so deleting the agent
+// garbage-collects the binding instead of orphaning it — the fix for the ADR 0017
+// gap that left <agent>-<tool> bindings dangling on agent delete and 409-colliding
+// on recreate.
+func TestBinding_AdoptedByAgent_OwnerReferenceSet(t *testing.T) {
+	const ns = "default"
+	agent := mkAgent(t, "adopt-agent", ns)
+	const url = "http://mcp-echo.default.svc.cluster.local/mcp"
+
+	mkRegistry(t, "reg-adopt", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "adopt-wc", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef:    agent.Name,
+		RegistryRef: "reg-adopt",
+		ToolName:    "word-count",
+		Mode:        toolmanifest.ModeRemote,
+		Server:      agentsv1alpha1.ToolServer{URL: url},
+	})
+	require.Empty(t, binding.OwnerReferences, "a freshly created binding has no owner")
+
+	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+
+	var got agentsv1alpha1.MCPToolBinding
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
+	require.Len(t, got.OwnerReferences, 1, "binding must be owned by its agent after reconcile")
+	ref := got.OwnerReferences[0]
+	assert.Equal(t, "AgentDeployment", ref.Kind, "owner kind")
+	assert.Equal(t, agent.Name, ref.Name, "owner name")
+	assert.Equal(t, agent.UID, ref.UID, "owner UID must match the live agent")
+	require.NotNil(t, ref.Controller)
+	assert.True(t, *ref.Controller, "agent must be the CONTROLLING owner (cascade GC on delete)")
+
+	// Idempotent: a second reconcile must not duplicate the owner ref.
+	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
+	assert.Len(t, got.OwnerReferences, 1, "re-reconcile must not add a second owner ref")
+}
+
+// TestBinding_AdoptionDeferredUntilAgentExists: a binding created before its
+// AgentDeployment cannot be owned yet (no owner object to reference). Reconcile
+// must not error and must leave it ownerless; once the agent exists a later
+// reconcile adopts it — the binding-before-agent ordering the AgentDeployment
+// watch requeues.
+func TestBinding_AdoptionDeferredUntilAgentExists(t *testing.T) {
+	const ns = "default"
+	const url = "http://wc.svc/mcp"
+
+	mkRegistry(t, "reg-defer", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "defer-wc", ns, agentsv1alpha1.MCPToolBindingSpec{
+		AgentRef:    "defer-agent", // does not exist yet
+		RegistryRef: "reg-defer",
+		ToolName:    "word-count",
+		Mode:        toolmanifest.ModeRemote,
+		Server:      agentsv1alpha1.ToolServer{URL: url},
+	})
+
+	// Agent absent: reconcile converges without error and does not fabricate an owner.
+	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+	var got agentsv1alpha1.MCPToolBinding
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
+	assert.Empty(t, got.OwnerReferences, "no owner can be set while the agent does not exist")
+
+	// Agent appears → adoption happens on the next reconcile.
+	agent := mkAgent(t, "defer-agent", ns)
+	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
+	require.Len(t, got.OwnerReferences, 1, "binding must be adopted once its agent exists")
+	assert.Equal(t, agent.UID, got.OwnerReferences[0].UID, "owner UID must match the now-live agent")
+}
+
 // TestBinding_ValidSidecar_ToolContainerInjected: a valid sidecar binding →
 // AgentDeployment injects the discovery sidecar AND a sidecar-mode tool
 // container; the manifest endpoint is the assigned localhost port + /mcp.
