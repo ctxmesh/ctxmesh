@@ -186,9 +186,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// OBO egress-sidecar injection (ADR 0030). Default-off (no drift); a values-gated Helm
+	// install turns it on and provides the sidecar image, the platform capability public key,
+	// and the locked credential namespace. Shared by the deployment (injects the sidecar) and
+	// binding (rewrites remote endpoints) reconcilers.
+	oboEgress := controller.OBOEgressConfig{
+		Enabled:                os.Getenv("MCP_OBO_EGRESS_ENABLED") == "true",
+		SidecarImage:           os.Getenv("EGRESS_SIDECAR_IMAGE"),
+		CapabilityPublicKeyB64: os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
+		CapabilityAudience:     os.Getenv("MCP_CAPABILITY_AUDIENCE"),
+		CredentialNamespace:    os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
+		TokenServiceURL:        os.Getenv("TOKEN_SERVICE_URL"),
+	}
+	if oboEgress.Enabled {
+		setupLog.Info("OBO egress-sidecar injection ENABLED (ADR 0030)",
+			"sidecarImage", oboEgress.SidecarImage, "delegating", oboEgress.TokenServiceURL != "")
+	}
+
 	if err := (&controller.AgentDeploymentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		OBOEgress: oboEgress,
 		// Prompt-only deploy (M9): the resolve seam. v1 ships the deterministic,
 		// OFFLINE fixture resolver — the dev/CI environment has no live git remote
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
@@ -205,8 +223,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.MCPToolBindingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		OBOEgress: oboEgress,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)

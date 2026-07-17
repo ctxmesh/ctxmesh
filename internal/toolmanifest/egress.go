@@ -32,6 +32,29 @@ type Route struct {
 	OAuth     bool   `json:"oauth"`
 }
 
+// EgressRoutes returns the deduped egress route table for a binding set: one Route per
+// remote OBO server (a remote binding with a ServerName), carrying its REAL url + auth type.
+// The controller serializes this into the egress sidecar's EGRESS_ROUTES env (the real URLs
+// live only in the sidecar, never the agent manifest). Nil when no remote OBO tool exists.
+func EgressRoutes(bindings []Binding) []Route {
+	routes := make(map[string]Route)
+	for _, b := range bindings {
+		if b.Mode != ModeRemote || strings.TrimSpace(b.ServerName) == "" {
+			continue
+		}
+		routes[b.ServerName] = Route{Name: b.ServerName, TargetURL: b.URL, OAuth: b.OAuth}
+	}
+	if len(routes) == 0 {
+		return nil
+	}
+	list := make([]Route, 0, len(routes))
+	for _, r := range routes {
+		list = append(list, r)
+	}
+	slices.SortFunc(list, func(a, b Route) int { return strings.Compare(a.Name, b.Name) })
+	return list
+}
+
 // RewriteRemoteForEgress redirects the manifest's REMOTE tool endpoints through the per-pod
 // injecting egress sidecar (ADR 0030 §1): each remote tool's endpoint becomes
 // sidecarBaseURL/<serverName>, and the real upstream URL is moved into the returned route
@@ -43,37 +66,25 @@ type Route struct {
 // — the SDK sees the new endpoints. Returns the manifest unchanged + nil routes when no
 // remote OBO tool is present.
 func RewriteRemoteForEgress(m Manifest, bindings []Binding, sidecarBaseURL string) (Manifest, []Route) {
-	type server struct {
-		name  string
-		oauth bool
-	}
-	byTool := make(map[string]server)
-	routes := make(map[string]Route)
-	for _, b := range bindings {
-		if b.Mode != ModeRemote || strings.TrimSpace(b.ServerName) == "" {
-			continue
-		}
-		byTool[b.ToolName] = server{name: b.ServerName, oauth: b.OAuth}
-		routes[b.ServerName] = Route{Name: b.ServerName, TargetURL: b.URL, OAuth: b.OAuth}
-	}
-	if len(byTool) == 0 {
+	routes := EgressRoutes(bindings)
+	if len(routes) == 0 {
 		return m, nil
+	}
+
+	toServer := make(map[string]string, len(bindings)) // ToolName → ServerName (remote OBO only)
+	for _, b := range bindings {
+		if b.Mode == ModeRemote && strings.TrimSpace(b.ServerName) != "" {
+			toServer[b.ToolName] = b.ServerName
+		}
 	}
 
 	base := strings.TrimRight(sidecarBaseURL, "/")
 	rewritten := make([]Tool, len(m.Tools))
 	for i, t := range m.Tools {
 		rewritten[i] = t
-		if s, ok := byTool[t.Name]; ok && t.Mode == ModeRemote {
-			rewritten[i].Endpoint = base + "/" + s.name
+		if serverName, ok := toServer[t.Name]; ok && t.Mode == ModeRemote {
+			rewritten[i].Endpoint = base + "/" + serverName
 		}
 	}
-
-	routeList := make([]Route, 0, len(routes))
-	for _, r := range routes {
-		routeList = append(routeList, r)
-	}
-	slices.SortFunc(routeList, func(a, b Route) int { return strings.Compare(a.Name, b.Name) })
-
-	return Normalize(Manifest{Tools: rewritten}), routeList
+	return Normalize(Manifest{Tools: rewritten}), routes
 }
