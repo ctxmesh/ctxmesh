@@ -176,6 +176,10 @@ type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// OBOEgress configures OBO egress-sidecar injection (ADR 0030). Disabled (default)
+	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
+	OBOEgress OBOEgressConfig
+
 	// PromptResolver resolves a PromptVersion git pointer (repo, ref, path) into
 	// prompt content for the prompt-only-deploy path (M9). It is the mock⇄real
 	// seam: production wires a real (e.g. go-git) resolver; dev / envtest / e2e
@@ -730,6 +734,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	_, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
+	// OBO egress (ADR 0030): the deduped route table for this agent's remote OBO tools —
+	// the real MCP URLs the injected sidecar fronts (kept out of the agent's manifest).
+	// Empty unless OBO egress is enabled AND the agent has ≥1 remote OBO tool.
+	var egressRoutes []toolmanifest.Route
+	if r.OBOEgress.Enabled {
+		egressRoutes = toolmanifest.EgressRoutes(validBindings)
+	}
+
 	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
 	// inject MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (downward
 	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
@@ -902,6 +914,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		volumes = append(volumes, toolsVolume(deploy.Name))
 	}
 
+	// OBO egress (ADR 0030): inject the injecting egress sidecar when enabled AND the agent
+	// has ≥1 remote OBO tool. Its manifest endpoints were rewritten to 127.0.0.1:<port>/
+	// <server> (mcptoolbinding_controller); the sidecar verifies the run capability, resolves
+	// the invoking user's credential, and forwards to the real MCP server this pod fronts.
+	if r.OBOEgress.Enabled && len(egressRoutes) > 0 {
+		agentIdentity := deploy.Namespace + "/" + deploy.Name
+		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, egressRoutesJSON(egressRoutes)))
+	}
+
 	// Combined structural digest: "" when no binding/membership resolves (bare
 	// pre-M4 name). With ANY binding (tool and/or memory) or membership, one
 	// combined digest ("-h<digest8>") rolls the workload when a binding is
@@ -921,6 +942,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// create/delete of a different workload KIND (handled by the per-model
 	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
+	if ed := egressDigest(r.OBOEgress.SidecarImage, egressRoutes); ed != "" {
+		// The egress sidecar (image + routes — the real URLs now live in pod env, not the
+		// hot-path manifest) is pod-template state, so fold it into the tool component: adding/
+		// removing the sidecar or changing a route rolls a new revision. Inert when OBO is off
+		// (egressRoutes is nil ⇒ egressDigest is "").
+		toolDigest += "e" + ed
+	}
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
 	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
 	// and its values are package constants (objectStoreAddr + the dev creds,

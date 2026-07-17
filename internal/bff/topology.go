@@ -279,6 +279,10 @@ func buildGroupedTopology(ctx context.Context, r AgentReader, spec topologyGroup
 			}
 		}
 		ga := agentNode(ad)
+		// Stamp the resolved group id on the node so the SPA partitions members by
+		// their ACTUAL group, not by namespace (two registries in one namespace would
+		// otherwise both render every agent in it).
+		ga.node.Group = acc.g.ID
 		acc.g.MemberCount++
 		addToRollup(&acc.g.Health, ga.health)
 		acc.members = append(acc.members, ga)

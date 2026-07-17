@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // maxInvokeRequestBytes bounds the Playground input body. A run's input is a
@@ -50,8 +51,13 @@ type InvokeRequest struct {
 // the agent's raw response as a string. traceId is always present on a run that
 // reached the agent — even a failed (non-2xx) run was traced.
 type InvokeResponse struct {
-	TraceID  string `json:"traceId"`
-	Response string `json:"response"`
+	TraceID string `json:"traceId"`
+	// ConsentRequired names the MCP servers a tool call hit that the invoking user has not
+	// connected an account to (ADR 0029 §2 / m25.9) — surfaced from the agent's structured
+	// result so the console can render a "Connect your account for <server>" CTA (→ the
+	// m17.3 consent flow) instead of the user hunting through the raw output. Omitted when none.
+	ConsentRequired []string `json:"consentRequired,omitempty"`
+	Response        string   `json:"response"`
 }
 
 // handleInvoke serves POST /api/invoke — the Playground run. It is CALLER-SCOPED
@@ -83,7 +89,49 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Mint the invoking user's run capability and carry it on the request context so the
+	// adapter attaches it to the agent's /invoke (runcap, ADR 0030 §2). Best-effort: a
+	// mint failure never fails the run — it just proceeds without a capability (unattended).
+	r = s.attachRunCapability(r, caller, req.Agent, req.Namespace)
 	s.writeInvokeResult(w, r, req.Agent, endpoint, []byte(req.Input))
+}
+
+// attachRunCapability mints a run capability for the authenticated caller and returns r
+// carrying it on its context for the InvokeAdapter to attach (runcap, ADR 0030 §2). It is
+// BEST-EFFORT: when minting is disabled (no platform key) or the caller identity cannot be
+// resolved, it returns r unchanged and the run proceeds WITHOUT a capability — a downstream
+// tool call then resolves as unattended (org/public only), never another user's grant. The
+// capability is the invoking user's HASHED identity (`sub`), the agent as the RFC 8693
+// actor, scoped to a fresh run id — the agent only ever relays it, never forges it.
+func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agent, namespace string) *http.Request {
+	if s.capabilitySigner == nil {
+		return r // minting disabled — no platform capability key configured
+	}
+	username, err := callerUsername(r.Context(), caller)
+	if err != nil || strings.TrimSpace(username) == "" {
+		s.log.Error(err, "run-capability: could not resolve caller identity; proceeding without a capability")
+		return r
+	}
+	runID, err := randToken(16)
+	if err != nil {
+		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+		return r
+	}
+	ns := namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
+		User:  userGrantHash(username),
+		Agent: ns + "/" + agent,
+		RunID: runID,
+		TTL:   runCapabilityTTL,
+	})
+	if err != nil {
+		s.log.Error(err, "run-capability: mint failed; proceeding without a capability")
+		return r
+	}
+	return r.WithContext(contextWithRunCapability(r.Context(), token))
 }
 
 // handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).
@@ -139,9 +187,23 @@ func (s *Server) writeInvokeResult(w http.ResponseWriter, r *http.Request, agent
 	}
 
 	writeJSON(w, http.StatusOK, InvokeResponse{
-		TraceID:  traceID,
-		Response: string(resp),
+		TraceID:         traceID,
+		ConsentRequired: parseConsentRequired(resp),
+		Response:        string(resp),
 	})
+}
+
+// parseConsentRequired best-effort extracts the consent_required servers from the agent's
+// structured /invoke result (the managed-agent returns them, m25.9) so the console can render
+// a "Connect your account" CTA. A non-JSON / field-less response yields nil (no CTA).
+func parseConsentRequired(resp []byte) []string {
+	var parsed struct {
+		ConsentRequired []string `json:"consent_required"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return nil
+	}
+	return parsed.ConsentRequired
 }
 
 // InvokeErrorResponse is returned when the agent answered non-2xx: the honest
@@ -182,10 +244,23 @@ func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, ca
 
 	url := strings.TrimSpace(deploy.Status.URL)
 	if url == "" {
-		// The agent exists but has no assigned endpoint yet (not Ready). A run
+		// A job agent has NO live endpoint by design (executionModel: job → a one-shot
+		// Kubernetes Job, not a request-driven Service), so "run with a prompt" here can
+		// never resolve one. Say that plainly instead of the misleading "not ready yet",
+		// which would wrongly imply waiting will help (m25 S4).
+		if deploy.Spec.ExecutionModel == executionModelJob {
+			writeError(w, http.StatusConflict,
+				"this is a job agent (executionModel: job) — it runs as a one-shot Kubernetes Job, not a live endpoint, so it can't be invoked with a prompt here")
+			return "", false
+		}
+		// Otherwise the agent exists but has no assigned endpoint yet (not Ready). A run
 		// cannot be dispatched — surface it as a conflict, not a fake success.
 		writeError(w, http.StatusConflict, "agent is not ready (no endpoint assigned yet)")
 		return "", false
 	}
 	return url, true
 }
+
+// executionModelJob is the AgentDeployment executionModel that runs as a one-shot
+// Kubernetes Job (no serving endpoint) — see api/v1alpha1 AgentDeploymentSpec.
+const executionModelJob = "job"

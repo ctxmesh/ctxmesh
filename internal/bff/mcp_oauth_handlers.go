@@ -20,6 +20,7 @@ import (
 	"context"
 	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,42 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
+
+// Console SPA routes the OAuth callback (a BROWSER redirect target, not an API call)
+// returns the browser to. Same-origin relative paths so they work behind the console's
+// port-forward or a real ingress alike.
+const (
+	consoleRouteAddMCP      = "/tools/add-mcp"
+	consoleRouteToolCatalog = "/tools/catalog"
+)
+
+// oauthCallbackRedirect sends the browser back into the console after the OAuth
+// callback completes (success OR failure). The callback is reached by an
+// authorization-server redirect, so its terminal response must be a redirect the
+// browser can follow — NOT JSON (which is what the user would otherwise see). 303 See
+// Other makes the follow-up a clean GET. A short machine-readable status param lets the
+// landing page toast the outcome; no token/verifier is ever placed in the URL.
+func oauthCallbackRedirect(w http.ResponseWriter, r *http.Request, path string, params url.Values) {
+	target := path
+	if enc := params.Encode(); enc != "" {
+		target += "?" + enc
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// oauthCallbackError redirects the browser back to the add-MCP page with a
+// human-readable error (a declined consent, an expired state, a token-exchange
+// failure) instead of dumping a JSON error into the browser tab.
+func oauthCallbackError(w http.ResponseWriter, r *http.Request, msg string) {
+	oauthCallbackRedirect(w, r, consoleRouteAddMCP, url.Values{"mcp_error": {msg}})
+}
+
+// oauthCallbackConnected redirects the browser to the tool catalog after a server is
+// connected (fresh registration OR a per-user grant consent), carrying only the server
+// name so the catalog can toast the success. Shared by both callback branches.
+func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName string) {
+	oauthCallbackRedirect(w, r, consoleRouteToolCatalog, url.Values{"mcp_connected": {serverName}})
+}
 
 // The OAuth 2.1 register + callback HANDLERS for BYO-MCP (m17.2, ADR 0016). These
 // drive the two-legged flow whose crux is that MCP-resource tokens NEVER reach the
@@ -174,16 +211,16 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		if state != "" {
 			s.oauthFlows.take(state) // consume the abandoned flow
 		}
-		writeError(w, http.StatusBadRequest, "the OAuth authorization was not granted ("+oauthErrorCode(oauthErr)+")")
+		oauthCallbackError(w, r, "the OAuth authorization was not granted ("+oauthErrorCode(oauthErr)+")")
 		return
 	}
 
 	if state == "" {
-		writeError(w, http.StatusBadRequest, "missing state on the OAuth callback")
+		oauthCallbackError(w, r, "missing state on the OAuth callback")
 		return
 	}
 	if code == "" {
-		writeError(w, http.StatusBadRequest, "missing code on the OAuth callback")
+		oauthCallbackError(w, r, "missing code on the OAuth callback")
 		return
 	}
 
@@ -192,7 +229,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// removes the flow so a replayed callback (same state) cannot re-exchange.
 	flow, ok := s.oauthFlows.take(state)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "unknown or expired OAuth state (start the connection again)")
+		oauthCallbackError(w, r, "unknown or expired OAuth state (start the connection again)")
 		return
 	}
 
@@ -202,7 +239,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// held only transiently here for the Secret write below.
 	toks, exErr := s.exchangeCodeForTokens(r.Context(), flow.oauth, code, flow.codeVerifier)
 	if exErr != nil {
-		writeError(w, exErr.status, exErr.msg)
+		oauthCallbackError(w, r, exErr.msg)
 		return
 	}
 
@@ -210,7 +247,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// The K8s writes run as the registering user — a viewer's denied create → 403.
 	caller, cErr := s.callerFromToken(flow.callerToken)
 	if cErr != nil {
-		writeError(w, http.StatusUnauthorized, msgTokenRejected)
+		oauthCallbackError(w, r, msgTokenRejected)
 		return
 	}
 
@@ -219,7 +256,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// tokens as THEIR (user, server) grant Secret (labeled by the hashed user) and
 	// return — no probe/catalog/egress (the server is already registered).
 	if flow.grantUserHash != "" {
-		s.completeGrantConsent(r.Context(), w, caller, *flow, toks)
+		s.completeGrantConsent(r.Context(), w, r, caller, *flow, toks)
 		return
 	}
 
@@ -228,17 +265,17 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	tools, pErr := probeMCPServer(r.Context(), s.providerHTTP, flow.serverURL, toks.AccessToken)
 	if pErr != nil {
 		if me, isME := isMCPError(pErr); isME {
-			writeError(w, me.status, me.msg)
+			oauthCallbackError(w, r, me.msg)
 			return
 		}
-		writeError(w, http.StatusBadGateway, "MCP discovery failed")
+		oauthCallbackError(w, r, "MCP discovery failed")
 		return
 	}
 
 	// (3) Store the tokens in a Secret + create the catalog, egress, and binding —
 	// all caller-scoped. The tokens land ONLY in the Secret's data (oauthSecretData);
 	// they are never in an annotation/label/DTO/log.
-	created, crErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
+	if _, crErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
 		name:            flow.serverName,
 		namespace:       flow.namespace,
 		url:             flow.serverURL,
@@ -246,26 +283,20 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		status:          flow.status,
 		authType:        oauthAuthType,
 		oauthSecretData: oauthSecretData(flow.oauth, toks),
-	})
-	if crErr != nil {
-		writeError(w, crErr.status, crErr.msg)
+		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
+		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
+		scope: scopePersonal,
+		owner: flow.grantUserHash,
+	}); crErr != nil {
+		oauthCallbackError(w, r, crErr.msg)
 		return
 	}
 
-	// Success: the register summary + the discovered tools. NO token/verifier here.
-	writeJSON(w, http.StatusCreated, RegisterMCPServerResponse{
-		Server: MCPServerSummary{
-			Name:       flow.serverName,
-			Namespace:  flow.namespace,
-			URL:        flow.serverURL,
-			ToolCount:  len(tools),
-			Status:     flow.status,
-			SecretName: flow.serverName,
-			AuthType:   oauthAuthType,
-		},
-		Tools:   toolCatalogEntriesFromDiscovered(flow.serverName, flow.namespace, tools, flow.status),
-		Created: created,
-	})
+	// Success: send the browser to the tool catalog, where the freshly-registered
+	// server + its tools are listed. The server-side objects (Secret, catalog, egress,
+	// binding) are already created; the SPA re-fetches the catalog on landing. No
+	// token/verifier is ever in the URL — only the server name for a success toast.
+	oauthCallbackConnected(w, r, flow.serverName)
 }
 
 // callerFromToken builds a caller-scoped client from a RAW bearer token (as

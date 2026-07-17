@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,7 +127,7 @@ func seedGrant(server, username, access, refresh, tokenEndpoint string, expiry t
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantSecretName(server, userHash),
 			Namespace: ns,
-			Labels:    grantSecretLabels(server, userHash),
+			Labels:    grantSecretLabels(server, userHash, ""),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
@@ -170,7 +171,7 @@ func TestOBOResolverPerUserIsolation(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(oauthToolRegistry(server, "http://weather/mcp"), aliceSecret, bobSecret).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	alice, err := r.Resolve(context.Background(), ns, server, "alice@example.com")
 	require.NoError(t, err)
@@ -188,6 +189,89 @@ func TestOBOResolverPerUserIsolation(t *testing.T) {
 	// The two users' grants are DISTINCT objects (different names + user labels).
 	assert.NotEqual(t, aliceSecret.Name, bobSecret.Name)
 	assert.NotEqual(t, aliceSecret.Labels[labelMCPGrantUser], bobSecret.Labels[labelMCPGrantUser])
+}
+
+// seedLockedGrant builds a grant Secret AS IT LIVES in the locked credential namespace
+// (m25.1b): named by grantSecretCoordinates (source ns folded in) + carrying the
+// source-namespace label, in credNS rather than the agent namespace.
+func seedLockedGrant(credNS, sourceNs, server, username, access string, expiry time.Time) *corev1.Secret {
+	userHash := userGrantHash(username)
+	_, name := grantSecretCoordinates(credNS, sourceNs, server, userHash)
+	data := map[string][]byte{
+		secretKeyOAuthAccessToken:   []byte(access),
+		secretKeyOAuthTokenEndpoint: []byte("https://x/token"),
+		secretKeyOAuthClientID:      []byte(theOAuthClientID),
+	}
+	if !expiry.IsZero() {
+		data[secretKeyOAuthExpiry] = []byte(expiry.UTC().Format(time.RFC3339))
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: credNS,
+			Labels:    grantSecretLabels(server, userHash, sourceNs),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}
+}
+
+// TestServerGrantRoutingModes pins the m25.1b mode switch: the write/read/delete paths
+// route to the locked credential namespace via the privileged client only when BOTH a
+// namespace and a client are wired, and stay on the legacy caller-scoped per-namespace
+// path otherwise (fail-safe: a namespace without a client does NOT enter locked mode).
+func TestServerGrantRoutingModes(t *testing.T) {
+	caller := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	cred := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	locked := &Server{credentialNamespace: "ae-credentials", credentialClient: cred}
+	require.True(t, locked.lockedCredentials())
+	ns, name := locked.grantCoordinates("prod", "gh", "u-abc")
+	assert.Equal(t, "ae-credentials", ns, "locked: grant lands in the credential namespace")
+	assert.NotEqual(t, grantSecretName("gh", "u-abc"), name, "locked: name folds the source ns")
+	assert.True(t, locked.grantClient(caller) == cred, "locked: writes go through the privileged client")
+	assert.Equal(t, "prod", locked.grantSourceNSLabel("prod"))
+
+	legacy := &Server{}
+	require.False(t, legacy.lockedCredentials())
+	lns, lname := legacy.grantCoordinates("prod", "gh", "u-abc")
+	assert.Equal(t, "prod", lns, "legacy: grant stays in the source namespace")
+	assert.Equal(t, grantSecretName("gh", "u-abc"), lname, "legacy: original name")
+	assert.True(t, legacy.grantClient(caller) == caller, "legacy: caller-scoped write")
+	assert.Empty(t, legacy.grantSourceNSLabel("prod"))
+
+	half := &Server{credentialNamespace: "ae-credentials"}
+	assert.False(t, half.lockedCredentials(), "a namespace without a privileged client must stay legacy (fail-safe)")
+}
+
+// TestOBOResolverLockedNamespace proves the resolver reads a grant from the locked
+// credential namespace (not the agent namespace) AND that a grant is bound to its
+// source namespace — the same (user, server) from a different namespace does not
+// resolve it (the source-namespace label is an authoritative match key in locked mode).
+func TestOBOResolverLockedNamespace(t *testing.T) {
+	const credNS, sourceNs, server = "ae-credentials", "prod", "weather-mcp"
+	future := time.Now().Add(time.Hour)
+	grant := seedLockedGrant(credNS, sourceNs, server, "alice@example.com", "ALICE-locked-token", future)
+	require.Equal(t, credNS, grant.Namespace, "the grant physically lives in the locked namespace")
+
+	// The ToolRegistry (metadata) stays in the AGENT namespace; only the grant moves.
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(oauthToolRegistry(server, "http://weather/mcp"), grant).Build()
+	r := NewOBOCredentialResolver(c, credNS, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+
+	got, err := r.Resolve(context.Background(), sourceNs, server, "alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "ALICE-locked-token", got.Value, "resolve reads the grant from the credential namespace")
+
+	// Cross-namespace isolation at the lookup seam: the same (user, server) keyed to a
+	// DIFFERENT source namespace does not match alice's prod grant.
+	res := &oboCredentialResolver{reader: c, credentialNamespace: credNS}
+	_, found, err := res.findGrant(context.Background(), sourceNs, server, userGrantHash("alice@example.com"))
+	require.NoError(t, err)
+	assert.True(t, found, "the grant resolves for its own source namespace")
+	_, foundOther, err := res.findGrant(context.Background(), "staging", server, userGrantHash("alice@example.com"))
+	require.NoError(t, err)
+	assert.False(t, foundOther, "a grant bound to source ns 'prod' must not resolve for 'staging'")
 }
 
 // TestOBOResolverAbsentGrantIsConsentRequired proves that an OAuth server with NO
@@ -210,7 +294,7 @@ func TestOBOResolverAbsentGrantIsConsentRequired(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(oauthToolRegistry(server, "http://oauth/mcp"), shared, binding).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	cred, err := r.Resolve(context.Background(), ns, server, "carol@example.com")
 	assert.True(t, isConsentRequired(err), "an OAuth server with no user grant must signal consent-required, got %v", err)
@@ -236,7 +320,7 @@ func TestOBOResolverBackwardCompatSharedMode(t *testing.T) {
 	tr := &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: server, Namespace: ns}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(shared, binding, tr).Build()
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 
 	// Two different users get the SAME shared key (M14 semantics) — per-user is off
 	// for a non-OAuth server.
@@ -261,7 +345,7 @@ func TestOBOResolverRefreshesNearExpiryGrant(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 	s.oauthFlows.now = func() time.Time { return base }
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "dana@example.com")
 	require.NoError(t, err)
 	assert.Equal(t, theRotatedAccess, cred.Value, "a near-expiry per-user grant refreshes")
@@ -285,7 +369,7 @@ func TestOBOResolverExpiredNoRefreshIsConsentRequired(t *testing.T) {
 	s, _, _ := newMCPServer(t, c, false)
 	s.oauthFlows.now = func() time.Time { return base }
 
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), s.refreshMCPOAuthToken, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "erin@example.com")
 	assert.True(t, isConsentRequired(err), "an unrefreshable near-expiry grant must signal consent-required, got %v", err)
 	assert.Empty(t, cred.Value)
@@ -358,15 +442,10 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	require.NotEmpty(t, pending.State)
 	oauth.expectChallenge = "" // pass PKCE; assert grant storage
 
+	// The callback is browser-facing → 303 back to the console catalog, not JSON.
 	crec := callback(t, s, oauth.validCode, pending.State)
-	require.Equal(t, http.StatusCreated, crec.Code, "body: %s", crec.Body.String())
-
-	var resp MCPGrantResponse
-	require.NoError(t, json.Unmarshal(crec.Body.Bytes(), &resp))
-	assert.Equal(t, "granted", resp.Status)
-	assert.Equal(t, server, resp.Server)
-	// The response carries the HASHED user, never the raw username, never a token.
-	assert.Equal(t, userGrantHash("user:alice-token"), resp.User)
+	q := assertCallbackRedirect(t, crec, "/tools/catalog")
+	assert.Equal(t, server, q.Get("mcp_connected"), "the redirect names the consented server")
 
 	// The grant Secret exists, labeled (user, server), with the token ONLY in Data.
 	var grant corev1.Secret
@@ -446,7 +525,7 @@ func TestMCPGrantRevokeThenConsentRequired(t *testing.T) {
 	s, lb := newGrantServer(t, c)
 
 	// The grant resolves before revoke.
-	r := NewOBOCredentialResolver(c, NewSharedSecretCredentialResolver(c), staticRefresher, nil)
+	r := NewOBOCredentialResolver(c, "", NewSharedSecretCredentialResolver(c), staticRefresher, nil)
 	cred, err := r.Resolve(context.Background(), ns, server, "user:alice-token")
 	require.NoError(t, err)
 	assert.Equal(t, theOAuthAccessToken, cred.Value)
@@ -504,4 +583,78 @@ func TestMCPGrantRevokeForbiddenIs403(t *testing.T) {
 
 	rec := revokeGrant(t, s, server, "viewer-token")
 	assert.Equal(t, http.StatusForbidden, rec.Code, "a denied delete must surface a 403")
+}
+
+// TestUserGrantHashHMAC pins the m25.1 security property (ADR 0029 §7, advisor R5):
+// with a per-cluster key the user-identity hash is HMAC-SHA256 — salted by the key so
+// it cannot be confirmed offline against a low-entropy email/username — while staying
+// deterministic for lookup; without a key it degrades to the legacy unsalted SHA-256
+// so already-hardened callers and dev clusters both keep working. The hash is one-way
+// and fixed-format regardless, so a raw username never lands in cluster metadata.
+func TestUserGrantHashHMAC(t *testing.T) {
+	// grantHMACKey is package-global; restore the default (nil ⇒ legacy) for every
+	// other test in the package, whatever this one leaves it at.
+	defer setGrantHMACKey(nil)
+
+	const user = "alice@example.com"
+
+	setGrantHMACKey(nil)
+	legacy := userGrantHash(user)
+	assert.Equal(t, legacy, userGrantHash(user), "no key: deterministic")
+	assert.Regexp(t, `^u-[0-9a-f]{40}$`, legacy, "fixed one-way format, no raw username")
+
+	setGrantHMACKey([]byte("cluster-key-one"))
+	k1 := userGrantHash(user)
+	assert.Regexp(t, `^u-[0-9a-f]{40}$`, k1)
+	assert.NotEqual(t, legacy, k1, "a key must salt the hash away from the unsalted digest")
+	assert.Equal(t, k1, userGrantHash(user), "same key + user: deterministic (lookup stable)")
+
+	setGrantHMACKey([]byte("cluster-key-two"))
+	assert.NotEqual(t, k1, userGrantHash(user), "a different cluster key must yield a different hash")
+
+	setGrantHMACKey([]byte("cluster-key-one"))
+	assert.Equal(t, k1, userGrantHash(user), "the same key reproduces the same hash (re-key = re-consent, not drift)")
+	assert.NotEqual(t, k1, userGrantHash("bob@example.com"), "distinct users stay distinct under one key")
+}
+
+// TestGrantSecretCoordinates pins the m25.1a key shape (ADR 0029 §7): legacy mode is
+// byte-for-byte the pre-m25.1 (namespace, name) so nothing migrates until a locked
+// credential namespace is configured; locked mode consolidates every grant into that
+// one namespace while folding the source namespace into the object name so grants
+// from different namespaces never collide there.
+func TestGrantSecretCoordinates(t *testing.T) {
+	const server, hash = "gh", "u-abcdef0123456789"
+
+	// Legacy (no credential namespace): unchanged (source ns, original name).
+	ns, name := grantSecretCoordinates("", "team-a", server, hash)
+	assert.Equal(t, "team-a", ns, "legacy: grant stays in its source namespace")
+	assert.Equal(t, grantSecretName(server, hash), name, "legacy: original name, no migration")
+
+	// Locked: the credential namespace, source ns folded into the name.
+	lockedNS, lockedName := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	assert.Equal(t, "ae-credentials", lockedNS, "locked: all grants land in the credential namespace")
+	assert.True(t, strings.HasPrefix(lockedName, grantSecretName(server, hash)+"-"),
+		"locked: name extends the legacy base with the source-ns hash")
+	assert.LessOrEqual(t, len(lockedName), 253, "object name stays within the k8s limit")
+
+	// Same (server, user) from a DIFFERENT namespace → a distinct object (no collision).
+	_, otherName := grantSecretCoordinates("ae-credentials", "team-b", server, hash)
+	assert.NotEqual(t, lockedName, otherName, "locked: different source namespaces never collide")
+
+	// A different server in the same namespace is also a distinct object.
+	_, otherServer := grantSecretCoordinates("ae-credentials", "team-a", "jira", hash)
+	assert.NotEqual(t, lockedName, otherServer, "locked: different servers never collide")
+
+	// A different user (hash) for the same server + namespace is a distinct object too.
+	_, otherUser := grantSecretCoordinates("ae-credentials", "team-a", server, "u-999888777666")
+	assert.NotEqual(t, lockedName, otherUser, "locked: different users never collide")
+
+	// Deterministic (lookup must be stable across write/read/refresh).
+	_, again := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	assert.Equal(t, lockedName, again, "locked: coordinates are deterministic")
+
+	// The source namespace is the authoritative label match key in locked mode.
+	assert.Equal(t, "team-a", grantSecretLabels(server, hash, "team-a")[labelMCPGrantSourceNS])
+	_, hasNS := grantSecretLabels(server, hash, "")[labelMCPGrantSourceNS]
+	assert.False(t, hasNS, "legacy labels carry no source-namespace")
 }

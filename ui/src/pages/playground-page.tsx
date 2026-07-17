@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, Play, Rocket } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Play, Rocket } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -39,7 +39,7 @@ import {
 type Run =
   | { kind: "idle" }
   | { kind: "running" }
-  | { kind: "done"; traceId: string; response: string }
+  | { kind: "done"; traceId: string; response: string; consentRequired?: string[] }
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 // Export is the export-to-CRD lifecycle: expand (preview) → apply. It reuses the
@@ -57,7 +57,7 @@ export function PlaygroundPage() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [namespace, setNamespace] = useState("");
-  const [input, setInput] = useState('{\n  "prompt": "Hello, agent"\n}');
+  const [input, setInput] = useState('{\n  "input": "Hello, agent"\n}');
   const [run, setRun] = useState<Run>({ kind: "idle" });
   const [exp, setExp] = useState<Export>({ kind: "idle" });
   // RBAC-aware chrome (§3): running an agent and applying a CRD are both
@@ -95,7 +95,12 @@ export function PlaygroundPage() {
         namespace: namespace.trim(),
         input: parsedInput,
       });
-      setRun({ kind: "done", traceId: res.traceId, response: res.response });
+      setRun({
+        kind: "done",
+        traceId: res.traceId,
+        response: res.response,
+        consentRequired: res.consentRequired,
+      });
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
@@ -271,6 +276,23 @@ export function PlaygroundPage() {
                     <CheckCircle2 className="h-5 w-5" />
                     <span className="text-sm font-medium">Traced run complete</span>
                   </div>
+                  {run.consentRequired && run.consentRequired.length > 0 && (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                      <div className="space-y-1">
+                        <p className="font-medium">Connect your account to continue</p>
+                        <p className="text-muted-foreground">
+                          This run needs your own credentials for{" "}
+                          <span className="font-mono">{run.consentRequired.join(", ")}</span>.
+                          Connect your account on the{" "}
+                          <Link to="/tools/mcp-servers" className="underline">
+                            MCP Servers
+                          </Link>{" "}
+                          page, then run again.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   <div className="rounded-md border p-3">
                     <p className="text-xs text-muted-foreground">trace id</p>
                     <p className="truncate font-mono text-xs" data-testid="trace-id">

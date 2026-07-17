@@ -337,6 +337,10 @@ export interface TopologyNode {
   namespace: string;
   health: TopologyHealth;
   detail: string;
+  // group is the id of the group this node belongs to in grouped mode — the
+  // authoritative partition key so agents render only under their own registry
+  // (not every registry sharing their namespace). Absent in flat mode.
+  group?: string;
 }
 
 export interface TopologyEdge {
@@ -536,6 +540,10 @@ export interface InvokeResponse {
   traceId: string;
   // response is the agent's raw response body as a string.
   response: string;
+  // consentRequired names the MCP servers a tool call hit that the invoking user has not
+  // connected an account to (ADR 0029 §2 / m25.9). Non-empty ⇒ show a "Connect your account"
+  // prompt; the model already told the user to connect. Absent on a normal run.
+  consentRequired?: string[];
 }
 
 // --- Provider connect (POST/GET /api/providers, GET .../models) -------------
@@ -685,6 +693,26 @@ export interface McpApprovalsResponse {
   items: McpApproval[];
 }
 
+// McpServerSummary is one registered BYO-MCP server (GET /api/mcpservers) — the
+// MCP Servers list page's row. authType is "oauth" for an OAuth server, else "" for
+// a key/no-auth server; secretName is the (reference-only) Secret name when it has one.
+export interface McpServerSummary {
+  name: string;
+  namespace: string;
+  url: string;
+  toolCount: number;
+  status: string;
+  secretName?: string;
+  authType?: string;
+}
+
+export interface McpServerListResponse {
+  // The BFF returns the same rows under both keys (list-contract); read `items`
+  // with a `servers` fallback, defaulting to [] so an odd shape never crashes.
+  servers?: McpServerSummary[];
+  items?: McpServerSummary[];
+}
+
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
 // The merged tool catalog — curated ToolRegistry entries + the user's own
 // BYO-MCP discoveries (ADR 0016). It's the create-agent tool picker's source:
@@ -700,6 +728,10 @@ export interface McpApprovalsResponse {
 export interface CatalogTool {
   name: string;
   description?: string;
+  // registry is the MCP server / ToolRegistry the tool belongs to (e.g.
+  // "scalekit-mcp-server") — the grouping key for "group tools by MCP server".
+  registry?: string;
+  // source is the ORIGIN CLASS ("user-added" | "curated"), not the server name.
   source?: string;
   approvalStatus?: "approved" | "pending";
   inputSchema?: unknown;
@@ -1928,6 +1960,11 @@ export const api = {
     );
   },
 
+  // listMcpServers lists the registered BYO-MCP servers (GET /api/mcpservers) for
+  // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
+  listMcpServers: (signal?: AbortSignal) =>
+    getJSON<McpServerListResponse>("/api/mcpservers", signal),
+
   // mcpApprovals lists the pending MCP servers awaiting operator approval
   // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
   // caller can't list approvals (non-operator); a 501 = approval queue not enabled.
@@ -2109,7 +2146,11 @@ export const api = {
         res.status,
       );
     }
-    return (await res.json()) as DeleteAgentResponse;
+    // A delete may legitimately return 204 No Content or an empty body — reading it
+    // as JSON would throw "Unexpected end of JSON input" even though the delete
+    // SUCCEEDED (m25 S19). Tolerate an empty body: treat a 2xx as accepted.
+    const text = await res.text();
+    return (text ? JSON.parse(text) : { accepted: true }) as DeleteAgentResponse;
   },
 
   // agentReferences reads the delete-impact preview for an agent (m15.11):

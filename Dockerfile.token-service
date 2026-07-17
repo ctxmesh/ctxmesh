@@ -1,0 +1,23 @@
+# Dockerfile.token-service — the central token service (ADR 0030 §1, the scaling split).
+#
+# Builds only the token-service binary (cmd/token-service) as a distroless/static image.
+# It runs as a Deployment in the locked credential namespace (Helm, m25.8) behind an
+# internal mTLS API; the per-pod egress sidecars delegate cache-miss resolution to it, so
+# grant reads + OAuth refresh are singleflighted globally (one refresh across the fleet).
+
+FROM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o token-service ./cmd/token-service
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/token-service /token-service
+USER 65532:65532
+ENTRYPOINT ["/token-service"]

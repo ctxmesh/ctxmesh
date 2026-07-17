@@ -359,7 +359,8 @@ func TestEditWithoutTokenIs401(t *testing.T) {
 	assert.False(t, patchCalled, "no K8s apply must run for a token-less request")
 }
 
-// TestEditMissingBodyIs400 proves an empty agentYAML body is a teaching 400.
+// TestEditMissingBodyIs400 proves an edit with neither agentYAML nor any field is a
+// teaching 400.
 func TestEditMissingBodyIs400(t *testing.T) {
 	const src = "name: echo\nimage: img:1\n"
 	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
@@ -368,5 +369,49 @@ func TestEditMissingBodyIs400(t *testing.T) {
 
 	rec := putAgent(t, s, "echo", "")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "agentYAML is required")
+	assert.Contains(t, rec.Body.String(), "no edit provided")
 }
+
+// TestMergeEditOntoSourceSpecPreservesTools pins the m25 S5 fix at the merge seam: a
+// field-only edit (image/prompt/scaling) overlays onto the stored source spec WITHOUT
+// dropping fields the edit form doesn't model — crucially `tools`.
+func TestMergeEditOntoSourceSpecPreservesTools(t *testing.T) {
+	stored := `{"image":"img:1","name":"echo","scaling":{"max":3,"min":1},"tools":["search","fetch"]}`
+	img, prompt := "img:2", "be helpful"
+	merged, mErr := mergeEditOntoSourceSpec(stored, UpdateAgentRequest{
+		Image:        &img,
+		SystemPrompt: &prompt,
+		Scaling:      &editScalingSpec{Min: intPtr(2), Max: intPtr(5)},
+	})
+	require.Nil(t, mErr)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(merged), &got))
+	assert.Equal(t, "img:2", got["image"], "image overlaid")
+	assert.Equal(t, "be helpful", got["systemPrompt"], "prompt overlaid")
+	assert.Equal(t, []any{"search", "fetch"}, got["tools"], "tools MUST survive a field-only edit")
+	sc, _ := got["scaling"].(map[string]any)
+	assert.EqualValues(t, 2, sc["min"])
+	assert.EqualValues(t, 5, sc["max"])
+}
+
+// TestEditFieldOnlySucceeds proves the console edit form's shape (structured fields,
+// no agentYAML) is now accepted end-to-end: it merges onto the source spec, re-expands,
+// and applies — the "agentYAML is required" bug is closed.
+func TestEditFieldOnlySucceeds(t *testing.T) {
+	src := "name: echo\nruntime: managed\nimage: img:1\ntools:\n  - search\n"
+	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	img := "img:2"
+	body, err := json.Marshal(UpdateAgentRequest{Image: &img})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPut, "/api/agents/"+detailNS+"/echo", bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, r)
+	require.Equal(t, http.StatusOK, rec.Code, "a field-only edit must be accepted; body: %s", rec.Body.String())
+}
+
+func intPtr(i int) *int { return &i }

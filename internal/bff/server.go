@@ -25,8 +25,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -102,6 +104,26 @@ type Server struct {
 	// pending-approval; the approval queue itself is M17 (here we only mark the
 	// state). Wired from MCP_REQUIRE_APPROVAL (Helm value bff.mcp.requireApproval).
 	mcpRequireApproval bool
+
+	// credentialNamespace + credentialClient move MCP grant Secrets out of the
+	// per-request (agent) namespace into ONE RBAC-locked platform namespace (m25.1b,
+	// ADR 0029 §7). When both are set, grant write/read/delete route through the
+	// privileged, namespace-scoped credentialClient against credentialNamespace — a
+	// bounded, deliberate exception to "the BFF SA never acts on user objects"
+	// (cmd/bff/main.go): it touches ONLY Secrets in this locked namespace, keyed by
+	// the authenticated caller's OWN identity, never a user CRD. When unset the BFF
+	// keeps the legacy caller-scoped, per-namespace grant path (ADR 0011). Wired from
+	// MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
+	credentialNamespace string
+	credentialClient    client.Client
+
+	// capabilitySigner mints the short-lived RUN CAPABILITY (runcap, ADR 0030 §2) at an
+	// authenticated /invoke: an EdDSA-signed JWT carrying the invoking user's hashed
+	// identity that the credential plane verifies to resolve THAT user's OBO credential.
+	// nil ⇒ minting DISABLED (no platform capability key configured) — the invoke carries
+	// no capability and a downstream tool call resolves as unattended (org/public only),
+	// never another user's grant. Built in NewServer from MCP_CAPABILITY_PRIVATE_KEY.
+	capabilitySigner *runcap.Signer
 
 	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
 	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
@@ -185,6 +207,34 @@ type Options struct {
 	// (hardened) they are marked pending-approval (the approval queue is M17). Wired
 	// from MCP_REQUIRE_APPROVAL in cmd/bff/main.go.
 	MCPRequireApproval bool
+	// MCPGrantHMACKey is the per-cluster key that salts the one-way user-identity hash
+	// used as the grant Secret label + mcp-owner annotation (m25.1, ADR 0029 §7). When
+	// non-empty, userGrantHash is HMAC-SHA256(user, key) — offline confirmation of a
+	// low-entropy username/email is infeasible without the key. When empty (dev /
+	// not-yet-hardened), it degrades to legacy unsalted SHA-256 with a start-up warning.
+	// A production cluster MUST set it (a per-cluster platform Secret); wired from
+	// MCP_GRANT_HMAC_KEY in cmd/bff/main.go. Immutable after start-up (changing it
+	// re-keys all grants ⇒ re-consent).
+	MCPGrantHMACKey []byte
+	// MCPCredentialNamespace is the locked platform namespace that holds every MCP
+	// grant Secret when set (m25.1b, ADR 0029 §7). Empty ⇒ legacy per-request-namespace
+	// grants. Wired from MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
+	MCPCredentialNamespace string
+	// CredentialClient is the privileged, namespace-scoped client used to write/read/
+	// delete grant Secrets in MCPCredentialNamespace (the BFF's own SA — tenants have
+	// no RBAC there). Built in cmd/bff/main.go only when MCPCredentialNamespace is set;
+	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
+	// why this bounded SA use does not reopen the confused-deputy gap.
+	CredentialClient client.Client
+	// MCPCapabilityPrivateSeedB64 is the base64-encoded Ed25519 private seed the BFF signs
+	// run capabilities with (runcap, ADR 0030 §2/§5) — a per-cluster platform Secret. Empty
+	// ⇒ capability minting is DISABLED (an /invoke carries no capability header). Wired from
+	// MCP_CAPABILITY_PRIVATE_KEY in cmd/bff/main.go.
+	MCPCapabilityPrivateSeedB64 string
+	// MCPCapabilityAudience is the credential-plane audience minted capabilities target
+	// (their `aud`); the sidecar / central token service verify against the same value.
+	// Defaults to defaultCapabilityAudience when empty. Wired from MCP_CAPABILITY_AUDIENCE.
+	MCPCapabilityAudience string
 	// PromptResolver is the OPTIONAL server-side resolver for git-pointer PromptVersions
 	// (m17.8). When nil (the default), the diff endpoint returns an honest 501
 	// ("prompt resolution not configured"). Wire a FixtureResolver in tests and a
@@ -214,6 +264,8 @@ func NewServer(opts Options) *Server {
 		platformGenerationModels: opts.PlatformGenerationModels,
 		mcpEnabled:               opts.MCPEnabled,
 		mcpRequireApproval:       opts.MCPRequireApproval,
+		credentialNamespace:      opts.MCPCredentialNamespace,
+		credentialClient:         opts.CredentialClient,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		log:                      opts.Log,
@@ -224,7 +276,78 @@ func NewServer(opts Options) *Server {
 	if opts.StaticDir != "" {
 		s.static = os.DirFS(opts.StaticDir)
 	}
+	// Wire the per-cluster HMAC key that salts the one-way user-identity hash used for
+	// grant Secret labels + the mcp-owner annotation (m25.1, ADR 0029 §7). Package-level
+	// because userGrantHash is also called by the runtime resolver (not a *Server); the
+	// key is cluster-global and set once. Empty ⇒ legacy unsalted SHA-256 (warned below).
+	setGrantHMACKey(opts.MCPGrantHMACKey)
+	if s.mcpEnabled && len(opts.MCPGrantHMACKey) == 0 {
+		opts.Log.Info("mcp: MCP_GRANT_HMAC_KEY not set — user-identity hashes use legacy unsalted SHA-256; " +
+			"set a per-cluster HMAC key before production (ADR 0029 §7). Changing it later re-keys grants (re-consent).")
+	}
+	if s.mcpEnabled && s.credentialNamespace == "" {
+		opts.Log.Info("mcp: MCP_CREDENTIAL_NAMESPACE not set — MCP grant Secrets are stored in the per-request " +
+			"(agent) namespace (legacy); set a locked platform namespace before production (ADR 0029 §7) so a " +
+			"tenant cannot read another user's grant tokens.")
+	}
+	// Build the run-capability signer from the per-cluster platform key (runcap, ADR 0030
+	// §2). Absent ⇒ minting stays disabled (an /invoke carries no capability). A malformed
+	// seed is a hard misconfiguration surfaced at start-up, never a silent wrong-key.
+	if seed := opts.MCPCapabilityPrivateSeedB64; seed != "" {
+		priv, decErr := runcap.DecodePrivateSeed(seed)
+		if decErr != nil {
+			opts.Log.Error(decErr, "mcp: MCP_CAPABILITY_PRIVATE_KEY is set but invalid — run-capability minting DISABLED")
+		} else {
+			aud := opts.MCPCapabilityAudience
+			if aud == "" {
+				aud = defaultCapabilityAudience
+			}
+			s.capabilitySigner = runcap.NewSigner(priv, aud, nil)
+		}
+	} else if s.mcpEnabled {
+		opts.Log.Info("mcp: MCP_CAPABILITY_PRIVATE_KEY not set — run capabilities are NOT minted; a tool call " +
+			"resolves as unattended (org/public only) until the platform capability key + egress sidecar are deployed (ADR 0030).")
+	}
 	return s
+}
+
+// lockedCredentials reports whether grant Secrets are consolidated into the RBAC-locked
+// credential namespace (m25.1b): true only when BOTH a namespace and its privileged
+// client are wired, so the coordinate + client decisions can never disagree. False ⇒
+// the legacy caller-scoped, per-request-namespace grant path (ADR 0011).
+func (s *Server) lockedCredentials() bool {
+	return s.credentialNamespace != "" && s.credentialClient != nil
+}
+
+// grantCoordinates resolves a grant Secret's (namespace, name) for the current mode
+// (locked → the credential namespace with the source ns folded in; legacy → the source
+// namespace, original name). The single call the write/delete paths share so they land
+// on the exact object the OBO resolver will later read.
+func (s *Server) grantCoordinates(sourceNs, server, userHash string) (namespace, name string) {
+	credNs := ""
+	if s.lockedCredentials() {
+		credNs = s.credentialNamespace
+	}
+	return grantSecretCoordinates(credNs, sourceNs, server, userHash)
+}
+
+// grantClient returns the client that writes/reads/deletes a grant Secret: the
+// privileged credential-component client in locked mode (tenants have no RBAC in the
+// credential namespace), else the caller-scoped client (legacy, ADR 0011).
+func (s *Server) grantClient(caller client.Client) client.Client {
+	if s.lockedCredentials() {
+		return s.credentialClient
+	}
+	return caller
+}
+
+// grantSourceNSLabel is the source-namespace label value to stamp: the origin
+// namespace in locked mode (the authoritative match key there), "" in legacy mode.
+func (s *Server) grantSourceNSLabel(sourceNs string) string {
+	if s.lockedCredentials() {
+		return sourceNs
+	}
+	return ""
 }
 
 // Handler returns the fully-wired http.Handler: the /api mux (auth-gated) plus
@@ -691,6 +814,10 @@ func (s *Server) Handler() http.Handler {
 			// distinct patterns.
 			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
 			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
+			// Admin org-credential (m25.9, ADR 0029 §7): promote a server to org scope + set
+			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
+			// scope change is written caller-scoped (a viewer can't update it → 403).
+			authed.HandleFunc("POST /api/mcp/org-credential", s.handleSetOrgCredential)
 			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
 			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
 			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries

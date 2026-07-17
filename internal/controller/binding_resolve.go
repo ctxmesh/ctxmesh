@@ -35,6 +35,14 @@ const (
 	// toolsConfigMapKey is the data key inside the <agent>-tools ConfigMap.
 	toolsConfigMapKey = "tools.json"
 
+	// mcpAuthTypeAnnotation / mcpOAuthAuthType MUST match internal/bff.annMCPAuthType +
+	// its "oauth" value — the non-secret annotation the register flow stamps on a server's
+	// ToolRegistry. The OBO egress path reads it so the sidecar returns consent-required
+	// (OAuth) vs open (no credential) on a missing grant. (A future consolidation could
+	// move the MCP annotation keys into a shared package.)
+	mcpAuthTypeAnnotation = "agents.ctxmesh.ai/mcp-auth-type"
+	mcpOAuthAuthType      = "oauth"
+
 	// Ready-condition reasons for MCPToolBinding validation.
 	reasonBound            = "Bound"
 	reasonUnregisteredTool = "UnregisteredTool"
@@ -231,6 +239,12 @@ func resolveAgentBindings(
 			// model exact tool-call parameters. Nil when the entry has none
 			// (curated/legacy) → manifest omits it → SDK permissive fallback.
 			InputSchema: registryInputSchema(b, registries),
+			// OBO egress (ADR 0030): the server (ToolRegistry) is the credential-
+			// resolution key + the sidecar route key; OAuth gates consent-required vs
+			// open on a missing grant. Populated always (metadata-only); the rewrite +
+			// sidecar injection are applied only when OBO egress is enabled.
+			ServerName: b.Spec.RegistryRef,
+			OAuth:      registries[b.Spec.RegistryRef].Annotations[mcpAuthTypeAnnotation] == mcpOAuthAuthType,
 		})
 	}
 	return valid, validations, nil

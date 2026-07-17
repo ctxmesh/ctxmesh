@@ -22,7 +22,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
 // The OAuth 2.1 (Authorization-Code + PKCE) tier of BYO-MCP registration (ADR
@@ -77,27 +78,18 @@ const oauthTokenTimeout = 15 * time.Second
 // cannot force unbounded buffering. Token responses are small JSON.
 const maxOAuthBodyBytes = 1 << 20
 
-// refreshSkew is how far BEFORE the recorded expiry a stored access token is
-// considered "near expiry" and is proactively refreshed. It absorbs clock skew
-// and the round-trip latency of the call the token is about to authenticate.
-const refreshSkew = 60 * time.Second
-
 // Secret data keys for an OAuth grant Secret. The access/refresh tokens and the
 // expiry are stored under stable keys so the credential resolver + refresh helper
 // agree. NONE of these values is ever surfaced in a DTO/log/annotation.
+// OAuth grant-Secret data keys now live in internal/credresolve (the single source of
+// the grant wire format, ADR 0030). These aliases keep the bff OAuth handlers reading
+// with the same keys the credential plane reads/writes — a divergence is impossible.
 const (
-	secretKeyOAuthAccessToken  = "oauth-access-token"
-	secretKeyOAuthRefreshToken = "oauth-refresh-token"
-	// secretKeyOAuthExpiry holds the access-token expiry as an RFC3339 timestamp
-	// so the refresh helper knows when to rotate. A timestamp (not a raw
-	// expires_in) survives restarts correctly.
-	secretKeyOAuthExpiry = "oauth-expiry"
-	// secretKeyOAuthTokenEndpoint / secretKeyOAuthClientID persist the endpoint +
-	// client id the refresh call needs (non-secret, but kept in the Secret so the
-	// refresh helper needs only the Secret to rotate). Stored here — never in a
-	// public annotation/DTO — so the grant is fully self-contained.
-	secretKeyOAuthTokenEndpoint = "oauth-token-endpoint"
-	secretKeyOAuthClientID      = "oauth-client-id"
+	secretKeyOAuthAccessToken   = credresolve.KeyAccessToken
+	secretKeyOAuthRefreshToken  = credresolve.KeyRefreshToken
+	secretKeyOAuthExpiry        = credresolve.KeyExpiry
+	secretKeyOAuthTokenEndpoint = credresolve.KeyTokenEndpoint
+	secretKeyOAuthClientID      = credresolve.KeyClientID
 )
 
 // annMCPAuthType persists the auth tier ("oauth") on the ToolRegistry/Secret so
@@ -312,17 +304,11 @@ func (s *Server) startOAuthFlow(cfg mcpOAuthConfig, tmpl pendingOAuthFlow) (auth
 	return u.String(), st, nil
 }
 
-// oauthTokens is the result of a token-endpoint exchange or refresh. The tokens
-// live here transiently on the server side (between the HTTP response and the
-// Secret write) and NEVER cross into a DTO/log.
-type oauthTokens struct {
-	AccessToken  string
-	RefreshToken string
-	// ExpiresAt is the absolute access-token expiry (now + expires_in). Zero when
-	// the server returned no expires_in (a non-expiring token — no proactive
-	// refresh is scheduled).
-	ExpiresAt time.Time
-}
+// oauthTokens is the result of a token-endpoint exchange or refresh — the credresolve
+// token triple, aliased so the bff OAuth flow and the credential plane share ONE type
+// (ADR 0030). The tokens live here transiently (between the HTTP response and the Secret
+// write) and NEVER cross into a DTO/log.
+type oauthTokens = credresolve.Tokens
 
 // tokenEndpointResponse maps the OAuth token-endpoint JSON response. expires_in
 // is seconds-until-expiry per RFC 6749; refresh_token may be absent (a server
@@ -455,41 +441,25 @@ func oauthErrorCode(code string) string {
 	return b.String()
 }
 
-// oauthSecretData builds the Secret data map for an OAuth grant: the access token,
-// the refresh token (when present), the expiry (RFC3339, when known), and the
-// token endpoint + client id the refresh helper needs. This is the ONLY object
-// the tokens land in — never a DTO, log, annotation, or label.
+// oauthSecretData builds the grant-Secret data map for a set of tokens. It delegates to
+// credresolve.SecretData (the single source of the grant wire format, ADR 0030) so the
+// BFF writes exactly what the credential plane reads. This is the ONLY object the tokens
+// land in — never a DTO, log, annotation, or label.
 func oauthSecretData(cfg mcpOAuthConfig, toks oauthTokens) map[string][]byte {
-	data := map[string][]byte{
-		secretKeyOAuthAccessToken:   []byte(toks.AccessToken),
-		secretKeyOAuthTokenEndpoint: []byte(strings.TrimSpace(cfg.TokenEndpoint)),
-		secretKeyOAuthClientID:      []byte(strings.TrimSpace(cfg.ClientID)),
-	}
-	if toks.RefreshToken != "" {
-		data[secretKeyOAuthRefreshToken] = []byte(toks.RefreshToken)
-	}
-	if !toks.ExpiresAt.IsZero() {
-		data[secretKeyOAuthExpiry] = []byte(toks.ExpiresAt.UTC().Format(time.RFC3339))
-	}
-	return data
+	return credresolve.SecretData(
+		credresolve.OAuthConfig{TokenEndpoint: cfg.TokenEndpoint, ClientID: cfg.ClientID},
+		toks,
+	)
 }
 
-// errNoRefreshToken is returned by refreshMCPOAuthToken when the grant Secret has
-// no refresh token to rotate with (a non-refreshable grant — the caller must
-// re-consent rather than refresh).
-var errNoRefreshToken = errors.New("oauth grant has no refresh token")
+// errNoRefreshToken is returned when a grant is at/near expiry but has no refresh token
+// to rotate with (the caller must re-consent). Aliased to the credresolve sentinel so
+// the BFF and the credential plane agree on the exact error (ADR 0030).
+var errNoRefreshToken = credresolve.ErrNoRefreshToken
 
-// oauthTokenNeedsRefresh reports whether an access token stored with the given
-// expiry timestamp is at/near expiry (within refreshSkew). An empty/unparseable
-// expiry means "no known expiry" → no proactive refresh (a non-expiring token).
+// oauthTokenNeedsRefresh reports whether an access token stored with the given expiry is
+// at/near expiry. Delegates to credresolve.NeedsRefresh (the single source of the refresh
+// policy, ADR 0030).
 func oauthTokenNeedsRefresh(expiry string, now time.Time) bool {
-	expiry = strings.TrimSpace(expiry)
-	if expiry == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, expiry)
-	if err != nil {
-		return false
-	}
-	return !now.Before(t.Add(-refreshSkew))
+	return credresolve.NeedsRefresh(expiry, now)
 }

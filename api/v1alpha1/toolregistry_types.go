@@ -104,11 +104,15 @@ type ToolEntry struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.tools.all(i, self.tools.filter(j, j.name == i.name).size() == 1)",message="tool names must be unique within a ToolRegistry"
 type ToolRegistrySpec struct {
-	// tools is the catalog of approved MCP tools. At most 20 entries —
-	// MaxItems (with MaxLength on entry fields) bounds the O(n²) CEL cost of
-	// the uniqueness rule under the apiserver's budget.
+	// tools is the catalog of approved MCP tools. At most 200 entries: real MCP
+	// servers routinely expose far more than a handful of tools (e.g. Scalekit ~35,
+	// GitHub ~100), so a low cap made legitimate servers un-registerable. MaxItems
+	// (with MaxLength=63 on the name) still bounds the O(n²) uniqueness rule's CEL
+	// cost (~200²×~10 ≈ 6e5, well under the apiserver's 1e7 budget). A registry only
+	// CATALOGS tools; an agent binds a subset (AgentDeployment tool refs are capped
+	// separately), so a large catalog does not bloat any single agent.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:MaxItems=200
 	Tools []ToolEntry `json:"tools"`
 }
 

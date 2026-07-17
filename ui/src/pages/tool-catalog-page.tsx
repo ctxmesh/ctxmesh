@@ -7,6 +7,7 @@ import {
   Code2,
   Loader2,
   RefreshCw,
+  Server,
   Shield,
   User,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import {
   type WizardStep,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
+import { groupToolsByServer } from "@/lib/tool-groups";
 import { useNamespace } from "@/lib/namespace";
 import {
   api,
@@ -102,6 +104,19 @@ export function ToolCatalogPage() {
   const [filter, setFilter] = React.useState<FilterState>("all");
   const [q, setQ] = React.useState("");
   const [wizard, setWizard] = React.useState<WizardState>({ kind: "closed" });
+  // MCP-server grouping (m25 S11) is collapsible; browse defaults to EXPANDED (the
+  // grouping is visible up front) so we track which servers the user COLLAPSED.
+  const [collapsedServers, setCollapsedServers] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleServer = React.useCallback((server: string) => {
+    setCollapsedServers((s) => {
+      const next = new Set(s);
+      if (next.has(server)) next.delete(server);
+      else next.add(server);
+      return next;
+    });
+  }, []);
 
   const { can } = useCapabilities();
   // Binding is a write op — gated on mcptoolbindings/create. Display-only;
@@ -264,18 +279,47 @@ export function ToolCatalogPage() {
               intent="filtered"
             />
           ) : (
-            <div
-              className="rounded-lg border bg-card shadow-card divide-y"
-              data-testid="catalog-tool-list"
-            >
-              {displayedTools.map((tool) => (
-                <ToolRow
-                  key={tool.name}
-                  tool={tool}
-                  canBind={canBind}
-                  onBind={() => setWizard({ kind: "open", tool })}
-                />
-              ))}
+            // Group the catalog by MCP server (m25 S11) as a COLLAPSIBLE tree: the
+            // catalog shows the servers; click one to reveal its tools. Curated tools
+            // (no registry) group last under "Curated tools".
+            <div className="space-y-3" data-testid="catalog-tool-list">
+              {groupToolsByServer(displayedTools).map(([server, tools]) => {
+                const isOpen = !collapsedServers.has(server);
+                return (
+                  <div
+                    key={server}
+                    className="overflow-hidden rounded-lg border bg-card shadow-card"
+                    data-testid={`catalog-group-${server}`}
+                  >
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 bg-muted/40 px-4 py-2.5 text-left hover:bg-muted/60"
+                      onClick={() => toggleServer(server)}
+                      aria-expanded={isOpen}
+                      data-testid={`catalog-group-toggle-${server}`}
+                    >
+                      <ChevronRight
+                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
+                      />
+                      <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 truncate text-sm font-medium">{server}</span>
+                      <Badge variant="secondary">{tools.length}</Badge>
+                    </button>
+                    {isOpen && (
+                      <div className="divide-y border-t">
+                        {tools.map((tool) => (
+                          <ToolRow
+                            key={`${server}/${tool.name}`}
+                            tool={tool}
+                            canBind={canBind}
+                            onBind={() => setWizard({ kind: "open", tool })}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </>
@@ -303,6 +347,8 @@ interface ToolRowProps {
 function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
   const state = toolState(tool);
   const isPending = state === "pending-approval";
+  const hasSchema = tool.inputSchema !== undefined && tool.inputSchema !== null;
+  const [showSchema, setShowSchema] = React.useState(false);
 
   return (
     <div
@@ -314,25 +360,38 @@ function ToolRow({ tool, canBind, onBind }: ToolRowProps) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">{tool.name}</span>
           <ToolStateBadge state={state} toolName={tool.name} />
-          {tool.inputSchema !== undefined && (
-            <Badge variant="outline" className="text-[10px]">
-              <Code2 className="mr-1 h-2.5 w-2.5" />
-              schema
-            </Badge>
+          {hasSchema && (
+            <button
+              type="button"
+              onClick={() => setShowSchema((s) => !s)}
+              data-testid={`catalog-schema-toggle-${tool.name}`}
+              aria-expanded={showSchema}
+            >
+              <Badge
+                variant="outline"
+                className="cursor-pointer text-[10px] hover:bg-muted"
+              >
+                <Code2 className="mr-1 h-2.5 w-2.5" />
+                {showSchema ? "hide schema" : "schema"}
+              </Badge>
+            </button>
           )}
         </div>
         {tool.description && (
           <p className="text-sm text-muted-foreground">{tool.description}</p>
         )}
-        {tool.source && (
-          <p className="font-mono text-xs text-muted-foreground">
-            source: {tool.source}
-          </p>
-        )}
         {isPending && (
           <p className="text-xs text-warning-foreground">
             Awaiting operator approval — cannot bind until approved.
           </p>
+        )}
+        {showSchema && hasSchema && (
+          <pre
+            className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 text-xs"
+            data-testid={`catalog-schema-${tool.name}`}
+          >
+            {JSON.stringify(tool.inputSchema, null, 2)}
+          </pre>
         )}
       </div>
       <div className="shrink-0">
