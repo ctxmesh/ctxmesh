@@ -45,8 +45,13 @@ function recordingFetch(opts?: {
       if (path.startsWith("/api/capabilities")) {
         return j({
           namespace: "",
-          allowed: opts?.caps ?? { agentregistries: { create: true, delete: true } },
+          allowed: opts?.caps ?? {
+            agentregistries: { create: true, update: true, delete: true },
+          },
         });
+      }
+      if (path === "/api/mcp/org-credential" && method === "POST") {
+        return j({ status: "org-credential-set", server: "scalekit-mcp-server", namespace: "prod" });
       }
       if (path.endsWith("/references")) {
         return j({ references: opts?.references ?? [], bindingCount: (opts?.references ?? []).length });
@@ -73,6 +78,7 @@ interface McpRow {
   toolCount: number;
   status: string;
   authType?: string;
+  scope?: string;
 }
 const defaultRow: McpRow = {
   name: "scalekit-mcp-server",
@@ -81,6 +87,7 @@ const defaultRow: McpRow = {
   toolCount: 35,
   status: "approved",
   authType: "oauth",
+  scope: "personal",
 };
 
 function renderPage() {
@@ -132,6 +139,30 @@ describe("McpServersPage delete (m26.4)", () => {
       expect(screen.queryByTestId("mcp-server-scalekit-mcp-server")).toBeNull();
     });
     expect(screen.getByText(/No MCP servers yet/)).toBeInTheDocument();
+  });
+
+  it("shows the scope badge and promotes a server to org scope with a shared credential, then reloads", async () => {
+    const calls = recordingFetch();
+    renderPage();
+
+    // The current scope is surfaced as a badge.
+    expect(await screen.findByTestId("scope-scalekit-mcp-server")).toHaveTextContent("personal");
+
+    // The org-credential (share) action opens a dialog with a credential input.
+    fireEvent.click(screen.getByTestId("org-cred-scalekit-mcp-server"));
+    const input = await screen.findByTestId("org-cred-input");
+    expect(input).toHaveAttribute("type", "password"); // the secret is never a plain field
+    fireEvent.change(input, { target: { value: "org-shared-token" } });
+
+    fireEvent.click(screen.getByTestId("org-cred-submit"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === "POST" && c.url === "/api/mcp/org-credential")).toBe(true);
+    });
+    // A reload follows (a second list GET after the initial one).
+    await waitFor(() => {
+      expect(calls.filter((c) => c.url === "/api/mcpservers" && c.method === "GET").length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it("hides the delete affordance when the caller cannot delete registries", async () => {

@@ -67,7 +67,8 @@
         "url": "https://mcp.acme.dev/sse",
         "toolCount": 3,
         "status": "approved",
-        "secretName": "acme-key"
+        "secretName": "acme-key",
+        "scope": ""
       }
     ],
     "items": [
@@ -77,7 +78,8 @@
         "url": "https://mcp.acme.dev/sse",
         "toolCount": 3,
         "status": "approved",
-        "secretName": "acme-key"
+        "secretName": "acme-key",
+        "scope": ""
       }
     ]
   },

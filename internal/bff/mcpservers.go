@@ -717,6 +717,13 @@ func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSumm
 	if status == "" {
 		status = agentsv1alpha1.ApprovalApproved
 	}
+	// Scope for display: the label value, grandfathering an absent label to "org"
+	// (ADR 0029 — a pre-scope server is visible org-wide). Visibility only; a resolve
+	// never keys on this.
+	scope := tr.Labels[labelMCPScope]
+	if scope == "" {
+		scope = scopeOrg
+	}
 	return MCPServerSummary{
 		Name:       tr.Name,
 		Namespace:  tr.Namespace,
@@ -725,6 +732,7 @@ func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSumm
 		Status:     status,
 		SecretName: tr.Annotations[annMCPSecret],
 		AuthType:   mcpServerSummaryAuthType(tr),
+		Scope:      scope,
 	}
 }
 
