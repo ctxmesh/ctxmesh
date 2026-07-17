@@ -706,6 +706,27 @@ export interface McpServerSummary {
   authType?: string;
 }
 
+// McpServerReference is one object that depends on an MCP server — an MCPToolBinding
+// whose RegistryRef is the server, which would go RegistryNotFound on delete (m26.3).
+export interface McpServerReference {
+  kind: string;
+  name: string;
+  agentRef: string;
+}
+
+// McpServerReferencesResponse is the delete-impact preview for an MCP server.
+export interface McpServerReferencesResponse {
+  references: McpServerReference[];
+  bindingCount: number;
+}
+
+// DeleteMcpServerResponse reports what a deregister tore down + which bindings it
+// left dangling (RegistryNotFound).
+export interface DeleteMcpServerResponse {
+  deleted: string[];
+  orphanedBindings: string[];
+}
+
 export interface McpServerListResponse {
   // The BFF returns the same rows under both keys (list-contract); read `items`
   // with a `servers` fallback, defaulting to [] so an odd shape never crashes.
@@ -1989,6 +2010,31 @@ export const api = {
   // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
   listMcpServers: (signal?: AbortSignal) =>
     getJSON<McpServerListResponse>("/api/mcpservers", signal),
+
+  // mcpServerReferences returns the delete-impact for an MCP server (m26.3) — the
+  // dependent MCPToolBindings that would go RegistryNotFound if the server is deleted.
+  mcpServerReferences: (ns: string, name: string, signal?: AbortSignal) =>
+    getJSON<McpServerReferencesResponse>(
+      `/api/mcpservers/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/references`,
+      signal,
+    ),
+
+  // deleteMcpServer tears down an MCP server's whole register bundle — catalog,
+  // credential Secret, SecretBinding, and egress NetworkPolicy (m26.3). A 403 = not
+  // the owner (personal server) or RBAC-denied; a 404 = no such server.
+  deleteMcpServer: async (ns: string, name: string): Promise<DeleteMcpServerResponse> => {
+    const res = await apiFetch(
+      `/api/mcpservers/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+    if (res.ok) {
+      return (await res.json()) as DeleteMcpServerResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `deleteMcpServer failed (${res.status})`),
+      res.status,
+    );
+  },
 
   // mcpApprovals lists the pending MCP servers awaiting operator approval
   // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the

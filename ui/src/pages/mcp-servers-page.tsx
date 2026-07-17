@@ -1,13 +1,25 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Plus, Wrench } from "lucide-react";
+import { ExternalLink, Plus, Trash2, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { EmptyState, ErrorState, ForbiddenInline, SkeletonTable } from "@/components/kit";
+import {
+  ConfirmDialog,
+  EmptyState,
+  ErrorState,
+  ForbiddenInline,
+  SkeletonTable,
+  useToast,
+} from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_REGISTRIES } from "@/lib/nav";
-import { api, ApiError, type McpServerSummary } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  type McpServerReference,
+  type McpServerSummary,
+} from "@/lib/api";
 
 // McpServersPage (m25 S10) — the LIST of registered BYO-MCP servers, with an
 // "Add MCP server" action ON the page (not a separate add-only nav item). Read-open
@@ -24,7 +36,10 @@ export function McpServersPage() {
   const navigate = useNavigate();
   const { can } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
+  const canDelete = can(RES_REGISTRIES, "delete");
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
+  // The server currently queued for deletion (its ConfirmDialog is open).
+  const [toDelete, setToDelete] = React.useState<McpServerSummary | null>(null);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
@@ -146,12 +161,148 @@ export function McpServersPage() {
                     <ExternalLink className="mr-1 h-3.5 w-3.5" />
                     Tools
                   </Button>
+                  {canDelete && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setToDelete(s)}
+                      data-testid={`delete-mcp-${s.name}`}
+                      aria-label={`Delete ${s.name}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                 </div>
               </div>
             </li>
           ))}
         </ul>
       )}
+
+      {toDelete && (
+        <DeleteMcpDialog
+          server={toDelete}
+          onClose={() => setToDelete(null)}
+          onDeleted={() => {
+            setToDelete(null);
+            load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// DeleteMcpDialog (m26.4) — loads the delete-impact (dependent bindings) then shows a
+// typed-name ConfirmDialog. On confirm → DELETE the server bundle → reload the list.
+// The dialog's impact list scrolls (the m26.1 ConfirmDialog fix), so a server with many
+// dependent bindings never hides the Delete button.
+type RefsLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; references: McpServerReference[] }
+  | { kind: "error"; message: string };
+
+function DeleteMcpDialog({
+  server,
+  onClose,
+  onDeleted,
+}: {
+  server: McpServerSummary;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const { toast } = useToast();
+  const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
+  const [deleting, setDeleting] = React.useState(false);
+
+  React.useEffect(() => {
+    const c = new AbortController();
+    api
+      .mcpServerReferences(server.namespace, server.name, c.signal)
+      .then((res) => {
+        if (c.signal.aborted) return;
+        setRefs({ kind: "ready", references: res.references });
+      })
+      .catch((err: unknown) => {
+        if (c.signal.aborted) return;
+        setRefs({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load delete impact",
+        });
+      });
+    return () => c.abort();
+  }, [server.namespace, server.name]);
+
+  async function onConfirm() {
+    setDeleting(true);
+    try {
+      await api.deleteMcpServer(server.namespace, server.name);
+      toast({
+        variant: "success",
+        title: "MCP server deleted",
+        description: `${server.name} and its tools were removed.`,
+      });
+      onDeleted();
+    } catch (err) {
+      toast({
+        variant: "error",
+        title: "Delete failed",
+        description: err instanceof Error ? err.message : "delete failed",
+      });
+      setDeleting(false);
+      onClose();
+    }
+  }
+
+  const impact =
+    refs.kind === "loading" ? (
+      <p className="text-sm text-muted-foreground" data-testid="mcp-refs-loading">
+        Loading delete impact…
+      </p>
+    ) : refs.kind === "error" ? (
+      <p className="text-sm text-muted-foreground" data-testid="mcp-refs-error">
+        Couldn't load delete impact ({refs.message}) — proceeding will still delete the
+        server.
+      </p>
+    ) : refs.references.length === 0 ? (
+      <p className="text-sm text-muted-foreground" data-testid="mcp-refs-empty">
+        No agents depend on this server's tools.
+      </p>
+    ) : (
+      <div data-testid="mcp-refs-list">
+        <p className="mb-2 text-xs font-medium text-muted-foreground">
+          Deleting this server breaks {refs.references.length} bound{" "}
+          {refs.references.length === 1 ? "tool" : "tools"} (they become
+          RegistryNotFound):
+        </p>
+        <ul className="space-y-1.5">
+          {refs.references.map((r) => (
+            <li
+              key={r.name}
+              className="flex items-center justify-between gap-2 text-sm"
+              data-testid={`mcp-ref-${r.name}`}
+            >
+              <span className="truncate font-mono text-xs">{r.name}</span>
+              <Badge variant="secondary" className="text-[10px]">
+                agent {r.agentRef}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+
+  return (
+    <ConfirmDialog
+      open={true}
+      onCancel={onClose}
+      onConfirm={onConfirm}
+      title={`Delete ${server.name}?`}
+      description={`This permanently deletes the MCP server "${server.name}" — its catalog, credential, and egress. Bound tools break until re-pointed.`}
+      confirmText={server.name}
+      confirmLabel="Delete server"
+      busy={deleting}
+      impact={impact}
+    />
   );
 }
