@@ -17,6 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { api, ApiError, type CreatedObject } from "@/lib/api";
+import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 import {
@@ -60,6 +61,10 @@ export function PlaygroundPage() {
   const [input, setInput] = useState('{\n  "input": "Hello, agent"\n}');
   const [run, setRun] = useState<Run>({ kind: "idle" });
   const [exp, setExp] = useState<Export>({ kind: "idle" });
+  // Inline consent (ADR 0031, m26.2): the server currently being connected (its inline
+  // "Connect" button shows a spinner) and any begin-consent error.
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
   // RBAC-aware chrome (§3): running an agent and applying a CRD are both
   // create-shaped ops; a viewer's affordances are hidden. DISPLAY-ONLY — the API
   // still enforces, so the 403 paths below stay live even if this is optimistic.
@@ -105,6 +110,60 @@ export function PlaygroundPage() {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
     }
+  }
+
+  // onConnect runs the INLINE per-user consent (ADR 0031, m26.2): begin the OAuth grant
+  // for the named server (the BFF recovers the OAuth config, so we send only the server),
+  // open the provider consent in a POPUP so this run stays on screen, then — when the
+  // popup messages back (the auto-close bridge) or is closed — RE-RUN the same invoke so
+  // the freshly-connected credential is injected. The token never touches the SPA; the
+  // exchange is entirely server-side. Popup blocked → full-page redirect fallback.
+  async function onConnect(server: string) {
+    setConnectError(null);
+    setConnecting(server);
+    let authorizationURL: string;
+    try {
+      const res = await api.beginMcpGrant({ server, namespace: namespace.trim() });
+      authorizationURL = res.authorizationURL;
+    } catch (err) {
+      setConnecting(null);
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setConnectError(err instanceof Error ? err.message : "Couldn't start the connect flow.");
+      return;
+    }
+
+    const popup = window.open(
+      authorizationURL,
+      "ctxmesh-oauth-connect",
+      "width=520,height=680,menubar=no,toolbar=no",
+    );
+    if (!popup) {
+      // Popup blocked → fall back to a full-page redirect. The run state is lost, but
+      // the connect completes and the user re-runs on return.
+      window.location.href = authorizationURL;
+      return;
+    }
+
+    // Resume when the popup reports back (message) or is closed; re-invoke once.
+    let done = false;
+    let poll = 0;
+    function finish() {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onMessage);
+      window.clearInterval(poll);
+      setConnecting(null);
+      void onRun(); // re-invoke in place — the resume
+    }
+    function onMessage(e: MessageEvent) {
+      if (e.origin !== window.location.origin) return;
+      const data = e.data as { type?: string } | null;
+      if (data?.type === MCP_OAUTH_MESSAGE) finish();
+    }
+    window.addEventListener("message", onMessage);
+    poll = window.setInterval(() => {
+      if (popup.closed) finish();
+    }, 700);
   }
 
   // Export-to-CRD: preview the expanded CRD (POST /api/expand), then apply it
@@ -279,17 +338,31 @@ export function PlaygroundPage() {
                   {run.consentRequired && run.consentRequired.length > 0 && (
                     <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                      <div className="space-y-1">
+                      <div className="space-y-2">
                         <p className="font-medium">Connect your account to continue</p>
                         <p className="text-muted-foreground">
-                          This run needs your own credentials for{" "}
-                          <span className="font-mono">{run.consentRequired.join(", ")}</span>.
-                          Connect your account on the{" "}
-                          <Link to="/tools/mcp-servers" className="underline">
-                            MCP Servers
-                          </Link>{" "}
-                          page, then run again.
+                          This run needs your own credentials. Connect, and it re-runs
+                          automatically.
                         </p>
+                        <div className="flex flex-wrap gap-2">
+                          {run.consentRequired.map((server) => (
+                            <Button
+                              key={server}
+                              size="sm"
+                              variant="outline"
+                              disabled={connecting !== null}
+                              onClick={() => void onConnect(server)}
+                              data-testid={`connect-${server}`}
+                            >
+                              {connecting === server ? "Connecting…" : `Connect ${server}`}
+                            </Button>
+                          ))}
+                        </div>
+                        {connectError && (
+                          <p className="text-destructive" data-testid="connect-error">
+                            {connectError}
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}

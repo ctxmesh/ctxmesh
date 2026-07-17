@@ -1923,6 +1923,31 @@ export const api = {
   addMcpServer: (req: AddMcpRequest, signal?: AbortSignal) =>
     postJSON<AddMcpRequest, AddMcpResponse>("/api/mcpservers", req, signal),
 
+  // beginMcpGrant starts the INLINE per-user OAuth consent for an ALREADY-REGISTERED
+  // server (ADR 0031, m26.2). The BFF recovers the server's OAuth client config
+  // server-side, so the SPA sends only { server, namespace } and gets back 202 +
+  // { authorizationURL, state }. The SPA opens that URL in a popup and NEVER sees a
+  // token — the exchange happens server-side on the callback, which stores the
+  // invoking user's grant. Used by the Playground's inline "Connect" affordance.
+  beginMcpGrant: async (
+    req: { server: string; namespace?: string },
+    signal?: AbortSignal,
+  ): Promise<OAuthInitResponse> => {
+    const res = await apiFetch("/api/mcp/oauth/grant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.status === 202) {
+      return (await res.json()) as OAuthInitResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `beginMcpGrant failed (${res.status})`),
+      res.status,
+    );
+  },
+
   // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202
   // + { authorizationURL, state } — the SPA redirects the browser to that URL and
   // NEVER sees a token (the full exchange happens server-side on callback). A 403
