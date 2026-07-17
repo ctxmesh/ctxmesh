@@ -333,18 +333,44 @@ func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
 	assert.Contains(t, pending.AuthorizationURL, "recovered-client-id", "authorize URL carries the recovered client id")
 }
 
-// TestMCPGrantConsentLegacyServerNeedsConfig (m26.1): a legacy OAuth server registered
-// before config persistence has no recoverable config; beginning consent with no auth
-// block fails validation honestly rather than starting a broken flow. Supplying the config
-// (overlay) still works — covered by TestMCPGrantConsentStoresPerUserGrant.
-func TestMCPGrantConsentLegacyServerNeedsConfig(t *testing.T) {
+// TestMCPGrantConsentLegacyServerDiscoveryFails (m26.1b): a legacy OAuth server with no
+// stored config triggers a discovery/DCR backfill; when discovery can't complete (here the
+// server URL is unreachable), the connect fails HONESTLY (422, ADR 0027) rather than a 500
+// or a broken flow.
+func TestMCPGrantConsentLegacyServerDiscoveryFails(t *testing.T) {
 	const server = "legacy-oauth-mcp"
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://legacy/mcp")).Build() // no OAuth config annotations
+		WithObjects(oauthToolRegistry(server, "http://legacy.invalid/mcp")).Build() // unreachable
 	s, _ := newGrantServer(t, c)
 
-	rec, _ := beginGrant(t, s, server, "alice-token", nil) // nothing to recover, nothing supplied
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "no recoverable + no supplied config → honest 400")
+	rec, _ := beginGrant(t, s, server, "alice-token", &MCPAuthRequest{Type: "oauth", RedirectURI: "https://console.example/api/mcp/oauth/callback"})
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, "unrecoverable config → honest 422")
+}
+
+// TestMCPGrantConsentLegacyServerBackfillsViaDiscovery (m26.1b): a legacy OAuth server (no
+// annMCPOAuth* annotations) begins consent by RE-DISCOVERING the config from its stored URL
+// (register's own path), and the recovered config is BACKFILLED onto the ToolRegistry so it
+// is a one-time recovery. The SPA supplies the redirect (only the browser knows its origin).
+func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
+	disco, _ := oauthDiscoveryStub(t, false, false) // DCR available, no CIMD
+	const server = "legacy-discoverable-mcp"
+	tr := oauthToolRegistry(server, disco.URL+"/mcp") // oauth + URL, but NO config annotations
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
+	s, _ := newGrantServer(t, c)
+
+	const redirect = "https://console.example/api/mcp/oauth/callback"
+	rec, pending := beginGrant(t, s, server, "bob-token", &MCPAuthRequest{Type: "oauth", RedirectURI: redirect})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, pending.AuthorizationURL, disco.URL+"/authorize", "authorize URL from the DISCOVERED endpoint")
+	assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "client id from DCR")
+
+	// The recovered config is persisted onto the ToolRegistry (one-time recovery).
+	var got agentsv1alpha1.ToolRegistry
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(tr), &got))
+	assert.Equal(t, disco.URL+"/authorize", got.Annotations[annMCPOAuthAuthEndpoint], "backfilled authorization endpoint")
+	assert.Equal(t, disco.URL+"/token", got.Annotations[annMCPOAuthTokenEndpoint], "backfilled token endpoint")
+	assert.Equal(t, "dyn-client-123", got.Annotations[annMCPOAuthClientID], "backfilled client id")
+	assert.Equal(t, redirect, got.Annotations[annMCPOAuthRedirectURI], "backfilled redirect uri")
 }
 
 // TestCreateMCPObjectsPersistsOAuthConfig (m26.1, ADR 0031): an OAuth registration stamps
