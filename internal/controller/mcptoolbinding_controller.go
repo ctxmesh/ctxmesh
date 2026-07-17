@@ -137,7 +137,53 @@ func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
+	// Adopt the binding under its AgentDeployment so deleting the agent cascades
+	// (GC) to its bindings instead of leaving them as orphans.
+	if err := r.ensureOwnedByAgent(ctx, &binding); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return r.syncAgent(ctx, binding.Namespace, binding.Spec.AgentRef)
+}
+
+// ensureOwnedByAgent stamps a controller ownerReference from the binding's
+// AgentDeployment onto the binding, so Kubernetes garbage-collects the binding
+// when the agent is deleted. Without it a bound tool set is left dangling on
+// agent delete (the ADR 0017 orphan-pruning gap) AND its deterministic name
+// (<agent>-<tool>) collides with a 409 when the agent is recreated.
+//
+// It is a self-healing no-op in the common case: already-owned bindings skip the
+// write, and when the AgentDeployment does not exist yet (a binding created
+// before its agent) adoption is deferred — the AgentDeployment watch in
+// SetupWithManager requeues the binding once the agent appears, and this stamps
+// the ref then. Only bindings whose agent is permanently gone stay orphaned
+// (nothing to own them); those are cleaned up out of band.
+func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
+	ctx context.Context,
+	binding *agentsv1alpha1.MCPToolBinding,
+) error {
+	for i := range binding.OwnerReferences {
+		o := &binding.OwnerReferences[i]
+		if o.Kind == "AgentDeployment" && o.Name == binding.Spec.AgentRef {
+			return nil // already owned by this agent
+		}
+	}
+
+	var agent agentsv1alpha1.AgentDeployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.AgentRef}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // agent not present yet — adopt on a later reconcile
+		}
+		return fmt.Errorf("getting AgentDeployment %s for binding ownership: %w", binding.Spec.AgentRef, err)
+	}
+
+	if err := ctrl.SetControllerReference(&agent, binding, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on binding %s: %w", binding.Name, err)
+	}
+	if err := r.Update(ctx, binding); err != nil {
+		return fmt.Errorf("adopting binding %s under agent %s: %w", binding.Name, binding.Spec.AgentRef, err)
+	}
+	return nil
 }
 
 // syncAgent resolves the agent's full binding set, validates + statuses every
