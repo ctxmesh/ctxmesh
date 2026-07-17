@@ -920,7 +920,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the invoking user's credential, and forwards to the real MCP server this pod fronts.
 	if r.OBOEgress.Enabled && len(egressRoutes) > 0 {
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(r.OBOEgress, agentIdentity, egressRoutesJSON(egressRoutes)))
+		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, egressRoutesJSON(egressRoutes)))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
