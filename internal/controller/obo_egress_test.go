@@ -43,7 +43,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha/support", `[{"name":"scalekit"}]`)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", `[{"name":"scalekit"}]`)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -55,24 +55,21 @@ func TestEgressSidecarContainer(t *testing.T) {
 		"MCP_CREDENTIAL_NAMESPACE":  "ae-credentials",
 		"EGRESS_AGENT":              "team-alpha/support",
 		"EGRESS_ROUTES":             `[{"name":"scalekit"}]`,
+		// POD_NAMESPACE is a LITERAL (Knative Serving forbids the downward-API fieldRef).
+		"POD_NAMESPACE": "team-alpha",
 	} {
 		e, ok := envValue(c, name)
 		require.True(t, ok, "env %s present", name)
 		assert.Equal(t, want, e.Value, name)
+		assert.Nil(t, e.ValueFrom, "%s must be a literal value (Knative rejects valueFrom.fieldRef)", name)
 	}
-
-	// POD_NAMESPACE comes from the downward API, not a literal.
-	podNS, ok := envValue(c, "POD_NAMESPACE")
-	require.True(t, ok)
-	require.NotNil(t, podNS.ValueFrom)
-	assert.Equal(t, "metadata.namespace", podNS.ValueFrom.FieldRef.FieldPath)
 
 	// No delegation env unless a token-service URL is configured.
 	_, hasDelegate := envValue(c, "TOKEN_SERVICE_URL")
 	assert.False(t, hasDelegate)
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha/support", "[]")
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "[]")
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)

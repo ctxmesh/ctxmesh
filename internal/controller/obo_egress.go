@@ -31,11 +31,17 @@ const (
 	// egressSidecarContainerName is the injecting egress proxy container in the agent pod.
 	egressSidecarContainerName = "egress-sidecar"
 
-	// egressSidecarBaseURL is what the manifest rewrite points remote tool endpoints at.
-	// The sidecar listens on this localhost address (shared pod netns); like the discovery +
-	// tool sidecars it declares NO container port (Knative single-port rule) and binds inside
-	// the netns, so the agent reaches it at 127.0.0.1:8081 (the sidecar's own default addr).
-	egressSidecarBaseURL = "http://127.0.0.1:8081"
+	// egressSidecarListenAddr is where the sidecar binds inside the shared pod netns. It must
+	// avoid every other in-pod port: the managed-agent's upstream (8081) + AGENT_PORT (8080),
+	// discovery (2999), sidecar tools (3001+), feedback (2995), memory (2998), and the Knative
+	// queue-proxy ports — so 8899. Injected as EGRESS_LISTEN_ADDR so the sidecar binds exactly
+	// what the manifest rewrite points at. Like the other sidecars it declares NO container
+	// port (Knative single-port rule) and binds inside the netns.
+	egressSidecarListenAddr = "127.0.0.1:8899"
+
+	// egressSidecarBaseURL is what the manifest rewrite points remote tool endpoints at (it
+	// must match egressSidecarListenAddr — the agent reaches the sidecar there on localhost).
+	egressSidecarBaseURL = "http://" + egressSidecarListenAddr
 )
 
 // OBOEgressConfig configures OBO egress-sidecar injection (ADR 0030). It is set once at
@@ -63,18 +69,20 @@ type OBOEgressConfig struct {
 // declares no container port (Knative single-port rule), binds localhost in the pod netns,
 // and carries the verify + resolve config as env — the platform public key, audience, the
 // grant namespace, the agent identity (act-scope), and the route table (real MCP URLs, kept
-// out of the agent's own manifest). POD_NAMESPACE (the grant source ns) comes from the
-// downward API.
-func egressSidecarContainer(cfg OBOEgressConfig, agentIdentity, routesJSON string) corev1.Container {
+// out of the agent's own manifest). POD_NAMESPACE (the grant source ns) is the agent's own
+// namespace, set as a LITERAL (not the downward-API fieldRef, which Knative Serving forbids —
+// `kubernetes.podspec-fieldref` is off by default; the controller knows the namespace anyway).
+func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, routesJSON string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
 		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
 		{Name: "MCP_CREDENTIAL_NAMESPACE", Value: cfg.CredentialNamespace},
 		{Name: "EGRESS_AGENT", Value: agentIdentity},
 		{Name: "EGRESS_ROUTES", Value: routesJSON},
-		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-		}},
+		{Name: "POD_NAMESPACE", Value: namespace},
+		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
+		// port (the managed-agent's own listener collided at the default 8081).
+		{Name: "EGRESS_LISTEN_ADDR", Value: egressSidecarListenAddr},
 	}
 	if cfg.TokenServiceURL != "" {
 		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
@@ -114,10 +122,11 @@ func egressDigest(image string, routes []toolmanifest.Route) string {
 		return ""
 	}
 	type shape struct {
-		Image  string               `json:"image"`
-		Routes []toolmanifest.Route `json:"routes"`
+		Image      string               `json:"image"`
+		ListenAddr string               `json:"listenAddr"`
+		Routes     []toolmanifest.Route `json:"routes"`
 	}
-	b, err := json.Marshal(shape{Image: image, Routes: routes})
+	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Routes: routes})
 	if err != nil {
 		return "invalid"
 	}
