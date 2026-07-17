@@ -88,9 +88,9 @@ export function ConfirmDialog({
       <div
         ref={panelRef}
         tabIndex={-1}
-        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
+        className="relative flex max-h-[85vh] w-full max-w-md flex-col rounded-lg border bg-card p-6 shadow-overlay outline-none"
       >
-        <div className="flex items-start gap-4">
+        <div className="flex shrink-0 items-start gap-4">
           {destructive && (
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/15 text-destructive">
               <AlertTriangle className="h-5 w-5" />
@@ -109,13 +109,13 @@ export function ConfirmDialog({
         </div>
 
         {impact && (
-          <div className="mt-4 rounded-md border bg-surface-2/60 p-3 text-sm">
+          <div className="mt-4 max-h-[50vh] min-h-0 overflow-y-auto rounded-md border bg-surface-2/60 p-3 text-sm">
             {impact}
           </div>
         )}
 
         {gated && (
-          <div className="mt-4 space-y-1.5">
+          <div className="mt-4 shrink-0 space-y-1.5">
             <Label htmlFor="confirm-name">
               Type{" "}
               <span className="font-mono font-semibold text-foreground">
@@ -141,7 +141,7 @@ export function ConfirmDialog({
           </div>
         )}
 
-        <div className="mt-6 flex justify-end gap-2">
+        <div className="mt-6 flex shrink-0 justify-end gap-2">
           <Button variant="ghost" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
