@@ -502,6 +502,85 @@ func TestMCPGrantConsentUnknownServerIs404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// oauthToolRegistryWithConfig builds an OAuth ToolRegistry carrying the persisted OAuth
+// client config annotations (ADR 0031), so a grant can be begun from just {server, ns}.
+func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agentsv1alpha1.ToolRegistry {
+	tr := oauthToolRegistry(server, url)
+	tr.Annotations[annMCPOAuthAuthEndpoint] = o.authorizeURL()
+	tr.Annotations[annMCPOAuthTokenEndpoint] = o.tokenURL()
+	tr.Annotations[annMCPOAuthClientID] = "recovered-client-id"
+	tr.Annotations[annMCPOAuthScope] = "read"
+	tr.Annotations[annMCPOAuthRedirectURI] = "https://console.example/api/mcp/oauth/callback"
+	return tr
+}
+
+// TestMCPGrantConsentRecoversConfigFromRegistration (m26.1, ADR 0031): a caller begins
+// consent with NO auth block — the BFF recovers the server's OAuth client config from the
+// register-time annotations, so the Playground never has to supply OAuth config. The
+// authorization URL is built from the RECOVERED endpoint + client id.
+func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	const server = "recover-mcp"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(oauthToolRegistryWithConfig(server, "http://recover/mcp", oauth)).Build()
+	s, _ := newGrantServer(t, c)
+
+	rec, pending := beginGrant(t, s, server, "bob-token", nil) // no auth block — recovery only
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "authorization_required", pending.Status)
+	require.NotEmpty(t, pending.State)
+	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "authorize URL from the recovered endpoint")
+	assert.Contains(t, pending.AuthorizationURL, "recovered-client-id", "authorize URL carries the recovered client id")
+}
+
+// TestMCPGrantConsentLegacyServerNeedsConfig (m26.1): a legacy OAuth server registered
+// before config persistence has no recoverable config; beginning consent with no auth
+// block fails validation honestly rather than starting a broken flow. Supplying the config
+// (overlay) still works — covered by TestMCPGrantConsentStoresPerUserGrant.
+func TestMCPGrantConsentLegacyServerNeedsConfig(t *testing.T) {
+	const server = "legacy-oauth-mcp"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(oauthToolRegistry(server, "http://legacy/mcp")).Build() // no OAuth config annotations
+	s, _ := newGrantServer(t, c)
+
+	rec, _ := beginGrant(t, s, server, "alice-token", nil) // nothing to recover, nothing supplied
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "no recoverable + no supplied config → honest 400")
+}
+
+// TestCreateMCPObjectsPersistsOAuthConfig (m26.1, ADR 0031): an OAuth registration stamps
+// the discovered OAuth client config as NON-SECRET annotations on the ToolRegistry (so a
+// per-user grant can later be begun from {server, ns}) — and no token material leaks into
+// any annotation.
+func TestCreateMCPObjectsPersistsOAuthConfig(t *testing.T) {
+	const server, ns = "cfg-mcp", "prod"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	_, cErr := createMCPObjects(context.Background(), c, testScheme(t), mcpCreateSpec{
+		name: server, namespace: ns, url: "http://10.0.0.5:8080/mcp", status: "approved",
+		authType:        oauthAuthType,
+		oauthSecretData: map[string][]byte{secretKeyOAuthAccessToken: []byte(theOAuthAccessToken)},
+		oauthConfig: mcpOAuthConfig{
+			AuthorizationEndpoint: "https://as.example/authorize",
+			TokenEndpoint:         "https://as.example/token",
+			ClientID:              "cfg-client",
+			Scope:                 "read write",
+			RedirectURI:           "https://console.example/api/mcp/oauth/callback",
+		},
+	})
+	require.Nil(t, cErr)
+
+	var tr agentsv1alpha1.ToolRegistry
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: server, Namespace: ns}, &tr))
+	assert.Equal(t, "https://as.example/authorize", tr.Annotations[annMCPOAuthAuthEndpoint])
+	assert.Equal(t, "https://as.example/token", tr.Annotations[annMCPOAuthTokenEndpoint])
+	assert.Equal(t, "cfg-client", tr.Annotations[annMCPOAuthClientID])
+	assert.Equal(t, "read write", tr.Annotations[annMCPOAuthScope])
+	assert.Equal(t, "https://console.example/api/mcp/oauth/callback", tr.Annotations[annMCPOAuthRedirectURI])
+	// The access token lands ONLY in the Secret, never an annotation.
+	for k, v := range tr.Annotations {
+		assert.NotContains(t, v, theOAuthAccessToken, "annotation %s must not carry token material", k)
+	}
+}
+
 // --- revocation -------------------------------------------------------------
 
 // revokeGrant issues DELETE /api/mcp/oauth/grant/{server} as the given user token.
