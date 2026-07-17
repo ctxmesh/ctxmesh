@@ -143,19 +143,13 @@ func TestCredentialNamespaceRBACReadIsolation(t *testing.T) {
 	}
 	require.NoError(t, credClient.Create(ctx, grant), "the credential-component SA can write grants")
 
-	// The OBO resolver, reading with the privileged client, resolves alice's token from
-	// the credential namespace (the runtime read path m25.4 will wire).
-	refresh := func(ctx context.Context, c client.Client, ns, name string) (string, error) {
-		var s corev1.Secret
-		if gErr := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &s); gErr != nil {
-			return "", gErr
-		}
-		return string(s.Data[secretKeyOAuthAccessToken]), nil
-	}
-	resolver := NewOBOCredentialResolver(credClient, credNS, NewSharedSecretCredentialResolver(credClient), refresh, nil)
-	cred, err := resolver.Resolve(ctx, sourceNs, server, grantForUser)
-	require.NoError(t, err)
-	assert.Equal(t, accessToken, cred.Value, "the credential component resolves the grant token")
+	// The privileged (credential-plane) client reads alice's grant from the locked
+	// namespace — the runtime resolve path lives in internal/credresolve now
+	// (TestIntegrationPerUserIsolation there); here we prove the RBAC ISOLATION around it.
+	var privileged corev1.Secret
+	require.NoError(t, credClient.Get(ctx, client.ObjectKey{Namespace: credNS, Name: grantName}, &privileged),
+		"the privileged client reads the grant from the credential namespace")
+	assert.Equal(t, accessToken, string(privileged.Data[secretKeyOAuthAccessToken]))
 
 	// --- (2) a tenant is FORBIDDEN from reading the grant Secret (the whole point) ---
 	var stolen corev1.Secret
