@@ -102,6 +102,9 @@ const (
 // the server name (deterministic, so a re-register collides cleanly).
 const networkPolicyMCPSuffix = "-mcp-egress"
 
+// networkPolicyKind is the Kind label used in the created/deleted object lists.
+const networkPolicyKind = "NetworkPolicy"
+
 // handleRegisterMCPServer serves POST /api/mcpservers (ADR 0016). It:
 //  1. reads + validates the request body;
 //  2. PROBES the MCP server (initialize + tools/list) → the tools with their
@@ -418,10 +421,10 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: bindingKey},
 			},
 		}
-		objs = append(objs, kindObj{"Secret", secret}, kindObj{"SecretBinding", binding})
+		objs = append(objs, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
 	}
 
-	objs = append(objs, kindObj{"ToolRegistry", registry})
+	objs = append(objs, kindObj{toolRegistryKind, registry})
 
 	// The per-server egress NetworkPolicy — opened for an APPROVED server ONLY
 	// (ADR 0016 §4: "egress opens per approved server only"). Self-serve (default →
@@ -435,7 +438,7 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 		if npErr != nil {
 			return nil, npErr
 		}
-		objs = append(objs, kindObj{"NetworkPolicy", np})
+		objs = append(objs, kindObj{networkPolicyKind, np})
 	}
 
 	created := make([]createdObject, 0, len(objs))
