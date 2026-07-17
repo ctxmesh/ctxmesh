@@ -51,8 +51,13 @@ type InvokeRequest struct {
 // the agent's raw response as a string. traceId is always present on a run that
 // reached the agent — even a failed (non-2xx) run was traced.
 type InvokeResponse struct {
-	TraceID  string `json:"traceId"`
-	Response string `json:"response"`
+	TraceID string `json:"traceId"`
+	// ConsentRequired names the MCP servers a tool call hit that the invoking user has not
+	// connected an account to (ADR 0029 §2 / m25.9) — surfaced from the agent's structured
+	// result so the console can render a "Connect your account for <server>" CTA (→ the
+	// m17.3 consent flow) instead of the user hunting through the raw output. Omitted when none.
+	ConsentRequired []string `json:"consentRequired,omitempty"`
+	Response        string   `json:"response"`
 }
 
 // handleInvoke serves POST /api/invoke — the Playground run. It is CALLER-SCOPED
@@ -182,9 +187,23 @@ func (s *Server) writeInvokeResult(w http.ResponseWriter, r *http.Request, agent
 	}
 
 	writeJSON(w, http.StatusOK, InvokeResponse{
-		TraceID:  traceID,
-		Response: string(resp),
+		TraceID:         traceID,
+		ConsentRequired: parseConsentRequired(resp),
+		Response:        string(resp),
 	})
+}
+
+// parseConsentRequired best-effort extracts the consent_required servers from the agent's
+// structured /invoke result (the managed-agent returns them, m25.9) so the console can render
+// a "Connect your account" CTA. A non-JSON / field-less response yields nil (no CTA).
+func parseConsentRequired(resp []byte) []string {
+	var parsed struct {
+		ConsentRequired []string `json:"consent_required"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return nil
+	}
+	return parsed.ConsentRequired
 }
 
 // InvokeErrorResponse is returned when the agent answered non-2xx: the honest

@@ -116,6 +116,33 @@ func TestInvokeReturnsTraceID(t *testing.T) {
 	assert.JSONEq(t, `{"prompt":"hi"}`, string(inv.gotBody))
 }
 
+// TestInvokeSurfacesConsentRequired proves /invoke lifts the agent's structured
+// consent_required (m25.9) onto the response DTO so the console can render a CTA.
+func TestInvokeSurfacesConsentRequired(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{
+		traceID: "t",
+		resp:    []byte(`{"output":"connect your account","tools_called":[],"consent_required":["scalekit-mcp-server"]}`),
+	}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body InvokeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []string{"scalekit-mcp-server"}, body.ConsentRequired)
+
+	// A plain result carries no consent_required (no CTA).
+	assert.Nil(t, parseConsentRequired([]byte(`{"output":"done","tools_called":["x"]}`)))
+	assert.Nil(t, parseConsentRequired([]byte(`not json`)))
+}
+
 // TestInvokeMintsAndAttachesRunCapability proves the authenticated /invoke mints the
 // invoking user's run capability (runcap, ADR 0030 §2) and carries it on the adapter's
 // context: it verifies under the platform public key with the caller's hashed identity as
