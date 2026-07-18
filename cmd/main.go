@@ -205,6 +205,7 @@ func main() {
 
 	if err := (&controller.AgentDeploymentReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:    mgr.GetScheme(),
 		OBOEgress: oboEgress,
 		// Prompt-only deploy (M9): the resolve seam. v1 ships the deterministic,
