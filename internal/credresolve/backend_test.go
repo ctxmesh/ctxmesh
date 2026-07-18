@@ -126,6 +126,25 @@ func backendWith(t *testing.T, ex TokenExchanger, isOAuth bool, objs ...client.O
 	return b, cl
 }
 
+// TestResolveLegacyBoundaryFallback: the migration bridge (ADR 0033, m30.6) on the default K8s
+// backend — a boundary-scoped resolve with no scoped grant falls back to the user's legacy
+// unscoped grant, so connected accounts keep working before every write is boundary-scoped.
+func TestResolveLegacyBoundaryFallback(t *testing.T) {
+	ctx := context.Background()
+	// Only a LEGACY (unscoped, boundary "") grant exists — as grantSecret builds.
+	legacy := grantSecret(oauthData("LEGACY-AT", "LEGACY-RT", fixedNow.Add(time.Hour)))
+	b, _ := backendWith(t, &fakeExchanger{}, true, legacy)
+
+	// A registry-boundary-scoped resolve finds no scoped grant → falls back to the legacy one.
+	got, err := b.Resolve(ctx, testNS, "r:reg-a", "weather", UserHash(nil, testUser))
+	require.NoError(t, err)
+	assert.Equal(t, "LEGACY-AT", got.Value)
+
+	// A user with NO grant at all still gets consent-required under a boundary (no false fallback).
+	_, err = b.Resolve(ctx, testNS, "r:reg-a", "weather", UserHash(nil, "nobody@example.com"))
+	require.ErrorIs(t, err, ErrConsentRequired)
+}
+
 func TestResolvePerUserIsolation(t *testing.T) {
 	ctx := context.Background()
 	// Only alice has a grant (a still-valid token).

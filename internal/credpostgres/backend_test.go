@@ -179,6 +179,42 @@ func TestBackend_StoreResolveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBackend_LegacyBoundaryFallback: the migration bridge (ADR 0033, m30.6). A boundary-scoped
+// resolve with NO scoped grant falls back to the user's legacy unscoped ("") grant, so connected
+// accounts keep working during the cutover — UNTIL a boundary-scoped grant exists, which wins.
+func TestBackend_LegacyBoundaryFallback(t *testing.T) {
+	t.Parallel()
+	b := newBackend(t, BackendConfig{})
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour)
+
+	// A legacy (unscoped) grant exists.
+	if err := b.Store(ctx, "ns", "", "srv", "uh", Grant{AccessToken: "legacy-tok", ExpiresAt: exp}); err != nil {
+		t.Fatalf("Store legacy: %v", err)
+	}
+
+	// A boundary-scoped resolve with no scoped grant falls back to the legacy grant.
+	cred, err := b.Resolve(ctx, "ns", "r:reg-a", "srv", "uh")
+	if err != nil || cred.Value != "legacy-tok" {
+		t.Fatalf("scoped Resolve (no scoped grant) = (%+v, %v), want the legacy grant", cred, err)
+	}
+
+	// Once a boundary-scoped grant is written, it WINS over the legacy fallback for that boundary.
+	if err := b.Store(ctx, "ns", "r:reg-a", "srv", "uh", Grant{AccessToken: "scoped-tok", ExpiresAt: exp}); err != nil {
+		t.Fatalf("Store scoped: %v", err)
+	}
+	cred, err = b.Resolve(ctx, "ns", "r:reg-a", "srv", "uh")
+	if err != nil || cred.Value != "scoped-tok" {
+		t.Fatalf("scoped Resolve (scoped grant present) = (%+v, %v), want scoped-tok", cred, err)
+	}
+	// A DIFFERENT boundary with no scoped grant still falls back to the legacy grant (isolation:
+	// reg-b does not see reg-a's scoped grant, only the shared legacy one).
+	cred, err = b.Resolve(ctx, "ns", "r:reg-b", "srv", "uh")
+	if err != nil || cred.Value != "legacy-tok" {
+		t.Fatalf("other-boundary Resolve = (%+v, %v), want the legacy grant (not reg-a's scoped)", cred, err)
+	}
+}
+
 // TestBackend_StoreGrant: the SPI write payload (credresolve.Grant) round-trips through the
 // Postgres backend's GrantWriter adapter.
 func TestBackend_StoreGrant(t *testing.T) {
