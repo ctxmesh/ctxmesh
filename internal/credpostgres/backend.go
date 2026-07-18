@@ -134,6 +134,18 @@ func (b *Backend) Resolve(ctx context.Context, ns, boundary, server, userHash st
 	if err != nil {
 		return credresolve.Credential{}, err
 	}
+	if !found && boundary != "" {
+		// Migration bridge (ADR 0033, m30.6): fall back to the user's legacy unscoped grant so
+		// connected accounts keep working during the boundary cutover. Resolve it AS the legacy
+		// grant (boundary "") so refresh + cache key match where it actually lives.
+		lst, lok, lerr := b.cfg.Storage.load(ctx, ns, "", server, userHash)
+		if lerr != nil {
+			return credresolve.Credential{}, lerr
+		}
+		if lok {
+			st, found, boundary = lst, true, ""
+		}
+	}
 	if found {
 		cred, err := b.resolveGrant(ctx, ns, boundary, server, userHash, st)
 		if err != nil {

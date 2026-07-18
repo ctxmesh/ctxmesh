@@ -108,6 +108,21 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash
 	if err != nil {
 		return Credential{}, err
 	}
+	if !found && boundaryHash != "" {
+		// Migration bridge (ADR 0033, m30.6): no boundary-scoped grant yet, but the user may
+		// hold a pre-ADR-0033 unscoped grant. Fall back to it so connected accounts keep working
+		// during the cutover; a later boundary-scoped write (re-consent for this agent's
+		// registry) supersedes it. This is what makes it safe to introduce the boundary on the
+		// read side before every write is boundary-scoped.
+		legacyNS, legacyName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, "")
+		ls, lok, lerr := b.findGrant(ctx, legacyNS, legacyName, ns, server, userHash, "")
+		if lerr != nil {
+			return Credential{}, lerr
+		}
+		if lok {
+			secret, found, cacheKey = ls, true, legacyNS+"/"+legacyName
+		}
+	}
 	if !found {
 		// No personal grant. Try the admin-set shared ORG credential (ADR 0029 §2) —
 		// personal-before-org holds because we only reach here when the invoker has none.
