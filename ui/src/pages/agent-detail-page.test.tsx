@@ -332,6 +332,23 @@ describe("AgentDetailPage (landing page)", () => {
     fireEvent.click(screen.getByTestId("run-button"));
     await waitFor(() => expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument());
   });
+
+  it("a run returning consent_required shows the inline Connect CTA on the agent's own page", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: true } },
+      invoke: {
+        ok: true,
+        status: 200,
+        body: { traceId: "t-consent", response: "{}", consentRequired: ["scalekit-mcp-server"] },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("run-panel");
+    fireEvent.click(screen.getByTestId("run-button"));
+    // The inline consent Connect button renders HERE (not only in the Playground).
+    expect(await screen.findByTestId("connect-scalekit-mcp-server")).toBeInTheDocument();
+    expect(screen.getByText("Connect your account to continue")).toBeInTheDocument();
+  });
 });
 
 // ── m15.11 new tests ─────────────────────────────────────────────────────────
