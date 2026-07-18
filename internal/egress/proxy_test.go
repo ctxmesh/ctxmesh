@@ -42,21 +42,22 @@ const (
 
 // mockResolver is a credresolve.CredentialResolver test double capturing its inputs.
 type mockResolver struct {
-	cred      credresolve.Credential
-	err       error
-	calls     int
-	gotNS     string
-	gotServer string
-	gotUser   string
+	cred        credresolve.Credential
+	err         error
+	calls       int
+	gotNS       string
+	gotServer   string
+	gotUser     string
+	gotBoundary string
 }
 
-func (m *mockResolver) Resolve(_ context.Context, ns, server, userHash string) (credresolve.Credential, error) {
+func (m *mockResolver) Resolve(_ context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	m.calls++
-	m.gotNS, m.gotServer, m.gotUser = ns, server, userHash
+	m.gotNS, m.gotServer, m.gotUser, m.gotBoundary = ns, server, userHash, boundary
 	return m.cred, m.err
 }
 
-func (m *mockResolver) Revoke(context.Context, string, string, string) error { return nil }
+func (m *mockResolver) Revoke(context.Context, string, string, string, string) error { return nil }
 
 // upstream captures what the sidecar forwarded.
 type upstream struct {

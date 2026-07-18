@@ -224,7 +224,10 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 			Config:    credresolve.OAuthConfig{TokenEndpoint: flow.oauth.TokenEndpoint, ClientID: flow.oauth.ClientID},
 			ServerURL: flow.serverURL,
 		}
-		if err := s.grantStore.StoreGrant(ctx, flow.namespace, flow.serverName, flow.grantUserHash, g); err != nil {
+		// boundary "" keeps this write on the legacy unscoped key for now; m30.2 threads the
+		// invoking agent's registry boundary (ADR 0033) here and into the capability mint
+		// together, so the write key and the egress read key stay consistent.
+		if err := s.grantStore.StoreGrant(ctx, flow.namespace, "", flow.serverName, flow.grantUserHash, g); err != nil {
 			s.log.Error(err, "delegate MCP per-user grant store failed", "server", flow.serverName)
 			oauthCallbackError(w, r, "failed to store the per-user grant")
 			return

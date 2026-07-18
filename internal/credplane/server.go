@@ -67,7 +67,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, err := s.resolver.Resolve(r.Context(), req.Namespace, req.Server, req.UserHash)
+	cred, err := s.resolver.Resolve(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash)
 	switch {
 	case err == nil:
 		writeJSON(w, resolveResponse{Kind: cred.Kind, Value: cred.Value})
@@ -91,7 +91,7 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if err := s.resolver.Revoke(r.Context(), req.Namespace, req.Server, req.UserHash); err != nil {
+	if err := s.resolver.Revoke(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash); err != nil {
 		s.log.Error(err, "credplane: revoke failed", "server", req.Server, "namespace", req.Namespace)
 		writeJSON(w, revokeResponse{Error: errCodeInternal})
 		return
@@ -123,7 +123,7 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAtUnix > 0 {
 		g.Tokens.ExpiresAt = time.Unix(req.ExpiresAtUnix, 0)
 	}
-	if err := writer.StoreGrant(r.Context(), req.Namespace, req.Server, req.UserHash, g); err != nil {
+	if err := writer.StoreGrant(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash, g); err != nil {
 		s.log.Error(err, "credplane: store failed", "server", req.Server, "namespace", req.Namespace)
 		writeJSON(w, storeResponse{Error: errCodeInternal})
 		return

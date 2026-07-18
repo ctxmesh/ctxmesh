@@ -129,8 +129,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve THIS user's OBO credential for THIS server.
-	cred, err := p.cfg.Resolver.Resolve(r.Context(), p.cfg.Namespace, route.Name, runCap.User)
+	// Resolve THIS user's OBO credential for THIS server, within the run's trust boundary
+	// (ADR 0033): the capability carries the boundary (the invoking agent's registry, or the
+	// agent when standalone), so an agent resolves only grants scoped to its own boundary.
+	cred, err := p.cfg.Resolver.Resolve(r.Context(), p.cfg.Namespace, runCap.Boundary, route.Name, runCap.User)
 	switch {
 	case err == nil:
 		// Have the invoking user's fresh token — inject it below.

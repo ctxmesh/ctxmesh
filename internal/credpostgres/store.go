@@ -48,11 +48,11 @@ type stored struct {
 // package implements it (sqlStore, or a test fake); external packages hold it but construct
 // it via NewStore.
 type Storage interface {
-	load(ctx context.Context, ns, server, userHash string) (stored, bool, error)
+	load(ctx context.Context, ns, boundary, server, userHash string) (stored, bool, error)
 	// save upserts the row. expectedVersion 0 ⇒ INSERT (new grant); >0 ⇒ UPDATE guarded by
 	// version = expectedVersion (errConflict on mismatch).
-	save(ctx context.Context, ns, server, userHash string, s stored, expectedVersion int64) error
-	del(ctx context.Context, ns, server, userHash string) error
+	save(ctx context.Context, ns, boundary, server, userHash string, s stored, expectedVersion int64) error
+	del(ctx context.Context, ns, boundary, server, userHash string) error
 	sweepExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS credential_grants (
     source_ns   text   NOT NULL,
     server      text   NOT NULL,
     user_hash   text   NOT NULL,
+    boundary    text   NOT NULL DEFAULT '',
     key_id      text   NOT NULL,
     wrapped_dek bytea  NOT NULL,
     nonce       bytea  NOT NULL,
@@ -78,9 +79,12 @@ CREATE TABLE IF NOT EXISTS credential_grants (
     version     bigint NOT NULL DEFAULT 1,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (source_ns, server, user_hash)
+    PRIMARY KEY (source_ns, server, user_hash, boundary)
 );
-CREATE INDEX IF NOT EXISTS credential_grants_expiry ON credential_grants (expires_at);`
+CREATE INDEX IF NOT EXISTS credential_grants_expiry ON credential_grants (expires_at);
+-- Idempotent migration for a table created before the boundary dimension (ADR 0033):
+-- add the column (default '' = legacy unscoped grants) so old rows resolve as boundary "".
+ALTER TABLE credential_grants ADD COLUMN IF NOT EXISTS boundary text NOT NULL DEFAULT '';`
 
 // sqlStore is the database/sql-backed storage (Postgres via any registered driver).
 type sqlStore struct {
@@ -95,12 +99,12 @@ func newSQLStore(ctx context.Context, db *sql.DB) (*sqlStore, error) {
 	return &sqlStore{db: db}, nil
 }
 
-func (s *sqlStore) load(ctx context.Context, ns, server, userHash string) (stored, bool, error) {
+func (s *sqlStore) load(ctx context.Context, ns, boundary, server, userHash string) (stored, bool, error) {
 	const q = `SELECT key_id, wrapped_dek, nonce, ciphertext, expires_at, token_type, scope, class, version
-		FROM credential_grants WHERE source_ns=$1 AND server=$2 AND user_hash=$3`
+		FROM credential_grants WHERE source_ns=$1 AND server=$2 AND user_hash=$3 AND boundary=$4`
 	var st stored
 	var exp sql.NullTime
-	err := s.db.QueryRowContext(ctx, q, ns, server, userHash).
+	err := s.db.QueryRowContext(ctx, q, ns, server, userHash, boundary).
 		Scan(&st.keyID, &st.wrappedDEK, &st.nonce, &st.ciphertext, &exp, &st.tokenType, &st.scope, &st.class, &st.version)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -114,17 +118,17 @@ func (s *sqlStore) load(ctx context.Context, ns, server, userHash string) (store
 	return st, true, nil
 }
 
-func (s *sqlStore) save(ctx context.Context, ns, server, userHash string, st stored, expectedVersion int64) error {
+func (s *sqlStore) save(ctx context.Context, ns, boundary, server, userHash string, st stored, expectedVersion int64) error {
 	var expiry any
 	if !st.expiresAt.IsZero() {
 		expiry = st.expiresAt
 	}
 	if expectedVersion == 0 {
 		const ins = `INSERT INTO credential_grants
-			(source_ns, server, user_hash, key_id, wrapped_dek, nonce, ciphertext, expires_at, token_type, scope, class, version)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)
-			ON CONFLICT (source_ns, server, user_hash) DO NOTHING`
-		res, err := s.db.ExecContext(ctx, ins, ns, server, userHash,
+			(source_ns, server, user_hash, boundary, key_id, wrapped_dek, nonce, ciphertext, expires_at, token_type, scope, class, version)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1)
+			ON CONFLICT (source_ns, server, user_hash, boundary) DO NOTHING`
+		res, err := s.db.ExecContext(ctx, ins, ns, server, userHash, boundary,
 			st.keyID, st.wrappedDEK, st.nonce, st.ciphertext, expiry, st.tokenType, st.scope, st.class)
 		if err != nil {
 			return fmt.Errorf("credpostgres: insert grant: %w", err)
@@ -136,10 +140,10 @@ func (s *sqlStore) save(ctx context.Context, ns, server, userHash string, st sto
 	}
 
 	const upd = `UPDATE credential_grants SET
-			key_id=$4, wrapped_dek=$5, nonce=$6, ciphertext=$7, expires_at=$8, token_type=$9, scope=$10, class=$11,
+			key_id=$5, wrapped_dek=$6, nonce=$7, ciphertext=$8, expires_at=$9, token_type=$10, scope=$11, class=$12,
 			version=version+1, updated_at=now()
-		WHERE source_ns=$1 AND server=$2 AND user_hash=$3 AND version=$12`
-	res, err := s.db.ExecContext(ctx, upd, ns, server, userHash,
+		WHERE source_ns=$1 AND server=$2 AND user_hash=$3 AND boundary=$4 AND version=$13`
+	res, err := s.db.ExecContext(ctx, upd, ns, server, userHash, boundary,
 		st.keyID, st.wrappedDEK, st.nonce, st.ciphertext, expiry, st.tokenType, st.scope, st.class, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("credpostgres: update grant: %w", err)
@@ -150,9 +154,9 @@ func (s *sqlStore) save(ctx context.Context, ns, server, userHash string, st sto
 	return nil
 }
 
-func (s *sqlStore) del(ctx context.Context, ns, server, userHash string) error {
-	const q = `DELETE FROM credential_grants WHERE source_ns=$1 AND server=$2 AND user_hash=$3`
-	if _, err := s.db.ExecContext(ctx, q, ns, server, userHash); err != nil {
+func (s *sqlStore) del(ctx context.Context, ns, boundary, server, userHash string) error {
+	const q = `DELETE FROM credential_grants WHERE source_ns=$1 AND server=$2 AND user_hash=$3 AND boundary=$4`
+	if _, err := s.db.ExecContext(ctx, q, ns, server, userHash, boundary); err != nil {
 		return fmt.Errorf("credpostgres: delete grant: %w", err)
 	}
 	return nil

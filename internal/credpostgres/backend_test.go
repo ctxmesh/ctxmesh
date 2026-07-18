@@ -36,17 +36,17 @@ type fakeStorage struct {
 
 func newFakeStorage() *fakeStorage { return &fakeStorage{rows: map[string]stored{}} }
 
-func (f *fakeStorage) load(_ context.Context, ns, server, userHash string) (stored, bool, error) {
+func (f *fakeStorage) load(_ context.Context, ns, boundary, server, userHash string) (stored, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st, ok := f.rows[rowKey(ns, server, userHash)]
+	st, ok := f.rows[rowKey(ns, boundary, server, userHash)]
 	return st, ok, nil
 }
 
-func (f *fakeStorage) save(_ context.Context, ns, server, userHash string, st stored, expectedVersion int64) error {
+func (f *fakeStorage) save(_ context.Context, ns, boundary, server, userHash string, st stored, expectedVersion int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	k := rowKey(ns, server, userHash)
+	k := rowKey(ns, boundary, server, userHash)
 	cur, exists := f.rows[k]
 	if expectedVersion == 0 {
 		if exists {
@@ -64,10 +64,10 @@ func (f *fakeStorage) save(_ context.Context, ns, server, userHash string, st st
 	return nil
 }
 
-func (f *fakeStorage) del(_ context.Context, ns, server, userHash string) error {
+func (f *fakeStorage) del(_ context.Context, ns, boundary, server, userHash string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.rows, rowKey(ns, server, userHash))
+	delete(f.rows, rowKey(ns, boundary, server, userHash))
 	return nil
 }
 
@@ -165,15 +165,15 @@ func TestBackend_StoreResolveRoundTrip(t *testing.T) {
 	b := newBackend(t, BackendConfig{Storage: fs})
 	ctx := context.Background()
 
-	if err := b.Store(ctx, "ns", "srv", "uh", Grant{AccessToken: "access-1", RefreshToken: "refresh-1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := b.Store(ctx, "ns", "", "srv", "uh", Grant{AccessToken: "access-1", RefreshToken: "refresh-1", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	cred, err := b.Resolve(ctx, "ns", "srv", "uh")
+	cred, err := b.Resolve(ctx, "ns", "", "srv", "uh")
 	if err != nil || cred.Value != "access-1" {
 		t.Fatalf("Resolve = (%+v, %v), want access-1", cred, err)
 	}
 	// Dump-is-inert: the persisted row must not contain the plaintext tokens.
-	row := fs.rows[rowKey("ns", "srv", "uh")]
+	row := fs.rows[rowKey("ns", "", "srv", "uh")]
 	if bytes.Contains(row.ciphertext, []byte("access-1")) || bytes.Contains(row.ciphertext, []byte("refresh-1")) {
 		t.Fatal("plaintext token leaked into the stored ciphertext")
 	}
@@ -190,10 +190,10 @@ func TestBackend_StoreGrant(t *testing.T) {
 		Tokens: credresolve.Tokens{AccessToken: "pg-tok", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
 		Config: credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
 	}
-	if err := b.StoreGrant(ctx, "ns", "srv", "uh", g); err != nil {
+	if err := b.StoreGrant(ctx, "ns", "", "srv", "uh", g); err != nil {
 		t.Fatalf("StoreGrant: %v", err)
 	}
-	cred, err := b.Resolve(ctx, "ns", "srv", "uh")
+	cred, err := b.Resolve(ctx, "ns", "", "srv", "uh")
 	if err != nil || cred.Value != "pg-tok" {
 		t.Fatalf("Resolve after StoreGrant = (%+v, %v), want pg-tok", cred, err)
 	}
@@ -209,13 +209,13 @@ func TestBackend_RefreshesNearExpiry(t *testing.T) {
 	ctx := context.Background()
 
 	// Stored token already past the refresh skew.
-	if err := b.Store(ctx, "ns", "srv", "uh", Grant{
+	if err := b.Store(ctx, "ns", "", "srv", "uh", Grant{
 		AccessToken: "access-1", RefreshToken: "refresh-1", TokenEndpoint: "https://as/token", ClientID: "cid",
 		ExpiresAt: time.Now().Add(5 * time.Second),
 	}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	cred, err := b.Resolve(ctx, "ns", "srv", "uh")
+	cred, err := b.Resolve(ctx, "ns", "", "srv", "uh")
 	if err != nil || cred.Value != "access-2" {
 		t.Fatalf("Resolve = (%+v, %v), want the refreshed access-2", cred, err)
 	}
@@ -237,7 +237,7 @@ func TestBackend_Precedence(t *testing.T) {
 			return credresolve.Credential{Kind: credresolve.KindBearer, Value: "org-tok"}, nil
 		},
 	})
-	if cred, err := bOrg.Resolve(ctx, "ns", "srv", "uh"); err != nil || cred.Value != "org-tok" {
+	if cred, err := bOrg.Resolve(ctx, "ns", "", "srv", "uh"); err != nil || cred.Value != "org-tok" {
 		t.Fatalf("org-path Resolve = (%+v, %v), want org-tok", cred, err)
 	}
 
@@ -248,7 +248,7 @@ func TestBackend_Precedence(t *testing.T) {
 			return credresolve.Credential{}, credresolve.ErrNoCredential
 		},
 	})
-	if _, err := bConsent.Resolve(ctx, "ns", "srv", "uh"); !errors.Is(err, credresolve.ErrConsentRequired) {
+	if _, err := bConsent.Resolve(ctx, "ns", "", "srv", "uh"); !errors.Is(err, credresolve.ErrConsentRequired) {
 		t.Fatalf("consent-path err = %v, want ErrConsentRequired", err)
 	}
 
@@ -256,7 +256,7 @@ func TestBackend_Precedence(t *testing.T) {
 	bOpen := newBackend(t, BackendConfig{
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return false, nil },
 	})
-	if _, err := bOpen.Resolve(ctx, "ns", "srv", "uh"); !errors.Is(err, credresolve.ErrNoCredential) {
+	if _, err := bOpen.Resolve(ctx, "ns", "", "srv", "uh"); !errors.Is(err, credresolve.ErrNoCredential) {
 		t.Fatalf("open-path err = %v, want ErrNoCredential", err)
 	}
 }
@@ -269,13 +269,13 @@ func TestBackend_Revoke(t *testing.T) {
 	b := newBackend(t, BackendConfig{Storage: fs, Exchanger: ex})
 	ctx := context.Background()
 
-	if err := b.Store(ctx, "ns", "srv", "uh", Grant{AccessToken: "a", RefreshToken: "r", RevocationEndpoint: "https://as/revoke", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := b.Store(ctx, "ns", "", "srv", "uh", Grant{AccessToken: "a", RefreshToken: "r", RevocationEndpoint: "https://as/revoke", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	if err := b.Revoke(ctx, "ns", "srv", "uh"); err != nil {
+	if err := b.Revoke(ctx, "ns", "", "srv", "uh"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if _, ok := fs.rows[rowKey("ns", "srv", "uh")]; ok {
+	if _, ok := fs.rows[rowKey("ns", "", "srv", "uh")]; ok {
 		t.Fatal("grant not deleted on revoke")
 	}
 	if len(ex.revoked) != 1 || ex.revoked[0] != "r" {

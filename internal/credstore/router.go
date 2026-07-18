@@ -206,26 +206,26 @@ func NewRouter(reader client.Reader, deps Deps) *Router {
 }
 
 // Resolve routes to the backend selected for ns.
-func (r *Router) Resolve(ctx context.Context, ns, server, userHash string) (credresolve.Credential, error) {
+func (r *Router) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	b, err := r.backendFor(ctx, ns)
 	if err != nil {
 		return credresolve.Credential{}, err
 	}
-	return b.Resolve(ctx, ns, server, userHash)
+	return b.Resolve(ctx, ns, boundary, server, userHash)
 }
 
 // Revoke routes to the backend selected for ns.
-func (r *Router) Revoke(ctx context.Context, ns, server, userHash string) error {
+func (r *Router) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
 	b, err := r.backendFor(ctx, ns)
 	if err != nil {
 		return err
 	}
-	return b.Revoke(ctx, ns, server, userHash)
+	return b.Revoke(ctx, ns, boundary, server, userHash)
 }
 
 // StoreGrant persists a grant to the backend the CredentialStore selects for ns — the SPI
 // write path (ADR 0032). A backend that does not implement GrantWriter fails closed.
-func (r *Router) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (r *Router) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	b, err := r.backendFor(ctx, ns)
 	if err != nil {
 		return err
@@ -234,7 +234,7 @@ func (r *Router) StoreGrant(ctx context.Context, ns, server, userHash string, g 
 	if !ok {
 		return fmt.Errorf("credstore: the selected credential backend for namespace %q does not support writes", ns)
 	}
-	return w.StoreGrant(ctx, ns, server, userHash, g)
+	return w.StoreGrant(ctx, ns, boundary, server, userHash, g)
 }
 
 func (r *Router) backendFor(ctx context.Context, ns string) (credresolve.CredentialResolver, error) {

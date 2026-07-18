@@ -34,9 +34,9 @@ import (
 func legacyGrantSecret(credNS, ns, server, userHash, token string) client.Object {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        credresolve.SecretName(server, userHash),
+			Name:        credresolve.SecretName(server, userHash, ""),
 			Namespace:   credNS,
-			Labels:      credresolve.SecretLabels(server, userHash, ns),
+			Labels:      credresolve.SecretLabels(server, userHash, ns, ""),
 			Annotations: map[string]string{credresolve.AnnGrantServerURL: "https://mcp/" + server},
 		},
 		Data: credresolve.SecretData(
@@ -66,7 +66,7 @@ func TestMigrate_K8sToPostgres(t *testing.T) {
 		t.Fatalf("Migrate = (%d, %v), want 2 migrated", n, err)
 	}
 	for _, tc := range []struct{ ns, uh, want string }{{"team-a", "uhA", "tok-a"}, {"team-b", "uhB", "tok-b"}} {
-		cred, err := target.Resolve(ctx, tc.ns, "srv", tc.uh)
+		cred, err := target.Resolve(ctx, tc.ns, "", "srv", tc.uh)
 		if err != nil || cred.Value != tc.want {
 			t.Fatalf("post-migrate Resolve %s = (%+v, %v), want %s", tc.ns, cred, err, tc.want)
 		}
@@ -79,11 +79,11 @@ type stubResolver struct {
 	revokeCalls int
 }
 
-func (s *stubResolver) Resolve(context.Context, string, string, string) (credresolve.Credential, error) {
+func (s *stubResolver) Resolve(context.Context, string, string, string, string) (credresolve.Credential, error) {
 	return s.cred, s.err
 }
 
-func (s *stubResolver) Revoke(context.Context, string, string, string) error {
+func (s *stubResolver) Revoke(context.Context, string, string, string, string) error {
 	s.revokeCalls++
 	return nil
 }
@@ -98,19 +98,19 @@ func TestDualRead_FallbackOnMiss(t *testing.T) {
 	primary := &stubResolver{err: credresolve.ErrConsentRequired}
 	fallback := &stubResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "legacy-tok"}}
 	dr := NewDualRead(primary, fallback)
-	if cred, err := dr.Resolve(ctx, "ns", "srv", "uh"); err != nil || cred.Value != "legacy-tok" {
+	if cred, err := dr.Resolve(ctx, "ns", "", "srv", "uh"); err != nil || cred.Value != "legacy-tok" {
 		t.Fatalf("miss→fallback Resolve = (%+v, %v), want legacy-tok", cred, err)
 	}
 
 	// Primary HIT → the primary wins, fallback untouched.
 	primary2 := &stubResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "new-tok"}}
 	fallback2 := &stubResolver{err: fmt.Errorf("should not be called")}
-	if cred, err := NewDualRead(primary2, fallback2).Resolve(ctx, "ns", "srv", "uh"); err != nil || cred.Value != "new-tok" {
+	if cred, err := NewDualRead(primary2, fallback2).Resolve(ctx, "ns", "", "srv", "uh"); err != nil || cred.Value != "new-tok" {
 		t.Fatalf("primary-hit Resolve = (%+v, %v), want new-tok", cred, err)
 	}
 
 	// Revoke hits BOTH backends.
-	if err := dr.Revoke(ctx, "ns", "srv", "uh"); err != nil {
+	if err := dr.Revoke(ctx, "ns", "", "srv", "uh"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if primary.revokeCalls != 1 || fallback.revokeCalls != 1 {

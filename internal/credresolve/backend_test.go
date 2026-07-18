@@ -57,9 +57,9 @@ func grantSecret(data map[string][]byte) *corev1.Secret {
 	userHash := UserHash(nil, testUser)
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SecretName(testServer, userHash),
+			Name:      SecretName(testServer, userHash, ""),
 			Namespace: testNS,
-			Labels:    SecretLabels(testServer, userHash, ""),
+			Labels:    SecretLabels(testServer, userHash, "", ""),
 		},
 		Data: data,
 	}
@@ -132,19 +132,19 @@ func TestResolvePerUserIsolation(t *testing.T) {
 	alice := grantSecret(oauthData("ALICE-AT", "ALICE-RT", fixedNow.Add(time.Hour)))
 	b, _ := backendWith(t, &fakeExchanger{}, true, alice)
 
-	got, err := b.Resolve(ctx, testNS, "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value)
 
 	// Bob has no grant on an OAuth server → consent-required, and NEVER alice's token.
-	_, err = b.Resolve(ctx, testNS, "weather", UserHash(nil, "bob@example.com"))
+	_, err = b.Resolve(ctx, testNS, "", "weather", UserHash(nil, "bob@example.com"))
 	require.ErrorIs(t, err, ErrConsentRequired)
 }
 
 func TestResolveOpenServerNoGrant(t *testing.T) {
 	ctx := context.Background()
 	b, _ := backendWith(t, &fakeExchanger{}, false /* not OAuth */)
-	_, err := b.Resolve(ctx, testNS, "open-mcp", UserHash(nil, testUser))
+	_, err := b.Resolve(ctx, testNS, "", "open-mcp", UserHash(nil, testUser))
 	assert.ErrorIs(t, err, ErrNoCredential)
 }
 
@@ -161,7 +161,7 @@ func TestResolveOrgCredentialWhenNoPersonalGrant(t *testing.T) {
 			return Credential{Kind: KindBearer, Value: "ORG-SHARED"}, nil
 		},
 	})
-	got, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, "bob@example.com"))
+	got, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, "bob@example.com"))
 	require.NoError(t, err)
 	assert.Equal(t, "ORG-SHARED", got.Value, "an org-scoped server resolves the shared org credential")
 	assert.Equal(t, 1, orgCalls)
@@ -181,7 +181,7 @@ func TestResolvePersonalBeforeOrg(t *testing.T) {
 			return Credential{Value: "ORG"}, nil
 		},
 	})
-	got, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value, "a personal grant overrides the org credential")
 	assert.Equal(t, 0, orgCalls, "the org credential is not consulted when a personal grant exists")
@@ -198,7 +198,7 @@ func TestResolveOrgNoCredentialFallsThroughToConsent(t *testing.T) {
 			return Credential{}, ErrNoCredential // not org-scoped / no org credential
 		},
 	})
-	_, err := b.Resolve(ctx, testNS, testServer, UserHash(nil, "bob@example.com"))
+	_, err := b.Resolve(ctx, testNS, "", testServer, UserHash(nil, "bob@example.com"))
 	assert.ErrorIs(t, err, ErrConsentRequired, "no org credential + OAuth server → consent")
 }
 
@@ -208,7 +208,7 @@ func TestResolveStillValidSkipsRefresh(t *testing.T) {
 	grant := grantSecret(oauthData("AT", "RT", fixedNow.Add(time.Hour)))
 	b, _ := backendWith(t, ex, true, grant)
 
-	got, err := b.Resolve(ctx, testNS, "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "AT", got.Value)
 	assert.Equal(t, 0, ex.calls(), "a still-valid token must not hit the token endpoint")
@@ -220,7 +220,7 @@ func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
 	b, cl := backendWith(t, ex, true, grant)
 
-	got, err := b.Resolve(ctx, testNS, "weather", UserHash(nil, testUser))
+	got, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
 	require.NoError(t, err)
 	assert.Equal(t, "NEW-AT", got.Value)
 	assert.Equal(t, 1, ex.calls())
@@ -239,7 +239,7 @@ func TestResolveNearExpiryNoRefreshTokenNeedsConsent(t *testing.T) {
 	grant := grantSecret(oauthData("OLD-AT", "", fixedNow.Add(10*time.Second)))
 	b, _ := backendWith(t, ex, true, grant)
 
-	_, err := b.Resolve(ctx, testNS, "weather", UserHash(nil, testUser))
+	_, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
 	assert.ErrorIs(t, err, ErrConsentRequired)
 	assert.Equal(t, 0, ex.calls(), "no refresh token ⇒ no token-endpoint call")
 }
@@ -251,13 +251,13 @@ func TestResolveCacheFastPath(t *testing.T) {
 	b, cl := backendWith(t, ex, true, grant)
 	userHash := UserHash(nil, testUser)
 
-	first, err := b.Resolve(ctx, testNS, "weather", userHash)
+	first, err := b.Resolve(ctx, testNS, "", "weather", userHash)
 	require.NoError(t, err)
 	assert.Equal(t, "AT", first.Value)
 
 	// Delete the backing Secret; a cached resolve must still succeed (served locally).
 	require.NoError(t, cl.Delete(ctx, grant))
-	second, err := b.Resolve(ctx, testNS, "weather", userHash)
+	second, err := b.Resolve(ctx, testNS, "", "weather", userHash)
 	require.NoError(t, err, "the cache fast-path serves without re-reading the Secret")
 	assert.Equal(t, "AT", second.Value)
 }
@@ -281,7 +281,7 @@ func TestResolveSingleflightCollapsesHerd(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = b.Resolve(ctx, testNS, "weather", userHash)
+			results[i], errs[i] = b.Resolve(ctx, testNS, "", "weather", userHash)
 		}(i)
 	}
 
@@ -335,7 +335,7 @@ func TestResolveOptimisticConcurrencyAdoptsWinner(t *testing.T) {
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
 	})
 
-	got, err := b.Resolve(ctx, testNS, "weather", userHash)
+	got, err := b.Resolve(ctx, testNS, "", "weather", userHash)
 	require.NoError(t, err)
 	// We adopt the WINNER's token (re-read after conflict), NOT our own rotation, and we do
 	// NOT re-call the authorization server for the winner's already-fresh token.
@@ -352,7 +352,7 @@ func TestRevokeForgetsAndBestEffortRevokes(t *testing.T) {
 	b, cl := backendWith(t, ex, true, grant)
 	userHash := UserHash(nil, testUser)
 
-	require.NoError(t, b.Revoke(ctx, testNS, "weather", userHash))
+	require.NoError(t, b.Revoke(ctx, testNS, "", "weather", userHash))
 	assert.Equal(t, 1, ex.revokeCalls, "a stored revocation endpoint ⇒ best-effort RFC 7009 revoke")
 	assert.Equal(t, "RT", ex.revokedTok, "revoke uses the refresh token when present")
 
@@ -362,5 +362,5 @@ func TestRevokeForgetsAndBestEffortRevokes(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "revoke deletes the grant Secret")
 
 	// A revoke of a missing grant is a no-op.
-	assert.NoError(t, b.Revoke(ctx, testNS, "weather", userHash))
+	assert.NoError(t, b.Revoke(ctx, testNS, "", "weather", userHash))
 }

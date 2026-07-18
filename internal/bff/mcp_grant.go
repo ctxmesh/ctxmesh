@@ -94,8 +94,11 @@ func userGrantHash(username string) string {
 // the name within the 253-char object-name limit; the full hash lives in the
 // label (the authoritative match key), so the short-slice collision risk only
 // affects the NAME, and the label is still checked on read.
+// boundary is the grant's trust-boundary hash (ADR 0033); "" here keeps the BFF's direct
+// write/read path on the legacy unscoped key. m30.2 threads the invoking agent's registry
+// boundary through these wrappers (the token-service delegation already carries it).
 func grantSecretName(server, userHash string) string {
-	return credresolve.SecretName(server, userHash)
+	return credresolve.SecretName(server, userHash, "")
 }
 
 // grantSecretLabels builds the lookup labels for a (user, server) grant Secret.
@@ -104,7 +107,7 @@ func grantSecretName(server, userHash string) string {
 // — never any token material (the m17.2 discipline). These are what a resolve/revoke
 // matches on. sourceNs is "" in legacy per-namespace mode.
 func grantSecretLabels(server, userHash, sourceNs string) map[string]string {
-	return credresolve.SecretLabels(server, userHash, sourceNs)
+	return credresolve.SecretLabels(server, userHash, sourceNs, "")
 }
 
 // grantSecretCoordinates resolves WHERE the (sourceNs, server, userHash) grant Secret
@@ -118,7 +121,7 @@ func grantSecretLabels(server, userHash, sourceNs string) map[string]string {
 //   - LEGACY mode (credNs == ""): the grant stays in its source namespace under the
 //     original (server, user) name — pre-m25.1 clusters, dev, and envtest, unchanged.
 func grantSecretCoordinates(credNs, sourceNs, server, userHash string) (namespace, name string) {
-	return credresolve.SecretCoordinates(credNs, sourceNs, server, userHash)
+	return credresolve.SecretCoordinates(credNs, sourceNs, server, userHash, "")
 }
 
 // --- audit (M11 vocabulary, BFF-side) ---------------------------------------

@@ -83,15 +83,16 @@ type GrantMaterial struct {
 // §A.1); it degrades to "" for single-tenant installs.
 type Backend interface {
 	Capabilities(ctx context.Context) (Capabilities, error)
-	Resolve(ctx context.Context, ns, server, userHash, tenant string) (credresolve.Credential, error)
-	Store(ctx context.Context, ns, server, userHash, tenant string, grant GrantMaterial) error
-	Revoke(ctx context.Context, ns, server, userHash, tenant string) error
+	Resolve(ctx context.Context, ns, boundary, server, userHash, tenant string) (credresolve.Credential, error)
+	Store(ctx context.Context, ns, boundary, server, userHash, tenant string, grant GrantMaterial) error
+	Revoke(ctx context.Context, ns, boundary, server, userHash, tenant string) error
 }
 
 // --- wire messages ---
 
 type resolveRequest struct {
 	Namespace string `json:"namespace"`
+	Boundary  string `json:"boundary,omitempty"` // trust boundary (ADR 0033); "" = legacy unscoped
 	Server    string `json:"server"`
 	UserHash  string `json:"userHash"`
 	Tenant    string `json:"tenant,omitempty"`
@@ -107,6 +108,7 @@ type resolveResponse struct {
 
 type storeRequest struct {
 	Namespace string        `json:"namespace"`
+	Boundary  string        `json:"boundary,omitempty"`
 	Server    string        `json:"server"`
 	UserHash  string        `json:"userHash"`
 	Tenant    string        `json:"tenant,omitempty"`
@@ -115,6 +117,7 @@ type storeRequest struct {
 
 type revokeRequest struct {
 	Namespace string `json:"namespace"`
+	Boundary  string `json:"boundary,omitempty"`
 	Server    string `json:"server"`
 	UserHash  string `json:"userHash"`
 	Tenant    string `json:"tenant,omitempty"`

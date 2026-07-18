@@ -39,7 +39,7 @@ func Migrate(ctx context.Context, source GrantLister, target credresolve.GrantWr
 	}
 	migrated := 0
 	for _, mg := range grants {
-		if err := target.StoreGrant(ctx, mg.Namespace, mg.Server, mg.UserHash, mg.Grant); err != nil {
+		if err := target.StoreGrant(ctx, mg.Namespace, mg.Boundary, mg.Server, mg.UserHash, mg.Grant); err != nil {
 			return migrated, fmt.Errorf("credstore: migrate grant %s/%s: %w", mg.Namespace, mg.Server, err)
 		}
 		migrated++
@@ -63,13 +63,13 @@ func NewDualRead(primary, fallback credresolve.CredentialResolver) *DualRead {
 }
 
 // Resolve tries the primary, then the legacy fallback ONLY on a not-found signal.
-func (d *DualRead) Resolve(ctx context.Context, ns, server, userHash string) (credresolve.Credential, error) {
-	cred, err := d.primary.Resolve(ctx, ns, server, userHash)
+func (d *DualRead) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
+	cred, err := d.primary.Resolve(ctx, ns, boundary, server, userHash)
 	if err == nil {
 		return cred, nil
 	}
 	if errors.Is(err, credresolve.ErrConsentRequired) || errors.Is(err, credresolve.ErrNoCredential) {
-		if c2, e2 := d.fallback.Resolve(ctx, ns, server, userHash); e2 == nil {
+		if c2, e2 := d.fallback.Resolve(ctx, ns, boundary, server, userHash); e2 == nil {
 			return c2, nil
 		}
 	}
@@ -77,21 +77,21 @@ func (d *DualRead) Resolve(ctx context.Context, ns, server, userHash string) (cr
 }
 
 // Revoke revokes in BOTH backends (best-effort) so a revoke during migration is complete.
-func (d *DualRead) Revoke(ctx context.Context, ns, server, userHash string) error {
+func (d *DualRead) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
 	return errors.Join(
-		d.primary.Revoke(ctx, ns, server, userHash),
-		d.fallback.Revoke(ctx, ns, server, userHash),
+		d.primary.Revoke(ctx, ns, boundary, server, userHash),
+		d.fallback.Revoke(ctx, ns, boundary, server, userHash),
 	)
 }
 
 // StoreGrant writes to the PRIMARY (new writes land in the config-selected backend), if it
 // supports writes.
-func (d *DualRead) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (d *DualRead) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	w, ok := d.primary.(credresolve.GrantWriter)
 	if !ok {
 		return fmt.Errorf("credstore: dual-read primary backend does not support writes")
 	}
-	return w.StoreGrant(ctx, ns, server, userHash, g)
+	return w.StoreGrant(ctx, ns, boundary, server, userHash, g)
 }
 
 // Compile-time assertions.

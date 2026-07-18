@@ -35,19 +35,21 @@ func NewMemStore() Storage {
 	return &memStore{rows: map[string]stored{}}
 }
 
-func memKey(ns, server, userHash string) string { return ns + "|" + server + "|" + userHash }
+func memKey(ns, boundary, server, userHash string) string {
+	return ns + "|" + boundary + "|" + server + "|" + userHash
+}
 
-func (m *memStore) load(_ context.Context, ns, server, userHash string) (stored, bool, error) {
+func (m *memStore) load(_ context.Context, ns, boundary, server, userHash string) (stored, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st, ok := m.rows[memKey(ns, server, userHash)]
+	st, ok := m.rows[memKey(ns, boundary, server, userHash)]
 	return st, ok, nil
 }
 
-func (m *memStore) save(_ context.Context, ns, server, userHash string, st stored, expectedVersion int64) error {
+func (m *memStore) save(_ context.Context, ns, boundary, server, userHash string, st stored, expectedVersion int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	k := memKey(ns, server, userHash)
+	k := memKey(ns, boundary, server, userHash)
 	cur, exists := m.rows[k]
 	if expectedVersion == 0 {
 		if exists {
@@ -65,10 +67,10 @@ func (m *memStore) save(_ context.Context, ns, server, userHash string, st store
 	return nil
 }
 
-func (m *memStore) del(_ context.Context, ns, server, userHash string) error {
+func (m *memStore) del(_ context.Context, ns, boundary, server, userHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.rows, memKey(ns, server, userHash))
+	delete(m.rows, memKey(ns, boundary, server, userHash))
 	return nil
 }
 
