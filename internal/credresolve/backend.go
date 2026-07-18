@@ -227,6 +227,57 @@ func (b *K8sBackend) refresh(ctx context.Context, ns, name string) (string, time
 // Compile-time assertion: the kubernetes backend is a config-selected grant writer.
 var _ GrantWriter = (*K8sBackend)(nil)
 
+// MigratableGrant is a legacy k8s-Secret grant reconstructed for migration into another
+// backend — the (identity) coordinates plus the full token material.
+type MigratableGrant struct {
+	Namespace string
+	Server    string
+	UserHash  string
+	Grant     Grant
+}
+
+// ListGrants enumerates the per-user grant Secrets in the locked credential namespace and
+// reconstructs each as a MigratableGrant — the READ side of a backfill into another backend
+// (m28.2). It requires a locked credential namespace (the normal OBO deployment).
+func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) {
+	if b.cfg.CredentialNamespace == "" {
+		return nil, errors.New("credresolve: ListGrants requires a locked credential namespace")
+	}
+	var secs corev1.SecretList
+	if err := b.cfg.Client.List(ctx, &secs, client.InNamespace(b.cfg.CredentialNamespace)); err != nil {
+		return nil, fmt.Errorf("credresolve: list grant Secrets: %w", err)
+	}
+	out := make([]MigratableGrant, 0, len(secs.Items))
+	for i := range secs.Items {
+		s := &secs.Items[i]
+		userHash, server := s.Labels[LabelGrantUser], s.Labels[LabelGrantServer]
+		if userHash == "" || server == "" {
+			continue // not a grant Secret
+		}
+		ns := s.Labels[LabelGrantSourceNS]
+		if ns == "" {
+			ns = s.Namespace
+		}
+		out = append(out, MigratableGrant{
+			Namespace: ns, Server: server, UserHash: userHash,
+			Grant: Grant{
+				Tokens: Tokens{
+					AccessToken:  string(s.Data[KeyAccessToken]),
+					RefreshToken: string(s.Data[KeyRefreshToken]),
+					ExpiresAt:    ParseExpiry(string(s.Data[KeyExpiry])),
+				},
+				Config: OAuthConfig{
+					TokenEndpoint:      string(s.Data[KeyTokenEndpoint]),
+					ClientID:           string(s.Data[KeyClientID]),
+					RevocationEndpoint: string(s.Data[KeyRevocationEndpoint]),
+				},
+				ServerURL: s.Annotations[AnnGrantServerURL],
+			},
+		})
+	}
+	return out, nil
+}
+
 // StoreGrant upserts the user's grant as a Secret — the kubernetes backend's write side of
 // the SPI (ADR 0032). A re-consent for the same (user, server) REPLACES the stored grant
 // (rotated tokens) rather than failing. This is the same shape the BFF OAuth callback writes,
