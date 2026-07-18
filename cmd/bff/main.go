@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -44,6 +45,8 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/bff"
+	"github.com/ctxmesh/agent-engine/internal/credplane"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
 func main() {
@@ -181,7 +184,23 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 			"issuer", oidcIssuer, "clientID", oidcClientID)
 	}
 
+	// SPI write path (ADR 0032): when TOKEN_SERVICE_URL is set, the OAuth callback DELEGATES
+	// grant persistence to the central token-service so grants land in the config-selected
+	// backend and DB/vault creds stay out of this user-facing BFF. mTLS engages when the
+	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
+	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
+	var grantStore credresolve.GrantWriter
+	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
+		httpClient, tlsErr := tokenServiceHTTPClient(tsURL)
+		if tlsErr != nil {
+			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
+		}
+		grantStore = credplane.NewClient(tsURL, httpClient)
+		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
+	}
+
 	srv := bff.NewServer(bff.Options{
+		GrantStore:                  grantStore,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
@@ -267,6 +286,43 @@ func envTrue(raw string) bool {
 	default:
 		return false
 	}
+}
+
+// tokenServiceHTTPClient builds the http.Client the BFF uses to delegate grant writes to
+// the token-service. When the BFF_TOKEN_SERVICE_TLS_* files are all present it is mTLS
+// (the platform client cert + CA); otherwise it returns nil so credplane.NewClient uses a
+// plain default client (dev only — the token-service also degrades to plain HTTP).
+func tokenServiceHTTPClient(tsURL string) (*http.Client, error) {
+	certFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_CERT_FILE"))
+	keyFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_KEY_FILE"))
+	caFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_CA_FILE"))
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return nil, nil
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("read client cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read client key: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA: %w", err)
+	}
+	serverName := ""
+	if u, uErr := url.Parse(tsURL); uErr == nil {
+		serverName = u.Hostname()
+	}
+	tlsCfg, err := credplane.ClientTLSConfig(certPEM, keyPEM, caPEM, serverName)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}, nil
 }
 
 // parseGenerationModels splits the PLATFORM_GENERATION_MODELS env (a

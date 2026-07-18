@@ -31,6 +31,7 @@ package credplane
 const (
 	pathResolve = "/v1/resolve"
 	pathRevoke  = "/v1/revoke"
+	pathStore   = "/v1/store"
 )
 
 // resolveRequest asks the central service to resolve the OBO credential for one
@@ -65,9 +66,33 @@ type revokeResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// storeRequest asks the central service to PERSIST a user's grant to the config-selected
+// backend (the SPI write path, ADR 0032) — the BFF OAuth callback delegates here so DB /
+// remote-vault creds stay in the token-service, not the user-facing BFF. Token fields are
+// secret and cross only the mTLS link.
+type storeRequest struct {
+	Namespace          string `json:"namespace"`
+	Server             string `json:"server"`
+	UserHash           string `json:"userHash"`
+	AccessToken        string `json:"accessToken"`
+	RefreshToken       string `json:"refreshToken,omitempty"`
+	ExpiresAtUnix      int64  `json:"expiresAtUnix,omitempty"`
+	TokenEndpoint      string `json:"tokenEndpoint,omitempty"`
+	ClientID           string `json:"clientID,omitempty"`
+	RevocationEndpoint string `json:"revocationEndpoint,omitempty"`
+	ServerURL          string `json:"serverURL,omitempty"`
+}
+
+// storeResponse reports a store outcome ("" ok, "unsupported" if the backend can't write,
+// else "internal").
+type storeResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
 // Stable error codes on the wire (never a raw error string — that could leak internals).
 const (
 	errCodeConsentRequired = "consent_required"
 	errCodeNoCredential    = "no_credential"
 	errCodeInternal        = "internal"
+	errCodeUnsupported     = "unsupported" // the resolved backend cannot persist grants
 )

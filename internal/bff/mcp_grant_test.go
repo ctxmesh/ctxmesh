@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -270,6 +271,51 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	// The audit log records the create WITHOUT the token.
 	assert.Contains(t, lb.String(), string(grantActionCreate), "grant.create must be audited")
 	assert.Contains(t, lb.String(), userGrantHash("user:alice-token"), "the audit carries the hashed user")
+}
+
+// fakeGrantWriter captures a delegated grant persist (the SPI write path).
+type fakeGrantWriter struct {
+	calls                int
+	ns, server, userHash string
+	g                    credresolve.Grant
+}
+
+func (f *fakeGrantWriter) StoreGrant(_ context.Context, ns, server, userHash string, g credresolve.Grant) error {
+	f.calls++
+	f.ns, f.server, f.userHash, f.g = ns, server, userHash, g
+	return nil
+}
+
+// TestMCPGrantConsentDelegatesToGrantStore: when a token-service grant store is configured
+// (SPI write path, ADR 0032), the callback DELEGATES the persist there — the grant lands in
+// the config-selected backend and NO k8s Secret is written by the BFF.
+func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	const server, ns = "grant-mcp", "prod"
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(oauthToolRegistry(server, "http://grant/mcp")).Build()
+	s, _ := newGrantServer(t, c)
+	fw := &fakeGrantWriter{}
+	s.grantStore = fw // delegate instead of writing a Secret
+
+	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	oauth.expectChallenge = ""
+	crec := callback(t, s, oauth.validCode, pending.State)
+	assertCallbackRedirect(t, crec, "/tools/catalog")
+
+	// The delegate received the grant WITH the token material.
+	require.Equal(t, 1, fw.calls, "the callback must delegate exactly one grant persist")
+	assert.Equal(t, server, fw.server)
+	assert.Equal(t, userGrantHash("user:alice-token"), fw.userHash)
+	assert.Equal(t, theOAuthAccessToken, fw.g.Tokens.AccessToken)
+	assert.Equal(t, theOAuthRefreshToken, fw.g.Tokens.RefreshToken)
+
+	// And the BFF wrote NO grant Secret (the token-service owns the write).
+	var grant corev1.Secret
+	name := grantSecretName(server, userGrantHash("user:alice-token"))
+	err := c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, &grant)
+	assert.True(t, apierrors.IsNotFound(err), "no grant Secret should be written when delegating, got err=%v", err)
 }
 
 // TestMCPGrantConsentNonOAuthServerIs4xx proves consent for a server that is not an

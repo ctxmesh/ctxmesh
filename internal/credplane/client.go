@@ -85,6 +85,29 @@ func (c *Client) Revoke(ctx context.Context, ns, server, userHash string) error 
 	return nil
 }
 
+// StoreGrant delegates a grant PERSIST to the central service, which writes it to the
+// config-selected backend (the SPI write path, ADR 0032). Implements credresolve.GrantWriter
+// so the BFF OAuth callback swaps a direct Secret write for this with no other change.
+func (c *Client) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+	req := storeRequest{
+		Namespace: ns, Server: server, UserHash: userHash,
+		AccessToken: g.Tokens.AccessToken, RefreshToken: g.Tokens.RefreshToken,
+		TokenEndpoint: g.Config.TokenEndpoint, ClientID: g.Config.ClientID,
+		RevocationEndpoint: g.Config.RevocationEndpoint, ServerURL: g.ServerURL,
+	}
+	if !g.Tokens.ExpiresAt.IsZero() {
+		req.ExpiresAtUnix = g.Tokens.ExpiresAt.Unix()
+	}
+	var resp storeResponse
+	if err := c.post(ctx, pathStore, req, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("credplane: central service store error (%s)", resp.Error)
+	}
+	return nil
+}
+
 // post sends req as JSON to path and decodes the response into out. A non-2xx or transport
 // failure is a real error (never a silent empty credential).
 func (c *Client) post(ctx context.Context, path string, req, out any) error {
@@ -117,5 +140,8 @@ func (c *Client) post(ctx context.Context, path string, req, out any) error {
 	return nil
 }
 
-// Compile-time assertion that Client is a drop-in credresolve.CredentialResolver.
-var _ credresolve.CredentialResolver = (*Client)(nil)
+// Compile-time assertions: a drop-in resolver AND a delegating grant writer.
+var (
+	_ credresolve.CredentialResolver = (*Client)(nil)
+	_ credresolve.GrantWriter        = (*Client)(nil)
+)
