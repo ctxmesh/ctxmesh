@@ -67,6 +67,30 @@ func runCapabilityFromContext(ctx context.Context) string {
 	return token
 }
 
+// hdrConversationID is the header the agent reads to scope memory to a conversation
+// thread (`mem:{ns}/{agent}:{conversationId}`) — the same convention the launcher's
+// memory/gateway/A2A paths already use (cmd/launcher). The console's chat sends one
+// stable id per session so the stock managed loop can thread context across turns.
+const hdrConversationID = "X-Conversation-Id"
+
+// conversationIDCtxKey carries the console-supplied conversation id from the /invoke
+// handler to the adapter (like the run capability), so the pure-HTTP adapter attaches
+// the X-Conversation-Id header without the handler reaching into it.
+type conversationIDCtxKey struct{}
+
+// contextWithConversationID returns ctx carrying the conversation id for the adapter to
+// attach as the X-Conversation-Id header on the outbound /invoke.
+func contextWithConversationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, conversationIDCtxKey{}, id)
+}
+
+// conversationIDFromContext returns the conversation id carried on ctx, or "" when the
+// run is single-shot (no thread — today's Playground) and no id was supplied.
+func conversationIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(conversationIDCtxKey{}).(string)
+	return id
+}
+
 // httpInvokeAdapter is the concrete InvokeAdapter (m12.7). It is a PURE HTTP
 // invoker: it holds no Kubernetes client and never resolves an agent's address —
 // the caller-scoped handler resolves the endpoint (AgentDeployment status.url)
@@ -152,6 +176,12 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	// carries no capability (unattended / dev / minting-disabled).
 	if capToken := runCapabilityFromContext(ctx); capToken != "" {
 		req.Header.Set(runcap.HeaderName, capToken)
+	}
+	// Conversation thread (m29.5): when the console supplies a conversation id, forward it as
+	// X-Conversation-Id so a memory-aware agent scopes its context to this chat. Absent ⇒ the
+	// run is single-shot (today's Playground) and carries no thread — nothing changes.
+	if convID := conversationIDFromContext(ctx); convID != "" {
+		req.Header.Set(hdrConversationID, convID)
 	}
 
 	resp, err := a.client.Do(req)
