@@ -1,0 +1,20 @@
+# Token-service ClusterRole — CLUSTER-WIDE READ-ONLY of the non-secret CRDs the central
+# credential plane consults for requests from ANY namespace (ADR 0030 §1, ADR 0032):
+#   - ClusterCredentialStore  (cluster-scoped) — the default backend selection
+#   - CredentialStore          (in any request namespace) — the per-namespace override
+#   - ToolRegistry             (in any request namespace) — classify a server's auth type/scope
+# Cluster-wide because a request for (namespace N, server) resolves N's store + server class,
+# and N is any agent namespace. Read-only — the plane selects/classifies, never manages these.
+# Per-user grant SECRETS stay in the locked credential namespace (the namespaced Role).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: token-service-clusterrole
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: ["agents.ctxmesh.ai"]
+    resources: ["clustercredentialstores", "credentialstores", "toolregistries"]
+    verbs: ["get", "list", "watch"]
