@@ -1,0 +1,17 @@
+# Binds the token-service SA to its cluster-scoped ClusterCredentialStore read role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: token-service-clusterrolebinding
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: token-service-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: token-service
+    namespace: system
