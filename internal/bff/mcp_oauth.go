@@ -181,6 +181,12 @@ type pendingOAuthFlow struct {
 	// egress). It is the hash of the consenting caller's username (never the raw
 	// username), captured at consent-begin. Empty → the m17.2 register flow.
 	grantUserHash string
+	// boundary is the trust boundary (ADR 0033) the grant is stored under: the connecting
+	// agent's registry, or the agent itself when the consent is initiated from a specific
+	// agent's run. Empty ⇒ a legacy unscoped grant (connect-for-all — e.g. a servers-page
+	// consent with no agent context). Captured at consent-begin so the WRITE key matches the
+	// boundary a run of that agent resolves within (m30.5).
+	boundary string
 	// expiresAt bounds the flow's lifetime (register time + pendingFlowTTL).
 	expiresAt time.Time
 }

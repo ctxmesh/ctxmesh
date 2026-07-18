@@ -128,7 +128,7 @@ func seedGrant(server, username, access, refresh, tokenEndpoint string, expiry t
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantSecretName(server, userHash),
 			Namespace: ns,
-			Labels:    grantSecretLabels(server, userHash, ""),
+			Labels:    grantSecretLabels(server, userHash, "", ""),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
@@ -158,7 +158,7 @@ func TestServerGrantRoutingModes(t *testing.T) {
 
 	locked := &Server{credentialNamespace: "ae-credentials", credentialClient: cred}
 	require.True(t, locked.lockedCredentials())
-	ns, name := locked.grantCoordinates("prod", "gh", "u-abc")
+	ns, name := locked.grantCoordinates("prod", "", "gh", "u-abc")
 	assert.Equal(t, "ae-credentials", ns, "locked: grant lands in the credential namespace")
 	assert.NotEqual(t, grantSecretName("gh", "u-abc"), name, "locked: name folds the source ns")
 	assert.True(t, locked.grantClient(caller) == cred, "locked: writes go through the privileged client")
@@ -166,7 +166,7 @@ func TestServerGrantRoutingModes(t *testing.T) {
 
 	legacy := &Server{}
 	require.False(t, legacy.lockedCredentials())
-	lns, lname := legacy.grantCoordinates("prod", "gh", "u-abc")
+	lns, lname := legacy.grantCoordinates("prod", "", "gh", "u-abc")
 	assert.Equal(t, "prod", lns, "legacy: grant stays in the source namespace")
 	assert.Equal(t, grantSecretName("gh", "u-abc"), lname, "legacy: original name")
 	assert.True(t, legacy.grantClient(caller) == caller, "legacy: caller-scoped write")
@@ -568,35 +568,35 @@ func TestGrantSecretCoordinates(t *testing.T) {
 	const server, hash = "gh", "u-abcdef0123456789"
 
 	// Legacy (no credential namespace): unchanged (source ns, original name).
-	ns, name := grantSecretCoordinates("", "team-a", server, hash)
+	ns, name := grantSecretCoordinates("", "team-a", "", server, hash)
 	assert.Equal(t, "team-a", ns, "legacy: grant stays in its source namespace")
 	assert.Equal(t, grantSecretName(server, hash), name, "legacy: original name, no migration")
 
 	// Locked: the credential namespace, source ns folded into the name.
-	lockedNS, lockedName := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	lockedNS, lockedName := grantSecretCoordinates("ae-credentials", "team-a", "", server, hash)
 	assert.Equal(t, "ae-credentials", lockedNS, "locked: all grants land in the credential namespace")
 	assert.True(t, strings.HasPrefix(lockedName, grantSecretName(server, hash)+"-"),
 		"locked: name extends the legacy base with the source-ns hash")
 	assert.LessOrEqual(t, len(lockedName), 253, "object name stays within the k8s limit")
 
 	// Same (server, user) from a DIFFERENT namespace → a distinct object (no collision).
-	_, otherName := grantSecretCoordinates("ae-credentials", "team-b", server, hash)
+	_, otherName := grantSecretCoordinates("ae-credentials", "team-b", "", server, hash)
 	assert.NotEqual(t, lockedName, otherName, "locked: different source namespaces never collide")
 
 	// A different server in the same namespace is also a distinct object.
-	_, otherServer := grantSecretCoordinates("ae-credentials", "team-a", "jira", hash)
+	_, otherServer := grantSecretCoordinates("ae-credentials", "team-a", "", "jira", hash)
 	assert.NotEqual(t, lockedName, otherServer, "locked: different servers never collide")
 
 	// A different user (hash) for the same server + namespace is a distinct object too.
-	_, otherUser := grantSecretCoordinates("ae-credentials", "team-a", server, "u-999888777666")
+	_, otherUser := grantSecretCoordinates("ae-credentials", "team-a", "", server, "u-999888777666")
 	assert.NotEqual(t, lockedName, otherUser, "locked: different users never collide")
 
 	// Deterministic (lookup must be stable across write/read/refresh).
-	_, again := grantSecretCoordinates("ae-credentials", "team-a", server, hash)
+	_, again := grantSecretCoordinates("ae-credentials", "team-a", "", server, hash)
 	assert.Equal(t, lockedName, again, "locked: coordinates are deterministic")
 
 	// The source namespace is the authoritative label match key in locked mode.
-	assert.Equal(t, "team-a", grantSecretLabels(server, hash, "team-a")[labelMCPGrantSourceNS])
-	_, hasNS := grantSecretLabels(server, hash, "")[labelMCPGrantSourceNS]
+	assert.Equal(t, "team-a", grantSecretLabels(server, hash, "team-a", "")[labelMCPGrantSourceNS])
+	_, hasNS := grantSecretLabels(server, hash, "", "")[labelMCPGrantSourceNS]
 	assert.False(t, hasNS, "legacy labels carry no source-namespace")
 }
