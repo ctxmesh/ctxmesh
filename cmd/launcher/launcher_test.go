@@ -686,6 +686,29 @@ func TestProxy_AgentIdentityTraceTag(t *testing.T) {
 	}
 }
 
+// TestProxy_AgentTraceName: the agent.invoke span carries `langfuse.trace.name`
+// so the trace has a human-readable name in the runs list. The trace ROOT is the
+// BFF's never-exported seed span (invoke.go mints a traceparent), so WITHOUT this
+// the trace is unnamed and invisible in the runs list. Name = `<ns>/<name>`,
+// degrading to the bare name, then to "agent.invoke" — NEVER empty.
+func TestProxy_AgentTraceName(t *testing.T) {
+	t.Parallel()
+
+	// Namespaced agent → `<ns>/<name>`.
+	nsAttrs := invokeSpanAttrs(t, Config{AgentName: "foo", AgentNamespace: "team-a"})
+	if got, want := nsAttrs[langfuseTraceNameAttr], "team-a/foo"; got != want {
+		t.Errorf("%s = %q, want %q", langfuseTraceNameAttr, got, want)
+	}
+	// Namespace absent → bare name.
+	if got, want := invokeSpanAttrs(t, Config{AgentName: "foo"})[langfuseTraceNameAttr], "foo"; got != want {
+		t.Errorf("namespace-absent %s = %q, want %q", langfuseTraceNameAttr, got, want)
+	}
+	// Unnamed agent → the "agent.invoke" fallback, NEVER empty (still a visible run).
+	if got, want := invokeSpanAttrs(t, Config{})[langfuseTraceNameAttr], "agent.invoke"; got != want {
+		t.Errorf("unnamed-agent %s = %q, want %q (must never be empty)", langfuseTraceNameAttr, got, want)
+	}
+}
+
 // TestProxy_AgentIdentityTagCrossNamespaceDistinct: two agents that share a bare
 // NAME in different namespaces get DISTINCT identity tags — the property that keeps
 // the BFF per-agent run list from mixing default/foo with other/foo.

@@ -46,6 +46,18 @@ const tracerName = "agent-engine/launcher"
 // exactly one agent, never mixing two same-named agents in different namespaces.
 const langfuseTraceTagsAttr = "langfuse.trace.tags"
 
+// langfuseTraceNameAttr names the TRACE (not just the span). The BFF mints a
+// traceparent with a seed span id (invoke.go), so the launcher's agent.invoke span
+// is a CHILD of that seed — and the seed span is never exported, so the trace's root
+// has no name and Langfuse shows an unnamed run (invisible in the runs list). Langfuse
+// honors `langfuse.trace.name` from ANY span, so stamping it on agent.invoke gives the
+// trace a stable, human-readable name regardless of the phantom root.
+const langfuseTraceNameAttr = "langfuse.trace.name"
+
+// agentInvokeSpanName is the launcher's root proxy span name and the trace-name
+// fallback for an unnamed agent.
+const agentInvokeSpanName = "agent.invoke"
+
 // agentTagPrefix prefixes the per-agent identity tag value. The full tag is
 // `agent:<namespace>/<name>` — the SAME `<ns>/<name>` key the BFF topology keys
 // agents on — so a filter for one agent's runs cannot match a same-named agent in
@@ -68,12 +80,29 @@ func agentIdentityTag(cfg Config) string {
 	return agentTagPrefix + cfg.AgentNamespace + "/" + cfg.AgentName
 }
 
-// setAgentIdentityTag stamps the trace-level `langfuse.trace.tags` attribute with
-// the agent-identity tag when one can be built. It is a no-op for an unnamed agent
-// (nothing to filter on), so a mis-injected launcher never emits an empty/garbage
-// tag. Called on EVERY agent.invoke span — including the guard-denied path — so a
-// denied run is still attributed to its agent.
+// agentTraceName is the human-readable TRACE name stamped via langfuse.trace.name:
+// the `<ns>/<name>` agent identity (so the runs list identifies WHICH agent ran),
+// degrading to the bare name, then to "agent.invoke" for an unnamed agent — never
+// empty, so a run is always named and visible in the runs list.
+func agentTraceName(cfg Config) string {
+	switch {
+	case cfg.AgentName == "":
+		return agentInvokeSpanName
+	case cfg.AgentNamespace == "":
+		return cfg.AgentName
+	default:
+		return cfg.AgentNamespace + "/" + cfg.AgentName
+	}
+}
+
+// setAgentIdentityTag stamps the trace-level `langfuse.trace.name` + `langfuse.trace.tags`
+// attributes: the NAME so the run is visible/identifiable in the runs list (the trace root
+// is the BFF's never-exported seed span, so without this the trace is unnamed), and the
+// per-agent identity TAG so the BFF can filter one agent's runs. Called on EVERY
+// agent.invoke span — including the guard-denied path — so a denied run is still named +
+// attributed to its agent.
 func setAgentIdentityTag(span trace.Span, cfg Config) {
+	span.SetAttributes(attribute.String(langfuseTraceNameAttr, agentTraceName(cfg)))
 	if tag := agentIdentityTag(cfg); tag != "" {
 		span.SetAttributes(attribute.StringSlice(langfuseTraceTagsAttr, []string{tag}))
 	}
@@ -192,7 +221,7 @@ func buildHandler(
 		// existing trace for A2A calls; starts a new root if absent).
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
-		ctx, span := tracer.Start(ctx, "agent.invoke",
+		ctx, span := tracer.Start(ctx, agentInvokeSpanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		// Deferred so the span is always ended (and exported) even if the
