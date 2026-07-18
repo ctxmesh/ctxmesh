@@ -31,6 +31,7 @@ import {
   useToast,
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
+import { ChatMarkdown } from "@/components/chat-markdown";
 import { RunInspector } from "@/components/dashboard/run-inspector";
 import { UseAgentPanel } from "@/components/dashboard/use-agent-panel";
 import {
@@ -48,6 +49,7 @@ import {
   type MemoryBindingSummary,
   type RunSummary,
 } from "@/lib/api";
+import { extractAgentOutput } from "@/lib/agent-output";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
@@ -1165,8 +1167,11 @@ function ChatPanel({
   function renderTurn(t: ChatTurn) {
     if (t.role === "user") {
       return (
-        <div key={t.id} className="flex justify-end" data-testid="chat-turn-user">
-          <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+        <div key={t.id} className="flex flex-col items-end gap-1" data-testid="chat-turn-user">
+          <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            You
+          </span>
+          <div className="max-w-[80%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-primary px-3.5 py-2 text-xs text-primary-foreground shadow-sm">
             {t.text}
           </div>
         </div>
@@ -1174,11 +1179,21 @@ function ChatPanel({
     }
     const traceId = t.traceId;
     return (
-      <div key={t.id} className="flex justify-start" data-testid="chat-turn-agent">
-        <div className="max-w-[85%] space-y-2 rounded-lg bg-surface-3 px-3 py-2 text-xs">
+      <div key={t.id} className="flex flex-col items-start gap-1" data-testid="chat-turn-agent">
+        <span className="flex items-center gap-1 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          <MessageSquare className="h-3 w-3" />
+          {name}
+        </span>
+        <div className="w-full max-w-[92%] space-y-2 rounded-2xl rounded-bl-sm border border-border bg-card px-3.5 py-2.5">
           {t.pending ? (
-            <span className="text-muted-foreground" data-testid="chat-pending">
-              Thinking…
+            <span
+              className="inline-flex items-center gap-1 py-1"
+              data-testid="chat-pending"
+              aria-label="Agent is thinking"
+            >
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.25s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.12s]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40" />
             </span>
           ) : t.error ? (
             t.forbidden ? (
@@ -1188,7 +1203,7 @@ function ChatPanel({
                 detail={t.error}
               />
             ) : (
-              <span className="text-destructive" role="alert" data-testid="chat-turn-error">
+              <span className="text-xs text-destructive" role="alert" data-testid="chat-turn-error">
                 {t.error}
               </span>
             )
@@ -1196,7 +1211,7 @@ function ChatPanel({
             <>
               {t.consentRequired && t.consentRequired.length > 0 && (
                 <div
-                  className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5"
+                  className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs"
                   data-testid="chat-consent"
                 >
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
@@ -1228,12 +1243,12 @@ function ChatPanel({
                   </div>
                 </div>
               )}
-              {t.text && <p className="whitespace-pre-wrap break-words">{t.text}</p>}
+              {t.text && <ChatMarkdown>{extractAgentOutput(t.text)}</ChatMarkdown>}
               {traceId && (
                 <button
                   type="button"
                   onClick={() => onTraced(traceId)}
-                  className="font-mono text-primary hover:underline"
+                  className="pt-0.5 font-mono text-[11px] text-muted-foreground hover:text-primary hover:underline"
                   data-testid="open-trace"
                 >
                   trace {traceId} →
@@ -1247,11 +1262,22 @@ function ChatPanel({
   }
 
   return (
-    <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="chat-panel">
-      <div className="mb-3 flex items-center justify-between gap-2">
+    <div className="flex flex-col rounded-lg border bg-card shadow-card" data-testid="chat-panel">
+      <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
         <div className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-primary" />
-          <p className="text-sm font-medium">Chat</p>
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary">
+            <MessageSquare className="h-4 w-4" />
+          </span>
+          <div className="leading-tight">
+            <p className="text-sm font-medium">Chat</p>
+            <p className="text-[11px] text-muted-foreground" data-testid="chat-memory-hint">
+              {!canRun
+                ? "read-only access"
+                : memoryBound
+                  ? "keeps context across turns"
+                  : "no memory — won't remember earlier turns"}
+            </p>
+          </div>
         </div>
         {turns.length > 0 && (
           <Button size="sm" variant="ghost" onClick={newChat} data-testid="chat-new">
@@ -1262,7 +1288,7 @@ function ChatPanel({
 
       {!canRun ? (
         <p
-          className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
+          className="m-4 rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
           data-testid="chat-readonly-note"
         >
           You have read-only access — chatting with an agent requires create permission on
@@ -1270,54 +1296,65 @@ function ChatPanel({
         </p>
       ) : (
         <>
-          <p className="mb-2 text-[11px] text-muted-foreground" data-testid="chat-memory-hint">
-            {memoryBound
-              ? "Threaded on one conversation — the agent keeps context across turns via memory."
-              : "This agent has no memory binding, so it won't remember earlier turns. Attach memory to keep context."}
-          </p>
           {!ready && (
-            <p className="mb-2 text-xs text-warning-foreground" data-testid="chat-not-ready-note">
+            <p
+              className="mx-4 mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
+              data-testid="chat-not-ready-note"
+            >
               The agent isn't Ready yet — a message may fail until it comes up.
             </p>
           )}
 
           <div
             ref={scrollRef}
-            className="mb-3 max-h-96 space-y-3 overflow-y-auto"
+            className="flex min-h-[18rem] flex-col gap-4 overflow-y-auto px-4 py-4"
+            style={{ maxHeight: "32rem" }}
             data-testid="chat-thread"
           >
             {turns.length === 0 ? (
-              <p
-                className="py-6 text-center text-xs text-muted-foreground"
+              <div
+                className="m-auto max-w-xs text-center text-xs text-muted-foreground"
                 data-testid="chat-empty"
               >
-                Say something to start the conversation.
-              </p>
+                <MessageSquare className="mx-auto mb-2 h-6 w-6 opacity-40" />
+                <p>Start a conversation with {name}.</p>
+                <p className="mt-1 opacity-80">
+                  {memoryBound
+                    ? "It remembers earlier turns in this chat."
+                    : "Each message is independent (no memory bound)."}
+                </p>
+              </div>
             ) : (
               turns.map(renderTurn)
             )}
           </div>
 
-          <div className="flex items-end gap-2">
-            <Textarea
-              aria-label="Chat message"
-              rows={2}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line)"
-              className="text-xs"
-              data-testid="chat-input"
-            />
-            <Button
-              size="sm"
-              onClick={() => void send()}
-              disabled={busy || draft.trim() === ""}
-              data-testid="chat-send"
-            >
-              <Send className="h-4 w-4" />
-              Send
-            </Button>
+          <div className="border-t p-3">
+            <div className="flex items-end gap-2">
+              <Textarea
+                aria-label="Chat message"
+                rows={2}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Message the agent…"
+                className="resize-none text-xs"
+                data-testid="chat-input"
+              />
+              <Button
+                size="icon"
+                onClick={() => void send()}
+                disabled={busy || draft.trim() === ""}
+                data-testid="chat-send"
+                aria-label="Send message"
+                className="h-9 w-9 shrink-0"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </div>
+            <p className="mt-1.5 px-0.5 text-[10px] text-muted-foreground">
+              Enter to send · Shift+Enter for a new line
+            </p>
           </div>
         </>
       )}
