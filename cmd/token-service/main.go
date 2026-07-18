@@ -44,6 +44,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/credstore"
 )
 
 // mcpAuthTypeAnnotation MUST match internal/bff.annMCPAuthType — the non-secret annotation
@@ -98,41 +99,52 @@ func run(log logr.Logger) error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// The ONE shared backend — its cache + singleflight + optimistic writeback are now
-	// global across every delegating sidecar (ADR 0030 §1).
-	backend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
-		Client:              k8sClient,
-		CredentialNamespace: credentialNS,
-		Exchanger:           &credresolve.HTTPTokenExchanger{},
-		AuthTypeIsOAuth: func(ctx context.Context, ns, server string) (bool, error) {
-			var tr agentsv1alpha1.ToolRegistry
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
-				if apierrors.IsNotFound(err) {
-					return false, nil
-				}
-				return false, err
+	// getTR fetches a server's ToolRegistry; a missing registry ⇒ (nil, nil), which the
+	// callers treat conservatively (not-OAuth / not-org) so a transient absence never
+	// masquerades as a consent prompt or an org fallback.
+	getTR := func(ctx context.Context, ns, server string) (*agentsv1alpha1.ToolRegistry, error) {
+		var tr agentsv1alpha1.ToolRegistry
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, nil
 			}
-			return tr.Annotations[mcpAuthTypeAnnotation] == oauthAuthType, nil
-		},
-		// Org-scope resolution (ADR 0029 §2): when the invoker has no personal grant and the
-		// server is EXPLICITLY org-scoped, resolve the admin-set shared credential.
-		OrgCredential: credresolve.NewOrgCredentialFunc(k8sClient, credentialNS,
-			func(ctx context.Context, ns, server string) (bool, error) {
-				var tr agentsv1alpha1.ToolRegistry
-				if err := k8sClient.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
-					if apierrors.IsNotFound(err) {
-						return false, nil
-					}
-					return false, err
-				}
-				return tr.Labels[mcpScopeLabel] == scopeOrgValue, nil
-			}),
+			return nil, err
+		}
+		return &tr, nil
+	}
+	authTypeIsOAuth := func(ctx context.Context, ns, server string) (bool, error) {
+		tr, err := getTR(ctx, ns, server)
+		if err != nil || tr == nil {
+			return false, err
+		}
+		return tr.Annotations[mcpAuthTypeAnnotation] == oauthAuthType, nil
+	}
+	// isOrgScoped drives org-scope resolution (ADR 0029 §2): when the invoker has no
+	// personal grant and the server is EXPLICITLY org-scoped, resolve the shared credential.
+	isOrgScoped := func(ctx context.Context, ns, server string) (bool, error) {
+		tr, err := getTR(ctx, ns, server)
+		if err != nil || tr == nil {
+			return false, err
+		}
+		return tr.Labels[mcpScopeLabel] == scopeOrgValue, nil
+	}
+
+	// The credential backend is CONFIG-SELECTED per the CredentialStore / ClusterCredentialStore
+	// CRDs (ADR 0032); with no CRD present it is the built-in kubernetes backend, so existing
+	// installs are unchanged. Backends are shared per resolved config, so the cache + singleflight
+	// + optimistic writeback stay global across every delegating sidecar (ADR 0030 §1).
+	router := credstore.NewRouter(k8sClient, credstore.Deps{
+		Client:                     k8sClient,
+		DefaultCredentialNamespace: credentialNS,
+		Exchanger:                  &credresolve.HTTPTokenExchanger{},
+		AuthTypeIsOAuth:            authTypeIsOAuth,
+		IsOrgScoped:                isOrgScoped,
 		Audit: func(e credresolve.AuditEvent) {
 			log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
 		},
 	})
 
-	handler := credplane.NewServer(backend, log).Handler()
+	handler := credplane.NewServer(router, log).Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 
