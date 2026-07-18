@@ -82,7 +82,8 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 	want := make([]string, users)
 	for i := range users {
 		want[i] = fmt.Sprintf("token-%03d", i)
-		if err := backend.Store(ctx, ns, server, userHash(i), credpostgres.Grant{AccessToken: want[i], ExpiresAt: farFuture}); err != nil {
+		g := credpostgres.Grant{AccessToken: want[i], ExpiresAt: farFuture}
+		if err := backend.Store(ctx, ns, server, userHash(i), g); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
@@ -94,7 +95,7 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 
 	var bleed, resolves int64
 	var mu sync.Mutex
-	for r := 0; r < rounds; r++ {
+	for range rounds {
 		var wg sync.WaitGroup
 		for i := range users {
 			wg.Add(1)
@@ -131,7 +132,7 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 	if total != users*rounds || sink.badClass != 0 {
 		t.Fatalf("audit total=%d (want %d), mis-classed=%d", total, users*rounds, sink.badClass)
 	}
-	t.Logf("no-bleed soak OK: %d users × %d rounds = %d resolves through the plane, zero cross-attribution", users, rounds, resolves)
+	t.Logf("no-bleed soak OK: %d users x %d rounds = %d plane resolves, zero cross-attribution", users, rounds, resolves)
 }
 
 func userHash(i int) string { return fmt.Sprintf("userhash-%03d", i) }
