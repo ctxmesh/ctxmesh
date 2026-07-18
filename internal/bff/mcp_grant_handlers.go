@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
 // parseGrantConsentRequest decodes + validates the POST /api/mcp/oauth/grant body.
@@ -213,6 +214,31 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 // 403. The response DTO carries the (user, server) identity + the server, never a
 // token.
 func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter, r *http.Request, caller client.Client, flow pendingOAuthFlow, toks oauthTokens) {
+	// SPI write path (ADR 0032): when a token-service grant store is configured, DELEGATE
+	// the persist to it so the grant lands in the config-selected backend (Postgres /
+	// remote) with DB/vault creds kept in the token-service, not this BFF. Otherwise fall
+	// through to the direct k8s-Secret write (the kubernetes default / dev).
+	if s.grantStore != nil {
+		g := credresolve.Grant{
+			Tokens:    toks,
+			Config:    credresolve.OAuthConfig{TokenEndpoint: flow.oauth.TokenEndpoint, ClientID: flow.oauth.ClientID},
+			ServerURL: flow.serverURL,
+		}
+		if err := s.grantStore.StoreGrant(ctx, flow.namespace, flow.serverName, flow.grantUserHash, g); err != nil {
+			s.log.Error(err, "delegate MCP per-user grant store failed", "server", flow.serverName)
+			oauthCallbackError(w, r, "failed to store the per-user grant")
+			return
+		}
+		s.grantAudit().record(grantAuditEntry{
+			action:    grantActionCreate,
+			server:    flow.serverName,
+			userHash:  flow.grantUserHash,
+			namespace: flow.namespace,
+		})
+		oauthCallbackConnected(w, r, flow.serverName)
+		return
+	}
+
 	// In locked mode the grant lands in the credential namespace with the source ns
 	// folded into the coordinates + the source-namespace label; in legacy mode it stays
 	// in flow.namespace under the original name (sourceNs label "").

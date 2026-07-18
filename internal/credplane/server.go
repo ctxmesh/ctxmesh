@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -50,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(pathResolve, s.handleResolve)
 	mux.HandleFunc(pathRevoke, s.handleRevoke)
+	mux.HandleFunc(pathStore, s.handleStore)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	return mux
@@ -95,6 +97,38 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, revokeResponse{})
+}
+
+func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writer, ok := s.resolver.(credresolve.GrantWriter)
+	if !ok {
+		// The wrapped backend cannot persist grants (e.g. a read-only resolver) — fail
+		// closed with a stable code, never a partial write.
+		writeJSON(w, storeResponse{Error: errCodeUnsupported})
+		return
+	}
+	var req storeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	g := credresolve.Grant{
+		Tokens:    credresolve.Tokens{AccessToken: req.AccessToken, RefreshToken: req.RefreshToken},
+		Config:    credresolve.OAuthConfig{TokenEndpoint: req.TokenEndpoint, ClientID: req.ClientID, RevocationEndpoint: req.RevocationEndpoint},
+		ServerURL: req.ServerURL,
+	}
+	if req.ExpiresAtUnix > 0 {
+		g.Tokens.ExpiresAt = time.Unix(req.ExpiresAtUnix, 0)
+	}
+	if err := writer.StoreGrant(r.Context(), req.Namespace, req.Server, req.UserHash, g); err != nil {
+		s.log.Error(err, "credplane: store failed", "server", req.Server, "namespace", req.Namespace)
+		writeJSON(w, storeResponse{Error: errCodeInternal})
+		return
+	}
+	writeJSON(w, storeResponse{})
 }
 
 // decode reads a bounded JSON body into v, writing a 400 and returning false on failure.

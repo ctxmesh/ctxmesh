@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
@@ -124,6 +125,13 @@ type Server struct {
 	// no capability and a downstream tool call resolves as unattended (org/public only),
 	// never another user's grant. Built in NewServer from MCP_CAPABILITY_PRIVATE_KEY.
 	capabilitySigner *runcap.Signer
+
+	// grantStore, when set, DELEGATES the OAuth-callback grant persist to the central
+	// token-service (credplane.Client) so the grant lands in the CONFIG-SELECTED backend
+	// (ADR 0032) — Postgres / remote-vault creds stay in the token-service, not this
+	// user-facing BFF. nil ⇒ the BFF writes the grant Secret directly (the kubernetes
+	// default / dev). Built in NewServer from TOKEN_SERVICE_URL.
+	grantStore credresolve.GrantWriter
 
 	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
 	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
@@ -226,6 +234,11 @@ type Options struct {
 	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
 	// why this bounded SA use does not reopen the confused-deputy gap.
 	CredentialClient client.Client
+	// GrantStore, when set, DELEGATES the OAuth-callback grant persist to the central
+	// token-service so grants land in the config-selected backend (ADR 0032). nil ⇒ the BFF
+	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
+	// TOKEN_SERVICE_URL (a credplane.Client over mTLS).
+	GrantStore credresolve.GrantWriter
 	// MCPCapabilityPrivateSeedB64 is the base64-encoded Ed25519 private seed the BFF signs
 	// run capabilities with (runcap, ADR 0030 §2/§5) — a per-cluster platform Secret. Empty
 	// ⇒ capability minting is DISABLED (an /invoke carries no capability header). Wired from
@@ -266,6 +279,7 @@ func NewServer(opts Options) *Server {
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
+		grantStore:               opts.GrantStore,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		log:                      opts.Log,
