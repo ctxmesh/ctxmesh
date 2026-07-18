@@ -13,6 +13,8 @@ resources:
 - bases/agents.ctxmesh.ai_agentscalingpolicies.yaml
 - bases/agents.ctxmesh.ai_evalsuites.yaml
 - bases/agents.ctxmesh.ai_promptversions.yaml
+- bases/agents.ctxmesh.ai_credentialstores.yaml
+- bases/agents.ctxmesh.ai_clustercredentialstores.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
