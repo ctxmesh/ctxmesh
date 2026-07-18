@@ -136,7 +136,7 @@ func BackendFor(ctx context.Context, spec agentsv1alpha1.CredentialStoreSpec, de
 	case p.Remote != nil:
 		return buildRemoteBackend(ctx, p.Remote, deps)
 	case p.Postgres != nil:
-		return nil, fmt.Errorf("%w: postgres (m27.4)", ErrProviderNotImplemented)
+		return buildPostgresBackend(ctx, p.Postgres, deps)
 	case p.OpenBao != nil:
 		return nil, fmt.Errorf("%w: openbao", ErrProviderNotImplemented)
 	default:

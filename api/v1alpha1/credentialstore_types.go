@@ -66,10 +66,19 @@ type CredentialProviderRemote struct {
 }
 
 // EnvelopeEncryption configures the plane's envelope encryption for a passive backend:
-// a per-record AES-256-GCM data key wrapped by a KEK that never leaves the KMS.
+// a per-record AES-256-GCM data key wrapped by a KEK. Exactly one KEK source.
+// +kubebuilder:validation:XValidation:rule="[has(self.localKEKSecretRef), has(self.kmsV2)].filter(x, x).size() == 1",message="exactly one KEK source (localKEKSecretRef or kmsV2) must be set"
 type EnvelopeEncryption struct {
-	// kmsV2 points at a Kubernetes KMS v2 provider that wraps/unwraps the data keys.
-	KMSv2 *KMSv2Provider `json:"kmsV2"`
+	// localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
+	// keys are HMAC-derived. Gives encryption-at-rest but NOT true crypto-shred — use kmsV2
+	// for that.
+	// +optional
+	LocalKEKSecretRef *SecretKeyRef `json:"localKEKSecretRef,omitempty"`
+
+	// kmsV2 points at a Kubernetes KMS v2 provider that wraps/unwraps the data keys, with
+	// per-tenant KEKs (crypto-shred).
+	// +optional
+	KMSv2 *KMSv2Provider `json:"kmsV2,omitempty"`
 }
 
 // KMSv2Provider references a Kubernetes KMS v2 gRPC provider (the same contract used for
