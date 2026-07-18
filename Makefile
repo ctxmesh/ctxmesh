@@ -100,6 +100,10 @@ test: manifests generate fmt vet py-test ui-test ## Run unit tests (Go + Python 
 test-integration: manifests generate fmt vet setup-envtest ## Run envtest-backed integration tests (build tag 'integration').
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -tags=integration $$(go list -tags=integration ./...) -coverprofile cover-integration.out
 
+.PHONY: test-conformance
+test-conformance: ## Run the credential-store backend conformance suite (ADR 0032). Hermetic by default; set CREDPOSTGRES_TEST_DSN + OPENBAO_TEST_ADDR/TOKEN for the full Postgres+OpenBao profile (incl crypto-shred).
+	go test ./test/credconformance/... -v
+
 # e2e/acceptance tests are black-box and live in the agent-brain harness
 # (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
