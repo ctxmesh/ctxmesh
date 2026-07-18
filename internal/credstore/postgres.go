@@ -81,7 +81,7 @@ func buildSealer(ctx context.Context, enc *agentsv1alpha1.EnvelopeEncryption, de
 	case enc.OpenBaoTransit != nil:
 		return buildTransitSealer(ctx, enc.OpenBaoTransit, deps)
 	case enc.KMSv2 != nil:
-		return nil, fmt.Errorf("%w: kmsV2 envelope (generic single-key KMS)", ErrProviderNotImplemented)
+		return credpostgres.NewKMSv2Sealer(enc.KMSv2.Endpoint)
 	default:
 		return nil, fmt.Errorf("credstore: postgres encryption has no KEK custodian")
 	}
