@@ -44,6 +44,52 @@ from ctxmesh.errors import ConfigError, ConsentRequiredError
 #: config (the image reads MAX_STEPS).
 DEFAULT_MAX_STEPS = 8
 
+#: The inbound header that scopes a run to a conversation thread — the same
+#: X-Conversation-Id convention the launcher (cmd/launcher) and the memory/gateway/
+#: A2A paths use. When present AND the agent is bound to memory, the loop replays the
+#: recent turns so the stock agent is context-aware across a chat.
+CONVERSATION_HEADER = "X-Conversation-Id"
+
+#: The most recent conversation messages the loop replays as context on each turn.
+#: Bounds the prompt so a long chat can't grow the context without limit — older turns
+#: fall out of the window (the memory plane still retains the full history).
+MAX_HISTORY_MESSAGES = 40
+
+
+def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
+    """Pull the conversation id out of inbound *headers* case-insensitively (HTTP header
+    case is not guaranteed), returning "" when absent or blank."""
+    if not headers:
+        return ""
+    target = CONVERSATION_HEADER.lower()
+    for key, value in headers.items():
+        if key.lower() == target:
+            return (value or "").strip()
+    return ""
+
+
+def _load_history(client: Client, conversation_id: str) -> List[Dict[str, Any]]:
+    """Return the recent ``{role, content}`` turns stored for this conversation, bounded to
+    the last :data:`MAX_HISTORY_MESSAGES`. Only well-formed user/assistant message dicts are
+    replayed; any other JSON in the store is ignored (the memory plane is a general log)."""
+    history: List[Dict[str, Any]] = []
+    for entry in client.memory.get(conversation_id):
+        if (
+            isinstance(entry, dict)
+            and entry.get("role") in ("user", "assistant")
+            and isinstance(entry.get("content"), str)
+        ):
+            history.append({"role": entry["role"], "content": entry["content"]})
+    return history[-MAX_HISTORY_MESSAGES:]
+
+
+def _persist_turn(client: Client, conversation_id: str, user_input: str, answer: str) -> None:
+    """Append this turn's user message and the assistant's final answer to the conversation
+    so the next turn replays them. Intermediate tool-call scratchpad messages are NOT stored
+    — only the clean user↔assistant exchange, which is what a later turn should see."""
+    client.memory.append({"role": "user", "content": user_input}, conversation_id)
+    client.memory.append({"role": "assistant", "content": answer}, conversation_id)
+
 
 @dataclass
 class ManagedConfig:
@@ -178,8 +224,18 @@ def run_managed_loop(
     tool_names = {t.name for t in tools}
     tool_schemas = [_tool_schema(t) for t in tools]
 
+    # Conversation threading (m29.6): when the caller supplied a conversation id — the
+    # console chat sends one stable id per session via X-Conversation-Id — AND this agent
+    # is bound to memory, replay the recent turns so the stock loop is context-aware across
+    # the chat. No id, or no memory binding ⇒ a single-shot run: messages are just
+    # [system, user] and nothing is persisted (today's Playground behaviour, unchanged).
+    conversation_id = _conversation_id_from_headers(headers)
+    threaded = bool(conversation_id) and client.config.memory_wired
+    history = _load_history(client, conversation_id) if threaded else []
+
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": config.system_prompt},
+        *history,
         {"role": "user", "content": user_input},
     ]
     tools_called: List[str] = []
@@ -203,6 +259,11 @@ def run_managed_loop(
                     # The model stopped calling tools → this is the final answer.
                     turn.set_output(resp.text)
                     root.set_output(resp.text)
+                    # Persist the clean user↔assistant exchange so the next turn in this
+                    # conversation replays it. Only on a completed answer (an error/runaway
+                    # path stores nothing — there is no answer to thread).
+                    if threaded:
+                        _persist_turn(client, conversation_id, user_input, resp.text)
                     return ManagedResult(
                         output=resp.text,
                         steps=step,
