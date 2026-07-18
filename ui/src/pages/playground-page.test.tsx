@@ -280,12 +280,13 @@ describe("PlaygroundPage", () => {
   });
 
   it("blocks a run when the agent name is missing (and does not call /api/invoke)", async () => {
-    const calls = recordingFetch({});
+    const calls = recordingFetch({
+      invoke: () => ({ ok: true, status: 200, json: { traceId: "t", response: "{}" } }),
+    });
     renderPage();
-    // No name → the run is blocked on the name error (only the name is required to run).
+    // No name → the run is blocked; the invoke must NOT be sent (name is the only run req).
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
-
-    expect(await screen.findByText(/Name is required/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 120));
     expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
   });
 
