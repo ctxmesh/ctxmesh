@@ -80,12 +80,18 @@ export function PlaygroundPage() {
   // the same identity used for export. Input is parsed as JSON so the browser
   // sends a real object (a malformed input is caught before the round-trip).
   async function onRun() {
-    const found = validate(form);
-    setErrors(found);
-    if (Object.keys(found).length > 0) {
-      setRun({ kind: "error", message: "Fix the highlighted fields before running." });
+    // Run invokes an EXISTING, already-deployed agent BY NAME — so it needs only a valid
+    // agent name (+ valid JSON input below). Image / scaling / budget are define/export-time
+    // fields validated by "Export to CRD"; requiring them here wrongly BLOCKED invoking a
+    // live agent (the run silently never fired → no response, no consent CTA). Validate the
+    // name only for a run.
+    const nameError = validate(form).name;
+    if (nameError) {
+      setErrors({ name: nameError });
+      setRun({ kind: "error", message: nameError });
       return;
     }
+    setErrors({});
     let parsedInput: unknown;
     try {
       parsedInput = input.trim() ? JSON.parse(input) : {};

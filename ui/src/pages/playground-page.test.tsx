@@ -266,13 +266,27 @@ describe("PlaygroundPage", () => {
     expect(createPayload.namespace).toBe("prod");
   });
 
-  it("blocks a run on client-side validation and does not call /api/invoke", async () => {
-    const calls = recordingFetch({});
+  it("runs an EXISTING agent from just its name — Image is NOT required for a run", async () => {
+    const calls = recordingFetch({
+      invoke: () => ({ ok: true, status: 200, json: { traceId: "t1", response: "{}" } }),
+    });
     renderPage();
-    // Name + image empty → client validation fails.
+    // Only the agent name — NO Image (Image is a define/export field, not a run field).
+    fill("Agent name", "scalekit-agent");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
-    expect(await screen.findByText(/Fix the highlighted fields before running/)).toBeInTheDocument();
+    // The invoke fires — the full-form validation must not block invoking a live agent.
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/invoke")).toBeDefined());
+  });
+
+  it("blocks a run when the agent name is missing (and does not call /api/invoke)", async () => {
+    const calls = recordingFetch({
+      invoke: () => ({ ok: true, status: 200, json: { traceId: "t", response: "{}" } }),
+    });
+    renderPage();
+    // No name → the run is blocked; the invoke must NOT be sent (name is the only run req).
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+    await new Promise((r) => setTimeout(r, 120));
     expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
   });
 

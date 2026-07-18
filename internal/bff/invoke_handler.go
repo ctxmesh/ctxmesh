@@ -19,6 +19,7 @@ package bff
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -44,6 +45,11 @@ type InvokeRequest struct {
 	Namespace string `json:"namespace"`
 	// Input is the raw request body forwarded verbatim to the agent's /invoke.
 	Input json.RawMessage `json:"input"`
+	// ConversationID threads a multi-turn chat: when set, it is forwarded as the
+	// X-Conversation-Id header so a memory-aware agent scopes its context to this
+	// thread (`mem:{ns}/{agent}:{conversationId}`). Empty → a single-shot run (the
+	// Playground default) — no thread, no memory scope.
+	ConversationID string `json:"conversationId,omitempty"`
 }
 
 // InvokeResponse is returned by POST /api/invoke: the run's traceId (the hand-off
@@ -89,11 +95,49 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Thread the conversation id (m29.5) onto the request context so the adapter forwards it
+	// as X-Conversation-Id. A malformed id fails fast with a 400 here rather than deep in the
+	// agent; an empty id leaves the run single-shot (no thread).
+	r, ok = attachConversationID(w, r, req.ConversationID)
+	if !ok {
+		return
+	}
 	// Mint the invoking user's run capability and carry it on the request context so the
 	// adapter attaches it to the agent's /invoke (runcap, ADR 0030 §2). Best-effort: a
 	// mint failure never fails the run — it just proceeds without a capability (unattended).
 	r = s.attachRunCapability(r, caller, req.Agent, req.Namespace)
 	s.writeInvokeResult(w, r, req.Agent, endpoint, []byte(req.Input))
+}
+
+// maxConversationID mirrors the launcher's bound (cmd/launcher/memory.go) — the id lands
+// in Redis keys + span attributes, so it stays short and key-safe.
+const maxConversationID = 128
+
+// attachConversationID validates a console-supplied conversation id and, when non-empty,
+// carries it on the request context for the adapter to forward as X-Conversation-Id. An
+// empty id is fine (single-shot run) and passes through unchanged. A malformed id (too
+// long, or a control/separator char that would break memory-key layout) is rejected with
+// a 400 — the same rules the launcher's validateConversationID enforces downstream.
+func attachConversationID(w http.ResponseWriter, r *http.Request, id string) (*http.Request, bool) {
+	if id == "" {
+		return r, true
+	}
+	if len(id) > maxConversationID {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("conversationId too long (max %d)", maxConversationID))
+		return r, false
+	}
+	for _, ru := range id {
+		if ru < 0x20 || ru == 0x7f {
+			writeError(w, http.StatusBadRequest, "conversationId contains control characters")
+			return r, false
+		}
+		switch ru {
+		case '/', ':', ' ', '\t', '\n', '\r':
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("conversationId contains disallowed character %q", ru))
+			return r, false
+		}
+	}
+	return r.WithContext(contextWithConversationID(r.Context(), id)), true
 }
 
 // attachRunCapability mints a run capability for the authenticated caller and returns r
@@ -142,6 +186,10 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 // is never reported as a success.
 func (s *Server) handleDevInvoke(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseInvokeRequest(w, r)
+	if !ok {
+		return
+	}
+	r, ok = attachConversationID(w, r, req.ConversationID)
 	if !ok {
 		return
 	}

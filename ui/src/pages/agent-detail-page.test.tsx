@@ -302,14 +302,25 @@ describe("AgentDetailPage (landing page)", () => {
     expect(logCall.url).toContain("follow=true");
   });
 
-  it("Run → POST /api/invoke → traceId → the run inspector opens with the tool span", async () => {
+  it("Chat → POST /api/invoke → traceId link → clicking it opens the run inspector", async () => {
     const calls = installFetch();
     renderAt();
-    await screen.findByTestId("run-panel");
-    fireEvent.click(screen.getByTestId("run-button"));
-    // The invoke POST fired.
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "where is my order" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    // The invoke POST fired, carrying the plain message as {input} + a conversationId.
     await waitFor(() => expect(calls.some((c) => c.url === "/api/invoke" && c.method === "POST")).toBe(true));
-    // The run inspector opens (drawer) and builds the tree — the tool span visible.
+    const invoke = calls.find((c) => c.url === "/api/invoke" && c.method === "POST")!;
+    const sent = JSON.parse(invoke.body);
+    expect(sent.input).toEqual({ input: "where is my order" });
+    expect(typeof sent.conversationId).toBe("string");
+    expect(sent.conversationId.length).toBeGreaterThan(0);
+    // The agent turn renders the response.
+    expect(await screen.findByTestId("chat-turn-agent")).toHaveTextContent("Order shipped.");
+    // The inspector does NOT auto-open — the trace id is a link the user clicks to open it.
+    expect(screen.queryByTestId("run-inspector")).toBeNull();
+    fireEvent.click(await screen.findByTestId("open-trace"));
+    // Now the run inspector opens (drawer) and builds the tree — the tool span visible.
     await screen.findByTestId("run-inspector");
     const toolRow = await screen.findByTestId("span-row-tool");
     expect(toolRow).toHaveTextContent("get_invoice");
@@ -317,20 +328,94 @@ describe("AgentDetailPage (landing page)", () => {
     expect(screen.getByTestId("span-detail")).toHaveTextContent("12 in / 4 out");
   });
 
-  it("a viewer (no create) is gated — the Run button is hidden, a note explains", async () => {
+  it("renders the agent's output as markdown, not the raw JSON envelope", async () => {
+    installFetch({
+      invoke: {
+        ok: true,
+        status: 200,
+        body: {
+          traceId: "tr-md",
+          // The managed-agent envelope, exactly as the agent returns it.
+          response: JSON.stringify({
+            agent: "sk-agent",
+            output: "Here are your **environments**:\n\n| Name | Type |\n|------|------|\n| Personal Dev | DEV |",
+            steps: 2,
+            tools_called: ["list_environments"],
+            consent_required: [],
+          }),
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "list environments" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    const agentTurn = await screen.findByTestId("chat-turn-agent");
+    // The human answer renders (markdown → a real <table>, bold text) …
+    expect(agentTurn).toHaveTextContent("Here are your environments");
+    expect(agentTurn.querySelector("table")).not.toBeNull();
+    expect(agentTurn).toHaveTextContent("Personal Dev");
+    // … and the raw envelope's structural fields never appear.
+    expect(agentTurn.textContent).not.toContain("tools_called");
+    expect(agentTurn.textContent).not.toContain('"steps"');
+  });
+
+  it("threads ONE conversationId across turns (a multi-turn chat)", async () => {
+    const calls = installFetch();
+    renderAt();
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "first" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.url === "/api/invoke" && c.method === "POST").length).toBe(1),
+    );
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "second" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.url === "/api/invoke" && c.method === "POST").length).toBe(2),
+    );
+    const invokes = calls.filter((c) => c.url === "/api/invoke" && c.method === "POST");
+    const ids = invokes.map((c) => JSON.parse(c.body).conversationId);
+    // Both turns rode the SAME conversationId (the thread the agent scopes memory to).
+    expect(ids[0]).toBe(ids[1]);
+    // Both user turns are on screen.
+    expect(screen.getAllByTestId("chat-turn-user")).toHaveLength(2);
+  });
+
+  it("a viewer (no create) is gated — the chat input is hidden, a note explains", async () => {
     installFetch({ caps: { agentdeployments: { create: false } } });
     renderAt();
-    await screen.findByTestId("run-panel");
-    expect(screen.getByTestId("run-readonly-note")).toBeInTheDocument();
-    expect(screen.queryByTestId("run-button")).toBeNull();
+    await screen.findByTestId("chat-panel");
+    expect(screen.getByTestId("chat-readonly-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(screen.queryByTestId("chat-send")).toBeNull();
   });
 
   it("a forced invoke 403 → ForbiddenInline (the API is the real gate)", async () => {
     installFetch({ caps: { agentdeployments: { create: true } }, invoke: { ok: false, status: 403, body: { error: "forbidden: cannot invoke" } } });
     renderAt();
-    await screen.findByTestId("run-panel");
-    fireEvent.click(screen.getByTestId("run-button"));
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
     await waitFor(() => expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument());
+  });
+
+  it("a message returning consent_required shows the inline Connect CTA on the agent's own page", async () => {
+    installFetch({
+      caps: { agentdeployments: { create: true } },
+      invoke: {
+        ok: true,
+        status: 200,
+        body: { traceId: "t-consent", response: "{}", consentRequired: ["scalekit-mcp-server"] },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "list environments" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    // The inline consent Connect button renders in the agent turn (the m26.2 flow, on the chat).
+    expect(await screen.findByTestId("connect-scalekit-mcp-server")).toBeInTheDocument();
+    expect(screen.getByText("Connect your account to continue")).toBeInTheDocument();
   });
 });
 

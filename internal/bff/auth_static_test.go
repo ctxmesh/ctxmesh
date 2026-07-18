@@ -107,23 +107,34 @@ func TestServesStaticSPA(t *testing.T) {
 	}
 	s := newAuthServer(t, static)
 
-	// A real asset is served verbatim.
+	// A real (content-hashed) asset is served verbatim and is NOT force-no-cached —
+	// hashed assets can cache forever.
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "console.log")
+	assert.NotEqual(t, "no-cache", rec.Header().Get("Cache-Control"), "hashed assets must be cacheable")
 
-	// Root serves index.html.
+	// Root serves the SPA shell (index.html) — and MUST be no-cache so a new deploy's
+	// asset hashes are picked up (regression guard: the root path used to bypass this).
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "id=root")
+	assert.Equal(t, "no-cache", rec.Header().Get("Cache-Control"), "the SPA shell at / must be no-cache")
 
-	// A client-side route (no such file) falls back to index.html (SPA routing).
+	// An explicit /index.html is also no-cache.
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-cache", rec.Header().Get("Cache-Control"), "the SPA shell at /index.html must be no-cache")
+
+	// A client-side route (no such file) falls back to index.html (SPA routing), no-cache.
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/agents", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "id=root")
+	assert.Equal(t, "no-cache", rec.Header().Get("Cache-Control"))
 }
 
 func TestAllowAllAuthenticator(t *testing.T) {

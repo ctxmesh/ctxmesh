@@ -39,7 +39,7 @@ from ctxmesh.errors import ConfigError
 from ctxmesh.managed import _PERMISSIVE_PARAMETERS, _tool_schema
 from ctxmesh.tools import Tool
 
-from .launcher_stub import DiscoveryStub, RecordedRequest, _BaseStub, _StubState
+from .launcher_stub import DiscoveryStub, MemoryStub, RecordedRequest, _BaseStub, _StubState
 
 # ── Mirror of the harness m14.2 fixture contract (tool-call-mock.py) ───────────
 # Kept in lockstep with harness/mock-provider/tool-call-mock.py module constants.
@@ -318,6 +318,74 @@ def test_managed_loop_no_tools_bound_plain_chat(gateway_stub):
     # No tools advertised → no `tools` field sent to the gateway.
     first_req = json.loads(gateway_stub.requests[0].body)
     assert "tools" not in first_req
+
+
+# ── conversation threading (m29.6): the stock loop replays memory across turns ──
+
+
+class _EmptyDiscovery(_BaseStub):
+    """A discovery stub advertising NO tools — the loop is then a plain chat agent."""
+
+    def _install_routes(self) -> None:
+        def tools(state: _StubState, req: RecordedRequest):
+            body = json.dumps({"version": "v0", "tools": []}).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        self.state.routes.update({"GET /tools": tools})
+
+
+def test_managed_loop_threads_conversation_memory(gateway_stub):
+    """With a conversation id (X-Conversation-Id) AND memory wired, the loop persists the
+    turn and replays it on the next turn — the stock agent is context-aware across a chat."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        headers = {"X-Conversation-Id": "chat-1"}
+
+        # Turn 1: no prior history → messages are [system, user]; the turn is persisted.
+        run_managed_loop(client, config, "my name is Zed", headers=headers)
+        turn1 = json.loads(gateway_stub.requests[0].body)["messages"]
+        assert [m["role"] for m in turn1] == ["system", "user"]
+        assert mem.store["chat-1"] == [
+            {"role": "user", "content": "my name is Zed"},
+            {"role": "assistant", "content": "the answer is 42"},
+        ]
+
+        # Turn 2: the prior user+assistant exchange is replayed BEFORE the new user turn.
+        run_managed_loop(client, config, "what is my name", headers=headers)
+        turn2 = json.loads(gateway_stub.requests[-1].body)["messages"]
+        assert turn2 == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "my name is Zed"},
+            {"role": "assistant", "content": "the answer is 42"},
+            {"role": "user", "content": "what is my name"},
+        ]
+        # Both turns are now stored (4 messages).
+        assert len(mem.store["chat-1"]) == 4
+
+
+def test_managed_loop_without_conversation_id_is_stateless(gateway_stub):
+    """No conversation id ⇒ single-shot: memory is never touched and only [system, user]
+    is sent — today's Playground behaviour is unchanged."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+
+        run_managed_loop(client, config, "hello")  # no headers → no conversation id
+
+        assert mem.store == {}, "no conversation id ⇒ memory untouched"
+        msgs = json.loads(gateway_stub.requests[0].body)["messages"]
+        assert [m["role"] for m in msgs] == ["system", "user"]
 
 
 # ── _tool_schema: discovered inputSchema verbatim, else permissive fallback ─────

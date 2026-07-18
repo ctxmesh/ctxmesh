@@ -977,8 +977,14 @@ func (s *Server) spaHandler() http.Handler {
 		setSPASecurityHeaders(w)
 		// Clean the request path to a filesystem path (io/fs uses no leading /).
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if name == "" {
-			name = indexHTML
+		// The SPA SHELL (root "/" or an explicit index.html) must ALWAYS be served
+		// through serveIndex so it carries Cache-Control: no-cache — otherwise the
+		// root path served index.html via FileServerFS (Last-Modified only), so a
+		// browser cached a stale shell and kept loading an old asset bundle after a
+		// new deploy. Only the content-hashed /assets/* are cacheable (FileServerFS).
+		if name == "" || name == indexHTML {
+			s.serveIndex(w)
+			return
 		}
 		if f, err := s.static.Open(name); err == nil {
 			// A directory request falls through to index.html (SPA route).
