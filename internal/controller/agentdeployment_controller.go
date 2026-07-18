@@ -176,6 +176,14 @@ type AgentDeploymentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader is an UNCACHED reader (the manager's API reader). The collector's
+	// Langfuse telemetry Secret is read through it, NOT the cache: a cached read is
+	// racy around informer resync and can render a collector sidecar WITHOUT the
+	// LANGFUSE_OTLP env while its ConfigMap already references it — which crash-loops
+	// the sidecar. Nil in tests (envtest) ⇒ the reconciler falls back to the cached
+	// client, whose reads are consistent there.
+	APIReader client.Reader
+
 	// OBOEgress configures OBO egress-sidecar injection (ADR 0030). Disabled (default)
 	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
 	OBOEgress OBOEgressConfig
@@ -1144,9 +1152,16 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 	// agent-engine-system silently ran debug-only and nothing ever reached
 	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
 	var sec corev1.Secret
-	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
+	// UNCACHED read (see APIReader): a cached read is racy around informer resync and can
+	// render a collector without the LANGFUSE_OTLP env while its ConfigMap references it —
+	// crash-looping the sidecar. Fall back to the cached client when no APIReader is wired.
+	secretReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		secretReader = r.APIReader
+	}
+	err := secretReader.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
 	if apierrors.IsNotFound(err) && deploy.Namespace != gateway.GatewayNamespace {
-		err = r.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
+		err = secretReader.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
 	}
 	switch {
 	case err == nil:
