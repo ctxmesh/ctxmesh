@@ -19,6 +19,7 @@ package credstore
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,26 +106,35 @@ func TestSelectSpec_Precedence(t *testing.T) {
 }
 
 // TestBackendFor_KubernetesAndUnimplemented: kubernetes builds a real resolver; the
-// not-yet-built providers fail closed with ErrProviderNotImplemented (never a wrong backend).
+// not-yet-built providers fail closed with ErrProviderNotImplemented (never a wrong backend);
+// a remote provider without mtls fails closed with an mtls-required error (never a plaintext dial).
 func TestBackendFor_KubernetesAndUnimplemented(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	deps := testDeps(c)
 
-	b, err := BackendFor(ImplicitKubernetesSpec(), deps)
+	b, err := BackendFor(ctx, ImplicitKubernetesSpec(), deps)
 	if err != nil || b == nil {
 		t.Fatalf("kubernetes BackendFor = (%v, %v), want a backend", b, err)
 	}
 
 	for name, prov := range map[string]agentsv1alpha1.CredentialStoreProvider{
 		"postgres": {Postgres: &agentsv1alpha1.CredentialProviderPostgres{DSNSecretRef: agentsv1alpha1.SecretKeyRef{Name: "p", Key: "dsn"}}},
-		"grpc":     {GRPC: &agentsv1alpha1.CredentialProviderGRPC{Endpoint: "dns:///x:1"}},
 		"openbao":  {OpenBao: &agentsv1alpha1.CredentialProviderOpenBao{Address: "https://x:8200"}},
 	} {
-		_, err := BackendFor(agentsv1alpha1.CredentialStoreSpec{Provider: prov}, deps)
+		_, err := BackendFor(ctx, agentsv1alpha1.CredentialStoreSpec{Provider: prov}, deps)
 		if !errors.Is(err, ErrProviderNotImplemented) {
 			t.Errorf("%s BackendFor err = %v, want ErrProviderNotImplemented (fail closed)", name, err)
 		}
+	}
+
+	// remote WITHOUT mtls → fail closed on an mtls-required error (not a plaintext dial).
+	_, err = BackendFor(ctx, agentsv1alpha1.CredentialStoreSpec{Provider: agentsv1alpha1.CredentialStoreProvider{
+		Remote: &agentsv1alpha1.CredentialProviderRemote{Endpoint: "https://x:8443"},
+	}}, deps)
+	if err == nil || !strings.Contains(err.Error(), "mtls") {
+		t.Errorf("remote-without-mtls err = %v, want an mtls-required error", err)
 	}
 }
 

@@ -114,10 +114,10 @@ func SelectSpec(ctx context.Context, reader client.Reader, ns string) (agentsv1a
 	return ImplicitKubernetesSpec(), "implicit-kubernetes", nil
 }
 
-// BackendFor constructs a CredentialResolver for a resolved store spec. Only the
-// kubernetes provider is built in this task (m27.2); the others fail closed with
-// ErrProviderNotImplemented until their tasks land.
-func BackendFor(spec agentsv1alpha1.CredentialStoreSpec, deps Deps) (credresolve.CredentialResolver, error) {
+// BackendFor constructs a CredentialResolver for a resolved store spec. kubernetes (m27.2)
+// and remote (m27.3) are built; the others fail closed with ErrProviderNotImplemented
+// until their tasks land. ctx is used to load a remote backend's mTLS material.
+func BackendFor(ctx context.Context, spec agentsv1alpha1.CredentialStoreSpec, deps Deps) (credresolve.CredentialResolver, error) {
 	p := spec.Provider
 	switch {
 	case p.Kubernetes != nil:
@@ -133,12 +133,12 @@ func BackendFor(spec agentsv1alpha1.CredentialStoreSpec, deps Deps) (credresolve
 			OrgCredential:       credresolve.NewOrgCredentialFunc(deps.Client, credNs, deps.IsOrgScoped),
 			Audit:               deps.Audit,
 		}), nil
+	case p.Remote != nil:
+		return buildRemoteBackend(ctx, p.Remote, deps)
 	case p.Postgres != nil:
 		return nil, fmt.Errorf("%w: postgres (m27.4)", ErrProviderNotImplemented)
 	case p.OpenBao != nil:
 		return nil, fmt.Errorf("%w: openbao", ErrProviderNotImplemented)
-	case p.GRPC != nil:
-		return nil, fmt.Errorf("%w: grpc (m27.3)", ErrProviderNotImplemented)
 	default:
 		return nil, errors.New("credstore: CredentialStore has no provider set")
 	}
@@ -160,8 +160,8 @@ func backendKey(spec agentsv1alpha1.CredentialStoreSpec, deps Deps) string {
 		return "postgres:" + p.Postgres.DSNSecretRef.Name + "/" + p.Postgres.DSNSecretRef.Key
 	case p.OpenBao != nil:
 		return "openbao:" + p.OpenBao.Address
-	case p.GRPC != nil:
-		return "grpc:" + p.GRPC.Endpoint
+	case p.Remote != nil:
+		return "remote:" + p.Remote.Endpoint
 	default:
 		return "none"
 	}
@@ -238,7 +238,7 @@ func (r *Router) backendFor(ctx context.Context, ns string) (credresolve.Credent
 	defer r.mu.Unlock()
 	b, ok := r.backends[key]
 	if !ok {
-		b, err = BackendFor(spec, r.deps)
+		b, err = BackendFor(ctx, spec, r.deps)
 		if err != nil {
 			return nil, err
 		}

@@ -52,10 +52,11 @@ type CredentialProviderOpenBao struct {
 	Address string `json:"address"`
 }
 
-// CredentialProviderGRPC selects an out-of-tree gRPC backend (bring-your-own vault,
-// m27.3): the token-service dials it over mTLS and adapts it to the resolver interface.
-type CredentialProviderGRPC struct {
-	// endpoint is the gRPC target (e.g. dns:///cred-backend.acme.svc:8443). Required.
+// CredentialProviderRemote selects an out-of-tree backend (bring-your-own vault, m27.3):
+// the token-service dials it over the JSON-over-mTLS credprovider contract and adapts it
+// to the resolver interface. Implementable by a third party in any language.
+type CredentialProviderRemote struct {
+	// endpoint is the provider's HTTPS base URL (e.g. https://cred-backend.acme.svc:8443).
 	// +kubebuilder:validation:MinLength=1
 	Endpoint string `json:"endpoint"`
 
@@ -85,20 +86,23 @@ type KMSv2Provider struct {
 	KeyIDPrefix string `json:"keyIDPrefix,omitempty"`
 }
 
-// MTLSClientConfig locates the CA + client cert the token-service uses to authenticate
-// to a gRPC backend.
+// MTLSClientConfig locates the CA + client cert the token-service uses to authenticate to
+// a remote backend.
 type MTLSClientConfig struct {
-	// caSecretRef locates the CA bundle that verifies the provider's server cert. Required.
+	// caSecretRef locates the CA bundle (a Secret + key) that verifies the provider's
+	// server cert. Required.
 	CASecretRef SecretKeyRef `json:"caSecretRef"`
 
-	// clientCertSecretRef locates the client cert+key the token-service presents. Required.
-	ClientCertSecretRef SecretKeyRef `json:"clientCertSecretRef"`
+	// clientTLSSecretName names a kubernetes.io/tls Secret providing tls.crt + tls.key —
+	// the client cert the token-service presents to the provider. Required.
+	// +kubebuilder:validation:MinLength=1
+	ClientTLSSecretName string `json:"clientTLSSecretName"`
 }
 
 // CredentialStoreProvider is the backend union: exactly one field is set. It mirrors the
 // External Secrets Operator SecretStore provider model — the backend is a config choice,
 // not a rebuild (ADR 0032).
-// +kubebuilder:validation:XValidation:rule="[has(self.kubernetes), has(self.postgres), has(self.openbao), has(self.grpc)].filter(x, x).size() == 1",message="exactly one provider (kubernetes, postgres, openbao, grpc) must be set"
+// +kubebuilder:validation:XValidation:rule="[has(self.kubernetes), has(self.postgres), has(self.openbao), has(self.remote)].filter(x, x).size() == 1",message="exactly one provider (kubernetes, postgres, openbao, remote) must be set"
 type CredentialStoreProvider struct {
 	// kubernetes selects the built-in Kubernetes-Secret backend (the zero-dep default).
 	// +optional
@@ -112,9 +116,10 @@ type CredentialStoreProvider struct {
 	// +optional
 	OpenBao *CredentialProviderOpenBao `json:"openbao,omitempty"`
 
-	// grpc selects an out-of-tree gRPC backend (bring-your-own vault).
+	// remote selects an out-of-tree backend over the JSON-over-mTLS provider contract
+	// (bring-your-own vault).
 	// +optional
-	GRPC *CredentialProviderGRPC `json:"grpc,omitempty"`
+	Remote *CredentialProviderRemote `json:"remote,omitempty"`
 }
 
 // CredentialStoreSpec is the shared spec for CredentialStore and ClusterCredentialStore.
