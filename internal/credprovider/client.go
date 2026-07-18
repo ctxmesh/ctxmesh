@@ -116,6 +116,16 @@ func (c *Client) Store(ctx context.Context, ns, server, userHash, tenant string,
 	return nil
 }
 
+// StoreGrant adapts the SPI's common write payload (credresolve.Grant) to the provider's
+// Store, so a `remote` backend is a config-selected GrantWriter (ADR 0032).
+func (c *Client) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+	gm := GrantMaterial{AccessToken: g.Tokens.AccessToken, RefreshToken: g.Tokens.RefreshToken}
+	if !g.Tokens.ExpiresAt.IsZero() {
+		gm.ExpiresAtUnix = g.Tokens.ExpiresAt.Unix()
+	}
+	return c.Store(ctx, ns, server, userHash, "", gm)
+}
+
 // do sends req (nil for GET) as JSON to path and decodes into out. A non-2xx or transport
 // failure is a real error — never a silent empty credential (fail closed).
 func (c *Client) do(ctx context.Context, method, path string, req, out any) error {
@@ -157,5 +167,8 @@ func (c *Client) do(ctx context.Context, method, path string, req, out any) erro
 	return nil
 }
 
-// Compile-time assertion that Client is a drop-in credresolve.CredentialResolver.
-var _ credresolve.CredentialResolver = (*Client)(nil)
+// Compile-time assertions: a drop-in resolver AND a config-selected grant writer.
+var (
+	_ credresolve.CredentialResolver = (*Client)(nil)
+	_ credresolve.GrantWriter        = (*Client)(nil)
+)

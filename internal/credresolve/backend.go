@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -221,6 +222,54 @@ func (b *K8sBackend) refresh(ctx context.Context, ns, name string) (string, time
 	})
 	r, _ := v.(result)
 	return r.access, r.expiresAt, err
+}
+
+// Compile-time assertion: the kubernetes backend is a config-selected grant writer.
+var _ GrantWriter = (*K8sBackend)(nil)
+
+// StoreGrant upserts the user's grant as a Secret — the kubernetes backend's write side of
+// the SPI (ADR 0032). A re-consent for the same (user, server) REPLACES the stored grant
+// (rotated tokens) rather than failing. This is the same shape the BFF OAuth callback writes,
+// so grants are interchangeable across the two write paths.
+func (b *K8sBackend) StoreGrant(ctx context.Context, ns, server, userHash string, g Grant) error {
+	sourceNsLabel := ""
+	if b.cfg.CredentialNamespace != "" {
+		sourceNsLabel = ns
+	}
+	grantNS, grantName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash)
+	data := SecretData(g.Config, g.Tokens)
+	labels := SecretLabels(server, userHash, sourceNsLabel)
+	ann := map[string]string{}
+	if g.ServerURL != "" {
+		ann[AnnGrantServerURL] = g.ServerURL
+	}
+
+	var sec corev1.Secret
+	err := b.cfg.Client.Get(ctx, client.ObjectKey{Namespace: grantNS, Name: grantName}, &sec)
+	switch {
+	case apierrors.IsNotFound(err):
+		sec = corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: grantName, Namespace: grantNS, Labels: labels, Annotations: ann},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       data,
+		}
+		return b.cfg.Client.Create(ctx, &sec)
+	case err != nil:
+		return err
+	default:
+		sec.Data = data
+		if sec.Labels == nil {
+			sec.Labels = map[string]string{}
+		}
+		maps.Copy(sec.Labels, labels)
+		if len(ann) > 0 {
+			if sec.Annotations == nil {
+				sec.Annotations = map[string]string{}
+			}
+			maps.Copy(sec.Annotations, ann)
+		}
+		return b.cfg.Client.Update(ctx, &sec)
+	}
 }
 
 // refreshOnce reads the grant Secret and, if the access token is at/near expiry, rotates

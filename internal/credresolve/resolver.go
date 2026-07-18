@@ -56,6 +56,29 @@ type CredentialResolver interface {
 	Revoke(ctx context.Context, ns, server, userHash string) error
 }
 
+// AnnGrantServerURL annotates a stored grant with its (non-secret) MCP server URL — used
+// by the refresh/discovery paths. Matches the BFF's mcp-url annotation so a grant written
+// by either path is interchangeable.
+const AnnGrantServerURL = "agents.ctxmesh.ai/mcp-url"
+
+// Grant is the token material to persist for one (server, user) grant — the WRITE payload
+// of the credential-store SPI (ADR 0032). Value fields are secret; never log them.
+type Grant struct {
+	// Tokens are the access/refresh tokens + expiry.
+	Tokens Tokens
+	// Config is the non-secret OAuth config a refresh needs (endpoints + client id).
+	Config OAuthConfig
+	// ServerURL is the MCP server URL (non-secret; refresh/discovery).
+	ServerURL string
+}
+
+// GrantWriter persists a user's grant to the backend the CredentialStore selects — so a
+// grant minted by the OAuth callback lands in the config-selected store (kubernetes /
+// postgres / remote), not always a k8s Secret. The write is an UPSERT (re-consent replaces).
+type GrantWriter interface {
+	StoreGrant(ctx context.Context, ns, server, userHash string, g Grant) error
+}
+
 var (
 	// ErrNoCredential — the server has no stored credential for this user and needs
 	// none (an open server). The caller attaches no Authorization header.
