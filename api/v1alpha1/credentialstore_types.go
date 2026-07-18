@@ -66,19 +66,46 @@ type CredentialProviderRemote struct {
 }
 
 // EnvelopeEncryption configures the plane's envelope encryption for a passive backend:
-// a per-record AES-256-GCM data key wrapped by a KEK. Exactly one KEK source.
-// +kubebuilder:validation:XValidation:rule="[has(self.localKEKSecretRef), has(self.kmsV2)].filter(x, x).size() == 1",message="exactly one KEK source (localKEKSecretRef or kmsV2) must be set"
+// a per-record AES-256-GCM data key wrapped by a KEK. Exactly one KEK custodian.
+// +kubebuilder:validation:XValidation:rule="[has(self.localKEKSecretRef), has(self.openBaoTransit), has(self.kmsV2)].filter(x, x).size() == 1",message="exactly one KEK custodian (localKEKSecretRef, openBaoTransit, or kmsV2) must be set"
 type EnvelopeEncryption struct {
 	// localKEKSecretRef locates a 32-byte AES-256 master KEK (a Secret + key); per-tenant
-	// keys are HMAC-derived. Gives encryption-at-rest but NOT true crypto-shred — use kmsV2
-	// for that.
+	// keys are HMAC-derived. Encryption-at-rest but NOT true crypto-shred (dev/default).
 	// +optional
 	LocalKEKSecretRef *SecretKeyRef `json:"localKEKSecretRef,omitempty"`
 
-	// kmsV2 points at a Kubernetes KMS v2 provider that wraps/unwraps the data keys, with
-	// per-tenant KEKs (crypto-shred).
+	// openBaoTransit wraps DEKs with a named per-tenant OpenBao transit key — the KEK never
+	// leaves OpenBao, and crypto-shred = delete the transit key (the reference scale custodian).
+	// +optional
+	OpenBaoTransit *OpenBaoTransitKMS `json:"openBaoTransit,omitempty"`
+
+	// kmsV2 points at a Kubernetes KMS v2 provider (generic; single-key per plugin — KEK
+	// custody + rotation, but NOT per-tenant crypto-shred).
 	// +optional
 	KMSv2 *KMSv2Provider `json:"kmsV2,omitempty"`
+}
+
+// OpenBaoTransitKMS configures OpenBao (or Vault) transit as the KEK custodian: a named
+// per-tenant key wraps each DEK, so tenant deletion is a cryptographic key-destroy.
+type OpenBaoTransitKMS struct {
+	// address is the OpenBao/Vault API base URL (e.g. https://openbao.cred.svc:8200).
+	// +kubebuilder:validation:MinLength=1
+	Address string `json:"address"`
+
+	// tokenSecretRef locates the OpenBao token the token-service authenticates with.
+	TokenSecretRef SecretKeyRef `json:"tokenSecretRef"`
+
+	// mountPath is the transit engine mount. Empty ⇒ "transit".
+	// +optional
+	MountPath string `json:"mountPath,omitempty"`
+
+	// keyPrefix derives the per-tenant transit key name (<keyPrefix><tenant>).
+	// +optional
+	KeyPrefix string `json:"keyPrefix,omitempty"`
+
+	// caSecretRef optionally verifies the OpenBao server cert (a Secret + key).
+	// +optional
+	CASecretRef *SecretKeyRef `json:"caSecretRef,omitempty"`
 }
 
 // KMSv2Provider references a Kubernetes KMS v2 gRPC provider (the same contract used for

@@ -18,8 +18,11 @@ package credstore
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"fmt"
+	"net/http"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 
@@ -75,9 +78,39 @@ func buildSealer(ctx context.Context, enc *agentsv1alpha1.EnvelopeEncryption, de
 			return nil, fmt.Errorf("credstore: load local KEK: %w", err)
 		}
 		return credpostgres.NewLocalSealer(kek)
+	case enc.OpenBaoTransit != nil:
+		return buildTransitSealer(ctx, enc.OpenBaoTransit, deps)
 	case enc.KMSv2 != nil:
-		return nil, fmt.Errorf("%w: kmsV2 envelope (m27.5)", ErrProviderNotImplemented)
+		return nil, fmt.Errorf("%w: kmsV2 envelope (generic single-key KMS)", ErrProviderNotImplemented)
 	default:
-		return nil, fmt.Errorf("credstore: postgres encryption has no KEK source")
+		return nil, fmt.Errorf("credstore: postgres encryption has no KEK custodian")
 	}
+}
+
+// buildTransitSealer builds an OpenBao transit Sealer: load the token (+ optional CA) from
+// Secrets and construct the transit client.
+func buildTransitSealer(ctx context.Context, cfg *agentsv1alpha1.OpenBaoTransitKMS, deps Deps) (credpostgres.Sealer, error) {
+	token, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, cfg.TokenSecretRef.Name, cfg.TokenSecretRef.Key)
+	if err != nil {
+		return nil, fmt.Errorf("credstore: load openbao token: %w", err)
+	}
+	httpClient := &http.Client{Timeout: remoteTimeout}
+	if cfg.CASecretRef != nil {
+		caPEM, cErr := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, cfg.CASecretRef.Name, cfg.CASecretRef.Key)
+		if cErr != nil {
+			return nil, fmt.Errorf("credstore: load openbao CA: %w", cErr)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("credstore: openbao CA is not valid PEM")
+		}
+		httpClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+	}
+	return credpostgres.NewTransitSealer(credpostgres.TransitSealerConfig{
+		Address:   cfg.Address,
+		MountPath: cfg.MountPath,
+		Token:     string(token),
+		KeyPrefix: cfg.KeyPrefix,
+		HTTP:      httpClient,
+	})
 }
