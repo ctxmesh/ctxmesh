@@ -16,13 +16,11 @@ metadata:
     app.kubernetes.io/name: agent-engine
     app.kubernetes.io/managed-by: kustomize
 rules:
-  # Per-user grant Secrets: read to resolve, update to write back a rotated token, delete on
-  # revoke (RFC 7009: forget locally). NO create — grants are minted by the OAuth callback.
+  # Per-user grant Secrets in the LOCKED credential namespace: read to resolve, update to write
+  # back a rotated token (or persist a new grant), delete on revoke (RFC 7009: forget locally).
+  # NO create is needed beyond update. Grants live only in this one namespace (ADR 0029 §7), so
+  # this stays a namespaced Role. (ToolRegistry + CredentialStore reads are cluster-wide — the
+  # plane serves requests from ANY namespace — see the ClusterRole.)
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "update", "delete"]
-  # ToolRegistry: classify a server (auth type / scope) so an absent grant is consent-required
-  # (OAuth) vs open, and an org-scoped server resolves the shared credential.
-  - apiGroups: ["agents.ctxmesh.ai"]
-    resources: ["toolregistries"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]

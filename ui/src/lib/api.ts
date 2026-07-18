@@ -534,6 +534,10 @@ export interface InvokeRequest {
   namespace: string;
   // input is the raw JSON body forwarded verbatim to the agent's /invoke.
   input: unknown;
+  // conversationId threads a multi-turn chat: when set, the BFF forwards it as
+  // X-Conversation-Id so a memory-aware agent scopes its context to this thread
+  // (mem:{ns}/{agent}:{conversationId}). Omit for a single-shot run.
+  conversationId?: string;
 }
 
 export interface InvokeResponse {
