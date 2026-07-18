@@ -191,6 +191,36 @@ func TestRouter_UnimplementedProviderFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRouter_StoreGrant_Kubernetes: the SPI write path — StoreGrant routes to the selected
+// (default kubernetes) backend, which persists a grant Secret; the same Router then resolves
+// it. Proves the write path lands in the config-selected backend and round-trips.
+func TestRouter_StoreGrant_Kubernetes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build() // no CRD → kubernetes default
+	r := NewRouter(c, testDeps(c))
+
+	g := credresolve.Grant{
+		Tokens:    credresolve.Tokens{AccessToken: "tok-1", ExpiresAt: time.Now().Add(time.Hour)},
+		Config:    credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
+		ServerURL: "https://mcp.example/mcp",
+	}
+	if err := r.StoreGrant(ctx, "app-ns", "srv", "uh", g); err != nil {
+		t.Fatalf("StoreGrant: %v", err)
+	}
+	// A grant Secret now exists in the credential namespace at the derived coordinates.
+	gns, gname := credresolve.SecretCoordinates("cred-system", "app-ns", "srv", "uh")
+	var sec corev1.Secret
+	if err := c.Get(ctx, client.ObjectKey{Namespace: gns, Name: gname}, &sec); err != nil {
+		t.Fatalf("grant Secret not written: %v", err)
+	}
+	// And it resolves back through the same Router (write→read round-trip).
+	cred, err := r.Resolve(ctx, "app-ns", "srv", "uh")
+	if err != nil || cred.Value != "tok-1" {
+		t.Fatalf("Resolve after StoreGrant = (%+v, %v), want tok-1", cred, err)
+	}
+}
+
 // TestRouter_SelectionCacheTTL: the namespace→backend selection is cached; after the TTL
 // elapses it is re-resolved (so a store change propagates).
 func TestRouter_SelectionCacheTTL(t *testing.T) {

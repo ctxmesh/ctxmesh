@@ -185,6 +185,12 @@ type nsSelection struct {
 	expires time.Time
 }
 
+// Compile-time assertions: the Router is a drop-in resolver AND a config-selected writer.
+var (
+	_ credresolve.CredentialResolver = (*Router)(nil)
+	_ credresolve.GrantWriter        = (*Router)(nil)
+)
+
 // NewRouter builds a config-selected router. reader reads the CredentialStore CRDs (a
 // cached reader is preferable so selection is cheap); deps are the shared backend
 // collaborators.
@@ -215,6 +221,20 @@ func (r *Router) Revoke(ctx context.Context, ns, server, userHash string) error 
 		return err
 	}
 	return b.Revoke(ctx, ns, server, userHash)
+}
+
+// StoreGrant persists a grant to the backend the CredentialStore selects for ns — the SPI
+// write path (ADR 0032). A backend that does not implement GrantWriter fails closed.
+func (r *Router) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+	b, err := r.backendFor(ctx, ns)
+	if err != nil {
+		return err
+	}
+	w, ok := b.(credresolve.GrantWriter)
+	if !ok {
+		return fmt.Errorf("credstore: the selected credential backend for namespace %q does not support writes", ns)
+	}
+	return w.StoreGrant(ctx, ns, server, userHash, g)
 }
 
 func (r *Router) backendFor(ctx context.Context, ns string) (credresolve.CredentialResolver, error) {

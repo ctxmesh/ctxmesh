@@ -234,6 +234,19 @@ func (b *Backend) refresh(ctx context.Context, ns, server, userHash string) (str
 	return "", fmt.Errorf("credpostgres: refresh writeback exhausted %d optimistic retries", maxSaveAttempts)
 }
 
+// StoreGrant adapts the SPI's common write payload (credresolve.Grant) to this backend's
+// Store, so the Postgres backend is a config-selected GrantWriter (ADR 0032).
+func (b *Backend) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+	return b.Store(ctx, ns, server, userHash, Grant{
+		AccessToken:        g.Tokens.AccessToken,
+		RefreshToken:       g.Tokens.RefreshToken,
+		ExpiresAt:          g.Tokens.ExpiresAt,
+		TokenEndpoint:      g.Config.TokenEndpoint,
+		ClientID:           g.Config.ClientID,
+		RevocationEndpoint: g.Config.RevocationEndpoint,
+	})
+}
+
 // Store persists (or overwrites) a user's grant — the write path from the OAuth callback.
 func (b *Backend) Store(ctx context.Context, ns, server, userHash string, g Grant) error {
 	sg := sealedGrant{
@@ -375,5 +388,8 @@ func (b *Backend) cacheDel(key string) {
 	delete(b.cache, key)
 }
 
-// Compile-time assertion Backend is a drop-in credresolve.CredentialResolver.
-var _ credresolve.CredentialResolver = (*Backend)(nil)
+// Compile-time assertions: a drop-in resolver AND a config-selected grant writer.
+var (
+	_ credresolve.CredentialResolver = (*Backend)(nil)
+	_ credresolve.GrantWriter        = (*Backend)(nil)
+)

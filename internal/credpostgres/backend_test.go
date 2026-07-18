@@ -179,6 +179,26 @@ func TestBackend_StoreResolveRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBackend_StoreGrant: the SPI write payload (credresolve.Grant) round-trips through the
+// Postgres backend's GrantWriter adapter.
+func TestBackend_StoreGrant(t *testing.T) {
+	t.Parallel()
+	b := newBackend(t, BackendConfig{})
+	ctx := context.Background()
+
+	g := credresolve.Grant{
+		Tokens: credresolve.Tokens{AccessToken: "pg-tok", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
+		Config: credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
+	}
+	if err := b.StoreGrant(ctx, "ns", "srv", "uh", g); err != nil {
+		t.Fatalf("StoreGrant: %v", err)
+	}
+	cred, err := b.Resolve(ctx, "ns", "srv", "uh")
+	if err != nil || cred.Value != "pg-tok" {
+		t.Fatalf("Resolve after StoreGrant = (%+v, %v), want pg-tok", cred, err)
+	}
+}
+
 // TestBackend_RefreshesNearExpiry: a near-expiry grant is refreshed once at resolve time and
 // the rotated token is written back.
 func TestBackend_RefreshesNearExpiry(t *testing.T) {
