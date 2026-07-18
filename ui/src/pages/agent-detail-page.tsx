@@ -49,6 +49,7 @@ import {
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
+import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 
 // AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
 // extended m15.11). It closes the aha loop: watch the agent come alive (status
@@ -962,7 +963,7 @@ function StatusTimeline({
 type RunState =
   | { kind: "idle" }
   | { kind: "running" }
-  | { kind: "done"; traceId: string; response: string }
+  | { kind: "done"; traceId: string; response: string; consentRequired?: string[] }
   | { kind: "error"; message: string; status?: number; forbidden: boolean };
 
 function RunPanel({
@@ -980,6 +981,10 @@ function RunPanel({
   const canRun = can(RES_AGENTS, "create");
   const [input, setInput] = React.useState('{\n  "input": "Hello, agent"\n}');
   const [run, setRun] = React.useState<RunState>({ kind: "idle" });
+  // Inline consent (ADR 0031, m26.2) — surfaced HERE too, so a run started from the
+  // agent's own page (not just the Playground) offers the "Connect <server>" CTA.
+  const [connecting, setConnecting] = React.useState<string | null>(null);
+  const [connectError, setConnectError] = React.useState<string | null>(null);
 
   async function onRun() {
     let parsed: unknown;
@@ -992,7 +997,12 @@ function RunPanel({
     setRun({ kind: "running" });
     try {
       const res = await api.invoke({ agent: name, namespace: ns, input: parsed });
-      setRun({ kind: "done", traceId: res.traceId, response: res.response });
+      setRun({
+        kind: "done",
+        traceId: res.traceId,
+        response: res.response,
+        consentRequired: res.consentRequired,
+      });
       onTraced(res.traceId);
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -1004,6 +1014,59 @@ function RunPanel({
         forbidden: apiErr?.isForbidden ?? false,
       });
     }
+  }
+
+  // onConnect runs the INLINE per-user consent (ADR 0031, m26.2): begin the OAuth grant
+  // for the named server, open the provider consent in a POPUP so the run stays on screen,
+  // then re-run the same invoke when it completes so the fresh credential is injected. The
+  // token never touches the SPA (server-side exchange). Popup blocked → redirect fallback.
+  async function onConnect(server: string) {
+    setConnectError(null);
+    setConnecting(server);
+    let authorizationURL: string;
+    try {
+      const res = await api.beginMcpGrant({
+        server,
+        namespace: ns,
+        redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+      });
+      authorizationURL = res.authorizationURL;
+    } catch (err) {
+      setConnecting(null);
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setConnectError(err instanceof Error ? err.message : "Couldn't start the connect flow.");
+      return;
+    }
+
+    const popup = window.open(
+      authorizationURL,
+      "ctxmesh-oauth-connect",
+      "width=520,height=680,menubar=no,toolbar=no",
+    );
+    if (!popup) {
+      window.location.href = authorizationURL;
+      return;
+    }
+
+    let done = false;
+    let poll = 0;
+    function finish() {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onMessage);
+      window.clearInterval(poll);
+      setConnecting(null);
+      void onRun(); // re-invoke in place — the resume
+    }
+    function onMessage(e: MessageEvent) {
+      if (e.origin !== window.location.origin) return;
+      const data = e.data as { type?: string } | null;
+      if (data?.type === MCP_OAUTH_MESSAGE) finish();
+    }
+    window.addEventListener("message", onMessage);
+    poll = window.setInterval(() => {
+      if (popup.closed) finish();
+    }, 700);
   }
 
   return (
@@ -1055,6 +1118,36 @@ function RunPanel({
                 <CheckCircle2 className="h-4 w-4" />
                 <span className="font-medium">Traced run complete</span>
               </div>
+              {run.consentRequired && run.consentRequired.length > 0 && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <div className="space-y-2">
+                    <p className="font-medium">Connect your account to continue</p>
+                    <p className="text-muted-foreground">
+                      This run needs your own credentials. Connect, and it re-runs automatically.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {run.consentRequired.map((server) => (
+                        <Button
+                          key={server}
+                          size="sm"
+                          variant="outline"
+                          disabled={connecting !== null}
+                          onClick={() => void onConnect(server)}
+                          data-testid={`connect-${server}`}
+                        >
+                          {connecting === server ? "Connecting…" : `Connect ${server}`}
+                        </Button>
+                      ))}
+                    </div>
+                    {connectError && (
+                      <p className="text-destructive" data-testid="connect-error">
+                        {connectError}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
               <p className="whitespace-pre-wrap break-words">{run.response}</p>
               <button
                 type="button"
