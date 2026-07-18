@@ -133,18 +133,49 @@ func run(log logr.Logger) error {
 	// CRDs (ADR 0032); with no CRD present it is the built-in kubernetes backend, so existing
 	// installs are unchanged. Backends are shared per resolved config, so the cache + singleflight
 	// + optimistic writeback stay global across every delegating sidecar (ADR 0030 §1).
+	auditFn := func(e credresolve.AuditEvent) {
+		log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
+	}
 	router := credstore.NewRouter(k8sClient, credstore.Deps{
 		Client:                     k8sClient,
 		DefaultCredentialNamespace: credentialNS,
 		Exchanger:                  &credresolve.HTTPTokenExchanger{},
 		AuthTypeIsOAuth:            authTypeIsOAuth,
 		IsOrgScoped:                isOrgScoped,
-		Audit: func(e credresolve.AuditEvent) {
-			log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
-		},
+		Audit:                      auditFn,
 	})
 
-	handler := credplane.NewServer(router, log).Handler()
+	// A legacy k8s backend — the source for a one-time migration and the fallback for the
+	// dual-read cutover window (m28.2, ADR 0032).
+	k8sBackend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
+		Client:              k8sClient,
+		CredentialNamespace: credentialNS,
+		Exchanger:           &credresolve.HTTPTokenExchanger{},
+		AuthTypeIsOAuth:     authTypeIsOAuth,
+		OrgCredential:       credresolve.NewOrgCredentialFunc(k8sClient, credentialNS, isOrgScoped),
+		Audit:               auditFn,
+	})
+
+	// One-time backfill: TOKEN_SERVICE_MIGRATE_GRANTS=true lifts every legacy k8s grant into
+	// the config-selected backend (per namespace via the Router), logs the count, and exits.
+	if envTrue("TOKEN_SERVICE_MIGRATE_GRANTS") {
+		n, mErr := credstore.Migrate(context.Background(), k8sBackend, router)
+		if mErr != nil {
+			return fmt.Errorf("migrate grants: %w", mErr)
+		}
+		log.Info("grant migration complete", "migrated", n)
+		return nil
+	}
+
+	// Dual-read cutover window: TOKEN_SERVICE_DUAL_READ=true resolves fall back to the legacy
+	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
+	var resolver credresolve.CredentialResolver = router
+	if envTrue("TOKEN_SERVICE_DUAL_READ") {
+		resolver = credstore.NewDualRead(router, k8sBackend)
+		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
+	}
+
+	handler := credplane.NewServer(resolver, log).Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 
@@ -225,6 +256,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envTrue reports whether an env var is a truthy string.
+func envTrue(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // filesExist reports whether every path is a readable regular file — used to gate mTLS on
