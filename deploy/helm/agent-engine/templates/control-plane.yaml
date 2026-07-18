@@ -21,6 +21,16 @@ metadata:
   name: agent-engine-controller-manager
   namespace: {{ .Values.namespace }}
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
+  name: agent-engine-token-service
+  namespace: {{ .Values.namespace }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -61,6 +71,35 @@ rules:
   verbs:
   - create
   - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
+  name: agent-engine-token-service-role
+  namespace: {{ .Values.namespace }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - delete
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - toolregistries
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -544,6 +583,24 @@ subjects:
   namespace: {{ .Values.namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
+  name: agent-engine-token-service-rolebinding
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-engine-token-service-role
+subjects:
+- kind: ServiceAccount
+  name: agent-engine-token-service
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
@@ -623,6 +680,25 @@ spec:
     app.kubernetes.io/name: agent-engine
     control-plane: gateway
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
+  name: agent-engine-token-service
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - name: mtls
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -760,3 +836,82 @@ spec:
       - configMap:
           name: agent-engine-gateway-config
         name: gateway-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: token-service
+  name: agent-engine-token-service
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-engine
+      control-plane: token-service
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: token-service
+      labels:
+        app.kubernetes.io/name: agent-engine
+        control-plane: token-service
+    spec:
+      containers:
+      - env:
+        - name: MCP_CREDENTIAL_NAMESPACE
+          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+        - name: TOKEN_SERVICE_TLS_CERT_FILE
+          value: /etc/token-service/tls/tls.crt
+        - name: TOKEN_SERVICE_TLS_KEY_FILE
+          value: /etc/token-service/tls/tls.key
+        - name: TOKEN_SERVICE_CLIENT_CA_FILE
+          value: /etc/token-service/tls/ca.crt
+        image: token-service:latest
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          initialDelaySeconds: 10
+          periodSeconds: 20
+          tcpSocket:
+            port: 8443
+        name: token-service
+        ports:
+        - containerPort: 8443
+          name: mtls
+          protocol: TCP
+        readinessProbe:
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          tcpSocket:
+            port: 8443
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/token-service/tls
+          name: tls
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: agent-engine-token-service
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: tls
+        secret:
+          optional: true
+          secretName: token-service-tls

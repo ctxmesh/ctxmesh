@@ -1,0 +1,21 @@
+# Token-service Service — the central credential plane the injecting egress sidecars
+# delegate to over mTLS (ADR 0030 §1). Sidecars reach it via TOKEN_SERVICE_URL
+# (https://agent-engine-token-service.<ns>.svc:8443), injected by the controller.
+apiVersion: v1
+kind: Service
+metadata:
+  name: token-service
+  namespace: system
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+  ports:
+    - name: mtls
+      port: 8443
+      targetPort: 8443
+      protocol: TCP

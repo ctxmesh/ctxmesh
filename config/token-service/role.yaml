@@ -1,0 +1,28 @@
+# Token-service Role — the LEAST privilege the central credential resolver needs (ADR 0030
+# §1, ADR 0029 §7). It reads per-user grant Secrets and writes back rotated tokens
+# (optimistic concurrency) + deletes on revoke; it reads ToolRegistries to classify a
+# server's auth type / scope. NO agent-CRD access, NO create.
+#
+# This Role is namespaced to the platform namespace. When an operator runs OBO with a
+# DEDICATED credential namespace (mcp.credentialNamespace), the Helm chart also binds this
+# SA to the credential-component RBAC there (templated), so grants resolve cross-namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: token-service-role
+  namespace: system
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  # Per-user grant Secrets: read to resolve, update to write back a rotated token, delete on
+  # revoke (RFC 7009: forget locally). NO create — grants are minted by the OAuth callback.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "update", "delete"]
+  # ToolRegistry: classify a server (auth type / scope) so an absent grant is consent-required
+  # (OAuth) vs open, and an org-scoped server resolves the shared credential.
+  - apiGroups: ["agents.ctxmesh.ai"]
+    resources: ["toolregistries"]
+    verbs: ["get", "list", "watch"]

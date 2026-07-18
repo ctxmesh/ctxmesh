@@ -154,7 +154,11 @@ func run(log logr.Logger) error {
 	certFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_KEY_FILE"))
 	caFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_CA_FILE"))
-	mtls := certFile != "" && keyFile != "" && caFile != ""
+	// mTLS engages only when all three files are set AND present. The Helm manifest always
+	// points the env at an OPTIONAL cert Secret mount, so an install that has not provisioned
+	// platform certs degrades to plain HTTP (dev) instead of crash-looping — the operator
+	// drops in the Secret to switch mTLS on with no manifest change.
+	mtls := certFile != "" && keyFile != "" && caFile != "" && filesExist(certFile, keyFile, caFile)
 	if mtls {
 		tlsCfg, err := serverMTLS(certFile, keyFile, caFile)
 		if err != nil {
@@ -221,4 +225,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// filesExist reports whether every path is a readable regular file — used to gate mTLS on
+// an OPTIONAL cert Secret actually being mounted (absent ⇒ degrade to plain HTTP, not crash).
+func filesExist(paths ...string) bool {
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			return false
+		}
+	}
+	return true
 }
