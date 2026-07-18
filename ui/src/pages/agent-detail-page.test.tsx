@@ -302,14 +302,17 @@ describe("AgentDetailPage (landing page)", () => {
     expect(logCall.url).toContain("follow=true");
   });
 
-  it("Run → POST /api/invoke → traceId → the run inspector opens with the tool span", async () => {
+  it("Run → POST /api/invoke → traceId link → clicking it opens the run inspector", async () => {
     const calls = installFetch();
     renderAt();
     await screen.findByTestId("run-panel");
     fireEvent.click(screen.getByTestId("run-button"));
     // The invoke POST fired.
     await waitFor(() => expect(calls.some((c) => c.url === "/api/invoke" && c.method === "POST")).toBe(true));
-    // The run inspector opens (drawer) and builds the tree — the tool span visible.
+    // The inspector does NOT auto-open — the trace id is a link the user clicks to open it.
+    expect(screen.queryByTestId("run-inspector")).toBeNull();
+    fireEvent.click(await screen.findByTestId("open-trace"));
+    // Now the run inspector opens (drawer) and builds the tree — the tool span visible.
     await screen.findByTestId("run-inspector");
     const toolRow = await screen.findByTestId("span-row-tool");
     expect(toolRow).toHaveTextContent("get_invoice");

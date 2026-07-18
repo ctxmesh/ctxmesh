@@ -1003,7 +1003,8 @@ function RunPanel({
         response: res.response,
         consentRequired: res.consentRequired,
       });
-      onTraced(res.traceId);
+      // The trace id is shown as a clickable "trace … →" link in the result; do NOT
+      // auto-open the run inspector on completion — the user opens it only if they want to.
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       const apiErr = err instanceof ApiError ? err : null;
