@@ -328,6 +328,38 @@ describe("AgentDetailPage (landing page)", () => {
     expect(screen.getByTestId("span-detail")).toHaveTextContent("12 in / 4 out");
   });
 
+  it("renders the agent's output as markdown, not the raw JSON envelope", async () => {
+    installFetch({
+      invoke: {
+        ok: true,
+        status: 200,
+        body: {
+          traceId: "tr-md",
+          // The managed-agent envelope, exactly as the agent returns it.
+          response: JSON.stringify({
+            agent: "sk-agent",
+            output: "Here are your **environments**:\n\n| Name | Type |\n|------|------|\n| Personal Dev | DEV |",
+            steps: 2,
+            tools_called: ["list_environments"],
+            consent_required: [],
+          }),
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("chat-panel");
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "list environments" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    const agentTurn = await screen.findByTestId("chat-turn-agent");
+    // The human answer renders (markdown → a real <table>, bold text) …
+    expect(agentTurn).toHaveTextContent("Here are your environments");
+    expect(agentTurn.querySelector("table")).not.toBeNull();
+    expect(agentTurn).toHaveTextContent("Personal Dev");
+    // … and the raw envelope's structural fields never appear.
+    expect(agentTurn.textContent).not.toContain("tools_called");
+    expect(agentTurn.textContent).not.toContain('"steps"');
+  });
+
   it("threads ONE conversationId across turns (a multi-turn chat)", async () => {
     const calls = installFetch();
     renderAt();
