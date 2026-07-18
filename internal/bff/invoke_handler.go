@@ -168,8 +168,13 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
 		User:  userGrantHash(username),
 		Agent: ns + "/" + agent,
-		RunID: runID,
-		TTL:   runCapabilityTTL,
+		// The trust boundary (ADR 0033) the run resolves credentials within: the agent's
+		// registry, or the agent itself when standalone. The egress hop resolves the invoking
+		// user's grant within THIS boundary, so a registry's agents share the user's credential
+		// but a different registry cannot. Matches the boundary the consent write stores under.
+		Boundary: agentBoundary(r.Context(), caller, ns, agent),
+		RunID:    runID,
+		TTL:      runCapabilityTTL,
 	})
 	if err != nil {
 		s.log.Error(err, "run-capability: mint failed; proceeding without a capability")
