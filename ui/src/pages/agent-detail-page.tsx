@@ -1116,6 +1116,9 @@ function ChatPanel({
       const res = await api.beginMcpGrant({
         server,
         namespace: ns,
+        // Scope the grant to THIS agent's trust boundary (its registry, or itself) — the
+        // consent empowers this agent's team, not every agent the user owns (ADR 0033).
+        agent: name,
         redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
       });
       authorizationURL = res.authorizationURL;
