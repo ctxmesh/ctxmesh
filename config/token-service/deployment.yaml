@@ -1,0 +1,98 @@
+# Central OBO token-service Deployment (ADR 0030 §1). Runs the credresolve backend behind
+# an internal mTLS API; the per-pod injecting egress sidecars DELEGATE grant reads + OAuth
+# refresh here, so those two ceilings amortize once at the center (global cache + singleflight).
+#
+# The credential backend is CONFIG-SELECTED per the CredentialStore CRDs (ADR 0032); the
+# default is the built-in kubernetes backend, so a plain install needs no external store.
+#
+# mTLS POSTURE: the TLS env below always points at an OPTIONAL cert Secret mount
+# (token-service-tls). Provision that Secret (platform CA-signed server cert + the client CA
+# that authenticates sidecars) and the credential API is mutually authenticated; absent it,
+# the service degrades to plain HTTP with a LOUD warning (dev only). No manifest change to
+# switch mTLS on — just drop in the Secret. The capability keypair is NOT here (the BFF signs
+# the run capability, the sidecar verifies it; the token-service only resolves).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-service
+  namespace: system
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: token-service
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: token-service
+      labels:
+        control-plane: token-service
+        app.kubernetes.io/name: agent-engine
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: token-service
+          image: token-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mtls
+              containerPort: 8443
+              protocol: TCP
+          env:
+            # MCP_CREDENTIAL_NAMESPACE is the locked namespace holding per-user grant Secrets
+            # (ADR 0029 §7); must match the BFF's bff.mcp.credentialNamespace. Empty (default)
+            # keeps the legacy per-source-namespace grant path so kustomize/helm-default stay
+            # valid. The Helm chart templates it from mcp.credentialNamespace (no drift).
+            - name: MCP_CREDENTIAL_NAMESPACE
+              value: ""
+            # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ mTLS; absent ⇒
+            # plain HTTP (dev). No literal secret material here.
+            - name: TOKEN_SERVICE_TLS_CERT_FILE
+              value: /etc/token-service/tls/tls.crt
+            - name: TOKEN_SERVICE_TLS_KEY_FILE
+              value: /etc/token-service/tls/tls.key
+            - name: TOKEN_SERVICE_CLIENT_CA_FILE
+              value: /etc/token-service/tls/ca.crt
+          livenessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/token-service/tls
+              readOnly: true
+      volumes:
+        # Optional: the platform mTLS material. Absent ⇒ the mount is empty ⇒ plain HTTP.
+        - name: tls
+          secret:
+            secretName: token-service-tls
+            optional: true
+      serviceAccountName: token-service
+      terminationGracePeriodSeconds: 10

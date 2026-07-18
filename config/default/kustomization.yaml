@@ -25,6 +25,10 @@ resources:
 # both `make deploy` and the generated Helm chart (no-drift). ADR 0011: the BFF
 # SA holds no agent-CRD access — user ops run on the caller's token.
 - ../bff
+# The central OBO token-service + its least-privilege SA/RBAC (ADR 0030 §1). mTLS
+# + credential namespace are values-gated/optional so a plain install degrades to
+# the built-in kubernetes credential backend (ADR 0032). No-drift.
+- ../token-service
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
