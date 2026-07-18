@@ -28,14 +28,14 @@ import (
 // writerResolver is a mockResolver that ALSO persists grants (a config-selected backend).
 type writerResolver struct {
 	mockResolver
-	storeCalls             int
-	gotG                   credresolve.Grant
-	stNS, stServer, stUser string
+	storeCalls                         int
+	gotG                               credresolve.Grant
+	stNS, stBoundary, stServer, stUser string
 }
 
-func (wr *writerResolver) StoreGrant(_ context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (wr *writerResolver) StoreGrant(_ context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	wr.storeCalls++
-	wr.stNS, wr.stServer, wr.stUser, wr.gotG = ns, server, userHash, g
+	wr.stNS, wr.stBoundary, wr.stServer, wr.stUser, wr.gotG = ns, boundary, server, userHash, g
 	return nil
 }
 
@@ -52,7 +52,7 @@ func TestDelegationStore(t *testing.T) {
 		Config:    credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid", RevocationEndpoint: "https://as/revoke"},
 		ServerURL: "https://mcp.example/mcp",
 	}
-	if err := client.StoreGrant(context.Background(), "ns", "srv", "uh", g); err != nil {
+	if err := client.StoreGrant(context.Background(), "ns", "", "srv", "uh", g); err != nil {
 		t.Fatalf("StoreGrant: %v", err)
 	}
 	if wr.storeCalls != 1 || wr.stNS != "ns" || wr.stServer != "srv" || wr.stUser != "uh" {
@@ -70,7 +70,7 @@ func TestDelegationStore_UnsupportedBackend(t *testing.T) {
 	t.Parallel()
 	client := newDelegation(t, &mockResolver{}) // mockResolver is not a GrantWriter
 
-	err := client.StoreGrant(context.Background(), "ns", "srv", "uh", credresolve.Grant{})
+	err := client.StoreGrant(context.Background(), "ns", "", "srv", "uh", credresolve.Grant{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("StoreGrant on a read-only backend = %v, want an 'unsupported' error (fail closed)", err)
 	}

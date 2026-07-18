@@ -45,15 +45,18 @@ type Credential struct {
 // implement/consume (ADR 0030). K8sBackend is the self-hosted baseline; external-vault
 // backends (Scalekit / Auth0 / Vault) implement the same interface for managed installs.
 type CredentialResolver interface {
-	// Resolve returns the credential for (server, userHash). It returns:
-	//   - the user's fresh access token when they have a grant;
+	// Resolve returns the credential for (boundary, server, userHash). boundary is the
+	// trust boundary the personal grant is scoped to (ADR 0033) — the invoking agent's
+	// registry, or the agent itself when standalone; "" resolves a legacy unscoped
+	// (user, server) grant. It returns:
+	//   - the user's fresh access token when they have a grant in this boundary;
 	//   - ErrConsentRequired when the server needs per-user auth and this user has none;
 	//   - ErrNoCredential when the server needs no credential (an open server → attach nothing).
 	// Any other error is a real failure the caller surfaces.
-	Resolve(ctx context.Context, ns, server, userHash string) (Credential, error)
-	// Revoke forgets the user's grant for the server (deletes the grant Secret) and
+	Resolve(ctx context.Context, ns, boundary, server, userHash string) (Credential, error)
+	// Revoke forgets the user's grant for (boundary, server) (deletes the grant Secret) and
 	// best-effort revokes it at the AS (RFC 7009). A missing grant is a no-op (nil).
-	Revoke(ctx context.Context, ns, server, userHash string) error
+	Revoke(ctx context.Context, ns, boundary, server, userHash string) error
 }
 
 // AnnGrantServerURL annotates a stored grant with its (non-secret) MCP server URL — used
@@ -76,7 +79,9 @@ type Grant struct {
 // grant minted by the OAuth callback lands in the config-selected store (kubernetes /
 // postgres / remote), not always a k8s Secret. The write is an UPSERT (re-consent replaces).
 type GrantWriter interface {
-	StoreGrant(ctx context.Context, ns, server, userHash string, g Grant) error
+	// StoreGrant persists a user's grant for (boundary, server) — boundary is the trust
+	// boundary (ADR 0033); "" writes a legacy unscoped grant. UPSERT (re-consent replaces).
+	StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g Grant) error
 }
 
 var (

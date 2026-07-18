@@ -52,8 +52,12 @@ func NewSigner(priv ed25519.PrivateKey, audience string, now func() time.Time) *
 type MintRequest struct {
 	User  string
 	Agent string
-	RunID string
-	TTL   time.Duration
+	// Boundary is the trust boundary the personal grant is scoped to (ADR 0033) — the
+	// invoking agent's registry ("r:<registry>"), or the agent ("a:<ns>/<agent>") when
+	// standalone. "" mints a legacy unscoped capability (resolves the (user, server) grant).
+	Boundary string
+	RunID    string
+	TTL      time.Duration
 }
 
 // Mint returns a signed run capability (an EdDSA JWT). It refuses to mint an incomplete
@@ -71,6 +75,7 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 		Sub: req.User,
 		Aud: s.audience,
 		Run: req.RunID,
+		Bnd: req.Boundary,
 		Iat: now.Unix(),
 		Exp: now.Add(req.TTL).Unix(),
 	}
@@ -172,6 +177,7 @@ func (v *Verifier) Verify(token string) (Capability, error) {
 		User:      claims.Sub,
 		Audience:  claims.Aud,
 		RunID:     claims.Run,
+		Boundary:  claims.Bnd,
 		IssuedAt:  time.Unix(claims.Iat, 0),
 		ExpiresAt: time.Unix(claims.Exp, 0),
 	}

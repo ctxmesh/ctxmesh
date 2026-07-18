@@ -118,26 +118,29 @@ func (b *Backend) tenant(ns string) string {
 	return ns
 }
 
-func rowKey(ns, server, userHash string) string { return ns + "|" + server + "|" + userHash }
+func rowKey(ns, boundary, server, userHash string) string {
+	return ns + "|" + boundary + "|" + server + "|" + userHash
+}
 
 // Resolve returns the invoking user's fresh access token, refreshing near-expiry grants.
 // Precedence (ADR 0029 §2): personal grant → org credential → consent-required / none.
-func (b *Backend) Resolve(ctx context.Context, ns, server, userHash string) (credresolve.Credential, error) {
-	if c, ok := b.cacheGet(rowKey(ns, server, userHash)); ok {
+// boundary scopes the personal grant to the invoking agent's registry (ADR 0033).
+func (b *Backend) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
+	if c, ok := b.cacheGet(rowKey(ns, boundary, server, userHash)); ok {
 		return c, nil
 	}
 
-	st, found, err := b.cfg.Storage.load(ctx, ns, server, userHash)
+	st, found, err := b.cfg.Storage.load(ctx, ns, boundary, server, userHash)
 	if err != nil {
 		return credresolve.Credential{}, err
 	}
 	if found {
-		cred, err := b.resolveGrant(ctx, ns, server, userHash, st)
+		cred, err := b.resolveGrant(ctx, ns, boundary, server, userHash, st)
 		if err != nil {
 			return credresolve.Credential{}, err
 		}
 		b.audit(credresolve.ActionUse, ns, server, userHash, credresolve.ClassPersonalGrant)
-		b.cacheSet(rowKey(ns, server, userHash), cred)
+		b.cacheSet(rowKey(ns, boundary, server, userHash), cred)
 		return cred, nil
 	}
 
@@ -165,7 +168,7 @@ func (b *Backend) Resolve(ctx context.Context, ns, server, userHash string) (cre
 }
 
 // resolveGrant decrypts a stored grant and refreshes it if near expiry.
-func (b *Backend) resolveGrant(ctx context.Context, ns, server, userHash string, st stored) (credresolve.Credential, error) {
+func (b *Backend) resolveGrant(ctx context.Context, ns, boundary, server, userHash string, st stored) (credresolve.Credential, error) {
 	g, err := b.unseal(ctx, ns, st)
 	if err != nil {
 		return credresolve.Credential{}, err
@@ -178,8 +181,8 @@ func (b *Backend) resolveGrant(ctx context.Context, ns, server, userHash string,
 		// still succeed; a subsequent 401 surfaces as consent).
 		return credresolve.Credential{Kind: credresolve.KindBearer, Value: g.AccessToken}, nil
 	}
-	token, sfErr, _ := b.group.Do(rowKey(ns, server, userHash), func() (any, error) {
-		return b.refresh(ctx, ns, server, userHash)
+	token, sfErr, _ := b.group.Do(rowKey(ns, boundary, server, userHash), func() (any, error) {
+		return b.refresh(ctx, ns, boundary, server, userHash)
 	})
 	if sfErr != nil {
 		return credresolve.Credential{}, sfErr
@@ -190,9 +193,9 @@ func (b *Backend) resolveGrant(ctx context.Context, ns, server, userHash string,
 // refresh rotates a near-expiry grant at the token endpoint and writes it back with
 // optimistic concurrency; on conflict it re-reads and adopts the winner (no double refresh
 // of a rotating refresh token).
-func (b *Backend) refresh(ctx context.Context, ns, server, userHash string) (string, error) {
+func (b *Backend) refresh(ctx context.Context, ns, boundary, server, userHash string) (string, error) {
 	for range maxSaveAttempts {
-		st, found, err := b.cfg.Storage.load(ctx, ns, server, userHash)
+		st, found, err := b.cfg.Storage.load(ctx, ns, boundary, server, userHash)
 		if err != nil {
 			return "", err
 		}
@@ -221,9 +224,9 @@ func (b *Backend) refresh(ctx context.Context, ns, server, userHash string) (str
 		if err != nil {
 			return "", err
 		}
-		switch err := b.cfg.Storage.save(ctx, ns, server, userHash, newSt, st.version); {
+		switch err := b.cfg.Storage.save(ctx, ns, boundary, server, userHash, newSt, st.version); {
 		case err == nil:
-			b.cacheDel(rowKey(ns, server, userHash))
+			b.cacheDel(rowKey(ns, boundary, server, userHash))
 			return toks.AccessToken, nil
 		case errors.Is(err, errConflict):
 			continue // another writer won; re-read + re-evaluate
@@ -236,8 +239,8 @@ func (b *Backend) refresh(ctx context.Context, ns, server, userHash string) (str
 
 // StoreGrant adapts the SPI's common write payload (credresolve.Grant) to this backend's
 // Store, so the Postgres backend is a config-selected GrantWriter (ADR 0032).
-func (b *Backend) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
-	return b.Store(ctx, ns, server, userHash, Grant{
+func (b *Backend) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
+	return b.Store(ctx, ns, boundary, server, userHash, Grant{
 		AccessToken:        g.Tokens.AccessToken,
 		RefreshToken:       g.Tokens.RefreshToken,
 		ExpiresAt:          g.Tokens.ExpiresAt,
@@ -248,13 +251,13 @@ func (b *Backend) StoreGrant(ctx context.Context, ns, server, userHash string, g
 }
 
 // Store persists (or overwrites) a user's grant — the write path from the OAuth callback.
-func (b *Backend) Store(ctx context.Context, ns, server, userHash string, g Grant) error {
+func (b *Backend) Store(ctx context.Context, ns, boundary, server, userHash string, g Grant) error {
 	sg := sealedGrant{
 		AccessToken: g.AccessToken, RefreshToken: g.RefreshToken,
 		TokenEndpoint: g.TokenEndpoint, ClientID: g.ClientID, RevocationEndpoint: g.RevocationEndpoint,
 	}
 	for range maxSaveAttempts {
-		_, _, expectedVersion, err := b.loadVersion(ctx, ns, server, userHash)
+		_, _, expectedVersion, err := b.loadVersion(ctx, ns, boundary, server, userHash)
 		if err != nil {
 			return err
 		}
@@ -262,9 +265,9 @@ func (b *Backend) Store(ctx context.Context, ns, server, userHash string, g Gran
 		if err != nil {
 			return err
 		}
-		switch err := b.cfg.Storage.save(ctx, ns, server, userHash, st, expectedVersion); {
+		switch err := b.cfg.Storage.save(ctx, ns, boundary, server, userHash, st, expectedVersion); {
 		case err == nil:
-			b.cacheDel(rowKey(ns, server, userHash))
+			b.cacheDel(rowKey(ns, boundary, server, userHash))
 			return nil
 		case errors.Is(err, errConflict):
 			continue
@@ -277,8 +280,8 @@ func (b *Backend) Store(ctx context.Context, ns, server, userHash string, g Gran
 
 // Revoke best-effort revokes at the AS then deletes the grant (RFC 7009: forget locally +
 // best-effort at the AS).
-func (b *Backend) Revoke(ctx context.Context, ns, server, userHash string) error {
-	st, found, err := b.cfg.Storage.load(ctx, ns, server, userHash)
+func (b *Backend) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
+	st, found, err := b.cfg.Storage.load(ctx, ns, boundary, server, userHash)
 	if err != nil {
 		return err
 	}
@@ -294,8 +297,8 @@ func (b *Backend) Revoke(ctx context.Context, ns, server, userHash string) error
 			_ = b.cfg.Exchanger.Revoke(ctx, g.RevocationEndpoint, tok) // advisory
 		}
 	}
-	b.cacheDel(rowKey(ns, server, userHash))
-	if err := b.cfg.Storage.del(ctx, ns, server, userHash); err != nil {
+	b.cacheDel(rowKey(ns, boundary, server, userHash))
+	if err := b.cfg.Storage.del(ctx, ns, boundary, server, userHash); err != nil {
 		return err
 	}
 	b.audit(credresolve.ActionRevoke, ns, server, userHash, credresolve.ClassPersonalGrant)
@@ -307,8 +310,8 @@ func (b *Backend) SweepExpired(ctx context.Context) (int64, error) {
 	return b.cfg.Storage.sweepExpired(ctx, b.cfg.Now())
 }
 
-func (b *Backend) loadVersion(ctx context.Context, ns, server, userHash string) (stored, bool, int64, error) {
-	st, found, err := b.cfg.Storage.load(ctx, ns, server, userHash)
+func (b *Backend) loadVersion(ctx context.Context, ns, boundary, server, userHash string) (stored, bool, int64, error) {
+	st, found, err := b.cfg.Storage.load(ctx, ns, boundary, server, userHash)
 	if err != nil {
 		return stored{}, false, 0, err
 	}

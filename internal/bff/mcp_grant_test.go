@@ -275,14 +275,14 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 
 // fakeGrantWriter captures a delegated grant persist (the SPI write path).
 type fakeGrantWriter struct {
-	calls                int
-	ns, server, userHash string
-	g                    credresolve.Grant
+	calls                          int
+	ns, boundary, server, userHash string
+	g                              credresolve.Grant
 }
 
-func (f *fakeGrantWriter) StoreGrant(_ context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (f *fakeGrantWriter) StoreGrant(_ context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	f.calls++
-	f.ns, f.server, f.userHash, f.g = ns, server, userHash, g
+	f.ns, f.boundary, f.server, f.userHash, f.g = ns, boundary, server, userHash, g
 	return nil
 }
 

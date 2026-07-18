@@ -51,13 +51,13 @@ type mockResolver struct {
 	revNS, revServer, revUser string
 }
 
-func (m *mockResolver) Resolve(_ context.Context, ns, server, userHash string) (credresolve.Credential, error) {
+func (m *mockResolver) Resolve(_ context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	m.calls++
 	m.gotNS, m.gotServer, m.gotUser = ns, server, userHash
 	return m.cred, m.err
 }
 
-func (m *mockResolver) Revoke(_ context.Context, ns, server, userHash string) error {
+func (m *mockResolver) Revoke(_ context.Context, ns, boundary, server, userHash string) error {
 	m.revokeCalls++
 	m.revNS, m.revServer, m.revUser = ns, server, userHash
 	return nil
@@ -77,7 +77,7 @@ func TestDelegationResolveRoundTrip(t *testing.T) {
 	mock := &mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "USER-TOKEN"}}
 	client := newDelegation(t, mock)
 
-	got, err := client.Resolve(ctx, testNS, testServer, "u-alicehash")
+	got, err := client.Resolve(ctx, testNS, "", testServer, "u-alicehash")
 	require.NoError(t, err)
 	assert.Equal(t, credresolve.KindBearer, got.Kind)
 	assert.Equal(t, "USER-TOKEN", got.Value)
@@ -92,17 +92,17 @@ func TestDelegationMapsSentinels(t *testing.T) {
 
 	t.Run("consent_required", func(t *testing.T) {
 		client := newDelegation(t, &mockResolver{err: credresolve.ErrConsentRequired})
-		_, err := client.Resolve(ctx, testNS, testServer, "u-a")
+		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
 		assert.ErrorIs(t, err, credresolve.ErrConsentRequired)
 	})
 	t.Run("no_credential", func(t *testing.T) {
 		client := newDelegation(t, &mockResolver{err: credresolve.ErrNoCredential})
-		_, err := client.Resolve(ctx, testNS, testServer, "u-a")
+		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
 		assert.ErrorIs(t, err, credresolve.ErrNoCredential)
 	})
 	t.Run("internal error is generic (never leaks the cause)", func(t *testing.T) {
 		client := newDelegation(t, &mockResolver{err: errors.New("etcd on fire: secret xyz")})
-		_, err := client.Resolve(ctx, testNS, testServer, "u-a")
+		_, err := client.Resolve(ctx, testNS, "", testServer, "u-a")
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, credresolve.ErrConsentRequired)
 		assert.NotContains(t, err.Error(), "etcd on fire", "the central cause must not cross the wire")
@@ -112,7 +112,7 @@ func TestDelegationMapsSentinels(t *testing.T) {
 func TestDelegationRevoke(t *testing.T) {
 	mock := &mockResolver{}
 	client := newDelegation(t, mock)
-	require.NoError(t, client.Revoke(context.Background(), testNS, testServer, "u-alicehash"))
+	require.NoError(t, client.Revoke(context.Background(), testNS, "", testServer, "u-alicehash"))
 	assert.Equal(t, 1, mock.revokeCalls)
 	assert.Equal(t, "u-alicehash", mock.revUser)
 }
@@ -156,9 +156,9 @@ func TestDelegationGlobalSingleflight(t *testing.T) {
 	// A near-expiry grant Secret (in-skew ⇒ the backend refreshes).
 	grant := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      credresolve.SecretName(testServer, userHash),
+			Name:      credresolve.SecretName(testServer, userHash, ""),
 			Namespace: testNS,
-			Labels:    credresolve.SecretLabels(testServer, userHash, ""),
+			Labels:    credresolve.SecretLabels(testServer, userHash, "", ""),
 		},
 		Data: credresolve.SecretData(
 			credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
@@ -193,7 +193,7 @@ func TestDelegationGlobalSingleflight(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			client := credplane.NewClient(ts.URL, ts.Client())
-			results[i], errs[i] = client.Resolve(ctx, testNS, testServer, userHash)
+			results[i], errs[i] = client.Resolve(ctx, testNS, "", testServer, userHash)
 		}(i)
 	}
 

@@ -83,9 +83,9 @@ func itGrant(ns, server, user string, data map[string][]byte) *corev1.Secret {
 	userHash := UserHash(nil, user)
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      SecretName(server, userHash),
+			Name:      SecretName(server, userHash, ""),
 			Namespace: ns,
-			Labels:    SecretLabels(server, userHash, ""),
+			Labels:    SecretLabels(server, userHash, "", ""),
 		},
 		Data: data,
 	}
@@ -110,11 +110,11 @@ func TestIntegrationPerUserIsolation(t *testing.T) {
 		AuthTypeIsOAuth: func(context.Context, string, string) (bool, error) { return true, nil },
 	})
 
-	got, err := b.Resolve(ctx, ns, "weather", UserHash(nil, "alice@example.com"))
+	got, err := b.Resolve(ctx, ns, "", "weather", UserHash(nil, "alice@example.com"))
 	require.NoError(t, err)
 	assert.Equal(t, "ALICE-AT", got.Value)
 
-	_, err = b.Resolve(ctx, ns, "weather", UserHash(nil, "bob@example.com"))
+	_, err = b.Resolve(ctx, ns, "", "weather", UserHash(nil, "bob@example.com"))
 	assert.ErrorIs(t, err, ErrConsentRequired)
 }
 
@@ -153,7 +153,7 @@ func TestIntegrationOneRefreshUnderHerd(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = b.Resolve(ctx, ns, "weather", userHash)
+			results[i], errs[i] = b.Resolve(ctx, ns, "", "weather", userHash)
 		}(i)
 	}
 	<-ex.entered

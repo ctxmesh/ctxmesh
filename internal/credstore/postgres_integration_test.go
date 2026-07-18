@@ -66,7 +66,7 @@ func TestIntegration_Router_PostgresPath(t *testing.T) {
 	// The router selects postgres, reads the DSN + KEK Secrets, opens real Postgres, and
 	// applies the schema — then a Resolve for a user with no grant on an open (non-OAuth)
 	// server returns ErrNoCredential, proving a real query ran end-to-end through the wiring.
-	if _, err := r.Resolve(ctx, "app-ns", "srv", "nouser"); err != credresolve.ErrNoCredential {
+	if _, err := r.Resolve(ctx, "app-ns", "", "srv", "nouser"); err != credresolve.ErrNoCredential {
 		t.Fatalf("Resolve(no grant) err = %v, want ErrNoCredential (config-selected postgres backend is live)", err)
 	}
 }

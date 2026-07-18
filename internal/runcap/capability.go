@@ -37,6 +37,12 @@ type Capability struct {
 	// Agent is the agent acting on the user's behalf — the RFC 8693 `act` (actor) claim.
 	// It scopes misuse: a capability can only be presented by/for this agent's run.
 	Agent string
+	// Boundary is the trust boundary the personal grant is scoped to (ADR 0033): the
+	// invoking agent's registry ("r:<registry>"), or the agent itself when standalone
+	// ("a:<ns>/<agent>"). The credential plane resolves the grant within THIS boundary,
+	// so agents in one registry share the user's credential but a different registry can't.
+	// "" ⇒ a legacy unscoped run (resolves the pre-ADR-0033 (user, server) grant).
+	Boundary string
 	// Audience is the intended verifier (the credential plane) — the JWT `aud`. Verify
 	// rejects a capability minted for a different audience.
 	Audience string
@@ -79,6 +85,7 @@ type jwtClaims struct {
 	Act *actClaim `json:"act,omitempty"` // RFC 8693 actor: the agent
 	Aud string    `json:"aud"`           // credential-plane audience
 	Run string    `json:"run"`           // custom: the run id
+	Bnd string    `json:"bnd,omitempty"` // custom: the trust boundary (ADR 0033); "" = unscoped
 	Iat int64     `json:"iat"`
 	Exp int64     `json:"exp"`
 }

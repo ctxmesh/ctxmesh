@@ -92,8 +92,9 @@ func NewK8sBackend(cfg K8sBackendConfig) *K8sBackend {
 // refresh (singleflight + optimistic writeback) → cache + audit. Per-user isolation is
 // structural — the grant is selected by BOTH the server AND the invoking user's hash, so
 // user A can never resolve user B's grant.
-func (b *K8sBackend) Resolve(ctx context.Context, ns, server, userHash string) (Credential, error) {
-	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash)
+func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash string) (Credential, error) {
+	boundaryHash := BoundaryHash(boundary)
+	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
 	cacheKey := readNS + "/" + name
 	now := b.cfg.Now()
 
@@ -103,7 +104,7 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, server, userHash string) (
 		return Credential{Kind: KindBearer, Value: access}, nil
 	}
 
-	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash)
+	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash, boundaryHash)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -147,11 +148,12 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, server, userHash string) (
 
 // Revoke implements CredentialResolver: forget the grant (delete the Secret) and
 // best-effort revoke it at the AS (RFC 7009). A missing grant is a no-op.
-func (b *K8sBackend) Revoke(ctx context.Context, ns, server, userHash string) error {
-	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash)
+func (b *K8sBackend) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
+	boundaryHash := BoundaryHash(boundary)
+	readNS, name := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
 	cacheKey := readNS + "/" + name
 
-	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash)
+	secret, found, err := b.findGrant(ctx, readNS, name, ns, server, userHash, boundaryHash)
 	if err != nil {
 		return err
 	}
@@ -185,7 +187,7 @@ func (b *K8sBackend) Revoke(ctx context.Context, ns, server, userHash string) er
 // source namespace — so a truncated-hash NAME collision can NEVER return another user's
 // (or another namespace's) grant (the labels are the authoritative match). A missing
 // Secret is (nil, false, nil).
-func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, server, userHash string) (*corev1.Secret, bool, error) {
+func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, server, userHash, boundaryHash string) (*corev1.Secret, bool, error) {
 	var secret corev1.Secret
 	if err := b.cfg.Client.Get(ctx, client.ObjectKey{Name: name, Namespace: readNS}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -194,6 +196,12 @@ func (b *K8sBackend) findGrant(ctx context.Context, readNS, name, sourceNS, serv
 		return nil, false, err
 	}
 	if secret.Labels[LabelGrantUser] != userHash || secret.Labels[LabelGrantServer] != server {
+		return nil, false, nil
+	}
+	// The boundary is an authoritative match key too (ADR 0033): a boundary-scoped lookup
+	// must never return a grant from a different boundary (or the legacy unscoped grant),
+	// and an unscoped lookup (boundaryHash "") must not return a boundary-scoped grant.
+	if secret.Labels[LabelGrantBoundary] != boundaryHash {
 		return nil, false, nil
 	}
 	// In locked mode many namespaces' grants coexist in one namespace, so the source
@@ -231,9 +239,12 @@ var _ GrantWriter = (*K8sBackend)(nil)
 // backend — the (identity) coordinates plus the full token material.
 type MigratableGrant struct {
 	Namespace string
-	Server    string
-	UserHash  string
-	Grant     Grant
+	// Boundary is the trust boundary the grant is scoped to (ADR 0033); "" for a legacy
+	// unscoped grant. Preserved across a backfill so a migrated grant keeps its scope.
+	Boundary string
+	Server   string
+	UserHash string
+	Grant    Grant
 }
 
 // ListGrants enumerates the per-user grant Secrets in the locked credential namespace and
@@ -259,7 +270,7 @@ func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) 
 			ns = s.Namespace
 		}
 		out = append(out, MigratableGrant{
-			Namespace: ns, Server: server, UserHash: userHash,
+			Namespace: ns, Boundary: s.Annotations[AnnGrantBoundary], Server: server, UserHash: userHash,
 			Grant: Grant{
 				Tokens: Tokens{
 					AccessToken:  string(s.Data[KeyAccessToken]),
@@ -282,17 +293,21 @@ func (b *K8sBackend) ListGrants(ctx context.Context) ([]MigratableGrant, error) 
 // the SPI (ADR 0032). A re-consent for the same (user, server) REPLACES the stored grant
 // (rotated tokens) rather than failing. This is the same shape the BFF OAuth callback writes,
 // so grants are interchangeable across the two write paths.
-func (b *K8sBackend) StoreGrant(ctx context.Context, ns, server, userHash string, g Grant) error {
+func (b *K8sBackend) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g Grant) error {
 	sourceNsLabel := ""
 	if b.cfg.CredentialNamespace != "" {
 		sourceNsLabel = ns
 	}
-	grantNS, grantName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash)
+	boundaryHash := BoundaryHash(boundary)
+	grantNS, grantName := SecretCoordinates(b.cfg.CredentialNamespace, ns, server, userHash, boundaryHash)
 	data := SecretData(g.Config, g.Tokens)
-	labels := SecretLabels(server, userHash, sourceNsLabel)
+	labels := SecretLabels(server, userHash, sourceNsLabel, boundaryHash)
 	ann := map[string]string{}
 	if g.ServerURL != "" {
 		ann[AnnGrantServerURL] = g.ServerURL
+	}
+	if boundary != "" {
+		ann[AnnGrantBoundary] = boundary
 	}
 
 	var sec corev1.Secret

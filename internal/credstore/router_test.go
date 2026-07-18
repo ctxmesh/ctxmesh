@@ -185,7 +185,7 @@ func TestRouter_UnimplementedProviderFailsClosed(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ob).Build()
 	r := NewRouter(c, testDeps(c))
 
-	_, err := r.Resolve(ctx, "team-ob", "srv", "userhash")
+	_, err := r.Resolve(ctx, "team-ob", "", "srv", "userhash")
 	if !errors.Is(err, ErrProviderNotImplemented) {
 		t.Fatalf("Resolve on unbuilt provider = %v, want ErrProviderNotImplemented (fail closed)", err)
 	}
@@ -205,17 +205,17 @@ func TestRouter_StoreGrant_Kubernetes(t *testing.T) {
 		Config:    credresolve.OAuthConfig{TokenEndpoint: "https://as/token", ClientID: "cid"},
 		ServerURL: "https://mcp.example/mcp",
 	}
-	if err := r.StoreGrant(ctx, "app-ns", "srv", "uh", g); err != nil {
+	if err := r.StoreGrant(ctx, "app-ns", "", "srv", "uh", g); err != nil {
 		t.Fatalf("StoreGrant: %v", err)
 	}
 	// A grant Secret now exists in the credential namespace at the derived coordinates.
-	gns, gname := credresolve.SecretCoordinates("cred-system", "app-ns", "srv", "uh")
+	gns, gname := credresolve.SecretCoordinates("cred-system", "app-ns", "srv", "uh", "")
 	var sec corev1.Secret
 	if err := c.Get(ctx, client.ObjectKey{Namespace: gns, Name: gname}, &sec); err != nil {
 		t.Fatalf("grant Secret not written: %v", err)
 	}
 	// And it resolves back through the same Router (write→read round-trip).
-	cred, err := r.Resolve(ctx, "app-ns", "srv", "uh")
+	cred, err := r.Resolve(ctx, "app-ns", "", "srv", "uh")
 	if err != nil || cred.Value != "tok-1" {
 		t.Fatalf("Resolve after StoreGrant = (%+v, %v), want tok-1", cred, err)
 	}

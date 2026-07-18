@@ -83,7 +83,7 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 	for i := range users {
 		want[i] = fmt.Sprintf("token-%03d", i)
 		g := credpostgres.Grant{AccessToken: want[i], ExpiresAt: farFuture}
-		if err := backend.Store(ctx, ns, server, userHash(i), g); err != nil {
+		if err := backend.Store(ctx, ns, "", server, userHash(i), g); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
@@ -101,7 +101,7 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				cred, err := client.Resolve(ctx, ns, server, userHash(i))
+				cred, err := client.Resolve(ctx, ns, "", server, userHash(i))
 				mu.Lock()
 				resolves++
 				if err != nil || cred.Value != want[i] {

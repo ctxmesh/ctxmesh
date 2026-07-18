@@ -47,6 +47,18 @@ const (
 	// match key. Empty/absent in legacy per-namespace mode. Non-secret — a lookup key.
 	LabelGrantSourceNS = "mcp.ctxmesh.ai/source-namespace"
 
+	// LabelGrantBoundary holds the HASHED trust boundary a personal grant is scoped to
+	// (ADR 0033): the registry an agent belongs to (agents in it collaborate + share the
+	// user's credential) or, for a standalone agent, the agent itself. With LabelGrantUser
+	// + LabelGrantServer it selects one (user, boundary, server) grant. EMPTY/ABSENT = a
+	// legacy unscoped (user, server) grant — so old grants resolve unchanged and adopt into
+	// a boundary on first scoped use (dual-read migration). Non-secret — a lookup key.
+	LabelGrantBoundary = "mcp.ctxmesh.ai/boundary"
+
+	// AnnGrantBoundary mirrors the RAW boundary string (e.g. "r:my-registry") on the grant
+	// for debuggability; the label holds the hash (the match key). Non-secret.
+	AnnGrantBoundary = "agents.ctxmesh.ai/mcp-boundary"
+
 	// SecretPrefix prefixes the deterministic grant Secret name so it is visibly a
 	// grant and never collides with the shared server Secret (named after the server).
 	SecretPrefix = "mcp-grant"
@@ -82,18 +94,55 @@ func UserHash(hmacKey []byte, username string) string {
 	return "u-" + hex.EncodeToString(sum[:])[:40]
 }
 
-// SecretName is the deterministic name of the (user, server) grant Secret. It embeds
-// the server name and a SHORT (12-hex) slice of the user hash so a re-consent for the
-// SAME (user, server) collides on the same object (idempotent upsert) while different
-// users/servers get distinct names. The short slice keeps the name within the
-// object-name limit; the full hash lives in the label (the authoritative match key),
-// so the short-slice collision risk only affects the NAME, still checked on read.
-func SecretName(server, userHash string) string {
+// RegistryBoundary is the trust boundary for an agent that belongs to a registry — the
+// collaboration boundary (ADR 0033): every agent in the registry shares the invoking
+// user's personal grant. Empty registry → "" (an unscoped/legacy grant).
+func RegistryBoundary(registry string) string {
+	if registry == "" {
+		return ""
+	}
+	return "r:" + registry
+}
+
+// AgentBoundary is the trust boundary for a STANDALONE agent (no registry) — the agent is
+// its own boundary, so its grants are per-agent (ADR 0033). Namespaced to avoid a registry
+// and an agent of the same name colliding.
+func AgentBoundary(ns, agent string) string {
+	return "a:" + ns + "/" + agent
+}
+
+// BoundaryHash derives a short, label/name-safe token from a raw boundary string
+// ("r:<registry>" / "a:<ns>/<agent>"). Empty boundary → "" (the legacy unscoped key, so
+// pre-ADR-0033 grant names/labels are byte-identical and resolve unchanged).
+func BoundaryHash(boundary string) string {
+	if boundary == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(boundary))
+	return "b-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// SecretName is the deterministic name of the (user, boundary, server) grant Secret. It
+// embeds the server name, a SHORT (12-hex) slice of the user hash, and — when the grant is
+// boundary-scoped (ADR 0033) — a short boundary-hash segment, so a re-consent for the SAME
+// (user, boundary, server) collides on the same object (idempotent upsert) while different
+// users/boundaries/servers get distinct names. An EMPTY boundaryHash yields the exact
+// legacy name (backward compatible). The full hashes live in labels (the authoritative
+// match keys), so short-slice collisions only affect the NAME, still checked on read.
+func SecretName(server, userHash, boundaryHash string) string {
 	short := strings.TrimPrefix(userHash, "u-")
 	if len(short) > 12 {
 		short = short[:12]
 	}
-	return fmt.Sprintf("%s-%s-%s", SecretPrefix, server, short)
+	name := fmt.Sprintf("%s-%s-%s", SecretPrefix, server, short)
+	if boundaryHash != "" {
+		bshort := strings.TrimPrefix(boundaryHash, "b-")
+		if len(bshort) > 12 {
+			bshort = bshort[:12]
+		}
+		name += "-" + bshort
+	}
+	return name
 }
 
 // ShortNamespaceHash is a stable 8-hex slice of sha256(sourceNs), used only to keep
@@ -115,19 +164,20 @@ func ShortNamespaceHash(ns string) string {
 //     authoritative match on read).
 //   - LEGACY mode (credNs == ""): the grant stays in its source namespace under the
 //     original (server, user) name — pre-locked-namespace clusters, dev, envtest.
-func SecretCoordinates(credNs, sourceNs, server, userHash string) (namespace, name string) {
-	base := SecretName(server, userHash)
+func SecretCoordinates(credNs, sourceNs, server, userHash, boundaryHash string) (namespace, name string) {
+	base := SecretName(server, userHash, boundaryHash)
 	if credNs == "" {
 		return sourceNs, base
 	}
 	return credNs, base + "-" + ShortNamespaceHash(sourceNs)
 }
 
-// SecretLabels builds the lookup labels for a (user, server) grant Secret: ONLY the
-// hashed user + the server + the managed-by marker (+ the source namespace in locked
-// mode) — never any token material. These are what a resolve/revoke matches on.
-// sourceNs is "" in legacy per-namespace mode.
-func SecretLabels(server, userHash, sourceNs string) map[string]string {
+// SecretLabels builds the lookup labels for a (user, boundary, server) grant Secret: ONLY
+// the hashed user + the server + the managed-by marker (+ the source namespace in locked
+// mode, + the hashed boundary when boundary-scoped) — never any token material. These are
+// what a resolve/revoke matches on. sourceNs is "" in legacy per-namespace mode;
+// boundaryHash is "" for a legacy unscoped grant (ADR 0033).
+func SecretLabels(server, userHash, sourceNs, boundaryHash string) map[string]string {
 	labels := map[string]string{
 		LabelManagedBy:   ManagedByGrant,
 		LabelGrantUser:   userHash,
@@ -135,6 +185,9 @@ func SecretLabels(server, userHash, sourceNs string) map[string]string {
 	}
 	if sourceNs != "" {
 		labels[LabelGrantSourceNS] = sourceNs
+	}
+	if boundaryHash != "" {
+		labels[LabelGrantBoundary] = boundaryHash
 	}
 	return labels
 }
