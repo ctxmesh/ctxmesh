@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,7 +37,10 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := agentsv1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("add scheme: %v", err)
+		t.Fatalf("add agents scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
 	}
 	return s
 }
@@ -119,14 +123,12 @@ func TestBackendFor_KubernetesAndUnimplemented(t *testing.T) {
 		t.Fatalf("kubernetes BackendFor = (%v, %v), want a backend", b, err)
 	}
 
-	for name, prov := range map[string]agentsv1alpha1.CredentialStoreProvider{
-		"postgres": {Postgres: &agentsv1alpha1.CredentialProviderPostgres{DSNSecretRef: agentsv1alpha1.SecretKeyRef{Name: "p", Key: "dsn"}}},
-		"openbao":  {OpenBao: &agentsv1alpha1.CredentialProviderOpenBao{Address: "https://x:8200"}},
-	} {
-		_, err := BackendFor(ctx, agentsv1alpha1.CredentialStoreSpec{Provider: prov}, deps)
-		if !errors.Is(err, ErrProviderNotImplemented) {
-			t.Errorf("%s BackendFor err = %v, want ErrProviderNotImplemented (fail closed)", name, err)
-		}
+	// openbao is not yet built → fail closed with ErrProviderNotImplemented.
+	_, err = BackendFor(ctx, agentsv1alpha1.CredentialStoreSpec{Provider: agentsv1alpha1.CredentialStoreProvider{
+		OpenBao: &agentsv1alpha1.CredentialProviderOpenBao{Address: "https://x:8200"},
+	}}, deps)
+	if !errors.Is(err, ErrProviderNotImplemented) {
+		t.Errorf("openbao BackendFor err = %v, want ErrProviderNotImplemented (fail closed)", err)
 	}
 
 	// remote WITHOUT mtls → fail closed on an mtls-required error (not a plaintext dial).
@@ -135,6 +137,14 @@ func TestBackendFor_KubernetesAndUnimplemented(t *testing.T) {
 	}}, deps)
 	if err == nil || !strings.Contains(err.Error(), "mtls") {
 		t.Errorf("remote-without-mtls err = %v, want an mtls-required error", err)
+	}
+
+	// postgres WITHOUT encryption → fail closed (a Postgres store must not persist plaintext).
+	_, err = BackendFor(ctx, agentsv1alpha1.CredentialStoreSpec{Provider: agentsv1alpha1.CredentialStoreProvider{
+		Postgres: &agentsv1alpha1.CredentialProviderPostgres{DSNSecretRef: agentsv1alpha1.SecretKeyRef{Name: "p", Key: "dsn"}},
+	}}, deps)
+	if err == nil || !strings.Contains(err.Error(), "encryption") {
+		t.Errorf("postgres-without-encryption err = %v, want an encryption-required error", err)
 	}
 }
 
@@ -166,16 +176,16 @@ func TestRouter_SharesBackendAcrossNamespaces(t *testing.T) {
 func TestRouter_UnimplementedProviderFailsClosed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	pg := &agentsv1alpha1.CredentialStore{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultStoreName, Namespace: "team-pg"},
+	ob := &agentsv1alpha1.CredentialStore{
+		ObjectMeta: metav1.ObjectMeta{Name: DefaultStoreName, Namespace: "team-ob"},
 		Spec: agentsv1alpha1.CredentialStoreSpec{Provider: agentsv1alpha1.CredentialStoreProvider{
-			Postgres: &agentsv1alpha1.CredentialProviderPostgres{DSNSecretRef: agentsv1alpha1.SecretKeyRef{Name: "p", Key: "dsn"}},
+			OpenBao: &agentsv1alpha1.CredentialProviderOpenBao{Address: "https://x:8200"},
 		}},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pg).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ob).Build()
 	r := NewRouter(c, testDeps(c))
 
-	_, err := r.Resolve(ctx, "team-pg", "srv", "userhash")
+	_, err := r.Resolve(ctx, "team-ob", "srv", "userhash")
 	if !errors.Is(err, ErrProviderNotImplemented) {
 		t.Fatalf("Resolve on unbuilt provider = %v, want ErrProviderNotImplemented (fail closed)", err)
 	}
