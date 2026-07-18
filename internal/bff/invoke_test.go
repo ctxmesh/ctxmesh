@@ -229,6 +229,63 @@ func TestInvokeAdapterAttachesCapabilityHeader(t *testing.T) {
 	assert.Empty(t, gotCap, "no capability on the context ⇒ no header")
 }
 
+// TestInvokeAdapterAttachesConversationHeader proves the adapter forwards a conversation id
+// carried on the context as X-Conversation-Id — the header the memory-aware agent reads to
+// scope its thread — and attaches NO header when the run is single-shot (no id).
+func TestInvokeAdapterAttachesConversationHeader(t *testing.T) {
+	var gotConv string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConv = r.Header.Get(hdrConversationID)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithConversationID(context.Background(), "chat-42"), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "chat-42", gotConv, "the adapter attaches the conversation id from the context")
+
+	gotConv = ""
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, gotConv, "no conversation id on the context ⇒ no header (single-shot run)")
+}
+
+// TestInvokeThreadsConversationID proves the caller-scoped handler carries a body-supplied
+// conversationId onto the adapter's context (→ X-Conversation-Id), and rejects a malformed
+// id with a 400 at the console boundary rather than forwarding a memory-key-breaking value.
+func TestInvokeThreadsConversationID(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	reqBody, _ := json.Marshal(InvokeRequest{
+		Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{"input":"hi"}`), ConversationID: "chat-42",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, inv.called)
+	assert.Equal(t, "chat-42", conversationIDFromContext(inv.gotCtx), "the handler threads the id onto the adapter ctx")
+
+	// A malformed id (a memory-key separator) is rejected at the boundary — the run never fires.
+	bad := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{}`)}
+	s2 := newInvokeServer(t, newFakeFactory(c), bad)
+	badBody, _ := json.Marshal(InvokeRequest{
+		Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`), ConversationID: "bad:id",
+	})
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/invoke", bytes.NewReader(badBody))
+	req2.Header.Set("Authorization", "Bearer developer-persona-token")
+	s2.Handler().ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusBadRequest, rec2.Code)
+	assert.False(t, bad.called, "a malformed conversationId fails fast — the agent is never invoked")
+}
+
 // newDevInvokeServer builds the dev-mode substrate (ADR 0021): NO cluster
 // (CallerClients nil), DevMode on, and a fixed devInvokeEndpoint — so POST /api/invoke
 // targets the single local Compose agent directly through the given fake adapter.
