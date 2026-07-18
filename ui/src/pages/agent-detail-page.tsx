@@ -3,11 +3,12 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   Boxes,
-  CheckCircle2,
   ExternalLink,
+  MessageSquare,
   Pencil,
   Play,
   Plus,
+  Send,
   SlidersHorizontal,
   Terminal,
   Trash2,
@@ -882,10 +883,11 @@ function OverviewTab({
         url={detail.url}
       />
 
-      <RunPanel
+      <ChatPanel
         ns={detail.namespace}
         name={detail.name}
         ready={detail.ready}
+        memoryBound={detail.bindings.some((b) => b.kind === "memory")}
         onTraced={onTraced}
       />
     </div>
@@ -959,69 +961,152 @@ function StatusTimeline({
   );
 }
 
-// ── Run panel (define input → invoke → open the run inspector) ───────────────
-type RunState =
-  | { kind: "idle" }
-  | { kind: "running" }
-  | { kind: "done"; traceId: string; response: string; consentRequired?: string[] }
-  | { kind: "error"; message: string; status?: number; forbidden: boolean };
+// ── Chat panel (conversation-style interaction, m29.7) ───────────────────────
+// A turn-by-turn chat with a deployed agent, threaded on the framework's OWN
+// conversationId → the memory plane: one stable id per chat session lets a
+// memory-bound agent hold context across turns (state-layer.md). Under the hood
+// each message is still one traced /invoke (ADR 0011) — the chat just threads
+// them with a shared X-Conversation-Id (m29.5) so the stock managed loop replays
+// prior turns (m29.6). Each agent turn keeps the trace-id link (opens the run
+// inspector ON DEMAND, never automatically) and the inline per-user Connect
+// banner (ADR 0031) — connecting re-sends the same message in place.
+type ChatTurn = {
+  id: number;
+  role: "user" | "agent";
+  text: string;
+  // agent turns carry the user input that produced them, so a post-connect resume
+  // re-invokes the SAME message without appending a duplicate user turn.
+  sourceText?: string;
+  traceId?: string;
+  consentRequired?: string[];
+  pending?: boolean;
+  error?: string;
+  // a forbidden invoke (viewer without invoke rights) gets the ForbiddenInline
+  // treatment — the API is the real gate, not the SPA's create capability.
+  forbidden?: boolean;
+};
 
-function RunPanel({
+// newConversationId mints a key-safe thread id (no ':' '/' ' ' — the launcher's
+// validateConversationID rules). randomUUID is hex+hyphen only; the fallback keeps
+// jsdom (no crypto.randomUUID) working in tests.
+function newConversationId(): string {
+  const rand =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  return `chat-${rand}`;
+}
+
+function ChatPanel({
   ns,
   name,
   ready,
+  memoryBound,
   onTraced,
 }: {
   ns: string;
   name: string;
   ready: boolean;
+  memoryBound: boolean;
   onTraced: (traceId: string) => void;
 }) {
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
-  const [input, setInput] = React.useState('{\n  "input": "Hello, agent"\n}');
-  const [run, setRun] = React.useState<RunState>({ kind: "idle" });
-  // Inline consent (ADR 0031, m26.2) — surfaced HERE too, so a run started from the
-  // agent's own page (not just the Playground) offers the "Connect <server>" CTA.
+  const [conversationId, setConversationId] = React.useState(newConversationId);
+  const [turns, setTurns] = React.useState<ChatTurn[]>([]);
+  const [draft, setDraft] = React.useState("");
+  // Inline consent (ADR 0031, m26.2) — a message whose tool call needs the user's own
+  // credential surfaces a "Connect <server>" CTA in that agent turn.
   const [connecting, setConnecting] = React.useState<string | null>(null);
   const [connectError, setConnectError] = React.useState<string | null>(null);
+  const idRef = React.useRef(0);
+  const scrollRef = React.useRef<HTMLDivElement>(null);
 
-  async function onRun() {
-    let parsed: unknown;
+  const busy = connecting !== null || turns.some((t) => t.pending);
+
+  React.useEffect(() => {
+    // Keep the newest turn in view as the thread grows.
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [turns]);
+
+  function nextId(): number {
+    idRef.current += 1;
+    return idRef.current;
+  }
+
+  // runInvoke drives ONE traced /invoke for the given agent turn, threading the
+  // conversationId. Reused by the initial send and the post-connect resume so a
+  // resumed turn updates IN PLACE rather than appending a duplicate.
+  async function runInvoke(text: string, agentTurnId: number) {
+    setTurns((ts) =>
+      ts.map((t) => (t.id === agentTurnId ? { ...t, pending: true, error: undefined } : t)),
+    );
     try {
-      parsed = input.trim() ? JSON.parse(input) : {};
-    } catch {
-      setRun({ kind: "error", message: "Input must be valid JSON.", forbidden: false });
-      return;
-    }
-    setRun({ kind: "running" });
-    try {
-      const res = await api.invoke({ agent: name, namespace: ns, input: parsed });
-      setRun({
-        kind: "done",
-        traceId: res.traceId,
-        response: res.response,
-        consentRequired: res.consentRequired,
+      const res = await api.invoke({
+        agent: name,
+        namespace: ns,
+        input: { input: text },
+        conversationId,
       });
-      // The trace id is shown as a clickable "trace … →" link in the result; do NOT
-      // auto-open the run inspector on completion — the user opens it only if they want to.
+      setTurns((ts) =>
+        ts.map((t) =>
+          t.id === agentTurnId
+            ? {
+                ...t,
+                pending: false,
+                text: res.response,
+                traceId: res.traceId,
+                consentRequired: res.consentRequired,
+              }
+            : t,
+        ),
+      );
     } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      const apiErr = err instanceof ApiError ? err : null;
-      setRun({
-        kind: "error",
-        message: err instanceof Error ? err.message : "run failed",
-        status: apiErr?.status,
-        forbidden: apiErr?.isForbidden ?? false,
-      });
+      const forbidden = err instanceof ApiError && err.isForbidden;
+      if (forbidden) reprobe();
+      setTurns((ts) =>
+        ts.map((t) =>
+          t.id === agentTurnId
+            ? {
+                ...t,
+                pending: false,
+                error: err instanceof Error ? err.message : "run failed",
+                forbidden,
+              }
+            : t,
+        ),
+      );
     }
   }
 
-  // onConnect runs the INLINE per-user consent (ADR 0031, m26.2): begin the OAuth grant
-  // for the named server, open the provider consent in a POPUP so the run stays on screen,
-  // then re-run the same invoke when it completes so the fresh credential is injected. The
+  async function send() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    const userId = nextId();
+    const agentId = nextId();
+    setTurns((ts) => [
+      ...ts,
+      { id: userId, role: "user", text },
+      { id: agentId, role: "agent", text: "", pending: true, sourceText: text },
+    ]);
+    setDraft("");
+    await runInvoke(text, agentId);
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends; Shift+Enter inserts a newline (the chat convention).
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  }
+
+  // onConnect runs the INLINE per-user consent (ADR 0031): begin the OAuth grant for the
+  // named server, open the provider consent in a POPUP so the chat stays on screen, then
+  // re-send the SAME message when it completes so the fresh credential is injected. The
   // token never touches the SPA (server-side exchange). Popup blocked → redirect fallback.
-  async function onConnect(server: string) {
+  async function onConnect(server: string, text: string, agentTurnId: number) {
     setConnectError(null);
     setConnecting(server);
     let authorizationURL: string;
@@ -1057,7 +1142,7 @@ function RunPanel({
       window.removeEventListener("message", onMessage);
       window.clearInterval(poll);
       setConnecting(null);
-      void onRun(); // re-invoke in place — the resume
+      void runInvoke(text, agentTurnId); // resume the same turn with the fresh credential
     }
     function onMessage(e: MessageEvent) {
       if (e.origin !== window.location.origin) return;
@@ -1070,71 +1155,65 @@ function RunPanel({
     }, 700);
   }
 
-  return (
-    <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="run-panel">
-      <div className="mb-3 flex items-center gap-2">
-        <Play className="h-4 w-4 text-primary" />
-        <p className="text-sm font-medium">Run</p>
-      </div>
+  function newChat() {
+    setTurns([]);
+    setConversationId(newConversationId());
+    setConnectError(null);
+    setDraft("");
+  }
 
-      {!canRun ? (
-        <p
-          className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
-          data-testid="run-readonly-note"
-        >
-          You have read-only access — running an agent requires create permission on
-          AgentDeployments.
-        </p>
-      ) : (
-        <>
-          <Textarea
-            aria-label="Run input (JSON)"
-            rows={5}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            className="font-mono text-xs"
-          />
-          {!ready && (
-            <p className="mt-2 text-xs text-warning-foreground" data-testid="run-not-ready-note">
-              The agent isn't Ready yet — a run may fail until it comes up.
-            </p>
-          )}
-          <Button
-            className="mt-3 w-full"
-            size="sm"
-            onClick={onRun}
-            disabled={run.kind === "running"}
-            data-testid="run-button"
-          >
-            <Play className="h-4 w-4" />
-            {run.kind === "running" ? "Running…" : "Run agent"}
-          </Button>
-
-          {run.kind === "done" && (
-            <div
-              className="mt-4 space-y-2 rounded-md bg-surface-3 p-3 text-xs"
-              data-testid="run-result"
-            >
-              <div className="flex items-center gap-1.5 text-success">
-                <CheckCircle2 className="h-4 w-4" />
-                <span className="font-medium">Traced run complete</span>
-              </div>
-              {run.consentRequired && run.consentRequired.length > 0 && (
-                <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5">
+  function renderTurn(t: ChatTurn) {
+    if (t.role === "user") {
+      return (
+        <div key={t.id} className="flex justify-end" data-testid="chat-turn-user">
+          <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
+            {t.text}
+          </div>
+        </div>
+      );
+    }
+    const traceId = t.traceId;
+    return (
+      <div key={t.id} className="flex justify-start" data-testid="chat-turn-agent">
+        <div className="max-w-[85%] space-y-2 rounded-lg bg-surface-3 px-3 py-2 text-xs">
+          {t.pending ? (
+            <span className="text-muted-foreground" data-testid="chat-pending">
+              Thinking…
+            </span>
+          ) : t.error ? (
+            t.forbidden ? (
+              <ForbiddenInline
+                title="Not allowed to run this agent"
+                description="Your account can't invoke agents in this cluster."
+                detail={t.error}
+              />
+            ) : (
+              <span className="text-destructive" role="alert" data-testid="chat-turn-error">
+                {t.error}
+              </span>
+            )
+          ) : (
+            <>
+              {t.consentRequired && t.consentRequired.length > 0 && (
+                <div
+                  className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5"
+                  data-testid="chat-consent"
+                >
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                   <div className="space-y-2">
                     <p className="font-medium">Connect your account to continue</p>
                     <p className="text-muted-foreground">
-                      This run needs your own credentials. Connect, and it re-runs automatically.
+                      This message needs your own credentials. Connect, and it re-sends
+                      automatically.
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      {run.consentRequired.map((server) => (
+                      {t.consentRequired.map((server) => (
                         <Button
                           key={server}
                           size="sm"
                           variant="outline"
                           disabled={connecting !== null}
-                          onClick={() => void onConnect(server)}
+                          onClick={() => void onConnect(server, t.sourceText ?? "", t.id)}
                           data-testid={`connect-${server}`}
                         >
                           {connecting === server ? "Connecting…" : `Connect ${server}`}
@@ -1149,33 +1228,97 @@ function RunPanel({
                   </div>
                 </div>
               )}
-              <p className="whitespace-pre-wrap break-words">{run.response}</p>
-              <button
-                type="button"
-                onClick={() => onTraced(run.traceId)}
-                className="font-mono text-primary hover:underline"
-                data-testid="open-trace"
-              >
-                trace {run.traceId} →
-              </button>
-            </div>
+              {t.text && <p className="whitespace-pre-wrap break-words">{t.text}</p>}
+              {traceId && (
+                <button
+                  type="button"
+                  onClick={() => onTraced(traceId)}
+                  className="font-mono text-primary hover:underline"
+                  data-testid="open-trace"
+                >
+                  trace {traceId} →
+                </button>
+              )}
+            </>
           )}
+        </div>
+      </div>
+    );
+  }
 
-          {run.kind === "error" && run.forbidden && (
-            <div className="mt-3">
-              <ForbiddenInline
-                title="Not allowed to run this agent"
-                description="Your account can't invoke agents in this cluster."
-                detail={run.message}
-              />
-            </div>
-          )}
-          {run.kind === "error" && !run.forbidden && (
-            <p className="mt-3 text-xs text-destructive" role="alert" data-testid="run-error">
-              {run.message}
-              {run.status ? ` (${run.status})` : ""}
+  return (
+    <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="chat-panel">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <MessageSquare className="h-4 w-4 text-primary" />
+          <p className="text-sm font-medium">Chat</p>
+        </div>
+        {turns.length > 0 && (
+          <Button size="sm" variant="ghost" onClick={newChat} data-testid="chat-new">
+            New chat
+          </Button>
+        )}
+      </div>
+
+      {!canRun ? (
+        <p
+          className="rounded-md border border-dashed bg-card/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="chat-readonly-note"
+        >
+          You have read-only access — chatting with an agent requires create permission on
+          AgentDeployments.
+        </p>
+      ) : (
+        <>
+          <p className="mb-2 text-[11px] text-muted-foreground" data-testid="chat-memory-hint">
+            {memoryBound
+              ? "Threaded on one conversation — the agent keeps context across turns via memory."
+              : "This agent has no memory binding, so it won't remember earlier turns. Attach memory to keep context."}
+          </p>
+          {!ready && (
+            <p className="mb-2 text-xs text-warning-foreground" data-testid="chat-not-ready-note">
+              The agent isn't Ready yet — a message may fail until it comes up.
             </p>
           )}
+
+          <div
+            ref={scrollRef}
+            className="mb-3 max-h-96 space-y-3 overflow-y-auto"
+            data-testid="chat-thread"
+          >
+            {turns.length === 0 ? (
+              <p
+                className="py-6 text-center text-xs text-muted-foreground"
+                data-testid="chat-empty"
+              >
+                Say something to start the conversation.
+              </p>
+            ) : (
+              turns.map(renderTurn)
+            )}
+          </div>
+
+          <div className="flex items-end gap-2">
+            <Textarea
+              aria-label="Chat message"
+              rows={2}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line)"
+              className="text-xs"
+              data-testid="chat-input"
+            />
+            <Button
+              size="sm"
+              onClick={() => void send()}
+              disabled={busy || draft.trim() === ""}
+              data-testid="chat-send"
+            >
+              <Send className="h-4 w-4" />
+              Send
+            </Button>
+          </div>
         </>
       )}
     </div>
