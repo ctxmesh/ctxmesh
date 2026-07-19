@@ -34,11 +34,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +73,12 @@ const (
 	// maxConversationID bounds the caller-supplied conversation id. It lands in
 	// both span attributes and Redis keys, so it must be short and path-safe.
 	maxConversationID = 128
+
+	// maxConversationEntries caps a conversation's stored entry count (m33.6, ADR 0036): append
+	// LTRIMs to the last N so a long-lived (especially shared, m33.3) conversation cannot grow the
+	// store without bound — the oldest entries are evicted (the summary hook is the extension point;
+	// TTL still bounds age). The read-side replay window (SDK MAX_HISTORY_MESSAGES) is smaller still.
+	maxConversationEntries = 500
 )
 
 // MemoryStore is the minimal backend surface the memory handlers need. It is an
@@ -82,6 +91,13 @@ type MemoryStore interface {
 	Get(ctx context.Context, key string) ([]json.RawMessage, error)
 	// Replace atomically overwrites key with entries and (re)sets its TTL.
 	Replace(ctx context.Context, key string, entries []json.RawMessage, ttl time.Duration) error
+	// ReplaceIfVersion is Replace guarded by optimistic concurrency (ADR 0036, m33.2): it overwrites
+	// key ONLY if its current version (the list length) still equals expectedVersion, atomically.
+	// conflict=true (no write) when another writer advanced the version since the caller's read — so
+	// a stale rewrite can never silently clobber a concurrent append. Returns the new version.
+	ReplaceIfVersion(
+		ctx context.Context, key string, entries []json.RawMessage, expectedVersion int, ttl time.Duration,
+	) (newVersion int, conflict bool, err error)
 	// Append atomically appends one entry to key and (re)sets its TTL. It
 	// returns the resulting entry count.
 	Append(ctx context.Context, key string, entry json.RawMessage, ttl time.Duration) (int, error)
@@ -140,17 +156,67 @@ func (s *redisStore) Replace(ctx context.Context, key string, entries []json.Raw
 	return err
 }
 
+func (s *redisStore) ReplaceIfVersion(
+	ctx context.Context, key string, entries []json.RawMessage, expectedVersion int, ttl time.Duration,
+) (int, bool, error) {
+	// WATCH the key so a concurrent write (append or replace) between the LLEN read and the MULTI
+	// aborts the EXEC (redis.TxFailedErr) — optimistic concurrency, no lock held. The version is the
+	// list length (ADR 0036 permits length or a monotone rev); an append advances it, so a stale
+	// replace's expectedVersion no longer matches and is rejected.
+	var (
+		newVersion int
+		conflict   bool
+	)
+	txf := func(tx *redis.Tx) error {
+		n, err := tx.LLen(ctx, key).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return err
+		}
+		if int(n) != expectedVersion {
+			conflict = true
+			return nil
+		}
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.Del(ctx, key)
+			if len(entries) > 0 {
+				vals := make([]any, 0, len(entries))
+				for _, e := range entries {
+					vals = append(vals, string(e))
+				}
+				pipe.RPush(ctx, key, vals...)
+				pipe.Expire(ctx, key, ttl)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		newVersion = len(entries)
+		return nil
+	}
+	err := s.rdb.Watch(ctx, txf, key)
+	if errors.Is(err, redis.TxFailedErr) {
+		return 0, true, nil // the watched key changed under us — a conflict, retry-able
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return newVersion, conflict, nil
+}
+
 func (s *redisStore) Append(ctx context.Context, key string, entry json.RawMessage, ttl time.Duration) (int, error) {
-	// RPUSH is itself atomic; pairing it with EXPIRE in a pipeline refreshes
-	// the TTL on every write without a second round-trip. RPUSH returns the new
-	// length.
+	// RPUSH (atomic) then LTRIM to the last maxConversationEntries — a size cap (m33.6) so the
+	// conversation can't grow unbounded — then EXPIRE (TTL refresh), all in one round-trip. LLEN
+	// after the trim is the true post-cap count returned.
 	pipe := s.rdb.TxPipeline()
-	push := pipe.RPush(ctx, key, string(entry))
+	pipe.RPush(ctx, key, string(entry))
+	pipe.LTrim(ctx, key, -maxConversationEntries, -1)
 	pipe.Expire(ctx, key, ttl)
+	llen := pipe.LLen(ctx, key)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, err
 	}
-	return int(push.Val()), nil
+	return int(llen.Val()), nil
 }
 
 // memoryConfig is the subset of configuration the memory server needs. Parsed
@@ -166,7 +232,18 @@ type memoryConfig struct {
 	// from every other agent sharing the Valkey.
 	Namespace string
 	Agent     string
+	// Scope selects the key layout (ADR 0035, m33.3): "" / "session" = PRIVATE per-agent
+	// (mem:{namespace}/{agent}:{convId}); "shared" = a team scratchpad keyed
+	// mem:shared:{registry}:{convId} — readable/writable by every agent in the same registry
+	// conversation. Injected as MEMORY_SCOPE by the controller.
+	Scope string
+	// Registry is AGENT_REGISTRY_ID — the trust boundary (ADR 0033) the shared scope keys under.
+	// Required for the shared scope; empty ⇒ shared falls back to private (a visible misconfig).
+	Registry string
 }
+
+// memoryScopeShared is the MEMORY_SCOPE value that selects the shared team scratchpad.
+const memoryScopeShared = "shared"
 
 // memoryServer holds the per-listener dependencies: the backend store, the key
 // prefix, and the tracer. It is safe for concurrent use — every field is
@@ -174,15 +251,81 @@ type memoryConfig struct {
 type memoryServer struct {
 	store  MemoryStore
 	prefix string // "mem:{namespace}/{agent}:"
+	agent  string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
 	tracer trace.Tracer
 }
 
 func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer) *memoryServer {
+	// Shared scope (m33.3): key under the registry trust boundary so every agent in the
+	// conversation reads/writes ONE scratchpad. It requires a registry — without one there is no
+	// boundary to share within, so fall back to the private per-agent layout (the controller gates
+	// the shared injection on membership, so this only bites a hand-rolled misconfig).
+	prefix := fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent)
+	if cfg.Scope == memoryScopeShared && cfg.Registry != "" {
+		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
+	}
 	return &memoryServer{
 		store:  store,
-		prefix: fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent),
+		prefix: prefix,
+		agent:  cfg.Agent,
 		tracer: tracer,
 	}
+}
+
+// messageIDHeader carries a per-hop message id (ADR 0035, m33.4). When an append omits it, the
+// launcher mints one so every attributed entry is addressable.
+const messageIDHeader = "X-Message-Id"
+
+// attributeEntry stamps server-AUTHORITATIVE attribution on a message-shaped memory entry (ADR
+// 0036, m33.1): a JSON object carrying string `role` + `content` gains `agent` (THIS agent — the
+// caller cannot forge another's name, which matters once a shared scope has many writers, m33.3),
+// `messageId`, and `ts` (unix millis). Fields already present are preserved (idempotent — a replay
+// keeps its original id/agent). A non-message entry (any other JSON) is stored verbatim, so the
+// memory plane stays a general log and OLD opaque entries keep round-tripping (read-old/write-new).
+func attributeEntry(entry json.RawMessage, agent, messageID string, now time.Time) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
+		return entry // not an object — verbatim
+	}
+	role, hasRole := obj["role"]
+	content, hasContent := obj["content"]
+	if !hasRole || !hasContent || !isJSONString(role) || !isJSONString(content) {
+		return entry // not a message — verbatim
+	}
+	if _, ok := obj["agent"]; !ok {
+		obj["agent"] = mustJSON(agent)
+	}
+	if _, ok := obj["messageId"]; !ok {
+		obj["messageId"] = mustJSON(messageID)
+	}
+	if _, ok := obj["ts"]; !ok {
+		obj["ts"] = mustJSON(now.UnixMilli())
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return entry // never fail the write on a re-marshal hiccup
+	}
+	return out
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	var s string
+	return json.Unmarshal(raw, &s) == nil
+}
+
+// newMessageID mints a short random per-hop message id (hex). crypto/rand failure is astronomically
+// unlikely; on the off-chance, fall back to a timestamp so attribution still has a value.
+func newMessageID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("m-%d", time.Now().UnixNano())
+	}
+	return "m-" + hex.EncodeToString(b[:])
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 // key builds the full Redis key for a conversation. convID is validated by the
@@ -319,6 +462,10 @@ func (m *memoryServer) handleGet(
 	if entries == nil {
 		entries = []json.RawMessage{}
 	}
+	// The ETag is the conversation version (the entry count, ADR 0036 m33.2). A subsequent
+	// If-Match PUT uses it for a compare-and-set replace, so a stale rewrite can't clobber a
+	// concurrent append.
+	w.Header().Set("ETag", strconv.Itoa(len(entries)))
 	writeJSON(w, entries)
 }
 
@@ -343,10 +490,39 @@ func (m *memoryServer) handlePut(
 	opCtx, cancel := context.WithTimeout(ctx, memoryOpTimeout)
 	defer cancel()
 
+	// Optimistic-concurrency replace (ADR 0036, m33.2): an If-Match header (the version from a prior
+	// GET's ETag) makes this a compare-and-set — a stale rewrite (the version moved under us, e.g. a
+	// concurrent append) is a 412, so the caller re-reads + retries rather than silently clobbering.
+	// No If-Match keeps the legacy unconditional replace (last-writer-wins) for a simple full set.
+	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
+		expected, convErr := strconv.Atoi(strings.Trim(ifMatch, `"`))
+		if convErr != nil {
+			span.SetStatus(codes.Error, "bad If-Match")
+			writeJSONError(w, http.StatusBadRequest, "If-Match must be an integer version (a prior ETag)")
+			return
+		}
+		newVersion, conflict, repErr := m.store.ReplaceIfVersion(opCtx, m.key(convID), entries, expected, memoryTTL)
+		if repErr != nil {
+			backendError(w, span, repErr)
+			return
+		}
+		if conflict {
+			span.SetAttributes(attribute.Bool("memory.conflict", true))
+			writeJSONError(w, http.StatusPreconditionFailed,
+				"version conflict: the conversation changed since your read — re-read and retry")
+			return
+		}
+		w.Header().Set("ETag", strconv.Itoa(newVersion))
+		span.SetAttributes(attribute.Int("memory.entries", len(entries)))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if err := m.store.Replace(opCtx, m.key(convID), entries, memoryTTL); err != nil {
 		backendError(w, span, err)
 		return
 	}
+	w.Header().Set("ETag", strconv.Itoa(len(entries)))
 	span.SetAttributes(attribute.Int("memory.entries", len(entries)))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -371,7 +547,13 @@ func (m *memoryServer) handleAppend(
 		writeJSONError(w, http.StatusBadRequest, "body must be a single valid JSON value: "+err.Error())
 		return
 	}
-	entry := json.RawMessage(compact.Bytes())
+	// Stamp server-authoritative attribution on a message entry (m33.1): the per-hop messageId
+	// (ADR 0035) rides X-Message-Id when the caller/A2A sets it, else the launcher mints one.
+	messageID := strings.TrimSpace(r.Header.Get(messageIDHeader))
+	if messageID == "" {
+		messageID = newMessageID()
+	}
+	entry := attributeEntry(json.RawMessage(compact.Bytes()), m.agent, messageID, time.Now())
 
 	opCtx, cancel := context.WithTimeout(ctx, memoryOpTimeout)
 	defer cancel()

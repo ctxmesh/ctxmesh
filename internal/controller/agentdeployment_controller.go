@@ -124,6 +124,10 @@ const (
 	// host resolution) and the memory key namespace. STATIC (deploy.Namespace),
 	// NEVER a downward-API valueFrom (the m5.7 Knative ksvc landmine).
 	envPodNamespace = "POD_NAMESPACE"
+
+	// memoryScopeShared is the MemoryBinding scope + MEMORY_SCOPE env value that selects the shared
+	// team scratchpad (ADR 0035, m33.3) instead of private per-agent memory.
+	memoryScopeShared = "shared"
 )
 
 // Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
@@ -755,7 +759,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
 	// The single-writer rule applies: only this reconciler writes the pod
 	// template; the MemoryBinding controller only sets the binding's status.
-	memAddr, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
+	memAddr, memScope, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
@@ -804,6 +808,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
 		)
+		// Shared memory scope (ADR 0035, m33.3): a MemoryBinding scope=shared keys the team
+		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
+		// conversation collaborate on ONE context. Injected ONLY here — inside the membership block —
+		// because the shared key needs a registry boundary; a scope=shared binding on a NON-member
+		// agent gets no MEMORY_SCOPE and the launcher keeps its private layout (a visible misconfig,
+		// not a broken key).
+		if hasMemoryBinding && memScope == memoryScopeShared {
+			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
+		}
 		// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
 		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
 		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
