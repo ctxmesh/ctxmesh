@@ -255,6 +255,35 @@ func TestResumeRun_ApprovalDenied(t *testing.T) {
 	assert.Equal(t, run.StatusCancelled, got.Status, "a denied approval cancels the run")
 }
 
+func TestCancelRun(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// Pause the run in requires_action so it is non-terminal + stable to cancel deterministically.
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"connect","consent_required":["scalekit-mcp-server"]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+
+	// Cancel → 200 cancelled.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusCancelled, got.Status)
+
+	// Cancelling a terminal run → 409.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/cancel", nil)
+	req2.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusConflict, rec2.Code, "a terminal run cannot be cancelled")
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
