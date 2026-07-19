@@ -311,6 +311,9 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
     expect(list).toHaveTextContent("refund");
     expect(list).toHaveTextContent("pending approval");
     expect(list).toHaveTextContent("schema");
+    // The picker offers an "Add MCP server" affordance so a user can add a server they
+    // don't see without leaving the flow (opens the add-MCP wizard).
+    expect(screen.getByTestId("add-mcp-from-picker")).toHaveAttribute("href", "/tools/add-mcp");
   });
 
   it("selected tools flow into the created agent.yaml on Create → POST /api/agents", async () => {

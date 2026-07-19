@@ -35,10 +35,16 @@ import (
 // use) — they NEVER reach the browser; the SPA only receives the flat DTOs. One
 // configurable BaseURL keeps the backend swappable (ADR 0005).
 type LangfuseConfig struct {
-	// BaseURL is the Langfuse instance root, e.g. "https://cloud.langfuse.com"
-	// or the in-cluster "http://langfuse-web.langfuse.svc:3000". Used both for
-	// the public API calls and to build the trace embed/link-out URL.
+	// BaseURL is the Langfuse instance root the BFF calls SERVER-SIDE, e.g. the
+	// in-cluster "http://langfuse-web.langfuse.svc:3000". Used for the public API
+	// calls only.
 	BaseURL string
+	// UIBaseURL is the EXTERNAL, browser-reachable Langfuse root used ONLY to build
+	// the trace link-out (TraceURL) the SPA opens — e.g. "https://langfuse.example.com".
+	// It is distinct from BaseURL because the API host is an in-cluster svc DNS name
+	// the browser cannot reach (ADR 0038 internal/external URL split). When empty it
+	// falls back to BaseURL (pre-split behaviour).
+	UIBaseURL string
 	// PublicKey / SecretKey authenticate the Langfuse public API (HTTP Basic).
 	// Server-side only.
 	PublicKey string
@@ -52,7 +58,8 @@ type LangfuseConfig struct {
 // API server-side (creds in this process) and projects the responses onto the
 // flat cost/run DTOs. It also builds the trace URL for the embed/link-out.
 type langfuseAdapter struct {
-	baseURL   string
+	baseURL   string // server-side API host (in-cluster svc DNS)
+	uiBaseURL string // external, browser-reachable host for the trace link-out
 	publicKey string
 	secretKey string
 	client    *http.Client
@@ -74,22 +81,30 @@ func NewLangfuseAdapter(cfg LangfuseConfig) (LangfuseAdapter, error) {
 	if c == nil {
 		c = &http.Client{Timeout: 10 * time.Second}
 	}
+	// The trace link-out uses the EXTERNAL UI URL when provided; otherwise it falls
+	// back to the API host (pre-split behaviour) — ADR 0038 internal/external split.
+	uiBase := strings.TrimRight(strings.TrimSpace(cfg.UIBaseURL), "/")
+	if uiBase == "" {
+		uiBase = base
+	}
 	return &langfuseAdapter{
 		baseURL:   base,
+		uiBaseURL: uiBase,
 		publicKey: cfg.PublicKey,
 		secretKey: cfg.SecretKey,
 		client:    c,
 	}, nil
 }
 
-// TraceURL returns the Langfuse UI URL for a traceId — the single target used
-// for BOTH the embedded iframe src and the link-out href. The SPA never
-// hardcodes this; swapping BaseURL swaps the target everywhere (ADR 0005).
+// TraceURL returns the Langfuse UI URL for a traceId — the link-out href the SPA
+// opens. It uses the EXTERNAL uiBaseURL (browser-reachable), NOT the in-cluster API
+// host, so the "view full trace" link resolves from a user's browser (ADR 0038). The
+// SPA never hardcodes this; swapping the UI URL swaps the target everywhere (ADR 0005).
 func (a *langfuseAdapter) TraceURL(traceID string) (string, error) {
 	if strings.TrimSpace(traceID) == "" {
 		return "", fmt.Errorf("langfuse: empty traceID")
 	}
-	return a.baseURL + "/trace/" + url.PathEscape(traceID), nil
+	return a.uiBaseURL + "/trace/" + url.PathEscape(traceID), nil
 }
 
 // lfTracesResponse is the shape of GET /api/public/traces we consume. We map
@@ -110,11 +125,13 @@ type lfPageMeta struct {
 }
 
 type lfTrace struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Timestamp   string   `json:"timestamp"`
-	TotalCost   float64  `json:"totalCost"`
-	LatencyMs   float64  `json:"latency"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Timestamp string  `json:"timestamp"`
+	TotalCost float64 `json:"totalCost"`
+	// LatencySec is the Langfuse trace `latency` — in SECONDS (Langfuse's unit). The flat
+	// RunSummary/TraceRollup expose milliseconds (see latencyMsOf), so callers must convert.
+	LatencySec  float64  `json:"latency"`
 	Usage       *lfUsage `json:"usage,omitempty"`
 	TotalTokens int64    `json:"totalTokens"`
 	// Tags are the trace's Langfuse tags (the launcher stamps agent:<ns>/<name>).
@@ -186,13 +203,12 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 
 	runs := make([]RunSummary, 0, limit)
 	for _, t := range body.Data {
-		// A RUN is the `agent.invoke` boundary trace the launcher opens per invocation
-		// (cmd/launcher). Every other top-level trace — the proxy's per-request server
-		// span ("Received Proxy Server Request"), LLM-SDK spans ("ChatCompletion",
-		// "RunnableSequence"), unnamed spans — is NOT a run and was cluttering the list
-		// (m25 S15). The agent tag alone can't discriminate: the launcher stamps it on
-		// the proxy spans too, so we key on the boundary span NAME.
-		if t.Name != agentInvokeTraceName {
+		// A RUN is the launcher's per-invocation boundary trace — identified by its
+		// agent:<ns>/<name> identity tag (the launcher names the trace for the agent, so
+		// keying on the literal "agent.invoke" name misses every current run — the m35
+		// regression). Ambient traces (the proxy's per-request server span, LLM-SDK spans,
+		// memory ops, unnamed spans) carry no agent tag and are excluded (m25 S15).
+		if !isRunTrace(t) {
 			continue
 		}
 		runs = append(runs, RunSummary{
@@ -204,7 +220,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 		if len(runs) >= limit {
 			break
@@ -243,6 +259,51 @@ func agentRunTag(namespace, name string) string {
 		return "agent:" + n
 	}
 	return "agent:" + ns + "/" + n
+}
+
+// isRunTrace reports whether a Langfuse trace represents an agent RUN — the unit the
+// runs list shows. The launcher names each run's trace by AGENT IDENTITY via
+// langfuse.trace.name ("<ns>/<name>", e.g. "default/my-agent") AND stamps an
+// agent:<ns>/<name> identity tag on the boundary span (cmd/launcher/proxy.go).
+//
+// Keying on the literal name "agent.invoke" MISSES every run the current launcher
+// produces (its trace is named for the agent, not "agent.invoke") — the m35 regression
+// that emptied the runs list. But keying on the agent tag ALONE is too loose: an ambient
+// proxy per-request span can inherit the same agent tag (m25 S15) yet is not a run. The
+// launcher's own contract gives the exact discriminator: a RUN's trace NAME equals its
+// agent-identity display name (that is what langfuse.trace.name stamps), whereas an
+// agent-tagged proxy span keeps its own name ("Received Proxy Server Request", …). So a
+// trace is a run iff it is named "agent.invoke" (legacy launcher) OR its name matches the
+// agent-identity display of one of its own tags (current launcher).
+func isRunTrace(t lfTrace) bool {
+	if t.Name == agentInvokeTraceName {
+		return true
+	}
+	for _, tag := range t.Tags {
+		if ns, name, ok := parseAgentTag(tag); ok {
+			// A run's trace is named for its agent (langfuse.trace.name = "<ns>/<name>"),
+			// OR is UNNAMED — an older launcher stamped the identity TAG but not the name,
+			// so the run's phantom seed root surfaces with just the tag. Either way it is
+			// THIS agent's run. An ambient trace that merely inherits an agent tag keeps its
+			// own span name ("Received Proxy Server Request", "memory.append", …) — neither
+			// empty nor the identity — so it stays excluded (m25 S15).
+			if t.Name == "" || t.Name == agentDisplayFromTag(ns, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// agentDisplayFromTag renders an agent tag's (ns, name) as the trace display name the
+// launcher stamps via langfuse.trace.name: "<ns>/<name>", or bare "<name>" when the
+// namespace is empty. Kept in sync with the launcher's agentTraceName() so isRunTrace's
+// name-match is exact.
+func agentDisplayFromTag(ns, name string) string {
+	if ns == "" {
+		return name
+	}
+	return ns + "/" + name
 }
 
 // parseAgentTag is the INVERSE of agentRunTag: it strips the "agent:" prefix and
@@ -317,7 +378,7 @@ func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name stri
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 	}
 	return runs, nil
@@ -375,6 +436,12 @@ type RunFilter struct {
 // maxRunLimit caps the page size so one request cannot exhaust Langfuse memory.
 const maxRunLimit = 100
 
+// runFetchPageCap bounds how many Langfuse trace-pages FilteredRuns will walk in one
+// request while gathering enough RUNS (runs are sparse among traces). At maxRunLimit
+// traces/page this scans up to runFetchPageCap*maxRunLimit traces — a bounded recent
+// window, never an unbounded historical scan.
+const runFetchPageCap = 10
+
 // RunListPage is the paginated result of FilteredRuns.
 type RunListPage struct {
 	Runs       []RunSummary
@@ -405,62 +472,37 @@ var ErrBadParam = errors.New("bad parameter")
 //
 // Agent filter: applied server-side via Langfuse tags= + defensive post-fetch
 // tag re-check (same cross-namespace correctness guarantee as RunsForAgent).
-func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error) {
-	limit := f.Limit
-	if limit <= 0 {
-		limit = defaultRunLimit
-	}
-	if limit > maxRunLimit {
-		limit = maxRunLimit
-	}
-
-	// Decode cursor → Langfuse page number (1-indexed). "" = page 1.
-	page := 1
-	if f.Cursor != "" {
-		p, err := strconv.Atoi(f.Cursor)
-		if err != nil || p < 1 {
-			return RunListPage{}, fmt.Errorf("%w: cursor must be a positive integer, got %q", ErrBadParam, f.Cursor)
-		}
-		page = p
-	}
-
-	// Validate From/To timestamps before sending to Langfuse: catch malformed
-	// values early and return a 400-class error, not a silent wrong query.
+// buildRunsQuery validates a RunFilter and builds the shared Langfuse trace-list query
+// used for every over-fetched page: full page size (maxRunLimit) + timestamp.desc, plus
+// the server-side agent tags= and from/to filters. It returns the query, the resolved
+// agent tag (for the defensive post-fetch re-check), and a 400-class ErrBadParam for
+// malformed timestamps or the unsupported status filter (the runs LIST carries no
+// per-trace status — that lives on the trace DETAIL, see RunFilter doc).
+func buildRunsQuery(f RunFilter) (url.Values, string, error) {
 	if f.From != "" {
 		if _, ok := parseLangfuseTime(f.From); !ok {
-			return RunListPage{}, fmt.Errorf("%w: from must be RFC3339, got %q", ErrBadParam, f.From)
+			return nil, "", fmt.Errorf("%w: from must be RFC3339, got %q", ErrBadParam, f.From)
 		}
 	}
 	if f.To != "" {
 		if _, ok := parseLangfuseTime(f.To); !ok {
-			return RunListPage{}, fmt.Errorf("%w: to must be RFC3339, got %q", ErrBadParam, f.To)
+			return nil, "", fmt.Errorf("%w: to must be RFC3339, got %q", ErrBadParam, f.To)
 		}
 	}
-
-	// Status filtering is NOT supported on the runs LIST. The Langfuse trace-list
-	// response carries no per-trace status/level (only the full TraceDetail's
-	// observation.level does), so filtering here would need a detail fetch per
-	// trace — prohibitively expensive and a breach of the metadata-only/bounded
-	// contract. Rather than accept the param and silently return everything (a
-	// filter that lies), reject any non-empty status with a teaching error.
 	if f.Status != "" {
-		return RunListPage{}, fmt.Errorf("%w: status filtering is not supported on the runs list (the Langfuse trace list has no per-trace status); filter by status on the trace detail instead", ErrBadParam)
+		return nil, "", fmt.Errorf("%w: status filtering is not supported on the runs list (the Langfuse trace list has no per-trace status); filter by status on the trace detail instead", ErrBadParam)
 	}
 
+	// OVER-FETCH a full trace page: runs are identified CLIENT-SIDE (isRunTrace) and are
+	// only a fraction of all traces, so asking for just `limit` traces yields a near-empty
+	// page after run-filtering (the m35 symptom). No server-side name=agent.invoke filter —
+	// the launcher names each run's trace for its AGENT, so that filter returns zero runs.
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(limit))
-	q.Set("page", strconv.Itoa(page))
+	q.Set("limit", strconv.Itoa(maxRunLimit))
 	q.Set("orderBy", "timestamp.desc")
-	// A RUN is the agent.invoke boundary trace; ask Langfuse to return ONLY those so
-	// the proxy's per-request spans / LLM-SDK traces / unnamed spans don't clutter the
-	// list AND pagination stays correct (m25 S15). We still re-check client-side below
-	// in case an upstream ignores the name filter.
-	q.Set("name", agentInvokeTraceName)
 
-	// Server-side filters.
 	var agentTag string
 	if f.Agent != "" {
-		// Agent is "namespace/name" or "name" (bare).
 		parts := strings.SplitN(f.Agent, "/", 2)
 		if len(parts) == 2 {
 			agentTag = agentRunTag(parts[0], parts[1])
@@ -475,72 +517,117 @@ func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunLis
 	if f.To != "" {
 		q.Set("toTimestamp", f.To)
 	}
+	return q, agentTag, nil
+}
 
-	var body lfTracesResponse
-	if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
-		return RunListPage{}, err
-	}
-
-	// Project and filter.
-	q2 := strings.ToLower(strings.TrimSpace(f.Q))
-	runs := make([]RunSummary, 0, len(body.Data))
-	for _, t := range body.Data {
-		// Only the agent.invoke boundary trace is a RUN (defensive re-check of the
-		// server-side name filter, m25 S15).
-		if t.Name != agentInvokeTraceName {
+// appendRunTraces projects the RUN traces from one Langfuse trace-page onto RunSummary and
+// appends them to dst: it skips ambient (non-run) traces (isRunTrace), applies the agent
+// defensive tag re-check (cross-namespace correctness, same guarantee as RunsForAgent),
+// names each run by its agent, and applies the client-side Q substring filter.
+func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []RunSummary {
+	for _, t := range data {
+		if !isRunTrace(t) {
 			continue
 		}
-		// Agent defensive tag re-check (same guarantee as RunsForAgent).
 		if agentTag != "" && !traceHasTag(t, agentTag) {
 			continue
 		}
-		// Name the run by its agent so the list reads as meaningful runs, not a wall of
-		// identical "agent.invoke".
 		display := runDisplayName(t)
-		// Q: client-side substring filter on the (agent) name.
 		if q2 != "" && !strings.Contains(strings.ToLower(display), q2) {
 			continue
 		}
-		// NOTE: status filter is NOT applied here — see RunFilter doc.
-		runs = append(runs, RunSummary{
+		dst = append(dst, RunSummary{
 			TraceID:   t.ID,
 			Name:      display,
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 	}
+	return dst
+}
 
-	// Sort for determinism: timestamp desc (newest first), then traceId as
-	// tie-break (stable secondary key when timestamps are equal — m16.2
-	// carry-forward). The Langfuse upstream returns timestamp.desc already, but
-	// client-side filtering may reorder ties; re-sorting ensures stability.
+func (a *langfuseAdapter) FilteredRuns(ctx context.Context, f RunFilter) (RunListPage, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = defaultRunLimit
+	}
+	if limit > maxRunLimit {
+		limit = maxRunLimit
+	}
+
+	// Decode cursor → RUN offset into the deterministically-ordered filtered run list.
+	// "" = start (offset 0). Runs are sparse among traces, so pagination is by run offset
+	// (not Langfuse trace-page): FilteredRuns walks trace-pages until it has enough runs to
+	// serve [offset, offset+limit). The cursor is opaque to the caller (see RunListPage).
+	runOffset := 0
+	if f.Cursor != "" {
+		p, err := strconv.Atoi(f.Cursor)
+		if err != nil || p < 1 {
+			return RunListPage{}, fmt.Errorf("%w: cursor must be a positive integer, got %q", ErrBadParam, f.Cursor)
+		}
+		runOffset = p
+	}
+
+	// Validate the filter and build the shared over-fetch query (from/to/status/agent).
+	q, agentTag, err := buildRunsQuery(f)
+	if err != nil {
+		return RunListPage{}, err
+	}
+	q2 := strings.ToLower(strings.TrimSpace(f.Q))
+
+	// Walk Langfuse trace-pages (1-indexed), projecting runs, until we have at least one
+	// run PAST the requested window (so we can tell whether a next page exists) or the
+	// upstream is exhausted. runFetchPageCap bounds the walk so an all-ambient window
+	// cannot loop unboundedly.
+	runs := make([]RunSummary, 0, limit*2)
+	moreUpstream := false
+	for lfPage := 1; lfPage <= runFetchPageCap; lfPage++ {
+		q.Set("page", strconv.Itoa(lfPage))
+		var body lfTracesResponse
+		if err := a.getJSON(ctx, "/api/public/traces", q, &body); err != nil {
+			return RunListPage{}, err
+		}
+		runs = appendRunTraces(runs, body.Data, agentTag, q2)
+		moreUpstream = body.Meta != nil && lfPage < body.Meta.TotalPages
+		// Enough runs to fill the window and expose the next one, or upstream exhausted.
+		if len(runs) > runOffset+limit || !moreUpstream {
+			break
+		}
+	}
+
+	// Sort for determinism: timestamp desc (newest first), tie-break by traceId (stable
+	// secondary key when timestamps are equal — m16.2 carry-forward).
 	slices.SortStableFunc(runs, func(a, b RunSummary) int {
 		if a.Timestamp != b.Timestamp {
-			// Reverse chronological: b > a means b is newer, sort first.
 			if b.Timestamp > a.Timestamp {
 				return 1
 			}
 			return -1
 		}
-		// Tie-break by TraceID for a stable, deterministic order.
-		if a.TraceID < b.TraceID {
+		switch {
+		case a.TraceID < b.TraceID:
 			return -1
-		}
-		if a.TraceID > b.TraceID {
+		case a.TraceID > b.TraceID:
 			return 1
+		default:
+			return 0
 		}
-		return 0
 	})
 
-	// Compute next cursor: encode (page+1) if there are more pages.
-	nextCursor := ""
-	if body.Meta != nil && page < body.Meta.TotalPages {
-		nextCursor = strconv.Itoa(page + 1)
+	// Window the sorted runs to the requested run-offset page.
+	if runOffset >= len(runs) {
+		return RunListPage{Runs: []RunSummary{}, NextCursor: ""}, nil
 	}
-
-	return RunListPage{Runs: runs, NextCursor: nextCursor}, nil
+	end := min(runOffset+limit, len(runs))
+	// A next page exists if runs remain past this window, or the upstream still has
+	// unscanned trace-pages (a subsequent call re-walks and may surface more).
+	nextCursor := ""
+	if end < len(runs) || moreUpstream {
+		nextCursor = strconv.Itoa(end)
+	}
+	return RunListPage{Runs: runs[runOffset:end], NextCursor: nextCursor}, nil
 }
 
 // CostUsage aggregates recent cost/usage into the dashboard cost rollup via the
@@ -799,6 +886,13 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 	}, nil
 }
 
+// latencyMsOf converts a Langfuse trace's latency (SECONDS — Langfuse's unit) to the
+// milliseconds the flat RunSummary/TraceRollup DTOs expose. A run that took 1.448s is
+// 1448ms, not "1ms" (the pre-m35 bug: the seconds value was surfaced as if milliseconds).
+func latencyMsOf(t lfTrace) float64 {
+	return t.LatencySec * 1000
+}
+
 // traceTokens picks the token count from whichever field Langfuse populated
 // (usage.totalTokens or the flat totalTokens), preferring the nested usage.
 func traceTokens(t lfTrace) int64 {
@@ -903,7 +997,7 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			Timestamp: body.Timestamp,
 			CostUSD:   body.TotalCost,
 			Tokens:    tokens,
-			LatencyMs: body.LatencyMs,
+			LatencyMs: latencyMsOf(body.lfTrace),
 			SpanCount: len(ordered),
 		},
 		Spans:      ordered,

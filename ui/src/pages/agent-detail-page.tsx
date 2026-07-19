@@ -3,12 +3,14 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   Boxes,
+  ChevronRight,
   ExternalLink,
   MessageSquare,
   Pencil,
   Play,
   Plus,
   Send,
+  Server,
   SlidersHorizontal,
   Terminal,
   Trash2,
@@ -1607,6 +1609,8 @@ function BindingsTab({ bindings }: { bindings: AgentBinding[] }) {
   );
 }
 
+const OTHER_TOOLS_GROUP = "Other tools";
+
 function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
   if (bindings.length === 0) {
     return (
@@ -1615,9 +1619,77 @@ function BindingsList({ bindings }: { bindings: AgentBinding[] }) {
       </p>
     );
   }
+
+  // Tool bindings are grouped by MCP server and COLLAPSED by default (an agent can bind
+  // dozens of tools — a flat list is an unscrollable wall). Non-tool bindings (memory, …)
+  // are few, so they render flat below.
+  const tools = bindings.filter((b) => b.kind === "tool");
+  const others = bindings.filter((b) => b.kind !== "tool");
+
+  const groups = new Map<string, AgentBinding[]>();
+  for (const b of tools) {
+    const key = b.server?.trim() || OTHER_TOOLS_GROUP;
+    const arr = groups.get(key);
+    if (arr) arr.push(b);
+    else groups.set(key, [b]);
+  }
+  const serverGroups = [...groups.entries()].sort((a, b) => {
+    if (a[0] === OTHER_TOOLS_GROUP) return 1;
+    if (b[0] === OTHER_TOOLS_GROUP) return -1;
+    return a[0].localeCompare(b[0]);
+  });
+
   return (
-    <div className="space-y-2">
-      {bindings.map((b) => (
+    <div className="space-y-2" data-testid="bindings-list">
+      {serverGroups.map(([server, group]) => {
+        const readyCount = group.filter((b) => b.ready).length;
+        const allReady = readyCount === group.length;
+        return (
+          <details
+            key={server}
+            className="group rounded-md border bg-surface-2/40"
+            data-testid={`binding-group-${server}`}
+          >
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm [&::-webkit-details-marker]:hidden">
+              <div className="flex min-w-0 items-center gap-2">
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+                <Server className="h-4 w-4 shrink-0 text-primary" />
+                <span className="truncate font-medium">{server}</span>
+                <Badge variant="secondary" className="text-[10px]">
+                  {group.length} tool{group.length === 1 ? "" : "s"}
+                </Badge>
+              </div>
+              <Badge
+                variant={allReady ? "success" : "warning"}
+                className="shrink-0 text-[10px]"
+              >
+                {allReady ? "all ready" : `${readyCount}/${group.length} ready`}
+              </Badge>
+            </summary>
+            <div className="space-y-1 border-t px-3 py-2">
+              {group.map((b) => (
+                <div
+                  key={`${b.kind}/${b.name}`}
+                  className="flex items-center justify-between gap-3 rounded px-2 py-1.5 text-sm hover:bg-accent/40"
+                  data-testid={`binding-${b.name}`}
+                >
+                  <span className="truncate font-mono text-xs">
+                    {b.detail || b.name}
+                  </span>
+                  <Badge
+                    variant={b.ready ? "success" : "warning"}
+                    className="shrink-0 text-[10px]"
+                  >
+                    {b.ready ? "ready" : "pending"}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          </details>
+        );
+      })}
+
+      {others.map((b) => (
         <div
           key={`${b.kind}/${b.name}`}
           className="flex items-center justify-between gap-3 rounded-md border bg-surface-2/40 px-4 py-3 text-sm"

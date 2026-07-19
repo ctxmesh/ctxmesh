@@ -263,6 +263,21 @@ func TestResolveNearExpiryNoRefreshTokenNeedsConsent(t *testing.T) {
 	assert.Equal(t, 0, ex.calls(), "no refresh token ⇒ no token-endpoint call")
 }
 
+func TestResolveRefreshRejectedInvalidGrantNeedsConsent(t *testing.T) {
+	ctx := context.Background()
+	// Near expiry WITH a refresh token, but the token endpoint REJECTS the refresh with
+	// invalid_grant (the stored refresh token is expired/revoked/rotated). The dead grant
+	// must degrade to re-consent (surface the Connect CTA), NOT a hard resolve_failed — an
+	// unrefreshable grant is indistinguishable from "no grant" to the user.
+	ex := &fakeExchanger{err: &TokenError{Kind: TokenErrOAuth, Code: "invalid_grant"}}
+	grant := grantSecret(oauthData("OLD-AT", "OLD-RT", fixedNow.Add(10*time.Second)))
+	b, _ := backendWith(t, ex, true, grant)
+
+	_, err := b.Resolve(ctx, testNS, "", "weather", UserHash(nil, testUser))
+	assert.ErrorIs(t, err, ErrConsentRequired, "invalid_grant on refresh ⇒ re-consent, not resolve_failed")
+	assert.Equal(t, 1, ex.calls(), "the refresh was attempted, then rejected → re-consent")
+}
+
 func TestResolveCacheFastPath(t *testing.T) {
 	ctx := context.Background()
 	ex := &fakeExchanger{}

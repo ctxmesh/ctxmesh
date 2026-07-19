@@ -245,6 +245,30 @@ describe("AgentDetailPage (landing page)", () => {
     expect(screen.getByTestId("binding-get-invoice-binding")).toHaveTextContent("get_invoice");
   });
 
+  it("groups tool bindings by MCP server, collapsed by default, with a ready rollup", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        bindings: [
+          { kind: "tool", name: "sk-list", server: "scalekit-mcp-server", detail: "list_orgs", ready: true },
+          { kind: "tool", name: "sk-get", server: "scalekit-mcp-server", detail: "get_org", ready: false },
+          { kind: "memory", name: "mem", detail: "shared", ready: true },
+        ],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const group = screen.getByTestId("binding-group-scalekit-mcp-server");
+    expect(group).toHaveTextContent("scalekit-mcp-server");
+    expect(group).toHaveTextContent("2 tools");
+    expect(group).toHaveTextContent("1/2 ready");
+    // Collapsed by default (a <details> with no `open` attribute).
+    expect(group).not.toHaveAttribute("open");
+    // The tool rows are in the DOM (revealed on expand); non-tool bindings render outside.
+    expect(screen.getByTestId("binding-sk-list")).toHaveTextContent("list_orgs");
+    expect(screen.getByTestId("binding-mem")).toHaveTextContent("shared");
+  });
+
   it("a 404 → the not-found state", async () => {
     installFetch({ detailStatus: 404, detail: { error: "not found" } });
     renderAt("/agents/prod/ghost");
