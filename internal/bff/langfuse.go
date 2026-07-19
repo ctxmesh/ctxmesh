@@ -35,10 +35,16 @@ import (
 // use) — they NEVER reach the browser; the SPA only receives the flat DTOs. One
 // configurable BaseURL keeps the backend swappable (ADR 0005).
 type LangfuseConfig struct {
-	// BaseURL is the Langfuse instance root, e.g. "https://cloud.langfuse.com"
-	// or the in-cluster "http://langfuse-web.langfuse.svc:3000". Used both for
-	// the public API calls and to build the trace embed/link-out URL.
+	// BaseURL is the Langfuse instance root the BFF calls SERVER-SIDE, e.g. the
+	// in-cluster "http://langfuse-web.langfuse.svc:3000". Used for the public API
+	// calls only.
 	BaseURL string
+	// UIBaseURL is the EXTERNAL, browser-reachable Langfuse root used ONLY to build
+	// the trace link-out (TraceURL) the SPA opens — e.g. "https://langfuse.example.com".
+	// It is distinct from BaseURL because the API host is an in-cluster svc DNS name
+	// the browser cannot reach (ADR 0038 internal/external URL split). When empty it
+	// falls back to BaseURL (pre-split behaviour).
+	UIBaseURL string
 	// PublicKey / SecretKey authenticate the Langfuse public API (HTTP Basic).
 	// Server-side only.
 	PublicKey string
@@ -52,7 +58,8 @@ type LangfuseConfig struct {
 // API server-side (creds in this process) and projects the responses onto the
 // flat cost/run DTOs. It also builds the trace URL for the embed/link-out.
 type langfuseAdapter struct {
-	baseURL   string
+	baseURL   string // server-side API host (in-cluster svc DNS)
+	uiBaseURL string // external, browser-reachable host for the trace link-out
 	publicKey string
 	secretKey string
 	client    *http.Client
@@ -74,22 +81,30 @@ func NewLangfuseAdapter(cfg LangfuseConfig) (LangfuseAdapter, error) {
 	if c == nil {
 		c = &http.Client{Timeout: 10 * time.Second}
 	}
+	// The trace link-out uses the EXTERNAL UI URL when provided; otherwise it falls
+	// back to the API host (pre-split behaviour) — ADR 0038 internal/external split.
+	uiBase := strings.TrimRight(strings.TrimSpace(cfg.UIBaseURL), "/")
+	if uiBase == "" {
+		uiBase = base
+	}
 	return &langfuseAdapter{
 		baseURL:   base,
+		uiBaseURL: uiBase,
 		publicKey: cfg.PublicKey,
 		secretKey: cfg.SecretKey,
 		client:    c,
 	}, nil
 }
 
-// TraceURL returns the Langfuse UI URL for a traceId — the single target used
-// for BOTH the embedded iframe src and the link-out href. The SPA never
-// hardcodes this; swapping BaseURL swaps the target everywhere (ADR 0005).
+// TraceURL returns the Langfuse UI URL for a traceId — the link-out href the SPA
+// opens. It uses the EXTERNAL uiBaseURL (browser-reachable), NOT the in-cluster API
+// host, so the "view full trace" link resolves from a user's browser (ADR 0038). The
+// SPA never hardcodes this; swapping the UI URL swaps the target everywhere (ADR 0005).
 func (a *langfuseAdapter) TraceURL(traceID string) (string, error) {
 	if strings.TrimSpace(traceID) == "" {
 		return "", fmt.Errorf("langfuse: empty traceID")
 	}
-	return a.baseURL + "/trace/" + url.PathEscape(traceID), nil
+	return a.uiBaseURL + "/trace/" + url.PathEscape(traceID), nil
 }
 
 // lfTracesResponse is the shape of GET /api/public/traces we consume. We map

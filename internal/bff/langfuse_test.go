@@ -117,6 +117,29 @@ func TestLangfuseTraceURL(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestLangfuseTraceURLUsesExternalUIURL(t *testing.T) {
+	// The trace link-out must use the EXTERNAL, browser-reachable UI URL — NOT the
+	// in-cluster API host the browser cannot reach (ADR 0038 internal/external split).
+	a, err := NewLangfuseAdapter(LangfuseConfig{
+		BaseURL:   "http://langfuse-web.langfuse.svc:3000", // internal API host
+		UIBaseURL: "https://langfuse.example.com/",         // external UI (trailing slash trimmed)
+		PublicKey: "pk", SecretKey: "sk",
+	})
+	require.NoError(t, err)
+	u, err := a.TraceURL("t-1")
+	require.NoError(t, err)
+	assert.Equal(t, "https://langfuse.example.com/trace/t-1", u,
+		"the link-out uses the external UI URL, not the in-cluster API host")
+
+	// When UIBaseURL is unset, the link-out falls back to the API host (pre-split behaviour).
+	a2, err := NewLangfuseAdapter(LangfuseConfig{
+		BaseURL: "https://lf.internal", PublicKey: "pk", SecretKey: "sk",
+	})
+	require.NoError(t, err)
+	u2, _ := a2.TraceURL("t-2")
+	assert.Equal(t, "https://lf.internal/trace/t-2", u2)
+}
+
 func TestLangfuseRecentRuns(t *testing.T) {
 	// A RUN is a launcher boundary trace. The current launcher names it for its AGENT
 	// (langfuse.trace.name = "<ns>/<name>", e.g. "prod/chatbot") — keying on the literal
