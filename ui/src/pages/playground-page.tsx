@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Play, Rocket } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -16,7 +16,12 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
-import { api, ApiError, type CreatedObject } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  openRunStream,
+  type CreatedObject,
+} from "@/lib/api";
 import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
@@ -37,10 +42,20 @@ import {
 
 // Run is the lifecycle of a Playground invoke. On success we hold the returned
 // traceId — the hand-off we link to the native /traces/:id (m16.7, m17.13).
+// Approval is a human-in-the-loop pause (m32.4): the run awaits an approve/deny on `key`.
+type Approval = { runId: string; key: string; summary: string };
+
 type Run =
   | { kind: "idle" }
-  | { kind: "running" }
-  | { kind: "done"; traceId: string; response: string; consentRequired?: string[] }
+  // running carries the run id (for cancel) + the response accumulated live from token events.
+  | { kind: "running"; runId: string; response: string }
+  | {
+      kind: "done";
+      traceId: string;
+      response: string;
+      consentRequired?: string[];
+      approval?: Approval;
+    }
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
 // Export is the export-to-CRD lifecycle: expand (preview) → apply. It reuses the
@@ -70,6 +85,8 @@ export function PlaygroundPage() {
   // still enforces, so the 403 paths below stay live even if this is optimistic.
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
+  // The active run's SSE stream canceller (m32.8) — aborts on New-run / cancel / unmount.
+  const streamCancelRef = useRef<(() => void) | null>(null);
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -99,23 +116,153 @@ export function PlaygroundPage() {
       setRun({ kind: "error", message: "Input must be valid JSON." });
       return;
     }
-    setRun({ kind: "running" });
+    // Stream the run (ADR 0034, m32.8): create it, then consume its SSE event stream —
+    // tokens render live; a requires_action pause (consent/approval) or a terminal close
+    // is finalized by reading the structured run state.
+    let runId: string;
     try {
-      const res = await api.invoke({
-        agent: form.name.trim(),
-        namespace: namespace.trim(),
-        input: parsedInput,
-      });
+      runId = (
+        await api.createRun({
+          agent: form.name.trim(),
+          namespace: namespace.trim(),
+          input: parsedInput,
+        })
+      ).id;
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setRun(errorRun(err));
+      return;
+    }
+
+    setRun({ kind: "running", runId, response: "" });
+    let acc = "";
+    let finalized = false;
+    const finalize = () => {
+      if (finalized) return;
+      finalized = true;
+      stopStream();
+      void finalizeRun(runId, acc);
+    };
+    const cancelStream = openRunStream(runId, {
+      onEvent: (kind, data) => {
+        if (kind === "token") {
+          acc += data;
+          setRun({ kind: "running", runId, response: acc });
+        } else if (kind === "message") {
+          acc = data;
+          setRun({ kind: "running", runId, response: acc });
+        } else if (kind === "state" && data === "requires_action") {
+          // requires_action is NOT terminal, so the stream stays open — stop it and finalize.
+          finalize();
+        }
+      },
+      onClose: finalize,
+      onError: (message, status) => {
+        finalized = true;
+        setRun({ kind: "error", message, status });
+      },
+      onForbidden: (message) => {
+        finalized = true;
+        reprobe();
+        setRun({ kind: "error", message, forbidden: true });
+      },
+    });
+    streamCancelRef.current = cancelStream;
+  }
+
+  // finalizeRun reads the structured run state after the stream ends (or pauses at
+  // requires_action) and renders the outcome — the SSE stream carries tokens but not the
+  // traceId / requiresAction, which live on the run object.
+  async function finalizeRun(runId: string, streamed: string) {
+    try {
+      const detail = await api.getRun(runId);
+      const ra = detail.requiresAction;
+      const lastMessage = detail.messages?.length
+        ? detail.messages[detail.messages.length - 1].content
+        : streamed;
+      if (detail.status === "failed") {
+        setRun({ kind: "error", message: detail.error || "The run failed." });
+        return;
+      }
       setRun({
         kind: "done",
-        traceId: res.traceId,
-        response: res.response,
-        consentRequired: res.consentRequired,
+        traceId: detail.traceId ?? "",
+        response: lastMessage,
+        consentRequired: ra?.kind === "consent_required" ? ra.servers : undefined,
+        approval:
+          ra?.kind === "approval"
+            ? { runId, key: ra.key ?? "", summary: ra.message ?? "" }
+            : undefined,
       });
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
     }
+  }
+
+  // onApprove / onDeny resolve a human-in-the-loop pause (m32.4): approve re-invokes (the run
+  // resumes and streams to completion), deny cancels it. Approve re-streams from the same run.
+  async function onApprove(runId: string) {
+    try {
+      await api.resumeRun(runId, "approve");
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setRun(errorRun(err));
+      return;
+    }
+    setRun({ kind: "running", runId, response: "" });
+    let acc = "";
+    let finalized = false;
+    const finalize = () => {
+      if (finalized) return;
+      finalized = true;
+      stopStream();
+      void finalizeRun(runId, acc);
+    };
+    const cancelStream = openRunStream(runId, {
+      onEvent: (kind, data) => {
+        if (kind === "token") {
+          acc += data;
+          setRun({ kind: "running", runId, response: acc });
+        } else if (kind === "message") {
+          acc = data;
+        } else if (kind === "state" && data === "requires_action") {
+          finalize();
+        }
+      },
+      onClose: finalize,
+      onError: (message, status) => {
+        finalized = true;
+        setRun({ kind: "error", message, status });
+      },
+    });
+    streamCancelRef.current = cancelStream;
+  }
+
+  async function onDeny(runId: string) {
+    try {
+      await api.resumeRun(runId, "deny");
+      setRun({ kind: "done", traceId: "", response: "Approval denied — run cancelled." });
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setRun(errorRun(err));
+    }
+  }
+
+  // onCancel stops a streaming run: cancel the SSE, then cancel the run server-side.
+  async function onCancel(runId: string) {
+    stopStream();
+    try {
+      await api.cancelRun(runId);
+    } catch {
+      // best-effort — the run may already be terminal; the UI resets regardless.
+    }
+    setRun({ kind: "idle" });
+  }
+
+  function stopStream() {
+    streamCancelRef.current?.();
+    streamCancelRef.current = null;
   }
 
   // onConnect runs the INLINE per-user consent (ADR 0031, m26.2): begin the OAuth grant
@@ -377,12 +524,45 @@ export function PlaygroundPage() {
                       </div>
                     </div>
                   )}
-                  <div className="rounded-md border p-3">
-                    <p className="text-xs text-muted-foreground">trace id</p>
-                    <p className="truncate font-mono text-xs" data-testid="trace-id">
-                      {run.traceId}
-                    </p>
-                  </div>
+                  {run.approval && (
+                    <div
+                      className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                      data-testid="approval-request"
+                    >
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                      <div className="space-y-2">
+                        <p className="font-medium">Approval needed to continue</p>
+                        <p className="text-muted-foreground">{run.approval.summary}</p>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            disabled={running}
+                            onClick={() => run.approval && void onApprove(run.approval.runId)}
+                            data-testid="approve-run"
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={running}
+                            onClick={() => run.approval && void onDeny(run.approval.runId)}
+                            data-testid="deny-run"
+                          >
+                            Deny
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {run.traceId && (
+                    <div className="rounded-md border p-3">
+                      <p className="text-xs text-muted-foreground">trace id</p>
+                      <p className="truncate font-mono text-xs" data-testid="trace-id">
+                        {run.traceId}
+                      </p>
+                    </div>
+                  )}
                   <Textarea
                     aria-label="Agent response"
                     readOnly
@@ -390,11 +570,31 @@ export function PlaygroundPage() {
                     value={run.response}
                   />
                 </>
+              ) : run.kind === "running" ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground" data-testid="run-streaming">
+                      Streaming…
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void onCancel(run.runId)}
+                      data-testid="cancel-run"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                  <Textarea
+                    aria-label="Agent response"
+                    readOnly
+                    className="min-h-[8rem] font-mono text-xs"
+                    value={run.response}
+                  />
+                </div>
               ) : (
                 <p className="py-6 text-center text-sm text-muted-foreground">
-                  {running
-                    ? "Invoking the agent…"
-                    : "Run the agent to see its response and trace."}
+                  Run the agent to see its response and trace.
                 </p>
               )}
             </CardContent>
