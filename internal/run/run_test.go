@@ -101,3 +101,62 @@ func TestMemStore(t *testing.T) {
 
 	assert.Len(t, s.List(), 1)
 }
+
+func TestStoreEvents_LiveAndAutoState(t *testing.T) {
+	s := NewMemStore()
+	require.NoError(t, s.Create(New("r", "ns", "a", nil, "", t0)))
+
+	ch, cancel, err := s.Subscribe("r", 0)
+	require.NoError(t, err)
+	defer cancel()
+
+	require.NoError(t, s.AppendEvent("r", EventToken, "hel"))
+	require.NoError(t, s.AppendEvent("r", EventToken, "lo"))
+	ev := <-ch
+	assert.Equal(t, 1, ev.Seq)
+	assert.Equal(t, EventToken, ev.Kind)
+	assert.Equal(t, "hel", ev.Data)
+	assert.Equal(t, "lo", (<-ch).Data)
+
+	// A transition auto-emits a `state` event (from the ONE place status changes).
+	_, err = s.Update("r", func(rn *Run) error { return rn.Transition(StatusRunning, t0) })
+	require.NoError(t, err)
+	ev = <-ch
+	assert.Equal(t, EventState, ev.Kind)
+	assert.Equal(t, string(StatusRunning), ev.Data)
+
+	// A terminal transition emits its state event then CLOSES the channel.
+	_, err = s.Update("r", func(rn *Run) error { return rn.Transition(StatusSucceeded, t0) })
+	require.NoError(t, err)
+	assert.Equal(t, string(StatusSucceeded), (<-ch).Data)
+	_, open := <-ch
+	assert.False(t, open, "the stream closes when the run is terminal")
+}
+
+func TestStoreEvents_BacklogAndCursor(t *testing.T) {
+	s := NewMemStore()
+	require.NoError(t, s.Create(New("r", "ns", "a", nil, "", t0)))
+	require.NoError(t, s.AppendEvent("r", EventToken, "a"))                                 // seq 1
+	_, _ = s.Update("r", func(rn *Run) error { return rn.Transition(StatusRunning, t0) })   // seq 2 (state)
+	_, _ = s.Update("r", func(rn *Run) error { return rn.Transition(StatusSucceeded, t0) }) // seq 3 (state)
+
+	// Subscribing to a terminal run replays the whole backlog then closes.
+	ch, cancel, err := s.Subscribe("r", 0)
+	require.NoError(t, err)
+	defer cancel()
+	var seqs []int
+	for ev := range ch {
+		seqs = append(seqs, ev.Seq)
+	}
+	assert.Equal(t, []int{1, 2, 3}, seqs)
+
+	// Resuming from a cursor replays only later events.
+	ch2, cancel2, err := s.Subscribe("r", 2)
+	require.NoError(t, err)
+	defer cancel2()
+	var seqs2 []int
+	for ev := range ch2 {
+		seqs2 = append(seqs2, ev.Seq)
+	}
+	assert.Equal(t, []int{3}, seqs2)
+}
