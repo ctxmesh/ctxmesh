@@ -1961,6 +1961,9 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
   const [load, setLoad] = React.useState<ScalingPanelLoad>({ kind: "loading" });
   const [action, setAction] = React.useState<ScalingActionState>({ kind: "idle" });
   const [form, setForm] = React.useState<ScalingForm>({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
+  // Keep-warm (m32.5): a one-switch view over the agent's min-replicas floor — "warm" iff any
+  // attached policy holds ≥1 replica, so a latency-sensitive agent avoids Knative cold-starts.
+  const [keepWarmBusy, setKeepWarmBusy] = React.useState(false);
 
   const fetchPolicies = React.useCallback(() => {
     const controller = new AbortController();
@@ -2059,6 +2062,46 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
     }
   }
 
+  // doKeepWarm flips the agent's min-replicas floor (m32.5): ON holds ≥1 replica warm (creating a
+  // default policy if none is attached), OFF returns every attached policy to scale-to-zero (min 0).
+  async function doKeepWarm(enable: boolean) {
+    if (load.kind !== "ready") return;
+    setKeepWarmBusy(true);
+    try {
+      if (load.policies.length === 0) {
+        if (enable) {
+          await api.createAgentScalingPolicy({
+            namespace: ns,
+            agentRef: agentName,
+            minReplicas: 1,
+            maxReplicas: 3,
+          });
+        }
+      } else {
+        for (const p of load.policies) {
+          const target = enable ? Math.max(1, p.minReplicas) : 0;
+          if (target !== p.minReplicas) {
+            await api.updateAgentScalingPolicy(ns, p.name, { minReplicas: target });
+          }
+        }
+      }
+      toast({
+        variant: "success",
+        title: enable ? "Keeping the agent warm" : "Scale-to-zero enabled",
+      });
+      fetchPolicies();
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      toast({
+        variant: "error",
+        title: "Couldn't change keep-warm",
+        description: err instanceof Error ? err.message : "failed",
+      });
+    } finally {
+      setKeepWarmBusy(false);
+    }
+  }
+
   async function doDetach() {
     if (action.kind !== "detach-open") return;
     setAction({ ...action, busy: true });
@@ -2080,6 +2123,10 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
   const formForbidden = (action.kind === "attach-open" || action.kind === "edit-open") ? action.forbidden : false;
   const formBusy = (action.kind === "attach-open" || action.kind === "edit-open" || action.kind === "detach-open") ? action.busy : false;
 
+  // warm iff any attached policy holds ≥1 replica (the min-replicas floor is up, no cold-starts).
+  const warm =
+    load.kind === "ready" && load.policies.some((p) => p.minReplicas >= 1);
+
   return (
     <div data-testid="scaling-panel">
       <div className="mb-4 flex items-center justify-between">
@@ -2096,6 +2143,31 @@ function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
           </Button>
         )}
       </div>
+
+      {load.kind === "ready" && (canCreate || canUpdate) && (
+        <div
+          className="mb-4 flex items-center justify-between rounded-md border p-3"
+          data-testid="keep-warm"
+        >
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">Keep warm</p>
+            <p className="text-xs text-muted-foreground">
+              Hold at least one replica ready so latency-sensitive invokes skip the
+              Knative cold-start.
+            </p>
+          </div>
+          <Button
+            variant={warm ? "default" : "outline"}
+            size="sm"
+            disabled={keepWarmBusy}
+            aria-pressed={warm}
+            onClick={() => void doKeepWarm(!warm)}
+            data-testid="keep-warm-toggle"
+          >
+            {keepWarmBusy ? "Saving…" : warm ? "On" : "Off"}
+          </Button>
+        </div>
+      )}
 
       {load.kind === "loading" && (
         <p className="text-sm text-muted-foreground" data-testid="scaling-loading">Loading…</p>
