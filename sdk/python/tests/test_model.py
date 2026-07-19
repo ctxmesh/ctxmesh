@@ -174,3 +174,54 @@ def test_content_null_empty_tool_calls_raises():
             client.model.chat("m", [{"role": "user", "content": "q"}])
     finally:
         stub.__exit__(None, None, None)
+
+
+# ── m32.7: streaming token source ─────────────────────────────────────────────
+
+from ctxmesh.model import _sse_delta  # noqa: E402
+
+
+def test_sse_delta_parses_deltas_and_ignores_noise():
+    assert _sse_delta('data: {"choices":[{"delta":{"content":"hi"}}]}') == "hi"
+    assert _sse_delta("data: [DONE]") == ""
+    assert _sse_delta(": a comment line") == ""
+    assert _sse_delta("event: foo") == ""
+    assert _sse_delta("data: not-json") == ""
+    assert _sse_delta('data: {"choices":[{"delta":{}}]}') == ""
+    assert _sse_delta('data: {"choices":[]}') == ""
+
+
+def test_model_stream_yields_token_deltas():
+    import http.server
+    import threading
+
+    frames = [
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for f in frames:
+                self.wfile.write(f)
+                self.wfile.flush()
+
+        def log_message(self, *_a):  # quiet
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        cfg = PlaneConfig.for_test(model_gateway_url=f"http://127.0.0.1:{srv.server_address[1]}")
+        client = agent.from_config(cfg)
+        got = list(client.model.stream("m", [{"role": "user", "content": "hi"}]))
+        assert got == ["Hel", "lo", " there"], "streams each token delta in order"
+    finally:
+        srv.shutdown()
+        srv.server_close()
