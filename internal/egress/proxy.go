@@ -47,8 +47,15 @@ type ProxyConfig struct {
 	Namespace string
 	// ExpectedAgent, when non-empty, is the agent identity (ns/name) this sidecar serves; a
 	// capability whose `act` (actor) is a DIFFERENT agent is rejected, so a capability minted
-	// for agent A can never be redeemed at agent B's sidecar (ADR 0029 §5 scoping).
+	// for agent A can never be redeemed at agent B's sidecar (ADR 0029 §5 scoping). Used as the
+	// scoping gate ONLY when ExpectedBoundary is empty (a standalone agent / pre-ADR-0033).
 	ExpectedAgent string
+	// ExpectedBoundary, when non-empty, is the trust boundary (ADR 0033) this sidecar serves —
+	// the agent's registry. It SUPERSEDES the ExpectedAgent gate: a capability is redeemable
+	// here iff its `bnd` matches, so teammates in the same registry can act on-behalf-of the
+	// user (relayed across A2A, m30.3) while a different registry's capability is rejected. A
+	// standalone agent's boundary is unique to it, so this reduces to the per-agent check.
+	ExpectedBoundary string
 	// Routes maps a server name (the first path segment) to its real upstream + auth type.
 	Routes RouteTable
 	// Transport is the RoundTripper for the upstream forward (nil ⇒ http.DefaultTransport).
@@ -123,7 +130,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid_capability", "the run capability was rejected")
 		return
 	}
-	if p.cfg.ExpectedAgent != "" && runCap.Agent != p.cfg.ExpectedAgent {
+	// Scoping gate (ADR 0033, m30.3): prefer the BOUNDARY check — a capability is redeemable here
+	// iff its boundary matches this sidecar's registry, so a teammate's relayed capability is
+	// accepted (team-OBO) but a different registry's is not. Fall back to the exact-agent check
+	// only when no boundary is configured (a standalone agent, or a pre-ADR-0033 sidecar).
+	switch {
+	case p.cfg.ExpectedBoundary != "":
+		if runCap.Boundary != p.cfg.ExpectedBoundary {
+			writeError(w, http.StatusForbidden, "boundary_mismatch", "the run capability is scoped to a different trust boundary")
+			return
+		}
+	case p.cfg.ExpectedAgent != "" && runCap.Agent != p.cfg.ExpectedAgent:
 		// A capability minted for another agent must not be redeemable here.
 		writeError(w, http.StatusForbidden, "agent_mismatch", "the run capability was minted for a different agent")
 		return

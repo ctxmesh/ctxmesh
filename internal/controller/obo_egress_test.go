@@ -43,7 +43,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", `[{"name":"scalekit"}]`)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -54,7 +54,9 @@ func TestEgressSidecarContainer(t *testing.T) {
 		"MCP_CAPABILITY_AUDIENCE":   "aud",
 		"MCP_CREDENTIAL_NAMESPACE":  "ae-credentials",
 		"EGRESS_AGENT":              "team-alpha/support",
-		"EGRESS_ROUTES":             `[{"name":"scalekit"}]`,
+		// The trust boundary the sidecar serves — the registry (ADR 0033, m30.3).
+		"EGRESS_BOUNDARY": "r:squad-a",
+		"EGRESS_ROUTES":   `[{"name":"scalekit"}]`,
 		// POD_NAMESPACE is a LITERAL (Knative Serving forbids the downward-API fieldRef).
 		"POD_NAMESPACE": "team-alpha",
 	} {
@@ -69,7 +71,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	assert.False(t, hasDelegate)
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "[]")
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]")
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
@@ -85,12 +87,14 @@ func TestEgressRoutesJSON(t *testing.T) {
 
 func TestEgressDigest(t *testing.T) {
 	routes := []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://a", OAuth: true}}
-	assert.Empty(t, egressDigest("img", nil), "no routes ⇒ no digest (pod template unchanged)")
+	assert.Empty(t, egressDigest("img", "r:squad-a", nil), "no routes ⇒ no digest (pod template unchanged)")
 
-	base := egressDigest("img", routes)
+	base := egressDigest("img", "r:squad-a", routes)
 	assert.NotEmpty(t, base)
 	// A route URL change (the real URL lives in the sidecar env now) rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}))
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}))
 	// A sidecar image change rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img2", routes))
+	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes))
+	// A boundary (registry membership) change rolls the pod — the EGRESS_BOUNDARY env must land.
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-b", routes))
 }
