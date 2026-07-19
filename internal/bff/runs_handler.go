@@ -50,11 +50,57 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
+		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
 		return
 	}
 	authed.Handle("POST /api/runs", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
+	authed.Handle("POST /api/runs/{id}/resume", notImplemented("runs"))
+}
+
+// handleResumeRun serves POST /api/runs/{id}/resume — re-enter `running` from `requires_action`
+// (ADR 0034, m32.10). The requires_action pause is an OBO consent (the user has now connected) or a
+// human approval (M32); resume re-invokes the SAME input, so the agent's tool call now resolves the
+// fresh credential. Caller-scoped (the resume acts as the caller, like create).
+func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	rn, err := s.runStore.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if rn.Status != run.StatusRequiresAction {
+		writeError(w, http.StatusConflict, "run is not awaiting an action (status "+string(rn.Status)+")")
+		return
+	}
+	endpoint, ok := s.resolveAgentEndpoint(w, r, caller, rn.Agent, rn.Namespace)
+	if !ok {
+		return
+	}
+	r, ok = attachConversationID(w, r, rn.ConversationID)
+	if !ok {
+		return
+	}
+	r = s.attachRunCapability(r, caller, rn.Agent, rn.Namespace)
+
+	if _, err := s.runStore.Update(id, func(x *run.Run) error {
+		return x.Transition(run.StatusRunning, time.Now())
+	}); err != nil {
+		writeError(w, http.StatusConflict, "cannot resume this run")
+		return
+	}
+	execCtx := contextWithRunCapability(
+		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
+		runCapabilityFromContext(r.Context()),
+	)
+	go s.executeRun(execCtx, id, endpoint, []byte(rn.Input))
+
+	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: id, Status: string(run.StatusRunning)})
 }
 
 // handleCreateRun serves POST /api/runs — create a durable run and start it. It is CALLER-SCOPED
