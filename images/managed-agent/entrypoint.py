@@ -145,6 +145,12 @@ class Handler(BaseHTTPRequestHandler):
         # injects ``traceparent`` so the loop roots under agent.invoke.
         req_headers = dict(self.headers)
 
+        # Streaming (m32.7): when the caller Accepts text/event-stream, stream token events as the
+        # model generates + a final `done`/`error` frame — the source for the run event stream.
+        if "text/event-stream" in (self.headers.get("Accept") or ""):
+            self._stream_invoke(user_input, req_headers)
+            return
+
         try:
             result = run_managed_loop(
                 _client, _config, user_input, headers=req_headers
@@ -163,6 +169,40 @@ class Handler(BaseHTTPRequestHandler):
             )
         except Exception as exc:  # noqa: BLE001
             self._send(502, {"agent": AGENT_NAME, "error": str(exc)})
+
+    def _stream_invoke(self, user_input: str, req_headers: dict) -> None:
+        """Run the loop and stream Server-Sent Events: a `token` frame per content delta, then a
+        terminal `done` frame (the same envelope the JSON path returns) or an `error` frame. The
+        BFF's streaming adapter republishes these into the run event stream (m32.7)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        def emit(obj: dict) -> None:
+            self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            result = run_managed_loop(
+                _client,
+                _config,
+                user_input,
+                headers=req_headers,
+                on_token=lambda text: emit({"type": "token", "text": text}),
+            )
+            emit(
+                {
+                    "type": "done",
+                    "agent": AGENT_NAME,
+                    "output": result.output,
+                    "steps": result.steps,
+                    "tools_called": result.tools_called,
+                    "consent_required": result.consent_required,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            emit({"type": "error", "agent": AGENT_NAME, "error": str(exc)})
 
     def log_message(self, *_args: Any) -> None:  # quiet default access logging
         pass

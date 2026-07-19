@@ -18,6 +18,7 @@ package bff
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -193,4 +194,56 @@ func TestGetRun_NotFound(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// fakeStreamingInvokeAdapter implements BOTH InvokeAdapter and StreamingInvokeAdapter: InvokeStream
+// emits the canned tokens then returns the final envelope, so the run executor streams token events.
+type fakeStreamingInvokeAdapter struct {
+	traceID string
+	tokens  []string
+	final   []byte
+	err     error
+}
+
+func (f *fakeStreamingInvokeAdapter) Invoke(context.Context, string, []byte) ([]byte, string, error) {
+	return f.final, f.traceID, f.err
+}
+
+func (f *fakeStreamingInvokeAdapter) InvokeStream(_ context.Context, _ string, _ []byte, onToken func(string)) ([]byte, string, error) {
+	if f.err != nil {
+		return nil, f.traceID, f.err
+	}
+	for _, tok := range f.tokens {
+		onToken(tok)
+	}
+	return f.final, f.traceID, nil
+}
+
+func TestCreateRun_StreamsTokens(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeStreamingInvokeAdapter{
+		traceID: "t",
+		tokens:  []string{"Hel", "lo", " there"},
+		final:   []byte(`{"output":"Hello there","consent_required":[]}`),
+	}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	assert.Equal(t, "Hello there", final.Messages[0].Content)
+
+	// The event stream carried the token deltas as they arrived, then the message + state.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+created.ID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: token")
+	assert.Contains(t, body, "Hel")
+	assert.Contains(t, body, "lo")
+	assert.Contains(t, body, "event: message")
+	assert.Contains(t, body, "event: state")
+	assert.Contains(t, body, string(run.StatusSucceeded))
 }
