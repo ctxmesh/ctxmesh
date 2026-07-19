@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
+import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
 import { AgentDetailPage } from "@/pages/agent-detail-page";
 import { AgentRegistriesPage } from "@/pages/agent-registries-page";
 import { EvalsPage } from "@/pages/evals-page";
@@ -98,6 +99,17 @@ export function App() {
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />
+          {/* Standalone per-agent chatbox (m37) — authenticated (same console login) but
+              CHROME-LESS: it sits OUTSIDE the AppShell so there's no nav/sidebar, just the
+              chat. Pinned to one agent by the URL. */}
+          <Route
+            path="chat/:ns/:name"
+            element={
+              <RequireAuth>
+                <AgentChatboxPage />
+              </RequireAuth>
+            }
+          />
           <Route
             element={
               <RequireAuth>
