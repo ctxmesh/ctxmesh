@@ -25,6 +25,7 @@ import (
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 
 // ModelRoute is the v1beta1 schema — a field-identical graduation of the v1alpha1 ModelRoute (ADR 0037, M34),

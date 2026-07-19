@@ -87,7 +87,7 @@ type EvalSuiteStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=es
 // +kubebuilder:printcolumn:name="Gate",type="string",JSONPath=".spec.gate"

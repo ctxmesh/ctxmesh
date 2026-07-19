@@ -67,7 +67,7 @@ type MemoryBindingStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=mb
 // +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".spec.agentRef"

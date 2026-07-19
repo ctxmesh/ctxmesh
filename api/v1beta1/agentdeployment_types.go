@@ -25,6 +25,7 @@ import (
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 
 // AgentDeployment is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentDeployment (ADR 0037, M34),

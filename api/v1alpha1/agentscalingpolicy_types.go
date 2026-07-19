@@ -135,7 +135,7 @@ type AgentScalingPolicyStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=asp
 // +kubebuilder:printcolumn:name="Trigger",type="string",JSONPath=".spec.trigger"

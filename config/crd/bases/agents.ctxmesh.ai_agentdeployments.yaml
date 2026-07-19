@@ -14,7 +14,8 @@ spec:
     singular: agentdeployment
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - deprecated: true
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-
@@ -597,7 +598,7 @@ spec:
             labels capped at 63 characters'
           rule: size(self.metadata.name) <= 44
     served: true
-    storage: true
+    storage: false
     subresources:
       status: {}
   - name: v1beta1
@@ -1169,6 +1170,6 @@ spec:
         - spec
         type: object
     served: true
-    storage: false
+    storage: true
     subresources:
       status: {}
