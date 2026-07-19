@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
@@ -278,6 +279,29 @@ func parseConsentRequired(resp []byte) []string {
 		return nil
 	}
 	return parsed.ConsentRequired
+}
+
+// parseApprovalRequired extracts a human-in-the-loop approval signal from an agent's /invoke
+// envelope (m32.4): {approval_required:{key,summary}}. Returns nil when the run did not pause for
+// approval. The key is the stable identifier the resumed run carries back so the pause proceeds.
+func parseApprovalRequired(resp []byte) *run.Action {
+	var parsed struct {
+		ApprovalRequired *struct {
+			Key     string `json:"key"`
+			Summary string `json:"summary"`
+		} `json:"approval_required"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil || parsed.ApprovalRequired == nil {
+		return nil
+	}
+	if parsed.ApprovalRequired.Key == "" {
+		return nil
+	}
+	return &run.Action{
+		Kind:    run.ActionApproval,
+		Key:     parsed.ApprovalRequired.Key,
+		Message: parsed.ApprovalRequired.Summary,
+	}
 }
 
 // InvokeErrorResponse is returned when the agent answered non-2xx: the honest

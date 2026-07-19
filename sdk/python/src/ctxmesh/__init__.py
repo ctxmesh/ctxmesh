@@ -32,9 +32,11 @@ Surface:
 """
 
 from ctxmesh import agent
+from ctxmesh._approval import pause_for_approval
 from ctxmesh.client import Client
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import (
+    ApprovalRequiredError,
     ConfigError,
     CtxmeshError,
     EndpointError,
@@ -65,6 +67,8 @@ __all__ = [
     "ManagedConfig",
     "ManagedResult",
     "DEFAULT_MAX_STEPS",
+    "pause_for_approval",
+    "ApprovalRequiredError",
 ]
 
 __version__ = "0.1.0"

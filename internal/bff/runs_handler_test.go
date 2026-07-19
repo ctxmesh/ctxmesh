@@ -185,6 +185,76 @@ func TestResumeRun_NotAwaitingAction(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+// approvalInvokeAdapter models a human-in-the-loop agent (m32.4): the first invoke pauses for
+// approval; once the re-invoke carries the granted approval key in its `approvals`, it succeeds.
+type approvalInvokeAdapter struct{}
+
+func (approvalInvokeAdapter) Invoke(_ context.Context, _ string, body []byte) ([]byte, string, error) {
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(body, &m)
+	if _, approved := m["approvals"]; approved {
+		return []byte(`{"output":"email sent","consent_required":[]}`), "tr-appr", nil
+	}
+	return []byte(`{"output":"awaiting approval",` +
+		`"approval_required":{"key":"send-email","summary":"Send the email to the customer?"},` +
+		`"consent_required":[]}`), "tr-appr", nil
+}
+
+func resumeRun(t *testing.T, s *Server, id, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	var rdr *bytes.Reader
+	if body != "" {
+		rdr = bytes.NewReader([]byte(body))
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+id+"/resume", rdr)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestResumeRun_Approval(t *testing.T) {
+	agent := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	s := newInvokeServer(t, newFakeFactory(c), approvalInvokeAdapter{})
+
+	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+	require.Equal(t, run.StatusRequiresAction, got.Status)
+	require.NotNil(t, got.RequiresAction)
+	assert.Equal(t, run.ActionApproval, got.RequiresAction.Kind)
+	assert.Equal(t, "send-email", got.RequiresAction.Key)
+	assert.Equal(t, "Send the email to the customer?", got.RequiresAction.Message)
+
+	// Approve → the run re-invokes with the key granted and succeeds.
+	require.Equal(t, http.StatusAccepted, resumeRun(t, s, created.ID, `{"decision":"approve"}`).Code)
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	require.NotEmpty(t, final.Messages)
+	assert.Equal(t, "email sent", final.Messages[len(final.Messages)-1].Content)
+}
+
+func TestResumeRun_ApprovalDenied(t *testing.T) {
+	agent := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	s := newInvokeServer(t, newFakeFactory(c), approvalInvokeAdapter{})
+
+	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+
+	// Deny → the run is cancelled (terminal), never re-invoked.
+	rec := resumeRun(t, s, created.ID, `{"decision":"deny"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusCancelled, got.Status, "a denied approval cancels the run")
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()

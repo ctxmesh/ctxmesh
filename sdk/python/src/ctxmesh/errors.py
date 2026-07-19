@@ -61,3 +61,19 @@ class ConsentRequiredError(EndpointError):
     ):
         super().__init__(message, status=status, body=body)
         self.server = server
+
+
+class ApprovalRequiredError(CtxmeshError):
+    """A run reached a step gated on human approval (human-in-the-loop, ADR 0034 §HITL, m32.4).
+
+    Raised by :func:`ctxmesh.pause_for_approval` when the step's ``key`` has not (yet) been
+    approved. The managed loop turns it into a run OUTCOME — a ``requires_action`` (approval) the
+    console renders as an approve/deny affordance — not a crash. When the approver resolves it, the
+    run resumes: the re-invoke carries the approved key, so ``pause_for_approval`` proceeds instead
+    of raising.
+    """
+
+    def __init__(self, message: str, *, key: str, summary: str):
+        super().__init__(message)
+        self.key = key
+        self.summary = summary

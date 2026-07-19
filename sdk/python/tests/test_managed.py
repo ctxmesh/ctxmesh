@@ -265,6 +265,37 @@ def test_managed_loop_max_steps_guard_trips_on_runaway(runaway_gateway, echo_dis
     assert "max_steps=3" in str(exc.value)
 
 
+def test_managed_loop_surfaces_approval_then_resumes(tool_gateway, echo_discovery, monkeypatch):
+    """Human-in-the-loop (m32.4): a step that pauses for approval becomes an approval_required
+    OUTCOME (not a crash); re-invoking with the approved key lets the same step proceed to a final
+    answer — the resume contract, end to end through the loop."""
+    from ctxmesh import pause_for_approval
+
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="You are a helpful assistant.", model_route="tool-mock")
+
+    # Model the bound tool as a sensitive action gated on approval.
+    def gated_call(name, **kwargs):
+        pause_for_approval("echo-tool", "Run echo_tool with the given text?")
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(client.tools, "call", gated_call)
+
+    # First run: not approved → the loop surfaces requires_action(approval), never runs the tool.
+    paused = run_managed_loop(client, config, "please echo ping")
+    assert paused.approval_required == {
+        "key": "echo-tool",
+        "summary": "Run echo_tool with the given text?",
+    }
+    assert paused.tools_called == [], "the gated tool did not execute before approval"
+
+    # Resume: re-invoke with the approved key → pause_for_approval proceeds, the tool runs, and the
+    # loop reaches the mock final answer.
+    resumed = run_managed_loop(client, config, "please echo ping", approvals=["echo-tool"])
+    assert resumed.approval_required is None
+    assert resumed.output.startswith(FINAL_MARKER)
+
+
 def test_managed_loop_trace_has_step_tool_model_tree(
     tool_gateway, echo_discovery, span_exporter: InMemorySpanExporter
 ):
