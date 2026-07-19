@@ -1,53 +1,66 @@
-# Edge gateway (Gateway API / Envoy Gateway) — ADR 0038, M36
+# platform-edge — Gateway API edge (ADR 0038, M36)
 
-One host-routed edge in front of the whole platform, so console / Langfuse / agents are reached by
-**domain** instead of per-service `kubectl port-forward`. Non-destructive: Knative/Kourier is untouched
-— agent traffic is routed *through* Kourier by Host, so Knative keeps its own routing.
+A small, values-driven Helm chart: **one host-routed edge** in front of the whole platform, so the
+console / Langfuse / agents are reached by **domain** instead of per-service `kubectl port-forward`.
+Non-destructive — Knative/Kourier is untouched: agent traffic is routed *through* Kourier by Host, so
+Knative keeps its own routing.
 
-Base domain here is `127.0.0.1.sslip.io` (resolves to loopback everywhere, no `/etc/hosts`). In
-production this is a values-driven `baseDomain` (e.g. `agents.example.com`) and the gateway Service is a
-real `LoadBalancer`; the manifests are otherwise identical (ADR 0038 — config differs, not the shape).
+**Same manifests local→prod; only values differ** (`baseDomain`, `tls.enabled`, `dns.externalDns`) —
+config differs, not shape (ADR 0038 — the code never branches on environment).
 
-## Routes (`gateway.yaml`)
+## Routes (from `values.yaml`, host = `<subdomain>.<baseDomain>`)
 
-| Host | Backend |
-|------|---------|
+| Host (local default) | Backend |
+|----------------------|---------|
 | `console.127.0.0.1.sslip.io` | `agent-engine-bff` (BFF) |
 | `langfuse.127.0.0.1.sslip.io` | `langfuse-web` |
 | `*.default.127.0.0.1.sslip.io` | `kourier-internal` → Knative routes by Host to the agent |
 
-Each `HTTPRoute` lives in its backend's namespace (no `ReferenceGrant`); the `Gateway`
-(`envoy-gateway-system/platform-edge`) allows routes `from: All`.
+Each `HTTPRoute` renders in its backend's namespace (route+backend same ns ⇒ no `ReferenceGrant`),
+attached to the shared `Gateway` (`envoy-gateway-system/platform-edge`, `allowedRoutes: from All`).
 
 ## Install (local kind)
 
 ```sh
-# 1. Envoy Gateway (brings the Gateway API CRDs). Do NOT pre-install the CRDs separately —
-#    EG owns them; a kubectl pre-apply causes a field-manager conflict.
+# 1. A Gateway API implementation. Envoy Gateway brings the Gateway API CRDs — do NOT pre-apply the
+#    CRDs separately (a kubectl pre-apply causes a field-manager conflict with EG's helm).
 helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.2.4 \
   -n envoy-gateway-system --create-namespace
 kubectl -n envoy-gateway-system rollout status deploy/envoy-gateway
 
-# 2. GatewayClass + Gateway + HTTPRoutes
-kubectl apply -f deploy/edge/gateway.yaml
+# 2. The edge (this chart). Defaults = local (sslip.io, HTTP, no DNS controller).
+helm install platform-edge deploy/edge
 
 # 3. Publish the edge on the host. kind has no LoadBalancer provider, so the Gateway shows
 #    Programmed=False (AddressNotAssigned) — harmless; the data-plane Envoy is Running. Reach it via:
 SVC=$(kubectl get svc -n envoy-gateway-system -o name | grep platform-edge)
 kubectl port-forward -n envoy-gateway-system "$SVC" 8888:80
 #    → http://console.127.0.0.1.sslip.io:8888/ , http://langfuse.127.0.0.1.sslip.io:8888/ ,
-#      http://<agent>.default.127.0.0.1.sslip.io:8888/
-#    For clean :80 URLs (no port): `sudo kubectl port-forward … 80:80`, or run cloud-provider-kind
-#    so the LoadBalancer gets a real IP. For a pristine :80 that matches prod, recreate the kind
-#    cluster with extraPortMappings (destructive — wipes cluster state).
+#      http://<agent>.default.127.0.0.1.sslip.io:8888/invoke
+#    Clean :80 (no port): `sudo kubectl port-forward … 80:80`, or run cloud-provider-kind for a real
+#    LoadBalancer IP, or (destructive, later) recreate kind with extraPortMappings.
 ```
 
-Wire the BFF's Langfuse link-out at the edge domain so "view full trace" resolves in a browser:
-`LANGFUSE_UI_URL=http://langfuse.127.0.0.1.sslip.io:8888` (ADR 0038 internal/external URL split, m36.1).
+Wire the BFF's Langfuse link-out at the edge domain so "view full trace" resolves in a browser
+(ADR 0038 internal/external split, m36.1):
+`LANGFUSE_UI_URL=http://langfuse.127.0.0.1.sslip.io:8888`.
 
-## Follow-ons (M36 board)
-- Templatize the Gateway + HTTPRoutes as **values-gated chart templates** (`gateway.enabled`,
-  `baseDomain`) with `make helm-verify` no-drift.
-- Prod seams (m36.4): TLS via cert-manager (wildcard), DNS via external-dns, `Gateway.service.type:
-  LoadBalancer`. External agent invocation goes through the authenticated BFF; direct per-agent hosts
-  are opt-in + capability/mTLS auth (ADR 0033).
+## Production
+
+```sh
+helm install platform-edge deploy/edge \
+  --set baseDomain=agents.example.com \
+  --set tls.enabled=true --set tls.issuerRef.name=letsencrypt-prod \
+  --set dns.externalDns=true
+```
+
+This turns on the HTTPS listener + a cert-manager wildcard `Certificate`, and annotates the `Gateway`
+for `external-dns` — both are **cluster controllers installed out of band** (the chart references them,
+it does not install them; documented seams like state-layer HA / signed images in
+[specs/deployment.md](../../../agent-brain/specs/deployment.md)). The Gateway Service is a real
+`LoadBalancer` fronted by a cloud LB; DNS points `*.agents.example.com` at it. The manifests are
+otherwise identical to local.
+
+**Agent exposure:** external *invocation* goes through the authenticated BFF (`POST /api/invoke`) —
+agent ksvcs stay cluster-internal. The direct per-agent hostnames above are the escape hatch for
+cross-cluster A2A / webhooks and MUST enforce mutual auth (reuse the capability/OBO model, ADR 0033).

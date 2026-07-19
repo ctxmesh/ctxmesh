@@ -1,0 +1,52 @@
+# platform-edge values (ADR 0038). Defaults = local kind (sslip.io, HTTP, no DNS controller).
+# Production overrides baseDomain + tls.enabled + dns.externalDns + gateway.service.type — the
+# manifests are otherwise identical (config differs, not shape). See README.md.
+
+# The base domain every service is host-routed under. Local default resolves to loopback everywhere
+# with no /etc/hosts (sslip.io). Production: your real domain, e.g. "agents.example.com".
+baseDomain: 127.0.0.1.sslip.io
+
+gateway:
+  # Namespace the Gateway lives in (the Gateway API implementation's namespace by convention).
+  namespace: envoy-gateway-system
+  # The GatewayClass to attach to. `eg` = Envoy Gateway's controller.
+  className: eg
+  # Create the GatewayClass here. Set false if it is managed elsewhere / already exists.
+  createGatewayClass: true
+
+# TLS is a values-gated seam: off locally (HTTP), on in prod (an HTTPS listener + a cert-manager
+# wildcard Certificate). cert-manager is a CLUSTER controller (installed out of band) — the chart only
+# references the issuer, it does not install cert-manager.
+tls:
+  enabled: false
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+
+# DNS is a values-gated seam: none locally (sslip.io/.localhost resolve on their own); in prod the
+# external-dns CLUSTER controller creates records from a Gateway annotation. The chart only annotates;
+# it does not install external-dns.
+dns:
+  externalDns: false
+
+# The host-routed backends. Each renders an HTTPRoute in its BACKEND's namespace (route+backend in the
+# same namespace ⇒ no ReferenceGrant), attached to the shared Gateway. `wildcard` prefixes "*." so the
+# agents entry matches every agent under Knative's namespace-scoped domain and is routed THROUGH
+# Kourier by Host (Knative keeps its own routing — the edge is purely additive).
+routes:
+  console:
+    subdomain: console
+    service: agent-engine-bff
+    namespace: agent-engine-system
+    port: 9090
+  langfuse:
+    subdomain: langfuse
+    service: langfuse-web
+    namespace: langfuse
+    port: 3000
+  agents:
+    subdomain: default
+    service: kourier-internal
+    namespace: kourier-system
+    port: 80
+    wildcard: true
