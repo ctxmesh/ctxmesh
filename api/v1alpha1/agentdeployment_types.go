@@ -86,6 +86,26 @@ type ScalingSpec struct {
 	Max int32 `json:"max,omitempty"`
 }
 
+// SessionMemorySpec is the folded session-memory config (ADR 0037, m34.2): the former MemoryBinding
+// expressed as an AgentDeployment field, since a binding is always 1:1 with its agent and is never
+// shared as an object (the m33.3 "shared" scope is a data-layer key + a field value, not a shared
+// binding). Absent ⇒ the agent has no conversation memory (unless a legacy MemoryBinding CRD binds
+// it during the deprecation window).
+type SessionMemorySpec struct {
+	// scope selects the memory key layout. "session" (default) = PRIVATE per-agent
+	// (mem:{namespace}/{agent}:{conversationId}); "shared" (m33.3) = a team scratchpad keyed
+	// mem:shared:{registry}:{conversationId}, which requires the agent to be a registry member.
+	// +kubebuilder:validation:Enum=session;shared
+	// +kubebuilder:default=session
+	// +optional
+	Scope string `json:"scope,omitempty"`
+
+	// backend locates the Valkey state-layer instance. Defaulted to the cluster state-layer service
+	// when omitted.
+	// +optional
+	Backend *MemoryBackend `json:"backend,omitempty"`
+}
+
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
 type AgentDeploymentSpec struct {
 	// image is the fully-qualified container image for the agent,
@@ -129,6 +149,13 @@ type AgentDeploymentSpec struct {
 	// When omitted, defaults to min=0 (scale-to-zero) and max=3.
 	// +optional
 	Scaling *ScalingSpec `json:"scaling,omitempty"`
+
+	// sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
+	// agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
+	// (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
+	// deprecation window; this field wins when both are present.
+	// +optional
+	SessionMemory *SessionMemorySpec `json:"sessionMemory,omitempty"`
 
 	// role is the agent's role within its AgentRegistry (PRD §12.4 role-based
 	// access control). The three built-in roles always exist: "orchestrator",
