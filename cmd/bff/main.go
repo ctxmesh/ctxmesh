@@ -402,12 +402,16 @@ func parseGenerationModels(raw string) []string {
 //
 // Env:
 //   - LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY → Langfuse adapter
+//     (LANGFUSE_HOST = in-cluster API host; server-side only)
+//   - LANGFUSE_UI_URL → external, browser-reachable Langfuse root for the trace
+//     link-out (ADR 0038). Optional; falls back to LANGFUSE_HOST when unset.
 //   - PROMETHEUS_URL [+ PROMETHEUS_TOKEN]                       → Prometheus adapter
 func buildAdapters(log logr.Logger) bff.Adapters {
 	var adapters bff.Adapters
 
 	langfuse, err := bff.NewLangfuseAdapter(bff.LangfuseConfig{
 		BaseURL:   os.Getenv("LANGFUSE_HOST"),
+		UIBaseURL: os.Getenv("LANGFUSE_UI_URL"),
 		PublicKey: os.Getenv("LANGFUSE_PUBLIC_KEY"),
 		SecretKey: os.Getenv("LANGFUSE_SECRET_KEY"),
 	})
