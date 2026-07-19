@@ -124,6 +124,9 @@ export interface AgentScaling {
 export interface AgentBinding {
   kind: string;
   name: string;
+  // server is the MCP server (ToolRegistry) a "tool" binding belongs to — the group key
+  // the agent detail page collapses tool bindings under. Empty for non-tool bindings.
+  server?: string;
   detail: string;
   ready: boolean;
 }

@@ -142,10 +142,13 @@ describe("DashboardPage (render proof)", () => {
     // Topology renders as a scale-first SUMMARY card (m22.6/U5) — counts +
     // health rollup, not a node-per-agent graph.
     expect(await screen.findByTestId("topology-summary")).toBeInTheDocument();
-    // Cost cards rendered the Langfuse rollup (headline stat + the by-model chart).
-    expect(screen.getByText("Total cost")).toBeInTheDocument();
+    // Cost renders in the by-model breakdown card + the headline stat row.
     expect(screen.getByText("Cost by model")).toBeInTheDocument();
     expect(screen.getByText("gpt-4o")).toBeInTheDocument();
+    // Stat row surfaces tokens, latency, and fleet size (all m35, uniquely-labelled).
+    expect(screen.getByText("Tokens")).toBeInTheDocument();
+    expect(screen.getByText("Avg latency")).toBeInTheDocument();
+    expect(screen.getByText("Active agents")).toBeInTheDocument();
     // Recent runs rendered the traced run.
     expect(screen.getByText("checkout-flow")).toBeInTheDocument();
     expect(screen.getByText("t-abc")).toBeInTheDocument();
@@ -238,8 +241,8 @@ describe("DashboardPage (render proof)", () => {
     });
     renderDashboard();
 
-    // Wait for cost data to render.
-    await screen.findByText("Total cost");
+    // Wait for cost data to render (the by-model breakdown card).
+    await screen.findByText("Cost by model");
 
     // The "View cost details" link leads to the native /cost page.
     const costLink = screen.getByTestId("view-cost-details");
@@ -348,8 +351,11 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
 });
 
 describe("CostPanel bar chart", () => {
-  it("degrades to an empty-series hint when Prometheus is not wired", async () => {
-    const costNoProm = {
+  it("shows an empty-series hint (no bars) when there is no per-model cost yet", async () => {
+    // m35: cost totals live in the stat row; this card is the by-model breakdown. With an
+    // empty byModel (e.g. historical runs not yet priced), it shows a calm hint and no bars
+    // — no Prometheus scale/latency card exists anymore (it was never wired).
+    const costNoModels = {
       summary: {
         totalCostUSD: 1,
         totalTokens: 10,
@@ -361,14 +367,12 @@ describe("CostPanel bar chart", () => {
     };
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": costNoProm,
+      "/api/cost": costNoModels,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
     renderDashboard();
-    const hints = await screen.findAllByText(/Prometheus not wired/);
-    // One hint each for scale + latency.
-    expect(hints.length).toBeGreaterThanOrEqual(2);
+    await screen.findByText(/No cost data in the recent window/);
     const chart = screen.getByText("Cost by model").closest("div");
     expect(within(chart as HTMLElement).queryByRole("progressbar")).toBeNull();
   });

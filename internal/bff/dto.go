@@ -141,8 +141,11 @@ type AgentScaling struct {
 // Ready mirrors the binding's own Ready condition so the page can show a
 // per-binding health dot.
 type AgentBinding struct {
-	Kind   string `json:"kind"`   // "tool" | "memory"
-	Name   string `json:"name"`   // the binding object's own name
+	Kind string `json:"kind"` // "tool" | "memory"
+	Name string `json:"name"` // the binding object's own name
+	// Server is the MCP server (ToolRegistry) a "tool" binding belongs to — the group
+	// key the detail page collapses bindings under. Empty for non-tool bindings.
+	Server string `json:"server,omitempty"`
 	Detail string `json:"detail"` // tool name (tool) or scope (memory)
 	Ready  bool   `json:"ready"`
 }
@@ -1107,6 +1110,7 @@ func newAgentDetail(
 		bindings = append(bindings, AgentBinding{
 			Kind:   "tool",
 			Name:   b.Name,
+			Server: b.Spec.RegistryRef, // the MCP server (ToolRegistry) — the detail-page group key
 			Detail: b.Spec.ToolName,
 			Ready:  conditionReady(b.Status.Conditions),
 		})

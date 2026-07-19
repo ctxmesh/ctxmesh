@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronRight,
   PlugZap,
+  Plus,
   Rocket,
   Search,
   Server,
@@ -14,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -1400,7 +1401,13 @@ function SharedReview({
       {/* Tool picker — managed agents only (a custom image brings its own). */}
       {isManaged && (
         <div className="rounded-lg border bg-card p-5 shadow-card">
-          <p className="mb-3 text-sm font-medium">Attach tools</p>
+          <div className="mb-3">
+            <p className="text-sm font-semibold">Attach tools</p>
+            <p className="text-xs text-muted-foreground">
+              Choose the MCP tools this agent can call. Expand a server to pick
+              individual tools.
+            </p>
+          </div>
           <ToolPicker
             catalog={catalog}
             selected={selected}
@@ -1539,6 +1546,7 @@ function ToolPicker({
   const filtered = tools.filter((t) =>
     t.name.toLowerCase().includes(query.trim().toLowerCase()),
   );
+  const serverGroups = groupToolsByServer(filtered);
 
   return (
     <div className="space-y-3">
@@ -1551,34 +1559,71 @@ function ToolPicker({
           pre-selected tools are shown; you can still create the agent.
         </p>
       )}
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          aria-label="Search tools"
-          placeholder="Search tools…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="pl-9"
-        />
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            aria-label="Search tools"
+            placeholder="Search tools…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        {/* Don't see your server? Add one without leaving the flow — opens the add-MCP
+            wizard in a new tab; re-open the picker to see the new server's tools. */}
+        <a
+          href="/tools/add-mcp"
+          target="_blank"
+          rel="noreferrer"
+          data-testid="add-mcp-from-picker"
+          className={buttonVariants({ variant: "outline", size: "sm" })}
+        >
+          <Plus className="h-4 w-4" />
+          Add MCP server
+        </a>
       </div>
-      {/* A collapsible tree (m25 S13): the list shows MCP SERVERS, each with a
-          checkbox; expanding a server reveals its individual tools for granular
-          picking. The server checkbox selects/clears the whole server (m25 S12) and
-          shows an indeterminate state when only some of its tools are picked. */}
+      {/* At-a-glance selection summary — count + a clear affordance. */}
+      <div className="flex items-center justify-between px-0.5 text-xs text-muted-foreground">
+        <span>
+          <span className="font-semibold text-foreground">{selected.length}</span>{" "}
+          selected{" · "}
+          {tools.length} tool{tools.length === 1 ? "" : "s"} across{" "}
+          {serverGroups.length} server{serverGroups.length === 1 ? "" : "s"}
+        </span>
+        {selected.length > 0 && (
+          <button
+            type="button"
+            className="font-medium underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => onSelectMany(selected, false)}
+            data-testid="tool-clear-selected"
+          >
+            Clear selection
+          </button>
+        )}
+      </div>
+
+      {/* MCP servers, collapsed by default; expand to pick individual tools. The server
+          checkbox selects/clears the whole server (indeterminate when partial, m25 S12/S13). */}
       <div className="space-y-2" data-testid="tool-picker-list">
         {filtered.length === 0 && (
-          <p className="text-sm text-muted-foreground">No tools match.</p>
+          <p className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
+            No tools match{query.trim() ? ` “${query.trim()}”` : ""}.
+          </p>
         )}
-        {groupToolsByServer(filtered).map(([server, groupTools]) => {
+        {serverGroups.map(([server, groupTools]) => {
           const names = groupTools.map((t) => t.name);
           const selectedCount = names.filter((n) => selected.includes(n)).length;
           const allOn = selectedCount === names.length;
           const someOn = selectedCount > 0 && !allOn;
           const isOpen = expanded.has(server);
           return (
-            <div key={server} className="overflow-hidden rounded-md border">
-              {/* Server row: [select-all checkbox] [expand toggle: chevron + name]. */}
-              <div className="flex items-center gap-2 bg-muted/40 px-3 py-2">
+            <div
+              key={server}
+              className="overflow-hidden rounded-lg border bg-card"
+            >
+              {/* Server header: [select-all checkbox] [expand toggle] [selected + count]. */}
+              <div className="flex items-center gap-3 px-3 py-2.5">
                 <input
                   type="checkbox"
                   checked={allOn}
@@ -1607,14 +1652,21 @@ function ToolPicker({
                   <ChevronRight
                     className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`}
                   />
-                  <Server className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 truncate text-sm font-medium">{server}</span>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {selectedCount > 0
-                      ? `${selectedCount}/${groupTools.length}`
-                      : groupTools.length}
-                  </Badge>
+                  <Server className="h-4 w-4 shrink-0 text-primary" />
+                  <span className="min-w-0 truncate text-sm font-medium">
+                    {server}
+                  </span>
                 </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {selectedCount > 0 && (
+                    <Badge variant="success" className="text-[10px]">
+                      {selectedCount} selected
+                    </Badge>
+                  )}
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {groupTools.length} tool{groupTools.length === 1 ? "" : "s"}
+                  </span>
+                </div>
               </div>
               {isOpen && (
                 <div className="divide-y border-t">
@@ -1624,20 +1676,29 @@ function ToolPicker({
                     const hasSchema = t.inputSchema != null;
                     const schemaShown = schemaOpen.has(t.name);
                     return (
-                      <div key={t.name} className="bg-surface-2/40 py-2 pl-9 pr-3">
-                        <label className="flex items-center gap-3">
+                      <div key={t.name} className="bg-surface-2/30">
+                        <label className="flex cursor-pointer items-start gap-3 py-2.5 pl-10 pr-3 transition-colors hover:bg-accent/40">
                           <input
                             type="checkbox"
                             checked={on}
                             onChange={() => onToggle(t.name)}
-                            className="h-4 w-4 rounded border-input accent-primary"
+                            className="mt-0.5 h-4 w-4 shrink-0 rounded border-input accent-primary"
                             aria-label={`Bind ${t.name}`}
                           />
-                          <Wrench className="h-4 w-4 text-muted-foreground" />
                           <div className="min-w-0 flex-1">
-                            <p className="font-mono text-sm">{t.name}</p>
+                            <div className="flex items-center gap-2">
+                              <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                              <span className="truncate font-mono text-sm font-medium">
+                                {t.name}
+                              </span>
+                              {pending && (
+                                <Badge variant="warning" className="shrink-0 text-[10px]">
+                                  pending approval
+                                </Badge>
+                              )}
+                            </div>
                             {t.description && (
-                              <p className="truncate text-xs text-muted-foreground">
+                              <p className="mt-0.5 truncate text-xs text-muted-foreground">
                                 {t.description}
                               </p>
                             )}
@@ -1658,23 +1719,19 @@ function ToolPicker({
                                 });
                               }}
                               data-testid={`tool-schema-toggle-${t.name}`}
+                              className="shrink-0 self-center"
                             >
                               <Badge
-                                variant="secondary"
+                                variant="outline"
                                 className="cursor-pointer text-[10px] hover:bg-muted"
                               >
                                 {schemaShown ? "hide schema" : "schema"}
                               </Badge>
                             </button>
                           )}
-                          {pending && (
-                            <Badge variant="warning" className="text-[10px]">
-                              pending approval
-                            </Badge>
-                          )}
                         </label>
                         {schemaShown && hasSchema && (
-                          <pre className="mt-2 max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
+                          <pre className="mb-3 ml-10 mr-3 max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
                             {JSON.stringify(t.inputSchema, null, 2)}
                           </pre>
                         )}
@@ -1703,7 +1760,7 @@ interface YAMLSummary {
 }
 
 function FriendlySummary({ summary }: { summary: YAMLSummary }) {
-  const rows: { k: string; v: React.ReactNode }[] = [
+  const rows: { k: string; v: React.ReactNode; block?: boolean }[] = [
     {
       k: "Name",
       v: summary.name || <span className="text-muted-foreground">—</span>,
@@ -1737,26 +1794,48 @@ function FriendlySummary({ summary }: { summary: YAMLSummary }) {
       ),
     });
   rows.push({
-    k: "Tools",
+    k: summary.tools.length > 0 ? `Tools · ${summary.tools.length}` : "Tools",
+    block: true,
     v:
       summary.tools.length > 0 ? (
-        <span data-testid="summary-tools">{summary.tools.join(", ")}</span>
+        <div className="flex flex-wrap gap-1.5" data-testid="summary-tools">
+          {summary.tools.map((t) => (
+            <Badge
+              key={t}
+              variant="secondary"
+              className="font-mono text-[10px] font-normal"
+            >
+              {t}
+            </Badge>
+          ))}
+        </div>
       ) : (
-        <span className="text-muted-foreground">none</span>
+        <span className="text-muted-foreground" data-testid="summary-tools">
+          none
+        </span>
       ),
   });
 
   return (
     <dl className="divide-y rounded-md border" data-testid="friendly-summary">
-      {rows.map((r) => (
-        <div
-          key={r.k}
-          className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
-        >
-          <dt className="text-muted-foreground">{r.k}</dt>
-          <dd className="text-right">{r.v}</dd>
-        </div>
-      ))}
+      {rows.map((r) =>
+        r.block ? (
+          // Full-width row: label on top, value left-aligned below (for long/rich
+          // values like the tools chip cloud — a right-justified comma wall reads badly).
+          <div key={r.k} className="space-y-2 px-3 py-2.5 text-sm">
+            <dt className="text-muted-foreground">{r.k}</dt>
+            <dd>{r.v}</dd>
+          </div>
+        ) : (
+          <div
+            key={r.k}
+            className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
+          >
+            <dt className="text-muted-foreground">{r.k}</dt>
+            <dd className="text-right">{r.v}</dd>
+          </div>
+        ),
+      )}
     </dl>
   );
 }

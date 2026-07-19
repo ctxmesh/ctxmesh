@@ -117,31 +117,67 @@ func TestLangfuseTraceURL(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestLangfuseTraceURLUsesExternalUIURL(t *testing.T) {
+	// The trace link-out must use the EXTERNAL, browser-reachable UI URL — NOT the
+	// in-cluster API host the browser cannot reach (ADR 0038 internal/external split).
+	a, err := NewLangfuseAdapter(LangfuseConfig{
+		BaseURL:   "http://langfuse-web.langfuse.svc:3000", // internal API host
+		UIBaseURL: "https://langfuse.example.com/",         // external UI (trailing slash trimmed)
+		PublicKey: "pk", SecretKey: "sk",
+	})
+	require.NoError(t, err)
+	u, err := a.TraceURL("t-1")
+	require.NoError(t, err)
+	assert.Equal(t, "https://langfuse.example.com/trace/t-1", u,
+		"the link-out uses the external UI URL, not the in-cluster API host")
+
+	// When UIBaseURL is unset, the link-out falls back to the API host (pre-split behaviour).
+	a2, err := NewLangfuseAdapter(LangfuseConfig{
+		BaseURL: "https://lf.internal", PublicKey: "pk", SecretKey: "sk",
+	})
+	require.NoError(t, err)
+	u2, _ := a2.TraceURL("t-2")
+	assert.Equal(t, "https://lf.internal/trace/t-2", u2)
+}
+
 func TestLangfuseRecentRuns(t *testing.T) {
-	// Only the `agent.invoke` boundary trace is a RUN (m25 S15). The proxy trace is
-	// NOT a run (even though the launcher tags it) and MUST be filtered out; runs are
-	// named by their agent identity, not the generic "agent.invoke".
+	// A RUN is a launcher boundary trace. The current launcher names it for its AGENT
+	// (langfuse.trace.name = "<ns>/<name>", e.g. "prod/chatbot") — keying on the literal
+	// "agent.invoke" would miss it (the m35 regression). An older launcher named it
+	// "agent.invoke"; both must list. The proxy trace INHERITS an agent tag but keeps its
+	// own name, so it is NOT a run and MUST be filtered out (m25 S15).
+	// Newest-first, as Langfuse returns (orderBy=timestamp.desc). RecentRuns preserves
+	// that order; it does not re-sort.
 	body := `{"data":[
-		{"id":"t1","name":"agent.invoke","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]},
+		{"id":"t3","name":"","timestamp":"2026-07-01T00:02:00Z","totalCost":0.1,"latency":42.0,"totalTokens":50,"tags":["agent:prod/scalekit-agent"]},
+		{"id":"t2","name":"agent.invoke","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]},
+		{"id":"mnoise","name":"memory.append","timestamp":"2026-07-01T00:00:45Z","totalCost":0.0,"latency":1.0,"tags":[]},
 		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0,"tags":["agent:prod/chatbot"]},
-		{"id":"t2","name":"agent.invoke","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]}
+		{"id":"t1","name":"prod/chatbot","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":1.2,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]}
 	]}`
 	srv, rec := fakeLangfuse(t, body)
 	a := newTestLangfuse(t, srv.URL)
 
 	runs, err := a.RecentRuns(context.Background(), 10)
 	require.NoError(t, err)
-	require.Len(t, runs, 2, "the proxy trace must be filtered out even though it is agent-tagged")
+	// 3 runs: identity-named (t1), legacy agent.invoke (t2), empty-named agent-tagged
+	// (t3, older launcher). The agent-tagged proxy span (noise) and the untagged memory
+	// span (mnoise) are NOT runs and must be excluded (m25 S15).
+	require.Len(t, runs, 3, "proxy + memory ambient traces excluded; empty-named run included")
 	for _, r := range runs {
-		assert.NotEqual(t, "noise", r.TraceID, "a gateway/proxy trace is not a run")
+		assert.NotEqual(t, "noise", r.TraceID, "an agent-tagged proxy trace is not a run")
+		assert.NotEqual(t, "mnoise", r.TraceID, "a memory trace is not a run")
 	}
-
-	assert.Equal(t, "t1", runs[0].TraceID)
-	assert.Equal(t, "prod/chatbot", runs[0].Name, "runs are named by their agent, not 'agent.invoke'")
-	assert.InDelta(t, 0.5, runs[0].CostUSD, 1e-9)
-	assert.Equal(t, int64(900), runs[0].Tokens, "prefers usage.totalTokens")
-	assert.InDelta(t, 120.0, runs[0].LatencyMs, 1e-9)
-	assert.Equal(t, int64(400), runs[1].Tokens, "falls back to flat totalTokens")
+	// Newest first: t3 (00:02) → t2 (00:01) → t1 (00:00).
+	assert.Equal(t, "t3", runs[0].TraceID, "empty-named agent-tagged run (older launcher) lists")
+	assert.Equal(t, "prod/scalekit-agent", runs[0].Name, "empty-named run displayed by its agent tag")
+	assert.Equal(t, "t2", runs[1].TraceID, "legacy agent.invoke-named run still lists")
+	assert.Equal(t, "prod/summarizer", runs[1].Name, "legacy run named by its agent tag")
+	assert.Equal(t, "t1", runs[2].TraceID)
+	assert.Equal(t, "prod/chatbot", runs[2].Name, "current-launcher run: identity-named trace")
+	assert.InDelta(t, 0.5, runs[2].CostUSD, 1e-9)
+	assert.Equal(t, int64(900), runs[2].Tokens, "prefers usage.totalTokens")
+	assert.InDelta(t, 1200.0, runs[2].LatencyMs, 1e-9, "Langfuse latency is SECONDS → exposed as ms")
 
 	// Creds are sent server-side as HTTP Basic; they must NEVER appear in a DTO.
 	assert.True(t, rec.hadAuth, "public-API creds must be sent as Basic auth")
@@ -512,12 +548,13 @@ func TestFilteredRunsFromToTimestamps(t *testing.T) {
 // TestFilteredRunsQSubstringClientSide: q applies a client-side substring
 // filter on the run name AFTER the Langfuse response — not a server-side param.
 func TestFilteredRunsQSubstringClientSide(t *testing.T) {
-	// Runs are agent.invoke traces named by their agent (m25 S15); q filters those
-	// agent names client-side.
+	// Runs are identity-named boundary traces (current launcher); q filters those agent
+	// names client-side. Runs are identified client-side by isRunTrace — NOT a server-side
+	// name filter (which would drop every current run — m35).
 	corpus := []lfTrace{
-		{ID: "t1", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:prod/chat-session"}},
-		{ID: "t2", Name: "agent.invoke", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:prod/summarize-doc"}},
-		{ID: "t3", Name: "agent.invoke", Timestamp: "2026-07-01T00:00:00Z", Tags: []string{"agent:prod/chat-batch"}},
+		{ID: "t1", Name: "prod/chat-session", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:prod/chat-session"}},
+		{ID: "t2", Name: "prod/summarize-doc", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:prod/summarize-doc"}},
+		{ID: "t3", Name: "prod/chat-batch", Timestamp: "2026-07-01T00:00:00Z", Tags: []string{"agent:prod/chat-batch"}},
 	}
 	srv, rec := fakeLangfuseFiltered(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
@@ -530,9 +567,9 @@ func TestFilteredRunsQSubstringClientSide(t *testing.T) {
 	for _, r := range page.Runs {
 		assert.Contains(t, r.Name, "chat", "non-chat agents must be filtered out")
 	}
-	// The server-side name filter is the RUN-boundary filter (name=agent.invoke), NOT
-	// q: q ("chat") must never be forwarded to Langfuse.
-	assert.Contains(t, rec.query, "name=agent.invoke", "the run-boundary name filter is sent")
+	// No server-side run-name filter is sent (m35 tag-keying); q ("chat") is client-side
+	// only and must never be forwarded to Langfuse.
+	assert.NotContains(t, rec.query, "name=agent.invoke", "no server-side run-name filter (m35)")
 	assert.NotContains(t, rec.query, "chat", "q must NOT be forwarded to Langfuse")
 }
 
