@@ -249,6 +249,17 @@ func (e *TokenError) Error() string {
 	}
 }
 
+// IsInvalidGrant reports whether err is (or wraps) a token-endpoint OAuth error carrying
+// the invalid_grant code — the RFC 6749 §5.2 signal that the presented grant (here, the
+// stored refresh token) is expired, revoked, or otherwise no longer honored by the
+// authorization server. The stored credential is DEAD and cannot be refreshed, so the only
+// remedy is for the user to re-authorize. Callers map this to a re-consent outcome (surface
+// the "Connect your account" CTA) rather than a hard failure.
+func IsInvalidGrant(err error) bool {
+	var te *TokenError
+	return errors.As(err, &te) && te.Kind == TokenErrOAuth && te.Code == "invalid_grant"
+}
+
 // tokenEndpointResponse maps the OAuth token-endpoint JSON. expires_in is seconds per
 // RFC 6749; refresh_token may be absent.
 type tokenEndpointResponse struct {
