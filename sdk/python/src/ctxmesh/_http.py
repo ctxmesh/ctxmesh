@@ -31,7 +31,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from ctxmesh.errors import EndpointError
 
@@ -170,6 +170,42 @@ def request(
             body=response.text(),
         )
     return response
+
+
+def stream(
+    method: str,
+    url: str,
+    *,
+    body: Optional[bytes] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Iterator[str]:
+    """POST and yield the response body LINE BY LINE (for Server-Sent Events).
+
+    Unlike :func:`request` this does NOT buffer the whole body — it streams, so a token
+    stream is delivered as it arrives. No redirect following (streaming endpoints are
+    same-origin: the model gateway, the agent's own /invoke). Raises :class:`EndpointError`
+    on a non-2xx (with ``status`` + the error body) or a transport failure (``status`` None) —
+    never swallows the failure.
+    """
+    req = urllib.request.Request(url, data=body, method=method)  # noqa: S310
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise EndpointError(
+            f"{method} {url} returned {exc.code}: {err_body.strip()}",
+            status=exc.code,
+            body=err_body,
+        ) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise EndpointError(f"{method} {url} failed: {exc}", status=None) from exc
+
+    with resp:
+        for raw in resp:
+            yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
 
 def json_body(value: Any) -> bytes:

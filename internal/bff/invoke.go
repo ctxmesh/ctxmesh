@@ -17,10 +17,12 @@ limitations under the License.
 package bff
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -202,6 +204,98 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 		return data, traceID, &invokeError{status: resp.StatusCode, body: data}
 	}
 	return data, traceID, nil
+}
+
+// The agent's streaming /invoke emits these SSE frame types (m32.7): a token delta, the terminal
+// result envelope, or an error.
+const (
+	sseEventToken = "token"
+	sseEventDone  = "done"
+	sseEventError = "error"
+)
+
+// InvokeStream implements StreamingInvokeAdapter (ADR 0034, m32.7): POST /invoke asking for SSE,
+// forward each `token` frame to onToken as it arrives, and return the agent's final `done` envelope
+// (same shape Invoke returns, so consent/output parsing is unchanged). Same trace/capability/
+// conversation headers as Invoke. A non-2xx or an `error` frame surfaces as an invokeError.
+func (a *httpInvokeAdapter) InvokeStream(
+	ctx context.Context, endpoint string, body []byte, onToken func(string),
+) ([]byte, string, error) {
+	base := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	if base == "" {
+		return nil, "", fmt.Errorf("invoke: empty agent endpoint")
+	}
+	traceID, err := a.newTraceID()
+	if err != nil {
+		return nil, "", fmt.Errorf("invoke: mint trace id: %w", err)
+	}
+	spanID, err := randomSpanID()
+	if err != nil {
+		return nil, "", fmt.Errorf("invoke: mint span id: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+invokePath, bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("invoke: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", traceID, spanID))
+	if capToken := runCapabilityFromContext(ctx); capToken != "" {
+		req.Header.Set(runcap.HeaderName, capToken)
+	}
+	if convID := conversationIDFromContext(ctx); convID != "" {
+		req.Header.Set(hdrConversationID, convID)
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("invoke: request to %s failed: %w", base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxInvokeResponseBytes))
+		return data, traceID, &invokeError{status: resp.StatusCode, body: data}
+	}
+
+	var final []byte
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxInvokeResponseBytes)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[len("data:"):])
+		if payload == "" {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Text  string `json:"text"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue // a malformed frame must not kill the stream
+		}
+		switch ev.Type {
+		case sseEventToken:
+			if onToken != nil && ev.Text != "" {
+				onToken(ev.Text)
+			}
+		case sseEventDone:
+			final = append([]byte(nil), payload...)
+		case sseEventError:
+			return final, traceID, &invokeError{status: http.StatusBadGateway, body: []byte(ev.Error)}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, traceID, fmt.Errorf("invoke: read stream: %w", err)
+	}
+	if final == nil {
+		return nil, traceID, fmt.Errorf("invoke: stream ended with no result frame")
+	}
+	return final, traceID, nil
 }
 
 // invokeError carries the agent's non-2xx status so the handler maps it to an

@@ -18,6 +18,7 @@ package bff
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +141,149 @@ func TestRunEvents_SSE(t *testing.T) {
 	assert.Contains(t, body, "Hi there.")
 }
 
+func TestResumeRun(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// First invoke returns consent_required → requires_action; the resume re-invokes and (with the
+	// now-connected credential, simulated by flipping the adapter) succeeds.
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"connect","consent_required":["scalekit-mcp-server"]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{"input":"go"}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+	require.Equal(t, run.StatusRequiresAction, got.Status)
+
+	// The user connected → the agent now returns a real answer. Resume.
+	inv.resp = []byte(`{"output":"Here are your environments.","consent_required":[]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	require.Len(t, final.Messages, 1)
+	assert.Equal(t, "Here are your environments.", final.Messages[0].Content)
+}
+
+func TestResumeRun_NotAwaitingAction(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"done","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	// Resuming a succeeded run is a 409 (nothing to resume).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// approvalInvokeAdapter models a human-in-the-loop agent (m32.4): the first invoke pauses for
+// approval; once the re-invoke carries the granted approval key in its `approvals`, it succeeds.
+type approvalInvokeAdapter struct{}
+
+func (approvalInvokeAdapter) Invoke(_ context.Context, _ string, body []byte) ([]byte, string, error) {
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(body, &m)
+	if _, approved := m["approvals"]; approved {
+		return []byte(`{"output":"email sent","consent_required":[]}`), "tr-appr", nil
+	}
+	return []byte(`{"output":"awaiting approval",` +
+		`"approval_required":{"key":"send-email","summary":"Send the email to the customer?"},` +
+		`"consent_required":[]}`), "tr-appr", nil
+}
+
+func resumeRun(t *testing.T, s *Server, id, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	var rdr *bytes.Reader
+	if body != "" {
+		rdr = bytes.NewReader([]byte(body))
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+id+"/resume", rdr)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestResumeRun_Approval(t *testing.T) {
+	agent := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	s := newInvokeServer(t, newFakeFactory(c), approvalInvokeAdapter{})
+
+	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+	require.Equal(t, run.StatusRequiresAction, got.Status)
+	require.NotNil(t, got.RequiresAction)
+	assert.Equal(t, run.ActionApproval, got.RequiresAction.Kind)
+	assert.Equal(t, "send-email", got.RequiresAction.Key)
+	assert.Equal(t, "Send the email to the customer?", got.RequiresAction.Message)
+
+	// Approve → the run re-invokes with the key granted and succeeds.
+	require.Equal(t, http.StatusAccepted, resumeRun(t, s, created.ID, `{"decision":"approve"}`).Code)
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	require.NotEmpty(t, final.Messages)
+	assert.Equal(t, "email sent", final.Messages[len(final.Messages)-1].Content)
+}
+
+func TestResumeRun_ApprovalDenied(t *testing.T) {
+	agent := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	s := newInvokeServer(t, newFakeFactory(c), approvalInvokeAdapter{})
+
+	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+
+	// Deny → the run is cancelled (terminal), never re-invoked.
+	rec := resumeRun(t, s, created.ID, `{"decision":"deny"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusCancelled, got.Status, "a denied approval cancels the run")
+}
+
+func TestCancelRun(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// Pause the run in requires_action so it is non-terminal + stable to cancel deterministically.
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"connect","consent_required":["scalekit-mcp-server"]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+
+	// Cancel → 200 cancelled.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/cancel", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusCancelled, got.Status)
+
+	// Cancelling a terminal run → 409.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/cancel", nil)
+	req2.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusConflict, rec2.Code, "a terminal run cannot be cancelled")
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
@@ -149,4 +293,56 @@ func TestGetRun_NotFound(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// fakeStreamingInvokeAdapter implements BOTH InvokeAdapter and StreamingInvokeAdapter: InvokeStream
+// emits the canned tokens then returns the final envelope, so the run executor streams token events.
+type fakeStreamingInvokeAdapter struct {
+	traceID string
+	tokens  []string
+	final   []byte
+	err     error
+}
+
+func (f *fakeStreamingInvokeAdapter) Invoke(context.Context, string, []byte) ([]byte, string, error) {
+	return f.final, f.traceID, f.err
+}
+
+func (f *fakeStreamingInvokeAdapter) InvokeStream(_ context.Context, _ string, _ []byte, onToken func(string)) ([]byte, string, error) {
+	if f.err != nil {
+		return nil, f.traceID, f.err
+	}
+	for _, tok := range f.tokens {
+		onToken(tok)
+	}
+	return f.final, f.traceID, nil
+}
+
+func TestCreateRun_StreamsTokens(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeStreamingInvokeAdapter{
+		traceID: "t",
+		tokens:  []string{"Hel", "lo", " there"},
+		final:   []byte(`{"output":"Hello there","consent_required":[]}`),
+	}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	assert.Equal(t, "Hello there", final.Messages[0].Content)
+
+	// The event stream carried the token deltas as they arrived, then the message + state.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+created.ID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	assert.Contains(t, body, "event: token")
+	assert.Contains(t, body, "Hel")
+	assert.Contains(t, body, "lo")
+	assert.Contains(t, body, "event: message")
+	assert.Contains(t, body, "event: state")
+	assert.Contains(t, body, string(run.StatusSucceeded))
 }

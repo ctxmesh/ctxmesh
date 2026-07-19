@@ -50,11 +50,110 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
+		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
+		authed.HandleFunc("POST /api/runs/{id}/cancel", s.handleCancelRun)
 		return
 	}
 	authed.Handle("POST /api/runs", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
+	authed.Handle("POST /api/runs/{id}/resume", notImplemented("runs"))
+	authed.Handle("POST /api/runs/{id}/cancel", notImplemented("runs"))
+}
+
+// handleResumeRun serves POST /api/runs/{id}/resume — re-enter `running` from `requires_action`
+// (ADR 0034, m32.10). The requires_action pause is an OBO consent (the user has now connected) or a
+// human approval (M32); resume re-invokes the SAME input, so the agent's tool call now resolves the
+// fresh credential. Caller-scoped (the resume acts as the caller, like create).
+func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	rn, err := s.runStore.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if rn.Status != run.StatusRequiresAction {
+		writeError(w, http.StatusConflict, "run is not awaiting an action (status "+string(rn.Status)+")")
+		return
+	}
+
+	// The resume decision (human-in-the-loop, m32.4). Absent ⇒ approve — the consent path has
+	// nothing to deny (the user connected their account); a deny is meaningful only for an approval.
+	isApproval := rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionApproval
+	if isApproval && parseResumeDecision(r) == "deny" {
+		updated, err := s.runStore.Update(id, func(x *run.Run) error {
+			x.Error = "approval denied"
+			return x.Transition(run.StatusCancelled, time.Now())
+		})
+		if err != nil {
+			writeError(w, http.StatusConflict, "cannot resume this run")
+			return
+		}
+		writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
+		return
+	}
+
+	endpoint, ok := s.resolveAgentEndpoint(w, r, caller, rn.Agent, rn.Namespace)
+	if !ok {
+		return
+	}
+	r, ok = attachConversationID(w, r, rn.ConversationID)
+	if !ok {
+		return
+	}
+	r = s.attachRunCapability(r, caller, rn.Agent, rn.Namespace)
+
+	// On approval, re-invoke with the approved key granted so the agent's pause_for_approval(key)
+	// proceeds instead of pausing again (the consent path re-invokes the same input unchanged — the
+	// now-connected credential resolves the tool call).
+	input := []byte(rn.Input)
+	if isApproval && rn.RequiresAction.Key != "" {
+		input = withApprovals(input, []string{rn.RequiresAction.Key})
+	}
+
+	if _, err := s.runStore.Update(id, func(x *run.Run) error {
+		return x.Transition(run.StatusRunning, time.Now())
+	}); err != nil {
+		writeError(w, http.StatusConflict, "cannot resume this run")
+		return
+	}
+	execCtx := contextWithRunCapability(
+		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
+		runCapabilityFromContext(r.Context()),
+	)
+	go s.executeRun(execCtx, id, endpoint, input)
+
+	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: id, Status: string(run.StatusRunning)})
+}
+
+// handleCancelRun serves POST /api/runs/{id}/cancel — move a non-terminal run to `cancelled` (ADR
+// 0034). Caller-scoped. The state machine permits cancel from queued / running / requires_action;
+// a run that is already terminal returns 409 (nothing to cancel). The executing worker/goroutine
+// observes the terminal status via the store and its own writes are no-ops on a terminal run.
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	updated, err := s.runStore.Update(id, func(x *run.Run) error {
+		if x.Status.IsTerminal() {
+			return fmt.Errorf("run already %s", x.Status)
+		}
+		return x.Transition(run.StatusCancelled, time.Now())
+	})
+	if errors.Is(err, run.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "cannot cancel this run: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
 }
 
 // handleCreateRun serves POST /api/runs — create a durable run and start it. It is CALLER-SCOPED
@@ -94,19 +193,32 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ns = defaultCreateNamespace
 	}
 	rn := run.New(runID, ns, req.Agent, req.Input, req.ConversationID, time.Now())
+	// Capture the non-secret execution record so a durable WORKER can (re)execute this run off the
+	// request path (m32.2): the resolved+authorized endpoint, the caller's identity, and the trust
+	// boundary — enough to re-mint a fresh capability on the caller's behalf without their
+	// connection present. (Best-effort: identity may be unresolved when minting is disabled.)
+	rn.Endpoint = endpoint
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		rn.CallerUsername = username
+		rn.Boundary = agentBoundary(r.Context(), caller, ns, req.Agent)
+	}
 	if err := s.runStore.Create(rn); err != nil {
 		s.log.Error(err, "create run failed", "agent", req.Agent)
 		writeError(w, http.StatusInternalServerError, "failed to create the run")
 		return
 	}
 
-	// Detach the capability + conversationId onto a background context so execution survives the
-	// request returning (the 202). The request context would cancel the moment we respond.
-	execCtx := contextWithRunCapability(
-		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-		runCapabilityFromContext(r.Context()),
-	)
-	go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
+	// Worker-dispatch mode (ADR 0034): leave the run `queued` — a KEDA-scaled worker pool claims and
+	// executes it against the durable store, decoupled from this request (and this pod). Otherwise
+	// (dev / single-pod) execute in-process: detach the capability + conversationId onto a
+	// background context so execution survives the request returning (the request ctx cancels at 202).
+	if !s.runWorkerDispatch {
+		execCtx := contextWithRunCapability(
+			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
+			runCapabilityFromContext(r.Context()),
+		)
+		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
+	}
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 }
@@ -126,7 +238,20 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
-	resp, traceID, err := s.adapters.Invoke.Invoke(ctx, endpoint, input)
+	// Stream tokens when the adapter supports it (m32.7): each content delta becomes a `token`
+	// event on the run's stream as it arrives; the returned envelope is the same shape Invoke
+	// returns, so consent/output handling below is unchanged. A non-streaming adapter (a test
+	// fake) falls back to request/response.
+	var resp []byte
+	var traceID string
+	var err error
+	if sa, ok := s.adapters.Invoke.(StreamingInvokeAdapter); ok {
+		resp, traceID, err = sa.InvokeStream(ctx, endpoint, input, func(text string) {
+			_ = s.runStore.AppendEvent(runID, run.EventToken, text)
+		})
+	} else {
+		resp, traceID, err = s.adapters.Invoke.Invoke(ctx, endpoint, input)
+	}
 	now := time.Now()
 	if err != nil {
 		var ie *invokeError
@@ -153,6 +278,20 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 			return rn.Transition(run.StatusRequiresAction, now)
 		}); uErr != nil {
 			s.log.Error(uErr, "run: could not persist requires_action", "run", runID)
+		}
+		return
+	}
+
+	// Human-in-the-loop (m32.4): the agent paused a step for approval. Enter requires_action
+	// (approval) carrying the key + summary; an approver resolves it via resume (approve → re-invoke
+	// with the key granted; deny → cancelled).
+	if approval := parseApprovalRequired(resp); approval != nil {
+		if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+			rn.TraceID = traceID
+			rn.RequiresAction = approval
+			return rn.Transition(run.StatusRequiresAction, now)
+		}); uErr != nil {
+			s.log.Error(uErr, "run: could not persist approval requires_action", "run", runID)
 		}
 		return
 	}
@@ -247,6 +386,42 @@ func lastEventID(r *http.Request) int {
 		}
 	}
 	return 0
+}
+
+// parseResumeDecision reads an optional {"decision":"approve"|"deny"} from the resume body
+// (best-effort; a missing/blank/malformed body ⇒ "" ⇒ treated as approve). Bounded read.
+func parseResumeDecision(r *http.Request) string {
+	if r.Body == nil {
+		return ""
+	}
+	var body struct {
+		Decision string `json:"decision"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10))
+	if err := dec.Decode(&body); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(body.Decision))
+}
+
+// withApprovals merges the granted approval keys into the run's input JSON as an `approvals` array,
+// so the re-invoked agent's pause_for_approval(key) proceeds (m32.4). A non-object input is left
+// unchanged (the agent gets no approvals and pauses again — honest, not a silent success).
+func withApprovals(input []byte, keys []string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(input, &m); err != nil || m == nil {
+		return input
+	}
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return input
+	}
+	m["approvals"] = b
+	out, err := json.Marshal(m)
+	if err != nil {
+		return input
+	}
+	return out
 }
 
 // extractRunOutput unwraps the managed-agent /invoke envelope ({output,...}, m25.9) to the human

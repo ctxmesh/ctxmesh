@@ -102,6 +102,28 @@ func TestMemStore(t *testing.T) {
 	assert.Len(t, s.List(), 1)
 }
 
+func TestMemStore_ClaimQueued(t *testing.T) {
+	s := NewMemStore()
+	// Two queued runs; the older must be claimed first (FIFO), matching the durable store.
+	require.NoError(t, s.Create(New("old", "ns", "a", nil, "", t0)))
+	require.NoError(t, s.Create(New("new", "ns", "a", nil, "", t0.Add(time.Minute))))
+
+	claimed, err := s.ClaimQueued("worker-1", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "old", claimed.ID, "oldest queued run claimed first")
+	assert.Equal(t, StatusRunning, claimed.Status, "claim flips queued→running")
+	assert.Equal(t, "worker-1", claimed.WorkerID)
+	require.NotNil(t, claimed.LeaseExpiresAt)
+
+	second, err := s.ClaimQueued("worker-2", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "new", second.ID)
+
+	// Queue drained → ErrNoQueuedRun (a back-off signal, not a failure).
+	_, err = s.ClaimQueued("worker-3", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun)
+}
+
 func TestStoreEvents_LiveAndAutoState(t *testing.T) {
 	s := NewMemStore()
 	require.NoError(t, s.Create(New("r", "ns", "a", nil, "", t0)))

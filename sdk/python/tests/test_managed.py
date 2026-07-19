@@ -265,6 +265,37 @@ def test_managed_loop_max_steps_guard_trips_on_runaway(runaway_gateway, echo_dis
     assert "max_steps=3" in str(exc.value)
 
 
+def test_managed_loop_surfaces_approval_then_resumes(tool_gateway, echo_discovery, monkeypatch):
+    """Human-in-the-loop (m32.4): a step that pauses for approval becomes an approval_required
+    OUTCOME (not a crash); re-invoking with the approved key lets the same step proceed to a final
+    answer — the resume contract, end to end through the loop."""
+    from ctxmesh import pause_for_approval
+
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="You are a helpful assistant.", model_route="tool-mock")
+
+    # Model the bound tool as a sensitive action gated on approval.
+    def gated_call(name, **kwargs):
+        pause_for_approval("echo-tool", "Run echo_tool with the given text?")
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(client.tools, "call", gated_call)
+
+    # First run: not approved → the loop surfaces requires_action(approval), never runs the tool.
+    paused = run_managed_loop(client, config, "please echo ping")
+    assert paused.approval_required == {
+        "key": "echo-tool",
+        "summary": "Run echo_tool with the given text?",
+    }
+    assert paused.tools_called == [], "the gated tool did not execute before approval"
+
+    # Resume: re-invoke with the approved key → pause_for_approval proceeds, the tool runs, and the
+    # loop reaches the mock final answer.
+    resumed = run_managed_loop(client, config, "please echo ping", approvals=["echo-tool"])
+    assert resumed.approval_required is None
+    assert resumed.output.startswith(FINAL_MARKER)
+
+
 def test_managed_loop_trace_has_step_tool_model_tree(
     tool_gateway, echo_discovery, span_exporter: InMemorySpanExporter
 ):
@@ -498,3 +529,37 @@ def test_managed_loop_echo_fallback_still_permissive(tool_gateway, echo_discover
     fn = first_req["tools"][0]["function"]
     assert fn["name"] == TOOL_NAME
     assert fn["parameters"] == _PERMISSIVE_PARAMETERS
+
+
+# ── m32.7: the managed loop streams the answer via on_token ────────────────────
+
+from ctxmesh.model import ChatResponse  # noqa: E402
+
+
+def test_managed_loop_streams_the_answer(monkeypatch):
+    """With on_token wired, the loop streams the final answer's content deltas AND returns the
+    assembled result — the streaming /invoke's token source (m32.7)."""
+    with _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(discovery_base_url=disc.base_url, model_gateway_url="http://gw")
+        client = agent.from_config(plane)
+
+        def fake_stream(route, messages, **opts):
+            for tok in ["Hel", "lo", " there"]:
+                yield tok
+            return ChatResponse(
+                text="Hello there",
+                usage={},
+                model=route,
+                raw={"choices": [{"message": {"role": "assistant", "content": "Hello there"}}]},
+            )
+
+        monkeypatch.setattr(client.model, "stream_completion", fake_stream)
+
+        got: list = []
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        result = run_managed_loop(client, config, "hi", on_token=got.append)
+
+        assert got == ["Hel", "lo", " there"], "each content delta streamed to on_token"
+        assert result.output == "Hello there"
+        assert result.steps == 1
+        assert result.tools_called == []
