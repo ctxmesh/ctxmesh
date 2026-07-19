@@ -19,6 +19,7 @@ package run
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -225,6 +226,50 @@ func TestPostgresStore_OptimisticConcurrency(t *testing.T) {
 	got, err := s.Get("occ")
 	require.NoError(t, err)
 	assert.Len(t, got.Messages, n, "every concurrent update landed (OCC retried the losers)")
+}
+
+// TestPostgresStore_ClaimQueuedConcurrent proves the worker-claim path: many workers claim
+// concurrently, each gets a DISTINCT run (FOR UPDATE SKIP LOCKED — no double-dispatch), every
+// queued run is claimed exactly once, and the surplus workers get ErrNoQueuedRun.
+func TestPostgresStore_ClaimQueuedConcurrent(t *testing.T) {
+	s := openPGStore(t)
+
+	const runs = 12
+	for i := range runs {
+		id := "q" + string(rune('a'+i))
+		require.NoError(t, s.Create(New(id, "ns", "a", nil, "", t0.Add(time.Duration(i)*time.Second))))
+	}
+
+	const workers = 16 // more workers than runs → some get ErrNoQueuedRun
+	var (
+		mu      sync.Mutex
+		claimed = map[string]int{}
+		empties int
+		wg      sync.WaitGroup
+	)
+	wg.Add(workers)
+	for w := range workers {
+		go func() {
+			defer wg.Done()
+			r, err := s.ClaimQueued("worker-"+string(rune('A'+w)), time.Minute)
+			mu.Lock()
+			defer mu.Unlock()
+			if errors.Is(err, ErrNoQueuedRun) {
+				empties++
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, StatusRunning, r.Status)
+			claimed[r.ID]++
+		}()
+	}
+	wg.Wait()
+
+	assert.Len(t, claimed, runs, "every queued run claimed")
+	for id, n := range claimed {
+		assert.Equalf(t, 1, n, "run %s claimed exactly once (no double-dispatch)", id)
+	}
+	assert.Equal(t, workers-runs, empties, "surplus workers backed off with ErrNoQueuedRun")
 }
 
 // recvWithin receives one event or fails the test on timeout.

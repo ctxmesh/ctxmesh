@@ -140,19 +140,32 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ns = defaultCreateNamespace
 	}
 	rn := run.New(runID, ns, req.Agent, req.Input, req.ConversationID, time.Now())
+	// Capture the non-secret execution record so a durable WORKER can (re)execute this run off the
+	// request path (m32.2): the resolved+authorized endpoint, the caller's identity, and the trust
+	// boundary — enough to re-mint a fresh capability on the caller's behalf without their
+	// connection present. (Best-effort: identity may be unresolved when minting is disabled.)
+	rn.Endpoint = endpoint
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		rn.CallerUsername = username
+		rn.Boundary = agentBoundary(r.Context(), caller, ns, req.Agent)
+	}
 	if err := s.runStore.Create(rn); err != nil {
 		s.log.Error(err, "create run failed", "agent", req.Agent)
 		writeError(w, http.StatusInternalServerError, "failed to create the run")
 		return
 	}
 
-	// Detach the capability + conversationId onto a background context so execution survives the
-	// request returning (the 202). The request context would cancel the moment we respond.
-	execCtx := contextWithRunCapability(
-		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-		runCapabilityFromContext(r.Context()),
-	)
-	go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
+	// Worker-dispatch mode (ADR 0034): leave the run `queued` — a KEDA-scaled worker pool claims and
+	// executes it against the durable store, decoupled from this request (and this pod). Otherwise
+	// (dev / single-pod) execute in-process: detach the capability + conversationId onto a
+	// background context so execution survives the request returning (the request ctx cancels at 202).
+	if !s.runWorkerDispatch {
+		execCtx := contextWithRunCapability(
+			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
+			runCapabilityFromContext(r.Context()),
+		)
+		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
+	}
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
 }
