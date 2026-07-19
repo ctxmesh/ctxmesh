@@ -378,6 +378,38 @@ func TestMemoryUnconditionalReplaceStillWorks(t *testing.T) {
 	}
 }
 
+func TestMemoryConcurrentAppendsNoLostWrites(t *testing.T) {
+	t.Parallel()
+	// The shared-scope collaboration invariant (m33.3/m33.7): many agents appending to ONE
+	// scratchpad concurrently all land — append is an atomic RPUSH, no read-modify-write, no lost
+	// writes (unlike a replace race, which m33.2 guards with optimistic concurrency).
+	mr := miniredis.RunT(t)
+	s := newRedisStore(mr.Addr())
+	ctx := context.Background()
+
+	const writers = 50
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := range writers {
+		go func() {
+			defer wg.Done()
+			_, err := s.Append(ctx, "shared", json.RawMessage(fmt.Sprintf(`{"w":%d}`, i)), time.Minute)
+			if err != nil {
+				t.Errorf("concurrent append %d: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := s.Get(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != writers {
+		t.Fatalf("stored = %d, want %d — a concurrent append was LOST", len(got), writers)
+	}
+}
+
 func TestMemoryAppendCapsConversationSize(t *testing.T) {
 	t.Parallel()
 	// A long conversation cannot grow the store without bound (m33.6): append LTRIMs to the last
