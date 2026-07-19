@@ -1760,7 +1760,7 @@ interface YAMLSummary {
 }
 
 function FriendlySummary({ summary }: { summary: YAMLSummary }) {
-  const rows: { k: string; v: React.ReactNode }[] = [
+  const rows: { k: string; v: React.ReactNode; block?: boolean }[] = [
     {
       k: "Name",
       v: summary.name || <span className="text-muted-foreground">—</span>,
@@ -1794,26 +1794,48 @@ function FriendlySummary({ summary }: { summary: YAMLSummary }) {
       ),
     });
   rows.push({
-    k: "Tools",
+    k: summary.tools.length > 0 ? `Tools · ${summary.tools.length}` : "Tools",
+    block: true,
     v:
       summary.tools.length > 0 ? (
-        <span data-testid="summary-tools">{summary.tools.join(", ")}</span>
+        <div className="flex flex-wrap gap-1.5" data-testid="summary-tools">
+          {summary.tools.map((t) => (
+            <Badge
+              key={t}
+              variant="secondary"
+              className="font-mono text-[10px] font-normal"
+            >
+              {t}
+            </Badge>
+          ))}
+        </div>
       ) : (
-        <span className="text-muted-foreground">none</span>
+        <span className="text-muted-foreground" data-testid="summary-tools">
+          none
+        </span>
       ),
   });
 
   return (
     <dl className="divide-y rounded-md border" data-testid="friendly-summary">
-      {rows.map((r) => (
-        <div
-          key={r.k}
-          className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
-        >
-          <dt className="text-muted-foreground">{r.k}</dt>
-          <dd className="text-right">{r.v}</dd>
-        </div>
-      ))}
+      {rows.map((r) =>
+        r.block ? (
+          // Full-width row: label on top, value left-aligned below (for long/rich
+          // values like the tools chip cloud — a right-justified comma wall reads badly).
+          <div key={r.k} className="space-y-2 px-3 py-2.5 text-sm">
+            <dt className="text-muted-foreground">{r.k}</dt>
+            <dd>{r.v}</dd>
+          </div>
+        ) : (
+          <div
+            key={r.k}
+            className="flex items-start justify-between gap-4 px-3 py-2 text-sm"
+          >
+            <dt className="text-muted-foreground">{r.k}</dt>
+            <dd className="text-right">{r.v}</dd>
+          </div>
+        ),
+      )}
     </dl>
   );
 }
