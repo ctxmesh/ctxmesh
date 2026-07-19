@@ -39,9 +39,12 @@ type MemoryBindingSpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	AgentRef string `json:"agentRef"`
 
-	// scope is the memory scope. Only "session" is supported in v1;
-	// agent/shared scopes are phase-2.
-	// +kubebuilder:validation:Enum=session
+	// scope is the memory scope. "session" (the default) is PRIVATE per-agent conversation memory
+	// (mem:{namespace}/{agent}:{conversationId}). "shared" (ADR 0035, m33.3) is a team scratchpad
+	// keyed mem:shared:{registry}:{conversationId} — readable/writable by every agent in the same
+	// registry conversation; it REQUIRES the agent to be a registry member (the shared key needs a
+	// trust boundary, ADR 0033).
+	// +kubebuilder:validation:Enum=session;shared
 	// +kubebuilder:default=session
 	Scope string `json:"scope,omitempty"`
 

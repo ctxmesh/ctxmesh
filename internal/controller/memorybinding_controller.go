@@ -207,13 +207,13 @@ func resolveMemoryBinding(
 	ctx context.Context,
 	c client.Client,
 	namespace, agentName string,
-) (addr string, hasBinding bool, err error) {
+) (addr, scope string, hasBinding bool, err error) {
 	bindings, err := listAgentMemoryBindings(ctx, c, namespace, agentName)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	if len(bindings) == 0 {
-		return "", false, nil
+		return "", "", false, nil
 	}
 
 	// Use the first binding (sorted by name for determinism when multiple exist).
@@ -228,5 +228,5 @@ func resolveMemoryBinding(
 	if best.Spec.Backend != nil && best.Spec.Backend.Addr != "" {
 		addr = best.Spec.Backend.Addr
 	}
-	return addr, true, nil
+	return addr, best.Spec.Scope, true, nil
 }
