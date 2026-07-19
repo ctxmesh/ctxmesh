@@ -305,6 +305,79 @@ func TestAttributeEntryIdempotent(t *testing.T) {
 	}
 }
 
+func TestMemoryGetReturnsETagVersion(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`)
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"b":2}`)
+	resp, _ := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	if got := resp.Header.Get("ETag"); got != "2" {
+		t.Errorf("ETag = %q, want \"2\" (the conversation version = entry count)", got)
+	}
+}
+
+func putIfMatch(t *testing.T, url, ifMatch, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp
+}
+
+func TestMemoryConditionalReplaceSucceedsOnMatch(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`) // version → 1
+	resp := putIfMatch(t, srv.URL+"/memory/c", "1", `[{"x":1},{"y":2}]`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("conditional replace status = %d, want 204", resp.StatusCode)
+	}
+	if got := resp.Header.Get("ETag"); got != "2" {
+		t.Errorf("new ETag = %q, want \"2\"", got)
+	}
+}
+
+func TestMemoryConditionalReplaceConflictsOnStaleVersion(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	// Read at version 1, then a concurrent APPEND advances it to 2 before our replace lands.
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`) // version 1
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"b":2}`) // version 2 (the concurrent write)
+
+	// A replace based on the stale version 1 must be REJECTED (412), not clobber the append.
+	resp := putIfMatch(t, srv.URL+"/memory/c", "1", `[{"rewrite":true}]`)
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("stale replace status = %d, want 412", resp.StatusCode)
+	}
+	// The concurrent append survives — no silent clobber.
+	_, body := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(body, &entries)
+	if len(entries) != 2 {
+		t.Errorf("entries = %d, want 2 (the append was NOT clobbered)", len(entries))
+	}
+}
+
+func TestMemoryUnconditionalReplaceStillWorks(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`)
+	// No If-Match → legacy last-writer-wins replace.
+	resp := putIfMatch(t, srv.URL+"/memory/c", "", `[{"x":1}]`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unconditional replace status = %d, want 204", resp.StatusCode)
+	}
+}
+
 func TestMemoryAppendRejectsInvalidJSON(t *testing.T) {
 	t.Parallel()
 	_, srv := newTestMemoryServer(t)
@@ -476,6 +549,12 @@ type failingStore struct{ err error }
 func (f *failingStore) Get(context.Context, string) ([]json.RawMessage, error) { return nil, f.err }
 func (f *failingStore) Replace(context.Context, string, []json.RawMessage, time.Duration) error {
 	return f.err
+}
+
+func (f *failingStore) ReplaceIfVersion(
+	context.Context, string, []json.RawMessage, int, time.Duration,
+) (int, bool, error) {
+	return 0, false, f.err
 }
 
 func (f *failingStore) Append(context.Context, string, json.RawMessage, time.Duration) (int, error) {

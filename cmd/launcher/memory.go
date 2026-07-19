@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +85,13 @@ type MemoryStore interface {
 	Get(ctx context.Context, key string) ([]json.RawMessage, error)
 	// Replace atomically overwrites key with entries and (re)sets its TTL.
 	Replace(ctx context.Context, key string, entries []json.RawMessage, ttl time.Duration) error
+	// ReplaceIfVersion is Replace guarded by optimistic concurrency (ADR 0036, m33.2): it overwrites
+	// key ONLY if its current version (the list length) still equals expectedVersion, atomically.
+	// conflict=true (no write) when another writer advanced the version since the caller's read — so
+	// a stale rewrite can never silently clobber a concurrent append. Returns the new version.
+	ReplaceIfVersion(
+		ctx context.Context, key string, entries []json.RawMessage, expectedVersion int, ttl time.Duration,
+	) (newVersion int, conflict bool, err error)
 	// Append atomically appends one entry to key and (re)sets its TTL. It
 	// returns the resulting entry count.
 	Append(ctx context.Context, key string, entry json.RawMessage, ttl time.Duration) (int, error)
@@ -140,6 +148,54 @@ func (s *redisStore) Replace(ctx context.Context, key string, entries []json.Raw
 	}
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+func (s *redisStore) ReplaceIfVersion(
+	ctx context.Context, key string, entries []json.RawMessage, expectedVersion int, ttl time.Duration,
+) (int, bool, error) {
+	// WATCH the key so a concurrent write (append or replace) between the LLEN read and the MULTI
+	// aborts the EXEC (redis.TxFailedErr) — optimistic concurrency, no lock held. The version is the
+	// list length (ADR 0036 permits length or a monotone rev); an append advances it, so a stale
+	// replace's expectedVersion no longer matches and is rejected.
+	var (
+		newVersion int
+		conflict   bool
+	)
+	txf := func(tx *redis.Tx) error {
+		n, err := tx.LLen(ctx, key).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return err
+		}
+		if int(n) != expectedVersion {
+			conflict = true
+			return nil
+		}
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.Del(ctx, key)
+			if len(entries) > 0 {
+				vals := make([]any, 0, len(entries))
+				for _, e := range entries {
+					vals = append(vals, string(e))
+				}
+				pipe.RPush(ctx, key, vals...)
+				pipe.Expire(ctx, key, ttl)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		newVersion = len(entries)
+		return nil
+	}
+	err := s.rdb.Watch(ctx, txf, key)
+	if errors.Is(err, redis.TxFailedErr) {
+		return 0, true, nil // the watched key changed under us — a conflict, retry-able
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return newVersion, conflict, nil
 }
 
 func (s *redisStore) Append(ctx context.Context, key string, entry json.RawMessage, ttl time.Duration) (int, error) {
@@ -379,6 +435,10 @@ func (m *memoryServer) handleGet(
 	if entries == nil {
 		entries = []json.RawMessage{}
 	}
+	// The ETag is the conversation version (the entry count, ADR 0036 m33.2). A subsequent
+	// If-Match PUT uses it for a compare-and-set replace, so a stale rewrite can't clobber a
+	// concurrent append.
+	w.Header().Set("ETag", strconv.Itoa(len(entries)))
 	writeJSON(w, entries)
 }
 
@@ -403,10 +463,39 @@ func (m *memoryServer) handlePut(
 	opCtx, cancel := context.WithTimeout(ctx, memoryOpTimeout)
 	defer cancel()
 
+	// Optimistic-concurrency replace (ADR 0036, m33.2): an If-Match header (the version from a prior
+	// GET's ETag) makes this a compare-and-set — a stale rewrite (the version moved under us, e.g. a
+	// concurrent append) is a 412, so the caller re-reads + retries rather than silently clobbering.
+	// No If-Match keeps the legacy unconditional replace (last-writer-wins) for a simple full set.
+	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
+		expected, convErr := strconv.Atoi(strings.Trim(ifMatch, `"`))
+		if convErr != nil {
+			span.SetStatus(codes.Error, "bad If-Match")
+			writeJSONError(w, http.StatusBadRequest, "If-Match must be an integer version (a prior ETag)")
+			return
+		}
+		newVersion, conflict, repErr := m.store.ReplaceIfVersion(opCtx, m.key(convID), entries, expected, memoryTTL)
+		if repErr != nil {
+			backendError(w, span, repErr)
+			return
+		}
+		if conflict {
+			span.SetAttributes(attribute.Bool("memory.conflict", true))
+			writeJSONError(w, http.StatusPreconditionFailed,
+				"version conflict: the conversation changed since your read — re-read and retry")
+			return
+		}
+		w.Header().Set("ETag", strconv.Itoa(newVersion))
+		span.SetAttributes(attribute.Int("memory.entries", len(entries)))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if err := m.store.Replace(opCtx, m.key(convID), entries, memoryTTL); err != nil {
 		backendError(w, span, err)
 		return
 	}
+	w.Header().Set("ETag", strconv.Itoa(len(entries)))
 	span.SetAttributes(attribute.Int("memory.entries", len(entries)))
 	w.WriteHeader(http.StatusNoContent)
 }
