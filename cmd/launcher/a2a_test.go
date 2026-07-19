@@ -38,11 +38,14 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // peerCapture records what a peer agent received on its /invoke route.
 type peerCapture struct {
 	traceparent string
+	runCap      string
 	envelope    envelope
 	body        []byte
 }
@@ -65,6 +68,7 @@ func newTestA2AServer(
 		_ = json.Unmarshal([]byte(r.Header.Get(a2aEnvelopeHeader)), &env)
 		peerCh <- peerCapture{
 			traceparent: r.Header.Get("Traceparent"),
+			runCap:      r.Header.Get(runcap.HeaderName),
 			envelope:    env,
 			body:        body,
 		}
@@ -422,6 +426,27 @@ func TestA2ATracePropagation(t *testing.T) {
 }
 
 // ── response relay ──────────────────────────────────────────────────────────
+
+// TestA2ARelaysRunCapability: a hop carrying the invoking user's run capability relays it to the
+// peer (ADR 0033, m30.3) so a downstream agent can act on-behalf-of the same user; a call with no
+// capability relays none (an unattended run — the peer resolves org/public only).
+func TestA2ARelaysRunCapability(t *testing.T) {
+	s, _, _, peerCh := newTestA2AServer(t, baseCfg(), http.StatusOK, `{"ok":true}`)
+
+	rec := callA2A(t, s, context.Background(), "worker", `{"payload":"x"}`,
+		map[string]string{runcap.HeaderName: "the-cap-token"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if cap := <-peerCh; cap.runCap != "the-cap-token" {
+		t.Fatalf("peer runCap = %q, want the relayed capability", cap.runCap)
+	}
+
+	_ = callA2A(t, s, context.Background(), "worker", `{"payload":"y"}`, nil)
+	if cap := <-peerCh; cap.runCap != "" {
+		t.Fatalf("peer runCap = %q, want empty (no capability relayed)", cap.runCap)
+	}
+}
 
 func TestA2ARelaysPeerResponse(t *testing.T) {
 	t.Parallel()

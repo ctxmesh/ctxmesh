@@ -102,6 +102,10 @@ func run(log logr.Logger) error {
 	// The agent identity this sidecar serves (ns/name); a capability minted for another
 	// agent is rejected. Optional — empty skips the agent-scope check.
 	expectedAgent := strings.TrimSpace(os.Getenv("EGRESS_AGENT"))
+	// EGRESS_BOUNDARY is the agent's trust boundary (ADR 0033) — its registry, or "a:<ns>/<name>"
+	// when standalone — injected by the controller. When set it is the scoping gate (supersedes
+	// EGRESS_AGENT) so teammates in the same registry can redeem a relayed capability.
+	expectedBoundary := strings.TrimSpace(os.Getenv("EGRESS_BOUNDARY"))
 
 	listenAddr := strings.TrimSpace(os.Getenv("EGRESS_LISTEN_ADDR"))
 	if listenAddr == "" {
@@ -114,12 +118,13 @@ func run(log logr.Logger) error {
 	}
 
 	proxy := egress.NewProxy(egress.ProxyConfig{
-		Verifier:      runcap.NewVerifier(pub, audience, nil),
-		Resolver:      resolver,
-		Namespace:     podNS,
-		ExpectedAgent: expectedAgent,
-		Routes:        routes,
-		Log:           log,
+		Verifier:         runcap.NewVerifier(pub, audience, nil),
+		Resolver:         resolver,
+		Namespace:        podNS,
+		ExpectedAgent:    expectedAgent,
+		ExpectedBoundary: expectedBoundary,
+		Routes:           routes,
+		Log:              log,
 	})
 
 	mux := http.NewServeMux()

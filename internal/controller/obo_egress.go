@@ -24,6 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
 
@@ -72,7 +74,7 @@ type OBOEgressConfig struct {
 // out of the agent's own manifest). POD_NAMESPACE (the grant source ns) is the agent's own
 // namespace, set as a LITERAL (not the downward-API fieldRef, which Knative Serving forbids —
 // `kubernetes.podspec-fieldref` is off by default; the controller knows the namespace anyway).
-func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, routesJSON string) corev1.Container {
+func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
 		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
@@ -83,6 +85,12 @@ func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, route
 		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
 		// port (the managed-agent's own listener collided at the default 8081).
 		{Name: "EGRESS_LISTEN_ADDR", Value: egressSidecarListenAddr},
+	}
+	// The trust boundary (ADR 0033) the sidecar serves — the agent's registry, or the agent
+	// itself. It supersedes EGRESS_AGENT as the scoping gate so registry teammates can redeem a
+	// relayed capability (team-OBO); empty ⇒ the per-agent gate (standalone / OBO-boundary off).
+	if boundary != "" {
+		env = append(env, corev1.EnvVar{Name: "EGRESS_BOUNDARY", Value: boundary})
 	}
 	if cfg.TokenServiceURL != "" {
 		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
@@ -98,6 +106,18 @@ func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, route
 			},
 		},
 	}
+}
+
+// agentEgressBoundary is the trust boundary (ADR 0033) the agent's egress sidecar serves: its
+// registry when it is a member, else the agent itself. The sidecar checks a run capability's
+// `bnd` against it, so registry teammates can redeem a relayed capability (team-OBO) but a
+// different registry cannot. It folds into the egress digest so a membership change rolls a new
+// revision (the EGRESS_BOUNDARY env must actually land).
+func agentEgressBoundary(deploy *agentsv1alpha1.AgentDeployment, m registryMembership) string {
+	if m.IsMember && m.RegistryID != "" {
+		return credresolve.RegistryBoundary(m.RegistryID)
+	}
+	return credresolve.AgentBoundary(deploy.Namespace, deploy.Name)
 }
 
 // egressRoutesJSON serializes the sidecar route table to the EGRESS_ROUTES env value. An
@@ -117,16 +137,17 @@ func egressRoutesJSON(routes []toolmanifest.Route) string {
 // structural digest, so adding/removing the sidecar OR changing a route (the real URL now
 // lives in the sidecar env, not the hot-path manifest) rolls a new revision. Empty when no
 // OBO route is present (the pod template is unchanged).
-func egressDigest(image string, routes []toolmanifest.Route) string {
+func egressDigest(image, boundary string, routes []toolmanifest.Route) string {
 	if len(routes) == 0 {
 		return ""
 	}
 	type shape struct {
 		Image      string               `json:"image"`
 		ListenAddr string               `json:"listenAddr"`
+		Boundary   string               `json:"boundary"`
 		Routes     []toolmanifest.Route `json:"routes"`
 	}
-	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Routes: routes})
+	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, Routes: routes})
 	if err != nil {
 		return "invalid"
 	}
