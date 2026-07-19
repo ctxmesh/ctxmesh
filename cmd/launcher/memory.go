@@ -73,6 +73,12 @@ const (
 	// maxConversationID bounds the caller-supplied conversation id. It lands in
 	// both span attributes and Redis keys, so it must be short and path-safe.
 	maxConversationID = 128
+
+	// maxConversationEntries caps a conversation's stored entry count (m33.6, ADR 0036): append
+	// LTRIMs to the last N so a long-lived (especially shared, m33.3) conversation cannot grow the
+	// store without bound — the oldest entries are evicted (the summary hook is the extension point;
+	// TTL still bounds age). The read-side replay window (SDK MAX_HISTORY_MESSAGES) is smaller still.
+	maxConversationEntries = 500
 )
 
 // MemoryStore is the minimal backend surface the memory handlers need. It is an
@@ -199,16 +205,18 @@ func (s *redisStore) ReplaceIfVersion(
 }
 
 func (s *redisStore) Append(ctx context.Context, key string, entry json.RawMessage, ttl time.Duration) (int, error) {
-	// RPUSH is itself atomic; pairing it with EXPIRE in a pipeline refreshes
-	// the TTL on every write without a second round-trip. RPUSH returns the new
-	// length.
+	// RPUSH (atomic) then LTRIM to the last maxConversationEntries — a size cap (m33.6) so the
+	// conversation can't grow unbounded — then EXPIRE (TTL refresh), all in one round-trip. LLEN
+	// after the trim is the true post-cap count returned.
 	pipe := s.rdb.TxPipeline()
-	push := pipe.RPush(ctx, key, string(entry))
+	pipe.RPush(ctx, key, string(entry))
+	pipe.LTrim(ctx, key, -maxConversationEntries, -1)
 	pipe.Expire(ctx, key, ttl)
+	llen := pipe.LLen(ctx, key)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, err
 	}
-	return int(push.Val()), nil
+	return int(llen.Val()), nil
 }
 
 // memoryConfig is the subset of configuration the memory server needs. Parsed

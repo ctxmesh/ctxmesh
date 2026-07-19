@@ -378,6 +378,42 @@ func TestMemoryUnconditionalReplaceStillWorks(t *testing.T) {
 	}
 }
 
+func TestMemoryAppendCapsConversationSize(t *testing.T) {
+	t.Parallel()
+	// A long conversation cannot grow the store without bound (m33.6): append LTRIMs to the last
+	// maxConversationEntries; the oldest are evicted, the newest survive.
+	mr := miniredis.RunT(t)
+	s := newRedisStore(mr.Addr())
+	ctx := context.Background()
+
+	total := maxConversationEntries + 25
+	var lastN int
+	for i := range total {
+		n, err := s.Append(ctx, "cap", json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)), time.Minute)
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		lastN = n
+	}
+	if lastN != maxConversationEntries {
+		t.Errorf("append count = %d, want capped at %d", lastN, maxConversationEntries)
+	}
+
+	got, err := s.Get(ctx, "cap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxConversationEntries {
+		t.Fatalf("stored = %d, want %d (oldest evicted)", len(got), maxConversationEntries)
+	}
+	if !strings.Contains(string(got[len(got)-1]), fmt.Sprintf(`"i":%d`, total-1)) {
+		t.Errorf("last entry = %s, want the most recent (i=%d)", got[len(got)-1], total-1)
+	}
+	if !strings.Contains(string(got[0]), fmt.Sprintf(`"i":%d`, total-maxConversationEntries)) {
+		t.Errorf("first surviving = %s, want i=%d (older evicted)", got[0], total-maxConversationEntries)
+	}
+}
+
 func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
