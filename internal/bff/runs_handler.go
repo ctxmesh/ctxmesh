@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,10 +49,12 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 	if s.adapters.Invoke != nil && s.callerClients != nil {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
 		return
 	}
 	authed.Handle("POST /api/runs", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
+	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
 }
 
 // handleCreateRun serves POST /api/runs — create a durable run and start it. It is CALLER-SCOPED
@@ -138,21 +142,31 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
-	consent := parseConsentRequired(resp)
-	_, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
-		rn.TraceID = traceID
-		if len(consent) > 0 {
+	if consent := parseConsentRequired(resp); len(consent) > 0 {
+		if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+			rn.TraceID = traceID
 			rn.RequiresAction = &run.Action{
 				Kind:    run.ActionConsentRequired,
 				Servers: consent,
 				Message: "connect your account to continue",
 			}
 			return rn.Transition(run.StatusRequiresAction, now)
+		}); uErr != nil {
+			s.log.Error(uErr, "run: could not persist requires_action", "run", runID)
 		}
-		rn.Messages = append(rn.Messages, run.Message{Role: "assistant", Content: extractRunOutput(resp)})
+		return
+	}
+
+	// Success: emit the assistant message as a stream event BEFORE the terminal transition (which
+	// closes live subscribers), then persist it + succeed. m31.4 adds token-level events during
+	// the loop; here the whole answer arrives as one message.
+	output := extractRunOutput(resp)
+	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
+	if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+		rn.TraceID = traceID
+		rn.Messages = append(rn.Messages, run.Message{Role: "assistant", Content: output})
 		return rn.Transition(run.StatusSucceeded, now)
-	})
-	if uErr != nil {
+	}); uErr != nil {
 		s.log.Error(uErr, "run: could not persist terminal state", "run", runID)
 	}
 }
@@ -170,6 +184,69 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rn)
+}
+
+// handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR
+// 0034). It resumes from a `Last-Event-ID` header (or `?fromSeq=`) so a reconnect replays only
+// missed events, then streams live until the run is terminal (the stream closes) or the client
+// disconnects. Each frame is `id:<seq>`, `event:<kind>`, `data:<json event>`.
+func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
+		return
+	}
+	id := r.PathValue("id")
+	events, cancel, err := s.runStore.Subscribe(id, lastEventID(r))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // do not buffer SSE behind a reverse proxy
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return // client disconnected
+		case ev, open := <-events:
+			if !open {
+				return // run terminal + backlog drained
+			}
+			data, mErr := json.Marshal(ev)
+			if mErr != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Kind, data)
+			flusher.Flush()
+		}
+	}
+}
+
+// lastEventID reads the SSE resume cursor from the standard Last-Event-ID header, falling back to
+// a `?fromSeq=` query param for clients (EventSource) that cannot set the header on first connect.
+func lastEventID(r *http.Request) int {
+	if v := strings.TrimSpace(r.Header.Get("Last-Event-ID")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("fromSeq")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // extractRunOutput unwraps the managed-agent /invoke envelope ({output,...}, m25.9) to the human

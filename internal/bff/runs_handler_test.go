@@ -115,6 +115,31 @@ func TestCreateRun_AgentFailureIsFailed(t *testing.T) {
 	assert.NotEmpty(t, got.Error)
 }
 
+func TestRunEvents_SSE(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"Hi there.","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	// Wait until terminal so the stream has the full backlog and closes cleanly (no hang).
+	pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+created.ID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
+	body := rec.Body.String()
+	// The stream carried the state transitions + the assistant message.
+	assert.Contains(t, body, "event: state")
+	assert.Contains(t, body, string(run.StatusRunning))
+	assert.Contains(t, body, string(run.StatusSucceeded))
+	assert.Contains(t, body, "event: message")
+	assert.Contains(t, body, "Hi there.")
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
