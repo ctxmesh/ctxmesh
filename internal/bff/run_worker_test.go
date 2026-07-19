@@ -71,3 +71,39 @@ func TestRunWorker_DrainsQueue(t *testing.T) {
 	assert.Equal(t, "worked", got.Messages[0].Content)
 	assert.Equal(t, "chat-w", got.ConversationID, "conversation threaded through the worker path")
 }
+
+// TestRunWorker_ResumesAbandonedRun is the resume-on-pod-loss headline (m32.3): a run left `running`
+// by a worker that died mid-flight (its lease expires) is reclaimed by a live worker pool and driven
+// to completion — no operator intervention, the run survives the pod loss.
+func TestRunWorker_ResumesAbandonedRun(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr-r", resp: []byte(`{"output":"resumed","consent_required":[]}`)}
+	s := NewServer(Options{
+		CallerClients:     newFakeFactory(c),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "test",
+		RunWorkerDispatch: true,
+		Log:               logr.Discard(),
+	})
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{"input":"hi"}`)})
+
+	// Simulate a worker that CLAIMED the run then died before executing: claim it with a tiny lease
+	// and never run it. The run is now `running` with an about-to-expire lease and no live worker.
+	claimed, err := s.runStore.ClaimQueued("dead-worker", 5*time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, claimed.ID)
+	require.Equal(t, run.StatusRunning, claimed.Status)
+	time.Sleep(25 * time.Millisecond) // let the dead worker's lease lapse
+
+	// A live pool finds nothing queued, RECLAIMS the abandoned running run, and completes it.
+	s.StartRunWorkers(t.Context(), RunWorkerConfig{Concurrency: 2, Lease: time.Minute, PollBackoff: 10 * time.Millisecond})
+
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, got.Status, "the abandoned run was resumed to success")
+	require.NotEmpty(t, got.Messages)
+	assert.Equal(t, "resumed", got.Messages[len(got.Messages)-1].Content)
+}

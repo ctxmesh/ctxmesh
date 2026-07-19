@@ -307,6 +307,67 @@ func (p *pgStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error
 	return claimed, nil
 }
 
+func (p *pgStore) Heartbeat(id, workerID string, lease time.Duration) error {
+	ctx := context.Background()
+	now := p.clock()
+	exp := now.Add(lease)
+	// Renew only if THIS worker still holds the lease on a still-running run. No version bump — a
+	// lease renewal is not a logical state change (a concurrent terminal Update is unaffected).
+	const q = `UPDATE runs SET lease_expires_at=$1, updated_at=$2
+		WHERE id=$3 AND worker_id=$4 AND status=$5`
+	res, err := p.db.ExecContext(ctx, q, exp.UTC(), now.UTC(), id, workerID, string(StatusRunning))
+	if err != nil {
+		return fmt.Errorf("run: heartbeat: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Nothing updated: the run is gone, terminal, or leased by someone else (reclaimed).
+		if _, _, gErr := p.getWithVersion(ctx, p.db, id); errors.Is(gErr, ErrNotFound) {
+			return ErrNotFound
+		}
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, error) {
+	ctx := context.Background()
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("run: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := p.clock()
+	exp := now.Add(lease)
+	// Re-lease the oldest running run whose lease has expired (its worker is presumed dead). FOR
+	// UPDATE SKIP LOCKED so two live workers never reclaim the same run. It stays `running` (no
+	// state change, no version bump) — the worker resumes it from its last checkpoint.
+	const claim = `UPDATE runs SET worker_id=$1, lease_expires_at=$2, updated_at=$3
+		WHERE id = (
+			SELECT id FROM runs
+			WHERE status=$4 AND lease_expires_at IS NOT NULL AND lease_expires_at < $5
+			ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+		)
+		RETURNING id`
+	var id string
+	err = tx.QueryRowContext(ctx, claim,
+		workerID, exp.UTC(), now.UTC(), string(StatusRunning), now.UTC()).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrNoQueuedRun
+	case err != nil:
+		return nil, fmt.Errorf("run: claim reclaimable: %w", err)
+	}
+	reclaimed, _, err := p.getWithVersion(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("run: commit: %w", err)
+	}
+	return reclaimed, nil
+}
+
 func (p *pgStore) List() []*Run {
 	ctx := context.Background()
 	rows, err := p.db.QueryContext(ctx, `SELECT id FROM runs`)

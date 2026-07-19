@@ -272,6 +272,48 @@ func TestPostgresStore_ClaimQueuedConcurrent(t *testing.T) {
 	assert.Equal(t, workers-runs, empties, "surplus workers backed off with ErrNoQueuedRun")
 }
 
+// TestPostgresStore_ReclaimExpiredLease is the resume-on-pod-loss contract (m32.3): a run left
+// `running` by a dead worker (its lease expired) is reclaimed by a live worker and stays running (a
+// resume, not a restart); a fresh or heartbeat-renewed lease is NOT reclaimable; and the dead
+// worker's heartbeat fails once reclaimed. Uses an injected clock so expiry is deterministic.
+func TestPostgresStore_ReclaimExpiredLease(t *testing.T) {
+	s := openPGStore(t)
+	var mu sync.Mutex
+	current := t0
+	s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return current }
+	advance := func(d time.Duration) { mu.Lock(); current = current.Add(d); mu.Unlock() }
+
+	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
+
+	claimed, err := s.ClaimQueued("w1", time.Minute) // lease expires at t0+1m
+	require.NoError(t, err)
+	require.Equal(t, "w1", claimed.WorkerID)
+
+	// Fresh lease → not reclaimable.
+	_, err = s.ClaimReclaimable("w2", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "a fresh lease is not reclaimable")
+
+	// Heartbeat at t0+30s renews the lease to t0+90s.
+	advance(30 * time.Second)
+	require.NoError(t, s.Heartbeat("r1", "w1", time.Minute))
+
+	// At t0+70s the ORIGINAL lease would have expired, but the heartbeat pushed it to t0+90s.
+	advance(40 * time.Second)
+	_, err = s.ClaimReclaimable("w2", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "heartbeat kept the lease alive")
+
+	// At t0+100s the renewed lease has expired → a peer reclaims it, still running.
+	advance(30 * time.Second)
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "r1", reclaimed.ID)
+	assert.Equal(t, "w2", reclaimed.WorkerID, "re-leased to the reclaiming worker")
+	assert.Equal(t, StatusRunning, reclaimed.Status, "reclaim resumes (keeps running), never restarts")
+
+	// The dead worker's heartbeat now fails — it lost the lease.
+	assert.ErrorIs(t, s.Heartbeat("r1", "w1", time.Minute), ErrLeaseLost)
+}
+
 // recvWithin receives one event or fails the test on timeout.
 func recvWithin(t *testing.T, ch <-chan Event) Event {
 	t.Helper()

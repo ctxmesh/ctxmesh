@@ -73,14 +73,16 @@ func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) {
 	}
 }
 
-// runWorkerLoop claims and executes runs until ctx is cancelled. On an empty queue it backs off; on
-// a claim error it logs and backs off (a transient DB blip must not spin the loop hot).
+// runWorkerLoop claims and executes runs until ctx is cancelled. It first drains the queue, then —
+// when the queue is empty — reclaims a run abandoned by a dead worker (resume-on-pod-loss, m32.3).
+// On no work it backs off; on a claim error it logs and backs off (a transient DB blip must not
+// spin the loop hot).
 func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWorkerConfig) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		rn, err := s.runStore.ClaimQueued(workerID, cfg.Lease)
+		rn, err := s.claimNext(workerID, cfg.Lease)
 		switch {
 		case errors.Is(err, run.ErrNoQueuedRun):
 			if !sleepCtx(ctx, cfg.PollBackoff) {
@@ -94,25 +96,77 @@ func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWork
 			}
 			continue
 		}
-		s.executeClaimedRun(rn)
+		s.executeClaimedRun(ctx, workerID, rn, cfg.Lease)
 	}
 }
 
-// executeClaimedRun drives a run claimed by a worker. It rebuilds the OBO execution context —
-// re-minting a FRESH run capability from the run's stored caller identity + trust boundary, so the
-// autonomous run acts with the invoking user's granted scope without their connection present — then
-// hands off to the shared executeRun. The run is already `running` (ClaimQueued flipped it), so
-// executeRun's opening transition is an idempotent no-op. The exec context is detached from the
-// pool's ctx (executeRun applies its own timeout) so an in-flight run finishes during a graceful
-// drain rather than being failed by shutdown.
-func (s *Server) executeClaimedRun(rn *run.Run) {
+// claimNext prefers a fresh queued run, then falls back to reclaiming an expired-lease running run
+// (a dead worker's). Both return ErrNoQueuedRun when there is nothing to do.
+func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, error) {
+	rn, err := s.runStore.ClaimQueued(workerID, lease)
+	if err == nil {
+		return rn, nil
+	}
+	if !errors.Is(err, run.ErrNoQueuedRun) {
+		return nil, err
+	}
+	reclaimed, rErr := s.runStore.ClaimReclaimable(workerID, lease)
+	if rErr == nil {
+		s.log.Info("run-worker: reclaimed an abandoned run (resume-on-pod-loss)", "run", reclaimed.ID, "worker", workerID)
+	}
+	return reclaimed, rErr
+}
+
+// executeClaimedRun drives a run claimed (or reclaimed) by a worker. It rebuilds the OBO execution
+// context — re-minting a FRESH run capability from the run's stored caller identity + trust
+// boundary, pinned to the run's STABLE id (an idempotency key across a reclaim) — so the autonomous
+// run acts with the invoking user's granted scope without their connection present, then hands off
+// to the shared executeRun. The run is already `running` (the claim flipped it, or it was reclaimed
+// mid-flight), so executeRun's opening transition is an idempotent no-op. The exec context is
+// detached from the pool's ctx (executeRun applies its own timeout) so an in-flight run finishes
+// during a graceful drain rather than being failed by shutdown. A heartbeat renews the lease while
+// the run executes so a healthy long run is not falsely reclaimed by a peer.
+func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run.Run, lease time.Duration) {
 	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
 	if rn.CallerUsername != "" {
-		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary); ok {
+		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID); ok {
 			execCtx = contextWithRunCapability(execCtx, token)
 		}
 	}
+
+	// Renew the lease periodically while executing. If the lease is lost (a slow heartbeat let a
+	// peer reclaim us) the heartbeat loop stops — the run continues here, and the idempotency key
+	// bounds any duplicate downstream effect (at-least-once, the honest lease guarantee).
+	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease)
+	defer stopHeartbeat()
+
 	s.executeRun(execCtx, rn.ID, rn.Endpoint, []byte(rn.Input))
+}
+
+// startHeartbeat renews the run's lease every lease/3 until the returned stop func is called or ctx
+// ends. It returns a no-op stopper when heartbeating can't help (no lease interval).
+func (s *Server) startHeartbeat(ctx context.Context, workerID, runID string, lease time.Duration) func() {
+	interval := lease / 3
+	if interval <= 0 {
+		return func() {}
+	}
+	hbCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				if err := s.runStore.Heartbeat(runID, workerID, lease); err != nil {
+					// Lease lost or run gone — stop renewing (do not spin).
+					return
+				}
+			}
+		}
+	}()
+	return cancel
 }
 
 // sleepCtx sleeps for d, returning false if ctx is cancelled first (so the caller stops).

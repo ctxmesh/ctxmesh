@@ -161,7 +161,7 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 		ns = defaultCreateNamespace
 	}
 	boundary := agentBoundary(r.Context(), caller, ns, agent)
-	token, ok := s.mintRunCapability(username, ns, agent, boundary)
+	token, ok := s.mintRunCapability(username, ns, agent, boundary, "")
 	if !ok {
 		return r
 	}
@@ -174,14 +174,21 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 // egress hop resolves the user's grant within THIS boundary: a registry's agents share the user's
 // credential, a different registry cannot. It is best-effort: minting disabled or a failure ⇒
 // (\"\", false) and the run proceeds unattended (org/public only), never another user's grant.
-func (s *Server) mintRunCapability(username, ns, agent, boundary string) (string, bool) {
+// mintRunCapability mints from the caller identity + boundary. runID, when non-empty, pins the
+// capability's run id to a STABLE value (the durable run's own id) so a resumed run re-mints the
+// same id — an idempotency key downstream can dedupe on across a reclaim (m32.3). An empty runID
+// (the /invoke path, which has no durable run) gets a fresh random id.
+func (s *Server) mintRunCapability(username, ns, agent, boundary, runID string) (string, bool) {
 	if s.capabilitySigner == nil {
 		return "", false // minting disabled — no platform capability key configured
 	}
-	runID, err := randToken(16)
-	if err != nil {
-		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
-		return "", false
+	if runID == "" {
+		var err error
+		runID, err = randToken(16)
+		if err != nil {
+			s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+			return "", false
+		}
 	}
 	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
 		User:     userGrantHash(username),
