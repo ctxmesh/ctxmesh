@@ -27,7 +27,8 @@ A non-2xx (e.g. the budget proxy's 402 over-cap, or a 502 upstream) surfaces as 
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, Iterator, List
 
 from ctxmesh import _http, _semconv
 from ctxmesh.config import PlaneConfig
@@ -167,6 +168,48 @@ class ModelClient:
 
             return ChatResponse(text=text, usage=usage, model=resolved_model, raw=data)
 
+    def stream(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        **opts: Any,
+    ) -> Iterator[str]:
+        """Yield the assistant's text DELTAS as they arrive (a streaming chat completion).
+
+        Sets ``stream: true`` so the gateway (LiteLLM / OpenAI) returns Server-Sent Events
+        (``data: {choices:[{delta:{content}}]}`` … ``data: [DONE]``); this parses each frame and
+        yields ``delta.content`` chunks. Emits the same ``LLM`` span as :meth:`chat`, with the
+        accumulated text as its output. Same errors as :meth:`chat` (gateway unwired → ConfigError;
+        non-200 → EndpointError). Token streaming is the m32.7 source for the run event stream.
+        """
+        base_url = self._config.model_gateway_url
+        if not base_url:
+            raise ConfigError("model gateway is not wired: MODEL_GATEWAY_URL is unset.")
+        if not isinstance(messages, list):
+            raise ConfigError("model.stream expects messages as a list of {role,content} dicts")
+
+        body_opts = dict(opts)
+        raw_timeout = body_opts.pop("timeout", None)
+        timeout = raw_timeout if isinstance(raw_timeout, (int, float)) else _CHAT_TIMEOUT
+        payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        payload.update(body_opts)
+
+        with self._trace.llm(name=f"chat {model}", model=model, input=messages) as span:
+            span.set_attribute(_semconv.LLM_MODEL_NAME, model)
+            acc: List[str] = []
+            for line in _http.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                body=_http.json_body(payload),
+                headers=self._headers(),
+                timeout=timeout,
+            ):
+                delta = _sse_delta(line)
+                if delta:
+                    acc.append(delta)
+                    yield delta
+            span.set_output("".join(acc))
+
     def _headers(self) -> Dict[str, str]:
         # The gateway (LiteLLM / budget proxy) is OpenAI-compatible and expects a
         # bearer token; the launcher injects the master key in-pod. When absent
@@ -204,6 +247,23 @@ def _assistant_message(data: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     message = first.get("message")
     return message if isinstance(message, dict) else {}
+
+
+def _sse_delta(line: str) -> str:
+    """Extract the text delta from one SSE line of a streaming chat completion. A non-``data:``
+    line, the ``[DONE]`` sentinel, malformed JSON, or a content-less delta yields ``""``."""
+    if not line.startswith("data:"):
+        return ""
+    payload = line[len("data:") :].strip()
+    if not payload or payload == "[DONE]":
+        return ""
+    try:
+        obj = json.loads(payload)
+        choices = obj.get("choices") or []
+        content = (choices[0].get("delta") or {}).get("content")
+    except (json.JSONDecodeError, ValueError, AttributeError, IndexError, TypeError):
+        return ""
+    return content if isinstance(content, str) else ""
 
 
 def _completion_text(data: Dict[str, Any]) -> str:
