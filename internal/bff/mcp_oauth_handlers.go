@@ -165,7 +165,7 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleMCPOAuthClientMetadata(w http.ResponseWriter, r *http.Request) {
 	origin := requestOrigin(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"client_id":                  origin + clientMetadataPath, // MUST equal this URL
+		oauthParamClientID:           origin + clientMetadataPath, // MUST equal this URL
 		"client_name":                oauthClientName,
 		"redirect_uris":              []string{origin + "/api/mcp/oauth/callback"},
 		"grant_types":                []string{oauthGrantAuthCode, oauthGrantRefresh},
