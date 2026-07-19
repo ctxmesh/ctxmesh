@@ -140,6 +140,50 @@ func TestRunEvents_SSE(t *testing.T) {
 	assert.Contains(t, body, "Hi there.")
 }
 
+func TestResumeRun(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// First invoke returns consent_required → requires_action; the resume re-invokes and (with the
+	// now-connected credential, simulated by flipping the adapter) succeeds.
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"connect","consent_required":["scalekit-mcp-server"]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "sk", Namespace: "prod", Input: json.RawMessage(`{"input":"go"}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+	require.Equal(t, run.StatusRequiresAction, got.Status)
+
+	// The user connected → the agent now returns a real answer. Resume.
+	inv.resp = []byte(`{"output":"Here are your environments.","consent_required":[]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	final := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusSucceeded, final.Status)
+	require.Len(t, final.Messages, 1)
+	assert.Equal(t, "Here are your environments.", final.Messages[0].Content)
+}
+
+func TestResumeRun_NotAwaitingAction(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"done","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	// Resuming a succeeded run is a 409 (nothing to resume).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+created.ID+"/resume", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
 func TestGetRun_NotFound(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
