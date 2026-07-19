@@ -216,6 +216,15 @@ type InvokeAdapter interface {
 	Invoke(ctx context.Context, endpoint string, body []byte) (resp []byte, traceID string, err error)
 }
 
+// StreamingInvokeAdapter is an OPTIONAL capability an InvokeAdapter may also implement (ADR 0034,
+// m32.7): stream the agent's tokens as they generate. The run executor type-asserts for it — an
+// adapter without it (e.g. a test fake) just uses the request/response Invoke. InvokeStream POSTs
+// with `Accept: text/event-stream`, calls onToken per content delta, and returns the agent's final
+// `done` envelope (the same shape Invoke returns, so consent/output parsing is unchanged).
+type StreamingInvokeAdapter interface {
+	InvokeStream(ctx context.Context, endpoint string, body []byte, onToken func(string)) (final []byte, traceID string, err error)
+}
+
 // ExpandAdapter reuses the `agent-engine expand` logic server-side (agent.yaml →
 // CRD) for the config-builder round-trip (m12.6).
 type ExpandAdapter interface {

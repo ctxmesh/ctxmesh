@@ -172,7 +172,20 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
-	resp, traceID, err := s.adapters.Invoke.Invoke(ctx, endpoint, input)
+	// Stream tokens when the adapter supports it (m32.7): each content delta becomes a `token`
+	// event on the run's stream as it arrives; the returned envelope is the same shape Invoke
+	// returns, so consent/output handling below is unchanged. A non-streaming adapter (a test
+	// fake) falls back to request/response.
+	var resp []byte
+	var traceID string
+	var err error
+	if sa, ok := s.adapters.Invoke.(StreamingInvokeAdapter); ok {
+		resp, traceID, err = sa.InvokeStream(ctx, endpoint, input, func(text string) {
+			_ = s.runStore.AppendEvent(runID, run.EventToken, text)
+		})
+	} else {
+		resp, traceID, err = s.adapters.Invoke.Invoke(ctx, endpoint, input)
+	}
 	now := time.Now()
 	if err != nil {
 		var ie *invokeError
