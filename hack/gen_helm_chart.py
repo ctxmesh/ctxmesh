@@ -289,7 +289,21 @@ def main() -> None:
     # --- control-plane.yaml --------------------------------------------------
     with open(os.path.join(out_dir, "control-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
-        f.write("\n---\n".join(control_plane))
+        # Control-plane HA dial (ADR 0037, m34.5): template the controller-manager Deployment's
+        # replica count. --leader-elect is already in the manager args, so >1 replica is safe (one
+        # active leader reconciles; the rest are hot standbys for fast failover). Target ONLY the
+        # manager (the gateway Deployment also has replicas:1). Default 1 renders `replicas: 1` ==
+        # kustomize (helm-verify no-drift); `--set controllerManager.replicas=2` runs the control
+        # plane HA — pair it with controllerManager.podDisruptionBudget.enabled (control-plane-pdb).
+        cp_docs = []
+        for doc in control_plane:
+            if kind_of(doc) == "Deployment" and "control-plane: controller-manager" in doc:
+                doc = doc.replace(
+                    "  replicas: 1\n",
+                    "  replicas: {{ .Values.controllerManager.replicas | default 1 }}\n",
+                )
+            cp_docs.append(doc)
+        f.write("\n---\n".join(cp_docs))
         f.write("\n")
 
     # --- dev-data-plane.yaml -------------------------------------------------

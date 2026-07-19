@@ -740,7 +740,7 @@ metadata:
   name: agent-engine-controller-manager
   namespace: {{ .Values.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.controllerManager.replicas | default 1 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-engine
