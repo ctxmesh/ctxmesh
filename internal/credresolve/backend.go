@@ -149,8 +149,15 @@ func (b *K8sBackend) Resolve(ctx context.Context, ns, boundary, server, userHash
 	// Secret's ACTUAL namespace so the rotated-token writeback lands on the same object.
 	access, expiresAt, rErr := b.refresh(ctx, secret.Namespace, secret.Name)
 	if rErr != nil {
-		// A non-refreshable grant at/near expiry → the user must re-consent.
-		if errors.Is(rErr, ErrNoRefreshToken) {
+		// A DEAD grant → the user must re-consent (surface a Connect CTA), NOT a hard
+		// resolve_failed. Two cases mean the stored grant can no longer produce a token and
+		// only re-authorization fixes it:
+		//   - ErrNoRefreshToken: at/near expiry with nothing to rotate with; and
+		//   - invalid_grant: the token endpoint REJECTED the refresh because the stored
+		//     refresh token is expired/revoked (RFC 6749 §5.2).
+		// Both are indistinguishable from "no grant" to the user, so they get the same
+		// consent_required outcome — the run re-prompts to reconnect instead of erroring.
+		if errors.Is(rErr, ErrNoRefreshToken) || IsInvalidGrant(rErr) {
 			return Credential{}, ErrConsentRequired
 		}
 		return Credential{}, rErr
