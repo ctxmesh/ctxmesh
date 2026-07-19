@@ -218,8 +218,8 @@ class ModelClient:
     ) -> Iterator[str]:
         """Stream a chat completion: **yield** content deltas as they arrive AND **return** the
         assembled :class:`ChatResponse` (content + ``tool_calls``) via ``StopIteration.value`` when
-        the stream ends. This lets the managed loop stream tokens for the user AND still get the full
-        turn — a tool-calling turn yields no text but returns the assembled ``tool_calls`` to
+        the stream ends. This lets the managed loop stream tokens for the user AND still get the
+        full turn — a tool-calling turn yields no text but returns the assembled ``tool_calls`` to
         dispatch (m32.7). Consume it as::
 
             gen = client.model.stream_completion(route, messages)
@@ -233,7 +233,7 @@ class ModelClient:
         if not base_url:
             raise ConfigError("model gateway is not wired: MODEL_GATEWAY_URL is unset.")
         if not isinstance(messages, list):
-            raise ConfigError("model.stream_completion expects messages as a list of {role,content} dicts")
+            raise ConfigError("model.stream_completion expects messages as a list of dicts")
 
         body_opts = dict(opts)
         raw_timeout = body_opts.pop("timeout", None)
@@ -274,7 +274,8 @@ class ModelClient:
                 message["tool_calls"] = [tool_acc[i] for i in sorted(tool_acc)]
             span.set_output(text)
             _stamp_usage(span, usage)
-        return ChatResponse(text=text, usage=usage, model=model, raw={"choices": [{"message": message}]})
+        raw = {"choices": [{"message": message}]}
+        return ChatResponse(text=text, usage=usage, model=model, raw=raw)
 
     def _headers(self) -> Dict[str, str]:
         # The gateway (LiteLLM / budget proxy) is OpenAI-compatible and expects a
@@ -317,7 +318,7 @@ def _assistant_message(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _sse_obj(line: str) -> Any:
     """Parse one SSE ``data:`` line to its JSON object, or ``None`` for a non-data line, the
-    ``[DONE]`` sentinel, or malformed JSON (never raises — a stream must not die on one bad frame)."""
+    ``[DONE]`` sentinel, or malformed JSON (never raises — a stream must survive a bad frame)."""
     if not line.startswith("data:"):
         return None
     payload = line[len("data:") :].strip()
@@ -351,7 +352,8 @@ def _accumulate_tool_calls(acc: Dict[int, Dict[str, Any]], deltas: Any) -> None:
         if not isinstance(tc, dict):
             continue
         idx = tc.get("index", 0)
-        entry = acc.setdefault(idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        blank = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        entry = acc.setdefault(idx, blank)
         if tc.get("id"):
             entry["id"] = tc["id"]
         if tc.get("type"):
