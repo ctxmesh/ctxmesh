@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver for the durable run store
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,6 +49,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/bff"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
 func main() {
@@ -199,8 +202,27 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
 	}
 
+	// Durable run store (ADR 0034 §durability, m32.1): when RUN_STORE_DSN names a Postgres, runs
+	// persist there and survive a BFF restart/reschedule (a reconnecting client replays from the
+	// durable event log). Absent ⇒ the hot in-memory store (dev/single-pod), which the server
+	// defaults to. Aligned with the credential state layer so one Postgres backs both.
+	var runStore runstore.Store
+	if runDSN := strings.TrimSpace(os.Getenv("RUN_STORE_DSN")); runDSN != "" {
+		db, dbErr := sql.Open("pgx", runDSN)
+		if dbErr != nil {
+			return fmt.Errorf("open run-store postgres: %w", dbErr)
+		}
+		defer func() { _ = db.Close() }()
+		runStore, err = runstore.NewPostgresStore(context.Background(), db)
+		if err != nil {
+			return fmt.Errorf("init durable run store: %w", err)
+		}
+		log.Info("durable run store enabled (ADR 0034): runs persist to Postgres")
+	}
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
+		RunStore:                    runStore,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
