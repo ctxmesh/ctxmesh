@@ -49,6 +49,7 @@ from ctxmesh.managed import (
     run_managed_loop,
 )
 from ctxmesh.model import ChatResponse, ModelClient
+from ctxmesh.runs import Run, RunEvent, RunsClient
 from ctxmesh.trace import SpanHandle, TraceClient
 
 __all__ = [
@@ -69,6 +70,9 @@ __all__ = [
     "DEFAULT_MAX_STEPS",
     "pause_for_approval",
     "ApprovalRequiredError",
+    "RunsClient",
+    "Run",
+    "RunEvent",
 ]
 
 __version__ = "0.1.0"

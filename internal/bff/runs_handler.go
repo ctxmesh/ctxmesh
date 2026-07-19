@@ -51,12 +51,14 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
 		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
+		authed.HandleFunc("POST /api/runs/{id}/cancel", s.handleCancelRun)
 		return
 	}
 	authed.Handle("POST /api/runs", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
 	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
 	authed.Handle("POST /api/runs/{id}/resume", notImplemented("runs"))
+	authed.Handle("POST /api/runs/{id}/cancel", notImplemented("runs"))
 }
 
 // handleResumeRun serves POST /api/runs/{id}/resume — re-enter `running` from `requires_action`
@@ -126,6 +128,32 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	go s.executeRun(execCtx, id, endpoint, input)
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: id, Status: string(run.StatusRunning)})
+}
+
+// handleCancelRun serves POST /api/runs/{id}/cancel — move a non-terminal run to `cancelled` (ADR
+// 0034). Caller-scoped. The state machine permits cancel from queued / running / requires_action;
+// a run that is already terminal returns 409 (nothing to cancel). The executing worker/goroutine
+// observes the terminal status via the store and its own writes are no-ops on a terminal run.
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	updated, err := s.runStore.Update(id, func(x *run.Run) error {
+		if x.Status.IsTerminal() {
+			return fmt.Errorf("run already %s", x.Status)
+		}
+		return x.Transition(run.StatusCancelled, time.Now())
+	})
+	if errors.Is(err, run.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "cannot cancel this run: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
 }
 
 // handleCreateRun serves POST /api/runs — create a durable run and start it. It is CALLER-SCOPED
