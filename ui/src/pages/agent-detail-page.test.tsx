@@ -832,6 +832,46 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     expect(screen.queryByTestId("scaling-policy-sp-other")).toBeNull();
   });
 
+  it("keep-warm: enabling with no policy creates a warm (min=1) policy (m32.5)", async () => {
+    const calls = installFetch({ scalingPolicies: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    const toggle = await screen.findByTestId("keep-warm-toggle");
+    expect(toggle).toHaveAttribute("aria-pressed", "false"); // no policy ⇒ scale-to-zero
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const post = calls.find((c) => c.url === "/api/agentscalingpolicies" && c.method === "POST");
+      expect(post).toBeDefined();
+      expect(JSON.parse(post!.body).minReplicas).toBe(1);
+    });
+  });
+
+  it("keep-warm: disabling returns an existing policy to scale-to-zero (m32.5)", async () => {
+    const calls = installFetch({
+      scalingPolicies: [
+        { name: "sp-billing", namespace: "prod", agentRef: "billing", minReplicas: 1, maxReplicas: 5, mode: "static", ready: true },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-scaling"));
+
+    const toggle = await screen.findByTestId("keep-warm-toggle");
+    expect(toggle).toHaveAttribute("aria-pressed", "true"); // min=1 ⇒ warm
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const put = calls.find(
+        (c) => c.method === "PUT" && /\/api\/agentscalingpolicies\/[^/]+\/[^/]+$/.test(c.url),
+      );
+      expect(put).toBeDefined();
+      expect(JSON.parse(put!.body).minReplicas).toBe(0);
+    });
+  });
+
   it("attach: createAgentScalingPolicy is called with the form values", async () => {
     const calls = installFetch({ scalingPolicies: [] });
     renderAt();
