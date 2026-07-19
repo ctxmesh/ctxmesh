@@ -29,6 +29,7 @@ import (
 
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
@@ -56,6 +57,10 @@ type Server struct {
 	adapters      Adapters
 	version       string
 	log           logr.Logger
+
+	// runStore holds durable runs (ADR 0034 execution contract). Phase 1 is a hot in-memory
+	// store; M32 swaps a durable backend behind the same seam. Always non-nil (defaulted).
+	runStore run.Store
 
 	// devMode is true when the BFF runs under `agent-engine dev --ui` (ADR 0021):
 	// a local, single-developer substrate with NO cluster (callerClients nil →
@@ -255,6 +260,10 @@ type Options struct {
 	// beyond the diff response (ADR 0008).
 	PromptResolver prompt.Resolver
 	// Log is the structured logger.
+	// RunStore backs the run-oriented execution contract (ADR 0034). Optional — a hot in-memory
+	// store is used when nil (phase 1); M32 injects a durable store.
+	RunStore run.Store
+
 	Log logr.Logger
 }
 
@@ -282,7 +291,11 @@ func NewServer(opts Options) *Server {
 		grantStore:               opts.GrantStore,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
+		runStore:                 opts.RunStore,
 		log:                      opts.Log,
+	}
+	if s.runStore == nil {
+		s.runStore = run.NewMemStore()
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -742,6 +755,8 @@ func (s *Server) Handler() http.Handler {
 	default:
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
+
+	s.registerRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
 	// honest 501 otherwise.
