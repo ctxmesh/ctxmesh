@@ -1,0 +1,68 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1beta1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/conversion"
+
+	v1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+)
+
+// +kubebuilder:object:root=true
+
+// AgentVersion is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentVersion (ADR 0037, M34),
+// reusing the v1alpha1 spec/status so conversion is a direct copy.
+type AgentVersion struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec v1alpha1.AgentVersionSpec `json:"spec"`
+}
+
+// ConvertTo converts this v1beta1 AgentVersion to the v1alpha1 hub.
+func (src *AgentVersion) ConvertTo(dstRaw conversion.Hub) error {
+	dst := dstRaw.(*v1alpha1.AgentVersion)
+	dst.ObjectMeta = src.ObjectMeta
+	dst.Spec = src.Spec
+	return nil
+}
+
+// ConvertFrom populates this v1beta1 AgentVersion from the v1alpha1 hub.
+func (dst *AgentVersion) ConvertFrom(srcRaw conversion.Hub) error {
+	src := srcRaw.(*v1alpha1.AgentVersion)
+	dst.ObjectMeta = src.ObjectMeta
+	dst.Spec = src.Spec
+	return nil
+}
+
+// +kubebuilder:object:root=true
+
+// AgentVersionList contains a list of AgentVersion.
+type AgentVersionList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []AgentVersion `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(func(s *k8sruntime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &AgentVersion{}, &AgentVersionList{})
+		return nil
+	})
+}

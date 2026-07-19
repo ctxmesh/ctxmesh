@@ -219,3 +219,204 @@ spec:
     storage: true
     subresources:
       status: {}
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ModelRoute is the v1beta1 schema — a field-identical graduation of the v1alpha1 ModelRoute (ADR 0037, M34),
+          reusing the v1alpha1 spec/status so conversion is a direct copy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ModelRouteSpec defines the desired routing policy for a named LLM alias.
+              The route name (metadata.name) is the model alias that agents use when
+              calling the gateway (model="<alias>").
+
+              Validation rules:
+                - providers must have at least one entry (MinItems=1).
+                - provider priorities must be unique across the list.
+                - secretBindingRef is required for every non-mock provider.
+            properties:
+              providers:
+                description: |-
+                  providers is the ordered list of LiteLLM provider entries for this route.
+                  Entries are tried in ascending priority order (priority 1 first; higher
+                  values are fallbacks). At least one entry is required; at most 10 entries
+                  are permitted (MaxItems bounds the CEL cost estimate for uniqueness and
+                  secretBindingRef validation).
+                items:
+                  description: |-
+                    ProviderRef describes one LiteLLM provider entry in a ModelRoute's provider
+                    list. Providers are tried in ascending priority order (1 = first choice).
+                  properties:
+                    apiBase:
+                      description: |-
+                        apiBase optionally points this provider at an arbitrary OpenAI-compatible
+                        upstream base URL (e.g. "http://tool-mock.ns.svc.cluster.local:9099/v1").
+                        When set, the gateway proxies to that base with a dummy key and no
+                        SecretBinding is required — the seam that lets an in-cluster route target
+                        the deterministic tool-call mock, so a managed-agent run produces a
+                        provable tool span in CI (mock-first, no real key). It combines with
+                        provider (the LiteLLM client prefix, typically "openai") and model (an
+                        arbitrary id after the slash, since the real target is apiBase). Leave
+                        unset for a normal provider (real key via secretBindingRef) or mock.
+                        Must be an http(s) URL when set. Ignored when provider == "mock".
+                      pattern: ^https?://.+
+                      type: string
+                    model:
+                      description: |-
+                        model is the provider-specific model name, e.g. "claude-sonnet-4-6" for
+                        the anthropic provider or "mock-default" for the mock provider. Required.
+                      minLength: 1
+                      type: string
+                    priority:
+                      description: |-
+                        priority determines the order in which providers are tried; lower values
+                        are tried first. Must be ≥1 and unique within a single ModelRoute's
+                        provider list. Required.
+                      format: int32
+                      minimum: 1
+                      type: integer
+                    provider:
+                      description: |-
+                        provider is the LiteLLM provider prefix, e.g. "anthropic", "openai", or
+                        the special value "mock" which renders a deterministic mock response
+                        (MOCK_OK) without requiring a real API key. Required.
+                      minLength: 1
+                      type: string
+                    secretBindingRef:
+                      description: |-
+                        secretBindingRef names a SecretBinding resource in the same namespace
+                        whose resolved secret is injected into the gateway as
+                        SB_<binding-name>. Required for every non-mock provider unless apiBase is
+                        set (a keyless OpenAI-compatible upstream); ignored (and should be
+                        omitted) when provider == "mock".
+                      type: string
+                  required:
+                  - model
+                  - priority
+                  - provider
+                  type: object
+                maxItems: 10
+                minItems: 1
+                type: array
+                x-kubernetes-validations:
+                - message: secretBindingRef is required for every non-mock provider
+                    unless apiBase is set
+                  rule: self.all(p, p.provider == 'mock' || (has(p.apiBase) && p.apiBase
+                    != '') || (has(p.secretBindingRef) && p.secretBindingRef != ''))
+              rateLimit:
+                description: |-
+                  rateLimit optionally caps the per-tenant request rate forwarded to
+                  LiteLLM. When omitted, no rate limit is applied.
+                properties:
+                  tenantRPM:
+                    description: |-
+                      tenantRPM is the maximum number of requests per minute this route accepts
+                      on behalf of the owning tenant. Must be ≥1. Maps directly to the LiteLLM
+                      rpm setting on every provider entry rendered for this route.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - tenantRPM
+                type: object
+            required:
+            - providers
+            type: object
+            x-kubernetes-validations:
+            - message: provider priorities must be unique within a ModelRoute
+              rule: self.providers.all(i, self.providers.filter(j, j.priority == i.priority).size()
+                == 1)
+          status:
+            description: ModelRouteStatus defines the observed state of a ModelRoute.
+            properties:
+              conditions:
+                description: |-
+                  conditions reflect the current reconciliation state of the ModelRoute.
+                  The "Ready" condition is set to True once the route has been successfully
+                  rendered into the live gateway ConfigMap and all referenced SecretBindings
+                  are resolved.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
