@@ -76,6 +76,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 const (
@@ -411,7 +413,14 @@ func (s *a2aServer) handleCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.forward(ctx, w, span, env)
+	// Relay the invoking user's run capability across the hop (ADR 0033, m30.3) so the callee's
+	// egress can act on-behalf-of the same user. The capability is boundary-scoped (its `bnd` is
+	// the registry), and A2A only reaches same-registry peers (a foreign-registry hop is already
+	// a hard deny), so relaying it to a teammate agent is in-boundary by construction. Absent ⇒
+	// an unattended/dev run (the callee resolves org/public only).
+	capToken := r.Header.Get(runcap.HeaderName)
+
+	s.forward(ctx, w, span, env, capToken)
 }
 
 // buildEnvelope constructs the outgoing envelope. See the file header for the
@@ -477,7 +486,9 @@ func (s *a2aServer) buildEnvelope(
 // forward resolves the target, injects the envelope + traceparent, sends the
 // request, and relays the peer's response — mapping transport failures to typed
 // errors so the caller never sees a bare hang.
-func (s *a2aServer) forward(ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope) {
+func (s *a2aServer) forward(
+	ctx context.Context, w http.ResponseWriter, span trace.Span, env envelope, capToken string,
+) {
 	base := s.resolveHost(env.ReceiverAgentID)
 
 	// The wire body is the FULL envelope (payload nested inside) so the callee's
@@ -503,6 +514,11 @@ func (s *a2aServer) forward(ctx context.Context, w http.ResponseWriter, span tra
 	}
 	outReq.Header.Set("Content-Type", "application/json")
 	outReq.Header.Set(a2aEnvelopeHeader, string(envJSON))
+	// Relay the invoking user's run capability (ADR 0033, m30.3) so the callee acts on-behalf-of
+	// the same user; the callee's egress verifies it against the platform key + its own boundary.
+	if capToken != "" {
+		outReq.Header.Set(runcap.HeaderName, capToken)
+	}
 	// Inject W3C traceparent from the a2a.call span's context so the callee
 	// CONTINUES this trace (its agent.invoke becomes our child). THIS is what
 	// makes one trace tree span both agents.

@@ -337,12 +337,12 @@ func (s *Server) lockedCredentials() bool {
 // (locked → the credential namespace with the source ns folded in; legacy → the source
 // namespace, original name). The single call the write/delete paths share so they land
 // on the exact object the OBO resolver will later read.
-func (s *Server) grantCoordinates(sourceNs, server, userHash string) (namespace, name string) {
+func (s *Server) grantCoordinates(sourceNs, boundary, server, userHash string) (namespace, name string) {
 	credNs := ""
 	if s.lockedCredentials() {
 		credNs = s.credentialNamespace
 	}
-	return grantSecretCoordinates(credNs, sourceNs, server, userHash)
+	return grantSecretCoordinates(credNs, sourceNs, boundary, server, userHash)
 }
 
 // grantClient returns the client that writes/reads/deletes a grant Secret: the

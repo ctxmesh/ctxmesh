@@ -30,28 +30,30 @@ import (
 // conformance harness) implements.
 type fakeBackend struct {
 	caps      credprovider.Capabilities
-	resolveFn func(ns, server, userHash, tenant string) (credresolve.Credential, error)
+	resolveFn func(ns, boundary, server, userHash, tenant string) (credresolve.Credential, error)
 	stored    map[string]credprovider.GrantMaterial
 	revoked   map[string]bool
 }
 
-func key(ns, server, userHash string) string { return ns + "|" + server + "|" + userHash }
+func key(ns, boundary, server, userHash string) string {
+	return ns + "|" + boundary + "|" + server + "|" + userHash
+}
 
 func (f *fakeBackend) Capabilities(context.Context) (credprovider.Capabilities, error) {
 	return f.caps, nil
 }
 
-func (f *fakeBackend) Resolve(_ context.Context, ns, server, userHash, tenant string) (credresolve.Credential, error) {
-	return f.resolveFn(ns, server, userHash, tenant)
+func (f *fakeBackend) Resolve(_ context.Context, ns, boundary, server, userHash, tenant string) (credresolve.Credential, error) {
+	return f.resolveFn(ns, boundary, server, userHash, tenant)
 }
 
-func (f *fakeBackend) Store(_ context.Context, ns, server, userHash, _ string, g credprovider.GrantMaterial) error {
-	f.stored[key(ns, server, userHash)] = g
+func (f *fakeBackend) Store(_ context.Context, ns, boundary, server, userHash, _ string, g credprovider.GrantMaterial) error {
+	f.stored[key(ns, boundary, server, userHash)] = g
 	return nil
 }
 
-func (f *fakeBackend) Revoke(_ context.Context, ns, server, userHash, _ string) error {
-	f.revoked[key(ns, server, userHash)] = true
+func (f *fakeBackend) Revoke(_ context.Context, ns, boundary, server, userHash, _ string) error {
+	f.revoked[key(ns, boundary, server, userHash)] = true
 	return nil
 }
 
@@ -82,20 +84,20 @@ func TestRoundTrip_Capabilities(t *testing.T) {
 func TestRoundTrip_ResolveOutcomes(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
-		fn       func(ns, server, userHash, tenant string) (credresolve.Credential, error)
+		fn       func(ns, boundary, server, userHash, tenant string) (credresolve.Credential, error)
 		wantCred credresolve.Credential
 		wantErr  error
 	}{
-		"success": {fn: func(_, _, _, _ string) (credresolve.Credential, error) {
+		"success": {fn: func(_, _, _, _, _ string) (credresolve.Credential, error) {
 			return credresolve.Credential{Kind: "bearer", Value: "tok"}, nil
 		}, wantCred: credresolve.Credential{Kind: "bearer", Value: "tok"}},
-		"consent_required": {fn: func(_, _, _, _ string) (credresolve.Credential, error) {
+		"consent_required": {fn: func(_, _, _, _, _ string) (credresolve.Credential, error) {
 			return credresolve.Credential{}, credresolve.ErrConsentRequired
 		}, wantErr: credresolve.ErrConsentRequired},
-		"no_credential": {fn: func(_, _, _, _ string) (credresolve.Credential, error) {
+		"no_credential": {fn: func(_, _, _, _, _ string) (credresolve.Credential, error) {
 			return credresolve.Credential{}, credresolve.ErrNoCredential
 		}, wantErr: credresolve.ErrNoCredential},
-		"backend_error": {fn: func(_, _, _, _ string) (credresolve.Credential, error) {
+		"backend_error": {fn: func(_, _, _, _, _ string) (credresolve.Credential, error) {
 			return credresolve.Credential{}, errors.New("boom")
 		}},
 	}
@@ -105,7 +107,7 @@ func TestRoundTrip_ResolveOutcomes(t *testing.T) {
 			c, closeFn := newServer(&fakeBackend{resolveFn: tc.fn})
 			defer closeFn()
 
-			cred, err := c.Resolve(context.Background(), "ns", "srv", "uh")
+			cred, err := c.Resolve(context.Background(), "ns", "", "srv", "uh")
 			switch {
 			case tc.wantErr != nil:
 				if !errors.Is(err, tc.wantErr) {
@@ -135,16 +137,16 @@ func TestRoundTrip_StoreAndRevoke(t *testing.T) {
 	defer closeFn()
 	ctx := context.Background()
 
-	if err := c.Store(ctx, "ns", "srv", "uh", "tenant-a", credprovider.GrantMaterial{AccessToken: "at", RefreshToken: "rt"}); err != nil {
+	if err := c.Store(ctx, "ns", "", "srv", "uh", "tenant-a", credprovider.GrantMaterial{AccessToken: "at", RefreshToken: "rt"}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	if got := b.stored[key("ns", "srv", "uh")]; got.AccessToken != "at" || got.RefreshToken != "rt" {
+	if got := b.stored[key("ns", "", "srv", "uh")]; got.AccessToken != "at" || got.RefreshToken != "rt" {
 		t.Fatalf("stored = %+v, want the grant material", got)
 	}
-	if err := c.Revoke(ctx, "ns", "srv", "uh"); err != nil {
+	if err := c.Revoke(ctx, "ns", "", "srv", "uh"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if !b.revoked[key("ns", "srv", "uh")] {
+	if !b.revoked[key("ns", "", "srv", "uh")] {
 		t.Fatal("revoke did not reach the backend")
 	}
 }
@@ -154,14 +156,14 @@ func TestRoundTrip_StoreAndRevoke(t *testing.T) {
 func TestFailClosed_ServerDown(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(credprovider.NewHandler(&fakeBackend{
-		resolveFn: func(_, _, _, _ string) (credresolve.Credential, error) {
+		resolveFn: func(_, _, _, _, _ string) (credresolve.Credential, error) {
 			return credresolve.Credential{Kind: "bearer", Value: "tok"}, nil
 		},
 	}))
 	c := credprovider.NewClient(srv.URL, srv.Client())
 	srv.Close() // provider is now down
 
-	cred, err := c.Resolve(context.Background(), "ns", "srv", "uh")
+	cred, err := c.Resolve(context.Background(), "ns", "", "srv", "uh")
 	if err == nil {
 		t.Fatal("a down provider must error, not succeed with a blank credential")
 	}

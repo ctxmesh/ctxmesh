@@ -56,29 +56,29 @@ func TestSecretNameDeterministicAndDistinct(t *testing.T) {
 	bobHash := UserHash(nil, "bob@example.com")
 
 	// Same (server, user) ⇒ same name (idempotent upsert on re-consent).
-	assert.Equal(t, SecretName("weather", aliceHash), SecretName("weather", aliceHash))
+	assert.Equal(t, SecretName("weather", aliceHash, ""), SecretName("weather", aliceHash, ""))
 	// Different user ⇒ different name.
-	assert.NotEqual(t, SecretName("weather", aliceHash), SecretName("weather", bobHash))
+	assert.NotEqual(t, SecretName("weather", aliceHash, ""), SecretName("weather", bobHash, ""))
 	// Different server ⇒ different name.
-	assert.NotEqual(t, SecretName("weather", aliceHash), SecretName("calendar", aliceHash))
-	assert.True(t, strings.HasPrefix(SecretName("weather", aliceHash), SecretPrefix+"-"))
+	assert.NotEqual(t, SecretName("weather", aliceHash, ""), SecretName("calendar", aliceHash, ""))
+	assert.True(t, strings.HasPrefix(SecretName("weather", aliceHash, ""), SecretPrefix+"-"))
 }
 
 func TestSecretCoordinates(t *testing.T) {
 	userHash := UserHash(nil, "alice@example.com")
 
 	t.Run("legacy mode keeps the grant in its source namespace", func(t *testing.T) {
-		ns, name := SecretCoordinates("", "team-alpha", "weather", userHash)
+		ns, name := SecretCoordinates("", "team-alpha", "weather", userHash, "")
 		assert.Equal(t, "team-alpha", ns)
-		assert.Equal(t, SecretName("weather", userHash), name)
+		assert.Equal(t, SecretName("weather", userHash, ""), name)
 	})
 
 	t.Run("locked mode folds the source namespace into ns + name", func(t *testing.T) {
-		ns, name := SecretCoordinates("ae-credentials", "team-alpha", "weather", userHash)
+		ns, name := SecretCoordinates("ae-credentials", "team-alpha", "weather", userHash, "")
 		assert.Equal(t, "ae-credentials", ns)
-		assert.True(t, strings.HasPrefix(name, SecretName("weather", userHash)+"-"))
+		assert.True(t, strings.HasPrefix(name, SecretName("weather", userHash, "")+"-"))
 		// A different source namespace ⇒ a distinct name in the shared locked namespace.
-		_, other := SecretCoordinates("ae-credentials", "team-beta", "weather", userHash)
+		_, other := SecretCoordinates("ae-credentials", "team-beta", "weather", userHash, "")
 		assert.NotEqual(t, name, other, "different source namespaces must not collide")
 	})
 }
@@ -86,18 +86,51 @@ func TestSecretCoordinates(t *testing.T) {
 func TestSecretLabels(t *testing.T) {
 	userHash := UserHash(nil, "alice@example.com")
 
-	legacy := SecretLabels("weather", userHash, "")
+	legacy := SecretLabels("weather", userHash, "", "")
 	assert.Equal(t, ManagedByGrant, legacy[LabelManagedBy])
 	assert.Equal(t, userHash, legacy[LabelGrantUser])
 	assert.Equal(t, "weather", legacy[LabelGrantServer])
 	_, hasSource := legacy[LabelGrantSourceNS]
 	assert.False(t, hasSource, "no source-namespace label in legacy mode")
 
-	locked := SecretLabels("weather", userHash, "team-alpha")
+	locked := SecretLabels("weather", userHash, "team-alpha", "")
 	assert.Equal(t, "team-alpha", locked[LabelGrantSourceNS])
 
 	// A label value must never be a token; the labels carry only lookup keys.
 	for k, v := range locked {
 		require.NotContains(t, v, "token", "label %s must not carry token material", k)
 	}
+}
+
+// TestBoundaryKeying proves the trust boundary (ADR 0033) is a real isolation dimension in the
+// grant key: an empty boundary is byte-identical to the legacy key (so old grants resolve
+// unchanged), while distinct boundaries yield distinct names + labels (so a registry can't
+// resolve another registry's — or the legacy unscoped — grant).
+func TestBoundaryKeying(t *testing.T) {
+	userHash := UserHash(nil, "alice@example.com")
+
+	// Boundary constructors + hashing.
+	assert.Equal(t, "", RegistryBoundary(""), "empty registry ⇒ unscoped")
+	assert.Equal(t, "r:reg-a", RegistryBoundary("reg-a"))
+	assert.Equal(t, "a:ns1/agent-x", AgentBoundary("ns1", "agent-x"))
+	assert.Equal(t, "", BoundaryHash(""), "empty boundary hashes to empty (legacy key)")
+	assert.NotEqual(t, BoundaryHash("r:reg-a"), BoundaryHash("r:reg-b"))
+
+	regA := RegistryBoundary("reg-a")
+	regB := RegistryBoundary("reg-b")
+
+	// Empty boundary ⇒ the exact legacy name (backward compatible).
+	assert.Equal(t, SecretName("weather", userHash, ""), SecretName("weather", userHash, BoundaryHash("")))
+	// A boundary-scoped name differs from the legacy name AND from a different boundary's.
+	assert.NotEqual(t, SecretName("weather", userHash, ""), SecretName("weather", userHash, BoundaryHash(regA)))
+	assert.NotEqual(t, SecretName("weather", userHash, BoundaryHash(regA)), SecretName("weather", userHash, BoundaryHash(regB)))
+
+	// Labels: no boundary label when unscoped; a distinct hashed value per boundary.
+	legacy := SecretLabels("weather", userHash, "", "")
+	_, hasB := legacy[LabelGrantBoundary]
+	assert.False(t, hasB, "no boundary label on a legacy unscoped grant")
+	la := SecretLabels("weather", userHash, "", BoundaryHash(regA))
+	lb := SecretLabels("weather", userHash, "", BoundaryHash(regB))
+	assert.Equal(t, BoundaryHash(regA), la[LabelGrantBoundary])
+	assert.NotEqual(t, la[LabelGrantBoundary], lb[LabelGrantBoundary], "different registries ⇒ different boundary label")
 }

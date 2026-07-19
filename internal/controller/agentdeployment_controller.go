@@ -928,7 +928,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the invoking user's credential, and forwards to the real MCP server this pod fronts.
 	if r.OBOEgress.Enabled && len(egressRoutes) > 0 {
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, egressRoutesJSON(egressRoutes)))
+		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership), egressRoutesJSON(egressRoutes)))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
@@ -950,7 +950,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// create/delete of a different workload KIND (handled by the per-model
 	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
-	if ed := egressDigest(r.OBOEgress.SidecarImage, egressRoutes); ed != "" {
+	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes); ed != "" {
 		// The egress sidecar (image + routes — the real URLs now live in pod env, not the
 		// hot-path manifest) is pod-template state, so fold it into the tool component: adding/
 		// removing the sidecar or changing a route rolls a new revision. Inert when OBO is off

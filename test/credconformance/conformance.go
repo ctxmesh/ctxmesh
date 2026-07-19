@@ -87,7 +87,7 @@ func (s Subject) checkIsolation(t *testing.T) {
 		wg.Add(1)
 		go func(user string) {
 			defer wg.Done()
-			cred, err := s.Resolver.Resolve(ctx, ns, server, user)
+			cred, err := s.Resolver.Resolve(ctx, ns, "", server, user)
 			mu.Lock()
 			got[user], errs[user] = cred.Value, err
 			mu.Unlock()
@@ -113,13 +113,13 @@ func (s Subject) checkRevoke(t *testing.T) {
 	if err := s.Seed(ctx, ns, server, user, "revoke-me"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if cred, err := s.Resolver.Resolve(ctx, ns, server, user); err != nil || cred.Value != "revoke-me" {
+	if cred, err := s.Resolver.Resolve(ctx, ns, "", server, user); err != nil || cred.Value != "revoke-me" {
 		t.Fatalf("pre-revoke resolve = (%+v, %v), want the seeded token", cred, err)
 	}
-	if err := s.Resolver.Revoke(ctx, ns, server, user); err != nil {
+	if err := s.Resolver.Revoke(ctx, ns, "", server, user); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	cred, err := s.Resolver.Resolve(ctx, ns, server, user)
+	cred, err := s.Resolver.Resolve(ctx, ns, "", server, user)
 	if err == nil && cred.Value == "revoke-me" {
 		t.Fatal("token still resolves AFTER revoke — revoke did not take effect")
 	}
@@ -142,11 +142,11 @@ func (s Subject) checkCryptoShred(t *testing.T) {
 		t.Fatalf("Shred(A): %v", err)
 	}
 	// A is unrecoverable...
-	if cred, err := s.Resolver.Resolve(ctx, nsA, server, user); err == nil && cred.Value == "a-token" {
+	if cred, err := s.Resolver.Resolve(ctx, nsA, "", server, user); err == nil && cred.Value == "a-token" {
 		t.Fatal("tenant A's token still resolves after crypto-shred")
 	}
 	// ...B is unaffected.
-	cred, err := s.Resolver.Resolve(ctx, nsB, server, user)
+	cred, err := s.Resolver.Resolve(ctx, nsB, "", server, user)
 	if err != nil || cred.Value != "b-token" {
 		t.Fatalf("tenant B resolve = (%+v, %v) after shredding A, want b-token (isolation)", cred, err)
 	}
