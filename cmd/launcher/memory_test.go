@@ -214,6 +214,97 @@ func TestMemoryAppendOrdering(t *testing.T) {
 	}
 }
 
+func TestMemoryAppendAttributesMessageEntry(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	resp, body := doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"role":"user","content":"hi"}`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("append status=%d body=%s", resp.StatusCode, body)
+	}
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	if err := json.Unmarshal(got, &entries); err != nil {
+		t.Fatalf("GET: %v body=%s", err, got)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries=%d want 1", len(entries))
+	}
+	e := entries[0]
+	if e["role"] != "user" || e["content"] != "hi" {
+		t.Errorf("role/content not preserved: %v", e)
+	}
+	if e["agent"] != "test-agent" {
+		t.Errorf("agent = %v, want test-agent (server-authoritative attribution)", e["agent"])
+	}
+	if _, ok := e["messageId"].(string); !ok {
+		t.Errorf("messageId missing/not a string: %v", e["messageId"])
+	}
+	if _, ok := e["ts"].(float64); !ok {
+		t.Errorf("ts missing/not a number: %v", e["ts"])
+	}
+}
+
+func TestMemoryAppendHonorsClientMessageID(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	req, _ := http.NewRequest(
+		http.MethodPost, srv.URL+"/memory/c/append",
+		strings.NewReader(`{"role":"assistant","content":"ok"}`),
+	)
+	req.Header.Set("X-Message-Id", "m-fixed")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(got, &entries)
+	if entries[0]["messageId"] != "m-fixed" {
+		t.Errorf("messageId = %v, want m-fixed (per-hop id honored, ADR 0035)", entries[0]["messageId"])
+	}
+}
+
+func TestMemoryAppendNonMessageStoredVerbatim(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"note":"scratch"}`)
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(got, &entries)
+	if _, ok := entries[0]["agent"]; ok {
+		t.Errorf("a non-message entry must NOT be attributed: %v", entries[0])
+	}
+	if entries[0]["note"] != "scratch" {
+		t.Errorf("note not preserved: %v", entries[0])
+	}
+}
+
+func TestAttributeEntryIdempotent(t *testing.T) {
+	t.Parallel()
+	// A message already carrying agent/messageId keeps them (a replay retains its origin); only the
+	// absent ts is added.
+	in := json.RawMessage(`{"role":"user","content":"hi","agent":"other","messageId":"m-orig"}`)
+	out := attributeEntry(in, "me", "m-new", time.UnixMilli(1234))
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["agent"] != "other" {
+		t.Errorf("agent overwritten: %v", m["agent"])
+	}
+	if m["messageId"] != "m-orig" {
+		t.Errorf("messageId overwritten: %v", m["messageId"])
+	}
+	if m["ts"] != float64(1234) {
+		t.Errorf("ts = %v, want 1234 (added when absent)", m["ts"])
+	}
+}
+
 func TestMemoryAppendRejectsInvalidJSON(t *testing.T) {
 	t.Parallel()
 	_, srv := newTestMemoryServer(t)
