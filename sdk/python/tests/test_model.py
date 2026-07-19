@@ -174,3 +174,102 @@ def test_content_null_empty_tool_calls_raises():
             client.model.chat("m", [{"role": "user", "content": "q"}])
     finally:
         stub.__exit__(None, None, None)
+
+
+
+# ── m32.7: streaming token source ─────────────────────────────────────────────
+
+from ctxmesh import _http  # noqa: E402
+from ctxmesh.model import _accumulate_tool_calls, _sse_delta, _sse_obj  # noqa: E402
+
+
+def _lines(*frames):
+    """Split SSE frames into the lines _http.stream would yield (data lines + blank separators)."""
+    out = []
+    for f in frames:
+        out.extend(f.split("\n"))
+    return out
+
+
+def _patch_stream(monkeypatch, lines):
+    monkeypatch.setattr(_http, "stream", lambda *a, **k: iter(lines))
+
+
+def test_sse_delta_parses_deltas_and_ignores_noise():
+    assert _sse_delta('data: {"choices":[{"delta":{"content":"hi"}}]}') == "hi"
+    assert _sse_delta("data: [DONE]") == ""
+    assert _sse_delta(": a comment line") == ""
+    assert _sse_delta("event: foo") == ""
+    assert _sse_delta("data: not-json") == ""
+    assert _sse_delta('data: {"choices":[{"delta":{}}]}') == ""
+    assert _sse_delta('data: {"choices":[]}') == ""
+    assert _sse_obj("data: [DONE]") is None
+    assert _sse_obj('data: {"a":1}') == {"a": 1}
+
+
+def test_model_stream_yields_token_deltas(monkeypatch):
+    _patch_stream(
+        monkeypatch,
+        _lines(
+            'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+            'data: {"choices":[{"delta":{"content":"lo"}}]}',
+            "data: [DONE]",
+        ),
+    )
+    client = agent.from_config(PlaneConfig.for_test(model_gateway_url="http://gw"))
+    assert list(client.model.stream("m", [{"role": "user", "content": "hi"}])) == ["Hel", "lo"]
+
+
+def _drain(gen):
+    tokens = []
+    try:
+        while True:
+            tokens.append(next(gen))
+    except StopIteration as done:
+        return tokens, done.value
+
+
+def test_stream_completion_yields_tokens_and_returns_text(monkeypatch):
+    _patch_stream(
+        monkeypatch,
+        _lines(
+            'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+            'data: {"choices":[{"delta":{"content":"lo"}}]}',
+            "data: [DONE]",
+        ),
+    )
+    client = agent.from_config(PlaneConfig.for_test(model_gateway_url="http://gw"))
+    tokens, resp = _drain(client.model.stream_completion("m", [{"role": "user", "content": "hi"}]))
+    assert tokens == ["Hel", "lo"]
+    assert resp.text == "Hello"
+    assert resp.tool_calls == []
+    assert resp.has_tool_calls is False
+
+
+def test_stream_completion_assembles_streamed_tool_calls(monkeypatch):
+    # The name + id arrive in the first chunk; function.arguments is streamed across chunks.
+    _patch_stream(
+        monkeypatch,
+        _lines(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo_tool","arguments":"{\\"te"}}]}}]}',  # noqa: E501
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"xt\\":\\"hi\\"}"}}]}}]}',  # noqa: E501
+            "data: [DONE]",
+        ),
+    )
+    client = agent.from_config(PlaneConfig.for_test(model_gateway_url="http://gw"))
+    tokens, resp = _drain(client.model.stream_completion("m", [{"role": "user", "content": "hi"}]))
+    assert tokens == [], "a tool-calling turn streams no text"
+    assert resp.has_tool_calls is True
+    calls = resp.tool_calls
+    assert len(calls) == 1
+    assert calls[0]["id"] == "call_1"
+    assert calls[0]["function"]["name"] == "echo_tool"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"text": "hi"}
+
+
+def test_accumulate_tool_calls_ignores_malformed():
+    acc = {}
+    _accumulate_tool_calls(acc, None)
+    _accumulate_tool_calls(acc, "not-a-list")
+    _accumulate_tool_calls(acc, [{"index": 0, "function": {"arguments": "x"}}])
+    assert acc[0]["function"]["arguments"] == "x"

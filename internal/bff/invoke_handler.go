@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
@@ -156,31 +157,52 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 		s.log.Error(err, "run-capability: could not resolve caller identity; proceeding without a capability")
 		return r
 	}
-	runID, err := randToken(16)
-	if err != nil {
-		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
-		return r
-	}
 	ns := namespace
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
+	boundary := agentBoundary(r.Context(), caller, ns, agent)
+	token, ok := s.mintRunCapability(username, ns, agent, boundary, "")
+	if !ok {
+		return r
+	}
+	return r.WithContext(contextWithRunCapability(r.Context(), token))
+}
+
+// mintRunCapability mints a fresh run capability from the invoking user's identity + the ADR 0033
+// trust boundary (the agent's registry, or the agent itself when standalone) — the material a
+// durable WORKER re-mints from (m32.2), so OBO survives the caller's connection dropping. The
+// egress hop resolves the user's grant within THIS boundary: a registry's agents share the user's
+// credential, a different registry cannot. It is best-effort: minting disabled or a failure ⇒
+// (\"\", false) and the run proceeds unattended (org/public only), never another user's grant.
+// mintRunCapability mints from the caller identity + boundary. runID, when non-empty, pins the
+// capability's run id to a STABLE value (the durable run's own id) so a resumed run re-mints the
+// same id — an idempotency key downstream can dedupe on across a reclaim (m32.3). An empty runID
+// (the /invoke path, which has no durable run) gets a fresh random id.
+func (s *Server) mintRunCapability(username, ns, agent, boundary, runID string) (string, bool) {
+	if s.capabilitySigner == nil {
+		return "", false // minting disabled — no platform capability key configured
+	}
+	if runID == "" {
+		var err error
+		runID, err = randToken(16)
+		if err != nil {
+			s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+			return "", false
+		}
+	}
 	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
-		User:  userGrantHash(username),
-		Agent: ns + "/" + agent,
-		// The trust boundary (ADR 0033) the run resolves credentials within: the agent's
-		// registry, or the agent itself when standalone. The egress hop resolves the invoking
-		// user's grant within THIS boundary, so a registry's agents share the user's credential
-		// but a different registry cannot. Matches the boundary the consent write stores under.
-		Boundary: agentBoundary(r.Context(), caller, ns, agent),
+		User:     userGrantHash(username),
+		Agent:    ns + "/" + agent,
+		Boundary: boundary,
 		RunID:    runID,
 		TTL:      runCapabilityTTL,
 	})
 	if err != nil {
 		s.log.Error(err, "run-capability: mint failed; proceeding without a capability")
-		return r
+		return "", false
 	}
-	return r.WithContext(contextWithRunCapability(r.Context(), token))
+	return token, true
 }
 
 // handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).
@@ -257,6 +279,29 @@ func parseConsentRequired(resp []byte) []string {
 		return nil
 	}
 	return parsed.ConsentRequired
+}
+
+// parseApprovalRequired extracts a human-in-the-loop approval signal from an agent's /invoke
+// envelope (m32.4): {approval_required:{key,summary}}. Returns nil when the run did not pause for
+// approval. The key is the stable identifier the resumed run carries back so the pause proceeds.
+func parseApprovalRequired(resp []byte) *run.Action {
+	var parsed struct {
+		ApprovalRequired *struct {
+			Key     string `json:"key"`
+			Summary string `json:"summary"`
+		} `json:"approval_required"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil || parsed.ApprovalRequired == nil {
+		return nil
+	}
+	if parsed.ApprovalRequired.Key == "" {
+		return nil
+	}
+	return &run.Action{
+		Kind:    run.ActionApproval,
+		Key:     parsed.ApprovalRequired.Key,
+		Message: parsed.ApprovalRequired.Summary,
+	}
 }
 
 // InvokeErrorResponse is returned when the agent answered non-2xx: the honest

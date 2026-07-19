@@ -1,0 +1,75 @@
+# Durable run-worker Deployment (ADR 0034, m32.2).
+#
+# Runs the SAME bff binary/image in worker mode: RUN_WORKER_CONCURRENCY>0 starts the claim-loop pool
+# (cmd/bff/main.go) that drains queued runs from the durable store and executes them — decoupled from
+# the front-end BFF, so long/autonomous runs neither tie up a request nor a serving replica. It is a
+# separate Deployment (not the BFF) so it scales independently: KEDA (scaledobject.yaml) scales it to
+# zero when the queue is empty and up under backlog. The bff HTTP server still starts here (harmless
+# health surface); only the worker pool does the work.
+#
+# The worker re-mints each run's capability from the run's stored caller identity + boundary, so it
+# needs the platform capability signing key (the same secret the BFF uses) and the run-store DSN.
+# Both come from operator-provided Secrets (BYO, never literals here) — envFrom is optional so a
+# `kustomize build` stays valid before the Secrets exist.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: run-worker
+  namespace: system
+  labels:
+    control-plane: run-worker
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: run-worker
+spec:
+  # Replicas are owned by KEDA (scaledobject.yaml); start at 0 (scale-to-zero).
+  replicas: 0
+  selector:
+    matchLabels:
+      control-plane: run-worker
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      labels:
+        control-plane: run-worker
+        app.kubernetes.io/name: agent-engine
+    spec:
+      serviceAccountName: bff
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: run-worker
+          image: bff:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # RUN_STORE_DSN points at the durable Postgres run store (operator-provided Secret).
+            # The KEDA postgresql scaler reads the SAME env (connectionFromEnv) — one source of truth.
+            - name: RUN_STORE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: run-store
+                  key: dsn
+            # Start N concurrent claim loops. Dispatch is OFF here — workers EXECUTE runs; the
+            # front-end BFF is what dispatches (RUN_WORKER_DISPATCH=true on the bff Deployment).
+            - name: RUN_WORKER_CONCURRENCY
+              value: "4"
+          # The capability signing key + credential-plane audience (shared with the BFF, ADR 0030),
+          # so the worker can re-mint a run capability on the caller's behalf. Optional so the
+          # manifest builds before the Secret exists.
+          envFrom:
+            - secretRef:
+                name: bff-capability
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

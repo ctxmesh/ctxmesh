@@ -1,0 +1,11 @@
+# Durable run-worker overlay (ADR 0034, m32.2): the worker Deployment + its KEDA autoscaler.
+#
+# Opt-in — NOT wired into config/default by default (a deploy enables the worker path only when it
+# has provisioned the durable Postgres run store + set RUN_WORKER_DISPATCH=true on the BFF). Apply
+# with `kubectl apply -k config/run-worker` once the `run-store` + `bff-capability` Secrets exist.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: system
+resources:
+  - deployment.yaml
+  - scaledobject.yaml

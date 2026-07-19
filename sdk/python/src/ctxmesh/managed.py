@@ -33,11 +33,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
-from ctxmesh.errors import ConfigError, ConsentRequiredError
+from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
 
 #: A sane default bound: enough for a few tool round-trips, low enough that a
 #: runaway (a model that keeps calling tools) trips it quickly. Overridable via
@@ -132,6 +133,10 @@ class ManagedResult:
     #: (ADR 0029 §2 / m25.9). Non-empty ⇒ the run needs a "Connect your account" CTA; the
     #: model was told to report + stop rather than retry.
     consent_required: List[str] = field(default_factory=list)
+    #: When a step called ``pause_for_approval`` for a not-yet-approved key (human-in-the-loop,
+    #: m32.4), ``{"key": ..., "summary": ...}`` describing what needs approving. ``None`` ⇒ the run
+    #: did not pause for approval. Non-None ⇒ the BFF surfaces a ``requires_action`` (approval).
+    approval_required: Optional[Dict[str, str]] = None
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -198,12 +203,32 @@ def _tool_result_content(result: Any) -> str:
         return str(result)
 
 
+def _stream_turn(
+    client: Client,
+    route: str,
+    messages: List[Dict[str, Any]],
+    chat_opts: Dict[str, Any],
+    on_token: Callable[[str], None],
+) -> Any:
+    """Stream one model turn: push each content delta to *on_token*, and return the assembled
+    ChatResponse (content + tool_calls) so the loop dispatches tools / detects the final answer
+    exactly as the non-streaming path (m32.7)."""
+    gen = client.model.stream_completion(route, messages, **chat_opts)
+    try:
+        while True:
+            on_token(next(gen))
+    except StopIteration as done:
+        return done.value
+
+
 def run_managed_loop(
     client: Client,
     config: ManagedConfig,
     user_input: str,
     *,
     headers: Optional[Dict[str, str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+    approvals: Optional[Iterable[str]] = None,
 ) -> ManagedResult:
     """Run the config-driven tool-calling loop for one user turn.
 
@@ -243,85 +268,131 @@ def run_managed_loop(
 
     # Bind the invoking user's run capability (ADR 0030 §3) from the inbound headers for
     # the whole turn, so every MCP tool call this loop dispatches relays it to the egress
-    # sidecar. Request-scoped (a ContextVar) — no cross-user bleed between concurrent runs.
-    with capability_scope(headers), client.trace.loop("managed-agent", headers=headers) as root:
+    # sidecar. approval_scope binds the human-in-the-loop approvals GRANTED for this run
+    # (m32.4) — on a resume the re-invoke carries the approved key so pause_for_approval
+    # proceeds. Both are request-scoped ContextVars — no cross-user bleed between runs.
+    step = 0
+    with capability_scope(headers), approval_scope(approvals), client.trace.loop(
+        "managed-agent", headers=headers
+    ) as root:
         root.set_input(user_input)
 
-        for step in range(1, config.max_steps + 1):
-            with client.trace.step(f"turn-{step}") as turn:
-                # model.chat emits its own LLM span nested under this step.
-                chat_opts: Dict[str, Any] = dict(config.model_opts)
-                if tool_schemas:
-                    chat_opts["tools"] = tool_schemas
+        try:
+            return _drive_loop(
+                client, config, root, messages, tool_schemas, tool_names,
+                tools_called, consent_required, on_token, conversation_id, threaded, user_input,
+            )
+        except ApprovalRequiredError as exc:
+            # A step gated on human approval (pause_for_approval). Surface it as a
+            # requires_action (approval) OUTCOME — the console renders approve/deny and the
+            # run resumes with the key granted — rather than crashing the run.
+            root.set_output(f"approval required: {exc.summary}")
+            return ManagedResult(
+                output=f"Awaiting approval: {exc.summary}",
+                steps=step,
+                tools_called=tools_called,
+                consent_required=consent_required,
+                approval_required={"key": exc.key, "summary": exc.summary},
+            )
+
+
+def _drive_loop(
+    client: Client,
+    config: ManagedConfig,
+    root: Any,
+    messages: List[Dict[str, Any]],
+    tool_schemas: List[Dict[str, Any]],
+    tool_names: set,
+    tools_called: List[str],
+    consent_required: List[str],
+    on_token: Optional[Callable[[str], None]],
+    conversation_id: str,
+    threaded: bool,
+    user_input: str,
+) -> ManagedResult:
+    """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
+    capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
+    for step in range(1, config.max_steps + 1):
+        with client.trace.step(f"turn-{step}") as turn:
+            # model.chat emits its own LLM span nested under this step.
+            chat_opts: Dict[str, Any] = dict(config.model_opts)
+            if tool_schemas:
+                chat_opts["tools"] = tool_schemas
+            # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
+            # push content deltas to on_token as they arrive, then take the assembled response
+            # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
+            if on_token is not None:
+                resp = _stream_turn(client, config.model_route, messages, chat_opts, on_token)
+            else:
                 resp = client.model.chat(config.model_route, messages, **chat_opts)
 
-                if not resp.has_tool_calls:
-                    # The model stopped calling tools → this is the final answer.
-                    turn.set_output(resp.text)
-                    root.set_output(resp.text)
-                    # Persist the clean user↔assistant exchange so the next turn in this
-                    # conversation replays it. Only on a completed answer (an error/runaway
-                    # path stores nothing — there is no answer to thread).
-                    if threaded:
-                        _persist_turn(client, conversation_id, user_input, resp.text)
-                    return ManagedResult(
-                        output=resp.text,
-                        steps=step,
-                        tools_called=tools_called,
-                        consent_required=consent_required,
-                    )
+            if not resp.has_tool_calls:
+                # The model stopped calling tools → this is the final answer.
+                turn.set_output(resp.text)
+                root.set_output(resp.text)
+                # Persist the clean user↔assistant exchange so the next turn in this
+                # conversation replays it. Only on a completed answer (an error/runaway
+                # path stores nothing — there is no answer to thread).
+                if threaded:
+                    _persist_turn(client, conversation_id, user_input, resp.text)
+                return ManagedResult(
+                    output=resp.text,
+                    steps=step,
+                    tools_called=tools_called,
+                    consent_required=consent_required,
+                )
 
-                # A tool-calling turn: append the assistant message verbatim
-                # (OpenAI requires it to precede the tool results), then dispatch
-                # each call and append a role:"tool" result.
-                messages.append(_assistant_message_for_history(resp))
-                turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
+            # A tool-calling turn: append the assistant message verbatim
+            # (OpenAI requires it to precede the tool results), then dispatch
+            # each call and append a role:"tool" result.
+            messages.append(_assistant_message_for_history(resp))
+            turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
 
-                for call in resp.tool_calls:
-                    name = _call_name(call)
-                    args = _parse_arguments(_call_arguments(call))
-                    call_id = call.get("id", "")
+            for call in resp.tool_calls:
+                name = _call_name(call)
+                args = _parse_arguments(_call_arguments(call))
+                call_id = call.get("id", "")
 
-                    if name not in tool_names:
-                        # A tool the agent is not bound to — surface it as the
-                        # tool result so the model can recover, rather than
-                        # crashing the run on a hallucinated tool name.
-                        content = f"error: tool {name!r} is not bound to this agent"
-                    else:
-                        try:
-                            with client.trace.tool(name, input=args) as tool_span:
-                                result = client.tools.call(name, **args)
-                                tool_span.set_output(result)
-                            content = _tool_result_content(result)
-                            tools_called.append(name)
-                        except ConsentRequiredError as exc:
-                            # The invoking user has not connected their account to this MCP
-                            # server (ADR 0029 §2). Record it for the run's "Connect your
-                            # account" CTA and tell the model to report + stop, not retry.
-                            if exc.server and exc.server not in consent_required:
-                                consent_required.append(exc.server)
-                            content = (
-                                f"consent_required: the user must connect their account for "
-                                f"the {exc.server!r} MCP server before this tool can run. "
-                                f"Report this to the user and stop — do not retry."
-                            )
+                if name not in tool_names:
+                    # A tool the agent is not bound to — surface it as the
+                    # tool result so the model can recover, rather than
+                    # crashing the run on a hallucinated tool name.
+                    content = f"error: tool {name!r} is not bound to this agent"
+                else:
+                    try:
+                        with client.trace.tool(name, input=args) as tool_span:
+                            result = client.tools.call(name, **args)
+                            tool_span.set_output(result)
+                        content = _tool_result_content(result)
+                        tools_called.append(name)
+                    except ConsentRequiredError as exc:
+                        # The invoking user has not connected their account to this MCP
+                        # server (ADR 0029 §2). Record it for the run's "Connect your
+                        # account" CTA and tell the model to report + stop, not retry.
+                        if exc.server and exc.server not in consent_required:
+                            consent_required.append(exc.server)
+                        content = (
+                            f"consent_required: the user must connect their account for "
+                            f"the {exc.server!r} MCP server before this tool can run. "
+                            f"Report this to the user and stop — do not retry."
+                        )
 
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "name": name,
-                            "content": content,
-                        }
-                    )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": content,
+                    }
+                )
 
-        # Bound exceeded: the model kept calling tools past max_steps. Hard stop
-        # rather than hang the pod (the mandatory runaway guard, ADR 0013).
-        raise ConfigError(
-            f"managed loop exceeded max_steps={config.max_steps} without a final "
-            f"completion (the model kept calling tools). Tools called so far: "
-            f"{tools_called!r}."
-        )
+    # Bound exceeded: the model kept calling tools past max_steps. Hard stop
+    # rather than hang the pod (the mandatory runaway guard, ADR 0013).
+    raise ConfigError(
+        f"managed loop exceeded max_steps={config.max_steps} without a final "
+        f"completion (the model kept calling tools). Tools called so far: "
+        f"{tools_called!r}."
+    )
 
 
 def _call_name(call: Dict[str, Any]) -> str:

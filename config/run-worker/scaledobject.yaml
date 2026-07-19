@@ -1,0 +1,36 @@
+# KEDA ScaledObject for the durable run-worker (ADR 0034, m32.2).
+#
+# Autoscales the run-worker Deployment on the depth of the QUEUED-run backlog in the durable run
+# store (Postgres). This YAML MIRRORS internal/controller.BuildRunWorkerScaledObject — that Go
+# builder is the source of truth and an envtest (TestRunWorkerScaledObject_Wiring) asserts KEDA's
+# CRD schema accepts exactly this shape. Keep the two in sync.
+#
+# The postgresql scaler reads its connection from the worker Deployment's own RUN_STORE_DSN env
+# (connectionFromEnv) — so the DSN lives in ONE place (the worker's secret ref), not duplicated
+# into a TriggerAuthentication. Scale-to-zero is intentional: a durable run outlives its worker, so
+# a new replica claims any queued/reclaimable run when work arrives (activationTargetQueryValue 0
+# wakes the pool the moment the first run is queued).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: run-worker
+  namespace: system
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: run-worker
+spec:
+  scaleTargetRef:
+    name: run-worker
+    kind: Deployment
+    apiVersion: apps/v1
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  cooldownPeriod: 60
+  triggers:
+    - type: postgresql
+      name: queued-runs
+      metadata:
+        connectionFromEnv: RUN_STORE_DSN
+        query: "SELECT count(*) FROM runs WHERE status = 'queued'"
+        targetQueryValue: "5"
+        activationTargetQueryValue: "0"

@@ -121,6 +121,27 @@ type Run struct {
 	// CreatedAt / UpdatedAt bound the run's timeline.
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+
+	// --- Execution record (m32.2): the non-secret material a WORKER needs to (re)execute this run
+	// off the request path — durably, on any pod. Not part of the public API object (json:"-"); the
+	// durable store persists them as their own columns. None is a secret: CallerUsername + Boundary
+	// are identifiers, Endpoint is a service URL. They let a worker re-mint a fresh run capability
+	// for the original caller (OBO stays intact) without the caller's connection being present.
+
+	// CallerUsername is the invoking user's identity, so a worker re-mints the run capability on
+	// their behalf (the user consented by creating the run — an autonomous run acts with their
+	// granted scope). Empty ⇒ capability minting was disabled at create time.
+	CallerUsername string `json:"-"`
+	// Boundary is the ADR 0033 trust boundary credentials resolve within (the agent's registry, or
+	// the agent itself when standalone). Captured at create time so the re-mint matches.
+	Boundary string `json:"-"`
+	// Endpoint is the agent endpoint resolved (and authorized) at create time; the worker reuses it
+	// rather than re-resolving, so the create-time RBAC decision is the gate.
+	Endpoint string `json:"-"`
+	// WorkerID is the worker currently leasing this run (empty ⇒ unclaimed); LeaseExpiresAt bounds
+	// the lease so a dead worker's run can be reclaimed and resumed (m32.3).
+	WorkerID       string     `json:"-"`
+	LeaseExpiresAt *time.Time `json:"-"`
 }
 
 // ActionKind classifies what a requires_action run is waiting on.
@@ -139,7 +160,11 @@ type Action struct {
 	Kind ActionKind `json:"kind"`
 	// Servers names the MCP servers needing consent (for ActionConsentRequired).
 	Servers []string `json:"servers,omitempty"`
-	// Message is a human-readable description of the required action.
+	// Key is the stable approval key the resumed run must carry back (for ActionApproval, m32.4) so
+	// the agent's pause_for_approval(key) proceeds instead of pausing again.
+	Key string `json:"key,omitempty"`
+	// Message is a human-readable description of the required action (for approval: the summary the
+	// approver sees).
 	Message string `json:"message,omitempty"`
 }
 
