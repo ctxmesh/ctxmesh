@@ -759,7 +759,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
 	// The single-writer rule applies: only this reconciler writes the pod
 	// template; the MemoryBinding controller only sets the binding's status.
-	memAddr, memScope, hasMemoryBinding, err := resolveMemoryBinding(ctx, r.Client, deploy.Namespace, deploy.Name)
+	memAddr, memScope, hasMemoryBinding, err := resolveMemory(ctx, r.Client, deploy)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
