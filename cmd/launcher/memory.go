@@ -34,6 +34,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,6 +176,7 @@ type memoryConfig struct {
 type memoryServer struct {
 	store  MemoryStore
 	prefix string // "mem:{namespace}/{agent}:"
+	agent  string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
 	tracer trace.Tracer
 }
 
@@ -181,8 +184,65 @@ func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer) *
 	return &memoryServer{
 		store:  store,
 		prefix: fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent),
+		agent:  cfg.Agent,
 		tracer: tracer,
 	}
+}
+
+// messageIDHeader carries a per-hop message id (ADR 0035, m33.4). When an append omits it, the
+// launcher mints one so every attributed entry is addressable.
+const messageIDHeader = "X-Message-Id"
+
+// attributeEntry stamps server-AUTHORITATIVE attribution on a message-shaped memory entry (ADR
+// 0036, m33.1): a JSON object carrying string `role` + `content` gains `agent` (THIS agent — the
+// caller cannot forge another's name, which matters once a shared scope has many writers, m33.3),
+// `messageId`, and `ts` (unix millis). Fields already present are preserved (idempotent — a replay
+// keeps its original id/agent). A non-message entry (any other JSON) is stored verbatim, so the
+// memory plane stays a general log and OLD opaque entries keep round-tripping (read-old/write-new).
+func attributeEntry(entry json.RawMessage, agent, messageID string, now time.Time) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
+		return entry // not an object — verbatim
+	}
+	role, hasRole := obj["role"]
+	content, hasContent := obj["content"]
+	if !hasRole || !hasContent || !isJSONString(role) || !isJSONString(content) {
+		return entry // not a message — verbatim
+	}
+	if _, ok := obj["agent"]; !ok {
+		obj["agent"] = mustJSON(agent)
+	}
+	if _, ok := obj["messageId"]; !ok {
+		obj["messageId"] = mustJSON(messageID)
+	}
+	if _, ok := obj["ts"]; !ok {
+		obj["ts"] = mustJSON(now.UnixMilli())
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return entry // never fail the write on a re-marshal hiccup
+	}
+	return out
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	var s string
+	return json.Unmarshal(raw, &s) == nil
+}
+
+// newMessageID mints a short random per-hop message id (hex). crypto/rand failure is astronomically
+// unlikely; on the off-chance, fall back to a timestamp so attribution still has a value.
+func newMessageID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("m-%d", time.Now().UnixNano())
+	}
+	return "m-" + hex.EncodeToString(b[:])
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 // key builds the full Redis key for a conversation. convID is validated by the
@@ -371,7 +431,13 @@ func (m *memoryServer) handleAppend(
 		writeJSONError(w, http.StatusBadRequest, "body must be a single valid JSON value: "+err.Error())
 		return
 	}
-	entry := json.RawMessage(compact.Bytes())
+	// Stamp server-authoritative attribution on a message entry (m33.1): the per-hop messageId
+	// (ADR 0035) rides X-Message-Id when the caller/A2A sets it, else the launcher mints one.
+	messageID := strings.TrimSpace(r.Header.Get(messageIDHeader))
+	if messageID == "" {
+		messageID = newMessageID()
+	}
+	entry := attributeEntry(json.RawMessage(compact.Bytes()), m.agent, messageID, time.Now())
 
 	opCtx, cancel := context.WithTimeout(ctx, memoryOpTimeout)
 	defer cancel()
