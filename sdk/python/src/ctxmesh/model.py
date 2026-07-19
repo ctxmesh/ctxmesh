@@ -210,6 +210,72 @@ class ModelClient:
                     yield delta
             span.set_output("".join(acc))
 
+    def stream_completion(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        **opts: Any,
+    ) -> Iterator[str]:
+        """Stream a chat completion: **yield** content deltas as they arrive AND **return** the
+        assembled :class:`ChatResponse` (content + ``tool_calls``) via ``StopIteration.value`` when
+        the stream ends. This lets the managed loop stream tokens for the user AND still get the full
+        turn — a tool-calling turn yields no text but returns the assembled ``tool_calls`` to
+        dispatch (m32.7). Consume it as::
+
+            gen = client.model.stream_completion(route, messages)
+            try:
+                while True:
+                    on_token(next(gen))
+            except StopIteration as done:
+                resp = done.value  # ChatResponse
+        """
+        base_url = self._config.model_gateway_url
+        if not base_url:
+            raise ConfigError("model gateway is not wired: MODEL_GATEWAY_URL is unset.")
+        if not isinstance(messages, list):
+            raise ConfigError("model.stream_completion expects messages as a list of {role,content} dicts")
+
+        body_opts = dict(opts)
+        raw_timeout = body_opts.pop("timeout", None)
+        timeout = raw_timeout if isinstance(raw_timeout, (int, float)) else _CHAT_TIMEOUT
+        payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        payload.update(body_opts)
+
+        content_parts: List[str] = []
+        tool_acc: Dict[int, Dict[str, Any]] = {}
+        usage: Dict[str, Any] = {}
+        with self._trace.llm(name=f"chat {model}", model=model, input=messages) as span:
+            span.set_attribute(_semconv.LLM_MODEL_NAME, model)
+            for line in _http.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                body=_http.json_body(payload),
+                headers=self._headers(),
+                timeout=timeout,
+            ):
+                obj = _sse_obj(line)
+                if not isinstance(obj, dict):
+                    continue
+                if isinstance(obj.get("usage"), dict):
+                    usage = obj["usage"]
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    content_parts.append(content)
+                    yield content
+                _accumulate_tool_calls(tool_acc, delta.get("tool_calls"))
+
+            text = "".join(content_parts)
+            message: Dict[str, Any] = {"role": "assistant", "content": text or None}
+            if tool_acc:
+                message["tool_calls"] = [tool_acc[i] for i in sorted(tool_acc)]
+            span.set_output(text)
+            _stamp_usage(span, usage)
+        return ChatResponse(text=text, usage=usage, model=model, raw={"choices": [{"message": message}]})
+
     def _headers(self) -> Dict[str, str]:
         # The gateway (LiteLLM / budget proxy) is OpenAI-compatible and expects a
         # bearer token; the launcher injects the master key in-pod. When absent
@@ -249,21 +315,52 @@ def _assistant_message(data: Dict[str, Any]) -> Dict[str, Any]:
     return message if isinstance(message, dict) else {}
 
 
-def _sse_delta(line: str) -> str:
-    """Extract the text delta from one SSE line of a streaming chat completion. A non-``data:``
-    line, the ``[DONE]`` sentinel, malformed JSON, or a content-less delta yields ``""``."""
+def _sse_obj(line: str) -> Any:
+    """Parse one SSE ``data:`` line to its JSON object, or ``None`` for a non-data line, the
+    ``[DONE]`` sentinel, or malformed JSON (never raises — a stream must not die on one bad frame)."""
     if not line.startswith("data:"):
-        return ""
+        return None
     payload = line[len("data:") :].strip()
     if not payload or payload == "[DONE]":
+        return None
+    try:
+        return json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _sse_delta(line: str) -> str:
+    """The text delta from one SSE line, or ``""`` (a non-data line, [DONE], bad JSON, or a
+    content-less delta)."""
+    obj = _sse_obj(line)
+    if not isinstance(obj, dict):
         return ""
     try:
-        obj = json.loads(payload)
-        choices = obj.get("choices") or []
-        content = (choices[0].get("delta") or {}).get("content")
-    except (json.JSONDecodeError, ValueError, AttributeError, IndexError, TypeError):
+        content = ((obj.get("choices") or [])[0].get("delta") or {}).get("content")
+    except (AttributeError, IndexError, TypeError):
         return ""
     return content if isinstance(content, str) else ""
+
+
+def _accumulate_tool_calls(acc: Dict[int, Dict[str, Any]], deltas: Any) -> None:
+    """Fold streamed ``delta.tool_calls`` chunks into ``acc`` (index → tool-call object). The name +
+    id arrive once; ``function.arguments`` is streamed across chunks and concatenated."""
+    if not isinstance(deltas, list):
+        return
+    for tc in deltas:
+        if not isinstance(tc, dict):
+            continue
+        idx = tc.get("index", 0)
+        entry = acc.setdefault(idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        if tc.get("id"):
+            entry["id"] = tc["id"]
+        if tc.get("type"):
+            entry["type"] = tc["type"]
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            entry["function"]["name"] = fn["name"]
+        if isinstance(fn.get("arguments"), str):
+            entry["function"]["arguments"] += fn["arguments"]
 
 
 def _completion_text(data: Dict[str, Any]) -> str:
