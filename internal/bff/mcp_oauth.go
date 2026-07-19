@@ -92,6 +92,10 @@ const (
 	secretKeyOAuthClientID      = credresolve.KeyClientID
 )
 
+// oauthParamClientID is the OAuth "client_id" wire parameter name (RFC 6749) — the
+// authorize query param, the token-request form field, and the CIMD document key.
+const oauthParamClientID = "client_id"
+
 // annMCPAuthType persists the auth tier ("oauth") on the ToolRegistry/Secret so
 // the credential resolver (m17.3) can branch on how to attach the credential.
 // Non-secret.
@@ -298,7 +302,7 @@ func (s *Server) startOAuthFlow(cfg mcpOAuthConfig, tmpl pendingOAuthFlow) (auth
 	}
 	q := u.Query()
 	q.Set("response_type", "code")
-	q.Set("client_id", cfg.ClientID)
+	q.Set(oauthParamClientID, cfg.ClientID)
 	q.Set("redirect_uri", cfg.RedirectURI)
 	q.Set("state", st)
 	q.Set("code_challenge", pkceChallengeS256(verifier))
@@ -340,7 +344,7 @@ func (s *Server) exchangeCodeForTokens(ctx context.Context, cfg mcpOAuthConfig, 
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", cfg.RedirectURI)
-	form.Set("client_id", cfg.ClientID)
+	form.Set(oauthParamClientID, cfg.ClientID)
 	form.Set("code_verifier", verifier)
 	return s.postTokenEndpoint(ctx, cfg.TokenEndpoint, form)
 }
@@ -354,7 +358,7 @@ func (s *Server) refreshTokens(ctx context.Context, tokenEndpoint, clientID, ref
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	if clientID != "" {
-		form.Set("client_id", clientID)
+		form.Set(oauthParamClientID, clientID)
 	}
 	return s.postTokenEndpoint(ctx, tokenEndpoint, form)
 }

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronRight,
   PlugZap,
+  Plus,
   Rocket,
   Search,
   Server,
@@ -14,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -1551,15 +1552,29 @@ function ToolPicker({
           pre-selected tools are shown; you can still create the agent.
         </p>
       )}
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          aria-label="Search tools"
-          placeholder="Search tools…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="pl-9"
-        />
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            aria-label="Search tools"
+            placeholder="Search tools…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        {/* Don't see your server? Add one without leaving the flow — opens the add-MCP
+            wizard in a new tab; re-open the picker to see the new server's tools. */}
+        <a
+          href="/tools/add-mcp"
+          target="_blank"
+          rel="noreferrer"
+          data-testid="add-mcp-from-picker"
+          className={buttonVariants({ variant: "outline", size: "sm" })}
+        >
+          <Plus className="h-4 w-4" />
+          Add MCP server
+        </a>
       </div>
       {/* A collapsible tree (m25 S13): the list shows MCP SERVERS, each with a
           checkbox; expanding a server reveals its individual tools for granular
