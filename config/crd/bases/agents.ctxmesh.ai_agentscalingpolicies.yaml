@@ -29,6 +29,7 @@ spec:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -165,6 +166,223 @@ spec:
               rule: self.max >= self.min
           status:
             description: status defines the observed state of this policy.
+            properties:
+              backend:
+                description: |-
+                  backend records which backend the controller selected based on the trigger.
+                  Examples: "knative-annotations", "keda-scaledobject", "cronjob".
+                  Set after the first successful reconcile.
+                maxLength: 128
+                type: string
+              conditions:
+                description: |-
+                  conditions reflect the policy's reconciliation state.
+                  Ready=True means the target AgentDeployment exists and the chosen backend
+                  resource has been created or updated successfully.
+                  Known failure reasons: AgentNotFound, InvalidTrigger, BackendError.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentScalingPolicy is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentScalingPolicy (ADR 0037, M34),
+          reusing the v1alpha1 spec/status so conversion is a direct copy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentScalingPolicySpec defines the desired scaling policy for an AgentDeployment
+              (specs/eventing-scaling.md, PRD §18).
+            properties:
+              agentRef:
+                description: |-
+                  agentRef names the AgentDeployment (same namespace) that this policy
+                  targets. Required. Must be a valid DNS label.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$
+                type: string
+              cooldown:
+                default: 60s
+                description: |-
+                  cooldown is the cooldown period after a scale event before another may
+                  occur. Expressed as a Go duration string (e.g. "60s", "5m"). Defaults to
+                  "60s". For queue-depth triggers this maps to KEDA cooldownPeriod.
+                maxLength: 32
+                pattern: ^[0-9]+(s|m|h)$
+                type: string
+              max:
+                description: max is the maximum replica count. Must be at least 1
+                  and at least min.
+                format: int32
+                minimum: 1
+                type: integer
+              metric:
+                description: |-
+                  metric configures the custom metric when trigger is "custom-metric".
+                  Passed through as Knative autoscaling class/metric annotations on the ksvc.
+                properties:
+                  class:
+                    description: class is the Knative autoscaling class (e.g. "kpa.autoscaling.knative.dev").
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  metric:
+                    description: |-
+                      metric is the metric name exposed by the class (e.g. "rps", "concurrency",
+                      or a custom metric name).
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - class
+                - metric
+                type: object
+              min:
+                default: 0
+                description: |-
+                  min is the minimum replica count. 0 enables scale-to-zero (KEDA idles the
+                  consumer when the queue is empty). Defaults to 0.
+                format: int32
+                minimum: 0
+                type: integer
+              queueRef:
+                description: |-
+                  queueRef identifies the Knative Eventing Broker to use as the queue-depth
+                  scaler source. When omitted the controller defaults to the registry broker
+                  in the same namespace (resolved from the agent's AgentRegistry membership).
+                  Only meaningful when trigger is "queue-depth".
+                properties:
+                  name:
+                    description: name is the name of the Broker resource.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      namespace is the namespace of the Broker. Defaults to the policy's own
+                      namespace when omitted.
+                    maxLength: 63
+                    type: string
+                required:
+                - name
+                type: object
+              schedule:
+                description: |-
+                  schedule is a cron expression (standard 5-field cron, e.g. "*/5 * * * *").
+                  Required when trigger is "schedule"; ignored otherwise. The controller
+                  generates a CronJob for the target AgentDeployment (executionModel=job).
+                maxLength: 128
+                minLength: 1
+                type: string
+              trigger:
+                description: |-
+                  trigger selects the scaling backend that the controller generates.
+                  - request-rate: Knative autoscaling annotations (concurrency/rps) on the ksvc.
+                  - custom-metric: Knative custom autoscaling class/metric annotations on the ksvc.
+                  - queue-depth: KEDA ScaledObject targeting the agent deployment; scaler reads
+                    the AgentRegistry broker depth (PRD §18).
+                  - schedule: a CronJob for executionModel=job agents; schedule field required.
+                enum:
+                - request-rate
+                - custom-metric
+                - queue-depth
+                - schedule
+                type: string
+            required:
+            - agentRef
+            - max
+            - trigger
+            type: object
+            x-kubernetes-validations:
+            - message: schedule is required when trigger is 'schedule'
+              rule: self.trigger != 'schedule' || has(self.schedule)
+            - message: max must be greater than or equal to min
+              rule: self.max >= self.min
+          status:
+            description: AgentScalingPolicyStatus defines the observed state of an
+              AgentScalingPolicy.
             properties:
               backend:
                 description: |-

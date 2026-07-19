@@ -80,6 +80,7 @@ type MCPToolBindingStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=mtb
 // +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".spec.agentRef"

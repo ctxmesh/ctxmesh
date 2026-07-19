@@ -39,6 +39,7 @@ type AgentVersionSpec struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // AgentVersion is the Schema for the agentversions API.
 // Each AgentVersion is an immutable, controller-created snapshot of an

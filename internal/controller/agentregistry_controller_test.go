@@ -468,6 +468,65 @@ func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory still works (private)")
 }
 
+// TestMemory_FoldedSessionMemoryField: the folded AgentDeployment.spec.sessionMemory (ADR 0037,
+// m34.2) injects the memory env WITHOUT a MemoryBinding CRD — the fold produces identical wiring.
+func TestMemory_FoldedSessionMemoryField(t *testing.T) {
+	const namespace = "default"
+	const agentName = "folded-mem-agent"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+				Scope:   "session",
+				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "valkey.folded.svc:6379", envMap["MEMORY_BACKEND_ADDR"],
+		"the folded field injects the memory backend without a MemoryBinding CRD")
+	assert.Equal(t, namespace, envMap["MEMORY_KEY_NAMESPACE"])
+	assert.NotContains(t, envMap, "MEMORY_SCOPE", "private scope injects no MEMORY_SCOPE")
+}
+
+// TestMemory_FoldedSharedScopeForMember: the folded field with scope=shared on a registry member
+// injects MEMORY_SCOPE=shared — the m33.3 shared scope works through the m34.2 fold too.
+func TestMemory_FoldedSharedScopeForMember(t *testing.T) {
+	const namespace = "default"
+	const registryID = "folded-shared-mesh"
+	const agentName = "folded-shared-member"
+	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: agentName, Namespace: namespace, Labels: map[string]string{"registry": registryID},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
+			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+				Scope:   "shared",
+				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "shared", envMap["MEMORY_SCOPE"], "folded scope=shared on a member injects MEMORY_SCOPE")
+	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"])
+	assert.Equal(t, "valkey.folded.svc:6379", envMap["MEMORY_BACKEND_ADDR"])
+}
+
 // TestRegistry_NonMemberUnaffected verifies an agent whose labels do not match
 // any registry selector gets NO mesh env, NO membership label, and a bare
 // spec-hash revision name.

@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 )
 
@@ -91,6 +92,9 @@ func TestMain(m *testing.M) {
 	}
 	if err = agentsv1alpha1.AddToScheme(testScheme); err != nil {
 		panic("failed to add agents/v1alpha1 scheme: " + err.Error())
+	}
+	if err = agentsv1beta1.AddToScheme(testScheme); err != nil {
+		panic("failed to add agents/v1beta1 scheme: " + err.Error())
 	}
 	if err = servingv1.AddToScheme(testScheme); err != nil {
 		panic("failed to add Knative serving/v1 scheme: " + err.Error())

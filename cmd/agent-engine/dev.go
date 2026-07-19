@@ -41,6 +41,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/bff"
 )
 
@@ -300,6 +301,9 @@ func serveDevUI(uiPort int, uiDist string, plan *devPlan, out, errOut io.Writer)
 	}
 	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("adding agents to scheme: %w", err)
+	}
+	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("adding agents/v1beta1 to scheme: %w", err)
 	}
 
 	// The local agent's /invoke is published on the host at plan.HostPort; the BFF

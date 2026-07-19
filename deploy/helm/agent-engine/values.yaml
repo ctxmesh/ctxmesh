@@ -14,10 +14,28 @@ controllerManager:
   image:
     # The controller-manager image. Override repository+tag for a real registry
     # (air-gapped installs point this at the internal registry, spec §6).
+    # PRODUCTION: point repository at a SIGNED image in your registry (e.g.
+    # ghcr.io/<org>/agent-engine-controller) pinned to an immutable digest, and
+    # enforce signatures with a cluster admission policy (cosign / Sigstore
+    # policy-controller / Kyverno). The chart sets the image ref; signature
+    # ENFORCEMENT is a cluster-policy concern (specs/deployment.md), not a toggle.
     repository: controller
     # Empty tag falls back to Chart.appVersion ("latest"), matching
     # `controller:latest` in config/default. Set an immutable tag in production.
     tag: ""
+
+  # Control-plane HA (m34.5, ADR 0037). The controller-manager already runs with
+  # --leader-elect, so >1 replica is a hot-standby leader-election cluster (one active
+  # leader reconciles; the rest fail over fast). Default 1 keeps the vanilla chart ==
+  # kustomize (helm-verify no-drift). Set 2+ for a highly-available control plane.
+  replicas: 1
+
+  # An optional PodDisruptionBudget for the control plane. OFF by default (no-drift).
+  # Enable ALONGSIDE replicas>1 so a voluntary disruption (node drain/upgrade) cannot
+  # evict every manager at once — a leader always survives.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
 
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).

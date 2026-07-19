@@ -103,6 +103,7 @@ type AgentRegistryStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=ar
 // +kubebuilder:printcolumn:name="RegistryID",type="string",JSONPath=".spec.registryId"

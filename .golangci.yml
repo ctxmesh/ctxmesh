@@ -47,6 +47,7 @@ linters:
     rules:
       - linters:
           - lll
+          - dupl # v1beta1 conversion spokes are intentionally uniform field-copies (ADR 0037, M34)
         path: api/*
       - linters:
           - dupl

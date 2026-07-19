@@ -203,6 +203,29 @@ func listAgentMemoryBindings(
 // exist we use the first (sorted by name for determinism).
 //
 // When spec.backend.addr is omitted the controller applies memoryDefaultAddr.
+// resolveMemory resolves an agent's session-memory config (ADR 0037, m34.2), preferring the FOLDED
+// AgentDeployment.spec.sessionMemory field and falling back to a legacy sibling MemoryBinding CRD
+// (dual-served through the deprecation window). The field wins when both are present. Returns the
+// resolved backend addr + scope, and whether the agent has any memory at all.
+func resolveMemory(
+	ctx context.Context,
+	c client.Client,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (addr, scope string, hasMemory bool, err error) {
+	if sm := deploy.Spec.SessionMemory; sm != nil {
+		addr = memoryDefaultAddr
+		if sm.Backend != nil && sm.Backend.Addr != "" {
+			addr = sm.Backend.Addr
+		}
+		scope = sm.Scope
+		if scope == "" {
+			scope = "session"
+		}
+		return addr, scope, true, nil
+	}
+	return resolveMemoryBinding(ctx, c, deploy.Namespace, deploy.Name)
+}
+
 func resolveMemoryBinding(
 	ctx context.Context,
 	c client.Client,

@@ -39,7 +39,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// APIVersion is the group/version stamped on every expanded CRD manifest.
+// APIVersion is the group/version stamped on every expanded CRD manifest. The API graduated at
+// m34.4 — v1beta1 is the storage version and v1alpha1 is deprecated-but-served — but the BFF's own
+// typed operations (reconcile/read/apply) still run on v1alpha1 as the conversion hub, so expand
+// keeps emitting v1alpha1 for now (the API server converts it to v1beta1 storage). Moving expand +
+// the BFF to emit/operate on v1beta1 is a follow-on once the internal types graduate (m34 note).
 const APIVersion = "agents.ctxmesh.ai/v1alpha1"
 
 // AnnotationSourceSpec is the annotation key under which the BFF persists the
