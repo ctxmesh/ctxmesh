@@ -456,6 +456,37 @@ def test_mint_conversation_id_is_unique_and_prefixed():
     assert a != b, "each autonomous run gets its own thread id"
 
 
+def test_managed_loop_bounds_replayed_history_window(gateway_stub):
+    """The read-side window is bounded + configurable (m33.6): with max_history_messages=2, only the
+    2 most-recent stored messages are replayed, even though the store retains the full history."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        # Seed a long history directly in the store.
+        mem.store["long"] = [
+            {"role": "user", "content": "m1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "m2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m", max_history_messages=2)
+
+        run_managed_loop(client, config, "now", conversation_id="long")
+
+        msgs = json.loads(gateway_stub.requests[-1].body)["messages"]
+        # system + only the LAST 2 history messages + the new user turn (older m1/a1 dropped).
+        assert msgs == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "m2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "now"},
+        ]
+
+
 # ── _tool_schema: discovered inputSchema verbatim, else permissive fallback ─────
 
 # A schema requiring a real parameter — the whole point of m14.6b: the model must

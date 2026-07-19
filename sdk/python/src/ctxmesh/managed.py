@@ -92,10 +92,12 @@ def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
     return ""
 
 
-def _load_history(client: Client, conversation_id: str) -> List[Dict[str, Any]]:
-    """Return the recent ``{role, content}`` turns stored for this conversation, bounded to
-    the last :data:`MAX_HISTORY_MESSAGES`. Only well-formed user/assistant message dicts are
-    replayed; any other JSON in the store is ignored (the memory plane is a general log)."""
+def _load_history(
+    client: Client, conversation_id: str, max_messages: int = MAX_HISTORY_MESSAGES
+) -> List[Dict[str, Any]]:
+    """Return the recent ``{role, content}`` turns stored for this conversation, bounded to the last
+    *max_messages* (the m33.6 window). Only well-formed user/assistant message dicts are replayed;
+    any other JSON in the store is ignored (the memory plane is a general log)."""
     history: List[Dict[str, Any]] = []
     for entry in client.memory.get(conversation_id):
         if (
@@ -104,7 +106,9 @@ def _load_history(client: Client, conversation_id: str) -> List[Dict[str, Any]]:
             and isinstance(entry.get("content"), str)
         ):
             history.append({"role": entry["role"], "content": entry["content"]})
-    return history[-MAX_HISTORY_MESSAGES:]
+    # A non-positive bound would slice to empty/"all"; clamp to at least 1 turn of context.
+    window = max_messages if max_messages > 0 else MAX_HISTORY_MESSAGES
+    return history[-window:]
 
 
 def _persist_turn(
@@ -146,6 +150,12 @@ class ManagedConfig:
 
     #: Optional extra ``model.chat`` body opts (temperature, max_tokens, …).
     model_opts: Dict[str, Any] = field(default_factory=dict)
+
+    #: Bounded replay window (m33.6): the max number of recent conversation messages replayed as
+    #: context on each turn, so a long chat can't grow the prompt without limit — older turns fall
+    #: out of the window (the memory plane still retains the full history, itself capped + TTL'd on
+    #: the store side). Defaults to :data:`MAX_HISTORY_MESSAGES`.
+    max_history_messages: int = MAX_HISTORY_MESSAGES
 
 
 @dataclass
@@ -295,7 +305,9 @@ def run_managed_loop(
     # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
     message_id = _message_id_from_headers(headers)
     threaded = bool(conversation_id) and client.config.memory_wired
-    history = _load_history(client, conversation_id) if threaded else []
+    history = (
+        _load_history(client, conversation_id, config.max_history_messages) if threaded else []
+    )
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": config.system_prompt},
