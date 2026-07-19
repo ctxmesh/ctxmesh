@@ -341,7 +341,7 @@ type AgentDeploymentStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="metadata.name must be at most 44 characters: the controller appends a 19-character revision-name suffix and Knative revision names are DNS-1035 labels capped at 63 characters"
 

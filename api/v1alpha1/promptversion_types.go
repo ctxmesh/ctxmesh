@@ -62,7 +62,7 @@ type PromptVersionStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=pv
 // +kubebuilder:printcolumn:name="Repo",type="string",JSONPath=".spec.git.repo"

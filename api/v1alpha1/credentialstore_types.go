@@ -176,7 +176,7 @@ type CredentialStoreStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=credstore
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
@@ -210,7 +210,7 @@ type CredentialStoreList struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=clustercredstore
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"

@@ -113,7 +113,7 @@ type ModelRouteStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=mr
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"

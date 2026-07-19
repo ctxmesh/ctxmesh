@@ -26,6 +26,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 
 // CredentialStore is the v1beta1 schema — a field-identical graduation of the v1alpha1 namespaced
 // CredentialStore (ADR 0037, M34), reusing its spec/status.
@@ -66,6 +67,7 @@ type CredentialStoreList struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:storageversion
 // +kubebuilder:resource:scope=Cluster,shortName=clustercredstore
 
 // ClusterCredentialStore is the v1beta1 schema — a field-identical graduation of the cluster-scoped

@@ -25,6 +25,7 @@ import (
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 
 // AgentVersion is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentVersion (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.

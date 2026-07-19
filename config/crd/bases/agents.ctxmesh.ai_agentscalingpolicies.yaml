@@ -29,6 +29,7 @@ spec:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -242,7 +243,7 @@ spec:
         - spec
         type: object
     served: true
-    storage: true
+    storage: false
     subresources:
       status: {}
   - name: v1beta1
@@ -459,6 +460,6 @@ spec:
         - spec
         type: object
     served: true
-    storage: false
+    storage: true
     subresources:
       status: {}

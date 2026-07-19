@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -41,6 +42,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
 	require.NoError(t, agentsv1alpha1.AddToScheme(s))
+	require.NoError(t, agentsv1beta1.AddToScheme(s))
 	return s
 }
 

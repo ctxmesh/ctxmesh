@@ -14,7 +14,8 @@ spec:
     singular: agentversion
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - deprecated: true
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-
@@ -466,7 +467,7 @@ spec:
         - spec
         type: object
     served: true
-    storage: true
+    storage: false
   - name: v1beta1
     schema:
       openAPIV3Schema:
@@ -917,4 +918,4 @@ spec:
         - spec
         type: object
     served: true
-    storage: false
+    storage: true
