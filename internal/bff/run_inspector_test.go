@@ -59,7 +59,7 @@ const traceDetailJSON = `{
   "name": "run-my-agent",
   "timestamp": "2026-07-01T00:00:00.000Z",
   "totalCost": 0.75,
-  "latency": 1500.0,
+  "latency": 1.5,
   "usage": {"totalTokens": 1300},
   "observations": [
     {

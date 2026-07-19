@@ -110,11 +110,13 @@ type lfPageMeta struct {
 }
 
 type lfTrace struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Timestamp   string   `json:"timestamp"`
-	TotalCost   float64  `json:"totalCost"`
-	LatencyMs   float64  `json:"latency"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Timestamp string  `json:"timestamp"`
+	TotalCost float64 `json:"totalCost"`
+	// LatencySec is the Langfuse trace `latency` — in SECONDS (Langfuse's unit). The flat
+	// RunSummary/TraceRollup expose milliseconds (see latencyMsOf), so callers must convert.
+	LatencySec  float64  `json:"latency"`
 	Usage       *lfUsage `json:"usage,omitempty"`
 	TotalTokens int64    `json:"totalTokens"`
 	// Tags are the trace's Langfuse tags (the launcher stamps agent:<ns>/<name>).
@@ -203,7 +205,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 		if len(runs) >= limit {
 			break
@@ -361,7 +363,7 @@ func (a *langfuseAdapter) RunsForAgent(ctx context.Context, namespace, name stri
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 	}
 	return runs, nil
@@ -525,7 +527,7 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 			Timestamp: t.Timestamp,
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
-			LatencyMs: t.LatencyMs,
+			LatencyMs: latencyMsOf(t),
 		})
 	}
 	return dst
@@ -869,6 +871,13 @@ func (a *langfuseAdapter) CostBreakdown(ctx context.Context, limit int, cursor s
 	}, nil
 }
 
+// latencyMsOf converts a Langfuse trace's latency (SECONDS — Langfuse's unit) to the
+// milliseconds the flat RunSummary/TraceRollup DTOs expose. A run that took 1.448s is
+// 1448ms, not "1ms" (the pre-m35 bug: the seconds value was surfaced as if milliseconds).
+func latencyMsOf(t lfTrace) float64 {
+	return t.LatencySec * 1000
+}
+
 // traceTokens picks the token count from whichever field Langfuse populated
 // (usage.totalTokens or the flat totalTokens), preferring the nested usage.
 func traceTokens(t lfTrace) int64 {
@@ -973,7 +982,7 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			Timestamp: body.Timestamp,
 			CostUSD:   body.TotalCost,
 			Tokens:    tokens,
-			LatencyMs: body.LatencyMs,
+			LatencyMs: latencyMsOf(body.lfTrace),
 			SpanCount: len(ordered),
 		},
 		Spans:      ordered,

@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  formatCompact,
+  formatLatency,
+  formatUSD,
+  latencyStats,
+  shortTraceId,
+} from "@/lib/format";
+
+describe("formatUSD", () => {
+  it("renders zero as $0.00, not a dash", () => {
+    expect(formatUSD(0)).toBe("$0.00");
+  });
+  it("keeps sub-cent precision trimmed", () => {
+    expect(formatUSD(0.000297)).toBe("$0.000297");
+  });
+  it("rounds whole-dollar amounts to cents", () => {
+    expect(formatUSD(12.404)).toBe("$12.40");
+  });
+});
+
+describe("formatCompact", () => {
+  it("compacts large token counts", () => {
+    expect(formatCompact(426986)).toBe("427K");
+  });
+});
+
+describe("formatLatency", () => {
+  it("shows a non-positive latency as an em dash (never 0ms)", () => {
+    expect(formatLatency(0)).toBe("—");
+    expect(formatLatency(-5)).toBe("—");
+  });
+  it("shows sub-second in ms and seconds with a unit", () => {
+    expect(formatLatency(450)).toBe("450ms");
+    // 1.448s — the case that used to render as "1ms" before the seconds→ms fix.
+    expect(formatLatency(1448)).toBe("1.45s");
+  });
+  it("shows minutes for very long runs", () => {
+    expect(formatLatency(65000)).toBe("1m 5s");
+  });
+});
+
+describe("latencyStats", () => {
+  it("ignores unknown (non-positive) latencies and computes avg + p95", () => {
+    const s = latencyStats([100, 0, 200, 300, -1]);
+    expect(s.count).toBe(3);
+    expect(s.avgMs).toBe(200);
+    expect(s.p95Ms).toBe(300);
+  });
+  it("is all-zero for an empty set", () => {
+    expect(latencyStats([])).toEqual({ count: 0, avgMs: 0, p95Ms: 0 });
+  });
+});
+
+describe("shortTraceId", () => {
+  it("passes through short ids and truncates long ones", () => {
+    expect(shortTraceId("t-abc")).toBe("t-abc");
+    expect(shortTraceId("0123456789abcdef")).toBe("0123456789ab…");
+  });
+});

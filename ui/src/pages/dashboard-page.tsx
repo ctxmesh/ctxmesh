@@ -6,6 +6,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TopologySummary } from "@/components/dashboard/topology-summary";
 import { CostPanel } from "@/components/dashboard/cost-panel";
+import { DashboardStats } from "@/components/dashboard/dashboard-stats";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
 import { useNamespace } from "@/lib/namespace";
 import {
@@ -126,8 +127,8 @@ export function DashboardPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
           <p className="text-sm text-muted-foreground">
-            Live topology, cost/usage, and traced runs over the BFF (creds
-            server-side).
+            Cost, latency, and traced runs across your agents — live over the
+            BFF (creds server-side).
           </p>
         </div>
         <Button
@@ -140,6 +141,16 @@ export function DashboardPage() {
           Refresh
         </Button>
       </div>
+
+      {/* Headline metrics (m35 redesign): spend, tokens, run volume, latency, fleet —
+          sourced from the Langfuse cost rollup + the runs list + live topology (the old
+          Prometheus latency/scale was never wired, so those cards were always blank). Each
+          stat degrades to a placeholder until its own feed loads. */}
+      <DashboardStats
+        cost={cost.kind === "ready" ? cost.data : undefined}
+        runs={runs.kind === "ready" ? runs.data.runs : undefined}
+        topology={topology.kind === "ready" ? topology.data : undefined}
+      />
 
       {/* First-run checklist (m18.10) — the guided aha path. Rendered only when all
           three signals are loaded (accurate checkmarks) AND the setup is incomplete
@@ -208,89 +219,88 @@ export function DashboardPage() {
           );
         })()}
 
-      {/* 1. Live topology — a scale-first SUMMARY (m22.6/U5): counts + health
-          rollups + hotspots that need attention, not a node graph that becomes an
-          unreadable wall at scale. The full grouped/searchable interactive graph
-          is the /topology page. */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Network className="h-4 w-4 text-primary" />
-              Live topology
-            </CardTitle>
-            <Link
-              to="/topology"
-              data-testid="view-full-topology"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+      {/* Cost-by-model + live topology, side by side. The headline totals moved to the
+          stat row above; this row answers "where did the spend go" and "how is the fleet".
+          Live topology is a scale-first SUMMARY (m22.6/U5) — the full interactive graph is
+          the /topology page. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {cost.kind === "loading" && (
+          <Card className="h-full">
+            <CardContent className="py-10 text-center text-sm text-muted-foreground">
+              Loading cost…
+            </CardContent>
+          </Card>
+        )}
+        {cost.kind === "unavailable" && (
+          <Card className="h-full">
+            <CardContent
+              className="py-10 text-center text-sm text-muted-foreground"
+              data-testid="cost-unavailable"
             >
-              Open full topology
-            </Link>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="min-h-[16rem] overflow-hidden rounded-md border p-4">
-            {topology.kind === "loading" && (
-              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                Loading topology…
-              </div>
-            )}
-            {topology.kind === "error" && (
-              <div className="flex h-full items-center justify-center text-sm text-destructive">
-                Failed to load topology: {topology.message}
-              </div>
-            )}
-            {topology.kind === "ready" && (
-              <TopologySummary topology={topology.data} />
-            )}
-          </div>
-        </CardContent>
-      </Card>
+              Cost &amp; usage isn&apos;t configured — connect an observability
+              backend (Langfuse) to see spend here. Everything else works
+              without it.
+            </CardContent>
+          </Card>
+        )}
+        {cost.kind === "error" && (
+          <Card className="h-full">
+            <CardContent className="py-10 text-center text-sm text-destructive">
+              Failed to load cost: {cost.message}
+            </CardContent>
+          </Card>
+        )}
+        {cost.kind === "ready" && <CostPanel cost={cost.data} />}
 
-      {/* 2. Cost / usage — headline stats + charts; "View cost details" links
-          to the native /cost page (m16.10) for the full cost explorer. */}
-      {cost.kind === "loading" && (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            Loading cost &amp; usage…
-          </CardContent>
-        </Card>
-      )}
-      {cost.kind === "unavailable" && (
-        <Card>
-          <CardContent
-            className="py-10 text-center text-sm text-muted-foreground"
-            data-testid="cost-unavailable"
-          >
-            Cost &amp; usage isn&apos;t configured — connect an observability
-            backend (Langfuse) to see spend here. Everything else works without
-            it.
-          </CardContent>
-        </Card>
-      )}
-      {cost.kind === "error" && (
-        <Card>
-          <CardContent className="py-10 text-center text-sm text-destructive">
-            Failed to load cost: {cost.message}
-          </CardContent>
-        </Card>
-      )}
-      {cost.kind === "ready" && (
-        <div className="space-y-3">
-          <CostPanel cost={cost.data} />
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Coins className="h-3.5 w-3.5" />
-              Full cost breakdown and historical trends on the Cost page.
+        <Card className="h-full">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Network className="h-4 w-4 text-primary" />
+                Live topology
+              </CardTitle>
+              <Link
+                to="/topology"
+                data-testid="view-full-topology"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                Open full topology
+              </Link>
             </div>
-            <Link
-              to="/cost"
-              data-testid="view-cost-details"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
-            >
-              View cost details
-            </Link>
+          </CardHeader>
+          <CardContent>
+            <div className="min-h-[14rem] overflow-hidden rounded-md border p-4">
+              {topology.kind === "loading" && (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  Loading topology…
+                </div>
+              )}
+              {topology.kind === "error" && (
+                <div className="flex h-full items-center justify-center text-sm text-destructive">
+                  Failed to load topology: {topology.message}
+                </div>
+              )}
+              {topology.kind === "ready" && (
+                <TopologySummary topology={topology.data} />
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {cost.kind === "ready" && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Coins className="h-3.5 w-3.5" />
+            Full cost breakdown and historical trends on the Cost page.
           </div>
+          <Link
+            to="/cost"
+            data-testid="view-cost-details"
+            className={buttonVariants({ variant: "outline", size: "sm" })}
+          >
+            View cost details
+          </Link>
         </div>
       )}
 
@@ -299,7 +309,12 @@ export function DashboardPage() {
           The embedded Langfuse iframe (formerly section 4) was demoted in
           m16.11 — use the forensics link-out on /traces/:id instead. */}
       <div className="space-y-2">
-        <h3 className="text-sm font-medium">Recent runs</h3>
+        <div>
+          <h3 className="text-base font-semibold tracking-tight">Recent runs</h3>
+          <p className="text-xs text-muted-foreground">
+            Latest traced invocations — click a row to open its trace.
+          </p>
+        </div>
         {runs.kind === "loading" && (
           <Card>
             <CardContent className="py-8 text-center text-sm text-muted-foreground">

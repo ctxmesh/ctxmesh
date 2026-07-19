@@ -130,7 +130,7 @@ func TestLangfuseRecentRuns(t *testing.T) {
 		{"id":"t2","name":"agent.invoke","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]},
 		{"id":"mnoise","name":"memory.append","timestamp":"2026-07-01T00:00:45Z","totalCost":0.0,"latency":1.0,"tags":[]},
 		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0,"tags":["agent:prod/chatbot"]},
-		{"id":"t1","name":"prod/chatbot","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":120.0,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]}
+		{"id":"t1","name":"prod/chatbot","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":1.2,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]}
 	]}`
 	srv, rec := fakeLangfuse(t, body)
 	a := newTestLangfuse(t, srv.URL)
@@ -154,7 +154,7 @@ func TestLangfuseRecentRuns(t *testing.T) {
 	assert.Equal(t, "prod/chatbot", runs[2].Name, "current-launcher run: identity-named trace")
 	assert.InDelta(t, 0.5, runs[2].CostUSD, 1e-9)
 	assert.Equal(t, int64(900), runs[2].Tokens, "prefers usage.totalTokens")
-	assert.InDelta(t, 120.0, runs[2].LatencyMs, 1e-9)
+	assert.InDelta(t, 1200.0, runs[2].LatencyMs, 1e-9, "Langfuse latency is SECONDS → exposed as ms")
 
 	// Creds are sent server-side as HTTP Basic; they must NEVER appear in a DTO.
 	assert.True(t, rec.hadAuth, "public-API creds must be sent as Basic auth")
