@@ -77,11 +77,15 @@ func (a pgAdapter) Capabilities(context.Context) (credprovider.Capabilities, err
 	return credprovider.Capabilities{}, nil
 }
 
-func (a pgAdapter) Resolve(ctx context.Context, ns, boundary, server, userHash, _ string) (credresolve.Credential, error) {
+func (a pgAdapter) Resolve(
+	ctx context.Context, ns, boundary, server, userHash, _ string,
+) (credresolve.Credential, error) {
 	return a.b.Resolve(ctx, ns, boundary, server, userHash)
 }
 
-func (a pgAdapter) Store(ctx context.Context, ns, boundary, server, userHash, _ string, g credprovider.GrantMaterial) error {
+func (a pgAdapter) Store(
+	ctx context.Context, ns, boundary, server, userHash, _ string, g credprovider.GrantMaterial,
+) error {
 	exp := farFuture
 	if g.ExpiresAtUnix > 0 {
 		exp = time.Unix(g.ExpiresAtUnix, 0)
