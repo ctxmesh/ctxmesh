@@ -45,7 +45,13 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
 
-from ctxmesh import DEFAULT_MAX_STEPS, ManagedConfig, agent, run_managed_loop
+from ctxmesh import (
+    DEFAULT_MAX_STEPS,
+    ManagedConfig,
+    agent,
+    mint_conversation_id,
+    run_managed_loop,
+)
 
 # ---------------------------------------------------------------------------
 # Initialise the SDK client once (reads the launcher-injected env). from_env()
@@ -88,6 +94,15 @@ def _load_system_prompt() -> str:
             pass
 
     return "You are a helpful assistant."
+
+
+def _autonomous_conversation_id(headers: Dict[str, str]):
+    """A minted per-run conversation id (m33.5) when the caller supplied NO session — else None so
+    run_managed_loop uses the inbound X-Conversation-Id (a console chat / A2A hop). Case-insensitive."""
+    for key, value in headers.items():
+        if key.lower() == "x-conversation-id" and (value or "").strip():
+            return None
+    return mint_conversation_id()
 
 
 def _load_config() -> ManagedConfig:
@@ -151,15 +166,21 @@ class Handler(BaseHTTPRequestHandler):
         # injects ``traceparent`` so the loop roots under agent.invoke.
         req_headers = dict(self.headers)
 
+        # Autonomous per-run thread (m33.5, ADR 0035): with no inbound session id, mint one so an
+        # autonomous run is its own thread/trace. A console/A2A caller supplies X-Conversation-Id,
+        # which run_managed_loop reads from headers and which takes precedence over this.
+        conversation_id = _autonomous_conversation_id(req_headers)
+
         # Streaming (m32.7): when the caller Accepts text/event-stream, stream token events as the
         # model generates + a final `done`/`error` frame — the source for the run event stream.
         if "text/event-stream" in (self.headers.get("Accept") or ""):
-            self._stream_invoke(user_input, req_headers, approvals)
+            self._stream_invoke(user_input, req_headers, approvals, conversation_id)
             return
 
         try:
             result = run_managed_loop(
-                _client, _config, user_input, headers=req_headers, approvals=approvals
+                _client, _config, user_input, headers=req_headers,
+                approvals=approvals, conversation_id=conversation_id,
             )
             self._send(200, self._envelope(result))
         except Exception as exc:  # noqa: BLE001
@@ -179,7 +200,9 @@ class Handler(BaseHTTPRequestHandler):
             body["approval_required"] = result.approval_required
         return body
 
-    def _stream_invoke(self, user_input: str, req_headers: dict, approvals: list) -> None:
+    def _stream_invoke(
+        self, user_input: str, req_headers: dict, approvals: list, conversation_id
+    ) -> None:
         """Run the loop and stream Server-Sent Events: a `token` frame per content delta, then a
         terminal `done` frame (the same envelope the JSON path returns) or an `error` frame. The
         BFF's streaming adapter republishes these into the run event stream (m32.7)."""
@@ -199,6 +222,7 @@ class Handler(BaseHTTPRequestHandler):
                 user_input,
                 headers=req_headers,
                 approvals=approvals,
+                conversation_id=conversation_id,
                 on_token=lambda text: emit({"type": "token", "text": text}),
             )
             done = self._envelope(result)

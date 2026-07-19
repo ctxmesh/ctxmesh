@@ -256,6 +256,15 @@ func buildHandler(
 		outReq := r.Clone(ctx)
 		prop.Inject(ctx, propagation.HeaderCarrier(outReq.Header))
 
+		// Per-hop messageId (ADR 0035, m33.4): when this /invoke arrived via A2A, surface the
+		// envelope's messageId to the user container as X-Message-Id, so the agent's memory writes
+		// attribute to THIS hop (the :2998 endpoint stamps it, m33.1) and "who said what to whom"
+		// is addressable. A top-level /invoke (no envelope) sets nothing — the memory endpoint mints
+		// one. The messageId also already rides the trace (a2a.message.id).
+		if mid := a2aMessageIDFromEnvelope(r.Header.Get(a2aEnvelopeHeader)); mid != "" {
+			outReq.Header.Set(messageIDHeader, mid)
+		}
+
 		proxy.ServeHTTP(rw, outReq)
 
 		latencyMS := time.Since(start).Milliseconds()

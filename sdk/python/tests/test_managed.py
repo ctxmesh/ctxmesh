@@ -33,7 +33,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-from ctxmesh import ManagedConfig, agent, run_managed_loop
+from ctxmesh import ManagedConfig, agent, mint_conversation_id, run_managed_loop
 from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.errors import ConfigError
 from ctxmesh.managed import _PERMISSIVE_PARAMETERS, _tool_schema
@@ -417,6 +417,74 @@ def test_managed_loop_without_conversation_id_is_stateless(gateway_stub):
         assert mem.store == {}, "no conversation id ⇒ memory untouched"
         msgs = json.loads(gateway_stub.requests[0].body)["messages"]
         assert [m["role"] for m in msgs] == ["system", "user"]
+
+
+def test_managed_loop_stable_conversation_id_threads_without_a_header(gateway_stub):
+    """An autonomous agent with no inbound session supplies a STABLE conversation_id (m33.5) to
+    continue ONE long-lived thread across runs — the loop persists + replays under it."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+
+        # No X-Conversation-Id header — the id comes from the explicit arg.
+        run_managed_loop(client, config, "turn one", conversation_id="daily-digest")
+        assert mem.store["daily-digest"] == [
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "the answer is 42"},
+        ]
+
+        # A second run with the SAME stable id replays the prior turn.
+        run_managed_loop(client, config, "turn two", conversation_id="daily-digest")
+        turn2 = json.loads(gateway_stub.requests[-1].body)["messages"]
+        assert turn2[1:3] == [
+            {"role": "user", "content": "turn one"},
+            {"role": "assistant", "content": "the answer is 42"},
+        ]
+        assert len(mem.store["daily-digest"]) == 4
+
+
+def test_mint_conversation_id_is_unique_and_prefixed():
+    """The per-run minter (m33.5) yields a fresh, run-prefixed id each call."""
+    a = mint_conversation_id()
+    b = mint_conversation_id()
+    assert a.startswith("run-") and b.startswith("run-")
+    assert a != b, "each autonomous run gets its own thread id"
+
+
+def test_managed_loop_bounds_replayed_history_window(gateway_stub):
+    """The read-side window is bounded + configurable (m33.6): with max_history_messages=2, only the
+    2 most-recent stored messages are replayed, even though the store retains the full history."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        # Seed a long history directly in the store.
+        mem.store["long"] = [
+            {"role": "user", "content": "m1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "m2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m", max_history_messages=2)
+
+        run_managed_loop(client, config, "now", conversation_id="long")
+
+        msgs = json.loads(gateway_stub.requests[-1].body)["messages"]
+        # system + only the LAST 2 history messages + the new user turn (older m1/a1 dropped).
+        assert msgs == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "m2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "now"},
+        ]
 
 
 # ── _tool_schema: discovered inputSchema verbatim, else permissive fallback ─────

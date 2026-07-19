@@ -214,6 +214,292 @@ func TestMemoryAppendOrdering(t *testing.T) {
 	}
 }
 
+func TestMemoryAppendAttributesMessageEntry(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	resp, body := doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"role":"user","content":"hi"}`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("append status=%d body=%s", resp.StatusCode, body)
+	}
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	if err := json.Unmarshal(got, &entries); err != nil {
+		t.Fatalf("GET: %v body=%s", err, got)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries=%d want 1", len(entries))
+	}
+	e := entries[0]
+	if e["role"] != "user" || e["content"] != "hi" {
+		t.Errorf("role/content not preserved: %v", e)
+	}
+	if e["agent"] != "test-agent" {
+		t.Errorf("agent = %v, want test-agent (server-authoritative attribution)", e["agent"])
+	}
+	if _, ok := e["messageId"].(string); !ok {
+		t.Errorf("messageId missing/not a string: %v", e["messageId"])
+	}
+	if _, ok := e["ts"].(float64); !ok {
+		t.Errorf("ts missing/not a number: %v", e["ts"])
+	}
+}
+
+func TestMemoryAppendHonorsClientMessageID(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	req, _ := http.NewRequest(
+		http.MethodPost, srv.URL+"/memory/c/append",
+		strings.NewReader(`{"role":"assistant","content":"ok"}`),
+	)
+	req.Header.Set("X-Message-Id", "m-fixed")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(got, &entries)
+	if entries[0]["messageId"] != "m-fixed" {
+		t.Errorf("messageId = %v, want m-fixed (per-hop id honored, ADR 0035)", entries[0]["messageId"])
+	}
+}
+
+func TestMemoryAppendNonMessageStoredVerbatim(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"note":"scratch"}`)
+	_, got := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(got, &entries)
+	if _, ok := entries[0]["agent"]; ok {
+		t.Errorf("a non-message entry must NOT be attributed: %v", entries[0])
+	}
+	if entries[0]["note"] != "scratch" {
+		t.Errorf("note not preserved: %v", entries[0])
+	}
+}
+
+func TestAttributeEntryIdempotent(t *testing.T) {
+	t.Parallel()
+	// A message already carrying agent/messageId keeps them (a replay retains its origin); only the
+	// absent ts is added.
+	in := json.RawMessage(`{"role":"user","content":"hi","agent":"other","messageId":"m-orig"}`)
+	out := attributeEntry(in, "me", "m-new", time.UnixMilli(1234))
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["agent"] != "other" {
+		t.Errorf("agent overwritten: %v", m["agent"])
+	}
+	if m["messageId"] != "m-orig" {
+		t.Errorf("messageId overwritten: %v", m["messageId"])
+	}
+	if m["ts"] != float64(1234) {
+		t.Errorf("ts = %v, want 1234 (added when absent)", m["ts"])
+	}
+}
+
+func TestMemoryGetReturnsETagVersion(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`)
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"b":2}`)
+	resp, _ := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	if got := resp.Header.Get("ETag"); got != "2" {
+		t.Errorf("ETag = %q, want \"2\" (the conversation version = entry count)", got)
+	}
+}
+
+func putIfMatch(t *testing.T, url, ifMatch, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp
+}
+
+func TestMemoryConditionalReplaceSucceedsOnMatch(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`) // version → 1
+	resp := putIfMatch(t, srv.URL+"/memory/c", "1", `[{"x":1},{"y":2}]`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("conditional replace status = %d, want 204", resp.StatusCode)
+	}
+	if got := resp.Header.Get("ETag"); got != "2" {
+		t.Errorf("new ETag = %q, want \"2\"", got)
+	}
+}
+
+func TestMemoryConditionalReplaceConflictsOnStaleVersion(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+
+	// Read at version 1, then a concurrent APPEND advances it to 2 before our replace lands.
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`) // version 1
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"b":2}`) // version 2 (the concurrent write)
+
+	// A replace based on the stale version 1 must be REJECTED (412), not clobber the append.
+	resp := putIfMatch(t, srv.URL+"/memory/c", "1", `[{"rewrite":true}]`)
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("stale replace status = %d, want 412", resp.StatusCode)
+	}
+	// The concurrent append survives — no silent clobber.
+	_, body := doReq(t, http.MethodGet, srv.URL+"/memory/c", "")
+	var entries []map[string]any
+	_ = json.Unmarshal(body, &entries)
+	if len(entries) != 2 {
+		t.Errorf("entries = %d, want 2 (the append was NOT clobbered)", len(entries))
+	}
+}
+
+func TestMemoryUnconditionalReplaceStillWorks(t *testing.T) {
+	t.Parallel()
+	_, srv := newTestMemoryServer(t)
+	doReq(t, http.MethodPost, srv.URL+"/memory/c/append", `{"a":1}`)
+	// No If-Match → legacy last-writer-wins replace.
+	resp := putIfMatch(t, srv.URL+"/memory/c", "", `[{"x":1}]`)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unconditional replace status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestMemoryConcurrentAppendsNoLostWrites(t *testing.T) {
+	t.Parallel()
+	// The shared-scope collaboration invariant (m33.3/m33.7): many agents appending to ONE
+	// scratchpad concurrently all land — append is an atomic RPUSH, no read-modify-write, no lost
+	// writes (unlike a replace race, which m33.2 guards with optimistic concurrency).
+	mr := miniredis.RunT(t)
+	s := newRedisStore(mr.Addr())
+	ctx := context.Background()
+
+	const writers = 50
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := range writers {
+		go func() {
+			defer wg.Done()
+			_, err := s.Append(ctx, "shared", json.RawMessage(fmt.Sprintf(`{"w":%d}`, i)), time.Minute)
+			if err != nil {
+				t.Errorf("concurrent append %d: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := s.Get(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != writers {
+		t.Fatalf("stored = %d, want %d — a concurrent append was LOST", len(got), writers)
+	}
+}
+
+func TestMemoryAppendCapsConversationSize(t *testing.T) {
+	t.Parallel()
+	// A long conversation cannot grow the store without bound (m33.6): append LTRIMs to the last
+	// maxConversationEntries; the oldest are evicted, the newest survive.
+	mr := miniredis.RunT(t)
+	s := newRedisStore(mr.Addr())
+	ctx := context.Background()
+
+	total := maxConversationEntries + 25
+	var lastN int
+	for i := range total {
+		n, err := s.Append(ctx, "cap", json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)), time.Minute)
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		lastN = n
+	}
+	if lastN != maxConversationEntries {
+		t.Errorf("append count = %d, want capped at %d", lastN, maxConversationEntries)
+	}
+
+	got, err := s.Get(ctx, "cap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxConversationEntries {
+		t.Fatalf("stored = %d, want %d (oldest evicted)", len(got), maxConversationEntries)
+	}
+	if !strings.Contains(string(got[len(got)-1]), fmt.Sprintf(`"i":%d`, total-1)) {
+		t.Errorf("last entry = %s, want the most recent (i=%d)", got[len(got)-1], total-1)
+	}
+	if !strings.Contains(string(got[0]), fmt.Sprintf(`"i":%d`, total-maxConversationEntries)) {
+		t.Errorf("first surviving = %s, want i=%d (older evicted)", got[0], total-maxConversationEntries)
+	}
+}
+
+func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		newRedisStore(mr.Addr()),
+		memoryConfig{
+			BackendAddr: mr.Addr(), Namespace: "ns", Agent: "agent-a",
+			Scope: "shared", Registry: "team-x",
+		},
+		tp.Tracer(tracerName),
+	)
+	srv := httptest.NewServer(ms.handler())
+	t.Cleanup(srv.Close)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/conv1/append", `{"role":"user","content":"hi"}`)
+
+	if !mr.Exists("mem:shared:team-x:conv1") {
+		t.Errorf("shared scope must key under mem:shared:{registry}:{conv}; keys=%v", mr.Keys())
+	}
+	if mr.Exists("mem:ns/agent-a:conv1") {
+		t.Errorf("shared scope must NOT write the private per-agent key")
+	}
+}
+
+func TestMemorySharedScopeFallsBackToPrivateWithoutRegistry(t *testing.T) {
+	t.Parallel()
+	// scope=shared but NO registry → the private per-agent layout (a visible misconfig, not a
+	// broken/rootless shared key). The controller gates the shared injection on membership.
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		nil,
+		memoryConfig{Namespace: "ns", Agent: "a", Scope: "shared", Registry: ""},
+		tp.Tracer(tracerName),
+	)
+	if ms.prefix != "mem:ns/a:" {
+		t.Errorf("prefix = %q, want the private fallback mem:ns/a:", ms.prefix)
+	}
+}
+
+func TestMemoryPrivateScopeUnchanged(t *testing.T) {
+	t.Parallel()
+	// The default (empty/session) scope keeps the per-agent layout even when a registry is present.
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		nil,
+		memoryConfig{Namespace: "ns", Agent: "a", Registry: "team-x"},
+		tp.Tracer(tracerName),
+	)
+	if ms.prefix != "mem:ns/a:" {
+		t.Errorf("prefix = %q, want mem:ns/a: (private is the default even with a registry)", ms.prefix)
+	}
+}
+
 func TestMemoryAppendRejectsInvalidJSON(t *testing.T) {
 	t.Parallel()
 	_, srv := newTestMemoryServer(t)
@@ -385,6 +671,12 @@ type failingStore struct{ err error }
 func (f *failingStore) Get(context.Context, string) ([]json.RawMessage, error) { return nil, f.err }
 func (f *failingStore) Replace(context.Context, string, []json.RawMessage, time.Duration) error {
 	return f.err
+}
+
+func (f *failingStore) ReplaceIfVersion(
+	context.Context, string, []json.RawMessage, int, time.Duration,
+) (int, bool, error) {
+	return 0, false, f.err
 }
 
 func (f *failingStore) Append(context.Context, string, json.RawMessage, time.Duration) (int, error) {

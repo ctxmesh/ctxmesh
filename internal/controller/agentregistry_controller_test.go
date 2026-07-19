@@ -397,6 +397,77 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 	}
 }
 
+// mkSharedMemoryBinding creates a MemoryBinding with scope=shared (ADR 0035, m33.3).
+func mkSharedMemoryBinding(t *testing.T, name, namespace, agentRef, addr string) {
+	t.Helper()
+	mb := &agentsv1alpha1.MemoryBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.MemoryBindingSpec{
+			AgentRef: agentRef,
+			Scope:    "shared",
+			Backend:  &agentsv1alpha1.MemoryBackend{Addr: addr},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, mb))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, mb) })
+}
+
+// TestMemory_SharedScopeInjectedForMember: a scope=shared MemoryBinding on a REGISTRY MEMBER makes
+// the reconciler inject MEMORY_SCOPE=shared alongside AGENT_REGISTRY_ID, so the launcher keys the
+// team scratchpad under mem:shared:{registry}: (m33.3).
+func TestMemory_SharedScopeInjectedForMember(t *testing.T) {
+	const (
+		namespace  = "default"
+		registryID = "shared-mesh"
+		agentName  = "shared-mesh-member"
+	)
+	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: agentName, Namespace: namespace,
+			Labels: map[string]string{"registry": registryID},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+	mkSharedMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "shared", envMap["MEMORY_SCOPE"], "a shared binding on a member injects MEMORY_SCOPE=shared")
+	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"], "the shared scope keys under this registry")
+	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory path active")
+}
+
+// TestMemory_SharedScopeNotInjectedForNonMember: a scope=shared binding on a NON-member agent gets
+// NO MEMORY_SCOPE — there is no registry boundary to share within, so the launcher keeps its
+// private per-agent layout (a visible misconfig, not a broken key).
+func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
+	const namespace = "default"
+	const agentName = "lonely-shared-agent"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace}, // no registry label
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+	mkSharedMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
+	assert.NotContains(t, envMap, "MEMORY_SCOPE", "no registry ⇒ no shared scope (private fallback)")
+	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory still works (private)")
+}
+
 // TestRegistry_NonMemberUnaffected verifies an agent whose labels do not match
 // any registry selector gets NO mesh env, NO membership label, and a bare
 // spec-hash revision name.

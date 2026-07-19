@@ -294,6 +294,22 @@ type envelope struct {
 	Payload         json.RawMessage `json:"payload,omitempty"`
 }
 
+// a2aMessageIDFromEnvelope extracts just the per-hop messageId from a serialized A2A envelope
+// header (m33.4). Empty (no header / malformed / no id) ⇒ "" — a non-A2A /invoke, handled by the
+// caller. Kept tolerant: a parse failure never breaks the proxy path.
+func a2aMessageIDFromEnvelope(envJSON string) string {
+	if envJSON == "" {
+		return ""
+	}
+	var env struct {
+		MessageID string `json:"messageId"`
+	}
+	if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+		return ""
+	}
+	return env.MessageID
+}
+
 // a2aServer holds the outbound-listener dependencies. Every field is read-only
 // after construction and http.Client is safe for concurrent use, so the whole
 // struct is safe to share across the listener's goroutines.

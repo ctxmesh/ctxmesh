@@ -46,6 +46,7 @@ from ctxmesh.managed import (
     DEFAULT_MAX_STEPS,
     ManagedConfig,
     ManagedResult,
+    mint_conversation_id,
     run_managed_loop,
 )
 from ctxmesh.model import ChatResponse, ModelClient
@@ -65,6 +66,7 @@ __all__ = [
     "TraceClient",
     "SpanHandle",
     "run_managed_loop",
+    "mint_conversation_id",
     "ManagedConfig",
     "ManagedResult",
     "DEFAULT_MAX_STEPS",

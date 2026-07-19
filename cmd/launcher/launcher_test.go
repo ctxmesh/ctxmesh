@@ -446,6 +446,32 @@ func TestProxyRouting(t *testing.T) {
 		}
 	})
 
+	// ── A2A messageId → X-Message-Id forwarded to the user container (m33.4) ──
+	t.Run("A2A envelope messageId is forwarded as X-Message-Id", func(t *testing.T) {
+		// NOTE: not run in parallel — shares capturedCh
+		req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+		req.Header.Set(a2aEnvelopeHeader, `{"messageId":"m-hop-7","conversationId":"c1"}`)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		cap := <-capturedCh
+		if got := cap.header.Get("X-Message-Id"); got != "m-hop-7" {
+			t.Errorf("X-Message-Id forwarded = %q, want m-hop-7 (the A2A hop's id)", got)
+		}
+	})
+
+	// A top-level /invoke (no A2A envelope) forwards NO X-Message-Id — the memory endpoint mints one.
+	t.Run("non-A2A /invoke forwards no X-Message-Id", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/invoke", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		cap := <-capturedCh
+		if got := cap.header.Get("X-Message-Id"); got != "" {
+			t.Errorf("X-Message-Id = %q, want empty on a non-A2A /invoke", got)
+		}
+	})
+
 	// ── /healthz: request forwarded, NO span emitted ──────────────────────
 	t.Run("/healthz forwarded without span", func(t *testing.T) {
 		before := len(rec.Ended())
