@@ -1,0 +1,75 @@
+# M36.3 — non-destructive Gateway API edge (Envoy Gateway). One Gateway, host-routed:
+#   console.127.0.0.1.sslip.io   -> agent-engine-bff (BFF)
+#   langfuse.127.0.0.1.sslip.io  -> langfuse-web
+#   *.default.127.0.0.1.sslip.io -> kourier-internal (Knative routes by Host; Kourier untouched)
+# Each HTTPRoute lives in its backend's namespace (no ReferenceGrant); the Gateway allows all.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform-edge
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: console
+  namespace: agent-engine-system
+spec:
+  parentRefs:
+    - name: platform-edge
+      namespace: envoy-gateway-system
+  hostnames:
+    - console.127.0.0.1.sslip.io
+  rules:
+    - backendRefs:
+        - name: agent-engine-bff
+          port: 9090
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: langfuse
+  namespace: langfuse
+spec:
+  parentRefs:
+    - name: platform-edge
+      namespace: envoy-gateway-system
+  hostnames:
+    - langfuse.127.0.0.1.sslip.io
+  rules:
+    - backendRefs:
+        - name: langfuse-web
+          port: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agents
+  namespace: kourier-system
+spec:
+  parentRefs:
+    - name: platform-edge
+      namespace: envoy-gateway-system
+  hostnames:
+    - "*.default.127.0.0.1.sslip.io"
+  rules:
+    - backendRefs:
+        - name: kourier-internal
+          port: 80
