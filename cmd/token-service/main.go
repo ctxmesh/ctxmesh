@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/credstore"
@@ -89,6 +90,9 @@ func run(log logr.Logger) error {
 	}
 	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("add CRD scheme: %w", err)
+	}
+	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("adding agents/v1beta1 to scheme: %w", err)
 	}
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
