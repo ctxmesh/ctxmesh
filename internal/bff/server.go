@@ -764,6 +764,10 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
 
+	// Gateway ext-auth (ADR 0039): a token-authenticated hit to an AGENT URL gets OBO parity with
+	// /api/invoke via an Envoy ext-auth call to the BFF (extracted to keep Handler under gocyclo).
+	s.registerExtAuthRoutes(authed)
+
 	s.registerRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);

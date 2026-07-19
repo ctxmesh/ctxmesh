@@ -1,0 +1,46 @@
+{{- if .Values.extAuth.enabled }}
+{{- $agents := .Values.routes.agents }}
+# Authenticate at the agent edge (ADR 0039). This SecurityPolicy puts an ext-auth filter in front of
+# the agents HTTPRoute: Envoy calls the BFF for every request to an agent hostname. The BFF verifies the
+# caller's token (missing/invalid ⇒ 401 ⇒ Envoy denies), mints the run capability for that user + the
+# agent's trust boundary, and returns it in a header Envoy injects upstream. The agent only relays the
+# capability it receives — no agent ever becomes a signer (ADR 0033 holds end to end).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: agent-extauth
+  namespace: {{ $agents.namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: agents
+  extAuth:
+    http:
+      backendRefs:
+        - name: {{ .Values.extAuth.service }}
+          namespace: {{ .Values.extAuth.namespace }}
+          port: {{ .Values.extAuth.port }}
+      path: {{ .Values.extAuth.path }}
+      headersToBackend:
+        - {{ .Values.extAuth.capabilityHeader }}
+{{- if ne $agents.namespace .Values.extAuth.namespace }}
+---
+# Cross-namespace: the SecurityPolicy (in the agents route's namespace) references the BFF Service (in
+# the BFF's namespace), so a ReferenceGrant in the BFF's namespace must permit it.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: extauth-to-bff
+  namespace: {{ .Values.extAuth.namespace }}
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: {{ $agents.namespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ .Values.extAuth.service }}
+{{- end }}
+{{- end }}
