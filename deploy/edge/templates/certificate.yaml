@@ -1,0 +1,18 @@
+{{- if .Values.tls.enabled }}
+# Prod TLS seam (ADR 0038): a cert-manager wildcard Certificate for the base domain + the agents
+# sub-domain, terminated at the Gateway's HTTPS listener. cert-manager must be installed and the
+# referenced issuer must exist — the chart references, it does not install the controller.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-edge-tls
+  namespace: {{ .Values.gateway.namespace }}
+spec:
+  secretName: platform-edge-tls
+  dnsNames:
+    - "*.{{ .Values.baseDomain }}"
+    - "*.default.{{ .Values.baseDomain }}"
+  issuerRef:
+    name: {{ .Values.tls.issuerRef.name }}
+    kind: {{ .Values.tls.issuerRef.kind }}
+{{- end }}
