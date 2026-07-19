@@ -180,12 +180,21 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	// (the callback's grant-Secret write runs as this user). The redirect back
 	// carries no Authorization header, so the flow carries the identity that gates
 	// the write (ADR 0011).
+	// Scope the grant to the connecting agent's trust boundary (ADR 0033) when the consent is
+	// initiated from a specific agent's run — so it empowers that agent's registry, not every
+	// agent the user owns. No agent (e.g. a servers-page consent) ⇒ "" (a legacy unscoped grant).
+	boundary := ""
+	if a := strings.TrimSpace(req.Agent); a != "" {
+		boundary = agentBoundary(r.Context(), caller, ns, a)
+	}
+
 	authURL, state, sErr := s.startOAuthFlow(cfg, pendingOAuthFlow{
 		callerToken:   bearerToken(r),
 		serverName:    server,
 		namespace:     ns,
 		serverURL:     serverURL,
 		grantUserHash: userGrantHash(username),
+		boundary:      boundary,
 	})
 	if sErr != nil {
 		s.log.Error(sErr, "start MCP grant consent flow failed", "server", server)
@@ -224,7 +233,10 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 			Config:    credresolve.OAuthConfig{TokenEndpoint: flow.oauth.TokenEndpoint, ClientID: flow.oauth.ClientID},
 			ServerURL: flow.serverURL,
 		}
-		if err := s.grantStore.StoreGrant(ctx, flow.namespace, flow.serverName, flow.grantUserHash, g); err != nil {
+		// The grant is stored under the connecting agent's trust boundary (ADR 0033), captured
+		// at consent-begin — so the write key matches the boundary a run of that agent resolves
+		// within (m30.5). "" ⇒ a legacy unscoped grant (connect-for-all).
+		if err := s.grantStore.StoreGrant(ctx, flow.namespace, flow.boundary, flow.serverName, flow.grantUserHash, g); err != nil {
 			s.log.Error(err, "delegate MCP per-user grant store failed", "server", flow.serverName)
 			oauthCallbackError(w, r, "failed to store the per-user grant")
 			return
@@ -242,8 +254,13 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 	// In locked mode the grant lands in the credential namespace with the source ns
 	// folded into the coordinates + the source-namespace label; in legacy mode it stays
 	// in flow.namespace under the original name (sourceNs label "").
-	grantNS, grantName := s.grantCoordinates(flow.namespace, flow.serverName, flow.grantUserHash)
-	labels := grantSecretLabels(flow.serverName, flow.grantUserHash, s.grantSourceNSLabel(flow.namespace))
+	grantNS, grantName := s.grantCoordinates(flow.namespace, flow.boundary, flow.serverName, flow.grantUserHash)
+	labels := grantSecretLabels(flow.serverName, flow.grantUserHash, s.grantSourceNSLabel(flow.namespace), flow.boundary)
+	ann := map[string]string{annMCPGrantServerURL: flow.serverURL}
+	if flow.boundary != "" {
+		// Record the raw boundary (non-secret) so the migration ListGrants preserves the scope.
+		ann[credresolve.AnnGrantBoundary] = flow.boundary
+	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantName,
@@ -251,7 +268,7 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 			Labels:    labels,
 			// The server URL is non-secret and useful to the refresh path; the tokens
 			// are NEVER here — only in Data (oauthSecretData).
-			Annotations: map[string]string{annMCPGrantServerURL: flow.serverURL},
+			Annotations: ann,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: oauthSecretData(flow.oauth, toks),
@@ -317,8 +334,10 @@ func (s *Server) handleRevokeMCPGrant(w http.ResponseWriter, r *http.Request) {
 
 	// Delete ONLY the caller's own (user, server) grant. The name embeds the caller's
 	// hash, so it can never NAME another user's grant; in locked mode the write ran as
-	// the privileged credential client, so the delete does too.
-	grantNS, grantName := s.grantCoordinates(ns, server, userHash)
+	// the privileged credential client, so the delete does too. Revoke targets the legacy
+	// unscoped grant (boundary ""); per-boundary revoke (revoke "for agent X") is a later
+	// refinement — the revoke DTO carries no agent yet.
+	grantNS, grantName := s.grantCoordinates(ns, "", server, userHash)
 	gc := s.grantClient(caller)
 
 	// Defence in depth for the privileged, shared-namespace delete: verify the target's

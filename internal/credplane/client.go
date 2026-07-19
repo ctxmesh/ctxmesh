@@ -56,9 +56,9 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 // Resolve delegates to the central service and maps its structured error codes back to the
 // credresolve sentinels, so callers branch identically whether resolution is embedded or
 // delegated.
-func (c *Client) Resolve(ctx context.Context, ns, server, userHash string) (credresolve.Credential, error) {
+func (c *Client) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	var resp resolveResponse
-	if err := c.post(ctx, pathResolve, resolveRequest{Namespace: ns, Server: server, UserHash: userHash}, &resp); err != nil {
+	if err := c.post(ctx, pathResolve, resolveRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash}, &resp); err != nil {
 		return credresolve.Credential{}, err
 	}
 	switch resp.Error {
@@ -74,9 +74,9 @@ func (c *Client) Resolve(ctx context.Context, ns, server, userHash string) (cred
 }
 
 // Revoke delegates a revoke to the central service.
-func (c *Client) Revoke(ctx context.Context, ns, server, userHash string) error {
+func (c *Client) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
 	var resp revokeResponse
-	if err := c.post(ctx, pathRevoke, revokeRequest{Namespace: ns, Server: server, UserHash: userHash}, &resp); err != nil {
+	if err := c.post(ctx, pathRevoke, revokeRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash}, &resp); err != nil {
 		return err
 	}
 	if resp.Error != "" {
@@ -88,9 +88,9 @@ func (c *Client) Revoke(ctx context.Context, ns, server, userHash string) error 
 // StoreGrant delegates a grant PERSIST to the central service, which writes it to the
 // config-selected backend (the SPI write path, ADR 0032). Implements credresolve.GrantWriter
 // so the BFF OAuth callback swaps a direct Secret write for this with no other change.
-func (c *Client) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (c *Client) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	req := storeRequest{
-		Namespace: ns, Server: server, UserHash: userHash,
+		Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash,
 		AccessToken: g.Tokens.AccessToken, RefreshToken: g.Tokens.RefreshToken,
 		TokenEndpoint: g.Config.TokenEndpoint, ClientID: g.Config.ClientID,
 		RevocationEndpoint: g.Config.RevocationEndpoint, ServerURL: g.ServerURL,

@@ -55,7 +55,7 @@ func NewHandler(b Backend) http.Handler {
 		if !decode(w, r, &req) {
 			return
 		}
-		cred, err := b.Resolve(r.Context(), req.Namespace, req.Server, req.UserHash, req.Tenant)
+		cred, err := b.Resolve(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash, req.Tenant)
 		switch {
 		case errors.Is(err, credresolve.ErrConsentRequired):
 			writeJSON(w, resolveResponse{Signal: SignalConsentRequired})
@@ -74,7 +74,7 @@ func NewHandler(b Backend) http.Handler {
 		if !decode(w, r, &req) {
 			return
 		}
-		if err := b.Store(r.Context(), req.Namespace, req.Server, req.UserHash, req.Tenant, req.Grant); err != nil {
+		if err := b.Store(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash, req.Tenant, req.Grant); err != nil {
 			writeJSON(w, ackResponse{Error: errCodeInternal})
 			return
 		}
@@ -86,7 +86,7 @@ func NewHandler(b Backend) http.Handler {
 		if !decode(w, r, &req) {
 			return
 		}
-		if err := b.Revoke(r.Context(), req.Namespace, req.Server, req.UserHash, req.Tenant); err != nil {
+		if err := b.Revoke(r.Context(), req.Namespace, req.Boundary, req.Server, req.UserHash, req.Tenant); err != nil {
 			writeJSON(w, ackResponse{Error: errCodeInternal})
 			return
 		}

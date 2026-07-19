@@ -66,14 +66,14 @@ func (c *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 
 // Resolve maps the provider's structured signals back to the credresolve sentinels, so
 // callers branch identically whether resolution is in-tree or remote.
-func (c *Client) Resolve(ctx context.Context, ns, server, userHash string) (credresolve.Credential, error) {
-	return c.resolveTenant(ctx, ns, server, userHash, "")
+func (c *Client) Resolve(ctx context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
+	return c.resolveTenant(ctx, ns, boundary, server, userHash, "")
 }
 
-func (c *Client) resolveTenant(ctx context.Context, ns, server, userHash, tenant string) (credresolve.Credential, error) {
+func (c *Client) resolveTenant(ctx context.Context, ns, boundary, server, userHash, tenant string) (credresolve.Credential, error) {
 	var resp resolveResponse
 	if err := c.do(ctx, http.MethodPost, PathResolve,
-		resolveRequest{Namespace: ns, Server: server, UserHash: userHash, Tenant: tenant}, &resp); err != nil {
+		resolveRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash, Tenant: tenant}, &resp); err != nil {
 		return credresolve.Credential{}, err
 	}
 	switch {
@@ -91,10 +91,10 @@ func (c *Client) resolveTenant(ctx context.Context, ns, server, userHash, tenant
 }
 
 // Revoke delegates a revoke to the provider.
-func (c *Client) Revoke(ctx context.Context, ns, server, userHash string) error {
+func (c *Client) Revoke(ctx context.Context, ns, boundary, server, userHash string) error {
 	var resp ackResponse
 	if err := c.do(ctx, http.MethodPost, PathRevoke,
-		revokeRequest{Namespace: ns, Server: server, UserHash: userHash}, &resp); err != nil {
+		revokeRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash}, &resp); err != nil {
 		return err
 	}
 	if resp.Error != "" {
@@ -104,10 +104,10 @@ func (c *Client) Revoke(ctx context.Context, ns, server, userHash string) error 
 }
 
 // Store persists a grant at the provider (the write-path surface of the contract).
-func (c *Client) Store(ctx context.Context, ns, server, userHash, tenant string, grant GrantMaterial) error {
+func (c *Client) Store(ctx context.Context, ns, boundary, server, userHash, tenant string, grant GrantMaterial) error {
 	var resp ackResponse
 	if err := c.do(ctx, http.MethodPost, PathStore,
-		storeRequest{Namespace: ns, Server: server, UserHash: userHash, Tenant: tenant, Grant: grant}, &resp); err != nil {
+		storeRequest{Namespace: ns, Boundary: boundary, Server: server, UserHash: userHash, Tenant: tenant, Grant: grant}, &resp); err != nil {
 		return err
 	}
 	if resp.Error != "" {
@@ -118,12 +118,12 @@ func (c *Client) Store(ctx context.Context, ns, server, userHash, tenant string,
 
 // StoreGrant adapts the SPI's common write payload (credresolve.Grant) to the provider's
 // Store, so a `remote` backend is a config-selected GrantWriter (ADR 0032).
-func (c *Client) StoreGrant(ctx context.Context, ns, server, userHash string, g credresolve.Grant) error {
+func (c *Client) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	gm := GrantMaterial{AccessToken: g.Tokens.AccessToken, RefreshToken: g.Tokens.RefreshToken}
 	if !g.Tokens.ExpiresAt.IsZero() {
 		gm.ExpiresAtUnix = g.Tokens.ExpiresAt.Unix()
 	}
-	return c.Store(ctx, ns, server, userHash, "", gm)
+	return c.Store(ctx, ns, boundary, server, userHash, "", gm)
 }
 
 // do sends req (nil for GET) as JSON to path and decodes into out. A non-2xx or transport

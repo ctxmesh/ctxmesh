@@ -818,6 +818,12 @@ type MCPGrantConsentRequest struct {
 	Server string `json:"server"`
 	// Namespace scopes the server + the grant Secret; empty → the default namespace.
 	Namespace string `json:"namespace"`
+	// Agent, when set, is the AgentDeployment the user is connecting this server FOR — the
+	// inline-consent case (a run of that agent surfaced consent_required). It scopes the grant
+	// to the agent's trust boundary (its registry, or the agent itself; ADR 0033), so the
+	// consent empowers that agent's team but not others. Empty ⇒ a legacy unscoped grant
+	// (connect-for-all), e.g. a consent begun from the servers page with no agent context.
+	Agent string `json:"agent,omitempty"`
 	// Auth is the OAuth 2.1 client config for the consent flow (endpoints + public
 	// client id + redirect), the same shape register uses. OPTIONAL (ADR 0031): the
 	// config is recovered from the registration, so a caller begins from just {server,

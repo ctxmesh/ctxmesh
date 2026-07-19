@@ -42,21 +42,22 @@ const (
 
 // mockResolver is a credresolve.CredentialResolver test double capturing its inputs.
 type mockResolver struct {
-	cred      credresolve.Credential
-	err       error
-	calls     int
-	gotNS     string
-	gotServer string
-	gotUser   string
+	cred        credresolve.Credential
+	err         error
+	calls       int
+	gotNS       string
+	gotServer   string
+	gotUser     string
+	gotBoundary string
 }
 
-func (m *mockResolver) Resolve(_ context.Context, ns, server, userHash string) (credresolve.Credential, error) {
+func (m *mockResolver) Resolve(_ context.Context, ns, boundary, server, userHash string) (credresolve.Credential, error) {
 	m.calls++
-	m.gotNS, m.gotServer, m.gotUser = ns, server, userHash
+	m.gotNS, m.gotServer, m.gotUser, m.gotBoundary = ns, server, userHash, boundary
 	return m.cred, m.err
 }
 
-func (m *mockResolver) Revoke(context.Context, string, string, string) error { return nil }
+func (m *mockResolver) Revoke(context.Context, string, string, string, string) error { return nil }
 
 // upstream captures what the sidecar forwarded.
 type upstream struct {
@@ -188,6 +189,47 @@ func TestEgressRejectsAgentMismatch(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "agent_mismatch")
 	assert.Equal(t, 0, h.up.hits)
 	assert.Equal(t, 0, h.resolver.calls)
+}
+
+// TestEgressBoundaryMatch: the ADR 0033 / m30.3 scoping gate. When the sidecar serves a boundary
+// (a registry), a capability whose `bnd` matches is redeemable even from a DIFFERENT agent (a
+// teammate's capability relayed across A2A — team-OBO), while a capability scoped to a different
+// boundary is rejected. The boundary gate supersedes the exact-agent gate.
+func TestEgressBoundaryMatch(t *testing.T) {
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	up := newUpstream(t)
+	routes, err := ParseRouteTable(fmt.Appendf(nil, `[{"name":%q,"targetURL":%q,"oauth":true}]`, testServer, up.server.URL))
+	require.NoError(t, err)
+	signer := runcap.NewSigner(priv, testAudience, nil)
+
+	proxy := NewProxy(ProxyConfig{
+		Verifier:         runcap.NewVerifier(pub, testAudience, nil),
+		Resolver:         &mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "TOK"}},
+		Namespace:        testNS,
+		ExpectedAgent:    "team-alpha/support", // present but SUPERSEDED by the boundary gate
+		ExpectedBoundary: "r:squad-a",
+		Routes:           routes,
+		Log:              logr.Discard(),
+	})
+	call := func(agent, boundary string) *httptest.ResponseRecorder {
+		tok, mErr := signer.Mint(runcap.MintRequest{User: "u-alice", Agent: agent, Boundary: boundary, RunID: "r", TTL: time.Minute})
+		require.NoError(t, mErr)
+		req := httptest.NewRequest(http.MethodPost, "/"+testServer, strings.NewReader(`{}`))
+		req.Header.Set(runcap.HeaderName, tok)
+		rec := httptest.NewRecorder()
+		proxy.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A teammate agent (different act) with the SAME registry boundary is accepted (team-OBO).
+	rec := call("team-alpha/other-agent", "r:squad-a")
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// A capability scoped to a DIFFERENT registry is rejected — isolation across registries.
+	rec = call("team-alpha/support", "r:squad-b")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "boundary_mismatch")
 }
 
 func TestEgressConsentRequired(t *testing.T) {

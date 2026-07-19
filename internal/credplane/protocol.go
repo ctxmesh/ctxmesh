@@ -39,8 +39,11 @@ const (
 // sidecar's verified run capability) — the raw username never crosses this API.
 type resolveRequest struct {
 	Namespace string `json:"namespace"`
-	Server    string `json:"server"`
-	UserHash  string `json:"userHash"`
+	// Boundary is the trust boundary the personal grant is scoped to (ADR 0033); "" =
+	// legacy unscoped. omitempty keeps the wire backward-compatible with older peers.
+	Boundary string `json:"boundary,omitempty"`
+	Server   string `json:"server"`
+	UserHash string `json:"userHash"`
 }
 
 // resolveResponse returns the resolved credential OR a structured error code. The token
@@ -57,6 +60,7 @@ type resolveResponse struct {
 // revokeRequest asks the central service to forget + best-effort revoke a user's grant.
 type revokeRequest struct {
 	Namespace string `json:"namespace"`
+	Boundary  string `json:"boundary,omitempty"`
 	Server    string `json:"server"`
 	UserHash  string `json:"userHash"`
 }
@@ -72,6 +76,7 @@ type revokeResponse struct {
 // secret and cross only the mTLS link.
 type storeRequest struct {
 	Namespace          string `json:"namespace"`
+	Boundary           string `json:"boundary,omitempty"`
 	Server             string `json:"server"`
 	UserHash           string `json:"userHash"`
 	AccessToken        string `json:"accessToken"`

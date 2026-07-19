@@ -54,7 +54,7 @@ func newLocalBackend(t *testing.T, storage credpostgres.Storage) *credpostgres.B
 
 func seedViaBackend(b *credpostgres.Backend) func(context.Context, string, string, string, string) error {
 	return func(ctx context.Context, ns, server, userHash, token string) error {
-		return b.Store(ctx, ns, server, userHash, credpostgres.Grant{AccessToken: token, ExpiresAt: farFuture})
+		return b.Store(ctx, ns, "", server, userHash, credpostgres.Grant{AccessToken: token, ExpiresAt: farFuture})
 	}
 }
 
@@ -77,20 +77,20 @@ func (a pgAdapter) Capabilities(context.Context) (credprovider.Capabilities, err
 	return credprovider.Capabilities{}, nil
 }
 
-func (a pgAdapter) Resolve(ctx context.Context, ns, server, userHash, _ string) (credresolve.Credential, error) {
-	return a.b.Resolve(ctx, ns, server, userHash)
+func (a pgAdapter) Resolve(ctx context.Context, ns, boundary, server, userHash, _ string) (credresolve.Credential, error) {
+	return a.b.Resolve(ctx, ns, boundary, server, userHash)
 }
 
-func (a pgAdapter) Store(ctx context.Context, ns, server, userHash, _ string, g credprovider.GrantMaterial) error {
+func (a pgAdapter) Store(ctx context.Context, ns, boundary, server, userHash, _ string, g credprovider.GrantMaterial) error {
 	exp := farFuture
 	if g.ExpiresAtUnix > 0 {
 		exp = time.Unix(g.ExpiresAtUnix, 0)
 	}
-	return a.b.Store(ctx, ns, server, userHash, credpostgres.Grant{AccessToken: g.AccessToken, ExpiresAt: exp})
+	return a.b.Store(ctx, ns, boundary, server, userHash, credpostgres.Grant{AccessToken: g.AccessToken, ExpiresAt: exp})
 }
 
-func (a pgAdapter) Revoke(ctx context.Context, ns, server, userHash, _ string) error {
-	return a.b.Revoke(ctx, ns, server, userHash)
+func (a pgAdapter) Revoke(ctx context.Context, ns, boundary, server, userHash, _ string) error {
+	return a.b.Revoke(ctx, ns, boundary, server, userHash)
 }
 
 // TestConformance_OutOfTreeRemote: the same backend served over the credprovider contract
@@ -106,7 +106,7 @@ func TestConformance_OutOfTreeRemote(t *testing.T) {
 		Resolver: client,
 		Seed: func(ctx context.Context, ns, server, userHash, token string) error {
 			g := credprovider.GrantMaterial{AccessToken: token, ExpiresAtUnix: farFuture.Unix()}
-			return client.Store(ctx, ns, server, userHash, "", g)
+			return client.Store(ctx, ns, "", server, userHash, "", g)
 		},
 	})
 }

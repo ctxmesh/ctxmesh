@@ -126,7 +126,7 @@ func TestMTLSEnforced(t *testing.T) {
 	cliTLS, err := credplane.ClientTLSConfig(pki.clientCertPEM, pki.clientKeyPEM, pki.caPEM, serverName)
 	require.NoError(t, err)
 	ok := credplane.NewClient(ts.URL, &http.Client{Transport: &http.Transport{TLSClientConfig: cliTLS}, Timeout: 5 * time.Second})
-	got, err := ok.Resolve(context.Background(), testNS, testServer, "u-a")
+	got, err := ok.Resolve(context.Background(), testNS, "", testServer, "u-a")
 	require.NoError(t, err, "a sidecar with a platform client cert is accepted")
 	require.Equal(t, "OK", got.Value)
 
@@ -138,6 +138,6 @@ func TestMTLSEnforced(t *testing.T) {
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
 		Timeout:   5 * time.Second,
 	})
-	_, err = noCert.Resolve(context.Background(), testNS, testServer, "u-a")
+	_, err = noCert.Resolve(context.Background(), testNS, "", testServer, "u-a")
 	require.Error(t, err, "a caller without a platform client cert must be rejected by mTLS")
 }

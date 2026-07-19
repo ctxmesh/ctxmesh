@@ -125,14 +125,14 @@ func TestCredentialNamespaceRBACReadIsolation(t *testing.T) {
 
 	// --- (1) the credential component writes the grant through the real coordinates ---
 	userHash := userGrantHash(grantForUser)
-	grantNS, grantName := grantSecretCoordinates(credNS, sourceNs, server, userHash)
+	grantNS, grantName := grantSecretCoordinates(credNS, sourceNs, "", server, userHash)
 	require.Equal(t, credNS, grantNS, "the grant must land in the locked namespace")
 
 	grant := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      grantName,
 			Namespace: grantNS,
-			Labels:    grantSecretLabels(server, userHash, sourceNs),
+			Labels:    grantSecretLabels(server, userHash, sourceNs, ""),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{

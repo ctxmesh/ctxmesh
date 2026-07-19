@@ -61,26 +61,26 @@ func TestIntegration_SQLStore_OptimisticConcurrency(t *testing.T) {
 	ctx := context.Background()
 	row := stored{keyID: "local:default", wrappedDEK: []byte("wd"), nonce: []byte("nn"), ciphertext: []byte("ct"), expiresAt: time.Now().Add(time.Hour)}
 
-	if err := s.save(ctx, "ns", "srv", "uh", row, 0); err != nil {
+	if err := s.save(ctx, "ns", "", "srv", "uh", row, 0); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	// A second insert (expectedVersion 0) conflicts.
-	if err := s.save(ctx, "ns", "srv", "uh", row, 0); !errors.Is(err, errConflict) {
+	if err := s.save(ctx, "ns", "", "srv", "uh", row, 0); !errors.Is(err, errConflict) {
 		t.Fatalf("double insert err = %v, want errConflict", err)
 	}
-	got, found, err := s.load(ctx, "ns", "srv", "uh")
+	got, found, err := s.load(ctx, "ns", "", "srv", "uh")
 	if err != nil || !found || got.version != 1 {
 		t.Fatalf("load = (%+v, %v, %v), want version 1", got, found, err)
 	}
 	// Update at the right version → version advances.
-	if err := s.save(ctx, "ns", "srv", "uh", row, 1); err != nil {
+	if err := s.save(ctx, "ns", "", "srv", "uh", row, 1); err != nil {
 		t.Fatalf("update v1: %v", err)
 	}
 	// Update at the stale version → conflict.
-	if err := s.save(ctx, "ns", "srv", "uh", row, 1); !errors.Is(err, errConflict) {
+	if err := s.save(ctx, "ns", "", "srv", "uh", row, 1); !errors.Is(err, errConflict) {
 		t.Fatalf("stale update err = %v, want errConflict", err)
 	}
-	got, _, _ = s.load(ctx, "ns", "srv", "uh")
+	got, _, _ = s.load(ctx, "ns", "", "srv", "uh")
 	if got.version != 2 {
 		t.Fatalf("version = %d, want 2", got.version)
 	}
@@ -92,17 +92,17 @@ func TestIntegration_SQLStore_SweepAndDelete(t *testing.T) {
 	ctx := context.Background()
 	past := stored{keyID: "k", wrappedDEK: []byte("d"), nonce: []byte("n"), ciphertext: []byte("c"), expiresAt: time.Now().Add(-time.Hour)}
 	future := stored{keyID: "k", wrappedDEK: []byte("d"), nonce: []byte("n"), ciphertext: []byte("c"), expiresAt: time.Now().Add(time.Hour)}
-	_ = s.save(ctx, "ns", "expired", "uh", past, 0)
-	_ = s.save(ctx, "ns", "valid", "uh", future, 0)
+	_ = s.save(ctx, "ns", "", "expired", "uh", past, 0)
+	_ = s.save(ctx, "ns", "", "valid", "uh", future, 0)
 
 	n, err := s.sweepExpired(ctx, time.Now())
 	if err != nil || n != 1 {
 		t.Fatalf("sweep = (%d, %v), want 1 removed", n, err)
 	}
-	if _, found, _ := s.load(ctx, "ns", "expired", "uh"); found {
+	if _, found, _ := s.load(ctx, "ns", "", "expired", "uh"); found {
 		t.Fatal("expired row survived the sweep")
 	}
-	if _, found, _ := s.load(ctx, "ns", "valid", "uh"); !found {
+	if _, found, _ := s.load(ctx, "ns", "", "valid", "uh"); !found {
 		t.Fatal("valid row wrongly swept")
 	}
 }
@@ -117,17 +117,17 @@ func TestIntegration_Backend_RoundTrip(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := b.Store(ctx, "ns", "srv", "uh", Grant{AccessToken: "tok", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := b.Store(ctx, "ns", "", "srv", "uh", Grant{AccessToken: "tok", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	cred, err := b.Resolve(ctx, "ns", "srv", "uh")
+	cred, err := b.Resolve(ctx, "ns", "", "srv", "uh")
 	if err != nil || cred.Value != "tok" {
 		t.Fatalf("Resolve = (%+v, %v), want tok", cred, err)
 	}
-	if err := b.Revoke(ctx, "ns", "srv", "uh"); err != nil {
+	if err := b.Revoke(ctx, "ns", "", "srv", "uh"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if _, err := b.Resolve(ctx, "ns", "srv", "uh"); !errors.Is(err, credresolve.ErrNoCredential) && !errors.Is(err, credresolve.ErrConsentRequired) {
+	if _, err := b.Resolve(ctx, "ns", "", "srv", "uh"); !errors.Is(err, credresolve.ErrNoCredential) && !errors.Is(err, credresolve.ErrConsentRequired) {
 		t.Fatalf("post-revoke Resolve err = %v, want no-credential/consent", err)
 	}
 }
