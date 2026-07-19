@@ -57,7 +57,7 @@ import { api, ApiError, type AddMcpResponse, type DiscoveredTool } from "@/lib/a
 //   • OAuth init failure      → same error surface as probe failure.
 
 type SourceKind = "url" | "image";
-type AuthMode = "key" | "oauth";
+type AuthMode = "none" | "key" | "oauth";
 
 type Submit =
   | { kind: "idle" }
@@ -174,7 +174,8 @@ export function AddMcpPage() {
     const req = {
       name: name.trim(),
       ...(sourceKind === "url" ? { url: url.trim() } : { image: image.trim() }),
-      ...(apiKey ? { apiKey } : {}),
+      // Only attach a key in "key" mode — "none" (open server) probes with no auth.
+      ...(authMode === "key" && apiKey ? { apiKey } : {}),
     };
     setApiKey("");
     try {
@@ -330,6 +331,7 @@ export function AddMcpPage() {
               onChange={(e) => setAuthMode(e.target.value as AuthMode)}
               data-testid="mcp-auth-mode"
             >
+              <option value="none">None (open server)</option>
               <option value="key">Bearer key</option>
               <option value="oauth">OAuth 2.1 (redirect to consent)</option>
             </Select>
@@ -363,9 +365,11 @@ export function AddMcpPage() {
           ) : (
             <div className="rounded-md border border-info/30 bg-info/5 p-3 text-xs text-muted-foreground">
               The BFF probes the server and runs <span className="font-medium">tools/list</span>{" "}
-              discovery. Any key is stored as a Secret and attached at the egress
-              hop — never by the browser, never inside the agent container. Egress
-              opens per approved server only.
+              discovery.{" "}
+              {authMode === "none"
+                ? "An open server is contacted with no credentials."
+                : "A bearer key, if given, is stored as a Secret and attached at the egress hop — never by the browser, never inside the agent container."}{" "}
+              Egress opens per approved server only.
             </div>
           )}
           {submit.kind === "error" && (

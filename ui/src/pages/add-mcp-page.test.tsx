@@ -122,6 +122,23 @@ describe("AddMcpPage", () => {
     expect(payload.name).toBe("acme-support");
   });
 
+  it("open-server mode (none) probes with no apiKey", async () => {
+    const calls = recordingFetch({});
+    renderPage();
+    // Explicitly choose the open (no-auth) server mode.
+    fireEvent.change(screen.getByTestId("mcp-auth-mode"), { target: { value: "none" } });
+    await fillServer({}); // name + url only; the key field is hidden in "none" mode
+    fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
+
+    expect(await screen.findByText("search_docs")).toBeInTheDocument();
+    const post = calls.find((c) => c.url === "/api/mcpservers" && c.method === "POST");
+    expect(post).toBeDefined();
+    const payload = JSON.parse(post!.body) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("apiKey");
+    expect(payload).not.toHaveProperty("authType");
+    expect(payload.url).toBe("https://mcp.acme.dev/sse");
+  });
+
   it("never persists the bearer key client-side after submit", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     recordingFetch({});

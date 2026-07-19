@@ -106,6 +106,39 @@ func TestDiscoverMCPOAuthConfigPrefersCIMD(t *testing.T) {
 	assert.Nil(t, cfg.validate())
 }
 
+func TestDiscoverMCPOAuthConfigNoAuthServersFallsBackToOrigin(t *testing.T) {
+	// A non-standard MCP server (e.g. Zomato) whose protected-resource metadata OMITS
+	// authorization_servers (RFC 9728 §3.1) but which IS its own authorization server and
+	// serves RFC 8414 metadata at the origin. Discovery must fall back to the origin as the
+	// AS rather than hard-fail with "lists no authorization server".
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(oauthProtectedResourceMeta{Resource: srv.URL}) // no authorization_servers
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(oauthServerMeta{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+			ScopesSupported:       []string{"mcp:tools"},
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "dyn-abc"})
+	})
+
+	cfg, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", "http://localhost:9090/api/mcp/oauth/callback")
+	require.NoError(t, err, "must fall back to the origin AS, not fail on missing authorization_servers")
+	assert.Equal(t, srv.URL+"/authorize", cfg.AuthorizationEndpoint)
+	assert.Equal(t, srv.URL+"/token", cfg.TokenEndpoint)
+	assert.Equal(t, "dyn-abc", cfg.ClientID)
+	assert.Nil(t, cfg.validate())
+}
+
 func TestDiscoverMCPOAuthConfigLocalhostFallsBackToDCR(t *testing.T) {
 	// CIMD is advertised, but our console is at http://localhost (a kubectl
 	// port-forward): the auth server could never dereference an http://localhost
