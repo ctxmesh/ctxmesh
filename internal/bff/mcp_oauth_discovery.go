@@ -142,12 +142,24 @@ func discoverMCPOAuthConfig(
 	if err != nil {
 		return mcpOAuthConfig{}, err
 	}
-	if len(prm.AuthorizationServers) == 0 {
+	// Pick the authorization server. RFC 9728 says the protected-resource metadata SHOULD
+	// list authorization_servers[], but many real MCP servers ARE their own authorization
+	// server and omit that field (e.g. they serve an AS-shaped doc at
+	// /.well-known/oauth-protected-resource and the full AS metadata at
+	// /.well-known/oauth-authorization-server). Rather than hard-fail such a server, fall
+	// back to the resource's OWN origin as the AS and let the RFC 8414 fetch below resolve
+	// its endpoints. Only error if we cannot even determine an origin.
+	as := ""
+	if len(prm.AuthorizationServers) > 0 {
+		as = prm.AuthorizationServers[0] // the resource chose it
+	} else {
+		as = originOf(mcpServerURL)
+	}
+	if as == "" {
 		return mcpOAuthConfig{}, &oauthDiscoveryError{msg: "the MCP server's OAuth metadata lists no authorization server"}
 	}
 
-	// Use the first advertised authorization server (the resource chose it).
-	asMeta, err := fetchAuthServerMetadata(ctx, c, prm.AuthorizationServers[0])
+	asMeta, err := fetchAuthServerMetadata(ctx, c, as)
 	if err != nil {
 		return mcpOAuthConfig{}, err
 	}
