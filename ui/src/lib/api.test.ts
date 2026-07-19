@@ -4,10 +4,12 @@ import {
   api,
   ApiError,
   openLogStream,
+  openRunStream,
   setSessionExpiredHandler,
   setTokenProvider,
   whoami,
   type LogEventType,
+  type RunEventKind,
 } from "@/lib/api";
 
 // mockFetch returns a fetch stub resolving a Response-like object. It captures
@@ -390,5 +392,111 @@ describe("openLogStream (fetch-stream SSE tail)", () => {
     cancel();
     await new Promise((r) => setTimeout(r, 0));
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+// collectRun drains an openRunStream into a promise resolving once the stream closes
+// (clean close, an error, or a pre-stream forbidden).
+function collectRun(runId: string) {
+  type RunEv = { kind: RunEventKind; data: string; seq: number };
+  type Errored = { message: string; status?: number } | null;
+  const events: RunEv[] = [];
+  let errored: Errored = null;
+  let forbidden: string | null = null;
+  return new Promise<{
+    events: RunEv[];
+    errored: Errored;
+    forbidden: string | null;
+  }>((resolve) => {
+    const done = () => setTimeout(() => resolve({ events, errored, forbidden }), 0);
+    openRunStream(runId, {
+      onEvent: (kind, data, seq) => events.push({ kind, data, seq }),
+      onClose: done,
+      onForbidden: (m) => {
+        forbidden = m;
+        done();
+      },
+      onError: (message, status) => {
+        errored = { message, status };
+        done();
+      },
+    });
+  });
+}
+
+describe("openRunStream (run event SSE, m32.8)", () => {
+  it("parses id/event/data frames into typed run events in order", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          sseResponse([
+            "id:1\nevent:token\ndata:Hel\n\n",
+            "id:2\nevent:token\ndata:lo\n\n",
+            "id:3\nevent:message\ndata:Hello\n\n",
+            "id:4\nevent:state\ndata:succeeded\n\n",
+          ]),
+        ),
+      ),
+    );
+    const { events, errored } = await collectRun("run-1");
+    expect(errored).toBeNull();
+    expect(events).toEqual([
+      { kind: "token", data: "Hel", seq: 1 },
+      { kind: "token", data: "lo", seq: 2 },
+      { kind: "message", data: "Hello", seq: 3 },
+      { kind: "state", data: "succeeded", seq: 4 },
+    ]);
+  });
+
+  it("attaches the caller's Bearer + Accept: text/event-stream", async () => {
+    setTokenProvider(() => "tok-run");
+    let init: RequestInit | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, i?: RequestInit) => {
+        init = i;
+        return Promise.resolve(sseResponse(["event:state\ndata:succeeded\n\n"]));
+      }),
+    );
+    await collectRun("run-9");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("Authorization")).toBe("Bearer tok-run");
+    expect(headers.get("Accept")).toBe("text/event-stream");
+  });
+
+  it("a pre-stream 403 reports onForbidden, emits no events", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(sseResponse([], false, 403, { error: "denied" }))));
+    const { events, forbidden } = await collectRun("run-x");
+    expect(events).toEqual([]);
+    expect(forbidden).not.toBeNull();
+  });
+});
+
+describe("run mutations (m32.8/m32.9)", () => {
+  it("createRun POSTs /api/runs and returns the handle", async () => {
+    const fetchMock = mockFetch({ id: "run-1", status: "queued" }, true, 202);
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = await api.createRun({ agent: "echo", namespace: "prod", input: { input: "hi" } });
+    expect(handle).toEqual({ id: "run-1", status: "queued" });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/runs");
+  });
+
+  it("resumeRun sends the decision to /resume", async () => {
+    const fetchMock = mockFetch({ id: "run-1", status: "cancelled" });
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = await api.resumeRun("run-1", "deny");
+    expect(handle.status).toBe("cancelled");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/runs/run-1/resume");
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toEqual({ decision: "deny" });
+  });
+
+  it("cancelRun POSTs /cancel", async () => {
+    const fetchMock = mockFetch({ id: "run-1", status: "cancelled" });
+    vi.stubGlobal("fetch", fetchMock);
+    const handle = await api.cancelRun("run-1");
+    expect(handle.status).toBe("cancelled");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/runs/run-1/cancel");
   });
 });

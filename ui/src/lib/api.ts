@@ -1495,6 +1495,149 @@ function parseSSEFrame(
   return { type, data: dataLines.join("\n") };
 }
 
+// --- Run-oriented execution stream (ADR 0034, m32.8) -------------------------
+// The console chat consumes a run's SSE event stream (GET /api/runs/{id}/events):
+// `id:<seq>\nevent:<kind>\ndata:<json>\n\n`. Kinds: `token` (a live content delta),
+// `message` (a completed assistant turn), `state` (a status transition — the data
+// is the new status), `step` (a loop/tool boundary). The stream closes when the run
+// is terminal, so onClose fires exactly once (clean end or abort).
+
+export type CreateRunRequest = InvokeRequest;
+
+// RunHandle is the POST /api/runs 202 body: the run id + its initial status.
+export interface RunHandle {
+  id: string;
+  status: string;
+}
+
+// RunAction mirrors the BFF run.Action: what a requires_action run is waiting on.
+export interface RunAction {
+  kind: "consent_required" | "approval";
+  // servers names the MCP servers needing consent (consent_required).
+  servers?: string[];
+  // key is the approval key the resume must carry back (approval, m32.4).
+  key?: string;
+  // message is a human-readable description (approval: the summary the approver sees).
+  message?: string;
+}
+
+// RunDetail mirrors the BFF run DTO (GET /api/runs/{id}) — the structured final state the
+// SSE stream does not carry (traceId, requiresAction). Read on stream close / requires_action.
+export interface RunDetail {
+  id: string;
+  status: string;
+  traceId?: string;
+  messages?: { role: string; content: string }[];
+  requiresAction?: RunAction;
+  error?: string;
+}
+
+export type RunEventKind = "state" | "message" | "token" | "step";
+
+export interface RunStreamHandlers {
+  /** One SSE frame arrived, in wire order (monotonic seq for resume). */
+  onEvent: (kind: RunEventKind, data: string, seq: number) => void;
+  /** The stream ended (the run reached a terminal state, or was aborted). Fires once. */
+  onClose?: () => void;
+  /** A PRE-STREAM 403 (the caller can't read this run). No events emitted. */
+  onForbidden?: (message: string) => void;
+  /** A PRE-STREAM transport/HTTP failure that is not a 403. */
+  onError?: (message: string, status?: number) => void;
+}
+
+// openRunStream opens the run's SSE event stream with the caller's bearer attached
+// (the SAME apiFetch seam) and drives the handlers. Returns a cancel() that aborts
+// the stream (call on unmount / New-run — no leak). Mirrors openLogStream.
+export function openRunStream(
+  runId: string,
+  handlers: RunStreamHandlers,
+  opts: { fromSeq?: number; signal?: AbortSignal } = {},
+): () => void {
+  const path = `/api/runs/${encodeURIComponent(runId)}/events`;
+  const controller = new AbortController();
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else
+      opts.signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+  }
+
+  void (async () => {
+    let res: Response;
+    try {
+      const headers: Record<string, string> = { Accept: "text/event-stream" };
+      if (opts.fromSeq && opts.fromSeq > 0)
+        headers["Last-Event-ID"] = String(opts.fromSeq);
+      res = await apiFetch(path, { headers, signal: controller.signal });
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err.message : "run stream failed");
+      return;
+    }
+
+    if (!res.ok) {
+      const message = await errorMessage(res, `run stream failed (${res.status})`);
+      if (res.status === 403) handlers.onForbidden?.(message);
+      else handlers.onError?.(message, res.status);
+      return;
+    }
+    if (!res.body) {
+      handlers.onError?.("run stream returned no body");
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const parsed = parseRunSSEFrame(frame);
+          if (parsed) handlers.onEvent(parsed.kind, parsed.data, parsed.seq);
+        }
+      }
+      handlers.onClose?.();
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err.message : "run stream broke");
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+// parseRunSSEFrame parses one run SSE frame ("id:<seq>\nevent:<kind>\ndata:<json>")
+// into a typed event. Unknown/absent event names default to "message".
+function parseRunSSEFrame(
+  frame: string,
+): { seq: number; kind: RunEventKind; data: string } | null {
+  let event = "";
+  let seq = 0;
+  const dataLines: string[] = [];
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (line.startsWith("id:")) seq = Number(line.slice(3).trim()) || 0;
+    else if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:"))
+      dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0 && event === "") return null; // keep-alive.
+  const kind: RunEventKind =
+    event === "state" || event === "token" || event === "step"
+      ? event
+      : "message";
+  return { seq, kind, data: dataLines.join("\n") };
+}
+
 // --- ModelRoute DTOs (m15.12) ------------------------------------------------
 
 // ModelRouteProviderDTO mirrors the BFF's ModelRouteProviderDTO.
@@ -1883,6 +2026,79 @@ export const api = {
       );
     }
     return (await res.json()) as InvokeResponse;
+  },
+
+  // createRun starts a durable run (POST /api/runs → 202) — the streaming path
+  // the console chat uses (ADR 0034, m32.8). Returns the run id + initial status;
+  // the caller then openRunStream()s to render tokens + requires_action live.
+  createRun: async (
+    req: InvokeRequest,
+    signal?: AbortSignal,
+  ): Promise<RunHandle> => {
+    const res = await apiFetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `run failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunHandle;
+  },
+
+  // getRun fetches a run's current state (GET /api/runs/{id}) — the structured final
+  // state (traceId, requiresAction, messages) the console reads when the stream closes.
+  getRun: async (id: string, signal?: AbortSignal): Promise<RunDetail> => {
+    const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}`, { signal });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `get run failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunDetail;
+  },
+
+  // resumeRun re-enters a run paused in requires_action (POST /api/runs/{id}/resume).
+  // For a consent pause, no decision (the user connected their account); for a
+  // human-in-the-loop approval (m32.4), decision "approve" | "deny".
+  resumeRun: async (
+    id: string,
+    decision?: "approve" | "deny",
+    signal?: AbortSignal,
+  ): Promise<RunHandle> => {
+    const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: decision ? JSON.stringify({ decision }) : undefined,
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `resume failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunHandle;
+  },
+
+  // cancelRun cancels a non-terminal run (POST /api/runs/{id}/cancel → cancelled).
+  cancelRun: async (id: string, signal?: AbortSignal): Promise<RunHandle> => {
+    const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `cancel failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunHandle;
   },
 
   // listProviders lists the already-connected providers (names/models, NO

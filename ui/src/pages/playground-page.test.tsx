@@ -19,12 +19,42 @@ interface Captured {
   body: string;
 }
 
+// sseBody wraps SSE frame strings in a ReadableStream-like body (getReader) so the
+// run event stream (openRunStream) can be driven deterministically (m32.8).
+function sseBody(frames: string[]) {
+  const enc = new TextEncoder();
+  let i = 0;
+  return {
+    getReader() {
+      return {
+        read() {
+          if (i < frames.length)
+            return Promise.resolve({ value: enc.encode(frames[i++]), done: false });
+          return Promise.resolve({ value: undefined, done: true });
+        },
+        releaseLock() {},
+      };
+    },
+  };
+}
+
+// RunMock describes how the mocked run behaves: the create outcome, the SSE frames its
+// event stream emits, and the structured detail GET /api/runs/{id} returns.
+interface RunMock {
+  createOk?: boolean;
+  createStatus?: number;
+  createJson?: unknown;
+  frames?: string[];
+  detail?: unknown;
+}
+
 function recordingFetch(opts: {
-  invoke?: (body: string) => { ok: boolean; status?: number; json: unknown };
+  run?: RunMock;
   expand?: (body: string) => { ok: boolean; status?: number; text: string };
   create?: (body: string) => { ok: boolean; status?: number; json: unknown };
   traceUrl?: string;
 }) {
+  const run = opts.run ?? {};
   const calls: Captured[] = [];
   vi.stubGlobal(
     "fetch",
@@ -35,15 +65,46 @@ function recordingFetch(opts: {
       const body = typeof init?.body === "string" ? init.body : "";
       calls.push({ url: path, method, body });
 
-      if (path === "/api/invoke") {
-        const r = opts.invoke
-          ? opts.invoke(body)
-          : { ok: true, json: { traceId: "trace-xyz", response: '{"answer":"MOCK_OK"}' } };
+      // POST /api/runs — create a run (streaming path, m32.8).
+      if (path === "/api/runs" && method === "POST") {
+        const ok = run.createOk ?? true;
         return Promise.resolve({
-          ok: r.ok,
-          status: r.status ?? (r.ok ? 200 : 502),
-          json: async () => r.json,
-          text: async () => JSON.stringify(r.json),
+          ok,
+          status: run.createStatus ?? (ok ? 202 : 403),
+          json: async () => run.createJson ?? { id: "run-1", status: "queued" },
+          text: async () => JSON.stringify(run.createJson ?? { error: "denied" }),
+        } as Response);
+      }
+      // GET /api/runs/{id}/events — the SSE event stream. Default: the final message + succeeded.
+      if (path.endsWith("/events")) {
+        const frames = run.frames ?? [
+          'event:message\ndata:{"answer":"MOCK_OK"}\n\n',
+          "event:state\ndata:succeeded\n\n",
+        ];
+        return Promise.resolve({ ok: true, status: 200, body: sseBody(frames) } as unknown as Response);
+      }
+      // POST /api/runs/{id}/resume | /cancel — resume/cancel a run.
+      if (path.startsWith("/api/runs/") && (path.endsWith("/resume") || path.endsWith("/cancel"))) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "run-1", status: "running" }),
+          text: async () => "",
+        } as Response);
+      }
+      // GET /api/runs/{id} — the structured run detail (traceId + requiresAction).
+      if (path.startsWith("/api/runs/")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () =>
+            run.detail ?? {
+              id: "run-1",
+              status: "succeeded",
+              traceId: "trace-xyz",
+              messages: [{ role: "assistant", content: '{"answer":"MOCK_OK"}' }],
+            },
+          text: async () => "",
         } as Response);
       }
       if (path.startsWith("/api/traces/")) {
@@ -114,12 +175,7 @@ afterEach(() => {
 
 describe("PlaygroundPage", () => {
   it("defines and runs an agent, then offers a 'View full trace' Link → /traces/:id (no Langfuse iframe)", async () => {
-    const calls = recordingFetch({
-      invoke: () => ({
-        ok: true,
-        json: { traceId: "trace-xyz", response: '{"answer":"MOCK_OK"}' },
-      }),
-    });
+    const calls = recordingFetch({ run: {} });
 
     renderPage();
     fill("Agent name", "echo-agent");
@@ -129,11 +185,10 @@ describe("PlaygroundPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
-    // The run posted the right /api/invoke body (agent + namespace + input).
-    const invokeCall = calls.find((c) => c.url === "/api/invoke");
-    expect(invokeCall).toBeDefined();
-    expect(invokeCall?.method).toBe("POST");
-    const payload = JSON.parse(invokeCall!.body) as {
+    // The run posted the right POST /api/runs body (agent + namespace + input).
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    expect(createCall).toBeDefined();
+    const payload = JSON.parse(createCall!.body) as {
       agent: string;
       namespace: string;
       input: unknown;
@@ -163,14 +218,15 @@ describe("PlaygroundPage", () => {
     vi.stubGlobal("open", openSpy);
 
     const calls = recordingFetch({
-      invoke: () => ({
-        ok: true,
-        json: {
+      run: {
+        detail: {
+          id: "run-1",
+          status: "requires_action",
           traceId: "trace-xyz",
-          response: "please connect your account",
-          consentRequired: ["scalekit-mcp-server"],
+          messages: [{ role: "assistant", content: "please connect your account" }],
+          requiresAction: { kind: "consent_required", servers: ["scalekit-mcp-server"] },
         },
-      }),
+      },
     });
 
     renderPage();
@@ -211,10 +267,10 @@ describe("PlaygroundPage", () => {
       expect.stringContaining("width="),
     );
 
-    const invokesBefore = calls.filter((c) => c.url === "/api/invoke").length;
+    const runsBefore = calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length;
 
     // The popup reports back (auto-close bridge) → the run resumes in place: a second
-    // invoke, with no user re-typing.
+    // create, with no user re-typing.
     window.dispatchEvent(
       new MessageEvent("message", {
         data: { type: MCP_OAUTH_MESSAGE, server: "scalekit-mcp-server", error: "" },
@@ -222,7 +278,9 @@ describe("PlaygroundPage", () => {
       }),
     );
     await waitFor(() => {
-      expect(calls.filter((c) => c.url === "/api/invoke").length).toBe(invokesBefore + 1);
+      expect(calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length).toBe(
+        runsBefore + 1,
+      );
     });
   });
 
@@ -267,32 +325,34 @@ describe("PlaygroundPage", () => {
   });
 
   it("runs an EXISTING agent from just its name — Image is NOT required for a run", async () => {
-    const calls = recordingFetch({
-      invoke: () => ({ ok: true, status: 200, json: { traceId: "t1", response: "{}" } }),
-    });
+    const calls = recordingFetch({ run: {} });
     renderPage();
     // Only the agent name — NO Image (Image is a define/export field, not a run field).
     fill("Agent name", "scalekit-agent");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
-    // The invoke fires — the full-form validation must not block invoking a live agent.
-    await waitFor(() => expect(calls.find((c) => c.url === "/api/invoke")).toBeDefined());
+    // The create fires — the full-form validation must not block invoking a live agent.
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/api/runs" && c.method === "POST")).toBeDefined(),
+    );
   });
 
-  it("blocks a run when the agent name is missing (and does not call /api/invoke)", async () => {
-    const calls = recordingFetch({
-      invoke: () => ({ ok: true, status: 200, json: { traceId: "t", response: "{}" } }),
-    });
+  it("blocks a run when the agent name is missing (and does not call /api/runs)", async () => {
+    const calls = recordingFetch({ run: {} });
     renderPage();
-    // No name → the run is blocked; the invoke must NOT be sent (name is the only run req).
+    // No name → the run is blocked; no run must be created (name is the only run req).
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
     await new Promise((r) => setTimeout(r, 120));
-    expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
+    expect(calls.find((c) => c.url === "/api/runs")).toBeUndefined();
   });
 
   it("surfaces an RBAC 403 from the run (viewer cannot invoke) without a trace panel", async () => {
     recordingFetch({
-      invoke: () => ({ ok: false, status: 403, json: { error: "forbidden: not allowed to read the requested agent" } }),
+      run: {
+        createOk: false,
+        createStatus: 403,
+        createJson: { error: "forbidden: not allowed to read the requested agent" },
+      },
     });
 
     renderPage();
@@ -317,7 +377,90 @@ describe("PlaygroundPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     expect(await screen.findByText(/Input must be valid JSON/)).toBeInTheDocument();
-    expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
+    expect(calls.find((c) => c.url === "/api/runs")).toBeUndefined();
+  });
+
+  it("renders streamed tokens and the final answer (m32.8)", async () => {
+    recordingFetch({
+      run: {
+        frames: [
+          "event:token\ndata:Hel\n\n",
+          "event:token\ndata:lo\n\n",
+          "event:state\ndata:succeeded\n\n",
+        ],
+        detail: {
+          id: "run-1",
+          status: "succeeded",
+          traceId: "trace-xyz",
+          messages: [{ role: "assistant", content: "Hello" }],
+        },
+      },
+    });
+    renderPage();
+    fill("Agent name", "echo-agent");
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    // The streamed content lands in the response, and the run finalizes to done + trace.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Agent response") as HTMLTextAreaElement).value).toContain(
+        "Hello",
+      ),
+    );
+    expect(await screen.findByTestId("trace-id")).toHaveTextContent("trace-xyz");
+  });
+
+  it("surfaces a human-in-the-loop approval and resumes on Approve (m32.4)", async () => {
+    const calls = recordingFetch({
+      run: {
+        detail: {
+          id: "run-1",
+          status: "requires_action",
+          requiresAction: {
+            kind: "approval",
+            key: "send-email",
+            message: "Send the email to the customer?",
+          },
+        },
+      },
+    });
+    renderPage();
+    fill("Agent name", "mailer");
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    // The approval affordance surfaces the summary + Approve/Deny.
+    const approval = await screen.findByTestId("approval-request");
+    expect(approval).toHaveTextContent("Send the email to the customer?");
+    fireEvent.click(screen.getByTestId("approve-run"));
+
+    // Approve resumes the run with decision=approve.
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/api/runs/run-1/resume")).toBeDefined(),
+    );
+    const resumeCall = calls.find((c) => c.url === "/api/runs/run-1/resume")!;
+    expect(JSON.parse(resumeCall.body)).toEqual({ decision: "approve" });
+  });
+
+  it("denies a human-in-the-loop approval (m32.4)", async () => {
+    const calls = recordingFetch({
+      run: {
+        detail: {
+          id: "run-1",
+          status: "requires_action",
+          requiresAction: { kind: "approval", key: "k", message: "Proceed?" },
+        },
+      },
+    });
+    renderPage();
+    fill("Agent name", "mailer");
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    fireEvent.click(await screen.findByTestId("deny-run"));
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/api/runs/run-1/resume")).toBeDefined(),
+    );
+    const denyCall = calls.filter((c) => c.url === "/api/runs/run-1/resume").pop()!;
+    expect(JSON.parse(denyCall.body)).toEqual({ decision: "deny" });
+    expect(await screen.findByText(/Approval denied/)).toBeInTheDocument();
   });
 });
 
