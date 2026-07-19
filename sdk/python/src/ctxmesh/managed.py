@@ -32,6 +32,7 @@ system prompt, the model route) and hands it to :func:`run_managed_loop`.
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -70,6 +71,14 @@ def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
 def _message_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
     """Pull the per-hop message id (X-Message-Id, m33.4) out of inbound headers, "" when absent."""
     return _header_value(headers, MESSAGE_HEADER)
+
+
+def mint_conversation_id() -> str:
+    """Mint a fresh per-run conversation id for an autonomous run with no inbound session (m33.5,
+    ADR 0035) — the run id doubles as the thread id, so each execution is its own thread/trace. A
+    scheduled agent that must CONTINUE one long-lived thread supplies its own stable id instead (the
+    ``conversation_id`` arg of :func:`run_managed_loop`)."""
+    return "run-" + uuid.uuid4().hex
 
 
 def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
@@ -249,6 +258,7 @@ def run_managed_loop(
     headers: Optional[Dict[str, str]] = None,
     on_token: Optional[Callable[[str], None]] = None,
     approvals: Optional[Iterable[str]] = None,
+    conversation_id: Optional[str] = None,
 ) -> ManagedResult:
     """Run the config-driven tool-calling loop for one user turn.
 
@@ -274,7 +284,13 @@ def run_managed_loop(
     # is bound to memory, replay the recent turns so the stock loop is context-aware across
     # the chat. No id, or no memory binding ⇒ a single-shot run: messages are just
     # [system, user] and nothing is persisted (today's Playground behaviour, unchanged).
-    conversation_id = _conversation_id_from_headers(headers)
+    # Conversation id resolution (m33.5, ADR 0035). Precedence: the inbound session id (a console
+    # chat's X-Conversation-Id) > an agent-supplied conversation_id — the STABLE-key opt-in for a
+    # scheduled/autonomous agent that continues one long-lived thread across runs. When neither is
+    # present the loop is single-shot (unchanged). The "mint a fresh per-run id for an autonomous
+    # run" default is applied at the deployment boundary (the managed-agent entrypoint), which
+    # passes a minted id here — keeping this library call free of ambient I/O.
+    conversation_id = _conversation_id_from_headers(headers) or conversation_id or ""
     # Per-hop message id (m33.4): when this turn was reached via A2A, the launcher stamped the hop's
     # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
     message_id = _message_id_from_headers(headers)
