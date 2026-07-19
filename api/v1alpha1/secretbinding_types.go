@@ -64,6 +64,7 @@ type SecretBindingStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sb
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.backend"
