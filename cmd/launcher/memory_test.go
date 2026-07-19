@@ -378,6 +378,60 @@ func TestMemoryUnconditionalReplaceStillWorks(t *testing.T) {
 	}
 }
 
+func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		newRedisStore(mr.Addr()),
+		memoryConfig{
+			BackendAddr: mr.Addr(), Namespace: "ns", Agent: "agent-a",
+			Scope: "shared", Registry: "team-x",
+		},
+		tp.Tracer(tracerName),
+	)
+	srv := httptest.NewServer(ms.handler())
+	t.Cleanup(srv.Close)
+
+	doReq(t, http.MethodPost, srv.URL+"/memory/conv1/append", `{"role":"user","content":"hi"}`)
+
+	if !mr.Exists("mem:shared:team-x:conv1") {
+		t.Errorf("shared scope must key under mem:shared:{registry}:{conv}; keys=%v", mr.Keys())
+	}
+	if mr.Exists("mem:ns/agent-a:conv1") {
+		t.Errorf("shared scope must NOT write the private per-agent key")
+	}
+}
+
+func TestMemorySharedScopeFallsBackToPrivateWithoutRegistry(t *testing.T) {
+	t.Parallel()
+	// scope=shared but NO registry → the private per-agent layout (a visible misconfig, not a
+	// broken/rootless shared key). The controller gates the shared injection on membership.
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		nil,
+		memoryConfig{Namespace: "ns", Agent: "a", Scope: "shared", Registry: ""},
+		tp.Tracer(tracerName),
+	)
+	if ms.prefix != "mem:ns/a:" {
+		t.Errorf("prefix = %q, want the private fallback mem:ns/a:", ms.prefix)
+	}
+}
+
+func TestMemoryPrivateScopeUnchanged(t *testing.T) {
+	t.Parallel()
+	// The default (empty/session) scope keeps the per-agent layout even when a registry is present.
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(
+		nil,
+		memoryConfig{Namespace: "ns", Agent: "a", Registry: "team-x"},
+		tp.Tracer(tracerName),
+	)
+	if ms.prefix != "mem:ns/a:" {
+		t.Errorf("prefix = %q, want mem:ns/a: (private is the default even with a registry)", ms.prefix)
+	}
+}
+
 func TestMemoryAppendRejectsInvalidJSON(t *testing.T) {
 	t.Parallel()
 	_, srv := newTestMemoryServer(t)

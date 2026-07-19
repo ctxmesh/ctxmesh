@@ -224,7 +224,18 @@ type memoryConfig struct {
 	// from every other agent sharing the Valkey.
 	Namespace string
 	Agent     string
+	// Scope selects the key layout (ADR 0035, m33.3): "" / "session" = PRIVATE per-agent
+	// (mem:{namespace}/{agent}:{convId}); "shared" = a team scratchpad keyed
+	// mem:shared:{registry}:{convId} — readable/writable by every agent in the same registry
+	// conversation. Injected as MEMORY_SCOPE by the controller.
+	Scope string
+	// Registry is AGENT_REGISTRY_ID — the trust boundary (ADR 0033) the shared scope keys under.
+	// Required for the shared scope; empty ⇒ shared falls back to private (a visible misconfig).
+	Registry string
 }
+
+// memoryScopeShared is the MEMORY_SCOPE value that selects the shared team scratchpad.
+const memoryScopeShared = "shared"
 
 // memoryServer holds the per-listener dependencies: the backend store, the key
 // prefix, and the tracer. It is safe for concurrent use — every field is
@@ -237,9 +248,17 @@ type memoryServer struct {
 }
 
 func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer) *memoryServer {
+	// Shared scope (m33.3): key under the registry trust boundary so every agent in the
+	// conversation reads/writes ONE scratchpad. It requires a registry — without one there is no
+	// boundary to share within, so fall back to the private per-agent layout (the controller gates
+	// the shared injection on membership, so this only bites a hand-rolled misconfig).
+	prefix := fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent)
+	if cfg.Scope == memoryScopeShared && cfg.Registry != "" {
+		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
+	}
 	return &memoryServer{
 		store:  store,
-		prefix: fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent),
+		prefix: prefix,
 		agent:  cfg.Agent,
 		tracer: tracer,
 	}

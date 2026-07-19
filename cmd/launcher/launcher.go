@@ -289,6 +289,10 @@ func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfi
 		Port:        port,
 		Namespace:   ns,
 		Agent:       agentName,
+		// Shared scope (m33.3): MEMORY_SCOPE=shared keys the team scratchpad under the registry
+		// boundary (AGENT_REGISTRY_ID, already injected for a registry member).
+		Scope:    lookup("MEMORY_SCOPE"),
+		Registry: lookup("AGENT_REGISTRY_ID"),
 	}, nil
 }
 
