@@ -498,3 +498,37 @@ def test_managed_loop_echo_fallback_still_permissive(tool_gateway, echo_discover
     fn = first_req["tools"][0]["function"]
     assert fn["name"] == TOOL_NAME
     assert fn["parameters"] == _PERMISSIVE_PARAMETERS
+
+
+# ── m32.7: the managed loop streams the answer via on_token ────────────────────
+
+from ctxmesh.model import ChatResponse  # noqa: E402
+
+
+def test_managed_loop_streams_the_answer(monkeypatch):
+    """With on_token wired, the loop streams the final answer's content deltas AND returns the
+    assembled result — the streaming /invoke's token source (m32.7)."""
+    with _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(discovery_base_url=disc.base_url, model_gateway_url="http://gw")
+        client = agent.from_config(plane)
+
+        def fake_stream(route, messages, **opts):
+            for tok in ["Hel", "lo", " there"]:
+                yield tok
+            return ChatResponse(
+                text="Hello there",
+                usage={},
+                model=route,
+                raw={"choices": [{"message": {"role": "assistant", "content": "Hello there"}}]},
+            )
+
+        monkeypatch.setattr(client.model, "stream_completion", fake_stream)
+
+        got: list = []
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        result = run_managed_loop(client, config, "hi", on_token=got.append)
+
+        assert got == ["Hel", "lo", " there"], "each content delta streamed to on_token"
+        assert result.output == "Hello there"
+        assert result.steps == 1
+        assert result.tools_called == []
