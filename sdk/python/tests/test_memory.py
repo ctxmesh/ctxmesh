@@ -46,6 +46,17 @@ def test_append_posts_single_value(client, memory_stub: MemoryStub):
     assert req.method == "POST"
     assert req.path == "/memory/conv-9/append"
     assert json.loads(req.body) == {"role": "user", "content": "x"}
+    # No message id → no X-Message-Id header (the launcher endpoint mints one).
+    assert "x-message-id" not in req.headers
+
+
+def test_append_relays_message_id_header(client, memory_stub: MemoryStub):
+    # The per-hop messageId (m33.4) rides X-Message-Id so the launcher attributes the entry to it.
+    client.memory.append(
+        {"role": "user", "content": "x"}, conversation_id="c", message_id="m-hop-7"
+    )
+    req = memory_stub.requests[-1]
+    assert req.headers.get("x-message-id") == "m-hop-7"
 
 
 def test_search_passes_query_param(client, memory_stub: MemoryStub):

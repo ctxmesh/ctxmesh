@@ -51,6 +51,10 @@ DEFAULT_MAX_STEPS = 8
 #: recent turns so the stock agent is context-aware across a chat.
 CONVERSATION_HEADER = "X-Conversation-Id"
 
+#: X-Message-Id — the per-hop message id (ADR 0035, m33.4). The launcher sets it on an A2A-invoked
+#: /invoke from the envelope; the loop relays it to memory writes so entries attribute to THIS hop.
+MESSAGE_HEADER = "X-Message-Id"
+
 #: The most recent conversation messages the loop replays as context on each turn.
 #: Bounds the prompt so a long chat can't grow the context without limit — older turns
 #: fall out of the window (the memory plane still retains the full history).
@@ -60,9 +64,19 @@ MAX_HISTORY_MESSAGES = 40
 def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
     """Pull the conversation id out of inbound *headers* case-insensitively (HTTP header
     case is not guaranteed), returning "" when absent or blank."""
+    return _header_value(headers, CONVERSATION_HEADER)
+
+
+def _message_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
+    """Pull the per-hop message id (X-Message-Id, m33.4) out of inbound headers, "" when absent."""
+    return _header_value(headers, MESSAGE_HEADER)
+
+
+def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
+    """Case-insensitive header lookup (HTTP header case is not guaranteed); "" when absent/blank."""
     if not headers:
         return ""
-    target = CONVERSATION_HEADER.lower()
+    target = name.lower()
     for key, value in headers.items():
         if key.lower() == target:
             return (value or "").strip()
@@ -84,12 +98,18 @@ def _load_history(client: Client, conversation_id: str) -> List[Dict[str, Any]]:
     return history[-MAX_HISTORY_MESSAGES:]
 
 
-def _persist_turn(client: Client, conversation_id: str, user_input: str, answer: str) -> None:
+def _persist_turn(
+    client: Client, conversation_id: str, user_input: str, answer: str, message_id: str = ""
+) -> None:
     """Append this turn's user message and the assistant's final answer to the conversation
     so the next turn replays them. Intermediate tool-call scratchpad messages are NOT stored
-    — only the clean user↔assistant exchange, which is what a later turn should see."""
-    client.memory.append({"role": "user", "content": user_input}, conversation_id)
-    client.memory.append({"role": "assistant", "content": answer}, conversation_id)
+    — only the clean user↔assistant exchange, which is what a later turn should see.
+
+    message_id (m33.4) attributes both entries to the inbound A2A hop when this turn was reached
+    via A2A, so the shared/private log records which hop each message belongs to."""
+    mid = message_id or None
+    client.memory.append({"role": "user", "content": user_input}, conversation_id, message_id=mid)
+    client.memory.append({"role": "assistant", "content": answer}, conversation_id, message_id=mid)
 
 
 @dataclass
@@ -255,6 +275,9 @@ def run_managed_loop(
     # the chat. No id, or no memory binding ⇒ a single-shot run: messages are just
     # [system, user] and nothing is persisted (today's Playground behaviour, unchanged).
     conversation_id = _conversation_id_from_headers(headers)
+    # Per-hop message id (m33.4): when this turn was reached via A2A, the launcher stamped the hop's
+    # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
+    message_id = _message_id_from_headers(headers)
     threaded = bool(conversation_id) and client.config.memory_wired
     history = _load_history(client, conversation_id) if threaded else []
 
@@ -281,6 +304,7 @@ def run_managed_loop(
             return _drive_loop(
                 client, config, root, messages, tool_schemas, tool_names,
                 tools_called, consent_required, on_token, conversation_id, threaded, user_input,
+                message_id,
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -309,6 +333,7 @@ def _drive_loop(
     conversation_id: str,
     threaded: bool,
     user_input: str,
+    message_id: str = "",
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
@@ -334,7 +359,7 @@ def _drive_loop(
                 # conversation replays it. Only on a completed answer (an error/runaway
                 # path stores nothing — there is no answer to thread).
                 if threaded:
-                    _persist_turn(client, conversation_id, user_input, resp.text)
+                    _persist_turn(client, conversation_id, user_input, resp.text, message_id)
                 return ManagedResult(
                     output=resp.text,
                     steps=step,
