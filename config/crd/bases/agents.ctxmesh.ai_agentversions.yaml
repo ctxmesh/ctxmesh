@@ -373,6 +373,37 @@ spec:
                         minimum: 0
                         type: integer
                     type: object
+                  sessionMemory:
+                    description: |-
+                      sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
+                      agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
+                      (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
+                      deprecation window; this field wins when both are present.
+                    properties:
+                      backend:
+                        description: |-
+                          backend locates the Valkey state-layer instance. Defaulted to the cluster state-layer service
+                          when omitted.
+                        properties:
+                          addr:
+                            description: |-
+                              addr is the host:port of the Valkey backend.
+                              If omitted the controller defaults to
+                              agent-engine-statelayer.agent-engine-system.svc:6379.
+                            maxLength: 256
+                            type: string
+                        type: object
+                      scope:
+                        default: session
+                        description: |-
+                          scope selects the memory key layout. "session" (default) = PRIVATE per-agent
+                          (mem:{namespace}/{agent}:{conversationId}); "shared" (m33.3) = a team scratchpad keyed
+                          mem:shared:{registry}:{conversationId}, which requires the agent to be a registry member.
+                        enum:
+                        - session
+                        - shared
+                        type: string
+                    type: object
                   tracePolicy:
                     description: |-
                       tracePolicy optionally extends the always-on trace-redaction policy
