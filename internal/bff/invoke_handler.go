@@ -156,31 +156,45 @@ func (s *Server) attachRunCapability(r *http.Request, caller client.Client, agen
 		s.log.Error(err, "run-capability: could not resolve caller identity; proceeding without a capability")
 		return r
 	}
-	runID, err := randToken(16)
-	if err != nil {
-		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
-		return r
-	}
 	ns := namespace
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
+	boundary := agentBoundary(r.Context(), caller, ns, agent)
+	token, ok := s.mintRunCapability(username, ns, agent, boundary)
+	if !ok {
+		return r
+	}
+	return r.WithContext(contextWithRunCapability(r.Context(), token))
+}
+
+// mintRunCapability mints a fresh run capability from the invoking user's identity + the ADR 0033
+// trust boundary (the agent's registry, or the agent itself when standalone) — the material a
+// durable WORKER re-mints from (m32.2), so OBO survives the caller's connection dropping. The
+// egress hop resolves the user's grant within THIS boundary: a registry's agents share the user's
+// credential, a different registry cannot. It is best-effort: minting disabled or a failure ⇒
+// (\"\", false) and the run proceeds unattended (org/public only), never another user's grant.
+func (s *Server) mintRunCapability(username, ns, agent, boundary string) (string, bool) {
+	if s.capabilitySigner == nil {
+		return "", false // minting disabled — no platform capability key configured
+	}
+	runID, err := randToken(16)
+	if err != nil {
+		s.log.Error(err, "run-capability: could not mint a run id; proceeding without a capability")
+		return "", false
+	}
 	token, err := s.capabilitySigner.Mint(runcap.MintRequest{
-		User:  userGrantHash(username),
-		Agent: ns + "/" + agent,
-		// The trust boundary (ADR 0033) the run resolves credentials within: the agent's
-		// registry, or the agent itself when standalone. The egress hop resolves the invoking
-		// user's grant within THIS boundary, so a registry's agents share the user's credential
-		// but a different registry cannot. Matches the boundary the consent write stores under.
-		Boundary: agentBoundary(r.Context(), caller, ns, agent),
+		User:     userGrantHash(username),
+		Agent:    ns + "/" + agent,
+		Boundary: boundary,
 		RunID:    runID,
 		TTL:      runCapabilityTTL,
 	})
 	if err != nil {
 		s.log.Error(err, "run-capability: mint failed; proceeding without a capability")
-		return r
+		return "", false
 	}
-	return r.WithContext(contextWithRunCapability(r.Context(), token))
+	return token, true
 }
 
 // handleDevInvoke serves POST /api/invoke under `agent-engine dev --ui` (ADR 0021).

@@ -33,6 +33,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -220,9 +221,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("durable run store enabled (ADR 0034): runs persist to Postgres")
 	}
 
+	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
+	// `queued` for a KEDA-scaled worker pool (this pod, or a dedicated worker Deployment) to claim +
+	// execute — decoupled from the request. Only meaningful with a durable run store.
+	runWorkerDispatch := envTrue(os.Getenv("RUN_WORKER_DISPATCH"))
+	if runWorkerDispatch && runStore == nil {
+		return errors.New("RUN_WORKER_DISPATCH requires a durable run store (set RUN_STORE_DSN)")
+	}
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		RunStore:                    runStore,
+		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
@@ -253,6 +263,17 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Run-worker pool (ADR 0034, m32.2): RUN_WORKER_CONCURRENCY>0 runs N claim loops in THIS process
+	// that drain the durable queue. A dedicated worker Deployment sets this (with serving idle); the
+	// front-end BFF can also run a few. Stops claiming when the shutdown signal fires.
+	if n := envInt(os.Getenv("RUN_WORKER_CONCURRENCY")); n > 0 {
+		if runStore == nil {
+			return errors.New("RUN_WORKER_CONCURRENCY requires a durable run store (set RUN_STORE_DSN)")
+		}
+		srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
+		log.Info("run-worker pool started (ADR 0034)", "concurrency", n)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -308,6 +329,15 @@ func envTrue(raw string) bool {
 	default:
 		return false
 	}
+}
+
+// envInt parses a non-negative int env value; a blank or malformed value is 0 (feature off).
+func envInt(raw string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // tokenServiceHTTPClient builds the http.Client the BFF uses to delegate grant writes to

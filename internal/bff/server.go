@@ -61,6 +61,10 @@ type Server struct {
 	// runStore holds durable runs (ADR 0034 execution contract). Phase 1 is a hot in-memory
 	// store; M32 swaps a durable backend behind the same seam. Always non-nil (defaulted).
 	runStore run.Store
+	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
+	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
+	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
+	runWorkerDispatch bool
 
 	// devMode is true when the BFF runs under `agent-engine dev --ui` (ADR 0021):
 	// a local, single-developer substrate with NO cluster (callerClients nil →
@@ -263,6 +267,9 @@ type Options struct {
 	// RunStore backs the run-oriented execution contract (ADR 0034). Optional — a hot in-memory
 	// store is used when nil (phase 1); M32 injects a durable store.
 	RunStore run.Store
+	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
+	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
+	RunWorkerDispatch bool
 
 	Log logr.Logger
 }
@@ -292,6 +299,7 @@ func NewServer(opts Options) *Server {
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
+		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {

@@ -25,6 +25,10 @@ import (
 // ErrNotFound is returned when a run id is unknown to the store.
 var ErrNotFound = errors.New("run: not found")
 
+// ErrNoQueuedRun is returned by ClaimQueued when the queue holds no claimable run — the worker
+// backs off and polls again (it is not an error condition).
+var ErrNoQueuedRun = errors.New("run: no queued run to claim")
+
 // EventKind classifies a run event on the stream (ADR 0034). Phase 1 emits state + message; token
 // + step events (live model output) arrive with the launcher event source (m31.4).
 type EventKind string
@@ -70,6 +74,12 @@ type Store interface {
 	// state and its backlog is drained (so an SSE handler ends cleanly). cancel releases the
 	// subscription. Errors if the run is unknown.
 	Subscribe(id string, fromSeq int) (events <-chan Event, cancel func(), err error)
+	// ClaimQueued atomically leases the oldest `queued` run to workerID (transitioning it to
+	// `running`, stamping the worker + a lease that expires after `lease`) and returns it, so a
+	// KEDA-scaled worker pool drains the queue without two workers grabbing the same run (m32.2).
+	// Returns ErrNoQueuedRun when the queue is empty. A status change auto-emits its `state` event,
+	// exactly like Update.
+	ClaimQueued(workerID string, lease time.Duration) (*Run, error)
 }
 
 // subBuffer bounds a subscriber's live channel; a consumer slower than this is dropped (its
@@ -146,6 +156,34 @@ func (m *memStore) Update(id string, fn func(*Run) error) (*Run, error) {
 		}
 	}
 	return cloneRun(working), nil
+}
+
+func (m *memStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Oldest queued run first (FIFO by CreatedAt), so the hot store matches the durable store's
+	// ORDER BY created_at claim order.
+	var pick *entry
+	for _, e := range m.entries {
+		if e.run.Status != StatusQueued {
+			continue
+		}
+		if pick == nil || e.run.CreatedAt.Before(pick.run.CreatedAt) {
+			pick = e
+		}
+	}
+	if pick == nil {
+		return nil, ErrNoQueuedRun
+	}
+	now := time.Now()
+	exp := now.Add(lease)
+	pick.run.WorkerID = workerID
+	pick.run.LeaseExpiresAt = &exp
+	if err := pick.run.Transition(StatusRunning, now); err != nil {
+		return nil, err
+	}
+	m.appendLocked(pick, EventState, string(StatusRunning))
+	return cloneRun(pick.run), nil
 }
 
 func (m *memStore) List() []*Run {
@@ -246,6 +284,10 @@ func cloneRun(r *Run) *Run {
 			a.Servers = append([]string(nil), r.RequiresAction.Servers...)
 		}
 		c.RequiresAction = &a
+	}
+	if r.LeaseExpiresAt != nil {
+		t := *r.LeaseExpiresAt
+		c.LeaseExpiresAt = &t
 	}
 	return &c
 }
