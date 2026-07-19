@@ -78,6 +78,23 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "run is not awaiting an action (status "+string(rn.Status)+")")
 		return
 	}
+
+	// The resume decision (human-in-the-loop, m32.4). Absent ⇒ approve — the consent path has
+	// nothing to deny (the user connected their account); a deny is meaningful only for an approval.
+	isApproval := rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionApproval
+	if isApproval && parseResumeDecision(r) == "deny" {
+		updated, err := s.runStore.Update(id, func(x *run.Run) error {
+			x.Error = "approval denied"
+			return x.Transition(run.StatusCancelled, time.Now())
+		})
+		if err != nil {
+			writeError(w, http.StatusConflict, "cannot resume this run")
+			return
+		}
+		writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
+		return
+	}
+
 	endpoint, ok := s.resolveAgentEndpoint(w, r, caller, rn.Agent, rn.Namespace)
 	if !ok {
 		return
@@ -87,6 +104,14 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = s.attachRunCapability(r, caller, rn.Agent, rn.Namespace)
+
+	// On approval, re-invoke with the approved key granted so the agent's pause_for_approval(key)
+	// proceeds instead of pausing again (the consent path re-invokes the same input unchanged — the
+	// now-connected credential resolves the tool call).
+	input := []byte(rn.Input)
+	if isApproval && rn.RequiresAction.Key != "" {
+		input = withApprovals(input, []string{rn.RequiresAction.Key})
+	}
 
 	if _, err := s.runStore.Update(id, func(x *run.Run) error {
 		return x.Transition(run.StatusRunning, time.Now())
@@ -98,7 +123,7 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
 		runCapabilityFromContext(r.Context()),
 	)
-	go s.executeRun(execCtx, id, endpoint, []byte(rn.Input))
+	go s.executeRun(execCtx, id, endpoint, input)
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: id, Status: string(run.StatusRunning)})
 }
@@ -229,6 +254,20 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
+	// Human-in-the-loop (m32.4): the agent paused a step for approval. Enter requires_action
+	// (approval) carrying the key + summary; an approver resolves it via resume (approve → re-invoke
+	// with the key granted; deny → cancelled).
+	if approval := parseApprovalRequired(resp); approval != nil {
+		if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+			rn.TraceID = traceID
+			rn.RequiresAction = approval
+			return rn.Transition(run.StatusRequiresAction, now)
+		}); uErr != nil {
+			s.log.Error(uErr, "run: could not persist approval requires_action", "run", runID)
+		}
+		return
+	}
+
 	// Success: emit the assistant message as a stream event BEFORE the terminal transition (which
 	// closes live subscribers), then persist it + succeed. m31.4 adds token-level events during
 	// the loop; here the whole answer arrives as one message.
@@ -319,6 +358,42 @@ func lastEventID(r *http.Request) int {
 		}
 	}
 	return 0
+}
+
+// parseResumeDecision reads an optional {"decision":"approve"|"deny"} from the resume body
+// (best-effort; a missing/blank/malformed body ⇒ "" ⇒ treated as approve). Bounded read.
+func parseResumeDecision(r *http.Request) string {
+	if r.Body == nil {
+		return ""
+	}
+	var body struct {
+		Decision string `json:"decision"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10))
+	if err := dec.Decode(&body); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(body.Decision))
+}
+
+// withApprovals merges the granted approval keys into the run's input JSON as an `approvals` array,
+// so the re-invoked agent's pause_for_approval(key) proceeds (m32.4). A non-object input is left
+// unchanged (the agent gets no approvals and pauses again — honest, not a silent success).
+func withApprovals(input []byte, keys []string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(input, &m); err != nil || m == nil {
+		return input
+	}
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return input
+	}
+	m["approvals"] = b
+	out, err := json.Marshal(m)
+	if err != nil {
+		return input
+	}
+	return out
 }
 
 // extractRunOutput unwraps the managed-agent /invoke envelope ({output,...}, m25.9) to the human

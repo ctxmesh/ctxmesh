@@ -135,9 +135,15 @@ class Handler(BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
+        approvals: list = []
         try:
             body = json.loads(raw or b"{}")
             user_input = str(body.get("input", ""))
+            # Human-in-the-loop resume (m32.4): the BFF re-invokes an approved run with the granted
+            # approval keys, so pause_for_approval(key) proceeds instead of pausing again.
+            raw_approvals = body.get("approvals")
+            if isinstance(raw_approvals, list):
+                approvals = [str(a) for a in raw_approvals]
         except json.JSONDecodeError:
             user_input = raw.decode(errors="replace")
 
@@ -148,29 +154,32 @@ class Handler(BaseHTTPRequestHandler):
         # Streaming (m32.7): when the caller Accepts text/event-stream, stream token events as the
         # model generates + a final `done`/`error` frame — the source for the run event stream.
         if "text/event-stream" in (self.headers.get("Accept") or ""):
-            self._stream_invoke(user_input, req_headers)
+            self._stream_invoke(user_input, req_headers, approvals)
             return
 
         try:
             result = run_managed_loop(
-                _client, _config, user_input, headers=req_headers
+                _client, _config, user_input, headers=req_headers, approvals=approvals
             )
-            self._send(
-                200,
-                {
-                    "agent": AGENT_NAME,
-                    "output": result.output,
-                    "steps": result.steps,
-                    "tools_called": result.tools_called,
-                    # MCP servers the user must connect an account to (ADR 0029 §2 / m25.9) —
-                    # non-empty drives the console "Connect your account" CTA.
-                    "consent_required": result.consent_required,
-                },
-            )
+            self._send(200, self._envelope(result))
         except Exception as exc:  # noqa: BLE001
             self._send(502, {"agent": AGENT_NAME, "error": str(exc)})
 
-    def _stream_invoke(self, user_input: str, req_headers: dict) -> None:
+    def _envelope(self, result) -> dict:
+        """The /invoke response envelope. consent_required drives the "Connect your account" CTA
+        (ADR 0029 §2); approval_required drives the human-in-the-loop approve/deny (m32.4)."""
+        body = {
+            "agent": AGENT_NAME,
+            "output": result.output,
+            "steps": result.steps,
+            "tools_called": result.tools_called,
+            "consent_required": result.consent_required,
+        }
+        if result.approval_required:
+            body["approval_required"] = result.approval_required
+        return body
+
+    def _stream_invoke(self, user_input: str, req_headers: dict, approvals: list) -> None:
         """Run the loop and stream Server-Sent Events: a `token` frame per content delta, then a
         terminal `done` frame (the same envelope the JSON path returns) or an `error` frame. The
         BFF's streaming adapter republishes these into the run event stream (m32.7)."""
@@ -189,18 +198,12 @@ class Handler(BaseHTTPRequestHandler):
                 _config,
                 user_input,
                 headers=req_headers,
+                approvals=approvals,
                 on_token=lambda text: emit({"type": "token", "text": text}),
             )
-            emit(
-                {
-                    "type": "done",
-                    "agent": AGENT_NAME,
-                    "output": result.output,
-                    "steps": result.steps,
-                    "tools_called": result.tools_called,
-                    "consent_required": result.consent_required,
-                }
-            )
+            done = self._envelope(result)
+            done["type"] = "done"
+            emit(done)
         except Exception as exc:  # noqa: BLE001
             emit({"type": "error", "agent": AGENT_NAME, "error": str(exc)})
 

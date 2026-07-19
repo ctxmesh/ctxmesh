@@ -160,7 +160,11 @@ type Action struct {
 	Kind ActionKind `json:"kind"`
 	// Servers names the MCP servers needing consent (for ActionConsentRequired).
 	Servers []string `json:"servers,omitempty"`
-	// Message is a human-readable description of the required action.
+	// Key is the stable approval key the resumed run must carry back (for ActionApproval, m32.4) so
+	// the agent's pause_for_approval(key) proceeds instead of pausing again.
+	Key string `json:"key,omitempty"`
+	// Message is a human-readable description of the required action (for approval: the summary the
+	// approver sees).
 	Message string `json:"message,omitempty"`
 }
 
