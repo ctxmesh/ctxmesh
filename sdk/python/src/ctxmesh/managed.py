@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
@@ -198,12 +198,31 @@ def _tool_result_content(result: Any) -> str:
         return str(result)
 
 
+def _stream_turn(
+    client: Client,
+    route: str,
+    messages: List[Dict[str, Any]],
+    chat_opts: Dict[str, Any],
+    on_token: Callable[[str], None],
+) -> Any:
+    """Stream one model turn: push each content delta to *on_token*, and return the assembled
+    ChatResponse (content + tool_calls) so the loop dispatches tools / detects the final answer
+    exactly as the non-streaming path (m32.7)."""
+    gen = client.model.stream_completion(route, messages, **chat_opts)
+    try:
+        while True:
+            on_token(next(gen))
+    except StopIteration as done:
+        return done.value
+
+
 def run_managed_loop(
     client: Client,
     config: ManagedConfig,
     user_input: str,
     *,
     headers: Optional[Dict[str, str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> ManagedResult:
     """Run the config-driven tool-calling loop for one user turn.
 
@@ -253,7 +272,13 @@ def run_managed_loop(
                 chat_opts: Dict[str, Any] = dict(config.model_opts)
                 if tool_schemas:
                     chat_opts["tools"] = tool_schemas
-                resp = client.model.chat(config.model_route, messages, **chat_opts)
+                # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
+                # push content deltas to on_token as they arrive, then take the assembled response
+                # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
+                if on_token is not None:
+                    resp = _stream_turn(client, config.model_route, messages, chat_opts, on_token)
+                else:
+                    resp = client.model.chat(config.model_route, messages, **chat_opts)
 
                 if not resp.has_tool_calls:
                     # The model stopped calling tools → this is the final answer.
