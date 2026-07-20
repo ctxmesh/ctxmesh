@@ -29,10 +29,27 @@ tls:
 dns:
   externalDns: false
 
-# The host-routed backends. Each renders an HTTPRoute in its BACKEND's namespace (route+backend in the
-# same namespace ⇒ no ReferenceGrant), attached to the shared Gateway. `wildcard` prefixes "*." so the
-# agents entry matches every agent under Knative's namespace-scoped domain and is routed THROUGH
-# Kourier by Host (Knative keeps its own routing — the edge is purely additive).
+# ext-auth is a values-gated seam: an authenticating edge in FRONT of the agent routes (ADR 0039).
+# Envoy calls the BFF per request to an agent hostname; the BFF verifies the caller's bearer token,
+# mints the run capability (OBO) for that user + the agent's boundary, and returns it in a header Envoy
+# injects UPSTREAM — so a token-authenticated hit to an agent URL gets the SAME OBO the console front
+# door does, and the agent still only RELAYS the capability (never forges it). Off ⇒ agent URLs stay
+# unauthenticated with no OBO (the pre-ADR-0039 behaviour). The auth service is the BFF itself — it
+# already owns token verification, identity resolution, boundary computation, and the signing key.
+extAuth:
+  enabled: true
+  service: agent-engine-bff
+  namespace: agent-engine-system
+  port: 9090
+  # Envoy PREPENDS this to the original request path (its path_prefix), so the BFF matches the whole
+  # /api/extauth/ subtree — a client POST /invoke arrives as POST /api/extauth/invoke.
+  path: /api/extauth
+  # The auth-response header Envoy copies upstream to the backend (the minted run capability).
+  capabilityHeader: x-ctxmesh-run-capability
+
+# The whole-host backends. Each renders an HTTPRoute in its BACKEND's namespace (route+backend in the
+# same namespace ⇒ no ReferenceGrant), attached to the shared Gateway. The agent hosts are handled
+# separately below (agentEdge) because they path-split.
 routes:
   console:
     subdomain: console
@@ -44,9 +61,26 @@ routes:
     service: langfuse-web
     namespace: langfuse
     port: 3000
-  agents:
-    subdomain: default
+
+# The agent edge (m37.3): each agent's OWN hostname (`*.<subdomain>.<baseDomain>`, Knative's
+# namespace-scoped domain) serves BOTH the machine invoke endpoint AND the browser chatbox, split by
+# path across two HTTPRoutes on the same wildcard host:
+#   `invokePath` (/invoke) → the agent, THROUGH Kourier by Host (Knative keeps its own routing — the
+#                            edge stays additive), guarded by the ext-auth SecurityPolicy (OBO).
+#   everything else        → the BFF: the single-agent chatbox SPA + /api/* (login, invoke, MCP
+#                            consent). The app route sets `chatboxHeader` so the BFF pins the SPA to
+#                            the host's agent; NO ext-auth here — the SPA self-authenticates.
+# Path specificity routes /invoke (Exact) to the agent and the catch-all (prefix /) to the BFF; the
+# SecurityPolicy targets only the invoke route, so the browser front door is never gated.
+agentEdge:
+  subdomain: default
+  invokePath: /invoke
+  agent:
     service: kourier-internal
     namespace: kourier-system
     port: 80
-    wildcard: true
+  app:
+    service: agent-engine-bff
+    namespace: agent-engine-system
+    port: 9090
+  chatboxHeader: X-Ctxmesh-Agent-Chatbox

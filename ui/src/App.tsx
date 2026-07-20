@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
+import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
 import { AgentDetailPage } from "@/pages/agent-detail-page";
 import { AgentRegistriesPage } from "@/pages/agent-registries-page";
 import { EvalsPage } from "@/pages/evals-page";
@@ -68,17 +69,72 @@ const DesignGallery = lazy(() =>
   import("@/design/gallery").then((m) => ({ default: m.DesignGallery })),
 );
 
+// readAgentPin reads the agent this ORIGIN is pinned to (m37.3): when the SPA is served at an agent's
+// OWN hostname, the BFF injects `<meta name="agent-pin" content="namespace/name">` into index.html (a
+// meta tag, NOT a script — the CSP forbids inline scripts). Absent on the console origin. This is the
+// signal that flips the whole app into the chrome-less single-agent chatbox below.
+function readAgentPin(): { ns: string; name: string } | null {
+  const content = document
+    .querySelector('meta[name="agent-pin"]')
+    ?.getAttribute("content")
+    ?.trim();
+  if (!content) return null;
+  const slash = content.indexOf("/");
+  if (slash <= 0 || slash === content.length - 1) return null;
+  return { ns: content.slice(0, slash), name: content.slice(slash + 1) };
+}
+
+// ChatboxApp is the entire app when served at an agent's OWN hostname (m37.3): ONLY that agent's
+// chrome-less chatbox, its login, and the OIDC/MCP callbacks. The operator-console router is never
+// mounted, so the console is unreachable at agent origins — the tight surface falls out for free.
+// Same login (the user's own token) + own/org/MCP-connect creds as the console; the agent is pinned
+// by the host, so there's no picker. Trace link-outs resolve here too (same BFF, same origin).
+function ChatboxApp({ pin }: { pin: { ns: string; name: string } }) {
+  return (
+    <SessionProvider>
+      <ToastProvider>
+        <Routes>
+          <Route path="login" element={<LoginPage />} />
+          <Route path="auth/callback" element={<AuthCallbackPage />} />
+          <Route
+            path="traces/:id"
+            element={
+              <RequireAuth>
+                <TracePage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="*"
+            element={
+              <RequireAuth>
+                <AgentChatboxPage ns={pin.ns} name={pin.name} />
+              </RequireAuth>
+            }
+          />
+        </Routes>
+      </ToastProvider>
+    </SessionProvider>
+  );
+}
+
 // App — the SPA route table (ADR 0012 auth routing):
-//   • /design (flag-gated)  — static wireframes, NO auth (outside RequireAuth).
-//   • /login                — the token login; public. RedirectIfAuthed handled
-//                             inside LoginPage (an authed visit bounces to /).
-//   • everything else       — the console, behind RequireAuth (→ /login with the
-//                             return path preserved when signed out).
+//   • agent-pinned origin    — the single-agent chatbox ONLY (ChatboxApp, m37.3), no console.
+//   • /design (flag-gated)   — static wireframes, NO auth (outside RequireAuth).
+//   • /login                 — the token login; public. RedirectIfAuthed handled
+//                              inside LoginPage (an authed visit bounces to /).
+//   • everything else        — the console, behind RequireAuth (→ /login with the
+//                              return path preserved when signed out).
 //
 // SessionProvider wraps everything: it registers the api.ts token/401 seams and
 // restores a persisted token before the guards run. The design gallery still
 // mounts under it (so restore() runs) but is NOT wrapped in RequireAuth.
 export function App() {
+  const agentPin = readAgentPin();
+  if (agentPin) {
+    return <ChatboxApp pin={agentPin} />;
+  }
+
   const designOn = designGalleryEnabled();
 
   return (
@@ -98,6 +154,17 @@ export function App() {
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />
+          {/* Standalone per-agent chatbox (m37) — authenticated (same console login) but
+              CHROME-LESS: it sits OUTSIDE the AppShell so there's no nav/sidebar, just the
+              chat. Pinned to one agent by the URL. */}
+          <Route
+            path="chat/:ns/:name"
+            element={
+              <RequireAuth>
+                <AgentChatboxPage />
+              </RequireAuth>
+            }
+          />
           <Route
             element={
               <RequireAuth>

@@ -17,6 +17,8 @@ limitations under the License.
 package bff
 
 import (
+	"bytes"
+	"html"
 	"io/fs"
 	"net/http"
 	"os"
@@ -764,6 +766,10 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
 	}
 
+	// Gateway ext-auth (ADR 0039): a token-authenticated hit to an AGENT URL gets OBO parity with
+	// /api/invoke via an Envoy ext-auth call to the BFF (extracted to keep Handler under gocyclo).
+	s.registerExtAuthRoutes(authed)
+
 	s.registerRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
@@ -1006,7 +1012,7 @@ func (s *Server) spaHandler() http.Handler {
 		// browser cached a stale shell and kept loading an old asset bundle after a
 		// new deploy. Only the content-hashed /assets/* are cacheable (FileServerFS).
 		if name == "" || name == indexHTML {
-			s.serveIndex(w)
+			s.serveIndex(w, r)
 			return
 		}
 		if f, err := s.static.Open(name); err == nil {
@@ -1019,22 +1025,71 @@ func (s *Server) spaHandler() http.Handler {
 			_ = f.Close()
 		}
 		// Not a real file → serve the SPA entrypoint for client-side routing.
-		s.serveIndex(w)
+		s.serveIndex(w, r)
 	})
 }
 
 // serveIndex writes dist/index.html (the SPA shell). Used for client-side routes
 // and when the requested asset does not exist on disk. The caller (spaHandler)
-// has already applied the SPA security headers.
-func (s *Server) serveIndex(w http.ResponseWriter) {
+// has already applied the SPA security headers. When the request is for an agent's
+// OWN hostname (the edge set agentChatboxHeader, m37.3), it injects the agent-pin
+// meta so the SPA boots straight into that agent's chatbox instead of the console.
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(s.static, indexHTML)
 	if err != nil {
 		http.Error(w, "UI not built", http.StatusNotFound)
 		return
+	}
+	if pin := agentPinForRequest(r); pin != "" {
+		data = injectAgentPin(data, pin)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// index.html must never be cached so a new build's asset hashes are picked
 	// up immediately.
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(data)
+}
+
+// agentChatboxHeader is the flag the edge sets on requests to an agent's OWN hostname (m37.3): the
+// agents-app HTTPRoute injects it (RequestHeaderModifier set), so the BFF serves the single-agent
+// CHATBOX (the SPA pinned to the host's agent) rather than the console. Set by the edge — a client on
+// the agents-app route cannot forge a different agent, since `set` overwrites any inbound value.
+const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
+
+// agentPinForRequest returns "namespace/name" when this request is for an agent's own hostname (the
+// edge set agentChatboxHeader), else "". The agent is derived from the forwarded host — the same
+// <agent>.<ns>.<baseDomain> shape the ext-auth edge parses (ADR 0039).
+func agentPinForRequest(r *http.Request) string {
+	if r.Header.Get(agentChatboxHeader) == "" {
+		return ""
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	agent, ns := parseAgentFromHost(host)
+	if agent == "" || ns == "" {
+		return ""
+	}
+	return ns + "/" + agent
+}
+
+// injectAgentPin inserts `<meta name="agent-pin" content="ns/name">` into the SPA shell's <head> so
+// the app (readAgentPin in App.tsx) boots into the single-agent chatbox (m37.3). Meta, not a script —
+// the CSP forbids inline scripts. Best-effort: with no <head> the shell is served unchanged (the app
+// falls back to the console router). The pin is HTML-attribute-escaped defensively (it is a validated
+// DNS-1123 name in practice).
+func injectAgentPin(index []byte, pin string) []byte {
+	const head = "<head>"
+	i := bytes.Index(index, []byte(head))
+	if i < 0 {
+		return index
+	}
+	meta := []byte(`<meta name="agent-pin" content="` + html.EscapeString(pin) + `">`)
+	at := i + len(head)
+	out := make([]byte, 0, len(index)+len(meta))
+	out = append(out, index[:at]...)
+	out = append(out, meta...)
+	out = append(out, index[at:]...)
+	return out
 }
