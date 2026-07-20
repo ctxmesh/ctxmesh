@@ -255,6 +255,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OIDCEnabled:                 oidcEnabled,
 		OIDCIssuer:                  oidcIssuer,
 		OIDCClientID:                oidcClientID,
+		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 

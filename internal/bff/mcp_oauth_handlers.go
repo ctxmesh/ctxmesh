@@ -59,10 +59,17 @@ func oauthCallbackError(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 // oauthCallbackConnected redirects the browser to the tool catalog after a server is
-// connected (fresh registration OR a per-user grant consent), carrying only the server
-// name so the catalog can toast the success. Shared by both callback branches.
-func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName string) {
-	oauthCallbackRedirect(w, r, consoleRouteToolCatalog, url.Values{"mcp_connected": {serverName}})
+// connected (fresh registration OR a per-user grant consent), carrying the server name so
+// the catalog can toast the success. Shared by both callback branches. When openerOrigin is
+// set (ADR 0040) it also carries the server-validated origin that opened the consent popup,
+// so the SPA's popup-close bridge relays the "connected" signal back to it CROSS-origin (the
+// callback runs at the canonical console origin, the opener may be an agent hostname).
+func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName, openerOrigin string) {
+	params := url.Values{"mcp_connected": {serverName}}
+	if openerOrigin != "" {
+		params.Set("opener_origin", openerOrigin)
+	}
+	oauthCallbackRedirect(w, r, consoleRouteToolCatalog, params)
 }
 
 // The OAuth 2.1 register + callback HANDLERS for BYO-MCP (m17.2, ADR 0016). These
@@ -163,11 +170,11 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 // token_endpoint_auth_method "none"). Preferred over DCR because it needs no
 // per-server registration state — one stable, self-describing identity.
 func (s *Server) handleMCPOAuthClientMetadata(w http.ResponseWriter, r *http.Request) {
-	origin := requestOrigin(r)
+	origin := s.canonicalOrigin(r) // ADR 0040: the client_id + redirect must be the canonical origin
 	writeJSON(w, http.StatusOK, map[string]any{
 		oauthParamClientID:           origin + clientMetadataPath, // MUST equal this URL
 		"client_name":                oauthClientName,
-		"redirect_uris":              []string{origin + "/api/mcp/oauth/callback"},
+		"redirect_uris":              []string{origin + mcpOAuthCallbackPath},
 		"grant_types":                []string{oauthGrantAuthCode, oauthGrantRefresh},
 		"response_types":             []string{oauthResponseTypeCode},
 		"token_endpoint_auth_method": oauthAuthMethodNone,
@@ -183,6 +190,61 @@ func requestOrigin(r *http.Request) string {
 		scheme = schemeHTTPS
 	}
 	return scheme + "://" + r.Host
+}
+
+// mcpOAuthCallbackPath is the single BFF endpoint every MCP OAuth flow redirects back to.
+const mcpOAuthCallbackPath = "/api/mcp/oauth/callback"
+
+// canonicalOrigin is the ONE browser origin used to build the MCP-consent redirect_uri and the CIMD
+// client_id (ADR 0040): the configured console origin when set, else the request's own origin. Making
+// it server-controlled + stable is what lets consent initiated from ANY agent hostname present a
+// redirect_uri the provider actually has registered (agent subdomains are unbounded — you register the
+// console callback once, not each agent).
+func (s *Server) canonicalOrigin(r *http.Request) string {
+	if s.consoleURL != "" {
+		return s.consoleURL
+	}
+	return requestOrigin(r)
+}
+
+// allowedOpenerOrigin returns the browser Origin that opened the consent popup when it is safe to relay
+// the "connected" signal back to it cross-origin (ADR 0040): the request's Origin header, but ONLY when
+// a console origin is configured AND the opener shares the console's base domain (`*.<baseDomain>` + the
+// console itself). Otherwise "" — the flow falls back to same-origin (no relay). No token ever crosses;
+// the relay carries only a re-invoke signal, but the allowlist keeps even that on-domain.
+func (s *Server) allowedOpenerOrigin(r *http.Request) string {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" || s.consoleURL == "" {
+		return ""
+	}
+	if originsShareBaseDomain(origin, s.consoleURL) {
+		return origin
+	}
+	return ""
+}
+
+// originsShareBaseDomain reports whether opener is same-scheme and under the same registrable base as
+// the console origin — where the base is the console host minus its first DNS label
+// (console.<base> → <base>). So console.<base>, <base>, and any <x>.<base> (the agent hostnames) match;
+// a different site does not. Port is ignored (openers may differ by port from the console).
+func originsShareBaseDomain(opener, console string) bool {
+	o, oErr := url.Parse(opener)
+	c, cErr := url.Parse(console)
+	if oErr != nil || cErr != nil || o.Scheme != c.Scheme {
+		return false
+	}
+	oh, ch := o.Hostname(), c.Hostname()
+	if oh == "" || ch == "" {
+		return false
+	}
+	if oh == ch {
+		return true
+	}
+	base := ch
+	if _, rest, found := strings.Cut(ch, "."); found {
+		base = rest
+	}
+	return oh == base || strings.HasSuffix(oh, "."+base)
 }
 
 // handleMCPOAuthCallback serves GET /api/mcp/oauth/callback?code=&state=. It:
@@ -299,7 +361,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// server + its tools are listed. The server-side objects (Secret, catalog, egress,
 	// binding) are already created; the SPA re-fetches the catalog on landing. No
 	// token/verifier is ever in the URL — only the server name for a success toast.
-	oauthCallbackConnected(w, r, flow.serverName)
+	oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 }
 
 // callerFromToken builds a caller-scoped client from a RAW bearer token (as

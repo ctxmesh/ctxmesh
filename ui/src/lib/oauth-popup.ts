@@ -26,6 +26,12 @@ export interface McpOAuthPopupMessage {
 // normal page load, or the full-page register redirect (which has no opener). Returns
 // true when it acted (used by tests). Never throws: a cross-origin opener or a
 // non-browser env falls through to a normal boot.
+//
+// Cross-origin (ADR 0040): consent from a chatbox at an agent hostname runs its callback
+// at the CANONICAL console origin, so the popup ends up cross-origin from its opener. The
+// BFF carries the server-validated opener origin back as ?opener_origin, and we post to
+// THAT origin (not the popup's own) so the message reaches the agent-origin opener. Absent
+// ⇒ same-origin (post to the popup's own origin — the single-origin console default).
 export function maybeCloseOAuthPopup(win: Window = window): boolean {
   try {
     const params = new URLSearchParams(win.location.search);
@@ -40,7 +46,8 @@ export function maybeCloseOAuthPopup(win: Window = window): boolean {
       server: server ?? "",
       error: error ?? "",
     };
-    opener.postMessage(message, win.location.origin);
+    const target = params.get("opener_origin")?.trim() || win.location.origin;
+    opener.postMessage(message, target);
     win.close();
     return true;
   } catch {
