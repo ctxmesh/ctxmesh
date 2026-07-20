@@ -3,6 +3,7 @@ package bff
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ctxmesh/agent-engine/internal/runcap"
@@ -51,5 +52,44 @@ func TestRegisterExtAuthRoutes_Guarded(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/extauth", nil)
 	if _, pattern := mux.Handler(req); pattern != "" {
 		t.Errorf("ext-auth registered without the caller-client seam + signer (pattern %q)", pattern)
+	}
+}
+
+// TestAgentPinForRequest: the SPA is pinned to the host's agent ONLY when the edge set the chatbox
+// flag (m37.3); the agent is read from the forwarded host, else "".
+func TestAgentPinForRequest(t *testing.T) {
+	noFlag := httptest.NewRequest(http.MethodGet, "/", nil)
+	noFlag.Host = "scalekit-agent.default.127.0.0.1.sslip.io"
+	if pin := agentPinForRequest(noFlag); pin != "" {
+		t.Errorf("no chatbox flag → want empty pin (console origin), got %q", pin)
+	}
+
+	flagged := httptest.NewRequest(http.MethodGet, "/", nil)
+	flagged.Host = "scalekit-agent.default.127.0.0.1.sslip.io"
+	flagged.Header.Set(agentChatboxHeader, "1")
+	if got, want := agentPinForRequest(flagged), "default/scalekit-agent"; got != want {
+		t.Errorf("agentPinForRequest = %q, want %q", got, want)
+	}
+
+	forwarded := httptest.NewRequest(http.MethodGet, "/", nil)
+	forwarded.Host = "agent-engine-bff:9090" // internal svc host — must be ignored
+	forwarded.Header.Set(agentChatboxHeader, "1")
+	forwarded.Header.Set("X-Forwarded-Host", "sk-agent.prod.agents.example.com")
+	if got, want := agentPinForRequest(forwarded), "prod/sk-agent"; got != want {
+		t.Errorf("forwarded-host pin = %q, want %q", got, want)
+	}
+}
+
+// TestInjectAgentPin: the pin meta lands at the start of <head>, and a shell with no <head> is
+// returned unchanged (best-effort — the app then falls back to the console router).
+func TestInjectAgentPin(t *testing.T) {
+	const meta = `<meta name="agent-pin" content="default/scalekit-agent">`
+	out := string(injectAgentPin([]byte("<html><head><title>x</title></head></html>"), "default/scalekit-agent"))
+	if !strings.Contains(out, "<head>"+meta) {
+		t.Errorf("meta not injected at head start: %s", out)
+	}
+	noHead := []byte("<html>hi</html>")
+	if got := injectAgentPin(noHead, "a/b"); string(got) != string(noHead) {
+		t.Errorf("no <head> should be unchanged, got %s", got)
 	}
 }

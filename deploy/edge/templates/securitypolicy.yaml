@@ -1,5 +1,5 @@
 {{- if .Values.extAuth.enabled }}
-{{- $agents := .Values.routes.agents }}
+{{- $agents := .Values.agentEdge.agent }}
 # Authenticate at the agent edge (ADR 0039). This SecurityPolicy puts an ext-auth filter in front of
 # the agents HTTPRoute: Envoy calls the BFF for every request to an agent hostname. The BFF verifies the
 # caller's token (missing/invalid ⇒ 401 ⇒ Envoy denies), mints the run capability for that user + the
