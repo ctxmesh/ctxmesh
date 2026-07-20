@@ -1056,7 +1056,12 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pin := agentPinForRequest(r); pin != "" {
-		data = injectAgentPin(data, pin)
+		data = injectHeadMeta(data, "agent-pin", pin) // m37.3: boot the single-agent chatbox
+	}
+	// ADR 0040: tell the SPA the canonical console origin so a chatbox at an agent hostname trusts the
+	// cross-origin "connected" relay message from the MCP-consent callback (which runs at that origin).
+	if s.consoleURL != "" {
+		data = injectHeadMeta(data, "mcp-callback-origin", s.consoleURL)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// index.html must never be cached so a new build's asset hashes are picked
@@ -1089,18 +1094,18 @@ func agentPinForRequest(r *http.Request) string {
 	return ns + "/" + agent
 }
 
-// injectAgentPin inserts `<meta name="agent-pin" content="ns/name">` into the SPA shell's <head> so
-// the app (readAgentPin in App.tsx) boots into the single-agent chatbox (m37.3). Meta, not a script —
-// the CSP forbids inline scripts. Best-effort: with no <head> the shell is served unchanged (the app
-// falls back to the console router). The pin is HTML-attribute-escaped defensively (it is a validated
-// DNS-1123 name in practice).
-func injectAgentPin(index []byte, pin string) []byte {
+// injectHeadMeta inserts `<meta name="<name>" content="<content>">` at the start of the SPA shell's
+// <head> so the boot code can read it — used for the agent-pin (m37.3, boot the single-agent chatbox)
+// and the mcp-callback-origin (m38.3/ADR 0040, the trusted cross-origin relay origin). Meta, not a
+// script — the CSP forbids inline scripts. Best-effort: with no <head> the shell is served unchanged.
+// content is HTML-attribute-escaped defensively (in practice a validated DNS name or a config origin).
+func injectHeadMeta(index []byte, name, content string) []byte {
 	const head = "<head>"
 	i := bytes.Index(index, []byte(head))
 	if i < 0 {
 		return index
 	}
-	meta := []byte(`<meta name="agent-pin" content="` + html.EscapeString(pin) + `">`)
+	meta := []byte(`<meta name="` + name + `" content="` + html.EscapeString(content) + `">`)
 	at := i + len(head)
 	out := make([]byte, 0, len(index)+len(meta))
 	out = append(out, index[:at]...)

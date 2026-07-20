@@ -257,7 +257,7 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 			userHash:  flow.grantUserHash,
 			namespace: flow.namespace,
 		})
-		oauthCallbackConnected(w, r, flow.serverName)
+		oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 		return
 	}
 
@@ -307,7 +307,7 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 
 	// This callback is browser-facing (the OAuth redirect target): send the user back
 	// to the tool catalog with a success toast, not JSON. No token is ever in the URL.
-	oauthCallbackConnected(w, r, flow.serverName)
+	oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 }
 
 // handleRevokeMCPGrant serves DELETE /api/mcp/oauth/grant/{server} — a user

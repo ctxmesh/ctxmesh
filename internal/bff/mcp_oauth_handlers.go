@@ -59,10 +59,17 @@ func oauthCallbackError(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 // oauthCallbackConnected redirects the browser to the tool catalog after a server is
-// connected (fresh registration OR a per-user grant consent), carrying only the server
-// name so the catalog can toast the success. Shared by both callback branches.
-func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName string) {
-	oauthCallbackRedirect(w, r, consoleRouteToolCatalog, url.Values{"mcp_connected": {serverName}})
+// connected (fresh registration OR a per-user grant consent), carrying the server name so
+// the catalog can toast the success. Shared by both callback branches. When openerOrigin is
+// set (ADR 0040) it also carries the server-validated origin that opened the consent popup,
+// so the SPA's popup-close bridge relays the "connected" signal back to it CROSS-origin (the
+// callback runs at the canonical console origin, the opener may be an agent hostname).
+func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName, openerOrigin string) {
+	params := url.Values{"mcp_connected": {serverName}}
+	if openerOrigin != "" {
+		params.Set("opener_origin", openerOrigin)
+	}
+	oauthCallbackRedirect(w, r, consoleRouteToolCatalog, params)
 }
 
 // The OAuth 2.1 register + callback HANDLERS for BYO-MCP (m17.2, ADR 0016). These
@@ -354,7 +361,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// server + its tools are listed. The server-side objects (Secret, catalog, egress,
 	// binding) are already created; the SPA re-fetches the catalog on landing. No
 	// token/verifier is ever in the URL — only the server name for a success toast.
-	oauthCallbackConnected(w, r, flow.serverName)
+	oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 }
 
 // callerFromToken builds a caller-scoped client from a RAW bearer token (as
