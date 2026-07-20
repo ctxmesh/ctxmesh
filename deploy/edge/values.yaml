@@ -47,10 +47,9 @@ extAuth:
   # The auth-response header Envoy copies upstream to the backend (the minted run capability).
   capabilityHeader: x-ctxmesh-run-capability
 
-# The host-routed backends. Each renders an HTTPRoute in its BACKEND's namespace (route+backend in the
-# same namespace ⇒ no ReferenceGrant), attached to the shared Gateway. `wildcard` prefixes "*." so the
-# agents entry matches every agent under Knative's namespace-scoped domain and is routed THROUGH
-# Kourier by Host (Knative keeps its own routing — the edge is purely additive).
+# The whole-host backends. Each renders an HTTPRoute in its BACKEND's namespace (route+backend in the
+# same namespace ⇒ no ReferenceGrant), attached to the shared Gateway. The agent hosts are handled
+# separately below (agentEdge) because they path-split.
 routes:
   console:
     subdomain: console
@@ -62,9 +61,26 @@ routes:
     service: langfuse-web
     namespace: langfuse
     port: 3000
-  agents:
-    subdomain: default
+
+# The agent edge (m37.3): each agent's OWN hostname (`*.<subdomain>.<baseDomain>`, Knative's
+# namespace-scoped domain) serves BOTH the machine invoke endpoint AND the browser chatbox, split by
+# path across two HTTPRoutes on the same wildcard host:
+#   `invokePath` (/invoke) → the agent, THROUGH Kourier by Host (Knative keeps its own routing — the
+#                            edge stays additive), guarded by the ext-auth SecurityPolicy (OBO).
+#   everything else        → the BFF: the single-agent chatbox SPA + /api/* (login, invoke, MCP
+#                            consent). The app route sets `chatboxHeader` so the BFF pins the SPA to
+#                            the host's agent; NO ext-auth here — the SPA self-authenticates.
+# Path specificity routes /invoke (Exact) to the agent and the catch-all (prefix /) to the BFF; the
+# SecurityPolicy targets only the invoke route, so the browser front door is never gated.
+agentEdge:
+  subdomain: default
+  invokePath: /invoke
+  agent:
     service: kourier-internal
     namespace: kourier-system
     port: 80
-    wildcard: true
+  app:
+    service: agent-engine-bff
+    namespace: agent-engine-system
+    port: 9090
+  chatboxHeader: X-Ctxmesh-Agent-Chatbox

@@ -83,6 +83,27 @@ describe("AgentChatboxPage", () => {
     expect(body.conversationId).toBeTruthy();
   });
 
+  it("pins to the agent passed as PROPS (host-pinned mode, m37.3) even with no URL params", async () => {
+    installFetch();
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <Routes>
+                {/* At an agent's own hostname the app mounts the chatbox at "/" with the agent from
+                    the injected <meta>, passed as props — there are no /:ns/:name URL params. */}
+                <Route path="*" element={<AgentChatboxPage ns="default" name="scalekit-agent" />} />
+              </Routes>
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId("chatbox-agent")).toHaveTextContent("scalekit-agent");
+    expect(await screen.findByTestId("chat-panel")).toBeInTheDocument();
+  });
+
   it("shows a not-found error for a missing agent", async () => {
     vi.stubGlobal(
       "fetch",

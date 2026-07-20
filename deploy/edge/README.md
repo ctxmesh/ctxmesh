@@ -10,14 +10,33 @@ config differs, not shape (ADR 0038 — the code never branches on environment).
 
 ## Routes (from `values.yaml`, host = `<subdomain>.<baseDomain>`)
 
-| Host (local default) | Backend |
-|----------------------|---------|
-| `console.127.0.0.1.sslip.io` | `agent-engine-bff` (BFF) |
-| `langfuse.127.0.0.1.sslip.io` | `langfuse-web` |
-| `*.default.127.0.0.1.sslip.io` | `kourier-internal` → Knative routes by Host to the agent |
+| Host (local default) | Path | Backend |
+|----------------------|------|---------|
+| `console.127.0.0.1.sslip.io` | all | `agent-engine-bff` (BFF) |
+| `langfuse.127.0.0.1.sslip.io` | all | `langfuse-web` |
+| `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded) |
+| `*.default.127.0.0.1.sslip.io` | everything else | `agent-engine-bff` (BFF) — the per-agent **chatbox** SPA + `/api/*` |
 
-Each `HTTPRoute` renders in its backend's namespace (route+backend same ns ⇒ no `ReferenceGrant`),
-attached to the shared `Gateway` (`envoy-gateway-system/platform-edge`, `allowedRoutes: from All`).
+The agent host is **path-split** across two `HTTPRoute`s (m37.3, `agentEdge` values): the machine
+`/invoke` endpoint → the agent (behind ext-auth), and everything else → the BFF, which serves a
+chatbox pinned to that agent (see below). Each `HTTPRoute` renders in its backend's namespace
+(route+backend same ns ⇒ no `ReferenceGrant`), attached to the shared `Gateway`
+(`envoy-gateway-system/platform-edge`, `allowedRoutes: from All`).
+
+## Per-agent chatbox at the agent host (m37.3)
+
+A browser hitting an agent's own hostname (`<agent>.default.<baseDomain>/`) gets a **chrome-less,
+single-agent chatbox** — the same chat as the console, pinned to that one agent, with its own login.
+Mechanics: the `agents-app` route sets `X-Ctxmesh-Agent-Chatbox` so the BFF injects
+`<meta name="agent-pin" content="ns/name">` into the SPA shell (a meta, not a script — the CSP forbids
+inline scripts); the SPA reads it and mounts a **chatbox-only** app (the operator-console router is
+never mounted, so the console isn't reachable at agent origins). Auth is the SPA's own bearer login —
+`sessionStorage` is per-origin, so the agent origin logs in independently (no cross-origin token
+sharing). The MCP-consent OAuth callback resolves at the agent origin too (`/api/*` → BFF).
+
+> The SPA is chatbox-only, but `/api/*` is reachable at agent origins under the same bearer token +
+> caller RBAC (no privilege escalation — a token can only reach what it already could). Restricting the
+> API surface at agent origins to just the chatbox's calls is a hardening follow-on.
 
 ## Authenticated agent edge (ext-auth, ADR 0039)
 

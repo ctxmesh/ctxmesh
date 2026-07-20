@@ -1,0 +1,50 @@
+{{- with .Values.agentEdge }}
+# The agent edge (m37.3): each agent's own hostname serves the machine invoke endpoint AND the browser
+# chatbox, split by path. This route is /invoke → the agent THROUGH Kourier by Host — guarded by the
+# ext-auth SecurityPolicy (ADR 0039). Named "agents" so the SecurityPolicy targetRef stays stable.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agents
+  namespace: {{ .agent.namespace }}
+spec:
+  parentRefs:
+    - name: platform-edge
+      namespace: {{ $.Values.gateway.namespace }}
+  hostnames:
+    - "*.{{ .subdomain }}.{{ $.Values.baseDomain }}"
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: {{ .invokePath }}
+      backendRefs:
+        - name: {{ .agent.service }}
+          port: {{ .agent.port }}
+---
+# Everything else on the agent host → the BFF: the single-agent chatbox SPA + /api/* (login, invoke,
+# MCP-consent callback). The RequestHeaderModifier flags the BFF to serve the chatbox pinned to the
+# host's agent (`set` overwrites any inbound value, so a client can't forge a different agent). No
+# ext-auth here — the SPA self-authenticates with its own bearer login, like the console origin.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agents-app
+  namespace: {{ .app.namespace }}
+spec:
+  parentRefs:
+    - name: platform-edge
+      namespace: {{ $.Values.gateway.namespace }}
+  hostnames:
+    - "*.{{ .subdomain }}.{{ $.Values.baseDomain }}"
+  rules:
+    - filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: {{ .chatboxHeader }}
+                value: "1"
+      backendRefs:
+        - name: {{ .app.service }}
+          port: {{ .app.port }}
+{{- end }}

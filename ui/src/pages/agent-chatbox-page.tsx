@@ -5,19 +5,26 @@ import { MessageSquare } from "lucide-react";
 import { ChatPanel } from "@/components/agent-chat";
 import { api, ApiError, type AgentDetailResponse } from "@/lib/api";
 
-// AgentChatboxPage — a standalone, CHROME-LESS chatbox for ONE agent (m37). Reached at a
-// per-agent URL (e.g. /chat/default/scalekit-agent); it reuses the console's ChatPanel — the
-// SAME memory-threaded invoke + inline MCP "Connect" consent flow — but WITHOUT the console
-// shell/nav. Auth is the same console login (the route sits behind RequireAuth); the agent is
-// pinned by the URL, so there's no agent picker.
+// AgentChatboxPage — a standalone, CHROME-LESS chatbox for ONE agent (m37). Reached two ways with
+// the SAME component: (1) a console-origin path /chat/:ns/:name (the agent comes from the URL); (2)
+// the agent's OWN hostname (m37.3), where the BFF injects the agent via a <meta> tag and the app
+// passes it as props. Either way it reuses the console's ChatPanel — the SAME memory-threaded invoke
+// + inline MCP "Connect" consent flow — WITHOUT the console shell/nav. Auth is the same login (behind
+// RequireAuth); the agent is pinned (URL or host), so there's no agent picker.
 
 type Load =
   | { kind: "loading" }
   | { kind: "ready"; ready: boolean; memoryBound: boolean }
   | { kind: "error"; message: string };
 
-export function AgentChatboxPage() {
-  const { ns = "default", name = "" } = useParams();
+// Props override the URL params — set when the agent is pinned by the HOST (m37.3), not the path.
+export function AgentChatboxPage({
+  ns: nsProp,
+  name: nameProp,
+}: { ns?: string; name?: string } = {}) {
+  const params = useParams();
+  const ns = nsProp ?? params.ns ?? "default";
+  const name = nameProp ?? params.name ?? "";
   const navigate = useNavigate();
   const [load, setLoad] = useState<Load>({ kind: "loading" });
 
