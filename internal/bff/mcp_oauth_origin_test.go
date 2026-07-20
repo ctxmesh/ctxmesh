@@ -3,6 +3,7 @@ package bff
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -64,5 +65,27 @@ func TestAllowedOpenerOrigin(t *testing.T) {
 	}
 	if got := (&Server{}).allowedOpenerOrigin(req(agent)); got != "" {
 		t.Errorf("no consoleURL configured → relay disabled, got %q", got)
+	}
+}
+
+// The callback carries the validated opener origin so the SPA's popup-close bridge can relay the
+// "connected" signal back cross-origin (ADR 0040) — and omits it (same-origin) when there is none.
+func TestOAuthCallbackConnectedCarriesOpenerOrigin(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, mcpOAuthCallbackPath, nil)
+
+	w := httptest.NewRecorder()
+	oauthCallbackConnected(w, r, "scalekit-mcp-server", "https://scalekit-agent.default.example")
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "mcp_connected=scalekit-mcp-server") {
+		t.Errorf("Location missing the connected server: %s", loc)
+	}
+	if !strings.Contains(loc, "opener_origin=https%3A%2F%2Fscalekit-agent.default.example") {
+		t.Errorf("Location missing the opener_origin for the cross-origin relay: %s", loc)
+	}
+
+	w2 := httptest.NewRecorder()
+	oauthCallbackConnected(w2, r, "srv", "")
+	if strings.Contains(w2.Header().Get("Location"), "opener_origin") {
+		t.Errorf("no opener origin → the param must be absent (same-origin): %s", w2.Header().Get("Location"))
 	}
 }
