@@ -84,12 +84,12 @@ func TestAgentPinForRequest(t *testing.T) {
 // returned unchanged (best-effort — the app then falls back to the console router).
 func TestInjectAgentPin(t *testing.T) {
 	const meta = `<meta name="agent-pin" content="default/scalekit-agent">`
-	out := string(injectAgentPin([]byte("<html><head><title>x</title></head></html>"), "default/scalekit-agent"))
+	out := string(injectHeadMeta([]byte("<html><head><title>x</title></head></html>"), "agent-pin", "default/scalekit-agent"))
 	if !strings.Contains(out, "<head>"+meta) {
 		t.Errorf("meta not injected at head start: %s", out)
 	}
 	noHead := []byte("<html>hi</html>")
-	if got := injectAgentPin(noHead, "a/b"); string(got) != string(noHead) {
+	if got := injectHeadMeta(noHead, "agent-pin", "a/b"); string(got) != string(noHead) {
 		t.Errorf("no <head> should be unchanged, got %s", got)
 	}
 }

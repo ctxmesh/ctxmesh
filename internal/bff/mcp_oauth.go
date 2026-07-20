@@ -191,6 +191,12 @@ type pendingOAuthFlow struct {
 	// consent with no agent context). Captured at consent-begin so the WRITE key matches the
 	// boundary a run of that agent resolves within (m30.5).
 	boundary string
+	// openerOrigin, when non-empty, is the validated browser origin that opened the consent popup
+	// (ADR 0040) — the agent hostname when consent is initiated from the chatbox at the agent's own
+	// URL. It is captured (from the Origin header) + allowlisted at consent-begin, and carried through
+	// so the callback can relay the "connected" signal back to THAT origin cross-origin. Empty ⇒
+	// same-origin (the popup's own origin is the opener) — the default single-origin console behaviour.
+	openerOrigin string
 	// expiresAt bounds the flow's lifetime (register time + pendingFlowTTL).
 	expiresAt time.Time
 }
