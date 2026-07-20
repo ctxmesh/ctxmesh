@@ -48,4 +48,18 @@ describe("maybeCloseOAuthPopup", () => {
     expect(openerPost).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
   });
+
+  it("posts to opener_origin cross-origin when the callback carries one (ADR 0040)", () => {
+    // The callback runs at the console origin (win.location.origin) but the opener is an agent
+    // hostname; the bridge must target the opener's origin, not the popup's own.
+    const { win, openerPost } = fakeSetup(
+      "?mcp_connected=scalekit-mcp-server&opener_origin=https://scalekit-agent.default.example",
+      true,
+    );
+    expect(maybeCloseOAuthPopup(win)).toBe(true);
+    expect(openerPost).toHaveBeenCalledWith(
+      { type: MCP_OAUTH_MESSAGE, server: "scalekit-mcp-server", error: "" },
+      "https://scalekit-agent.default.example",
+    );
+  });
 });

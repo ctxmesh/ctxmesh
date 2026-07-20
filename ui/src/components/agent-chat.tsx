@@ -11,6 +11,15 @@ import { RES_AGENTS } from "@/lib/nav";
 import { extractAgentOutput } from "@/lib/agent-output";
 import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 
+// mcpCallbackOrigin is the canonical console origin the BFF injects (ADR 0040): the MCP-consent
+// callback runs THERE, so a chatbox served at an agent hostname must also trust its cross-origin
+// "connected" relay message (not only same-origin). Empty on a single-origin console (same-origin only).
+function mcpCallbackOrigin(): string {
+  return (
+    document.querySelector('meta[name="mcp-callback-origin"]')?.getAttribute("content")?.trim() ?? ""
+  );
+}
+
 // ChatPanel — a turn-by-turn chat with a deployed agent, threaded on the framework's OWN
 // conversationId → the memory plane: one stable id per chat session lets a memory-bound
 // agent hold context across turns (state-layer.md). Under the hood each message is still one
@@ -199,7 +208,11 @@ export function ChatPanel({
       void runInvoke(text, agentTurnId); // resume the same turn with the fresh credential
     }
     function onMessage(e: MessageEvent) {
-      if (e.origin !== window.location.origin) return;
+      // Accept the relay from our own origin OR the canonical console origin (ADR 0040) — the popup's
+      // callback runs at the console origin, which is a different origin when the chatbox is served at
+      // an agent hostname. Any other origin is ignored.
+      const callbackOrigin = mcpCallbackOrigin();
+      if (e.origin !== window.location.origin && !(callbackOrigin && e.origin === callbackOrigin)) return;
       const data = e.data as { type?: string } | null;
       if (data?.type === MCP_OAUTH_MESSAGE) finish();
     }
