@@ -142,6 +142,13 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg = overlayOAuthConfig(cfg, req.Auth)
 
+	// The redirect_uri is SERVER-controlled (ADR 0040): one canonical, pre-registered callback for
+	// every consent regardless of the initiating origin. Consent opened from an agent's own hostname
+	// would otherwise send that hostname's unregistered callback and be refused by the provider. The
+	// SPA-supplied origin is only a hint; the canonical origin wins (falls back to the request origin
+	// when no console URL is configured — single-origin behaviour unchanged).
+	cfg.RedirectURI = s.canonicalOrigin(r) + mcpOAuthCallbackPath
+
 	// Legacy backfill (m26.1b): a server registered before config persistence has no
 	// endpoints/clientId to recover. Re-run discovery/DCR from the stored URL — register's
 	// own path — to complete the config, then persist the annotations so it is a ONE-TIME
@@ -195,6 +202,9 @@ func (s *Server) beginMCPGrantConsent(w http.ResponseWriter, r *http.Request) {
 		serverURL:     serverURL,
 		grantUserHash: userGrantHash(username),
 		boundary:      boundary,
+		// Where to relay the "connected" signal after the callback (ADR 0040) — the agent hostname
+		// that opened the popup, or "" (same-origin) when off-domain / no console configured.
+		openerOrigin: s.allowedOpenerOrigin(r),
 	})
 	if sErr != nil {
 		s.log.Error(sErr, "start MCP grant consent flow failed", "server", server)

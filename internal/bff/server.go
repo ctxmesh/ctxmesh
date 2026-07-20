@@ -87,6 +87,16 @@ type Server struct {
 	oidcIssuer   string
 	oidcClientID string
 
+	// consoleURL is the canonical, browser-reachable console origin (scheme://host[:port]),
+	// e.g. "https://console.agents.example.com" — the ONE origin whose /api/mcp/oauth/callback
+	// is registered with MCP providers (ADR 0040). MCP consent uses it as the server-controlled
+	// redirect_uri for EVERY flow regardless of the initiating origin, so consent opened from an
+	// agent's own hostname uses a redirect the provider recognizes; and it is the only origin the
+	// cross-origin "connected" relay trusts. Empty ⇒ single-origin behaviour (the request's own
+	// origin is the callback, no cross-origin relay). Trailing slash trimmed. Wired from
+	// CONSOLE_URL in cmd/bff/main.go.
+	consoleURL string
+
 	// providerConnect is the ADR 0015 kill-switch. When false the connect
 	// endpoints (POST/GET /api/providers, GET /api/providers/{name}/models) are
 	// NOT registered and serve 404 — the UI falls back to reference-existing.
@@ -202,6 +212,10 @@ type Options struct {
 	OIDCEnabled  bool
 	OIDCIssuer   string
 	OIDCClientID string
+	// ConsoleURL is the canonical browser-reachable console origin used as the one
+	// registered MCP-consent redirect_uri + the trusted cross-origin relay target
+	// (ADR 0040). Empty ⇒ single-origin behaviour. Wired from CONSOLE_URL.
+	ConsoleURL string
 	// ProviderConnect is the ADR 0015 connect-a-provider kill-switch. When true
 	// (the default for dev/trial) the connect endpoints are registered; when
 	// false (a hardened install) they serve 404 and the UI falls back to
@@ -290,6 +304,7 @@ func NewServer(opts Options) *Server {
 		oidcEnabled:              opts.OIDCEnabled,
 		oidcIssuer:               opts.OIDCIssuer,
 		oidcClientID:             opts.OIDCClientID,
+		consoleURL:               strings.TrimRight(strings.TrimSpace(opts.ConsoleURL), "/"),
 		providerConnect:          opts.ProviderConnect,
 		providerHTTP:             opts.ProviderHTTP,
 		platformGenerationModels: opts.PlatformGenerationModels,
