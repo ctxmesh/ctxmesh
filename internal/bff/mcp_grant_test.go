@@ -403,9 +403,12 @@ func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 	tr := oauthToolRegistry(server, disco.URL+"/mcp") // oauth + URL, but NO config annotations
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
 	s, _ := newGrantServer(t, c)
+	s.consoleURL = "https://console.example" // ADR 0040: the canonical, server-controlled callback origin
 
-	const redirect = "https://console.example/api/mcp/oauth/callback"
-	rec, pending := beginGrant(t, s, server, "bob-token", &MCPAuthRequest{Type: "oauth", RedirectURI: redirect})
+	const canonicalRedirect = "https://console.example/api/mcp/oauth/callback"
+	// The SPA supplies its OWN origin (an agent hostname); ADR 0040 IGNORES it and uses the canonical
+	// console callback — the one actually registered with the provider.
+	rec, pending := beginGrant(t, s, server, "bob-token", &MCPAuthRequest{Type: "oauth", RedirectURI: "https://scalekit-agent.default.example/api/mcp/oauth/callback"})
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, pending.AuthorizationURL, disco.URL+"/authorize", "authorize URL from the DISCOVERED endpoint")
 	assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "client id from DCR")
@@ -416,7 +419,7 @@ func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 	assert.Equal(t, disco.URL+"/authorize", got.Annotations[annMCPOAuthAuthEndpoint], "backfilled authorization endpoint")
 	assert.Equal(t, disco.URL+"/token", got.Annotations[annMCPOAuthTokenEndpoint], "backfilled token endpoint")
 	assert.Equal(t, "dyn-client-123", got.Annotations[annMCPOAuthClientID], "backfilled client id")
-	assert.Equal(t, redirect, got.Annotations[annMCPOAuthRedirectURI], "backfilled redirect uri")
+	assert.Equal(t, canonicalRedirect, got.Annotations[annMCPOAuthRedirectURI], "backfilled redirect uri is the canonical (server-controlled) origin, not the SPA's")
 }
 
 // TestCreateMCPObjectsPersistsOAuthConfig (m26.1, ADR 0031): an OAuth registration stamps

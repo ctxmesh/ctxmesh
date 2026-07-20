@@ -88,6 +88,13 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # The canonical, browser-reachable console origin (ADR 0040) — e.g.
+  # "https://console.agents.example.com". Used as the ONE MCP-consent redirect_uri
+  # registered with providers + the trusted cross-origin relay target, so "Connect"
+  # works from an agent's own hostname. Empty (default) ⇒ single-origin behaviour
+  # (the request's own origin is the callback, no cross-origin relay). Set this to the
+  # console's edge host when serving the per-agent chatbox (M37) on a shared base domain.
+  consoleURL: ""
   providerConnect:
     enabled: true
   # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
