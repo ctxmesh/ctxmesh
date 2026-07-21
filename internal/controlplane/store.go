@@ -27,10 +27,13 @@ import (
 )
 
 // ErrNotFound is returned when a lookup finds no row. ErrConflict signals an optimistic-concurrency
-// version mismatch (a concurrent write moved the row on since the caller read it).
+// version mismatch (a concurrent write moved the row on since the caller read it). ErrInvalid signals a
+// validation failure on a write — the in-app replacement for the CRD's API-server schema validation once an
+// entity's writes leave the CRD (ADR 0044); the BFF maps a wrapped ErrInvalid to 422.
 var (
 	ErrNotFound = errors.New("controlplane: not found")
 	ErrConflict = errors.New("controlplane: version conflict")
+	ErrInvalid  = errors.New("controlplane: invalid")
 )
 
 // DefaultPageSize bounds an unpaginated list; MaxPageSize caps a caller-supplied one.
