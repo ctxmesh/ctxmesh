@@ -29,7 +29,48 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
+
+// mirrorToolRegistry best-effort dual-writes a ToolRegistry to the control-plane Postgres store (ADR 0042
+// Amendment 2, m41.2). Same posture as mirrorPromptVersion: a store failure is LOGGED, never returned —
+// the caller-scoped CRD write already succeeded and stays the source of truth during the migration window.
+// nil store (CONTROLPLANE_DSN unset) is a no-op. The catalog (spec.tools[]), the annotations (incl. the
+// non-secret OAuth-client config), and the labels are mirrored; per-user grant tokens are not here.
+func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.ToolRegistry) {
+	if s.toolRegistryStore == nil {
+		return
+	}
+	tools := make([]toolregistry.ToolEntry, len(tr.Spec.Tools))
+	for i := range tr.Spec.Tools {
+		e := tr.Spec.Tools[i]
+		var schema []byte
+		if e.InputSchema != nil {
+			schema = e.InputSchema.Raw
+		}
+		tools[i] = toolregistry.ToolEntry{
+			Name: e.Name, Image: e.Image, URL: e.URL, Description: e.Description,
+			InputSchema: schema, Source: e.Source, ApprovalStatus: e.ApprovalStatus,
+		}
+	}
+	if _, err := s.toolRegistryStore.Upsert(ctx, toolregistry.ToolRegistry{
+		Namespace: tr.Namespace, Name: tr.Name,
+		Tools: tools, Annotations: tr.Annotations, Labels: tr.Labels,
+	}); err != nil {
+		s.log.Error(err, "mirror ToolRegistry to control-plane store failed (CRD remains source of truth)",
+			"namespace", tr.Namespace, "name", tr.Name)
+	}
+}
+
+// unmirrorToolRegistry best-effort removes a ToolRegistry from the store after a successful CRD delete.
+func (s *Server) unmirrorToolRegistry(ctx context.Context, ns, name string) {
+	if s.toolRegistryStore == nil {
+		return
+	}
+	if err := s.toolRegistryStore.Delete(ctx, ns, name); err != nil {
+		s.log.Error(err, "unmirror ToolRegistry from control-plane store failed", "namespace", ns, "name", name)
+	}
+}
 
 // toolRegistryKind is the CRD kind name for a ToolRegistry (used in error
 // messages and the rename guard so they match the API server's kind strings).
@@ -408,6 +449,7 @@ func (s *Server) handleCreateToolRegistry(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.mirrorToolRegistry(r.Context(), tr) // ADR 0042 m41.2: best-effort dual-write to Postgres
 	writeJSON(w, http.StatusCreated, newToolRegistryDetail(tr))
 }
 
@@ -514,6 +556,7 @@ func (s *Server) handleUpdateToolRegistry(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.mirrorToolRegistry(r.Context(), &updated) // ADR 0042 m41.2: best-effort dual-write to Postgres
 	writeJSON(w, http.StatusOK, newToolRegistryDetail(&updated))
 }
 
@@ -558,5 +601,6 @@ func (s *Server) handleDeleteToolRegistry(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.unmirrorToolRegistry(r.Context(), ns, name) // ADR 0042 m41.2: best-effort dual-write to Postgres
 	w.WriteHeader(http.StatusNoContent)
 }

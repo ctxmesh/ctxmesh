@@ -51,6 +51,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/bff"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
@@ -230,7 +231,10 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Control-plane store (ADR 0042, m40.4): during the CRD→Postgres migration window PromptVersions
 	// dual-write to Postgres (the CRD stays the source of truth). CONTROLPLANE_DSN unset ⇒ CRD-only.
 	// OpenDB runs the goose migrations (with a session lock) at start-up.
-	var promptStore promptversion.Store
+	var (
+		promptStore promptversion.Store
+		toolStore   toolregistry.Store
+	)
 	if cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN")); cpDSN != "" {
 		cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
 		if cpErr != nil {
@@ -238,7 +242,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		}
 		defer func() { _ = cpDB.Close() }()
 		promptStore = promptversion.NewPostgresStore(cpDB)
-		log.Info("control-plane store enabled (ADR 0042): PromptVersions dual-write to Postgres")
+		toolStore = toolregistry.NewPostgresStore(cpDB) // shares the handle + migrations (m41.2)
+		log.Info("control-plane store enabled (ADR 0042): PromptVersions + ToolRegistries dual-write to Postgres")
 	}
 
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
@@ -253,6 +258,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		GrantStore:                  grantStore,
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
+		ToolRegistryStore:           toolStore,
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
