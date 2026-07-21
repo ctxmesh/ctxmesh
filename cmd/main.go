@@ -17,9 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,6 +42,9 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	// +kubebuilder:scaffold:imports
@@ -201,6 +206,38 @@ func main() {
 	if oboEgress.Enabled {
 		setupLog.Info("OBO egress-sidecar injection ENABLED (ADR 0030)",
 			"sidecarImage", oboEgress.SidecarImage, "delegating", oboEgress.TokenServiceURL != "")
+	}
+
+	// Control-plane store (ADR 0042 Amendment 4): when CONTROLPLANE_DSN is set, the
+	// operator runs the sync reconcilers that make Postgres an authoritative
+	// projection of the moved CRDs — the write path the read-switch depends on.
+	// Unset ⇒ the reconcilers are not registered and reads stay on the CRD (fully
+	// reversible). OpenDB runs the goose migrations (session-locked) at start-up.
+	if cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN")); cpDSN != "" {
+		cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
+		if cpErr != nil {
+			setupLog.Error(cpErr, "Failed to open the control-plane store (CONTROLPLANE_DSN)")
+			os.Exit(1)
+		}
+		defer func() { _ = cpDB.Close() }()
+		toolRegistryStore := toolregistry.NewPostgresStore(cpDB)
+		promptStore := promptversion.NewPostgresStore(cpDB)
+
+		if err := (&controller.ToolRegistrySyncReconciler{
+			Client: mgr.GetClient(),
+			Store:  toolRegistryStore,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "toolregistry-sync")
+			os.Exit(1)
+		}
+		if err := (&controller.PromptVersionSyncReconciler{
+			Client: mgr.GetClient(),
+			Store:  promptStore,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "promptversion-sync")
+			os.Exit(1)
+		}
+		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry + PromptVersion sync reconcilers registered")
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{
