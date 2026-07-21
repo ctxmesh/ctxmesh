@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -63,6 +64,13 @@ type Server struct {
 	// runStore holds durable runs (ADR 0034 execution contract). Phase 1 is a hot in-memory
 	// store; M32 swaps a durable backend behind the same seam. Always non-nil (defaulted).
 	runStore run.Store
+
+	// promptStore, when set, is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4).
+	// During the migration window the BFF DUAL-WRITES: the PromptVersion CRD stays the source of truth
+	// (RBAC-gated by the caller-scoped write) and the store is mirrored best-effort after each write, so
+	// a store hiccup never fails a CRUD the CRD accepted. Reads still come from the CRD until backfill +
+	// the read-switch land (m40.5). nil ⇒ CRD-only (CONTROLPLANE_DSN unset) — behaviour unchanged.
+	promptStore promptversion.Store
 	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
 	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
 	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
@@ -283,6 +291,9 @@ type Options struct {
 	// RunStore backs the run-oriented execution contract (ADR 0034). Optional — a hot in-memory
 	// store is used when nil (phase 1); M32 injects a durable store.
 	RunStore run.Store
+	// PromptStore is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4). Optional —
+	// nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	PromptStore promptversion.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -316,6 +327,7 @@ func NewServer(opts Options) *Server {
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
+		promptStore:              opts.PromptStore,
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
 	}
