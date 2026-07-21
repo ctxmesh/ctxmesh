@@ -29,6 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
@@ -263,6 +265,34 @@ func newPromptVersionDetail(pv *agentsv1alpha1.PromptVersion) PromptVersionDetai
 	}
 }
 
+// storeGitDTO builds the git pointer DTO from a store row's flat fields.
+func storeGitDTO(pv *promptversion.PromptVersion) GitPromptSourceDTO {
+	return GitPromptSourceDTO{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}
+}
+
+// newPromptVersionSummaryFromStore / …DetailFromStore project a Postgres store row
+// onto the same DTOs as the CRD path (m43.5 read-switch). PromptVersion has no
+// status writer, so Status.Conditions is always empty — phaseFromConditions(nil)
+// and empty Conditions match the CRD read exactly, so the switch is behaviour-
+// preserving. (If a controller ever populates PromptVersion conditions, the store
+// schema must carry them and these constructors must be revisited.)
+func newPromptVersionSummaryFromStore(pv *promptversion.PromptVersion) PromptVersionSummary {
+	ready, phase := phaseFromConditions(nil)
+	return PromptVersionSummary{
+		Name: pv.Name, Namespace: pv.Namespace,
+		Git: storeGitDTO(pv), Phase: phase, Ready: ready,
+	}
+}
+
+func newPromptVersionDetailFromStore(pv *promptversion.PromptVersion) PromptVersionDetail {
+	ready, phase := phaseFromConditions(nil)
+	return PromptVersionDetail{
+		Name: pv.Name, Namespace: pv.Namespace,
+		Git: storeGitDTO(pv), Phase: phase, Ready: ready,
+		Conditions: newPromptVersionConditionDTOs(nil),
+	}
+}
+
 // buildPromptVersionGit validates and converts a GitPromptSourceDTO to a GitPromptSource.
 func buildPromptVersionGit(dto GitPromptSourceDTO) (agentsv1alpha1.GitPromptSource, error) {
 	if strings.TrimSpace(dto.Repo) == "" {
@@ -323,6 +353,29 @@ func (s *Server) handleListPromptVersions(w http.ResponseWriter, r *http.Request
 	namespace := r.URL.Query().Get("namespace")
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
+	// Read-switch (ADR 0042 Amendment 4, m43.5): store-backed list behind a
+	// caller-scoped SSAR (exact RBAC parity with the CRD read).
+	if s.promptStore != nil {
+		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
+			s.writeAuthzError(w, err, "list prompt versions")
+			return
+		}
+		page, err := s.promptStore.List(r.Context(), controlplane.ListOptions{
+			Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
+		})
+		if err != nil {
+			s.log.Error(err, "list PromptVersions from store failed")
+			writeError(w, http.StatusInternalServerError, "failed to list prompt versions")
+			return
+		}
+		items := make([]PromptVersionSummary, 0, len(page.Items))
+		for i := range page.Items {
+			items = append(items, newPromptVersionSummaryFromStore(&page.Items[i]))
+		}
+		writeJSON(w, http.StatusOK, PromptVersionListResponse{Items: items, NextCursor: page.NextPage})
+		return
+	}
+
 	opts := []client.ListOption{client.Limit(int64(limit))}
 	if cursor != "" {
 		opts = append(opts, client.Continue(cursor))
@@ -373,6 +426,26 @@ func (s *Server) handleGetPromptVersion(w http.ResponseWriter, r *http.Request) 
 	name := strings.TrimSpace(r.PathValue("name"))
 	if ns == "" || name == "" {
 		writeError(w, http.StatusBadRequest, "namespace and name are required")
+		return
+	}
+
+	// Read-switch (m43.5): store-backed read behind a caller-scoped SSAR.
+	if s.promptStore != nil {
+		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+			s.writeAuthzError(w, err, "get prompt version")
+			return
+		}
+		pv, err := s.promptStore.Get(r.Context(), ns, name)
+		if err != nil {
+			if errors.Is(err, controlplane.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "prompt version not found")
+				return
+			}
+			s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, "failed to get prompt version")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(pv))
 		return
 	}
 
@@ -582,6 +655,40 @@ func (s *Server) handleDeletePromptVersion(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// promptGitForDiff returns the git pointer for a PromptVersion (ns/name) used by
+// the diff endpoint — store-backed behind a caller-scoped SSAR when the
+// read-switch is on (m43.5), else the caller-scoped CRD. On any failure it writes
+// the honest status (403/404/500 for the store path; writeGetError for the CRD
+// path) and returns ok=false. label is "from"/"to" for the message.
+func (s *Server) promptGitForDiff(
+	w http.ResponseWriter, r *http.Request, caller client.Client, ns, name, label string,
+) (agentsv1alpha1.GitPromptSource, bool) {
+	if s.promptStore != nil {
+		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+			s.writeAuthzError(w, err, fmt.Sprintf("get %s prompt version %q", label, name))
+			return agentsv1alpha1.GitPromptSource{}, false
+		}
+		pv, err := s.promptStore.Get(r.Context(), ns, name)
+		if err != nil {
+			if errors.Is(err, controlplane.ErrNotFound) {
+				writeError(w, http.StatusNotFound, fmt.Sprintf("%s prompt version %q not found", label, name))
+				return agentsv1alpha1.GitPromptSource{}, false
+			}
+			s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get %s prompt version", label))
+			return agentsv1alpha1.GitPromptSource{}, false
+		}
+		return agentsv1alpha1.GitPromptSource{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}, true
+	}
+
+	var pv agentsv1alpha1.PromptVersion
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &pv); err != nil {
+		s.writeGetError(w, err, fmt.Sprintf("%s prompt version %q", label, name))
+		return agentsv1alpha1.GitPromptSource{}, false
+	}
+	return pv.Spec.Git, true
+}
+
 // --- GET /api/promptversions/{ns}/{name}/diff --------------------------------
 
 // handlePromptVersionDiff serves GET /api/promptversions/{ns}/{name}/diff —
@@ -636,27 +743,27 @@ func (s *Server) handlePromptVersionDiff(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Fetch both PromptVersions caller-scoped. A missing version → 404 (never a
+	// Fetch both PromptVersions' git pointers (store-backed behind an SSAR when the
+	// read-switch is on, else caller-scoped CRD). A missing version → 404 (never a
 	// confused-deputy bypass; the caller must be able to read both).
-	var fromPV, toPV agentsv1alpha1.PromptVersion
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: fromName}, &fromPV); err != nil {
-		s.writeGetError(w, err, fmt.Sprintf("from prompt version %q", fromName))
+	fromGit, ok := s.promptGitForDiff(w, r, caller, ns, fromName, "from")
+	if !ok {
 		return
 	}
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: toName}, &toPV); err != nil {
-		s.writeGetError(w, err, fmt.Sprintf("to prompt version %q", toName))
+	toGit, ok := s.promptGitForDiff(w, r, caller, ns, toName, "to")
+	if !ok {
 		return
 	}
 
 	// Resolve both git pointers. DISTINCT error handling:
 	//   ErrNotFound → 404 (bad ref / missing path — user-facing, not transient)
 	//   other error  → 502 (infra/transient — never fabricated content)
-	fromResolved, err := s.promptResolver.Resolve(r.Context(), fromPV.Spec.Git)
+	fromResolved, err := s.promptResolver.Resolve(r.Context(), fromGit)
 	if err != nil {
 		if errors.Is(err, prompt.ErrNotFound) {
 			writeError(w, http.StatusNotFound,
 				fmt.Sprintf("prompt content not found: ref or path did not resolve for %q (repo=%s ref=%s path=%s)",
-					fromName, fromPV.Spec.Git.Repo, fromPV.Spec.Git.Ref, fromPV.Spec.Git.Path))
+					fromName, fromGit.Repo, fromGit.Ref, fromGit.Path))
 			return
 		}
 		s.log.Error(err, "resolve from prompt version failed", "namespace", ns, "name", fromName)
@@ -664,12 +771,12 @@ func (s *Server) handlePromptVersionDiff(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	toResolved, err := s.promptResolver.Resolve(r.Context(), toPV.Spec.Git)
+	toResolved, err := s.promptResolver.Resolve(r.Context(), toGit)
 	if err != nil {
 		if errors.Is(err, prompt.ErrNotFound) {
 			writeError(w, http.StatusNotFound,
 				fmt.Sprintf("prompt content not found: ref or path did not resolve for %q (repo=%s ref=%s path=%s)",
-					toName, toPV.Spec.Git.Repo, toPV.Spec.Git.Ref, toPV.Spec.Git.Path))
+					toName, toGit.Repo, toGit.Ref, toGit.Path))
 			return
 		}
 		s.log.Error(err, "resolve to prompt version failed", "namespace", ns, "name", toName)

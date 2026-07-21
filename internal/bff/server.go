@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -77,6 +78,12 @@ type Server struct {
 	// Amendment 2, m41.2). Same dual-write posture as promptStore: the CRD stays the source of truth +
 	// read source, the store is a best-effort mirror. nil ⇒ CRD-only.
 	toolRegistryStore toolregistry.Store
+
+	// authorizer gates a store-backed READ (ADR 0042 Amendment 4, m43.4): once a read comes from Postgres
+	// the API server is no longer in the path, so the BFF authorizes it with a caller-scoped SSAR (exact
+	// RBAC parity with the CRD read). Always non-nil (defaulted to authz.SSARAuthorizer{}); tests inject a
+	// fake to drive allow/deny deterministically.
+	authorizer authz.Authorizer
 	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
 	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
 	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
@@ -338,6 +345,7 @@ func NewServer(opts Options) *Server {
 		runStore:                 opts.RunStore,
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
+		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
 	}
