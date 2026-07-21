@@ -1,0 +1,130 @@
+package bff
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
+)
+
+func pvReadSwitchServer(t *testing.T, auth authz.Authorizer, resolver prompt.Resolver) (*Server, promptversion.Store) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	var s *Server
+	if resolver != nil {
+		s = newCallerServerWithResolver(t, &fakeCallerClientFactory{client: c}, resolver)
+	} else {
+		s = newCallerServer(t, &fakeCallerClientFactory{client: c})
+	}
+	store := promptversion.NewMemStore()
+	s.promptStore = store
+	s.authorizer = auth
+	return s, store
+}
+
+func seedPV(t *testing.T, store promptversion.Store, name, repo, ref, path string) {
+	t.Helper()
+	_, err := store.Upsert(context.Background(), promptversion.PromptVersion{
+		Namespace: pvNS, Name: name, Repo: repo, Ref: ref, Path: path,
+	})
+	require.NoError(t, err)
+}
+
+// m43.5: LIST reads from the store behind a caller-scoped SSAR (list promptversions).
+func TestPromptVersionListReadSwitch_Allowed(t *testing.T) {
+	auth := &recordingAuthorizer{}
+	s, store := pvReadSwitchServer(t, auth, nil)
+	seedPV(t, store, "pv1", "github.com/acme/p", "v1", "a.md")
+
+	body, code := getPromptVersions(t, s, "namespace="+pvNS)
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, body.Items, 1)
+	assert.Equal(t, "pv1", body.Items[0].Name)
+	assert.Equal(t, "v1", body.Items[0].Git.Ref)
+	assert.Equal(t, authz.VerbList, auth.last.Verb)
+	assert.Equal(t, resourcePromptVersions, auth.last.Resource)
+}
+
+// The security-critical denial: 403 and no store data leaks.
+func TestPromptVersionListReadSwitch_Forbidden(t *testing.T) {
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{err: authz.ErrForbidden}, nil)
+	seedPV(t, store, "secret-pv", "r", "ref", "p")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/promptversions?namespace="+pvNS, nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "secret-pv")
+}
+
+func TestPromptVersionGetReadSwitch_Allowed(t *testing.T) {
+	auth := &recordingAuthorizer{}
+	s, store := pvReadSwitchServer(t, auth, nil)
+	seedPV(t, store, "pv1", "github.com/acme/p", "v1.2.3", "sys.md")
+
+	detail, code, body := getPromptVersion(t, s, pvNS, "pv1")
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, "pv1", detail.Name)
+	assert.Equal(t, "v1.2.3", detail.Git.Ref)
+	assert.Equal(t, "sys.md", detail.Git.Path)
+	assert.Equal(t, authz.VerbGet, auth.last.Verb)
+	assert.Equal(t, "pv1", auth.last.Name)
+}
+
+func TestPromptVersionGetReadSwitch_Forbidden(t *testing.T) {
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{err: authz.ErrForbidden}, nil)
+	seedPV(t, store, "secret-pv", "r", "ref", "p")
+
+	_, code, body := getPromptVersion(t, s, pvNS, "secret-pv")
+	assert.Equal(t, http.StatusForbidden, code)
+	assert.NotContains(t, body, "secret-pv")
+}
+
+func TestPromptVersionGetReadSwitch_NotFound(t *testing.T) {
+	s, _ := pvReadSwitchServer(t, &recordingAuthorizer{}, nil)
+	_, code, _ := getPromptVersion(t, s, pvNS, "nope")
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
+// The diff endpoint reads BOTH versions' git pointers from the store (behind an
+// SSAR each) and resolves them — proving the store-backed diff path (m43.5).
+func TestPromptVersionDiffReadSwitch_Allowed(t *testing.T) {
+	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	resolver := prompt.NewFixtureResolver().
+		Seed(fromSrc, "one\n").
+		Seed(toSrc, "one\ntwo\n")
+
+	auth := &recordingAuthorizer{}
+	s, store := pvReadSwitchServer(t, auth, resolver)
+	seedPV(t, store, "pv-v1", fromSrc.Repo, fromSrc.Ref, fromSrc.Path)
+	seedPV(t, store, "pv-v2", toSrc.Repo, toSrc.Ref, toSrc.Path)
+
+	resp, code, body := getPromptVersionDiff(t, s, pvNS, "pv-v2", "pv-v1")
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, "textual", resp.ResolveMode)
+	assert.Contains(t, resp.Diff, "+two")
+	assert.Equal(t, authz.VerbGet, auth.last.Verb)
+	assert.Equal(t, 2, auth.count, "the diff must SSAR-gate BOTH versions (from + to), no partial disclosure")
+}
+
+// A denied caller can't diff store-backed versions either.
+func TestPromptVersionDiffReadSwitch_Forbidden(t *testing.T) {
+	resolver := prompt.NewFixtureResolver()
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{err: authz.ErrForbidden}, resolver)
+	seedPV(t, store, "pv-v1", "r", "v1", "s.md")
+	seedPV(t, store, "pv-v2", "r", "v2", "s.md")
+
+	_, code, _ := getPromptVersionDiff(t, s, pvNS, "pv-v2", "pv-v1")
+	assert.Equal(t, http.StatusForbidden, code)
+}
