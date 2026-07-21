@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,6 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
@@ -237,6 +240,40 @@ func newToolRegistryDetail(tr *agentsv1alpha1.ToolRegistry) ToolRegistryDetail {
 	}
 }
 
+// storeToolsDTO projects a store row's tool set onto the DTO slice.
+func storeToolsDTO(entries []toolregistry.ToolEntry) []ToolEntryDTO {
+	tools := make([]ToolEntryDTO, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
+		tools = append(tools, ToolEntryDTO{
+			Name: e.Name, Image: e.Image, URL: e.URL,
+			Description: e.Description, Source: e.Source, ApprovalStatus: e.ApprovalStatus,
+		})
+	}
+	return tools
+}
+
+// newToolRegistrySummaryFromStore / …DetailFromStore project a Postgres store row
+// onto the same DTOs as the CRD path (m43.4 read-switch). ToolRegistry has NO
+// controller, so its Status.Conditions is always empty — phaseFromConditions(nil)
+// yields the identical (Pending, ready=false) the CRD read returns, so the switch
+// is behaviour-preserving.
+func newToolRegistrySummaryFromStore(tr *toolregistry.ToolRegistry) ToolRegistrySummary {
+	ready, phase := phaseFromConditions(nil)
+	return ToolRegistrySummary{
+		Name: tr.Name, Namespace: tr.Namespace,
+		Tools: storeToolsDTO(tr.Tools), Phase: phase, Ready: ready,
+	}
+}
+
+func newToolRegistryDetailFromStore(tr *toolregistry.ToolRegistry) ToolRegistryDetail {
+	ready, phase := phaseFromConditions(nil)
+	return ToolRegistryDetail{
+		Name: tr.Name, Namespace: tr.Namespace,
+		Tools: storeToolsDTO(tr.Tools), Phase: phase, Ready: ready,
+	}
+}
+
 // buildToolEntries converts the request DTO entries to CRD ToolEntry slice,
 // preserving the approvalStatus from the LIVE object (never from the request).
 // liveByName maps tool name → existing ToolEntry so we can carry approval state
@@ -317,6 +354,31 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 	namespace := r.URL.Query().Get("namespace")
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
+	// Read-switch (ADR 0042 Amendment 4, m43.4): when the store is wired, reads
+	// come from Postgres. The API server is no longer in the path, so authorize the
+	// list with a caller-scoped SSAR (exact RBAC parity with the CRD read) and push
+	// the namespace/search/paging down to the store.
+	if s.toolRegistryStore != nil {
+		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
+			s.writeAuthzError(w, err, "list tool registries")
+			return
+		}
+		page, err := s.toolRegistryStore.List(r.Context(), controlplane.ListOptions{
+			Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
+		})
+		if err != nil {
+			s.log.Error(err, "list ToolRegistries from store failed")
+			writeError(w, http.StatusInternalServerError, "failed to list tool registries")
+			return
+		}
+		items := make([]ToolRegistrySummary, 0, len(page.Items))
+		for i := range page.Items {
+			items = append(items, newToolRegistrySummaryFromStore(&page.Items[i]))
+		}
+		writeJSON(w, http.StatusOK, ToolRegistryListResponse{Items: items, NextCursor: page.NextPage})
+		return
+	}
+
 	opts := []client.ListOption{client.Limit(int64(limit))}
 	if cursor != "" {
 		opts = append(opts, client.Continue(cursor))
@@ -365,6 +427,26 @@ func (s *Server) handleGetToolRegistry(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if ns == "" || name == "" {
 		writeError(w, http.StatusBadRequest, "namespace and name are required")
+		return
+	}
+
+	// Read-switch (m43.4): store-backed read behind a caller-scoped SSAR.
+	if s.toolRegistryStore != nil {
+		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
+			s.writeAuthzError(w, err, "get tool registry")
+			return
+		}
+		tr, err := s.toolRegistryStore.Get(r.Context(), ns, name)
+		if err != nil {
+			if errors.Is(err, controlplane.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "tool registry not found")
+				return
+			}
+			s.log.Error(err, "get ToolRegistry from store failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, "failed to get tool registry")
+			return
+		}
+		writeJSON(w, http.StatusOK, newToolRegistryDetailFromStore(tr))
 		return
 	}
 
