@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -129,38 +130,68 @@ func (r *AgentDeploymentReconciler) resolvePrompt(
 		return resolvedPrompt{}, nil
 	}
 
-	var pv agentsv1alpha1.PromptVersion
-	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.PromptRef}, &pv)
-	if apierrors.IsNotFound(err) {
-		return resolvedPrompt{}, &promptResolveError{
-			reason: "PromptVersionNotFound",
-			msg:    fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", deploy.Spec.PromptRef, deploy.Namespace),
-		}
-	}
-	if err != nil {
-		return resolvedPrompt{}, fmt.Errorf("fetching PromptVersion %q: %w", deploy.Spec.PromptRef, err)
+	src, name, perr := r.promptPointer(ctx, deploy)
+	if perr != nil {
+		return resolvedPrompt{}, perr
 	}
 
-	res, err := r.promptResolver().Resolve(ctx, pv.Spec.Git)
+	res, err := r.promptResolver().Resolve(ctx, src)
 	if errors.Is(err, prompt.ErrNotFound) {
 		// A bad git ref / missing path is USER input, not an infra failure: surface
 		// it on status and keep the old revision serving (no half-applied swap).
 		return resolvedPrompt{}, &promptResolveError{
 			reason: "PromptUnresolvable",
 			msg: fmt.Sprintf("PromptVersion %q git pointer does not resolve (repo=%q ref=%q path=%q): %v",
-				pv.Name, pv.Spec.Git.Repo, pv.Spec.Git.Ref, pv.Spec.Git.Path, err),
+				name, src.Repo, src.Ref, src.Path, err),
 		}
 	}
 	if err != nil {
-		return resolvedPrompt{}, fmt.Errorf("resolving PromptVersion %q: %w", pv.Name, err)
+		return resolvedPrompt{}, fmt.Errorf("resolving PromptVersion %q: %w", name, err)
 	}
 
 	return resolvedPrompt{
 		hasPrompt: true,
 		content:   res.Content,
 		version:   res.Version,
-		digest:    promptDigest(pv.Spec.Git, res.Version),
+		digest:    promptDigest(src, res.Version),
 	}, nil
+}
+
+// promptPointer returns the agent's prompt git pointer + a display name, from the DENORMALIZED
+// annotation the BFF stamps at create/update (ADR 0042, m40.3 — compose-and-denormalize) when present,
+// else by fetching the PromptVersion CRD (backward compat: an agent created before m40.3, or a direct
+// kubectl apply). The annotation path is what lets the PromptVersion move to Postgres without the
+// controller reading it — a stamped agent reconciles self-contained (no PromptVersion Get). The digest
+// + resolve logic downstream is identical either way (both yield a GitPromptSource).
+func (r *AgentDeploymentReconciler) promptPointer(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+) (agentsv1alpha1.GitPromptSource, string, error) {
+	if raw := deploy.Annotations[prompt.ResolvedPromptAnnotation]; raw != "" {
+		var p prompt.ResolvedPointer
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			// A corrupt stamp is a platform error, not user input — surface it on status (don't fall
+			// back to the CRD and silently mask a broken compose path).
+			return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+				reason: "PromptPointerInvalid",
+				msg:    fmt.Sprintf("the %s annotation on agent %q is not valid JSON: %v", prompt.ResolvedPromptAnnotation, deploy.Name, err),
+			}
+		}
+		return p.GitSource(), p.Name, nil
+	}
+
+	var pv agentsv1alpha1.PromptVersion
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.PromptRef}, &pv)
+	if apierrors.IsNotFound(err) {
+		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+			reason: "PromptVersionNotFound",
+			msg:    fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", deploy.Spec.PromptRef, deploy.Namespace),
+		}
+	}
+	if err != nil {
+		return agentsv1alpha1.GitPromptSource{}, "", fmt.Errorf("fetching PromptVersion %q: %w", deploy.Spec.PromptRef, err)
+	}
+	return pv.Spec.Git, pv.Name, nil
 }
 
 // promptDigest returns the prompt COMPONENT of combinedBindingDigest: 8 hex chars
