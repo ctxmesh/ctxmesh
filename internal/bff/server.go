@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -71,6 +72,11 @@ type Server struct {
 	// a store hiccup never fails a CRUD the CRD accepted. Reads still come from the CRD until backfill +
 	// the read-switch land (m40.5). nil ⇒ CRD-only (CONTROLPLANE_DSN unset) — behaviour unchanged.
 	promptStore promptversion.Store
+
+	// toolRegistryStore, when set, is the control-plane Postgres store for ToolRegistries (ADR 0042
+	// Amendment 2, m41.2). Same dual-write posture as promptStore: the CRD stays the source of truth +
+	// read source, the store is a best-effort mirror. nil ⇒ CRD-only.
+	toolRegistryStore toolregistry.Store
 	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
 	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
 	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
@@ -294,6 +300,9 @@ type Options struct {
 	// PromptStore is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4). Optional —
 	// nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
 	PromptStore promptversion.Store
+	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries (ADR 0042 Amdt 2, m41.2).
+	// Optional — nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	ToolRegistryStore toolregistry.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -328,6 +337,7 @@ func NewServer(opts Options) *Server {
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
 		promptStore:              opts.PromptStore,
+		toolRegistryStore:        opts.ToolRegistryStore,
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
 	}
