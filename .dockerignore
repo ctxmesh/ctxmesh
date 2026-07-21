@@ -10,6 +10,10 @@
 !go.mod
 !go.sum
 
+# Re-include the control-plane goose migrations (ADR 0042, m40): internal/controlplane embeds
+# migrations/*.sql via //go:embed, so the .sql files must be in the build context or the build fails.
+!internal/controlplane/migrations/**
+
 # Re-include the Vite SPA source so Dockerfile.bff can build the static UI
 # (m12.8a: the BFF image = build-time Node build of ui/ + Go binary, NO Node
 # runtime). Deps + build output are produced INSIDE the image from the committed
