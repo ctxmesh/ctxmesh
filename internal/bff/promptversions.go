@@ -29,8 +29,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
+
+// mirrorPromptVersion best-effort dual-writes a PromptVersion to the control-plane Postgres store
+// (ADR 0042, m40.4). A store failure is LOGGED, never returned — the caller-scoped CRD write already
+// succeeded and stays the source of truth during the migration window; a stale mirror self-heals on the
+// next write (or the eventual backfill). A nil store (CONTROLPLANE_DSN unset) is a no-op. The CRD write's
+// RBAC IS the authorization for the mirror — it only runs after a write the API server accepted.
+func (s *Server) mirrorPromptVersion(ctx context.Context, pv *agentsv1alpha1.PromptVersion) {
+	if s.promptStore == nil {
+		return
+	}
+	if _, err := s.promptStore.Upsert(ctx, promptversion.PromptVersion{
+		Namespace: pv.Namespace,
+		Name:      pv.Name,
+		Repo:      pv.Spec.Git.Repo,
+		Ref:       pv.Spec.Git.Ref,
+		Path:      pv.Spec.Git.Path,
+		Labels:    pv.Labels,
+	}); err != nil {
+		s.log.Error(err, "mirror PromptVersion to control-plane store failed (CRD remains source of truth)",
+			"namespace", pv.Namespace, "name", pv.Name)
+	}
+}
+
+// unmirrorPromptVersion best-effort removes a PromptVersion from the control-plane store after a
+// successful caller-scoped CRD delete (ADR 0042, m40.4). Best-effort like mirrorPromptVersion.
+func (s *Server) unmirrorPromptVersion(ctx context.Context, ns, name string) {
+	if s.promptStore == nil {
+		return
+	}
+	if err := s.promptStore.Delete(ctx, ns, name); err != nil {
+		s.log.Error(err, "unmirror PromptVersion from control-plane store failed", "namespace", ns, "name", name)
+	}
+}
 
 // promptVersionKind is the CRD kind name for a PromptVersion (used in error
 // messages and the rename guard so they match the API server's kind strings).
@@ -414,6 +448,7 @@ func (s *Server) handleCreatePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.mirrorPromptVersion(r.Context(), pv) // ADR 0042 m40.4: best-effort dual-write to Postgres
 	writeJSON(w, http.StatusCreated, newPromptVersionDetail(pv))
 }
 
@@ -498,6 +533,7 @@ func (s *Server) handleUpdatePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.mirrorPromptVersion(r.Context(), &updated) // ADR 0042 m40.4: best-effort dual-write to Postgres
 	writeJSON(w, http.StatusOK, newPromptVersionDetail(&updated))
 }
 
@@ -542,6 +578,7 @@ func (s *Server) handleDeletePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.unmirrorPromptVersion(r.Context(), ns, name) // ADR 0042 m40.4: best-effort dual-write to Postgres
 	w.WriteHeader(http.StatusNoContent)
 }
 

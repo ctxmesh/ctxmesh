@@ -359,6 +359,17 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentRead
 	// round-trips from the just-submitted intent (ADR 0017 §1).
 	stampSourceSpec(objs, sourceSpec)
 
+	// Re-stamp the denormalized prompt pointer too (ADR 0042, m40.3) — an edit may change promptRef (or
+	// the referenced PromptVersion's git.ref), so the annotation MUST be refreshed here or the controller
+	// would keep serving the create-time prompt. When it resolves, the SSA patch below force-owns the
+	// annotation. When it does NOT (a bad new promptRef), the edit is REJECTED here — atomically, before
+	// any apply — rather than leaving a stale annotation that would silently serve the old prompt (the
+	// m40.3 review's SHOULD-FIX #1: SSA can't drop a field a different field-manager owns, so "skip" is
+	// unsafe on edit).
+	if pErr := stampResolvedPrompt(ctx, reader, objs, ns); pErr != nil {
+		return pErr
+	}
+
 	for _, d := range objs {
 		d.obj.SetNamespace(ns)
 		// SSA needs the object's GVK populated (client.Apply encodes apiVersion/kind).
