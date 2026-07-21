@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/expand"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
 
 // serializerCodec returns a decoder that reads a single-document manifest into
@@ -152,6 +154,13 @@ func createAgentFromYAML(
 	// it is created, so the edit source of truth rides the object from birth.
 	stampSourceSpec(objs, sourceSpec)
 
+	// Compose-and-denormalize the prompt (ADR 0042, m40.3): resolve the agent's promptRef to its git
+	// pointer NOW and stamp it as an annotation, so the controller reconciles self-contained (no
+	// PromptVersion read) and PromptVersion can move to Postgres. CREATE is best-effort — an unresolved
+	// stamp is ignored: a fresh object has no stale annotation, and the controller's CRD fallback
+	// surfaces a bad ref at reconcile exactly as pre-m40.3, so a create that would succeed still does.
+	_ = stampResolvedPrompt(ctx, reader, objs, ns)
+
 	created := make([]createdObject, 0, len(objs))
 	agentName := agentDeploymentName(objs)
 
@@ -201,6 +210,65 @@ func createAgentFromYAML(
 		})
 	}
 	return created, nil
+}
+
+// stampResolvedPrompt denormalizes the agent's prompt (ADR 0042, m40.3): it resolves the primary
+// AgentDeployment's spec.promptRef to the PromptVersion's git pointer and stamps it as the
+// prompt.ResolvedPromptAnnotation, so the controller reconciles the prompt WITHOUT reading the
+// PromptVersion (which is moving to Postgres). The pointer comes from a PromptVersion created alongside
+// this agent (the `prompt:` block, not yet in the cluster) if present, else one already in the namespace.
+//
+// It returns a *createError when a set promptRef does NOT resolve (400) or the list fails (502). CALLERS
+// DIFFER (m40.3 review): the CREATE path IGNORES that error (best-effort — a fresh object carries no
+// stale annotation, and the controller's CRD fallback surfaces a bad ref at reconcile as before). The
+// EDIT path MUST propagate it: an edit that leaves the stamp unresolved would let the controller keep
+// serving the CREATE-time prompt (a wrong prompt, silently), so a bad-ref edit is rejected atomically
+// BEFORE the SSA apply — nothing changes, no stale annotation.
+func stampResolvedPrompt(ctx context.Context, reader AgentReader, objs []decodedObject, ns string) *createError {
+	var agent *agentsv1alpha1.AgentDeployment
+	alongside := map[string]agentsv1alpha1.GitPromptSource{}
+	for _, d := range objs {
+		switch o := d.obj.(type) {
+		case *agentsv1alpha1.AgentDeployment:
+			agent = o
+		case *agentsv1alpha1.PromptVersion:
+			alongside[o.Name] = o.Spec.Git
+		}
+	}
+	if agent == nil || agent.Spec.PromptRef == "" {
+		return nil
+	}
+
+	git, ok := alongside[agent.Spec.PromptRef]
+	if !ok {
+		var list agentsv1alpha1.PromptVersionList
+		if err := reader.List(ctx, &list, client.InNamespace(ns)); err != nil {
+			return &createError{status: 502, msg: fmt.Sprintf("resolving promptRef %q: %v", agent.Spec.PromptRef, err)}
+		}
+		for i := range list.Items {
+			if list.Items[i].Name == agent.Spec.PromptRef {
+				git, ok = list.Items[i].Spec.Git, true
+				break
+			}
+		}
+	}
+	if !ok {
+		return &createError{status: 400, msg: fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", agent.Spec.PromptRef, ns)}
+	}
+
+	raw, err := json.Marshal(prompt.ResolvedPointer{
+		Name: agent.Spec.PromptRef, Repo: git.Repo, Ref: git.Ref, Path: git.Path,
+	})
+	if err != nil {
+		return &createError{status: 500, msg: fmt.Sprintf("stamping resolved prompt: %v", err)}
+	}
+	ann := agent.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[prompt.ResolvedPromptAnnotation] = string(raw)
+	agent.SetAnnotations(ann)
+	return nil
 }
 
 // agentDeploymentName returns the name of the AgentDeployment among the decoded objects

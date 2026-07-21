@@ -49,6 +49,8 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/bff"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
@@ -225,6 +227,20 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("durable run store enabled (ADR 0034): runs persist to Postgres")
 	}
 
+	// Control-plane store (ADR 0042, m40.4): during the CRD→Postgres migration window PromptVersions
+	// dual-write to Postgres (the CRD stays the source of truth). CONTROLPLANE_DSN unset ⇒ CRD-only.
+	// OpenDB runs the goose migrations (with a session lock) at start-up.
+	var promptStore promptversion.Store
+	if cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN")); cpDSN != "" {
+		cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
+		if cpErr != nil {
+			return fmt.Errorf("open control-plane postgres: %w", cpErr)
+		}
+		defer func() { _ = cpDB.Close() }()
+		promptStore = promptversion.NewPostgresStore(cpDB)
+		log.Info("control-plane store enabled (ADR 0042): PromptVersions dual-write to Postgres")
+	}
+
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
 	// `queued` for a KEDA-scaled worker pool (this pod, or a dedicated worker Deployment) to claim +
 	// execute — decoupled from the request. Only meaningful with a durable run store.
@@ -236,6 +252,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		RunStore:                    runStore,
+		PromptStore:                 promptStore,
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
