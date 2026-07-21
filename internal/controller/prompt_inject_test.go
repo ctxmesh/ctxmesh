@@ -104,3 +104,35 @@ func TestResolvePrompt_NoPromptRef_NoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, rp.hasPrompt)
 }
+
+// The annotation path and the CRD path must produce the SAME digest/content for the same pointer (so a
+// stamped agent rolls to the SAME ksvc revision suffix), AND the annotation must win over a divergent
+// PromptVersion in the store (self-contained reconcile). Locks the m40.3 equivalence contract.
+func TestResolvePrompt_AnnotationEquivalentToCRD_AndWins(t *testing.T) {
+	ctx := context.Background()
+	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/x.git", Ref: "v9", Path: "p/s.txt"}
+	resolver := prompt.NewFixtureResolver().Seed(src, "same content")
+
+	// CRD path: no annotation, the matching PromptVersion in the store.
+	crdR := promptTestReconciler(t, resolver, &agentsv1alpha1.PromptVersion{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pv"},
+		Spec:       agentsv1alpha1.PromptVersionSpec{Git: src},
+	})
+	crdRP, err := crdR.resolvePrompt(ctx, promptAgent("pv", nil))
+	require.NoError(t, err)
+
+	// Annotation path: same pointer via the annotation, but a DIVERGENT PromptVersion of the same name in
+	// the store — if the annotation is (wrongly) ignored, this resolves to an unseeded pointer and errors.
+	annR := promptTestReconciler(t, resolver, &agentsv1alpha1.PromptVersion{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pv"},
+		Spec:       agentsv1alpha1.PromptVersionSpec{Git: agentsv1alpha1.GitPromptSource{Repo: "https://git/OTHER.git", Ref: "OTHER", Path: "OTHER"}},
+	})
+	raw, err := json.Marshal(prompt.ResolvedPointer{Name: "pv", Repo: src.Repo, Ref: src.Ref, Path: src.Path})
+	require.NoError(t, err)
+	annRP, err := annR.resolvePrompt(ctx, promptAgent("pv", map[string]string{prompt.ResolvedPromptAnnotation: string(raw)}))
+	require.NoError(t, err)
+
+	assert.Equal(t, crdRP.digest, annRP.digest, "same pointer → identical digest (same ksvc revision suffix)")
+	assert.Equal(t, crdRP.content, annRP.content)
+	assert.Equal(t, "same content", annRP.content, "the annotation must win over the divergent CRD")
+}
