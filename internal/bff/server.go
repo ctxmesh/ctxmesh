@@ -942,7 +942,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	root := http.NewServeMux()
-	root.Handle("/api/", api)
+	root.Handle("/api/", s.restrictAgentOriginAPI(api)) // M39: shrink the API surface at agent origins
 	root.Handle("/", s.spaHandler())
 	return root
 }
@@ -1075,6 +1075,51 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 // CHATBOX (the SPA pinned to the host's agent) rather than the console. Set by the edge — a client on
 // the agents-app route cannot forge a different agent, since `set` overwrites any inbound value.
 const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
+
+// agentOriginAPIAllowlist is the ONLY /api/* endpoints the standalone per-agent chatbox needs — every
+// call its reachable components make (the chat + MCP consent + agent detail + trace link + login/session
+// boot). Method-scoped: e.g. GET on an agent is the detail read, but its mutations, sub-resources
+// (/logs, /runs), and the whole rest of the console API (secrets, model routes, registries, topology,
+// cost, runs, evals, prompts, config, providers, the agents LIST, …) are absent → 404 at agent origins.
+var agentOriginAPIAllowlist = []string{
+	"GET /api/authconfig",
+	"GET /api/whoami",
+	"GET /api/devmode",
+	"GET /api/health",
+	"GET /api/capabilities",
+	"GET /api/namespaces",
+	"GET /api/agents/{ns}/{name}",
+	"POST /api/invoke",
+	"POST /api/mcp/oauth/grant",
+	"GET /api/mcp/oauth/callback",
+	"GET /api/mcp/oauth/client-metadata",
+	"GET /api/traces/{id}",
+	"GET /api/traces/{id}/detail",
+}
+
+// restrictAgentOriginAPI shrinks the console API surface reachable at an agent's OWN hostname (M39
+// hardening). When the edge marks the request as an agent-origin one (agentChatboxHeader — set by the
+// agents-app route, unforgeable by a client), only the chatbox allowlist proceeds; every other /api/*
+// is 404'd (not 403 — don't confirm an endpoint exists). No effect on the console origin, where the
+// header is absent. This is defense-in-depth ON TOP of RBAC (a token still only reaches what it may) —
+// it removes the wider surface, so an agent URL isn't a second front door to the whole operator console.
+// Matching reuses Go's method+pattern router, so the allowlist stays declarative and precise.
+func (s *Server) restrictAgentOriginAPI(next http.Handler) http.Handler {
+	allow := http.NewServeMux()
+	noop := func(http.ResponseWriter, *http.Request) {}
+	for _, pat := range agentOriginAPIAllowlist {
+		allow.HandleFunc(pat, noop)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(agentChatboxHeader) != "" {
+			if _, pattern := allow.Handler(r); pattern == "" {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // agentPinForRequest returns "namespace/name" when this request is for an agent's own hostname (the
 // edge set agentChatboxHeader), else "". The agent is derived from the forwarded host — the same
