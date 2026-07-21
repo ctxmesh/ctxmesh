@@ -213,6 +213,22 @@ type AgentDeploymentReconciler struct {
 	// for llm-judge/code offline); envtest/e2e inject a seeded factory to drive a
 	// candidate deliberately above/below threshold and exercise the state machine.
 	ScorerFactory func(scorerType, name string) (eval.Scorer, error)
+
+	// Registry reads referenced ToolRegistries when resolving an agent's valid
+	// bindings for the pod template (ADR 0043, the RegistryReader seam). Nil ⇒ the
+	// CRD-backed default (K8s API). At the M43 read-switch this MUST be wired from
+	// the SAME reader instance as the MCPToolBinding reconciler's Registry — the
+	// pod template and the pushed manifest are computed by the same
+	// resolveAgentBindings logic, so different readers would silently drift them.
+	Registry RegistryReader
+}
+
+// registryReader returns the configured RegistryReader or the CRD-backed default.
+func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
+	if r.Registry != nil {
+		return r.Registry
+	}
+	return NewCRDRegistryReader(r.Client)
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -739,7 +755,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the discovery sidecar + tools ConfigMap volume + (sidecar-mode) tool
 	// containers. The binding controller owns the CM CONTENT and the push; this
 	// reconciler is the single writer of the pod template.
-	validBindings, _, err := resolveAgentBindings(ctx, r.Client, deploy.Namespace, deploy.Name)
+	validBindings, _, err := resolveAgentBindings(ctx, r.Client, r.registryReader(), deploy.Namespace, deploy.Name)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
 	}
