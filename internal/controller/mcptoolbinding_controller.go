@@ -75,6 +75,22 @@ type MCPToolBindingReconciler struct {
 	// OBOEgress configures OBO egress-sidecar injection (ADR 0030). Disabled (default)
 	// ⇒ no manifest rewrite — remote endpoints stay verbatim (no drift).
 	OBOEgress OBOEgressConfig
+	// Registry reads referenced ToolRegistries for binding validation (ADR 0043,
+	// the RegistryReader seam). Nil ⇒ the CRD-backed default (K8s API) — the M42
+	// authoritative path, and the envtest path (no DB). A production build wires
+	// the Postgres reader only at the M43 read-switch, and MUST wire this AND the
+	// AgentDeployment reconciler's Registry from the SAME reader instance: the two
+	// reconcilers compute the pushed manifest and the pod template from the same
+	// resolveAgentBindings logic, so different readers would silently drift them.
+	Registry RegistryReader
+}
+
+// registryReader returns the configured RegistryReader or the CRD-backed default.
+func (r *MCPToolBindingReconciler) registryReader() RegistryReader {
+	if r.Registry != nil {
+		return r.Registry
+	}
+	return NewCRDRegistryReader(r.Client)
 }
 
 // pusher returns the configured pusher or a lazily-created default.
@@ -192,7 +208,7 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	ctx context.Context,
 	namespace, agentName string,
 ) (ctrl.Result, error) {
-	valid, validations, err := resolveAgentBindings(ctx, r.Client, namespace, agentName)
+	valid, validations, err := resolveAgentBindings(ctx, r.Client, r.registryReader(), namespace, agentName)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolving bindings for agent %s/%s: %w", namespace, agentName, err)
 	}
