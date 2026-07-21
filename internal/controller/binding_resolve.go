@@ -18,12 +18,15 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
 
@@ -189,12 +192,15 @@ func listAgentBindings(
 //   - the sorted list of valid render bindings (for the manifest / pod template),
 //   - a per-binding validation map keyed by binding name (for status).
 //
-// It performs all reads with c; callers in either controller share the logic so
-// the manifest the binding controller pushes and the pod template the
+// Bindings are listed off c (the K8s API — MCPToolBinding stays a CRD, ADR
+// 0043); referenced registries are loaded through reader (the RegistryReader
+// seam). Callers in either controller share the logic AND must share the same
+// reader so the manifest the binding controller pushes and the pod template the
 // AgentDeployment reconciler renders are computed identically.
 func resolveAgentBindings(
 	ctx context.Context,
 	c client.Client,
+	reader RegistryReader,
 	namespace, agentName string,
 ) (valid []toolmanifest.Binding, validations map[string]bindingValidation, err error) {
 	bindings, err := listAgentBindings(ctx, c, namespace, agentName)
@@ -209,15 +215,20 @@ func resolveAgentBindings(
 		if _, seen := registries[ref]; seen {
 			continue
 		}
-		var reg agentsv1alpha1.ToolRegistry
-		getErr := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref}, &reg)
-		if getErr == nil {
-			registries[ref] = reg
+		reg, getErr := reader.GetRegistry(ctx, namespace, ref)
+		switch {
+		case getErr == nil:
+			registries[ref] = *reg
+		case errors.Is(getErr, controlplane.ErrNotFound):
+			// A genuinely missing registry is left absent from the map →
+			// validateBinding reports RegistryNotFound (a declarative "the
+			// referenced registry doesn't exist").
+		default:
+			// A real read failure is NOT "not found": return it so the reconcile
+			// requeues instead of silently downgrading valid bindings to
+			// RegistryNotFound during a transient store outage (ADR 0043).
+			return nil, nil, fmt.Errorf("reading ToolRegistry %s/%s: %w", namespace, ref, getErr)
 		}
-		// A missing registry is left absent from the map → validateBinding
-		// reports RegistryNotFound. Any non-NotFound error still leaves it
-		// absent; the binding is reported unresolved rather than failing the
-		// whole reconcile (mirrors the ModelRoute controller's tolerant reads).
 	}
 
 	validations = make(map[string]bindingValidation, len(bindings))
