@@ -32,8 +32,9 @@ import (
 // DNS-1123 subdomain names). It returns an error wrapping controlplane.ErrInvalid
 // so the BFF maps it to 422; nil when the record is valid.
 func Validate(pv PromptVersion) error {
-	if strings.TrimSpace(pv.Namespace) == "" {
-		return fmt.Errorf("%w: namespace is required", controlplane.ErrInvalid)
+	if errs := validation.IsDNS1123Label(pv.Namespace); pv.Namespace == "" || len(errs) > 0 {
+		return fmt.Errorf("%w: namespace %q is not a valid Kubernetes namespace: %s",
+			controlplane.ErrInvalid, pv.Namespace, strings.Join(errs, "; "))
 	}
 	if errs := validation.IsDNS1123Subdomain(pv.Name); pv.Name == "" || len(errs) > 0 {
 		return fmt.Errorf("%w: name %q is not a valid Kubernetes object name: %s",

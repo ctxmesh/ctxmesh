@@ -359,7 +359,7 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 	// list with a caller-scoped SSAR (exact RBAC parity with the CRD read) and push
 	// the namespace/search/paging down to the store.
 	if s.toolRegistryStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
 			s.writeAuthzError(w, err, "list tool registries")
 			return
 		}
@@ -432,7 +432,7 @@ func (s *Server) handleGetToolRegistry(w http.ResponseWriter, r *http.Request) {
 
 	// Read-switch (m43.4): store-backed read behind a caller-scoped SSAR.
 	if s.toolRegistryStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
 			s.writeAuthzError(w, err, "get tool registry")
 			return
 		}

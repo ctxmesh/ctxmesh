@@ -230,14 +230,23 @@ func main() {
 			setupLog.Error(err, "Failed to create controller", "controller", "toolregistry-sync")
 			os.Exit(1)
 		}
-		if err := (&controller.PromptVersionSyncReconciler{
-			Client: mgr.GetClient(),
-			Store:  promptStore,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "promptversion-sync")
-			os.Exit(1)
+		// PromptVersion retirement (ADR 0044, m44.2): once PromptVersion is Postgres-
+		// authoritative (BFF writes Postgres-only), the sync reconciler MUST NOT run —
+		// its pruneOrphans would delete the now-authoritative rows (they have no CRD).
+		// RETIRE_PV=true stops it; deploy the operator with the flag BEFORE the BFF
+		// switches its write path (the hard ordering).
+		retirePV := strings.TrimSpace(os.Getenv("RETIRE_PV")) == "true"
+		if !retirePV {
+			if err := (&controller.PromptVersionSyncReconciler{
+				Client: mgr.GetClient(),
+				Store:  promptStore,
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "Failed to create controller", "controller", "promptversion-sync")
+				os.Exit(1)
+			}
 		}
-		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry + PromptVersion sync reconcilers registered")
+		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry sync reconciler registered",
+			"promptVersionSyncReconciler", !retirePV, "promptVersionRetired", retirePV)
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{

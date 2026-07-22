@@ -68,6 +68,25 @@ func TestStore_UpsertGetVersioning(t *testing.T) {
 	})
 }
 
+// TestStore_CreateConflict pins the ATOMIC create the retirement write path needs (ADR 0044): a first
+// Create succeeds at version 1; a second Create of the same (namespace, name) returns ErrConflict (NOT a
+// silent overwrite) — the property that maps to the BFF's 409. Both stores must agree.
+func TestStore_CreateConflict(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		created, err := s.Create(ctx, PromptVersion{Namespace: "default", Name: "c", Repo: "r", Ref: "v1", Path: "p"})
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, created.Version)
+
+		// A duplicate create conflicts and does NOT overwrite.
+		_, err = s.Create(ctx, PromptVersion{Namespace: "default", Name: "c", Repo: "r", Ref: "v2", Path: "p"})
+		assert.ErrorIs(t, err, controlplane.ErrConflict)
+		got, err := s.Get(ctx, "default", "c")
+		require.NoError(t, err)
+		assert.Equal(t, "v1", got.Ref, "the conflicting create must not have overwritten the row")
+	})
+}
+
 func TestStore_Delete(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
 		ctx := context.Background()
