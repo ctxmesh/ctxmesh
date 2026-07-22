@@ -84,6 +84,9 @@ type Server struct {
 	// RBAC parity with the CRD read). Always non-nil (defaulted to authz.SSARAuthorizer{}); tests inject a
 	// fake to drive allow/deny deterministically.
 	authorizer authz.Authorizer
+
+	// retirePromptVersion switches PromptVersion writes to Postgres-only (ADR 0044, m44.2) — see Options.
+	retirePromptVersion bool
 	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
 	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable
 	// runStore (a hot store is per-pod, so a worker on another pod could not see the run).
@@ -310,6 +313,11 @@ type Options struct {
 	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries (ADR 0042 Amdt 2, m41.2).
 	// Optional — nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
 	ToolRegistryStore toolregistry.Store
+	// RetirePromptVersion switches PromptVersion WRITES to Postgres-only (the CRD write path + best-effort
+	// mirror are dropped), gated behind an SSAR on the write verb + in-app validation (ADR 0044, m44.2).
+	// Requires PromptStore. false ⇒ the M43 CRD-write + mirror path (unchanged). Wired from RETIRE_PV; the
+	// operator manager reads the SAME env to stop the PV sync reconciler FIRST (the pruneOrphans ordering).
+	RetirePromptVersion bool
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -346,6 +354,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		authorizer:               authz.SSARAuthorizer{},
+		retirePromptVersion:      opts.RetirePromptVersion,
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
 	}

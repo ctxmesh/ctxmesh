@@ -53,6 +53,23 @@ func (m *memStore) Get(_ context.Context, ns, name string) (*PromptVersion, erro
 	return &out, nil
 }
 
+func (m *memStore) Create(_ context.Context, pv PromptVersion) (*PromptVersion, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := memKey(pv.Namespace, pv.Name)
+	if _, ok := m.rows[k]; ok {
+		return nil, controlplane.ErrConflict
+	}
+	now := m.now()
+	pv.Version = 1
+	pv.CreatedAt = now
+	pv.UpdatedAt = now
+	pv.Labels = cloneLabels(pv.Labels)
+	m.rows[k] = pv
+	out := pv
+	return &out, nil
+}
+
 func (m *memStore) Upsert(_ context.Context, pv PromptVersion) (*PromptVersion, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -356,7 +356,7 @@ func (s *Server) handleListPromptVersions(w http.ResponseWriter, r *http.Request
 	// Read-switch (ADR 0042 Amendment 4, m43.5): store-backed list behind a
 	// caller-scoped SSAR (exact RBAC parity with the CRD read).
 	if s.promptStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
 			s.writeAuthzError(w, err, "list prompt versions")
 			return
 		}
@@ -431,7 +431,7 @@ func (s *Server) handleGetPromptVersion(w http.ResponseWriter, r *http.Request) 
 
 	// Read-switch (m43.5): store-backed read behind a caller-scoped SSAR.
 	if s.promptStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
 			s.writeAuthzError(w, err, "get prompt version")
 			return
 		}
@@ -496,10 +496,40 @@ func (s *Server) handleCreatePromptVersion(w http.ResponseWriter, r *http.Reques
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
+	name := strings.TrimSpace(req.Name)
+
+	// Retirement write-path (ADR 0044, m44.2): PromptVersion is Postgres-authoritative —
+	// write to the store behind a caller-scoped SSAR + in-app validation (the API server
+	// is no longer in the path). Preserves CRD create semantics: 409 on an existing name.
+	if s.retirePromptVersion {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourcePromptVersions, ns, ""); err != nil {
+			s.writeAuthzError(w, err, "create prompt version")
+			return
+		}
+		rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
+		if vErr := promptversion.Validate(rec); vErr != nil {
+			s.writeValidationError(w, vErr)
+			return
+		}
+		// Atomic create: the store returns ErrConflict on a duplicate name (a Get-then-Upsert would race
+		// two concurrent creates into a silent overwrite) — 409, matching the CRD's atomic create.
+		stored, cErr := s.promptStore.Create(r.Context(), rec)
+		if cErr != nil {
+			if errors.Is(cErr, controlplane.ErrConflict) {
+				writeError(w, http.StatusConflict, fmt.Sprintf("prompt version %q already exists", name))
+				return
+			}
+			s.log.Error(cErr, "create PromptVersion in store failed", "name", name, "namespace", ns)
+			writeError(w, http.StatusInternalServerError, "failed to create prompt version")
+			return
+		}
+		writeJSON(w, http.StatusCreated, newPromptVersionDetailFromStore(stored))
+		return
+	}
 
 	pv := &agentsv1alpha1.PromptVersion{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      strings.TrimSpace(req.Name),
+			Name:      name,
 			Namespace: ns,
 		},
 		Spec: agentsv1alpha1.PromptVersionSpec{
@@ -572,6 +602,27 @@ func (s *Server) handleUpdatePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Retirement write-path (m44.2): upsert the store behind an SSAR + validation.
+	if s.retirePromptVersion {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourcePromptVersions, ns, name); err != nil {
+			s.writeAuthzError(w, err, "update prompt version")
+			return
+		}
+		rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
+		if vErr := promptversion.Validate(rec); vErr != nil {
+			s.writeValidationError(w, vErr)
+			return
+		}
+		stored, uErr := s.promptStore.Upsert(r.Context(), rec)
+		if uErr != nil {
+			s.log.Error(uErr, "update PromptVersion in store failed", "name", name, "namespace", ns)
+			writeError(w, http.StatusInternalServerError, "failed to update prompt version")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(stored))
+		return
+	}
+
 	apply := &agentsv1alpha1.PromptVersion{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -633,6 +684,30 @@ func (s *Server) handleDeletePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Retirement write-path (m44.2): delete from the store behind an SSAR. Preserves
+	// CRD delete semantics — 404 on an absent object (the store Delete is idempotent).
+	if s.retirePromptVersion {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourcePromptVersions, ns, name); err != nil {
+			s.writeAuthzError(w, err, "delete prompt version")
+			return
+		}
+		if _, gErr := s.promptStore.Get(r.Context(), ns, name); errors.Is(gErr, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "prompt version not found")
+			return
+		} else if gErr != nil {
+			s.log.Error(gErr, "delete PromptVersion: existence check failed", "name", name, "namespace", ns)
+			writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
+			return
+		}
+		if dErr := s.promptStore.Delete(r.Context(), ns, name); dErr != nil {
+			s.log.Error(dErr, "delete PromptVersion from store failed", "name", name, "namespace", ns)
+			writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	pv := &agentsv1alpha1.PromptVersion{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
@@ -664,7 +739,7 @@ func (s *Server) promptGitForDiff(
 	w http.ResponseWriter, r *http.Request, caller client.Client, ns, name, label string,
 ) (agentsv1alpha1.GitPromptSource, bool) {
 	if s.promptStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
 			s.writeAuthzError(w, err, fmt.Sprintf("get %s prompt version %q", label, name))
 			return agentsv1alpha1.GitPromptSource{}, false
 		}
