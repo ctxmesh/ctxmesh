@@ -38,8 +38,10 @@ import (
 const syncHealthInterval = 30 * time.Minute
 
 const (
-	entityToolRegistry  = "tool_registry"
-	entityPromptVersion = "prompt_version"
+	// entityToolRegistry is the only syncing entity until ToolRegistry is retired (M45);
+	// PromptVersion is already retired (ADR 0044) so no longer syncs. The metric keeps the
+	// {entity} label for forward-compat + dashboard stability.
+	entityToolRegistry = "tool_registry"
 
 	syncResultOK    = "ok"
 	syncResultError = "error"
@@ -57,6 +59,7 @@ var controlplaneSyncTotal = prometheus.NewCounterVec(
 
 func init() { metrics.Registry.MustRegister(controlplaneSyncTotal) }
 
+//nolint:unparam // entity is always entityToolRegistry until a second entity syncs again (M45); the label is part of the metric contract.
 func recordSync(entity, result string) { controlplaneSyncTotal.WithLabelValues(entity, result).Inc() }
 
 // storeOrphanPruner is a leader-elected, one-shot startup Runnable that deletes

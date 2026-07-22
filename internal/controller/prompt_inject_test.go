@@ -33,12 +33,12 @@ import (
 
 // A fast (no-envtest) unit test of the m40.3 compose-and-denormalize branch: resolvePrompt prefers the
 // denormalized annotation and only falls back to the PromptVersion CRD when it's absent.
-func promptTestReconciler(t *testing.T, resolver prompt.Resolver, objs ...runtime.Object) *AgentDeploymentReconciler {
+func promptTestReconciler(t *testing.T, resolver prompt.Resolver) *AgentDeploymentReconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 	return &AgentDeploymentReconciler{
-		Client:         fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build(),
+		Client:         fake.NewClientBuilder().WithScheme(scheme).Build(),
 		PromptResolver: resolver,
 	}
 }
@@ -66,27 +66,14 @@ func TestResolvePrompt_AnnotationFirst_NoCRDNeeded(t *testing.T) {
 	assert.NotEmpty(t, rp.digest)
 }
 
-func TestResolvePrompt_FallsBackToCRD_WhenNoAnnotation(t *testing.T) {
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/y.git", Ref: "v2", Path: "p/s.txt"}
-	pv := &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "legacy"},
-		Spec:       agentsv1alpha1.PromptVersionSpec{Git: src},
-	}
-	r := promptTestReconciler(t, prompt.NewFixtureResolver().Seed(src, "legacy prompt"), pv)
-
-	deploy := promptAgent("legacy", nil) // no annotation → fetch the CRD
-	rp, err := r.resolvePrompt(context.Background(), deploy)
-	require.NoError(t, err)
-	assert.True(t, rp.hasPrompt)
-	assert.Equal(t, "legacy prompt", rp.content)
-}
-
-func TestResolvePrompt_NoAnnotationNoCRD_UserError(t *testing.T) {
+// PromptVersion is retired to Postgres (ADR 0044) — there is no CRD fallback. An agent without the stamped
+// annotation surfaces a user-facing PromptPointerMissing status error (the BFF stamps it on create/edit).
+func TestResolvePrompt_NoAnnotation_UserError(t *testing.T) {
 	r := promptTestReconciler(t, prompt.NewFixtureResolver())
 	_, err := r.resolvePrompt(context.Background(), promptAgent("ghost", nil))
 	pe, ok := asPromptResolveError(err)
 	require.True(t, ok, "want a user-facing promptResolveError, got %v", err)
-	assert.Equal(t, "PromptVersionNotFound", pe.reason)
+	assert.Equal(t, "PromptPointerMissing", pe.reason)
 }
 
 func TestResolvePrompt_MalformedAnnotation_UserError(t *testing.T) {
@@ -105,34 +92,19 @@ func TestResolvePrompt_NoPromptRef_NoOp(t *testing.T) {
 	assert.False(t, rp.hasPrompt)
 }
 
-// The annotation path and the CRD path must produce the SAME digest/content for the same pointer (so a
-// stamped agent rolls to the SAME ksvc revision suffix), AND the annotation must win over a divergent
-// PromptVersion in the store (self-contained reconcile). Locks the m40.3 equivalence contract.
-func TestResolvePrompt_AnnotationEquivalentToCRD_AndWins(t *testing.T) {
+// The denormalized annotation is the sole prompt source (ADR 0044): it resolves to its pointer's content
+// and yields a stable, non-empty digest (so a stamped agent rolls to a deterministic ksvc revision suffix).
+func TestResolvePrompt_AnnotationResolves(t *testing.T) {
 	ctx := context.Background()
 	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/x.git", Ref: "v9", Path: "p/s.txt"}
 	resolver := prompt.NewFixtureResolver().Seed(src, "same content")
+	r := promptTestReconciler(t, resolver)
 
-	// CRD path: no annotation, the matching PromptVersion in the store.
-	crdR := promptTestReconciler(t, resolver, &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pv"},
-		Spec:       agentsv1alpha1.PromptVersionSpec{Git: src},
-	})
-	crdRP, err := crdR.resolvePrompt(ctx, promptAgent("pv", nil))
-	require.NoError(t, err)
-
-	// Annotation path: same pointer via the annotation, but a DIVERGENT PromptVersion of the same name in
-	// the store — if the annotation is (wrongly) ignored, this resolves to an unseeded pointer and errors.
-	annR := promptTestReconciler(t, resolver, &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pv"},
-		Spec:       agentsv1alpha1.PromptVersionSpec{Git: agentsv1alpha1.GitPromptSource{Repo: "https://git/OTHER.git", Ref: "OTHER", Path: "OTHER"}},
-	})
 	raw, err := json.Marshal(prompt.ResolvedPointer{Name: "pv", Repo: src.Repo, Ref: src.Ref, Path: src.Path})
 	require.NoError(t, err)
-	annRP, err := annR.resolvePrompt(ctx, promptAgent("pv", map[string]string{prompt.ResolvedPromptAnnotation: string(raw)}))
+	rp, err := r.resolvePrompt(ctx, promptAgent("pv", map[string]string{prompt.ResolvedPromptAnnotation: string(raw)}))
 	require.NoError(t, err)
-
-	assert.Equal(t, crdRP.digest, annRP.digest, "same pointer → identical digest (same ksvc revision suffix)")
-	assert.Equal(t, crdRP.content, annRP.content)
-	assert.Equal(t, "same content", annRP.content, "the annotation must win over the divergent CRD")
+	assert.True(t, rp.hasPrompt)
+	assert.Equal(t, "same content", rp.content)
+	assert.NotEmpty(t, rp.digest)
 }
