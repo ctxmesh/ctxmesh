@@ -36,8 +36,8 @@ import (
 )
 
 // mirrorToolRegistry best-effort dual-writes a ToolRegistry to the control-plane Postgres store (ADR 0042
-// Amendment 2, m41.2). Same posture as mirrorPromptVersion: a store failure is LOGGED, never returned —
-// the caller-scoped CRD write already succeeded and stays the source of truth during the migration window.
+// Amendment 2, m41.2): a store failure is LOGGED, never returned — the caller-scoped CRD write already
+// succeeded and stays the source of truth during the migration window (ToolRegistry is not yet retired).
 // nil store (CONTROLPLANE_DSN unset) is a no-op. The catalog (spec.tools[]), the annotations (incl. the
 // non-secret OAuth-client config), and the labels are mirrored; per-user grant tokens are not here.
 func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.ToolRegistry) {

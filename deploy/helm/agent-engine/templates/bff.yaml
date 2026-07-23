@@ -99,6 +99,8 @@ spec:
           value: {{ .Values.bff.mcp.enabled | quote }}
         - name: MCP_REQUIRE_APPROVAL
           value: {{ .Values.bff.mcp.requireApproval | quote }}
+        - name: CONSOLE_URL
+          value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | quote }}
         - name: OIDC_ENABLED

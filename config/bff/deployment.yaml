@@ -88,6 +88,14 @@ spec:
             # `bff.mcp.requireApproval`, default renders "false" (no drift).
             - name: MCP_REQUIRE_APPROVAL
               value: "false"
+            # CONSOLE_URL is the canonical console origin for cross-origin MCP consent
+            # (ADR 0040): the pre-registered redirect_uri + the trusted cross-origin
+            # relay target. Empty (the default) ⇒ single-origin behaviour (the request's
+            # own origin is the callback, no relay). This literal keeps `kustomize build`/
+            # `make deploy` valid; the Helm chart templates it from `bff.consoleURL`,
+            # default renders "" (no drift).
+            - name: CONSOLE_URL
+              value: ""
             # MCP_CREDENTIAL_NAMESPACE is the m25.1b locked platform namespace that
             # holds every MCP grant Secret (ADR 0029 §7). Empty (the default) keeps the
             # legacy per-request-namespace grant path (ADR 0011) so `kustomize build`/

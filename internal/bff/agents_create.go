@@ -353,6 +353,8 @@ func createPromptVersionInStore(ctx context.Context, promptStore promptversion.S
 	if promptStore == nil {
 		return &createError{status: 501, msg: "creating a prompt version requires the control-plane store (CONTROLPLANE_DSN)"}
 	}
+	// Namespace comes from the create request (ns), NOT pv.Namespace — the whole agent create is scoped to
+	// one namespace, matching how the CRD path derived it.
 	rec := promptversion.PromptVersion{
 		Namespace: ns, Name: pv.Name,
 		Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path, Labels: pv.Labels,

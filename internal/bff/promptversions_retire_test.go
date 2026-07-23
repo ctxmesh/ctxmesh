@@ -149,3 +149,22 @@ func TestPromptVersionRetire_DeleteForbidden(t *testing.T) {
 	_, err = store.Get(ctx, pvNS, "pv1")
 	assert.NoError(t, err, "row survives a denied delete")
 }
+
+// PUT rename guard: a body name that mismatches the URL name → 400 (S2 coverage).
+func TestPromptVersionRetire_UpdateRenameGuard400(t *testing.T) {
+	s, _ := pvRetireServer(t, &recordingAuthorizer{})
+	_, code, _ := putPromptVersion(t, s, pvNS, "pv1", PromptVersionUpdateRequest{
+		Name: "different", Git: GitPromptSourceDTO{Repo: "r", Ref: "v", Path: "p"},
+	})
+	assert.Equal(t, http.StatusBadRequest, code)
+}
+
+// buildPromptVersionGit rejects an empty git pointer at 400 BEFORE the store branch — identically on the
+// create path (S3 coverage; proves the comment on the invalid-name test, not just asserts it).
+func TestPromptVersionRetire_CreateMissingGit400(t *testing.T) {
+	s, _ := pvRetireServer(t, &recordingAuthorizer{})
+	req := pvCreateReq("pv1")
+	req.Git.Repo = ""
+	_, code, _ := createPromptVersion(t, s, req)
+	assert.Equal(t, http.StatusBadRequest, code)
+}
