@@ -17,6 +17,43 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
+// Retired delete: the server's ToolRegistry is removed from the store (SSAR-gated).
+func TestDeleteMCPServer_RetireDeletesStore(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	auth := &recordingAuthorizer{}
+	s, _, _ := newMCPServer(t, c, false)
+	s.toolRegistryStore = toolregistry.NewMemStore()
+	s.retireToolRegistry = true
+	s.authorizer = auth
+	_, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(scopedRegistry("scalekit-mcp", scopeOrg, "")))
+	require.NoError(t, err)
+
+	rec, resp := deleteMCPServer(t, s, "prod", "scalekit-mcp", "any-token")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, resp.Deleted, "ToolRegistry")
+	assert.Equal(t, authz.VerbDelete, auth.last.Verb)
+	_, gErr := s.toolRegistryStore.Get(ctx, "prod", "scalekit-mcp")
+	assert.ErrorIs(t, gErr, controlplane.ErrNotFound)
+}
+
+// A caller who can READ but not DELETE is 403'd and the store row survives.
+func TestDeleteMCPServer_RetireDeleteDenied(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newMCPServer(t, c, false)
+	s.toolRegistryStore = toolregistry.NewMemStore()
+	s.retireToolRegistry = true
+	s.authorizer = &verbAuthorizer{deny: map[string]bool{authz.VerbDelete: true}}
+	_, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(scopedRegistry("scalekit-mcp", scopeOrg, "")))
+	require.NoError(t, err)
+
+	rec, _ := deleteMCPServer(t, s, "prod", "scalekit-mcp", "any-token")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	_, gErr := s.toolRegistryStore.Get(ctx, "prod", "scalekit-mcp")
+	assert.NoError(t, gErr, "a denied delete leaves the store row intact")
+}
+
 // Retired register: the ToolRegistry catalog is written to the store (SSAR-gated,
 // validated), NOT the CRD; the other bundle objects still go via the caller.
 func TestCreateMCPObjects_RetireWritesStore(t *testing.T) {
