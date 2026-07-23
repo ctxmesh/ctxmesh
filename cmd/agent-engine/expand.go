@@ -24,6 +24,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -106,5 +107,18 @@ func runExpand(path string, w io.Writer) error {
 	if err != nil {
 		return &expand.Error{Kind: expand.KindParse, Err: fmt.Errorf("reading %q: %v", path, err)}
 	}
-	return expand.ExpandBytes(data, w)
+	// Buffer so we can warn (ADR 0044) when the output includes a PromptVersion doc — PromptVersion is
+	// retired to Postgres (API-managed), so that document cannot be `kubectl apply`'d (there is no CRD).
+	var buf bytes.Buffer
+	if err := expand.ExpandBytes(data, &buf); err != nil {
+		return err
+	}
+	if bytes.Contains(buf.Bytes(), []byte("kind: PromptVersion")) {
+		fmt.Fprintln(os.Stderr,
+			"Note: PromptVersion is API-managed (retired to Postgres, ADR 0044) — the PromptVersion document "+
+				"below cannot be applied with kubectl. Create the agent via the console/API, or use "+
+				"`promptRef: <name>` to reference an existing prompt.")
+	}
+	_, err = w.Write(buf.Bytes())
+	return err
 }

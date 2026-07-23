@@ -15,8 +15,8 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 )
 
-// pvRetireServer builds a Server in PromptVersion-retirement mode: writes go to the
-// store behind the injected authorizer (ADR 0044, m44.2).
+// pvRetireServer builds a Server with the store wired — PromptVersion is Postgres-only (ADR 0044), so
+// wiring the store IS the retirement mode; writes go to the store behind the injected authorizer.
 func pvRetireServer(t *testing.T, auth authz.Authorizer) (*Server, promptversion.Store) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
@@ -24,7 +24,6 @@ func pvRetireServer(t *testing.T, auth authz.Authorizer) (*Server, promptversion
 	store := promptversion.NewMemStore()
 	s.promptStore = store
 	s.authorizer = auth
-	s.retirePromptVersion = true
 	return s, store
 }
 

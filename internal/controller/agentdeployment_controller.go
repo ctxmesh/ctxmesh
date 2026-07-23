@@ -236,7 +236,7 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=promptversions,verbs=get;list;watch
+// PromptVersion retired to Postgres (ADR 0044) — the controller reads the resolved-prompt annotation, no CRD RBAC.
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=eventing.knative.dev,resources=triggers,verbs=get;list;watch;create;update;patch;delete

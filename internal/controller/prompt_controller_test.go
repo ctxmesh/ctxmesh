@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -35,32 +36,34 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
 
-// mkPromptVersion creates a PromptVersion with the given git pointer and returns
-// it. The referenced repo/path are fixed; the ref is the swappable pin.
-func mkPromptVersion(t *testing.T, name, namespace, ref string) *agentsv1alpha1.PromptVersion {
-	t.Helper()
-	pv := &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.PromptVersionSpec{
-			Git: agentsv1alpha1.GitPromptSource{
-				Repo: "https://github.com/example/prompts.git",
-				Ref:  ref,
-				Path: "agents/echo/system.txt",
-			},
-		},
+// PromptVersion is retired to Postgres (ADR 0044): the controller resolves the prompt from the
+// DENORMALIZED resolved-prompt annotation the BFF stamps (m40.3), NOT a PromptVersion CRD. These envtests
+// therefore stamp the annotation on the AgentDeployment rather than creating a PromptVersion object.
+
+// echoGit is the fixed prompt git pointer; ref is the swappable pin.
+func echoGit(ref string) agentsv1alpha1.GitPromptSource {
+	return agentsv1alpha1.GitPromptSource{
+		Repo: "https://github.com/example/prompts.git",
+		Ref:  ref,
+		Path: "agents/echo/system.txt",
 	}
-	require.NoError(t, k8sClient.Create(testCtx, pv))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, pv) })
-	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(pv), pv))
-	return pv
 }
 
-// TestReconcile_PromptMaterialisedAndRevisionRolls: an agent with a promptRef
-// gets the resolved prompt materialised into a <agent>-prompt ConfigMap, mounted
-// read-only into the user container, with PROMPT_FILE + PROMPT_VERSION static env
-// — and its revision name carries a "-h<digest>" suffix (the prompt folds into the
-// combined binding digest), whereas the SAME agent WITHOUT a promptRef gets the
-// bare "-{hash}" name. This proves the prompt rolls a revision.
+// stampPrompt sets the resolved-prompt annotation (the denormalized pointer) on the agent.
+func stampPrompt(t *testing.T, deploy *agentsv1alpha1.AgentDeployment, promptName string, git agentsv1alpha1.GitPromptSource) {
+	t.Helper()
+	raw, err := json.Marshal(prompt.ResolvedPointer{Name: promptName, Repo: git.Repo, Ref: git.Ref, Path: git.Path})
+	require.NoError(t, err)
+	if deploy.Annotations == nil {
+		deploy.Annotations = map[string]string{}
+	}
+	deploy.Annotations[prompt.ResolvedPromptAnnotation] = string(raw)
+}
+
+// TestReconcile_PromptMaterialisedAndRevisionRolls: an agent with a stamped prompt pointer gets the resolved
+// prompt materialised into a <agent>-prompt ConfigMap, mounted read-only with PROMPT_FILE + PROMPT_VERSION
+// static env — and its revision name carries a "-h<digest>" suffix, whereas the SAME agent WITHOUT a prompt
+// gets the bare "-{hash}" name. This proves the prompt rolls a revision.
 func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	const (
 		name      = "prompt-agent"
@@ -68,15 +71,15 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 		image     = "ghcr.io/ctxmesh/example-agent:pinned"
 	)
 
-	pv := mkPromptVersion(t, "echo-prompt-v1", namespace, "v1")
-
+	git := echoGit("v1")
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
 			Image:     image,
-			PromptRef: pv.Name,
+			PromptRef: "echo-prompt-v1",
 		},
 	}
+	stampPrompt(t, deploy, "echo-prompt-v1", git)
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
@@ -103,9 +106,7 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	content := cm.Data[promptConfigMapKey]
 	require.NotEmpty(t, content, "prompt ConfigMap must carry the resolved content")
 
-	// The resolved content is the fixture resolver's deterministic output for this
-	// pointer — assert we can recompute the same version from it.
-	wantVersion := prompt.Version(pv.Spec.Git, content)
+	wantVersion := prompt.Version(git, content)
 
 	// ── User container: prompt volume mount + static env, no valueFrom ─────────
 	userContainer := ksvc.Spec.Template.Spec.Containers[0]
@@ -143,7 +144,7 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 		assert.Nil(t, e.ValueFrom, "ksvc env %q must be static (no valueFrom)", e.Name)
 	}
 
-	// ── Baseline: an identical agent WITHOUT a promptRef has the bare name ──────
+	// ── Baseline: an identical agent WITHOUT a prompt has the bare name ─────────
 	bare := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare-agent", Namespace: namespace},
 		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: image},
@@ -160,35 +161,30 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "bare-agent-"+bareHash, bareKsvc.Spec.Template.Name,
 		"a promptless agent must have the bare revision name (no -h suffix)")
-	// And it must NOT mount a prompt volume or inject prompt env.
 	for _, e := range bareKsvc.Spec.Template.Spec.Containers[0].Env {
 		assert.NotEqual(t, envPromptFile, e.Name, "promptless agent must not get PROMPT_FILE")
 		assert.NotEqual(t, envPromptVersion, e.Name, "promptless agent must not get PROMPT_VERSION")
 	}
 }
 
-// TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage is the m9.3 core invariant:
-// swapping the referenced PromptVersion's git.ref (a prompt-ONLY change — the
-// AgentDeployment spec is untouched, so spec.Image and specHash are identical)
-// rolls a NEW Knative revision (new prompt content, new -h<digest> suffix) while
-// the container IMAGE DIGEST is UNCHANGED. No image rebuild.
+// TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage is the m9.3 core invariant: swapping the resolved prompt
+// pointer's ref (a prompt-ONLY change — spec.Image + specHash are identical; only the stamped annotation
+// changes) rolls a NEW Knative revision while the container IMAGE DIGEST is UNCHANGED. No image rebuild.
 func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 	const (
 		name      = "swap-agent"
 		namespace = "default"
-		// A digest-pinned image so "image digest unchanged" is literal.
-		image = "ghcr.io/ctxmesh/example-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		image     = "ghcr.io/ctxmesh/example-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	)
-
-	pv := mkPromptVersion(t, "swap-prompt", namespace, "ref-v1")
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
 			Image:     image,
-			PromptRef: pv.Name,
+			PromptRef: "swap-prompt",
 		},
 	}
+	stampPrompt(t, deploy, "swap-prompt", echoGit("ref-v1"))
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
@@ -209,12 +205,11 @@ func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 	content1 := cm1.Data[promptConfigMapKey]
 	promptVer1 := envByName(ksvc1.Spec.Template.Spec.Containers[0].Env)[envPromptVersion]
 
-	// ── Swap ONLY the PromptVersion's git.ref (prompt-only change) ─────────────
-	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(pv), pv))
-	pv.Spec.Git.Ref = "ref-v2"
-	require.NoError(t, k8sClient.Update(testCtx, pv))
+	// ── Swap ONLY the resolved-prompt pointer's ref (prompt-only change) ───────
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+	stampPrompt(t, deploy, "swap-prompt", echoGit("ref-v2"))
+	require.NoError(t, k8sClient.Update(testCtx, deploy))
 
-	// The AgentDeployment spec is UNCHANGED — reconcile the SAME deployment again.
 	reconcileNN(t, r, name, namespace)
 	var ksvc2 servingv1.Service
 	require.NoError(t, k8sClient.Get(testCtx,
@@ -233,25 +228,23 @@ func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 	assert.NotEqual(t, promptVer1, promptVer2, "PROMPT_VERSION must change on a ref swap")
 	assert.NotEqual(t, rev1, rev2, "the Knative revision must roll on a prompt-only swap (new -h digest)")
 
-	// THE CORE INVARIANT: the container image digest is byte-identical across the
-	// prompt swap — no image rebuild.
+	// THE CORE INVARIANT: the container image digest is byte-identical across the swap — no image rebuild.
 	assert.Equal(t, image, image1, "revision 1 uses the pinned image digest")
 	assert.Equal(t, image, image2, "revision 2 uses the SAME pinned image digest")
 	assert.Equal(t, image1, image2,
 		"prompt-only deploy: the container image digest is UNCHANGED across a prompt swap")
 
-	// The spec hash prefix (which folds spec.Image) is identical across the swap —
-	// only the -h<digest> suffix differs. Belt-and-braces that the image path did
-	// not move.
+	// The spec hash prefix (which folds spec.Image, NOT the annotation) is identical across the swap — only
+	// the -h<digest> suffix differs.
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(rev1, name+"-"+hash+"-h"))
 	assert.True(t, strings.HasPrefix(rev2, name+"-"+hash+"-h"))
 }
 
-// TestReconcile_PromptRefMissing: a promptRef naming a non-existent PromptVersion
-// is user input — the reconcile sets Ready=False (no panic, no hard error) and
-// materialises NO ksvc/prompt, so a prior revision (if any) would keep serving.
+// TestReconcile_PromptRefMissing: a promptRef with NO stamped pointer (e.g. a raw kubectl apply) is user
+// input — the reconcile sets Ready=False (reason PromptPointerMissing, no panic/hard error) and materialises
+// NO ksvc/prompt, so a prior revision (if any) keeps serving.
 func TestReconcile_PromptRefMissing(t *testing.T) {
 	const (
 		name      = "badref-agent"
@@ -265,12 +258,11 @@ func TestReconcile_PromptRefMissing(t *testing.T) {
 			PromptRef: "does-not-exist",
 		},
 	}
+	// No stamped annotation — the unresolved-pointer case.
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 
-	// reconcileNN asserts NO error — a missing PromptVersion is surfaced on status,
-	// not returned as a reconcile error.
 	reconcileNN(t, newReconciler(), name, namespace)
 
 	var updated agentsv1alpha1.AgentDeployment
@@ -278,49 +270,43 @@ func TestReconcile_PromptRefMissing(t *testing.T) {
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	require.NotNil(t, cond, "Ready condition must be set")
-	assert.Equal(t, metav1.ConditionFalse, cond.Status, "Ready must be False for an unresolvable promptRef")
-	assert.Equal(t, "PromptVersionNotFound", cond.Reason)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "Ready must be False for an unstamped promptRef")
+	assert.Equal(t, "PromptPointerMissing", cond.Reason)
 
-	// No ksvc must have been created (the workload write is skipped on the user
-	// error — the OLD revision, had there been one, keeps serving).
 	var ksvc servingv1.Service
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc)
-	assert.Error(t, err, "no ksvc must be created when the promptRef is unresolvable")
+	assert.Error(t, err, "no ksvc must be created when the prompt pointer is unstamped")
 
-	// No prompt ConfigMap either.
 	var cm corev1.ConfigMap
 	err = k8sClient.Get(testCtx,
 		types.NamespacedName{Name: promptConfigMapName(name), Namespace: namespace}, &cm)
-	assert.Error(t, err, "no prompt ConfigMap must be created on an unresolvable promptRef")
+	assert.Error(t, err, "no prompt ConfigMap must be created on an unstamped promptRef")
 }
 
-// TestReconcile_PromptUnresolvable: a PromptVersion whose git pointer the resolver
-// cannot resolve (ErrNotFound — a bad ref / missing path) is likewise surfaced as
-// Ready=False (reason PromptUnresolvable), keeping the old revision serving. Uses
-// an explicit not-found seed on the fixture resolver so the failure path is
-// exercised deterministically offline.
+// TestReconcile_PromptUnresolvable: a stamped prompt pointer the resolver cannot resolve (ErrNotFound — a bad
+// ref / missing path) is surfaced as Ready=False (reason PromptUnresolvable), keeping the old revision
+// serving. Uses an explicit not-found seed on the fixture resolver so the failure path is exercised offline.
 func TestReconcile_PromptUnresolvable(t *testing.T) {
 	const (
 		name      = "unresolvable-agent"
 		namespace = "default"
 	)
 
-	pv := mkPromptVersion(t, "unresolvable-prompt", namespace, "deleted-ref")
-
-	// A reconciler whose resolver treats this exact pointer as not-found.
+	git := echoGit("deleted-ref")
 	r := &AgentDeploymentReconciler{
 		Client:         k8sClient,
 		Scheme:         k8sClient.Scheme(),
-		PromptResolver: prompt.NewFixtureResolver().SeedNotFound(pv.Spec.Git),
+		PromptResolver: prompt.NewFixtureResolver().SeedNotFound(git),
 	}
 
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
 			Image:     "ghcr.io/ctxmesh/example-agent:latest",
-			PromptRef: pv.Name,
+			PromptRef: "unresolvable-prompt",
 		},
 	}
+	stampPrompt(t, deploy, "unresolvable-prompt", git)
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))

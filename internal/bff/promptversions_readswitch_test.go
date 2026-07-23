@@ -128,3 +128,28 @@ func TestPromptVersionDiffReadSwitch_Forbidden(t *testing.T) {
 	_, code, _ := getPromptVersionDiff(t, s, pvNS, "pv-v2", "pv-v1")
 	assert.Equal(t, http.StatusForbidden, code)
 }
+
+// The store-backed list pushes q (search), limit (page size), and cursor (page token) down to the store —
+// the handler-level contract after the read-switch (the store's filter/sort/paginate is conformance-tested
+// separately). Closes the coverage the deleted CRD-path list tests held (ADR 0044 m44.5b, Fable Risk 2).
+func TestPromptVersionListReadSwitch_FilterAndPaginate(t *testing.T) {
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, nil)
+	seedPV(t, store, "alpha", "r", "v", "p")
+	seedPV(t, store, "alpha-2", "r", "v", "p")
+	seedPV(t, store, "beta", "r", "v", "p")
+
+	// q= filters by name substring (2 of 3 match "alpha").
+	body, code := getPromptVersions(t, s, "namespace="+pvNS+"&q=alpha")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, body.Items, 2)
+
+	// limit=1 paginates; the opaque cursor fetches the next page (a distinct item).
+	page1, code := getPromptVersions(t, s, "namespace="+pvNS+"&q=alpha&limit=1")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, page1.Items, 1)
+	require.NotEmpty(t, page1.NextCursor)
+	page2, code := getPromptVersions(t, s, "namespace="+pvNS+"&q=alpha&limit=1&cursor="+page1.NextCursor)
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, page2.Items, 1)
+	assert.NotEqual(t, page1.Items[0].Name, page2.Items[0].Name)
+}
