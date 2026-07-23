@@ -662,13 +662,9 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	opts := []client.ListOption{client.MatchingLabels{labelManagedBy: managedByMCP}}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace,
+		map[string]string{labelManagedBy: managedByMCP})
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -748,13 +744,8 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	var opts []client.ListOption
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace, nil)
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return

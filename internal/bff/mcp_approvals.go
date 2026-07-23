@@ -83,13 +83,9 @@ func (s *Server) handleListMCPApprovals(w http.ResponseWriter, r *http.Request) 
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	opts := []client.ListOption{client.MatchingLabels{labelManagedBy: managedByMCP}}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace,
+		map[string]string{labelManagedBy: managedByMCP})
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -268,8 +264,8 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 // flow (no managed-by=agent-engine-mcp label) is a 404 — the approval surface acts
 // ONLY on BYO-MCP servers, never on operator-curated ToolRegistries.
 func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, bool) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)
+	if err != nil {
 		s.writeGetError(w, err, "MCP server")
 		return nil, false
 	}
@@ -277,7 +273,7 @@ func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, c
 		writeError(w, http.StatusNotFound, "MCP server not found")
 		return nil, false
 	}
-	return &tr, true
+	return tr, true
 }
 
 // openMCPEgress creates the per-server egress NetworkPolicy for an approved server,
