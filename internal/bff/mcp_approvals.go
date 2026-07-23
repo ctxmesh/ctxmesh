@@ -28,6 +28,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // The MCP APPROVAL QUEUE — the operator-facing surface for the HARDENED trust
@@ -171,7 +172,26 @@ func (s *Server) handleApproveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	tr.Annotations[annMCPStatus] = agentsv1alpha1.ApprovalApproved
 
-	if err := caller.Update(r.Context(), tr); err != nil {
+	// Retired (RETIRE_TR): the approve write is the operator-gated flip of the
+	// controller-owned approvalStatus — persist to the store behind SSAR VerbUpdate
+	// (the same RBAC the CRD update enforced). approve OWNS approvalStatus, so this
+	// is the one path allowed to set it.
+	if s.retireToolRegistry {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, name); err != nil {
+			s.writeAuthzError(w, err, "approve the MCP server")
+			return
+		}
+		rec := crdToolRegistryToStore(tr)
+		if vErr := toolregistry.Validate(rec); vErr != nil {
+			s.writeValidationError(w, vErr)
+			return
+		}
+		if _, err := s.toolRegistryStore.Upsert(r.Context(), rec); err != nil {
+			s.log.Error(err, "approve MCP: store update failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, "failed to approve the MCP server")
+			return
+		}
+	} else if err := caller.Update(r.Context(), tr); err != nil {
 		status, msg := classifyAgentRegistryWriteError(err, mcpApprovalKind, name)
 		if status >= 500 {
 			s.log.Error(err, "approve MCP: status update failed", "namespace", ns, "name", name)

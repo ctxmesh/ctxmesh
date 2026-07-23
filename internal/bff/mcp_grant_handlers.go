@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -526,8 +526,8 @@ func fillEmptyOAuthConfig(base, src mcpOAuthConfig) mcpOAuthConfig {
 // failed read/write is logged, never fatal — the current consent still proceeds. Runs
 // caller-scoped (a viewer who cannot update the registry just skips the backfill).
 func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Client, ns, server string, cfg mcpOAuthConfig) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: server}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(ctx, caller, ns, server)
+	if err != nil {
 		s.log.Info("oauth-config backfill skipped: could not read ToolRegistry", "server", server)
 		return
 	}
@@ -544,7 +544,20 @@ func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Clien
 	set(annMCPOAuthClientID, cfg.ClientID)
 	set(annMCPOAuthScope, cfg.Scope)
 	set(annMCPOAuthRedirectURI, cfg.RedirectURI)
-	if err := caller.Update(ctx, &tr); err != nil {
+	// Persist — best-effort throughout (a failed read/authz/write just skips the
+	// backfill; the current consent still proceeds). Retired ⇒ store.Upsert behind
+	// SSAR VerbUpdate (a caller who cannot update just skips, as on the CRD path).
+	if s.retireToolRegistry {
+		if aErr := s.authorizeStore(ctx, caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
+			s.log.Info("oauth-config backfill skipped: not permitted to update (non-fatal)", "server", server)
+			return
+		}
+		if _, uErr := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); uErr != nil {
+			s.log.Info("oauth-config backfill skipped: could not persist to store (non-fatal)", "server", server)
+		}
+		return
+	}
+	if uErr := caller.Update(ctx, tr); uErr != nil {
 		s.log.Info("oauth-config backfill skipped: could not persist annotations (non-fatal)", "server", server)
 	}
 }
