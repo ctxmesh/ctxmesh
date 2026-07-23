@@ -153,3 +153,52 @@ func TestPromptVersionListReadSwitch_FilterAndPaginate(t *testing.T) {
 	require.Len(t, page2.Items, 1)
 	assert.NotEqual(t, page1.Items[0].Name, page2.Items[0].Name)
 }
+
+// Diff error paths (S1 coverage — these handler branches survived the CRD-path test deletion):
+// no resolver → 501, missing ?from → 400, a version absent from the store → 404, an unresolvable git
+// pointer → 404, and byte-identical content → 200 identical:true. (A transient resolve error → 502 needs a
+// custom erroring resolver; the fixture only models Seed/SeedNotFound.)
+func TestPromptVersionDiffReadSwitch_NoResolver501(t *testing.T) {
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, nil) // nil resolver
+	seedPV(t, store, "pv-a", "r", "v1", "s.md")
+	seedPV(t, store, "pv-b", "r", "v2", "s.md")
+	_, code, _ := getPromptVersionDiff(t, s, pvNS, "pv-b", "pv-a")
+	assert.Equal(t, http.StatusNotImplemented, code)
+}
+
+func TestPromptVersionDiffReadSwitch_MissingFrom400(t *testing.T) {
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, prompt.NewFixtureResolver())
+	seedPV(t, store, "pv-b", "r", "v2", "s.md")
+	_, code, _ := getPromptVersionDiff(t, s, pvNS, "pv-b", "") // no ?from
+	assert.Equal(t, http.StatusBadRequest, code)
+}
+
+func TestPromptVersionDiffReadSwitch_VersionNotFound404(t *testing.T) {
+	s, _ := pvReadSwitchServer(t, &recordingAuthorizer{}, prompt.NewFixtureResolver())
+	_, code, _ := getPromptVersionDiff(t, s, pvNS, "ghost-to", "ghost-from") // neither in the store
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
+func TestPromptVersionDiffReadSwitch_Unresolvable404(t *testing.T) {
+	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	resolver := prompt.NewFixtureResolver().Seed(fromSrc, "one\n").SeedNotFound(toSrc)
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, resolver)
+	seedPV(t, store, "pv-v1", fromSrc.Repo, fromSrc.Ref, fromSrc.Path)
+	seedPV(t, store, "pv-v2", toSrc.Repo, toSrc.Ref, toSrc.Path)
+	_, code, _ := getPromptVersionDiff(t, s, pvNS, "pv-v2", "pv-v1")
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
+func TestPromptVersionDiffReadSwitch_Identical200(t *testing.T) {
+	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	resolver := prompt.NewFixtureResolver().Seed(fromSrc, "same\n").Seed(toSrc, "same\n")
+	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, resolver)
+	seedPV(t, store, "pv-v1", fromSrc.Repo, fromSrc.Ref, fromSrc.Path)
+	seedPV(t, store, "pv-v2", toSrc.Repo, toSrc.Ref, toSrc.Path)
+	resp, code, body := getPromptVersionDiff(t, s, pvNS, "pv-v2", "pv-v1")
+	require.Equal(t, http.StatusOK, code, body)
+	assert.True(t, resp.Identical)
+	assert.Empty(t, resp.Diff)
+}
