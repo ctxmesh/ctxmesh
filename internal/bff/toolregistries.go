@@ -17,7 +17,6 @@ limitations under the License.
 package bff
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,30 +24,13 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
-
-// mirrorToolRegistry best-effort dual-writes a ToolRegistry to the control-plane Postgres store (ADR 0042
-// Amendment 2, m41.2): a store failure is LOGGED, never returned — the caller-scoped CRD write already
-// succeeded and stays the source of truth during the migration window (ToolRegistry is not yet retired).
-// nil store (CONTROLPLANE_DSN unset) is a no-op. The catalog (spec.tools[]), the annotations (incl. the
-// non-secret OAuth-client config), and the labels are mirrored; per-user grant tokens are not here.
-func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.ToolRegistry) {
-	if s.toolRegistryStore == nil {
-		return
-	}
-	if _, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); err != nil {
-		s.log.Error(err, "mirror ToolRegistry to control-plane store failed (CRD remains source of truth)",
-			"namespace", tr.Namespace, "name", tr.Name)
-	}
-}
 
 // crdToolRegistryToStore maps a ToolRegistry CRD object to its store record — the
 // forward projection (storeToolRegistryToCRD is the inverse). The tool schema is
@@ -93,31 +75,14 @@ func toolRegistryStoreWriteError(err error, name, action string) *createError {
 	}
 }
 
-// unmirrorToolRegistry best-effort removes a ToolRegistry from the store after a successful CRD delete.
-func (s *Server) unmirrorToolRegistry(ctx context.Context, ns, name string) {
-	if s.toolRegistryStore == nil {
-		return
-	}
-	if err := s.toolRegistryStore.Delete(ctx, ns, name); err != nil {
-		s.log.Error(err, "unmirror ToolRegistry from control-plane store failed", "namespace", ns, "name", name)
-	}
-}
-
-// toolRegistryKind is the CRD kind name for a ToolRegistry (used in error
-// messages and the rename guard so they match the API server's kind strings).
+// toolRegistryKind is the ToolRegistry kind name (used in the register bundle's
+// created-object list + error messages).
 const toolRegistryKind = "ToolRegistry"
 
-// retiredToolRegistryStore returns the ToolRegistry store ONLY when the write path
-// is retired (RETIRE_TR) — the signal callers use to route catalog reads/writes to
-// Postgres instead of the CRD. nil in the dual-write window keeps the CRD path
-// byte-for-byte. (retireToolRegistry can only be true with a non-nil store — the
-// cmd/bff fail-closed guard enforces that.)
-func (s *Server) retiredToolRegistryStore() toolregistry.Store {
-	if s.retireToolRegistry {
-		return s.toolRegistryStore
-	}
-	return nil
-}
+// msgToolRegistryStoreRequired is the 501 message when the ToolRegistry store is
+// not wired — ToolRegistry is Postgres-authoritative (ADR 0044), so the API needs
+// CONTROLPLANE_DSN.
+const msgToolRegistryStoreRequired = "tool registries require the control-plane store (CONTROLPLANE_DSN)"
 
 // --- DTOs -------------------------------------------------------------------
 
@@ -220,17 +185,6 @@ type ToolRegistryUpdateRequest struct {
 	Name string `json:"name,omitempty"`
 	// Tools is the desired tool catalog. At least one entry required.
 	Tools []ToolEntryCreateDTO `json:"tools"`
-}
-
-// --- adapter helpers --------------------------------------------------------
-
-// listToolRegistries lists ToolRegistries via the reader (caller-scoped).
-func listToolRegistries(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.ToolRegistryList, error) {
-	var out agentsv1alpha1.ToolRegistryList
-	if err := r.List(ctx, &out, opts...); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // --- DTO projection helpers -------------------------------------------------
@@ -426,68 +380,35 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
+		return
+	}
 	limit := parseListLimit(r.URL.Query().Get("limit"))
 	cursor := r.URL.Query().Get("cursor")
 	namespace := r.URL.Query().Get("namespace")
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	// Read-switch (ADR 0042 Amendment 4, m43.4): when the store is wired, reads
-	// come from Postgres. The API server is no longer in the path, so authorize the
-	// list with a caller-scoped SSAR (exact RBAC parity with the CRD read) and push
-	// the namespace/search/paging down to the store.
-	if s.toolRegistryStore != nil {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
-			s.writeAuthzError(w, err, "list tool registries")
-			return
-		}
-		page, err := s.toolRegistryStore.List(r.Context(), controlplane.ListOptions{
-			Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
-		})
-		if err != nil {
-			s.log.Error(err, "list ToolRegistries from store failed")
-			writeError(w, http.StatusInternalServerError, "failed to list tool registries")
-			return
-		}
-		items := make([]ToolRegistrySummary, 0, len(page.Items))
-		for i := range page.Items {
-			items = append(items, newToolRegistrySummaryFromStore(&page.Items[i]))
-		}
-		writeJSON(w, http.StatusOK, ToolRegistryListResponse{Items: items, NextCursor: page.NextPage})
+	// ToolRegistry is Postgres-authoritative (ADR 0044). The API server is not in
+	// the path, so authorize the list with a caller-scoped SSAR (exact RBAC parity
+	// with the retired CRD read) and push namespace/search/paging down to the store.
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
+		s.writeAuthzError(w, err, "list tool registries")
 		return
 	}
-
-	opts := []client.ListOption{client.Limit(int64(limit))}
-	if cursor != "" {
-		opts = append(opts, client.Continue(cursor))
-	}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	list, err := listToolRegistries(r.Context(), caller, opts...)
+	page, err := s.toolRegistryStore.List(r.Context(), controlplane.ListOptions{
+		Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
+	})
 	if err != nil {
-		if status, msg, isRBAC := classifyReadError(err); isRBAC {
-			writeError(w, status, msg)
-			return
-		}
-		s.log.Error(err, "list ToolRegistries failed")
+		s.log.Error(err, "list ToolRegistries from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to list tool registries")
 		return
 	}
-
-	items := make([]ToolRegistrySummary, 0, len(list.Items))
-	for i := range list.Items {
-		summary := newToolRegistrySummary(&list.Items[i])
-		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
-			continue
-		}
-		items = append(items, summary)
+	items := make([]ToolRegistrySummary, 0, len(page.Items))
+	for i := range page.Items {
+		items = append(items, newToolRegistrySummaryFromStore(&page.Items[i]))
 	}
-
-	writeJSON(w, http.StatusOK, ToolRegistryListResponse{
-		Items:      items,
-		NextCursor: list.Continue,
-	})
+	writeJSON(w, http.StatusOK, ToolRegistryListResponse{Items: items, NextCursor: page.NextPage})
 }
 
 // --- GET /api/toolregistries/{ns}/{name} ------------------------------------
@@ -507,33 +428,26 @@ func (s *Server) handleGetToolRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read-switch (m43.4): store-backed read behind a caller-scoped SSAR.
-	if s.toolRegistryStore != nil {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
-			s.writeAuthzError(w, err, "get tool registry")
-			return
-		}
-		tr, err := s.toolRegistryStore.Get(r.Context(), ns, name)
-		if err != nil {
-			if errors.Is(err, controlplane.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "tool registry not found")
-				return
-			}
-			s.log.Error(err, "get ToolRegistry from store failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to get tool registry")
-			return
-		}
-		writeJSON(w, http.StatusOK, newToolRegistryDetailFromStore(tr))
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
 		return
 	}
-
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
-		s.writeGetError(w, err, "tool registry")
+	// Store-backed read behind a caller-scoped SSAR (ADR 0044, ToolRegistry retired).
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "get tool registry")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, newToolRegistryDetail(&tr))
+	tr, err := s.toolRegistryStore.Get(r.Context(), ns, name)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "tool registry not found")
+			return
+		}
+		s.log.Error(err, "get ToolRegistry from store failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to get tool registry")
+		return
+	}
+	writeJSON(w, http.StatusOK, newToolRegistryDetailFromStore(tr))
 }
 
 // --- POST /api/toolregistries -----------------------------------------------
@@ -577,72 +491,39 @@ func (s *Server) handleCreateToolRegistry(w http.ResponseWriter, r *http.Request
 	}
 	name := strings.TrimSpace(req.Name)
 
-	// Retired (RETIRE_TR, ADR 0044): ToolRegistry is Postgres-authoritative — write
-	// to the store behind a caller-scoped SSAR + in-app validation (the API server
-	// is no longer in the path). Atomic Create → 409 on an existing name.
-	if s.retireToolRegistry {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourceToolRegistries, ns, ""); err != nil {
-			s.writeAuthzError(w, err, "create tool registry")
-			return
-		}
-		storeEntries, bErr := buildStoreToolEntries(req.Tools, nil)
-		if bErr != nil {
-			writeError(w, http.StatusBadRequest, bErr.Error())
-			return
-		}
-		rec := toolregistry.ToolRegistry{Namespace: ns, Name: name, Tools: storeEntries}
-		if vErr := toolregistry.Validate(rec); vErr != nil {
-			s.writeValidationError(w, vErr)
-			return
-		}
-		stored, cErr := s.toolRegistryStore.Create(r.Context(), rec)
-		if cErr != nil {
-			if errors.Is(cErr, controlplane.ErrConflict) {
-				writeError(w, http.StatusConflict, fmt.Sprintf("tool registry %q already exists", name))
-				return
-			}
-			s.log.Error(cErr, "create ToolRegistry in store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to create tool registry")
-			return
-		}
-		writeJSON(w, http.StatusCreated, newToolRegistryDetailFromStore(stored))
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
 		return
 	}
-
-	// Build tool entries without live map (create — no existing approvalStatus to
-	// preserve). The CRD default handles approval state for new curated entries.
-	entries, err := buildToolEntries(req.Tools, nil)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	// ToolRegistry is Postgres-authoritative (ADR 0044): write to the store behind a
+	// caller-scoped SSAR + in-app validation (atomic Create → 409 on an existing
+	// name). The console cannot set approvalStatus (liveByName nil ⇒ empty, as the
+	// CRD stored for new curated entries; consumers treat empty as approved).
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourceToolRegistries, ns, ""); err != nil {
+		s.writeAuthzError(w, err, "create tool registry")
 		return
 	}
-
-	tr := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      strings.TrimSpace(req.Name),
-			Namespace: ns,
-		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: entries,
-		},
-	}
-	if err := ensureGVK(tr, s.scheme); err != nil {
-		s.log.Error(err, "resolve GVK for ToolRegistry failed")
-		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot resolve tool registry kind")
+	storeEntries, bErr := buildStoreToolEntries(req.Tools, nil)
+	if bErr != nil {
+		writeError(w, http.StatusBadRequest, bErr.Error())
 		return
 	}
-
-	if cErr := caller.Create(r.Context(), tr); cErr != nil {
-		status, msg := classifyToolRegistryWriteError(cErr, toolRegistryKind, tr.Name)
-		if status >= 500 {
-			s.log.Error(cErr, "create ToolRegistry failed", "name", tr.Name, "namespace", ns)
+	rec := toolregistry.ToolRegistry{Namespace: ns, Name: name, Tools: storeEntries}
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
+		return
+	}
+	stored, cErr := s.toolRegistryStore.Create(r.Context(), rec)
+	if cErr != nil {
+		if errors.Is(cErr, controlplane.ErrConflict) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("tool registry %q already exists", name))
+			return
 		}
-		writeError(w, status, msg)
+		s.log.Error(cErr, "create ToolRegistry in store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to create tool registry")
 		return
 	}
-
-	s.mirrorToolRegistry(r.Context(), tr) // ADR 0042 m41.2: best-effort dual-write to Postgres
-	writeJSON(w, http.StatusCreated, newToolRegistryDetail(tr))
+	writeJSON(w, http.StatusCreated, newToolRegistryDetailFromStore(stored))
 }
 
 // --- PUT /api/toolregistries/{ns}/{name} ------------------------------------
@@ -694,115 +575,54 @@ func (s *Server) handleUpdateToolRegistry(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Retired (RETIRE_TR, ADR 0044): upsert the store behind an SSAR + validation.
-	// The live row is read from Postgres (not the CRD) to preserve each entry's
-	// controller-owned approvalStatus; a missing row is an honest 404.
-	//
-	// Intentional contract shift on the retirement flip: the CRD PUT was an
-	// SSA-apply (create-if-absent), so a PUT to a non-existent name used to create
-	// it. Store-only, a PUT-to-edit must read the live row (to carry approvalStatus
-	// forward), so an absent row is a 404 — the more correct edit semantics, but an
-	// observable change when RETIRE_TR flips on (not a regression).
-	if s.retireToolRegistry {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, name); err != nil {
-			s.writeAuthzError(w, err, "update tool registry")
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
+		return
+	}
+	// Upsert the store behind an SSAR + validation (ADR 0044). The live row is read
+	// from Postgres to preserve each entry's controller-owned approvalStatus (the
+	// console can't flip it); a missing row is an honest 404 — a PUT-to-edit does not
+	// create (the retired store semantics; the old CRD SSA-apply created-if-absent).
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "update tool registry")
+		return
+	}
+	live, gErr := s.toolRegistryStore.Get(r.Context(), ns, name)
+	if gErr != nil {
+		if errors.Is(gErr, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "tool registry not found")
 			return
 		}
-		live, gErr := s.toolRegistryStore.Get(r.Context(), ns, name)
-		if gErr != nil {
-			if errors.Is(gErr, controlplane.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "tool registry not found")
-				return
-			}
-			s.log.Error(gErr, "update ToolRegistry: read live from store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to update tool registry")
-			return
-		}
-		liveByName := make(map[string]toolregistry.ToolEntry, len(live.Tools))
-		for i := range live.Tools {
-			liveByName[live.Tools[i].Name] = live.Tools[i]
-		}
-		storeEntries, bErr := buildStoreToolEntries(req.Tools, liveByName)
-		if bErr != nil {
-			writeError(w, http.StatusBadRequest, bErr.Error())
-			return
-		}
-		// Carry the registry's annotations + labels (OAuth-client config, scope/owner)
-		// forward unchanged — the console PUT edits only spec.tools.
-		rec := toolregistry.ToolRegistry{
-			Namespace: ns, Name: name, Tools: storeEntries,
-			Annotations: live.Annotations, Labels: live.Labels,
-		}
-		if vErr := toolregistry.Validate(rec); vErr != nil {
-			s.writeValidationError(w, vErr)
-			return
-		}
-		stored, uErr := s.toolRegistryStore.Upsert(r.Context(), rec)
-		if uErr != nil {
-			s.log.Error(uErr, "update ToolRegistry in store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to update tool registry")
-			return
-		}
-		writeJSON(w, http.StatusOK, newToolRegistryDetailFromStore(stored))
+		s.log.Error(gErr, "update ToolRegistry: read live from store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to update tool registry")
 		return
 	}
-
-	// Read the live object to extract each existing entry's approvalStatus so the
-	// PUT cannot flip it. This is the "don't-break-approval" invariant.
-	var live agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
-		s.writeGetError(w, err, "tool registry")
+	liveByName := make(map[string]toolregistry.ToolEntry, len(live.Tools))
+	for i := range live.Tools {
+		liveByName[live.Tools[i].Name] = live.Tools[i]
+	}
+	storeEntries, bErr := buildStoreToolEntries(req.Tools, liveByName)
+	if bErr != nil {
+		writeError(w, http.StatusBadRequest, bErr.Error())
 		return
 	}
-
-	// Build name → existing ToolEntry map so buildToolEntries can preserve approval.
-	liveByName := make(map[string]agentsv1alpha1.ToolEntry, len(live.Spec.Tools))
-	for _, te := range live.Spec.Tools {
-		liveByName[te.Name] = te
+	// Carry annotations + labels (OAuth-client config, scope/owner) forward unchanged
+	// — the console PUT edits only spec.tools.
+	rec := toolregistry.ToolRegistry{
+		Namespace: ns, Name: name, Tools: storeEntries,
+		Annotations: live.Annotations, Labels: live.Labels,
 	}
-
-	entries, err := buildToolEntries(req.Tools, liveByName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
 		return
 	}
-
-	apply := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: entries,
-		},
-	}
-	if err := ensureGVK(apply, s.scheme); err != nil {
-		s.log.Error(err, "resolve GVK for ToolRegistry failed")
-		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot resolve tool registry kind")
+	stored, uErr := s.toolRegistryStore.Upsert(r.Context(), rec)
+	if uErr != nil {
+		s.log.Error(uErr, "update ToolRegistry in store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to update tool registry")
 		return
 	}
-
-	// SSA write: console owns the spec.tools field; controller retains status.
-	if pErr := caller.Patch(r.Context(), apply, client.Apply, //nolint:staticcheck // typed-CRD SSA; patch-apply is the supported path
-		client.FieldOwner(consoleFieldManager), client.ForceOwnership); pErr != nil {
-		status, msg := classifyToolRegistryWriteError(pErr, toolRegistryKind, name)
-		if status >= 500 {
-			s.log.Error(pErr, "update ToolRegistry failed", "name", name, "namespace", ns)
-		}
-		writeError(w, status, msg)
-		return
-	}
-
-	// Re-read the live object so the response reflects what the API server persisted.
-	var updated agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &updated); err != nil {
-		s.log.Error(err, "re-read ToolRegistry after apply failed", "name", name, "namespace", ns)
-		writeError(w, http.StatusInternalServerError, "tool registry updated but could not be re-read")
-		return
-	}
-
-	s.mirrorToolRegistry(r.Context(), &updated) // ADR 0042 m41.2: best-effort dual-write to Postgres
-	writeJSON(w, http.StatusOK, newToolRegistryDetail(&updated))
+	writeJSON(w, http.StatusOK, newToolRegistryDetailFromStore(stored))
 }
 
 // --- DELETE /api/toolregistries/{ns}/{name} ---------------------------------
@@ -828,49 +648,28 @@ func (s *Server) handleDeleteToolRegistry(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Retired (RETIRE_TR, ADR 0044): delete from the store behind an SSAR — 404 on
-	// an absent object (the store Delete is idempotent, so an existence check gives
-	// the honest 404).
-	if s.retireToolRegistry {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
-			s.writeAuthzError(w, err, "delete tool registry")
-			return
-		}
-		if _, gErr := s.toolRegistryStore.Get(r.Context(), ns, name); errors.Is(gErr, controlplane.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "tool registry not found")
-			return
-		} else if gErr != nil {
-			s.log.Error(gErr, "delete ToolRegistry: existence check failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to delete tool registry")
-			return
-		}
-		if dErr := s.toolRegistryStore.Delete(r.Context(), ns, name); dErr != nil {
-			s.log.Error(dErr, "delete ToolRegistry from store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to delete tool registry")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
 		return
 	}
-
-	tr := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
-	}
-	if err := caller.Delete(r.Context(), tr); err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			writeError(w, http.StatusNotFound, "tool registry not found")
-		case apierrors.IsForbidden(err):
-			writeError(w, http.StatusForbidden, "forbidden: not allowed to delete the tool registry")
-		case apierrors.IsUnauthorized(err):
-			writeError(w, http.StatusUnauthorized, msgTokenRejected)
-		default:
-			s.log.Error(err, "delete ToolRegistry failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to delete tool registry")
-		}
+	// Delete from the store behind an SSAR (ADR 0044) — 404 on an absent object (the
+	// store Delete is idempotent, so an existence check gives the honest 404).
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "delete tool registry")
 		return
 	}
-
-	s.unmirrorToolRegistry(r.Context(), ns, name) // ADR 0042 m41.2: best-effort dual-write to Postgres
+	if _, gErr := s.toolRegistryStore.Get(r.Context(), ns, name); errors.Is(gErr, controlplane.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "tool registry not found")
+		return
+	} else if gErr != nil {
+		s.log.Error(gErr, "delete ToolRegistry: existence check failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to delete tool registry")
+		return
+	}
+	if dErr := s.toolRegistryStore.Delete(r.Context(), ns, name); dErr != nil {
+		s.log.Error(dErr, "delete ToolRegistry from store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to delete tool registry")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

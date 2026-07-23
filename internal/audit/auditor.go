@@ -45,12 +45,12 @@ func auditedTypes() []client.Object {
 		&agentsv1alpha1.ModelRoute{},
 		&agentsv1alpha1.SecretBinding{},
 		&agentsv1alpha1.MCPToolBinding{},
-		&agentsv1alpha1.ToolRegistry{},
 		&agentsv1alpha1.MemoryBinding{},
 		&agentsv1alpha1.AgentRegistry{},
 		&agentsv1alpha1.AgentScalingPolicy{},
 		&agentsv1alpha1.EvalSuite{},
-		// PromptVersion retired to Postgres (ADR 0044) — no longer a CRD, so not watched here.
+		// PromptVersion + ToolRegistry retired to Postgres (ADR 0044) — no longer
+		// CRDs, so not watched here.
 	}
 }
 

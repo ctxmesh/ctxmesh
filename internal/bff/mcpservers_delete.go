@@ -197,35 +197,18 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		refs = []MCPServerReference{}
 	}
 
-	// The ToolRegistry is the server itself — required, with real error handling.
-	// Retired (RETIRE_TR): delete from the store behind an SSAR VerbDelete; the
-	// read-guard above already confirmed existence + the owner gate, and the store
-	// Delete is idempotent, so a concurrent vanish is benign.
+	// The ToolRegistry is the server itself — required. Delete from the store behind
+	// an SSAR VerbDelete (the RBAC the CRD delete enforced, ADR 0044); the read-guard
+	// above already confirmed existence + the owner gate, and the store Delete is
+	// idempotent, so a concurrent vanish is benign.
 	deleted := []string{}
-	if s.retireToolRegistry {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
-			s.writeAuthzError(w, err, "delete the MCP server")
-			return
-		}
-		if err := s.toolRegistryStore.Delete(r.Context(), ns, name); err != nil {
-			s.log.Error(err, "delete MCP server from store failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to delete the MCP server")
-			return
-		}
-	} else if err := caller.Delete(r.Context(), &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
-	}); err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			writeError(w, http.StatusNotFound, "no such registered MCP server")
-		case apierrors.IsForbidden(err):
-			writeError(w, http.StatusForbidden, "forbidden: not allowed to delete the MCP server")
-		case apierrors.IsUnauthorized(err):
-			writeError(w, http.StatusUnauthorized, msgTokenRejected)
-		default:
-			s.log.Error(err, "delete MCP server ToolRegistry failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to delete the MCP server")
-		}
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "delete the MCP server")
+		return
+	}
+	if err := s.toolRegistryStore.Delete(r.Context(), ns, name); err != nil {
+		s.log.Error(err, "delete MCP server from store failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to delete the MCP server")
 		return
 	}
 	deleted = append(deleted, toolRegistryKind)
