@@ -52,8 +52,7 @@ func (*MemoryBinding) Hub() {}
 // Hub marks ModelRoute as the conversion hub.
 func (*ModelRoute) Hub() {}
 
-// Hub marks PromptVersion as the conversion hub.
-func (*PromptVersion) Hub() {}
+// PromptVersion is retired to Postgres (ADR 0044) — no CRD, no conversion hub.
 
 // Hub marks SecretBinding as the conversion hub.
 func (*SecretBinding) Hub() {}
