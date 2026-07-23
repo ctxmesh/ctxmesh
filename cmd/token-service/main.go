@@ -43,6 +43,8 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/credstore"
@@ -115,6 +117,25 @@ func run(log logr.Logger) error {
 			return nil, err
 		}
 		return &tr, nil
+	}
+	// Retired (RETIRE_TR, ADR 0044 / M45): the ToolRegistry CRD is gone, so the
+	// runtime's per-tool-call auth-type / org-scope read comes from Postgres instead
+	// of the K8s API — behind a short-TTL, serve-stale-on-error cache that bounds the
+	// blast radius of a Postgres blip on the OBO hot path (Fable's design gate).
+	if envTrue("RETIRE_TR") {
+		dsn := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN"))
+		if dsn == "" {
+			return errors.New("RETIRE_TR requires CONTROLPLANE_DSN (the Postgres ToolRegistry read path)")
+		}
+		cpDB, dbErr := controlplane.Connect(context.Background(), dsn)
+		if dbErr != nil {
+			return fmt.Errorf("connect control-plane postgres for ToolRegistry reads: %w", dbErr)
+		}
+		defer func() { _ = cpDB.Close() }()
+		trSource := newToolRegistrySource(
+			toolregistry.NewPostgresStore(cpDB), defaultToolRegistryCacheTTL, log.WithName("toolregistry"))
+		getTR = trSource.getTR
+		log.Info("ToolRegistry reads served from Postgres (ADR 0044): CRD retired; short-TTL serve-stale cache")
 	}
 	authTypeIsOAuth := func(ctx context.Context, ns, server string) (bool, error) {
 		tr, err := getTR(ctx, ns, server)
