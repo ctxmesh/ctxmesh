@@ -24,10 +24,8 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -157,41 +155,32 @@ func (r *AgentDeploymentReconciler) resolvePrompt(
 	}, nil
 }
 
-// promptPointer returns the agent's prompt git pointer + a display name, from the DENORMALIZED
-// annotation the BFF stamps at create/update (ADR 0042, m40.3 — compose-and-denormalize) when present,
-// else by fetching the PromptVersion CRD (backward compat: an agent created before m40.3, or a direct
-// kubectl apply). The annotation path is what lets the PromptVersion move to Postgres without the
-// controller reading it — a stamped agent reconciles self-contained (no PromptVersion Get). The digest
-// + resolve logic downstream is identical either way (both yield a GitPromptSource).
+// promptPointer returns the agent's prompt git pointer + a display name from the DENORMALIZED annotation
+// the BFF stamps at create/update (ADR 0042, m40.3 — compose-and-denormalize). PromptVersion is retired to
+// Postgres (ADR 0044) — there is no CRD to read — so the annotation is the ONLY source: a stamped agent
+// reconciles self-contained. An agent without the stamp (e.g. a raw kubectl apply) surfaces a user-facing
+// status error rather than reading a store the controller intentionally doesn't depend on.
 func (r *AgentDeploymentReconciler) promptPointer(
-	ctx context.Context,
+	_ context.Context,
 	deploy *agentsv1alpha1.AgentDeployment,
 ) (agentsv1alpha1.GitPromptSource, string, error) {
-	if raw := deploy.Annotations[prompt.ResolvedPromptAnnotation]; raw != "" {
-		var p prompt.ResolvedPointer
-		if err := json.Unmarshal([]byte(raw), &p); err != nil {
-			// A corrupt stamp is a platform error, not user input — surface it on status (don't fall
-			// back to the CRD and silently mask a broken compose path).
-			return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
-				reason: "PromptPointerInvalid",
-				msg:    fmt.Sprintf("the %s annotation on agent %q is not valid JSON: %v", prompt.ResolvedPromptAnnotation, deploy.Name, err),
-			}
-		}
-		return p.GitSource(), p.Name, nil
-	}
-
-	var pv agentsv1alpha1.PromptVersion
-	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.PromptRef}, &pv)
-	if apierrors.IsNotFound(err) {
+	raw := deploy.Annotations[prompt.ResolvedPromptAnnotation]
+	if raw == "" {
 		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
-			reason: "PromptVersionNotFound",
-			msg:    fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", deploy.Spec.PromptRef, deploy.Namespace),
+			reason: "PromptPointerMissing",
+			msg: fmt.Sprintf("agent %q has no resolved prompt pointer (annotation %s) for promptRef %q — create or edit the agent via the API so its PromptVersion pointer is resolved (PromptVersion is no longer a CRD, ADR 0044)",
+				deploy.Name, prompt.ResolvedPromptAnnotation, deploy.Spec.PromptRef),
 		}
 	}
-	if err != nil {
-		return agentsv1alpha1.GitPromptSource{}, "", fmt.Errorf("fetching PromptVersion %q: %w", deploy.Spec.PromptRef, err)
+	var p prompt.ResolvedPointer
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		// A corrupt stamp is a platform error, not user input — surface it on status.
+		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+			reason: "PromptPointerInvalid",
+			msg:    fmt.Sprintf("the %s annotation on agent %q is not valid JSON: %v", prompt.ResolvedPromptAnnotation, deploy.Name, err),
+		}
 	}
-	return pv.Spec.Git, pv.Name, nil
+	return p.GitSource(), p.Name, nil
 }
 
 // promptDigest returns the prompt COMPONENT of combinedBindingDigest: 8 hex chars

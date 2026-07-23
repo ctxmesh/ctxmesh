@@ -36,8 +36,8 @@ import (
 )
 
 // mirrorToolRegistry best-effort dual-writes a ToolRegistry to the control-plane Postgres store (ADR 0042
-// Amendment 2, m41.2). Same posture as mirrorPromptVersion: a store failure is LOGGED, never returned —
-// the caller-scoped CRD write already succeeded and stays the source of truth during the migration window.
+// Amendment 2, m41.2): a store failure is LOGGED, never returned — the caller-scoped CRD write already
+// succeeded and stays the source of truth during the migration window (ToolRegistry is not yet retired).
 // nil store (CONTROLPLANE_DSN unset) is a no-op. The catalog (spec.tools[]), the annotations (incl. the
 // non-secret OAuth-client config), and the labels are mirrored; per-user grant tokens are not here.
 func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.ToolRegistry) {
@@ -359,7 +359,7 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 	// list with a caller-scoped SSAR (exact RBAC parity with the CRD read) and push
 	// the namespace/search/paging down to the store.
 	if s.toolRegistryStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
 			s.writeAuthzError(w, err, "list tool registries")
 			return
 		}
@@ -432,7 +432,7 @@ func (s *Server) handleGetToolRegistry(w http.ResponseWriter, r *http.Request) {
 
 	// Read-switch (m43.4): store-backed read behind a caller-scoped SSAR.
 	if s.toolRegistryStore != nil {
-		if err := s.authorizeStoreRead(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
 			s.writeAuthzError(w, err, "get tool registry")
 			return
 		}

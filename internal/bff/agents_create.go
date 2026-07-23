@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
@@ -96,6 +98,7 @@ func createAgentFromYAML(
 	ctx context.Context,
 	w AgentWriter,
 	reader AgentReader,
+	promptStore promptversion.Store,
 	scheme *runtime.Scheme,
 	agentYAML []byte,
 	namespace string,
@@ -129,11 +132,31 @@ func createAgentFromYAML(
 		return nil, &createError{status: 400, msg: fmt.Sprintf("invalid agent.yaml: %v", err)}
 	}
 
-	objs, err := decodeManifests(manifests, scheme)
+	// Partition the expand output BEFORE decoding (ADR 0044 Amendment 2): PromptVersion is retired to
+	// Postgres, so its `kind: PromptVersion` docs are extracted scheme-free (no CRD type to decode into) and
+	// the rest are decoded as CRDs.
+	crdDocs, pvInfos, err := partitionManifests(manifests)
+	if err != nil {
+		return nil, &createError{status: 500, msg: fmt.Sprintf("splitting expanded manifests: %v", err)}
+	}
+
+	created := make([]createdObject, 0, len(pvInfos)+2)
+
+	// The inline `prompt:` block → a PromptVersion in the STORE (not the K8s API; there is no CRD) so
+	// promptRef resolution below + the console reads find it. NOT best-effort: a validation/conflict error
+	// fails the create with an honest status (nothing is created yet, so nothing is left dangling).
+	for _, pv := range pvInfos {
+		if cErr := createPromptVersionInStore(ctx, promptStore, pv, ns); cErr != nil {
+			return created, cErr
+		}
+		created = append(created, createdObject{Kind: promptVersionKind, Name: pv.Name, Namespace: ns})
+	}
+
+	objs, err := decodeManifests(crdDocs, scheme)
 	if err != nil {
 		// The expand output failed to decode into typed objects — that is a server
 		// bug (the mapping produced something the scheme rejects), not the caller's.
-		return nil, &createError{status: 500, msg: fmt.Sprintf("decoding expanded manifests: %v", err)}
+		return created, &createError{status: 500, msg: fmt.Sprintf("decoding expanded manifests: %v", err)}
 	}
 
 	// Point each generated MCPToolBinding at the ToolRegistry its tool ACTUALLY lives
@@ -147,7 +170,7 @@ func createAgentFromYAML(
 	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
 	// they cannot even see. Refused before any object is created.
 	if gErr := checkBindingOwnership(objs, idx, callerOwner); gErr != nil {
-		return nil, gErr
+		return created, gErr
 	}
 
 	// Stamp the source-spec annotation on the primary AgentDeployment only, before
@@ -155,13 +178,12 @@ func createAgentFromYAML(
 	stampSourceSpec(objs, sourceSpec)
 
 	// Compose-and-denormalize the prompt (ADR 0042, m40.3): resolve the agent's promptRef to its git
-	// pointer NOW and stamp it as an annotation, so the controller reconciles self-contained (no
-	// PromptVersion read) and PromptVersion can move to Postgres. CREATE is best-effort — an unresolved
-	// stamp is ignored: a fresh object has no stale annotation, and the controller's CRD fallback
-	// surfaces a bad ref at reconcile exactly as pre-m40.3, so a create that would succeed still does.
-	_ = stampResolvedPrompt(ctx, reader, objs, ns)
+	// pointer (from the Postgres store — including a PromptVersion just created above) and stamp it as an
+	// annotation, so the controller reconciles self-contained. CREATE is best-effort — an unresolved stamp
+	// is ignored: a fresh object carries no stale annotation, and the controller surfaces an unstamped
+	// promptRef at reconcile as PromptPointerMissing.
+	_ = stampResolvedPrompt(ctx, promptStore, objs, ns)
 
-	created := make([]createdObject, 0, len(objs))
 	agentName := agentDeploymentName(objs)
 
 	// Lazily-loaded name→agentRef of the namespace's existing MCPToolBindings — fetched
@@ -213,51 +235,40 @@ func createAgentFromYAML(
 }
 
 // stampResolvedPrompt denormalizes the agent's prompt (ADR 0042, m40.3): it resolves the primary
-// AgentDeployment's spec.promptRef to the PromptVersion's git pointer and stamps it as the
-// prompt.ResolvedPromptAnnotation, so the controller reconciles the prompt WITHOUT reading the
-// PromptVersion (which is moving to Postgres). The pointer comes from a PromptVersion created alongside
-// this agent (the `prompt:` block, not yet in the cluster) if present, else one already in the namespace.
+// AgentDeployment's spec.promptRef to the PromptVersion's git pointer — from the Postgres store, since
+// PromptVersion is retired (ADR 0044) — and stamps it as the prompt.ResolvedPromptAnnotation, so the
+// controller reconciles the prompt WITHOUT reading a PromptVersion.
 //
-// It returns a *createError when a set promptRef does NOT resolve (400) or the list fails (502). CALLERS
-// DIFFER (m40.3 review): the CREATE path IGNORES that error (best-effort — a fresh object carries no
-// stale annotation, and the controller's CRD fallback surfaces a bad ref at reconcile as before). The
-// EDIT path MUST propagate it: an edit that leaves the stamp unresolved would let the controller keep
+// It returns a *createError when a set promptRef does NOT resolve (400 not-found / 501 no store / 502
+// read error). CALLERS DIFFER (m40.3 review): the CREATE path IGNORES that error (best-effort — a fresh
+// object carries no stale annotation, and the controller surfaces the unstamped ref as PromptPointerMissing).
+// The EDIT path MUST propagate it: an edit that leaves the stamp unresolved would let the controller keep
 // serving the CREATE-time prompt (a wrong prompt, silently), so a bad-ref edit is rejected atomically
 // BEFORE the SSA apply — nothing changes, no stale annotation.
-func stampResolvedPrompt(ctx context.Context, reader AgentReader, objs []decodedObject, ns string) *createError {
+func stampResolvedPrompt(ctx context.Context, promptStore promptversion.Store, objs []decodedObject, ns string) *createError {
 	var agent *agentsv1alpha1.AgentDeployment
-	alongside := map[string]agentsv1alpha1.GitPromptSource{}
 	for _, d := range objs {
-		switch o := d.obj.(type) {
-		case *agentsv1alpha1.AgentDeployment:
+		if o, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
 			agent = o
-		case *agentsv1alpha1.PromptVersion:
-			alongside[o.Name] = o.Spec.Git
 		}
 	}
 	if agent == nil || agent.Spec.PromptRef == "" {
 		return nil
 	}
-
-	git, ok := alongside[agent.Spec.PromptRef]
-	if !ok {
-		var list agentsv1alpha1.PromptVersionList
-		if err := reader.List(ctx, &list, client.InNamespace(ns)); err != nil {
-			return &createError{status: 502, msg: fmt.Sprintf("resolving promptRef %q: %v", agent.Spec.PromptRef, err)}
-		}
-		for i := range list.Items {
-			if list.Items[i].Name == agent.Spec.PromptRef {
-				git, ok = list.Items[i].Spec.Git, true
-				break
-			}
-		}
+	if promptStore == nil {
+		return &createError{status: 501, msg: "resolving promptRef requires the control-plane store (CONTROLPLANE_DSN)"}
 	}
-	if !ok {
-		return &createError{status: 400, msg: fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", agent.Spec.PromptRef, ns)}
+
+	pv, err := promptStore.Get(ctx, ns, agent.Spec.PromptRef)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			return &createError{status: 400, msg: fmt.Sprintf("promptRef %q does not resolve to a PromptVersion in namespace %q", agent.Spec.PromptRef, ns)}
+		}
+		return &createError{status: 502, msg: fmt.Sprintf("resolving promptRef %q: %v", agent.Spec.PromptRef, err)}
 	}
 
 	raw, err := json.Marshal(prompt.ResolvedPointer{
-		Name: agent.Spec.PromptRef, Repo: git.Repo, Ref: git.Ref, Path: git.Path,
+		Name: agent.Spec.PromptRef, Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path,
 	})
 	if err != nil {
 		return &createError{status: 500, msg: fmt.Sprintf("stamping resolved prompt: %v", err)}
@@ -268,6 +279,95 @@ func stampResolvedPrompt(ctx context.Context, reader AgentReader, objs []decoded
 	}
 	ann[prompt.ResolvedPromptAnnotation] = string(raw)
 	agent.SetAnnotations(ann)
+	return nil
+}
+
+// promptVersionInfo is the lightweight, SCHEME-FREE projection of an inline PromptVersion manifest — just the
+// fields the store needs. PromptVersion is retired to Postgres (ADR 0044 Amendment 2), so the BFF routes it
+// to the store WITHOUT the runtime scheme (there is no CRD type to decode into).
+type promptVersionInfo struct {
+	Name      string
+	Namespace string
+	Repo      string
+	Ref       string
+	Path      string
+	Labels    map[string]string
+}
+
+// partitionManifests splits the expand YAML output into the PromptVersion docs (extracted scheme-free →
+// promptVersionInfo, routed to the store) and the remaining CRD docs (reassembled for decodeManifests). The
+// pre-filter (ADR 0044 Amendment 2) is what lets the PromptVersion CRD type leave the scheme entirely — the
+// BFF never decodes a `kind: PromptVersion` doc.
+func partitionManifests(manifests []byte) (crdDocs []byte, pvs []promptVersionInfo, err error) {
+	dec := utilyaml.NewYAMLOrJSONDecoder(bufio.NewReader(bytes.NewReader(manifests)), 4096)
+	var kept [][]byte
+	for {
+		var raw runtime.RawExtension
+		if derr := dec.Decode(&raw); derr != nil {
+			if errors.Is(derr, io.EOF) {
+				break
+			}
+			return nil, nil, fmt.Errorf("splitting YAML documents: %w", derr)
+		}
+		if len(bytes.TrimSpace(raw.Raw)) == 0 {
+			continue
+		}
+		// raw.Raw is JSON (the YAML decoder converts). Read only the kind + the PromptVersion fields.
+		var head struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name      string            `json:"name"`
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				Git struct {
+					Repo string `json:"repo"`
+					Ref  string `json:"ref"`
+					Path string `json:"path"`
+				} `json:"git"`
+			} `json:"spec"`
+		}
+		if uerr := json.Unmarshal(raw.Raw, &head); uerr != nil {
+			return nil, nil, fmt.Errorf("reading manifest kind: %w", uerr)
+		}
+		if head.Kind == promptVersionKind {
+			pvs = append(pvs, promptVersionInfo{
+				Name: head.Metadata.Name, Namespace: head.Metadata.Namespace,
+				Repo: head.Spec.Git.Repo, Ref: head.Spec.Git.Ref, Path: head.Spec.Git.Path,
+				Labels: head.Metadata.Labels,
+			})
+			continue
+		}
+		kept = append(kept, raw.Raw)
+	}
+	if len(kept) > 0 {
+		crdDocs = bytes.Join(kept, []byte("\n---\n"))
+	}
+	return crdDocs, pvs, nil
+}
+
+// createPromptVersionInStore writes an inline-created PromptVersion (the agent.yaml `prompt:` block) to the
+// control-plane store — validated, atomic (409 on a duplicate). ADR 0044.
+func createPromptVersionInStore(ctx context.Context, promptStore promptversion.Store, pv promptVersionInfo, ns string) *createError {
+	if promptStore == nil {
+		return &createError{status: 501, msg: "creating a prompt version requires the control-plane store (CONTROLPLANE_DSN)"}
+	}
+	// Namespace comes from the create request (ns), NOT pv.Namespace — the whole agent create is scoped to
+	// one namespace, matching how the CRD path derived it.
+	rec := promptversion.PromptVersion{
+		Namespace: ns, Name: pv.Name,
+		Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path, Labels: pv.Labels,
+	}
+	if vErr := promptversion.Validate(rec); vErr != nil {
+		return &createError{status: 422, msg: strings.TrimPrefix(vErr.Error(), "controlplane: invalid: ")}
+	}
+	if _, cErr := promptStore.Create(ctx, rec); cErr != nil {
+		if errors.Is(cErr, controlplane.ErrConflict) {
+			return &createError{status: 409, msg: fmt.Sprintf("prompt version %q already exists", pv.Name)}
+		}
+		return &createError{status: 502, msg: fmt.Sprintf("creating prompt version %q: %v", pv.Name, cErr)}
+	}
 	return nil
 }
 

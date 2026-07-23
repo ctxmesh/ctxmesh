@@ -71,7 +71,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - evalsuites
-  - promptversions
   - secretbindings
   - toolregistries
   verbs:

@@ -58,6 +58,11 @@ type Store interface {
 	// List returns a filtered, sorted, paginated page (name substring, label-equality, namespace scope),
 	// with the total matching count for the console's "page N of M".
 	List(ctx context.Context, opts controlplane.ListOptions) (controlplane.Page[PromptVersion], error)
+	// Create inserts a NEW row by (namespace, name), returning controlplane.ErrConflict if one already
+	// exists — the ATOMIC create the retirement write path needs (ADR 0044): once PromptVersion is
+	// Postgres-authoritative, this replaces the API server's atomic create-or-409, so a non-atomic
+	// Get-then-Upsert (which races two concurrent creates into a silent overwrite) is NOT acceptable.
+	Create(ctx context.Context, pv PromptVersion) (*PromptVersion, error)
 	// Upsert creates or replaces the row by (namespace, name), bumping Version, and returns the stored
 	// record. It is **last-write-wins by design** — it does NOT enforce optimistic concurrency on the
 	// caller-supplied version. During the migration window the CRD/etcd is the OCC authority (ADR 0042);

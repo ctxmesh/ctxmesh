@@ -99,6 +99,8 @@ spec:
           value: {{ .Values.bff.mcp.enabled | quote }}
         - name: MCP_REQUIRE_APPROVAL
           value: {{ .Values.bff.mcp.requireApproval | quote }}
+        - name: CONSOLE_URL
+          value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | quote }}
         - name: OIDC_ENABLED
@@ -107,11 +109,6 @@ spec:
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.issuer | quote }}{{ else }}""{{ end }}
         - name: OIDC_CLIENT_ID
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}""{{ end }}
-        # ADR 0040: the canonical, browser-reachable console origin — the ONE MCP-consent
-        # redirect_uri registered with providers + the trusted cross-origin relay target. Empty ⇒
-        # single-origin behaviour (the request's own origin is the callback, no relay).
-        - name: CONSOLE_URL
-          value: {{ .Values.bff.consoleURL | default "" | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters

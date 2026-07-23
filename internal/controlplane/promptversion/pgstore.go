@@ -24,8 +24,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 )
+
+// pgUniqueViolation is the Postgres SQLSTATE for a unique-constraint violation.
+const pgUniqueViolation = "23505"
 
 // pgStore is the Postgres-backed Store. The schema (prompt_versions) is applied by the control-plane
 // goose migrations (controlplane.Migrate), not here — the store assumes the table exists.
@@ -73,6 +78,30 @@ func (s *pgStore) Get(ctx context.Context, ns, name string) (*PromptVersion, err
 		return nil, fmt.Errorf("promptversion: get: %w", err)
 	}
 	return pv, nil
+}
+
+func (s *pgStore) Create(ctx context.Context, pv PromptVersion) (*PromptVersion, error) {
+	labels, err := json.Marshal(nonNilLabels(pv.Labels))
+	if err != nil {
+		return nil, fmt.Errorf("promptversion: encode labels: %w", err)
+	}
+	// Plain INSERT (no ON CONFLICT): a duplicate (namespace, name) raises a unique violation, mapped to
+	// controlplane.ErrConflict → the BFF's 409. The ATOMIC create the retirement path needs (ADR 0044);
+	// a Get-then-Upsert would race two concurrent creates into a silent overwrite.
+	row := s.db.QueryRowContext(ctx, `
+		INSERT INTO prompt_versions (namespace, name, repo, git_ref, path, labels, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, 1, now(), now())
+		RETURNING `+pgColumns,
+		pv.Namespace, pv.Name, pv.Repo, pv.Ref, pv.Path, string(labels))
+	out, err := scanPromptVersion(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return nil, controlplane.ErrConflict
+		}
+		return nil, fmt.Errorf("promptversion: create: %w", err)
+	}
+	return out, nil
 }
 
 func (s *pgStore) Upsert(ctx context.Context, pv PromptVersion) (*PromptVersion, error) {
