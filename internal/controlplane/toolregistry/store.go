@@ -70,6 +70,11 @@ type ToolRegistry struct {
 type Store interface {
 	Get(ctx context.Context, namespace, name string) (*ToolRegistry, error)
 	List(ctx context.Context, opts controlplane.ListOptions) (controlplane.Page[ToolRegistry], error)
+	// Create inserts a new registry, returning controlplane.ErrConflict when (namespace, name) already
+	// exists. The ATOMIC create the retirement write path needs (ADR 0044 / M45): once ToolRegistry writes
+	// leave the CRD, a POST must 409 on a duplicate name — Upsert's last-write-wins would silently clobber,
+	// and a Get-then-Upsert would race two concurrent creates into an overwrite.
+	Create(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error)
 	// Upsert creates or replaces by (namespace, name), bumping Version. Last-write-wins by design — OCC
 	// is delegated to the CRD/etcd during the migration window (ADR 0042); do not assume compare-and-swap.
 	Upsert(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error)

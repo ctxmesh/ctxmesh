@@ -52,6 +52,23 @@ func (m *memStore) Get(_ context.Context, ns, name string) (*ToolRegistry, error
 	return &out, nil
 }
 
+func (m *memStore) Create(_ context.Context, tr ToolRegistry) (*ToolRegistry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := memKey(tr.Namespace, tr.Name)
+	if _, ok := m.rows[k]; ok {
+		return nil, controlplane.ErrConflict
+	}
+	now := m.now()
+	tr.Version = 1
+	tr.CreatedAt = now
+	tr.UpdatedAt = now
+	stored := cloneRegistry(tr)
+	m.rows[k] = stored
+	out := cloneRegistry(stored)
+	return &out, nil
+}
+
 func (m *memStore) Upsert(_ context.Context, tr ToolRegistry) (*ToolRegistry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

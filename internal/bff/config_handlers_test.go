@@ -560,7 +560,7 @@ func TestBindingRegistryResolution(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(scalekit, acme).Build()
 
-	idx := toolRegistryIndex(context.Background(), c, "default")
+	idx := toolRegistryIndex(context.Background(), c, nil, "default")
 	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
 	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
 	assert.Equal(t, "acme-mcp", idx["search"].registry)

@@ -254,11 +254,21 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return errors.New("RUN_WORKER_DISPATCH requires a durable run store (set RUN_STORE_DSN)")
 	}
 
+	// ToolRegistry retirement (M45, ADR 0044): RETIRE_TR flips the ToolRegistry write path store-only
+	// (SSAR + in-app validation). It MUST be set in lockstep with the operator's RETIRE_TR — with the
+	// operator retired the sync reconciler is stopped, so a CRD write here would never reach the store.
+	// Fail closed: retire without the store would write nowhere authoritative.
+	retireToolRegistry := envTrue(os.Getenv("RETIRE_TR"))
+	if retireToolRegistry && toolStore == nil {
+		return errors.New("RETIRE_TR requires the control-plane store (set CONTROLPLANE_DSN)")
+	}
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
+		RetireToolRegistry:          retireToolRegistry,
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
