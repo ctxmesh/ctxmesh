@@ -44,6 +44,18 @@ func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.Tool
 	if s.toolRegistryStore == nil {
 		return
 	}
+	if _, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); err != nil {
+		s.log.Error(err, "mirror ToolRegistry to control-plane store failed (CRD remains source of truth)",
+			"namespace", tr.Namespace, "name", tr.Name)
+	}
+}
+
+// crdToolRegistryToStore maps a ToolRegistry CRD object to its store record — the
+// forward projection (storeToolRegistryToCRD is the inverse). The tool schema is
+// carried verbatim (RawExtension.Raw), the annotations (OAuth-client config) and
+// labels (scope/owner) as-is. Used by both the best-effort mirror and the
+// retired write paths (register/approve/org/oauth) that write the store directly.
+func crdToolRegistryToStore(tr *agentsv1alpha1.ToolRegistry) toolregistry.ToolRegistry {
 	tools := make([]toolregistry.ToolEntry, len(tr.Spec.Tools))
 	for i := range tr.Spec.Tools {
 		e := tr.Spec.Tools[i]
@@ -56,12 +68,28 @@ func (s *Server) mirrorToolRegistry(ctx context.Context, tr *agentsv1alpha1.Tool
 			InputSchema: schema, Source: e.Source, ApprovalStatus: e.ApprovalStatus,
 		}
 	}
-	if _, err := s.toolRegistryStore.Upsert(ctx, toolregistry.ToolRegistry{
+	return toolregistry.ToolRegistry{
 		Namespace: tr.Namespace, Name: tr.Name,
 		Tools: tools, Annotations: tr.Annotations, Labels: tr.Labels,
-	}); err != nil {
-		s.log.Error(err, "mirror ToolRegistry to control-plane store failed (CRD remains source of truth)",
-			"namespace", tr.Namespace, "name", tr.Name)
+	}
+}
+
+// toolRegistryStoreWriteError maps a store write failure (SSAR / Validate /
+// Create / Upsert / Delete) to a typed *createError for the MCP handlers that
+// return one instead of writing the response directly (register/approve/org).
+// Fail-closed: a non-forbidden authz error is a 500, never a silent allow.
+func toolRegistryStoreWriteError(err error, name, action string) *createError {
+	switch {
+	case errors.Is(err, authz.ErrForbidden):
+		return &createError{status: http.StatusForbidden, msg: "you do not have permission to " + action}
+	case errors.Is(err, controlplane.ErrInvalid):
+		return &createError{status: http.StatusUnprocessableEntity, msg: strings.TrimPrefix(err.Error(), "controlplane: invalid: ")}
+	case errors.Is(err, controlplane.ErrConflict):
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf("an MCP server named %q already exists", name)}
+	case errors.Is(err, controlplane.ErrNotFound):
+		return &createError{status: http.StatusNotFound, msg: "no such registered MCP server"}
+	default:
+		return &createError{status: http.StatusInternalServerError, msg: "failed to " + action}
 	}
 }
 

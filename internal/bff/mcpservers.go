@@ -36,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // The BYO-MCP register + tool-catalog handlers (ADR 0016). All are CALLER-SCOPED
@@ -185,7 +187,7 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 		// create below), register without an owner label rather than failing the whole flow.
 		s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
 	}
-	created, cErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
+	created, cErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
 		name:      name,
 		namespace: ns,
 		url:       strings.TrimSpace(req.URL),
@@ -304,7 +306,7 @@ type mcpCreateSpec struct {
 // It returns the flat identity of every created object, or a typed *createError
 // with the right HTTP status on the first failure (a viewer's denied create → an
 // honest 403).
-func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme, spec mcpCreateSpec) ([]createdObject, *createError) {
+func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spec mcpCreateSpec) ([]createdObject, *createError) {
 	labels := map[string]string{
 		labelManagedBy: managedByMCP,
 	}
@@ -443,7 +445,26 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 
 	created := make([]createdObject, 0, len(objs))
 	for _, ko := range objs {
-		if err := w.Create(ctx, ko.o); err != nil {
+		// The ToolRegistry (the server catalog) is Postgres-authoritative when
+		// retired (ADR 0044): write it to the store behind a caller-scoped SSAR +
+		// in-app validation (atomic Create → 409). The Secret / SecretBinding /
+		// NetworkPolicy remain K8s objects and are always created via the caller.
+		if ko.kind == toolRegistryKind && s.retireToolRegistry {
+			reg := ko.o.(*agentsv1alpha1.ToolRegistry)
+			if err := s.authorizeStore(ctx, caller, authz.VerbCreate, resourceToolRegistries, reg.Namespace, ""); err != nil {
+				return created, toolRegistryStoreWriteError(err, reg.Name, "register the MCP server")
+			}
+			rec := crdToolRegistryToStore(reg)
+			if vErr := toolregistry.Validate(rec); vErr != nil {
+				return created, toolRegistryStoreWriteError(vErr, reg.Name, "register the MCP server")
+			}
+			if _, err := s.toolRegistryStore.Create(ctx, rec); err != nil {
+				return created, toolRegistryStoreWriteError(err, reg.Name, "register the MCP server")
+			}
+			created = append(created, createdObject{Kind: ko.kind, Name: reg.Name, Namespace: reg.Namespace})
+			continue
+		}
+		if err := caller.Create(ctx, ko.o); err != nil {
 			return created, classifyCreateError(err, ko.kind, ko.o.GetName())
 		}
 		created = append(created, createdObject{
@@ -452,7 +473,6 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 			Namespace: ko.o.GetNamespace(),
 		})
 	}
-	_ = scheme // scheme reserved for future decode paths; kept for signature parity
 	return created, nil
 }
 

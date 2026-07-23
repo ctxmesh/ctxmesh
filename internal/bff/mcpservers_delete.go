@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
 // The delete-MCP-server surface (m26.3, ADR 0031 lifecycle gap). Register builds a
@@ -197,8 +198,21 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The ToolRegistry is the server itself — required, with real error handling.
+	// Retired (RETIRE_TR): delete from the store behind an SSAR VerbDelete; the
+	// read-guard above already confirmed existence + the owner gate, and the store
+	// Delete is idempotent, so a concurrent vanish is benign.
 	deleted := []string{}
-	if err := caller.Delete(r.Context(), &agentsv1alpha1.ToolRegistry{
+	if s.retireToolRegistry {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
+			s.writeAuthzError(w, err, "delete the MCP server")
+			return
+		}
+		if err := s.toolRegistryStore.Delete(r.Context(), ns, name); err != nil {
+			s.log.Error(err, "delete MCP server from store failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, "failed to delete the MCP server")
+			return
+		}
+	} else if err := caller.Delete(r.Context(), &agentsv1alpha1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}); err != nil {
 		switch {

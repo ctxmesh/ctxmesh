@@ -429,7 +429,7 @@ func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 func TestCreateMCPObjectsPersistsOAuthConfig(t *testing.T) {
 	const server, ns = "cfg-mcp", "prod"
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	_, cErr := createMCPObjects(context.Background(), c, testScheme(t), mcpCreateSpec{
+	_, cErr := (&Server{}).createMCPObjects(context.Background(), c, mcpCreateSpec{
 		name: server, namespace: ns, url: "http://10.0.0.5:8080/mcp", status: "approved",
 		authType:        oauthAuthType,
 		oauthSecretData: map[string][]byte{secretKeyOAuthAccessToken: []byte(theOAuthAccessToken)},
