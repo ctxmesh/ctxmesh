@@ -33,6 +33,7 @@ import (
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -207,10 +208,21 @@ func main() {
 			"sidecarImage", oboEgress.SidecarImage, "delegating", oboEgress.TokenServiceURL != "")
 	}
 
+	// ToolRegistry retirement switch (M45, ADR 0044): RETIRE_TR flips the
+	// ToolRegistry read path to Postgres (a shared RegistryReader) and replaces the
+	// CRD watch with the poll source — and, exactly like RETIRE_PV before it, STOPS
+	// the sync reconciler so pruneOrphans can never delete now-authoritative rows
+	// once the CRD is gone (the ADR 0044 §3 ordering hazard). Nil reader + nil
+	// channel ⇒ the CRD-backed default (fully reversible).
+	retireToolRegistry := os.Getenv("RETIRE_TR") == "true"
+	var registryReader controller.RegistryReader
+	var registryChanges <-chan event.GenericEvent
+
 	// Control-plane store (ADR 0042 Amendment 4): when CONTROLPLANE_DSN is set, the
-	// operator runs the sync reconcilers that make Postgres an authoritative
-	// projection of the moved CRDs — the write path the read-switch depends on.
-	// Unset ⇒ the reconcilers are not registered and reads stay on the CRD (fully
+	// operator runs the sync reconciler that makes Postgres an authoritative
+	// projection of the moved CRDs — the write path the read-switch depends on —
+	// UNLESS the entity is retired, in which case Postgres is already the source of
+	// truth and the reconciler is stopped. Unset ⇒ reads stay on the CRD (fully
 	// reversible). OpenDB runs the goose migrations (session-locked) at start-up.
 	if cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN")); cpDSN != "" {
 		cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
@@ -222,16 +234,39 @@ func main() {
 		toolRegistryStore := toolregistry.NewPostgresStore(cpDB)
 
 		// PromptVersion is retired to Postgres (ADR 0044) — no CRD, no sync reconciler.
-		// ToolRegistry still dual-writes (M43); its sync reconciler keeps Postgres an
-		// authoritative projection until ToolRegistry is retired (M45).
-		if err := (&controller.ToolRegistrySyncReconciler{
-			Client: mgr.GetClient(),
-			Store:  toolRegistryStore,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "toolregistry-sync")
-			os.Exit(1)
+		if retireToolRegistry {
+			// Read-switch: ONE shared Postgres reader for BOTH the MCPToolBinding and
+			// AgentDeployment reconcilers — they compute the pushed manifest and the
+			// pod template from the same resolveAgentBindings logic, so a split reader
+			// would silently drift them. The leader-elected poll source replaces the
+			// CRD watch, which cannot outlive the CRD definition.
+			registryReader = controller.NewPostgresRegistryReader(toolRegistryStore)
+			ch := make(chan event.GenericEvent)
+			registryChanges = ch
+			if err := mgr.Add(controller.NewRegistryPollSource(toolRegistryStore, ch)); err != nil {
+				setupLog.Error(err, "Failed to add the ToolRegistry poll source")
+				os.Exit(1)
+			}
+			setupLog.Info("ToolRegistry RETIRED to Postgres (ADR 0044): read-switch + poll source active; " +
+				"sync reconciler NOT registered")
+		} else {
+			// Dual-write window (M43): the sync reconciler keeps Postgres an
+			// authoritative projection; reads stay on the CRD.
+			if err := (&controller.ToolRegistrySyncReconciler{
+				Client: mgr.GetClient(),
+				Store:  toolRegistryStore,
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "Failed to create controller", "controller", "toolregistry-sync")
+				os.Exit(1)
+			}
+			setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry sync reconciler registered")
 		}
-		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry sync reconciler registered")
+	} else if retireToolRegistry {
+		// Fail closed: RETIRE_TR without a store would silently fall back to the CRD
+		// reader for a CRD that is being deleted — refuse to start.
+		setupLog.Error(nil, "RETIRE_TR=true requires CONTROLPLANE_DSN (the Postgres read path); "+
+			"refusing to start on the CRD read path with no store")
+		os.Exit(1)
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{
@@ -244,6 +279,10 @@ func main() {
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
 		// impl of prompt.Resolver swapped in HERE; nothing else changes.
 		PromptResolver: prompt.NewFixtureResolver(),
+		// Registry read source — nil ⇒ CRD default; the shared Postgres reader when
+		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
+		// MCPToolBinding reconciler uses (below), or the two drift.
+		Registry: registryReader,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
@@ -258,6 +297,10 @@ func main() {
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		OBOEgress: oboEgress,
+		// Same shared reader as the AgentDeployment reconciler (above) + the poll
+		// channel that replaces the CRD watch — both nil unless RETIRE_TR.
+		Registry:        registryReader,
+		RegistryChanges: registryChanges,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
