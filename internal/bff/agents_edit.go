@@ -33,6 +33,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
@@ -300,7 +301,7 @@ func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 // new spec no longer emits (e.g. a removed tool's MCPToolBinding) are left in
 // place — orphan pruning is a later concern; this path never deletes anything.
 func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, reader AgentReader, ns, name, editedYAML string) {
-	if err := applyEditedSpec(r.Context(), applier, reader, s.scheme, []byte(editedYAML), ns, name); err != nil {
+	if err := applyEditedSpec(r.Context(), applier, reader, s.promptStore, s.scheme, []byte(editedYAML), ns, name); err != nil {
 		s.writeEditError(w, err)
 		return
 	}
@@ -312,7 +313,7 @@ func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier A
 // SSA-apply every manifest under the console field-manager. It refuses to apply a
 // spec whose AgentDeployment name does not match the object being edited so a PUT
 // can never rename/re-target the agent (the {name} in the URL is authoritative).
-func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentReader, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
+func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentReader, promptStore promptversion.Store, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
 	if scheme == nil {
 		return &createError{status: 500, msg: "server misconfigured: no scheme"}
 	}
@@ -366,7 +367,7 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentRead
 	// any apply — rather than leaving a stale annotation that would silently serve the old prompt (the
 	// m40.3 review's SHOULD-FIX #1: SSA can't drop a field a different field-manager owns, so "skip" is
 	// unsafe on edit).
-	if pErr := stampResolvedPrompt(ctx, reader, objs, ns); pErr != nil {
+	if pErr := stampResolvedPrompt(ctx, promptStore, objs, ns); pErr != nil {
 		return pErr
 	}
 

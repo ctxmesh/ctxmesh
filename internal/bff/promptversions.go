@@ -17,14 +17,12 @@ limitations under the License.
 package bff
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -35,42 +33,13 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
 
-// mirrorPromptVersion best-effort dual-writes a PromptVersion to the control-plane Postgres store
-// (ADR 0042, m40.4). A store failure is LOGGED, never returned — the caller-scoped CRD write already
-// succeeded and stays the source of truth during the migration window; a stale mirror self-heals on the
-// next write (or the eventual backfill). A nil store (CONTROLPLANE_DSN unset) is a no-op. The CRD write's
-// RBAC IS the authorization for the mirror — it only runs after a write the API server accepted.
-func (s *Server) mirrorPromptVersion(ctx context.Context, pv *agentsv1alpha1.PromptVersion) {
-	if s.promptStore == nil {
-		return
-	}
-	if _, err := s.promptStore.Upsert(ctx, promptversion.PromptVersion{
-		Namespace: pv.Namespace,
-		Name:      pv.Name,
-		Repo:      pv.Spec.Git.Repo,
-		Ref:       pv.Spec.Git.Ref,
-		Path:      pv.Spec.Git.Path,
-		Labels:    pv.Labels,
-	}); err != nil {
-		s.log.Error(err, "mirror PromptVersion to control-plane store failed (CRD remains source of truth)",
-			"namespace", pv.Namespace, "name", pv.Name)
-	}
-}
-
-// unmirrorPromptVersion best-effort removes a PromptVersion from the control-plane store after a
-// successful caller-scoped CRD delete (ADR 0042, m40.4). Best-effort like mirrorPromptVersion.
-func (s *Server) unmirrorPromptVersion(ctx context.Context, ns, name string) {
-	if s.promptStore == nil {
-		return
-	}
-	if err := s.promptStore.Delete(ctx, ns, name); err != nil {
-		s.log.Error(err, "unmirror PromptVersion from control-plane store failed", "namespace", ns, "name", name)
-	}
-}
-
-// promptVersionKind is the CRD kind name for a PromptVersion (used in error
-// messages and the rename guard so they match the API server's kind strings).
+// promptVersionKind is the "PromptVersion" kind label (for created-object responses).
 const promptVersionKind = "PromptVersion"
+
+// msgPromptStoreRequired is the honest 501 when PromptVersion endpoints are hit but the control-plane store
+// isn't wired. PromptVersion is retired to Postgres (ADR 0044) — there is no CRD fallback, so the store is
+// mandatory for these routes.
+const msgPromptStoreRequired = "prompt versions require the control-plane store (CONTROLPLANE_DSN)"
 
 // --- DTOs -------------------------------------------------------------------
 
@@ -198,27 +167,7 @@ type PromptVersionDiffResponse struct {
 	Identical bool `json:"identical"`
 }
 
-// --- adapter helpers --------------------------------------------------------
-
-// listPromptVersions lists PromptVersions via the caller-scoped client.
-func listPromptVersions(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.PromptVersionList, error) {
-	var out agentsv1alpha1.PromptVersionList
-	if err := r.List(ctx, &out, opts...); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // --- DTO projection helpers -------------------------------------------------
-
-// newGitPromptSourceDTO projects a GitPromptSource onto the DTO.
-func newGitPromptSourceDTO(g agentsv1alpha1.GitPromptSource) GitPromptSourceDTO {
-	return GitPromptSourceDTO{
-		Repo: g.Repo,
-		Ref:  g.Ref,
-		Path: g.Path,
-	}
-}
 
 // newPromptVersionConditionDTO projects a metav1.Condition onto the flat DTO.
 func newPromptVersionConditionDTO(c metav1.Condition) PromptVersionConditionDTO {
@@ -240,42 +189,15 @@ func newPromptVersionConditionDTOs(conds []metav1.Condition) []PromptVersionCond
 	return out
 }
 
-// newPromptVersionSummary projects a PromptVersion onto the compact list DTO.
-func newPromptVersionSummary(pv *agentsv1alpha1.PromptVersion) PromptVersionSummary {
-	ready, phase := phaseFromConditions(pv.Status.Conditions)
-	return PromptVersionSummary{
-		Name:      pv.Name,
-		Namespace: pv.Namespace,
-		Git:       newGitPromptSourceDTO(pv.Spec.Git),
-		Phase:     phase,
-		Ready:     ready,
-	}
-}
-
-// newPromptVersionDetail projects a PromptVersion onto the full detail DTO.
-func newPromptVersionDetail(pv *agentsv1alpha1.PromptVersion) PromptVersionDetail {
-	ready, phase := phaseFromConditions(pv.Status.Conditions)
-	return PromptVersionDetail{
-		Name:       pv.Name,
-		Namespace:  pv.Namespace,
-		Git:        newGitPromptSourceDTO(pv.Spec.Git),
-		Phase:      phase,
-		Ready:      ready,
-		Conditions: newPromptVersionConditionDTOs(pv.Status.Conditions),
-	}
-}
-
 // storeGitDTO builds the git pointer DTO from a store row's flat fields.
 func storeGitDTO(pv *promptversion.PromptVersion) GitPromptSourceDTO {
 	return GitPromptSourceDTO{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}
 }
 
-// newPromptVersionSummaryFromStore / …DetailFromStore project a Postgres store row
-// onto the same DTOs as the CRD path (m43.5 read-switch). PromptVersion has no
-// status writer, so Status.Conditions is always empty — phaseFromConditions(nil)
-// and empty Conditions match the CRD read exactly, so the switch is behaviour-
-// preserving. (If a controller ever populates PromptVersion conditions, the store
-// schema must carry them and these constructors must be revisited.)
+// newPromptVersionSummaryFromStore / …DetailFromStore project a Postgres store row onto the DTOs.
+// PromptVersion is Postgres-only (ADR 0044) with no status writer, so Conditions is always empty and
+// phaseFromConditions(nil) yields (Pending, ready=false) — the honest, stable projection. (If a future
+// design gives PromptVersion status, the store schema must carry it and these constructors revisited.)
 func newPromptVersionSummaryFromStore(pv *promptversion.PromptVersion) PromptVersionSummary {
 	ready, phase := phaseFromConditions(nil)
 	return PromptVersionSummary{
@@ -311,26 +233,6 @@ func buildPromptVersionGit(dto GitPromptSourceDTO) (agentsv1alpha1.GitPromptSour
 	}, nil
 }
 
-// classifyPromptVersionWriteError maps a caller-scoped write failure to an honest
-// HTTP status. Mirrors the pattern from classifyEvalSuiteWriteError.
-func classifyPromptVersionWriteError(err error, kind, name string) (status int, msg string) {
-	switch {
-	case apierrors.IsAlreadyExists(err):
-		return http.StatusConflict, fmt.Sprintf("%s %q already exists", kind, name)
-	case apierrors.IsForbidden(err):
-		return http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to write %s %q", kind, name)
-	case apierrors.IsUnauthorized(err):
-		return http.StatusUnauthorized, msgTokenRejected
-	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
-		// CRD XValidation rejection → honest 422 with the API server's message.
-		return http.StatusUnprocessableEntity, fmt.Sprintf("%s %q rejected: %v", kind, name, err)
-	case apierrors.IsConflict(err):
-		return http.StatusConflict, fmt.Sprintf("%s %q apply conflict: %v", kind, name, err)
-	default:
-		return http.StatusBadGateway, fmt.Sprintf("failed to write %s %q: %v", kind, name, err)
-	}
-}
-
 // --- GET /api/promptversions ------------------------------------------------
 
 // handleListPromptVersions serves GET /api/promptversions — lists PromptVersions
@@ -353,61 +255,29 @@ func (s *Server) handleListPromptVersions(w http.ResponseWriter, r *http.Request
 	namespace := r.URL.Query().Get("namespace")
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
-	// Read-switch (ADR 0042 Amendment 4, m43.5): store-backed list behind a
-	// caller-scoped SSAR (exact RBAC parity with the CRD read).
-	if s.promptStore != nil {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
-			s.writeAuthzError(w, err, "list prompt versions")
-			return
-		}
-		page, err := s.promptStore.List(r.Context(), controlplane.ListOptions{
-			Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
-		})
-		if err != nil {
-			s.log.Error(err, "list PromptVersions from store failed")
-			writeError(w, http.StatusInternalServerError, "failed to list prompt versions")
-			return
-		}
-		items := make([]PromptVersionSummary, 0, len(page.Items))
-		for i := range page.Items {
-			items = append(items, newPromptVersionSummaryFromStore(&page.Items[i]))
-		}
-		writeJSON(w, http.StatusOK, PromptVersionListResponse{Items: items, NextCursor: page.NextPage})
+	// PromptVersion is Postgres-authoritative (ADR 0044): list from the store behind a caller-scoped SSAR
+	// (exact RBAC parity with the former CRD read); namespace/search/paging push down to the store.
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-
-	opts := []client.ListOption{client.Limit(int64(limit))}
-	if cursor != "" {
-		opts = append(opts, client.Continue(cursor))
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourcePromptVersions, namespace, ""); err != nil {
+		s.writeAuthzError(w, err, "list prompt versions")
+		return
 	}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	list, err := listPromptVersions(r.Context(), caller, opts...)
+	page, err := s.promptStore.List(r.Context(), controlplane.ListOptions{
+		Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
+	})
 	if err != nil {
-		if status, msg, isRBAC := classifyReadError(err); isRBAC {
-			writeError(w, status, msg)
-			return
-		}
-		s.log.Error(err, "list PromptVersions failed")
+		s.log.Error(err, "list PromptVersions from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to list prompt versions")
 		return
 	}
-
-	items := make([]PromptVersionSummary, 0, len(list.Items))
-	for i := range list.Items {
-		summary := newPromptVersionSummary(&list.Items[i])
-		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
-			continue
-		}
-		items = append(items, summary)
+	items := make([]PromptVersionSummary, 0, len(page.Items))
+	for i := range page.Items {
+		items = append(items, newPromptVersionSummaryFromStore(&page.Items[i]))
 	}
-
-	writeJSON(w, http.StatusOK, PromptVersionListResponse{
-		Items:      items,
-		NextCursor: list.Continue,
-	})
+	writeJSON(w, http.StatusOK, PromptVersionListResponse{Items: items, NextCursor: page.NextPage})
 }
 
 // --- GET /api/promptversions/{ns}/{name} ------------------------------------
@@ -429,33 +299,26 @@ func (s *Server) handleGetPromptVersion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Read-switch (m43.5): store-backed read behind a caller-scoped SSAR.
-	if s.promptStore != nil {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
-			s.writeAuthzError(w, err, "get prompt version")
-			return
-		}
-		pv, err := s.promptStore.Get(r.Context(), ns, name)
-		if err != nil {
-			if errors.Is(err, controlplane.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "prompt version not found")
-				return
-			}
-			s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to get prompt version")
-			return
-		}
-		writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(pv))
+	// PromptVersion is Postgres-authoritative (ADR 0044): store-backed read behind a caller-scoped SSAR.
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-
-	var pv agentsv1alpha1.PromptVersion
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &pv); err != nil {
-		s.writeGetError(w, err, "prompt version")
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+		s.writeAuthzError(w, err, "get prompt version")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, newPromptVersionDetail(&pv))
+	pv, err := s.promptStore.Get(r.Context(), ns, name)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "prompt version not found")
+			return
+		}
+		s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to get prompt version")
+		return
+	}
+	writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(pv))
 }
 
 // --- POST /api/promptversions -----------------------------------------------
@@ -498,61 +361,32 @@ func (s *Server) handleCreatePromptVersion(w http.ResponseWriter, r *http.Reques
 	}
 	name := strings.TrimSpace(req.Name)
 
-	// Retirement write-path (ADR 0044, m44.2): PromptVersion is Postgres-authoritative —
-	// write to the store behind a caller-scoped SSAR + in-app validation (the API server
-	// is no longer in the path). Preserves CRD create semantics: 409 on an existing name.
-	if s.retirePromptVersion {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourcePromptVersions, ns, ""); err != nil {
-			s.writeAuthzError(w, err, "create prompt version")
-			return
-		}
-		rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
-		if vErr := promptversion.Validate(rec); vErr != nil {
-			s.writeValidationError(w, vErr)
-			return
-		}
-		// Atomic create: the store returns ErrConflict on a duplicate name (a Get-then-Upsert would race
-		// two concurrent creates into a silent overwrite) — 409, matching the CRD's atomic create.
-		stored, cErr := s.promptStore.Create(r.Context(), rec)
-		if cErr != nil {
-			if errors.Is(cErr, controlplane.ErrConflict) {
-				writeError(w, http.StatusConflict, fmt.Sprintf("prompt version %q already exists", name))
-				return
-			}
-			s.log.Error(cErr, "create PromptVersion in store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to create prompt version")
-			return
-		}
-		writeJSON(w, http.StatusCreated, newPromptVersionDetailFromStore(stored))
+	// PromptVersion is Postgres-authoritative (ADR 0044) — write to the store behind a caller-scoped SSAR +
+	// in-app validation (the API server is no longer in the path). Atomic Create → 409 on an existing name.
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-
-	pv := &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-		},
-		Spec: agentsv1alpha1.PromptVersionSpec{
-			Git: gitSrc,
-		},
-	}
-	if err := ensureGVK(pv, s.scheme); err != nil {
-		s.log.Error(err, "resolve GVK for PromptVersion failed")
-		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot resolve prompt version kind")
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourcePromptVersions, ns, ""); err != nil {
+		s.writeAuthzError(w, err, "create prompt version")
 		return
 	}
-
-	if cErr := caller.Create(r.Context(), pv); cErr != nil {
-		status, msg := classifyPromptVersionWriteError(cErr, promptVersionKind, pv.Name)
-		if status >= 500 {
-			s.log.Error(cErr, "create PromptVersion failed", "name", pv.Name, "namespace", ns)
+	rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
+	if vErr := promptversion.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
+		return
+	}
+	stored, cErr := s.promptStore.Create(r.Context(), rec)
+	if cErr != nil {
+		if errors.Is(cErr, controlplane.ErrConflict) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("prompt version %q already exists", name))
+			return
 		}
-		writeError(w, status, msg)
+		s.log.Error(cErr, "create PromptVersion in store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to create prompt version")
 		return
 	}
-
-	s.mirrorPromptVersion(r.Context(), pv) // ADR 0042 m40.4: best-effort dual-write to Postgres
-	writeJSON(w, http.StatusCreated, newPromptVersionDetail(pv))
+	writeJSON(w, http.StatusCreated, newPromptVersionDetailFromStore(stored))
 }
 
 // --- PUT /api/promptversions/{ns}/{name} ------------------------------------
@@ -602,63 +436,28 @@ func (s *Server) handleUpdatePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Retirement write-path (m44.2): upsert the store behind an SSAR + validation.
-	if s.retirePromptVersion {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourcePromptVersions, ns, name); err != nil {
-			s.writeAuthzError(w, err, "update prompt version")
-			return
-		}
-		rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
-		if vErr := promptversion.Validate(rec); vErr != nil {
-			s.writeValidationError(w, vErr)
-			return
-		}
-		stored, uErr := s.promptStore.Upsert(r.Context(), rec)
-		if uErr != nil {
-			s.log.Error(uErr, "update PromptVersion in store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to update prompt version")
-			return
-		}
-		writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(stored))
+	// PromptVersion is Postgres-authoritative (ADR 0044): upsert the store behind an SSAR + validation
+	// (PUT creates-if-absent, matching the prior SSA-apply semantics).
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-
-	apply := &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-		},
-		Spec: agentsv1alpha1.PromptVersionSpec{
-			Git: gitSrc,
-		},
-	}
-	if err := ensureGVK(apply, s.scheme); err != nil {
-		s.log.Error(err, "resolve GVK for PromptVersion failed")
-		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot resolve prompt version kind")
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourcePromptVersions, ns, name); err != nil {
+		s.writeAuthzError(w, err, "update prompt version")
 		return
 	}
-
-	// SSA write: console owns the spec fields; controller retains status.conditions.
-	if pErr := caller.Patch(r.Context(), apply, client.Apply, //nolint:staticcheck // typed-CRD SSA; patch-apply is the supported path
-		client.FieldOwner(consoleFieldManager), client.ForceOwnership); pErr != nil {
-		status, msg := classifyPromptVersionWriteError(pErr, promptVersionKind, name)
-		if status >= 500 {
-			s.log.Error(pErr, "update PromptVersion failed", "name", name, "namespace", ns)
-		}
-		writeError(w, status, msg)
+	rec := promptversion.PromptVersion{Namespace: ns, Name: name, Repo: gitSrc.Repo, Ref: gitSrc.Ref, Path: gitSrc.Path}
+	if vErr := promptversion.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
 		return
 	}
-
-	// Re-read the live object so the response reflects what the API server persisted.
-	var updated agentsv1alpha1.PromptVersion
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &updated); err != nil {
-		s.log.Error(err, "re-read PromptVersion after apply failed", "name", name, "namespace", ns)
-		writeError(w, http.StatusInternalServerError, "prompt version updated but could not be re-read")
+	stored, uErr := s.promptStore.Upsert(r.Context(), rec)
+	if uErr != nil {
+		s.log.Error(uErr, "update PromptVersion in store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to update prompt version")
 		return
 	}
-
-	s.mirrorPromptVersion(r.Context(), &updated) // ADR 0042 m40.4: best-effort dual-write to Postgres
-	writeJSON(w, http.StatusOK, newPromptVersionDetail(&updated))
+	writeJSON(w, http.StatusOK, newPromptVersionDetailFromStore(stored))
 }
 
 // --- DELETE /api/promptversions/{ns}/{name} ----------------------------------
@@ -684,84 +483,58 @@ func (s *Server) handleDeletePromptVersion(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Retirement write-path (m44.2): delete from the store behind an SSAR. Preserves
-	// CRD delete semantics — 404 on an absent object (the store Delete is idempotent).
-	if s.retirePromptVersion {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourcePromptVersions, ns, name); err != nil {
-			s.writeAuthzError(w, err, "delete prompt version")
-			return
-		}
-		if _, gErr := s.promptStore.Get(r.Context(), ns, name); errors.Is(gErr, controlplane.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "prompt version not found")
-			return
-		} else if gErr != nil {
-			s.log.Error(gErr, "delete PromptVersion: existence check failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
-			return
-		}
-		if dErr := s.promptStore.Delete(r.Context(), ns, name); dErr != nil {
-			s.log.Error(dErr, "delete PromptVersion from store failed", "name", name, "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+	// PromptVersion is Postgres-authoritative (ADR 0044): delete from the store behind an SSAR — 404 on an
+	// absent object (the store Delete is idempotent, so an existence check gives the honest 404).
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return
 	}
-
-	pv := &agentsv1alpha1.PromptVersion{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
-	}
-	if err := caller.Delete(r.Context(), pv); err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			writeError(w, http.StatusNotFound, "prompt version not found")
-		case apierrors.IsForbidden(err):
-			writeError(w, http.StatusForbidden, "forbidden: not allowed to delete the prompt version")
-		case apierrors.IsUnauthorized(err):
-			writeError(w, http.StatusUnauthorized, msgTokenRejected)
-		default:
-			s.log.Error(err, "delete PromptVersion failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
-		}
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourcePromptVersions, ns, name); err != nil {
+		s.writeAuthzError(w, err, "delete prompt version")
 		return
 	}
-
-	s.unmirrorPromptVersion(r.Context(), ns, name) // ADR 0042 m40.4: best-effort dual-write to Postgres
+	if _, gErr := s.promptStore.Get(r.Context(), ns, name); errors.Is(gErr, controlplane.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "prompt version not found")
+		return
+	} else if gErr != nil {
+		s.log.Error(gErr, "delete PromptVersion: existence check failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
+		return
+	}
+	if dErr := s.promptStore.Delete(r.Context(), ns, name); dErr != nil {
+		s.log.Error(dErr, "delete PromptVersion from store failed", "name", name, "namespace", ns)
+		writeError(w, http.StatusInternalServerError, "failed to delete prompt version")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// promptGitForDiff returns the git pointer for a PromptVersion (ns/name) used by
-// the diff endpoint — store-backed behind a caller-scoped SSAR when the
-// read-switch is on (m43.5), else the caller-scoped CRD. On any failure it writes
-// the honest status (403/404/500 for the store path; writeGetError for the CRD
-// path) and returns ok=false. label is "from"/"to" for the message.
+// promptGitForDiff returns the git pointer for a PromptVersion (ns/name) used by the diff endpoint —
+// store-backed behind a caller-scoped SSAR (PromptVersion is Postgres-authoritative, ADR 0044). On any
+// failure it writes the honest status (501 no store / 403 / 404 / 500) and returns ok=false. label is
+// "from"/"to" for the message.
 func (s *Server) promptGitForDiff(
 	w http.ResponseWriter, r *http.Request, caller client.Client, ns, name, label string,
 ) (agentsv1alpha1.GitPromptSource, bool) {
-	if s.promptStore != nil {
-		if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
-			s.writeAuthzError(w, err, fmt.Sprintf("get %s prompt version %q", label, name))
-			return agentsv1alpha1.GitPromptSource{}, false
-		}
-		pv, err := s.promptStore.Get(r.Context(), ns, name)
-		if err != nil {
-			if errors.Is(err, controlplane.ErrNotFound) {
-				writeError(w, http.StatusNotFound, fmt.Sprintf("%s prompt version %q not found", label, name))
-				return agentsv1alpha1.GitPromptSource{}, false
-			}
-			s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get %s prompt version", label))
-			return agentsv1alpha1.GitPromptSource{}, false
-		}
-		return agentsv1alpha1.GitPromptSource{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}, true
-	}
-
-	var pv agentsv1alpha1.PromptVersion
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &pv); err != nil {
-		s.writeGetError(w, err, fmt.Sprintf("%s prompt version %q", label, name))
+	if s.promptStore == nil {
+		writeError(w, http.StatusNotImplemented, msgPromptStoreRequired)
 		return agentsv1alpha1.GitPromptSource{}, false
 	}
-	return pv.Spec.Git, true
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbGet, resourcePromptVersions, ns, name); err != nil {
+		s.writeAuthzError(w, err, fmt.Sprintf("get %s prompt version %q", label, name))
+		return agentsv1alpha1.GitPromptSource{}, false
+	}
+	pv, err := s.promptStore.Get(r.Context(), ns, name)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("%s prompt version %q not found", label, name))
+			return agentsv1alpha1.GitPromptSource{}, false
+		}
+		s.log.Error(err, "get PromptVersion from store failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get %s prompt version", label))
+		return agentsv1alpha1.GitPromptSource{}, false
+	}
+	return agentsv1alpha1.GitPromptSource{Repo: pv.Repo, Ref: pv.Ref, Path: pv.Path}, true
 }
 
 // --- GET /api/promptversions/{ns}/{name}/diff --------------------------------

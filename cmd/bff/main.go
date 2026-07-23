@@ -259,7 +259,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
-		RetirePromptVersion:         strings.TrimSpace(os.Getenv("RETIRE_PV")) == "true",
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
