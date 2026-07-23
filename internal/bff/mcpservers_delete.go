@@ -118,8 +118,8 @@ func (s *Server) handleMCPServerReferences(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)
+	if err != nil {
 		s.writeGetError(w, err, "MCP server")
 		return
 	}
@@ -156,8 +156,8 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)
+	if err != nil {
 		s.writeGetError(w, err, "MCP server")
 		return
 	}

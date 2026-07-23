@@ -440,8 +440,8 @@ func (s *Server) upsertGrantSecret(ctx context.Context, caller client.Client, se
 // caller then overlays an explicitly-supplied config (or fails validation), so a
 // one-click Playground connect works for new servers and legacy stays connectable.
 func (s *Server) recoverRegisteredOAuth(ctx context.Context, caller client.Client, ns, server string) (mcpOAuthConfig, string, *createError) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(ctx, caller, ns, server)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return mcpOAuthConfig{}, "", &createError{status: http.StatusNotFound, msg: "no such registered MCP server"}
 		}
