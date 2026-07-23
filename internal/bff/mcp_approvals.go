@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
 // The MCP APPROVAL QUEUE — the operator-facing surface for the HARDENED trust
@@ -228,8 +229,19 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// DELETE the catalog entry first — this is the operator-gated write. A viewer/
-	// developer without delete on toolregistries → the API server's real 403.
-	if err := caller.Delete(r.Context(), tr); err != nil && !apierrors.IsNotFound(err) {
+	// developer without delete on toolregistries → the API server's real 403 (CRD)
+	// or the SSAR's 403 (retired, store).
+	if s.retireToolRegistry {
+		if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
+			s.writeAuthzError(w, err, "reject the MCP server")
+			return
+		}
+		if err := s.toolRegistryStore.Delete(r.Context(), ns, name); err != nil {
+			s.log.Error(err, "reject MCP: delete from store failed", "namespace", ns, "name", name)
+			writeError(w, http.StatusInternalServerError, "failed to reject the MCP server")
+			return
+		}
+	} else if err := caller.Delete(r.Context(), tr); err != nil && !apierrors.IsNotFound(err) {
 		status, msg := classifyMCPDeleteError(err, mcpApprovalKind, name)
 		if status >= 500 {
 			s.log.Error(err, "reject MCP: delete ToolRegistry failed", "namespace", ns, "name", name)
