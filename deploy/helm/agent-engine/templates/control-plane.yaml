@@ -258,7 +258,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
-  - promptversions
   verbs:
   - create
   - delete
@@ -280,7 +279,6 @@ rules:
   - agentregistries/status
   - agentscalingpolicies/status
   - evalsuites/status
-  - promptversions/status
   verbs:
   - get
   - list
@@ -358,7 +356,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - evalsuites
-  - promptversions
   - secretbindings
   - toolregistries
   verbs:
@@ -490,7 +487,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
-  - promptversions
   verbs:
   - '*'
 - apiGroups:
@@ -506,7 +502,6 @@ rules:
   - agentregistries/status
   - agentscalingpolicies/status
   - evalsuites/status
-  - promptversions/status
   verbs:
   - get
   - list
@@ -554,7 +549,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
-  - promptversions
   verbs:
   - get
   - list
@@ -572,7 +566,6 @@ rules:
   - agentregistries/status
   - agentscalingpolicies/status
   - evalsuites/status
-  - promptversions/status
   verbs:
   - get
   - list

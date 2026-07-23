@@ -30,7 +30,6 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
-  - promptversions
   verbs:
   - create
   - delete
@@ -52,7 +51,6 @@ rules:
   - agentregistries/status
   - agentscalingpolicies/status
   - evalsuites/status
-  - promptversions/status
   verbs:
   - get
   - list

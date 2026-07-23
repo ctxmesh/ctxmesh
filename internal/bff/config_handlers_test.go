@@ -38,6 +38,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
@@ -47,7 +48,11 @@ import (
 // the K8s ops land on.
 func newConfigServer(t *testing.T, c client.Client) *Server {
 	t.Helper()
-	return newCallerServer(t, newFakeFactory(c))
+	s := newCallerServer(t, newFakeFactory(c))
+	// PromptVersion is Postgres-only (ADR 0044): the inline `prompt:` block routes to the store, so a
+	// create-from-prompt test needs one wired (reflecting production's CONTROLPLANE_DSN).
+	s.promptStore = promptversion.NewMemStore()
+	return s
 }
 
 // sampleAgentYAML is a full-surface form submission (name/image/execModel +
@@ -200,17 +205,20 @@ prompt:
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
 
-	require.Equal(t, http.StatusCreated, rec.Code)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp.Created, 3)
+	// PromptVersion is store-routed first (ADR 0044 partition), then the CRDs in dependency order.
 	kinds := []string{resp.Created[0].Kind, resp.Created[1].Kind, resp.Created[2].Kind}
-	assert.Equal(t, []string{"EvalSuite", "PromptVersion", "AgentDeployment"}, kinds)
+	assert.Equal(t, []string{"PromptVersion", "EvalSuite", "AgentDeployment"}, kinds)
 
+	// EvalSuite is a CRD (fake client); the PromptVersion is in the Postgres store (no CRD).
 	var es agentsv1alpha1.EvalSuite
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "quality", Namespace: "prod"}, &es))
-	var pv agentsv1alpha1.PromptVersion
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "system-prompt", Namespace: "prod"}, &pv))
+	storedPV, err := s.promptStore.Get(context.Background(), "prod", "system-prompt")
+	require.NoError(t, err)
+	assert.Equal(t, "main", storedPV.Ref)
 }
 
 func TestCreateAgentHandlerBadYAMLIs400(t *testing.T) {
@@ -404,9 +412,10 @@ prompt:
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "quality", Namespace: "prod"}, &es))
 	assert.NotContains(t, es.Annotations, expand.AnnotationSourceSpec, "generated EvalSuite must NOT carry the annotation")
 
-	var pv agentsv1alpha1.PromptVersion
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "system-prompt", Namespace: "prod"}, &pv))
-	assert.NotContains(t, pv.Annotations, expand.AnnotationSourceSpec, "generated PromptVersion must NOT carry the annotation")
+	// The generated PromptVersion is store-routed (ADR 0044) — the store record carries no annotations at
+	// all, so the source-spec annotation cannot land on it by construction.
+	_, err := s.promptStore.Get(context.Background(), "prod", "system-prompt")
+	require.NoError(t, err, "the generated PromptVersion landed in the store")
 }
 
 // TestCreateAgentInlineSecretRejected proves a spec carrying inline credential

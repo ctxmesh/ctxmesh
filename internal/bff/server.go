@@ -79,10 +79,10 @@ type Server struct {
 	// read source, the store is a best-effort mirror. nil ⇒ CRD-only.
 	toolRegistryStore toolregistry.Store
 
-	// authorizer gates a store-backed READ (ADR 0042 Amendment 4, m43.4): once a read comes from Postgres
-	// the API server is no longer in the path, so the BFF authorizes it with a caller-scoped SSAR (exact
-	// RBAC parity with the CRD read). Always non-nil (defaulted to authz.SSARAuthorizer{}); tests inject a
-	// fake to drive allow/deny deterministically.
+	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
+	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
+	// caller-scoped SSAR (exact RBAC parity with the CRD path). Always non-nil (defaulted to
+	// authz.SSARAuthorizer{}); tests inject a fake to drive allow/deny deterministically.
 	authorizer authz.Authorizer
 	// runWorkerDispatch, when true, makes POST /runs leave the run `queued` for a KEDA-scaled
 	// worker pool to claim + execute (m32.2) instead of running it in-process. Requires a durable

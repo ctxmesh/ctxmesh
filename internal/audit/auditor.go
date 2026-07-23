@@ -50,7 +50,7 @@ func auditedTypes() []client.Object {
 		&agentsv1alpha1.AgentRegistry{},
 		&agentsv1alpha1.AgentScalingPolicy{},
 		&agentsv1alpha1.EvalSuite{},
-		&agentsv1alpha1.PromptVersion{},
+		// PromptVersion retired to Postgres (ADR 0044) — no longer a CRD, so not watched here.
 	}
 }
 

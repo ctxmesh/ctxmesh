@@ -94,6 +94,18 @@ MCP_REQUIRE_APPROVAL_ENV_HELM = (
     "          value: {{ .Values.bff.mcp.requireApproval | quote }}"
 )
 
+# CONSOLE_URL (ADR 0040 cross-origin MCP consent): config/bff hardcodes "" (single-origin
+# default, so `kustomize build`/`make deploy` stay valid). The chart templates it from
+# `bff.consoleURL`; a multi-origin install sets the console origin. values.yaml ships ""
+# so the DEFAULT render == kustomize (no drift).
+CONSOLE_URL_ENV_KUSTOMIZE = (
+    '        - name: CONSOLE_URL\n' '          value: ""'
+)
+CONSOLE_URL_ENV_HELM = (
+    "        - name: CONSOLE_URL\n"
+    '          value: {{ .Values.bff.consoleURL | default "" | quote }}'
+)
+
 # MCP_CREDENTIAL_NAMESPACE (m25.1b, ADR 0029 §7): config/bff hardcodes "" (unset — the
 # legacy per-namespace grant path, so `kustomize build`/`make deploy` stay valid with
 # no extra namespace/RBAC). The chart templates it from `bff.mcp.credentialNamespace`;
@@ -214,6 +226,13 @@ def substitute(doc: str) -> str:
     doc = doc.replace(
         MCP_REQUIRE_APPROVAL_ENV_KUSTOMIZE,
         MCP_REQUIRE_APPROVAL_ENV_HELM,
+    )
+    # BFF cross-origin MCP-consent console origin -> Helm value (ADR 0040). Default
+    # renders "" == kustomize (no drift); `--set bff.consoleURL=https://console.<domain>`
+    # registers the canonical redirect_uri + cross-origin relay target.
+    doc = doc.replace(
+        CONSOLE_URL_ENV_KUSTOMIZE,
+        CONSOLE_URL_ENV_HELM,
     )
     # BFF locked credential namespace -> Helm value (m25.1b, ADR 0029 §7). Default
     # renders "" == kustomize (no drift); `--set bff.mcp.credentialNamespace=...` routes

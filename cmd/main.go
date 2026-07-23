@@ -43,7 +43,6 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
-	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -221,8 +220,10 @@ func main() {
 		}
 		defer func() { _ = cpDB.Close() }()
 		toolRegistryStore := toolregistry.NewPostgresStore(cpDB)
-		promptStore := promptversion.NewPostgresStore(cpDB)
 
+		// PromptVersion is retired to Postgres (ADR 0044) — no CRD, no sync reconciler.
+		// ToolRegistry still dual-writes (M43); its sync reconciler keeps Postgres an
+		// authoritative projection until ToolRegistry is retired (M45).
 		if err := (&controller.ToolRegistrySyncReconciler{
 			Client: mgr.GetClient(),
 			Store:  toolRegistryStore,
@@ -230,14 +231,7 @@ func main() {
 			setupLog.Error(err, "Failed to create controller", "controller", "toolregistry-sync")
 			os.Exit(1)
 		}
-		if err := (&controller.PromptVersionSyncReconciler{
-			Client: mgr.GetClient(),
-			Store:  promptStore,
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "Failed to create controller", "controller", "promptversion-sync")
-			os.Exit(1)
-		}
-		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry + PromptVersion sync reconcilers registered")
+		setupLog.Info("control-plane store enabled (ADR 0042): ToolRegistry sync reconciler registered")
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{
