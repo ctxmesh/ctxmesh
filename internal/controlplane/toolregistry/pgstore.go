@@ -24,8 +24,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 )
+
+// pgUniqueViolation is the Postgres SQLSTATE for unique_violation — a duplicate
+// (namespace, name) INSERT in Create, mapped to controlplane.ErrConflict.
+const pgUniqueViolation = "23505"
 
 // pgStore is the Postgres-backed Store. The tool_registries table is applied by the control-plane goose
 // migrations (controlplane.Migrate), not here.
@@ -87,6 +93,39 @@ func (s *pgStore) Get(ctx context.Context, ns, name string) (*ToolRegistry, erro
 		return nil, fmt.Errorf("toolregistry: get: %w", err)
 	}
 	return tr, nil
+}
+
+func (s *pgStore) Create(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error) {
+	tools, err := json.Marshal(nonNilTools(tr.Tools))
+	if err != nil {
+		return nil, fmt.Errorf("toolregistry: encode tools: %w", err)
+	}
+	ann, err := json.Marshal(nonNilMap(tr.Annotations))
+	if err != nil {
+		return nil, fmt.Errorf("toolregistry: encode annotations: %w", err)
+	}
+	labels, err := json.Marshal(nonNilMap(tr.Labels))
+	if err != nil {
+		return nil, fmt.Errorf("toolregistry: encode labels: %w", err)
+	}
+	// Plain INSERT (no ON CONFLICT): a duplicate (namespace, name) raises a unique
+	// violation, mapped to controlplane.ErrConflict → the BFF's 409. The ATOMIC
+	// create the retirement path needs (ADR 0044); a Get-then-Upsert would race two
+	// concurrent creates into a silent overwrite.
+	row := s.db.QueryRowContext(ctx, `
+		INSERT INTO tool_registries (namespace, name, tools, annotations, labels, version, created_at, updated_at)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, 1, now(), now())
+		RETURNING `+pgColumns,
+		tr.Namespace, tr.Name, string(tools), string(ann), string(labels))
+	out, err := scanRegistry(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return nil, controlplane.ErrConflict
+		}
+		return nil, fmt.Errorf("toolregistry: create: %w", err)
+	}
+	return out, nil
 }
 
 func (s *pgStore) Upsert(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error) {
