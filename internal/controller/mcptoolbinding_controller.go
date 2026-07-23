@@ -29,9 +29,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
@@ -83,6 +85,13 @@ type MCPToolBindingReconciler struct {
 	// reconcilers compute the pushed manifest and the pod template from the same
 	// resolveAgentBindings logic, so different readers would silently drift them.
 	Registry RegistryReader
+	// RegistryChanges, when non-nil, feeds ToolRegistry-change events from the
+	// Postgres poll source (registryPollSource, ADR 0044 §1) INSTEAD OF the CRD
+	// watch — wired once the ToolRegistry CRD is retired (M45), because a deleted
+	// CRD can no longer be watched. Nil ⇒ the CRD watch (pre-retirement, fully
+	// reversible). Both feed the SAME mapRegistryToBindings map function, so the
+	// fan-out semantics are identical; only the event source differs.
+	RegistryChanges <-chan event.GenericEvent
 }
 
 // registryReader returns the configured RegistryReader or the CRD-backed default.
@@ -461,10 +470,20 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.MCPToolBinding{}).
-		Watches(&agentsv1alpha1.ToolRegistry{}, mapRegistryToBindings).
 		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToBindings).
-		Named("mcptoolbinding").
-		Complete(r)
+		Named("mcptoolbinding")
+
+	// The ToolRegistry change trigger has two mutually-exclusive sources feeding
+	// the identical map function: the CRD watch (pre-retirement) or the Postgres
+	// poll channel (post-retirement — the CRD type can no longer be watched once
+	// its definition is deleted, M45 / ADR 0044 §1).
+	if r.RegistryChanges != nil {
+		b = b.WatchesRawSource(source.Channel(r.RegistryChanges, mapRegistryToBindings))
+	} else {
+		b = b.Watches(&agentsv1alpha1.ToolRegistry{}, mapRegistryToBindings)
+	}
+
+	return b.Complete(r)
 }
