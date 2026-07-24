@@ -32,10 +32,14 @@ go.work
 # macOS
 .DS_Store
 
-# build artifacts
+# build artifacts — the root-level binaries produced by `go build ./cmd/...`
 /agent-engine
 /discovery
 /launcher
+/bff
+/token-service
+/egress-sidecar
+/manager
 
 # UI (ui/ — Vite React SPA, m12.4). Build output + installed deps + tool caches
 # are never committed; the pinned pnpm-lock.yaml + .nvmrc ARE tracked.

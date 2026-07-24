@@ -19,12 +19,9 @@ package controller
 import (
 	"context"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
-	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
@@ -43,26 +40,6 @@ import (
 // unbackfilled mirror must never be trusted as the reconcile read source).
 type RegistryReader interface {
 	GetRegistry(ctx context.Context, namespace, name string) (*agentsv1alpha1.ToolRegistry, error)
-}
-
-// NewCRDRegistryReader reads ToolRegistries from the K8s API (the M42 default,
-// and the envtest path — no DB). reader is typically the reconciler's cached
-// client.
-func NewCRDRegistryReader(reader client.Reader) RegistryReader {
-	return crdRegistryReader{reader: reader}
-}
-
-type crdRegistryReader struct{ reader client.Reader }
-
-func (c crdRegistryReader) GetRegistry(ctx context.Context, namespace, name string) (*agentsv1alpha1.ToolRegistry, error) {
-	var reg agentsv1alpha1.ToolRegistry
-	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &reg); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, controlplane.ErrNotFound
-		}
-		return nil, err
-	}
-	return &reg, nil
 }
 
 // NewPostgresRegistryReader reads ToolRegistries from the control-plane store

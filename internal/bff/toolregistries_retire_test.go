@@ -24,7 +24,6 @@ func trRetireServer(t *testing.T, auth authz.Authorizer) (*Server, toolregistry.
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 	store := toolregistry.NewMemStore()
 	s.toolRegistryStore = store
-	s.retireToolRegistry = true
 	s.authorizer = auth
 	return s, store
 }
@@ -218,8 +217,8 @@ func TestToolRegistryIndex_FromStore(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// reader nil, regStore set ⇒ the store path.
-	idx := toolRegistryIndex(ctx, nil, store, trNS)
+	// the store path.
+	idx := toolRegistryIndex(ctx, store, trNS)
 	loc, ok := idx["create_organization"]
 	require.True(t, ok)
 	assert.Equal(t, "scalekit-mcp-server", loc.registry)
@@ -228,5 +227,5 @@ func TestToolRegistryIndex_FromStore(t *testing.T) {
 	assert.Equal(t, "owner-hash", loc.owner)
 
 	// A namespace with no registries → empty (not nil-panic).
-	assert.Empty(t, toolRegistryIndex(ctx, nil, store, "other-ns"))
+	assert.Empty(t, toolRegistryIndex(ctx, store, "other-ns"))
 }

@@ -274,7 +274,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - toolregistries/status
   - memorybindings/status
   - agentregistries/status
   - agentscalingpolicies/status
@@ -357,7 +356,6 @@ rules:
   resources:
   - evalsuites
   - secretbindings
-  - toolregistries
   verbs:
   - get
   - list
@@ -497,7 +495,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - toolregistries/status
   - memorybindings/status
   - agentregistries/status
   - agentscalingpolicies/status
@@ -521,7 +518,6 @@ rules:
   resources:
   - clustercredentialstores
   - credentialstores
-  - toolregistries
   verbs:
   - get
   - list
@@ -561,7 +557,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - toolregistries/status
   - memorybindings/status
   - agentregistries/status
   - agentscalingpolicies/status

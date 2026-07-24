@@ -130,13 +130,13 @@ func TestToolRegistryGetReadSwitch_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, code)
 }
 
-// Guard for the "store carries no status → conditions always empty" invariant
-// (reviewer NIT): the store-path DTO must report Pending / not-ready, identical to
-// the CRD read for a real (statusless) ToolRegistry. If a controller ever writes
-// ToolRegistry conditions, this trips red — a signal the store schema must carry
-// status before the read-switch can stay lossless.
-func TestToolRegistryDetailFromStore_PendingNotReady(t *testing.T) {
+// A store-backed ToolRegistry is always Ready (ADR 0044): the CRD/controller
+// reconcile loop is retired, so a persisted Postgres row is authoritative and
+// synchronously materialized — there is no async state to wait on. (During the
+// m43.4 read-switch this reported Pending, mirroring the statusless CRD read; the
+// full retirement in M45 makes "exists ⇒ Ready" the honest projection.)
+func TestToolRegistryDetailFromStore_Ready(t *testing.T) {
 	d := newToolRegistryDetailFromStore(&toolregistry.ToolRegistry{Namespace: trNS, Name: "reg1"})
-	assert.Equal(t, phasePending, d.Phase)
-	assert.False(t, d.Ready)
+	assert.Equal(t, phaseReady, d.Phase)
+	assert.True(t, d.Ready)
 }

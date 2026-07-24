@@ -370,6 +370,8 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 		entries = append(entries, entry)
 	}
 
+	// registry is the server catalog — a plain projection shape (ToolRegistry is
+	// retired to Postgres, ADR 0044); it is written to the store, not the K8s API.
 	registry := &agentsv1alpha1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
@@ -380,14 +382,15 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: entries},
 	}
 
-	// Assemble the create list in dependency order. The Secret/SecretBinding come
-	// first (the key store), then the ToolRegistry (the catalog), then the egress
-	// NetworkPolicy (the connectivity).
+	// The bundle is created in dependency order: the credential Secret +
+	// SecretBinding (the key store) BEFORE the ToolRegistry catalog, then the egress
+	// NetworkPolicy — those three are K8s objects created via the caller; the
+	// ToolRegistry goes to the Postgres store between them.
 	type kindObj struct {
 		kind string
 		o    client.Object
 	}
-	objs := make([]kindObj, 0, 4)
+	var beforeTR, afterTR []kindObj
 
 	if hasSecret {
 		// The Secret holds EITHER the bearer key (key tier) OR the OAuth grant
@@ -423,10 +426,8 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: bindingKey},
 			},
 		}
-		objs = append(objs, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
+		beforeTR = append(beforeTR, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
 	}
-
-	objs = append(objs, kindObj{toolRegistryKind, registry})
 
 	// The per-server egress NetworkPolicy — opened for an APPROVED server ONLY
 	// (ADR 0016 §4: "egress opens per approved server only"). Self-serve (default →
@@ -440,38 +441,39 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 		if npErr != nil {
 			return nil, npErr
 		}
-		objs = append(objs, kindObj{networkPolicyKind, np})
+		afterTR = append(afterTR, kindObj{networkPolicyKind, np})
 	}
 
-	created := make([]createdObject, 0, len(objs))
-	for _, ko := range objs {
-		// The ToolRegistry (the server catalog) is Postgres-authoritative when
-		// retired (ADR 0044): write it to the store behind a caller-scoped SSAR +
-		// in-app validation (atomic Create → 409). The Secret / SecretBinding /
-		// NetworkPolicy remain K8s objects and are always created via the caller.
-		if ko.kind == toolRegistryKind && s.retireToolRegistry {
-			reg := ko.o.(*agentsv1alpha1.ToolRegistry)
-			if err := s.authorizeStore(ctx, caller, authz.VerbCreate, resourceToolRegistries, reg.Namespace, ""); err != nil {
-				return created, toolRegistryStoreWriteError(err, reg.Name, "register the MCP server")
+	created := make([]createdObject, 0, len(beforeTR)+1+len(afterTR))
+	createK8s := func(kos []kindObj) *createError {
+		for _, ko := range kos {
+			if err := caller.Create(ctx, ko.o); err != nil {
+				return classifyCreateError(err, ko.kind, ko.o.GetName())
 			}
-			rec := crdToolRegistryToStore(reg)
-			if vErr := toolregistry.Validate(rec); vErr != nil {
-				return created, toolRegistryStoreWriteError(vErr, reg.Name, "register the MCP server")
-			}
-			if _, err := s.toolRegistryStore.Create(ctx, rec); err != nil {
-				return created, toolRegistryStoreWriteError(err, reg.Name, "register the MCP server")
-			}
-			created = append(created, createdObject{Kind: ko.kind, Name: reg.Name, Namespace: reg.Namespace})
-			continue
+			created = append(created, createdObject{Kind: ko.kind, Name: ko.o.GetName(), Namespace: ko.o.GetNamespace()})
 		}
-		if err := caller.Create(ctx, ko.o); err != nil {
-			return created, classifyCreateError(err, ko.kind, ko.o.GetName())
-		}
-		created = append(created, createdObject{
-			Kind:      ko.kind,
-			Name:      ko.o.GetName(),
-			Namespace: ko.o.GetNamespace(),
-		})
+		return nil
+	}
+
+	if cErr := createK8s(beforeTR); cErr != nil {
+		return created, cErr
+	}
+	// The ToolRegistry → the store, behind a caller-scoped SSAR VerbCreate + in-app
+	// validation (atomic Create → 409). ADR 0044.
+	if err := s.authorizeStore(ctx, caller, authz.VerbCreate, resourceToolRegistries, registry.Namespace, ""); err != nil {
+		return created, toolRegistryStoreWriteError(err, registry.Name, "register the MCP server")
+	}
+	rec := crdToolRegistryToStore(registry)
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		return created, toolRegistryStoreWriteError(vErr, registry.Name, "register the MCP server")
+	}
+	if _, err := s.toolRegistryStore.Create(ctx, rec); err != nil {
+		return created, toolRegistryStoreWriteError(err, registry.Name, "register the MCP server")
+	}
+	created = append(created, createdObject{Kind: toolRegistryKind, Name: registry.Name, Namespace: registry.Namespace})
+
+	if cErr := createK8s(afterTR); cErr != nil {
+		return created, cErr
 	}
 	return created, nil
 }

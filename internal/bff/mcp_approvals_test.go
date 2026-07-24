@@ -30,12 +30,13 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // pendingMCPURL is the IP-literal MCP endpoint the approval tests register. An IP
@@ -99,6 +100,23 @@ func approvedMCPRegistry(name, url string) *agentsv1alpha1.ToolRegistry {
 // TestListMCPApprovalsReturnsOnlyPending proves the queue lists ONLY the pending
 // register-managed servers — an already-approved one and a curated (non-managed)
 // registry are both excluded.
+// newApprovalServer wires an MCP approval-queue server that reads ToolRegistries
+// from a memstore (retired; no CRD, ADR 0044) seeded with regs; c backs the non-TR
+// objects (Secret/SecretBinding/NetworkPolicy). The SSAR authorizer is permissive
+// by default (RBAC-denial cases override s.authorizer).
+func newApprovalServer(t *testing.T, c client.Client, requireApproval bool, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory, toolregistry.Store) {
+	t.Helper()
+	s, factory, _ := newMCPServer(t, c, requireApproval)
+	store := toolregistry.NewMemStore()
+	s.toolRegistryStore = store
+	s.authorizer = &recordingAuthorizer{}
+	for _, reg := range regs {
+		_, err := store.Upsert(context.Background(), crdToolRegistryToStore(reg))
+		require.NoError(t, err)
+	}
+	return s, factory, store
+}
+
 func TestListMCPApprovalsReturnsOnlyPending(t *testing.T) {
 	pending := pendingMCPRegistry("pending-mcp", false)
 	approved := approvedMCPRegistry("approved-mcp", "http://10.0.0.6:8080/mcp")
@@ -106,8 +124,8 @@ func TestListMCPApprovalsReturnsOnlyPending(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
 		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pending, approved, curated).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newApprovalServer(t, c, true, pending, approved, curated)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp/approvals", nil)
@@ -125,7 +143,7 @@ func TestListMCPApprovalsReturnsOnlyPending(t *testing.T) {
 // TestListMCPApprovalsEmpty proves an empty queue is [] not null.
 func TestListMCPApprovalsEmpty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	s, _, _ := newApprovalServer(t, c, true)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp/approvals", nil)
@@ -141,8 +159,8 @@ func TestListMCPApprovalsEmpty(t *testing.T) {
 // queue is empty but the endpoint exists and behaves honestly.
 func TestListMCPApprovalsSelfServeIsEmpty(t *testing.T) {
 	approved := approvedMCPRegistry("self-serve-mcp", "http://10.0.0.7:8080/mcp")
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(approved).Build()
-	s, _, _ := newMCPServer(t, c, false) // requireApproval = false (self-serve)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newApprovalServer(t, c, false, approved) // requireApproval = false (self-serve)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp/approvals", nil)
@@ -153,14 +171,12 @@ func TestListMCPApprovalsSelfServeIsEmpty(t *testing.T) {
 	assert.JSONEq(t, `{"servers":[],"items":[]}`, rec.Body.String(), "self-serve → nothing pending")
 }
 
-// TestListMCPApprovalsForbiddenIs403 proves a Forbidden on the list surfaces as 403,
-// never a swallowed empty list.
+// TestListMCPApprovalsForbiddenIs403 proves a Forbidden on the list (the SSAR now,
+// ADR 0044) surfaces as 403, never a swallowed empty list.
 func TestListMCPApprovalsForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(forbiddenListInterceptor()).
-		Build()
-	s, _, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newApprovalServer(t, c, true)
+	s.authorizer = &recordingAuthorizer{err: authz.ErrForbidden}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcp/approvals", nil)
@@ -173,20 +189,18 @@ func TestListMCPApprovalsForbiddenIs403(t *testing.T) {
 
 // TestApproveMCPFlipsStatusAndOpensEgress is the core invariant proof: a pending
 // server has NO egress and un-bindable (pending) tools; approving flips
-// pending→approved (bindable) AND opens the per-server egress. It asserts BOTH the
-// before-state (no NetworkPolicy while pending) and the after-state (approved
-// entries + a bounded egress NetworkPolicy).
+// pending→approved in the STORE (bindable) AND opens the per-server egress. It
+// asserts the before-state (no NetworkPolicy) and the after-state (approved store
+// entries + a bounded egress NetworkPolicy, CIDR-scoped).
 func TestApproveMCPFlipsStatusAndOpensEgress(t *testing.T) {
+	ctx := context.Background()
 	pending := pendingMCPRegistry("weather-mcp", false)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pending).Build()
-	s, factory, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, factory, store := newApprovalServer(t, c, true, pending)
 
-	// BEFORE: pending → NO egress NetworkPolicy exists, and the tools are pending
-	// (not bindable). This is the m14.6 B1 property the approve must be the sole
-	// transition to break.
+	// BEFORE: pending → NO egress NetworkPolicy exists.
 	var npBefore networkingv1.NetworkPolicy
-	errBefore := c.Get(context.Background(),
-		client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &npBefore)
+	errBefore := c.Get(ctx, client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &npBefore)
 	require.True(t, apierrors.IsNotFound(errBefore), "a pending server must have NO egress before approval")
 
 	rec := httptest.NewRecorder()
@@ -196,25 +210,21 @@ func TestApproveMCPFlipsStatusAndOpensEgress(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, "operator-persona-token", factory.gotToken, "the caller's token scoped the approve")
-
 	var resp MCPServerSummary
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, agentsv1alpha1.ApprovalApproved, resp.Status)
 
-	// AFTER: the ToolRegistry entries + the status annotation are approved (bindable).
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "weather-mcp", Namespace: "prod"}, &tr))
+	// AFTER: the STORE row's entries + status annotation are approved (bindable).
+	tr, err := store.Get(ctx, "prod", "weather-mcp")
+	require.NoError(t, err)
 	assert.Equal(t, agentsv1alpha1.ApprovalApproved, tr.Annotations[annMCPStatus])
-	for _, e := range tr.Spec.Tools {
+	for _, e := range tr.Tools {
 		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
 	}
 
-	// AFTER: the per-server egress NetworkPolicy now EXISTS, egress-only + bounded to
-	// the server port (never a blanket open). Approving is the ONLY transition that
-	// opened it.
+	// AFTER: the per-server egress NetworkPolicy now EXISTS, egress-only + bounded.
 	var np networkingv1.NetworkPolicy
-	require.NoError(t, c.Get(context.Background(),
-		client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np))
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np))
 	require.Equal(t, []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, np.Spec.PolicyTypes)
 	require.Len(t, np.Spec.Egress, 1)
 	require.Len(t, np.Spec.Egress[0].Ports, 1, "egress is scoped to the server port, not a blanket open")
@@ -223,56 +233,13 @@ func TestApproveMCPFlipsStatusAndOpensEgress(t *testing.T) {
 	assert.Equal(t, "10.0.0.5/32", np.Spec.Egress[0].To[0].IPBlock.CIDR)
 }
 
-// TestApproveMCPViewerForbiddenIsRealNoEgress is the operator-only proof: a
-// developer/viewer whose RBAC denies the UPDATE gets the API server's real 403 —
-// AND (the crux) NO egress is opened by a denied approve. There is no bypass.
-func TestApproveMCPViewerForbiddenIsRealNoEgress(t *testing.T) {
-	pending := pendingMCPRegistry("weather-mcp", false)
-	npCreated := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithObjects(pending).
-		WithInterceptorFuncs(interceptor.Funcs{
-			// The operator-level write is an UPDATE on toolregistries — deny it as the
-			// API server would for a viewer/developer.
-			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "toolregistries"},
-					"weather-mcp", assert.AnError)
-			},
-			// Flag any NetworkPolicy create so we can prove a denied approve opens none.
-			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*networkingv1.NetworkPolicy); ok {
-					npCreated = true
-				}
-				return cl.Create(ctx, obj, opts...)
-			},
-		}).
-		Build()
-	s, _, _ := newMCPServer(t, c, true)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/weather-mcp", nil)
-	req.Header.Set("Authorization", "Bearer viewer-persona-token")
-	s.Handler().ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusForbidden, rec.Code, "a non-operator's approve is the API server's real 403")
-	assert.False(t, npCreated, "a DENIED approve must NOT open egress — approve is the ONLY opener, and it failed")
-
-	// The catalog entry stays pending (the failed update did not persist).
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "weather-mcp", Namespace: "prod"}, &tr))
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, tr.Spec.Tools[0].ApprovalStatus, "denied approve leaves it pending")
-	var np networkingv1.NetworkPolicy
-	err := c.Get(context.Background(),
-		client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np)
-	assert.True(t, apierrors.IsNotFound(err), "still no egress after a denied approve")
-}
+// (The operator-only "denied approve opens no egress" invariant is covered by
+// TestApproveMCP_RetireForbiddenNoEgress in mcp_approvals_retire_test.go.)
 
 // TestApproveMCPNotFoundIs404 proves approving a missing server is a 404.
 func TestApproveMCPNotFoundIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	s, _, _ := newApprovalServer(t, c, true)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/ghost-mcp", nil)
@@ -289,8 +256,8 @@ func TestApproveMCPRejectsNonManagedRegistryIs404(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "curated-tools", Namespace: "prod"},
 		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(curated).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, _ := newApprovalServer(t, c, true, curated)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/curated-tools", nil)
@@ -302,10 +269,11 @@ func TestApproveMCPRejectsNonManagedRegistryIs404(t *testing.T) {
 // --- POST /api/mcp/approvals/{ns}/{name}/reject: deny --------------------------
 
 // TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress proves rejecting a pending
-// (keyed) server removes the ToolRegistry (so the tools disappear from the catalog
-// and stay non-bindable) AND cleans up the Secret + SecretBinding — and NEVER opens
-// egress (a pending server has none; reject keeps it that way).
+// (keyed) server removes the ToolRegistry from the STORE (so the tools disappear
+// from the catalog and stay non-bindable) AND cleans up the Secret + SecretBinding
+// — and NEVER opens egress (a pending server has none; reject keeps it that way).
 func TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress(t *testing.T) {
+	ctx := context.Background()
 	pending := pendingMCPRegistry("keyed-mcp", true)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "keyed-mcp", Namespace: "prod"},
@@ -318,8 +286,8 @@ func TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress(t *testing.T) {
 			SecretRef: agentsv1alpha1.SecretKeyRef{Name: "keyed-mcp", Key: secretKeyAPIKey},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pending, secret, binding).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(secret, binding).Build()
+	s, _, store := newApprovalServer(t, c, true, pending)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/keyed-mcp/reject", nil)
@@ -331,57 +299,47 @@ func TestRejectMCPRemovesEntryAndArtifactsStaysNoEgress(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, mcpApprovalRejected, resp.Status)
 
-	// The ToolRegistry is gone → the tools are no longer in the catalog (not bindable).
-	var tr agentsv1alpha1.ToolRegistry
-	errTR := c.Get(context.Background(), client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &tr)
-	assert.True(t, apierrors.IsNotFound(errTR), "reject removes the catalog entry")
+	// The store row is gone → the tools are no longer in the catalog (not bindable).
+	_, errTR := store.Get(ctx, "prod", "keyed-mcp")
+	assert.ErrorIs(t, errTR, controlplane.ErrNotFound, "reject removes the catalog entry")
 
 	// The credential artifacts are cleaned up.
 	var sec corev1.Secret
 	assert.True(t, apierrors.IsNotFound(
-		c.Get(context.Background(), client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sec)),
-		"reject deletes the Secret")
+		c.Get(ctx, client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sec)), "reject deletes the Secret")
 	var sb agentsv1alpha1.SecretBinding
 	assert.True(t, apierrors.IsNotFound(
-		c.Get(context.Background(), client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sb)),
-		"reject deletes the SecretBinding")
+		c.Get(ctx, client.ObjectKey{Name: "keyed-mcp", Namespace: "prod"}, &sb)), "reject deletes the SecretBinding")
 
 	// No egress was ever opened (pending had none; reject never opens one).
 	var np networkingv1.NetworkPolicy
 	assert.True(t, apierrors.IsNotFound(
-		c.Get(context.Background(),
-			client.ObjectKey{Name: "keyed-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np)),
+		c.Get(ctx, client.ObjectKey{Name: "keyed-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np)),
 		"a rejected server stays with NO egress")
 }
 
-// TestRejectMCPViewerForbiddenIs403 proves a developer/viewer whose RBAC denies the
-// DELETE gets the API server's real 403 — no bypass — and the entry stays.
+// TestRejectMCPViewerForbiddenIs403 proves a developer/viewer whose SSAR denies the
+// delete gets a 403 — no bypass — and the entry stays.
 func TestRejectMCPViewerForbiddenIs403(t *testing.T) {
+	ctx := context.Background()
 	pending := pendingMCPRegistry("weather-mcp", false)
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithObjects(pending).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "toolregistries"},
-					"weather-mcp", assert.AnError)
-			},
-		}).
-		Build()
-	s, _, _ := newMCPServer(t, c, true)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s, _, store := newApprovalServer(t, c, true, pending)
+	s.authorizer = &verbAuthorizer{deny: map[string]bool{authz.VerbDelete: true}} // read OK, delete denied
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/weather-mcp/reject", nil)
 	req.Header.Set("Authorization", "Bearer viewer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusForbidden, rec.Code, "a non-operator's reject is the API server's real 403")
+	require.Equal(t, http.StatusForbidden, rec.Code, "a non-operator's reject is a 403")
+	_, err := store.Get(ctx, "prod", "weather-mcp")
+	require.NoError(t, err, "a denied reject leaves the store row")
 }
 
 // TestRejectMCPNotFoundIs404 proves rejecting a missing server is a 404.
 func TestRejectMCPNotFoundIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s, _, _ := newMCPServer(t, c, true)
+	s, _, _ := newApprovalServer(t, c, true)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcp/approvals/prod/ghost-mcp/reject", nil)

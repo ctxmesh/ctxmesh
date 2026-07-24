@@ -544,21 +544,15 @@ func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Clien
 	set(annMCPOAuthClientID, cfg.ClientID)
 	set(annMCPOAuthScope, cfg.Scope)
 	set(annMCPOAuthRedirectURI, cfg.RedirectURI)
-	// Persist — best-effort throughout (a failed read/authz/write just skips the
-	// backfill; the current consent still proceeds). Retired ⇒ store.Upsert behind
-	// SSAR VerbUpdate (a caller who cannot update just skips, as on the CRD path).
-	if s.retireToolRegistry {
-		if aErr := s.authorizeStore(ctx, caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
-			s.log.Info("oauth-config backfill skipped: not permitted to update (non-fatal)", "server", server)
-			return
-		}
-		if _, uErr := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); uErr != nil {
-			s.log.Info("oauth-config backfill skipped: could not persist to store (non-fatal)", "server", server)
-		}
+	// Persist to the store — best-effort throughout (a failed authz/write just skips
+	// the backfill; the current consent still proceeds) behind SSAR VerbUpdate (a
+	// caller who cannot update just skips, as on the old CRD path). ADR 0044.
+	if aErr := s.authorizeStore(ctx, caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
+		s.log.Info("oauth-config backfill skipped: not permitted to update (non-fatal)", "server", server)
 		return
 	}
-	if uErr := caller.Update(ctx, tr); uErr != nil {
-		s.log.Info("oauth-config backfill skipped: could not persist annotations (non-fatal)", "server", server)
+	if _, uErr := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); uErr != nil {
+		s.log.Info("oauth-config backfill skipped: could not persist to store (non-fatal)", "server", server)
 	}
 }
 

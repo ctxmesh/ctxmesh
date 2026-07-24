@@ -105,23 +105,18 @@ func (s *Server) handleSetOrgCredential(w http.ResponseWriter, r *http.Request) 
 	// between the check and the write. Accepted: org-promote RBAC is operator-stable
 	// and the window is sub-millisecond; the alternative (a store-side authz) is out
 	// of scope. (Documented in ADR 0044.)
-	if s.retireToolRegistry {
-		if aErr := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
-			s.writeAuthzError(w, aErr, "promote the MCP server to org scope")
-			return
-		}
-		rec := crdToolRegistryToStore(tr)
-		if vErr := toolregistry.Validate(rec); vErr != nil {
-			s.writeValidationError(w, vErr)
-			return
-		}
-		if _, uErr := s.toolRegistryStore.Upsert(r.Context(), rec); uErr != nil {
-			s.log.Error(uErr, "org-promote: store update failed", "namespace", ns, "server", server)
-			writeError(w, http.StatusInternalServerError, "failed to promote the MCP server to org scope")
-			return
-		}
-	} else if uErr := caller.Update(r.Context(), tr); uErr != nil {
-		writeMCPReadError(w, uErr, "MCP server")
+	if aErr := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
+		s.writeAuthzError(w, aErr, "promote the MCP server to org scope")
+		return
+	}
+	rec := crdToolRegistryToStore(tr)
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
+		return
+	}
+	if _, uErr := s.toolRegistryStore.Upsert(r.Context(), rec); uErr != nil {
+		s.log.Error(uErr, "org-promote: store update failed", "namespace", ns, "server", server)
+		writeError(w, http.StatusInternalServerError, "failed to promote the MCP server to org scope")
 		return
 	}
 

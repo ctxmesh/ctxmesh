@@ -33,17 +33,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
 
-// newBindingReconciler builds an MCPToolBindingReconciler on the envtest client.
-// The Pusher is left nil — the push path is NOT exercised in envtest (no kubelet
-// schedules pods, so pushToReadyPods lists zero ready pods and never dials). The
-// live push is proven by the m4.7 e2e slice instead.
+// testRegStore is the in-memory ToolRegistry store the envtest binding reconciler
+// reads (ToolRegistry is retired as a CRD, ADR 0044 — there is no CRD to create in
+// the test API server). mkRegistry seeds it; each registry is cleaned per-test.
+var testRegStore = toolregistry.NewMemStore()
+
+// newBindingReconciler builds an MCPToolBindingReconciler on the envtest client,
+// with the ToolRegistry reader backed by the in-memory store (no CRD). The Pusher
+// is left nil — the push path is NOT exercised in envtest (no kubelet schedules
+// pods, so pushToReadyPods lists zero ready pods and never dials). The live push is
+// proven by the m4.7 e2e slice instead.
 func newBindingReconciler() *MCPToolBindingReconciler {
 	return &MCPToolBindingReconciler{
-		Client: k8sClient,
-		Scheme: k8sClient.Scheme(),
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		Registry: NewPostgresRegistryReader(testRegStore),
 	}
 }
 
@@ -74,12 +82,20 @@ func mkAgent(t *testing.T, name, namespace string) *agentsv1alpha1.AgentDeployme
 
 func mkRegistry(t *testing.T, name, namespace string, tools ...agentsv1alpha1.ToolEntry) {
 	t.Helper()
-	reg := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: tools},
+	storeTools := make([]toolregistry.ToolEntry, len(tools))
+	for i, te := range tools {
+		var schema []byte
+		if te.InputSchema != nil {
+			schema = te.InputSchema.Raw
+		}
+		storeTools[i] = toolregistry.ToolEntry{
+			Name: te.Name, Image: te.Image, URL: te.URL, Description: te.Description,
+			InputSchema: schema, Source: te.Source, ApprovalStatus: te.ApprovalStatus,
+		}
 	}
-	require.NoError(t, k8sClient.Create(testCtx, reg))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, reg) })
+	_, err := testRegStore.Upsert(testCtx, toolregistry.ToolRegistry{Namespace: namespace, Name: name, Tools: storeTools})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = testRegStore.Delete(testCtx, namespace, name) })
 }
 
 func mkBinding(t *testing.T, name, namespace string, spec agentsv1alpha1.MCPToolBindingSpec) *agentsv1alpha1.MCPToolBinding {

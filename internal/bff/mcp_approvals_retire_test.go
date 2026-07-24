@@ -25,7 +25,6 @@ func retireApproveServer(t *testing.T, c client.Client, auth authz.Authorizer, s
 	s, _, _ := newMCPServer(t, c, true)
 	store := toolregistry.NewMemStore()
 	s.toolRegistryStore = store
-	s.retireToolRegistry = true
 	s.authorizer = auth
 	_, err := store.Upsert(context.Background(), crdToolRegistryToStore(seed))
 	require.NoError(t, err)
@@ -51,9 +50,6 @@ func TestApproveMCP_RetireWritesStore(t *testing.T) {
 	for _, e := range got.Tools {
 		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
 	}
-	// No ToolRegistry CRD exists.
-	var crd agentsv1alpha1.ToolRegistry
-	assert.True(t, apierrors.IsNotFound(c.Get(ctx, client.ObjectKey{Namespace: "prod", Name: "weather-mcp"}, &crd)))
 	// The egress NetworkPolicy WAS opened (still a K8s object).
 	var np networkingv1.NetworkPolicy
 	assert.NoError(t, c.Get(ctx, client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np))

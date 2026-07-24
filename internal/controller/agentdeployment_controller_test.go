@@ -40,8 +40,9 @@ import (
 // API server.
 func newReconciler() *AgentDeploymentReconciler {
 	return &AgentDeploymentReconciler{
-		Client: k8sClient,
-		Scheme: k8sClient.Scheme(),
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		Registry: NewPostgresRegistryReader(testRegStore),
 	}
 }
 
