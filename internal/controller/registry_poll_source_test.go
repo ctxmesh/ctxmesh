@@ -22,23 +22,24 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // drainEvents non-blockingly reads every queued GenericEvent and returns each
-// object's namespace/name key. It also asserts every event carries a
-// *ToolRegistry (the shape mapRegistryToBindings type-asserts).
+// object's namespace/name key. The poll source emits a lightweight
+// *PartialObjectMetadata carrying only the key (mapRegistryToBindings reads
+// GetNamespace/GetName off it — ToolRegistry is no longer a CRD object).
 func drainEvents(t *testing.T, ch chan event.GenericEvent) []string {
 	t.Helper()
 	var got []string
 	for {
 		select {
 		case e := <-ch:
-			if _, ok := e.Object.(*agentsv1alpha1.ToolRegistry); !ok {
-				t.Fatalf("event object type = %T, want *ToolRegistry (mapRegistryToBindings would drop it)", e.Object)
+			if _, ok := e.Object.(*metav1.PartialObjectMetadata); !ok {
+				t.Fatalf("event object type = %T, want *PartialObjectMetadata", e.Object)
 			}
 			got = append(got, e.Object.GetNamespace()+"/"+e.Object.GetName())
 		default:

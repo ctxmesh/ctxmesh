@@ -25,9 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
@@ -120,49 +118,10 @@ func TestPostgresRegistryReader_ProjectsStoreRow(t *testing.T) {
 	assert.JSONEq(t, string(schema), string(got.Spec.Tools[0].InputSchema.Raw))
 }
 
-// A missing row surfaces as controlplane.ErrNotFound (the sentinel both readers
-// share) so resolveAgentBindings can apply the not-found branch uniformly.
+// A missing row surfaces as controlplane.ErrNotFound (the sentinel the reader
+// uses) so resolveAgentBindings can apply the not-found branch uniformly.
 func TestPostgresRegistryReader_NotFound(t *testing.T) {
 	reader := NewPostgresRegistryReader(toolregistry.NewMemStore())
 	_, err := reader.GetRegistry(context.Background(), "default", "nope")
 	assert.ErrorIs(t, err, controlplane.ErrNotFound)
-}
-
-// The CRD-backed reader is the ONLY reader wired in M42, so its half of the
-// not-found contract must be pinned directly: a present registry round-trips; a
-// missing one maps apierrors.IsNotFound → controlplane.ErrNotFound; any other
-// read error passes through verbatim (so resolveAgentBindings requeues, never
-// treats it as not-found).
-func TestCRDRegistryReader_Contract(t *testing.T) {
-	reg := &agentsv1alpha1.ToolRegistry{ObjectMeta: metav1.ObjectMeta{Name: "reg1", Namespace: "default"}}
-	reg.Spec.Tools = []agentsv1alpha1.ToolEntry{{Name: "t1", URL: "https://mcp.example"}}
-
-	t.Run("present round-trips", func(t *testing.T) {
-		c := fake.NewClientBuilder().WithScheme(bindingResolveScheme(t)).WithObjects(reg).Build()
-		got, err := NewCRDRegistryReader(c).GetRegistry(context.Background(), "default", "reg1")
-		require.NoError(t, err)
-		assert.Equal(t, "reg1", got.Name)
-		require.Len(t, got.Spec.Tools, 1)
-		assert.Equal(t, "t1", got.Spec.Tools[0].Name)
-	})
-
-	t.Run("missing maps to ErrNotFound", func(t *testing.T) {
-		c := fake.NewClientBuilder().WithScheme(bindingResolveScheme(t)).Build()
-		_, err := NewCRDRegistryReader(c).GetRegistry(context.Background(), "default", "nope")
-		assert.ErrorIs(t, err, controlplane.ErrNotFound)
-	})
-
-	t.Run("other error passes through verbatim", func(t *testing.T) {
-		boom := errors.New("apiserver unavailable")
-		c := fake.NewClientBuilder().WithScheme(bindingResolveScheme(t)).
-			WithInterceptorFuncs(interceptor.Funcs{
-				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-					return boom
-				},
-			}).Build()
-		_, err := NewCRDRegistryReader(c).GetRegistry(context.Background(), "default", "reg1")
-		require.Error(t, err)
-		assert.ErrorIs(t, err, boom)
-		assert.NotErrorIs(t, err, controlplane.ErrNotFound)
-	})
 }

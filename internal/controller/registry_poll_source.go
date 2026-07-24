@@ -26,7 +26,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
@@ -77,7 +76,7 @@ type registryPollSource struct {
 }
 
 // NeedLeaderElection pins the poller to the leader — one replica emits the
-// change stream, never a herd (matches storeOrphanPruner).
+// change stream, never a herd.
 func (s *registryPollSource) NeedLeaderElection() bool { return true }
 
 // Start runs the poll loop until the context is cancelled. prev starts empty, so
@@ -148,7 +147,10 @@ func (s *registryPollSource) snapshot(ctx context.Context) (map[string]registryS
 func (s *registryPollSource) emitChanges(ctx context.Context, prev, cur map[string]registrySnapshot) int {
 	emitted := 0
 	send := func(rs registrySnapshot) bool {
-		evt := event.GenericEvent{Object: &agentsv1alpha1.ToolRegistry{
+		// A lightweight client.Object carrying only namespace/name — ToolRegistry is
+		// no longer a CRD/runtime.Object, and mapRegistryToBindings reads only the
+		// key off it (GetNamespace/GetName).
+		evt := event.GenericEvent{Object: &metav1.PartialObjectMetadata{
 			ObjectMeta: metav1.ObjectMeta{Namespace: rs.namespace, Name: rs.name},
 		}}
 		select {

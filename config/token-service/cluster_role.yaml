@@ -2,9 +2,11 @@
 # credential plane consults for requests from ANY namespace (ADR 0030 §1, ADR 0032):
 #   - ClusterCredentialStore  (cluster-scoped) — the default backend selection
 #   - CredentialStore          (in any request namespace) — the per-namespace override
-#   - ToolRegistry             (in any request namespace) — classify a server's auth type/scope
-# Cluster-wide because a request for (namespace N, server) resolves N's store + server class,
-# and N is any agent namespace. Read-only — the plane selects/classifies, never manages these.
+# Cluster-wide because a request for (namespace N, server) resolves N's store, and N is any
+# agent namespace. Read-only — the plane selects/classifies, never manages these.
+# ToolRegistry (server auth-type/scope classification) is retired to Postgres (ADR 0044):
+# the token-service reads it from the control-plane store via CONTROLPLANE_DSN, not the API,
+# so it no longer needs toolregistries RBAC here.
 # Per-user grant SECRETS stay in the locked credential namespace (the namespaced Role).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -16,5 +18,5 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 rules:
   - apiGroups: ["agents.ctxmesh.ai"]
-    resources: ["clustercredentialstores", "credentialstores", "toolregistries"]
+    resources: ["clustercredentialstores", "credentialstores"]
     verbs: ["get", "list", "watch"]

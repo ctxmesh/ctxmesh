@@ -97,16 +97,11 @@ func toolRegistryReadErrAsAPIError(err error, name string) error {
 	}
 }
 
-// mcpGetToolRegistry reads one server's ToolRegistry — the Postgres store
-// (projected, behind an SSAR) when retired, else the caller CRD read.
+// mcpGetToolRegistry reads one server's ToolRegistry from the Postgres store
+// (projected to the CRD shape) behind a caller-scoped SSAR (RBAC parity). Store /
+// authz errors are shaped as k8s apierrors so the MCP callers' handling is
+// unchanged (ToolRegistry is retired, ADR 0044 — there is no CRD to read).
 func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, error) {
-	if !s.retireToolRegistry {
-		var tr agentsv1alpha1.ToolRegistry
-		if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
-			return nil, err
-		}
-		return &tr, nil
-	}
 	if err := s.authorizeStore(ctx, caller, authz.VerbGet, resourceToolRegistries, ns, name); err != nil {
 		return nil, toolRegistryReadErrAsAPIError(err, name)
 	}
@@ -117,26 +112,11 @@ func (s *Server) mcpGetToolRegistry(ctx context.Context, caller client.Client, n
 	return storeToolRegistryToCRD(r), nil
 }
 
-// mcpListToolRegistries lists ToolRegistries (optionally namespace-scoped and
-// label-filtered — e.g. managed-by=agent-engine-mcp for the BYO-server surfaces) —
-// the store (SSAR VerbList + paged, projected) when retired, else the caller CRD
-// list. labels are AND-ed equality filters, matching client.MatchingLabels and the
-// store's ListOptions.Labels.
+// mcpListToolRegistries lists ToolRegistries from the store (SSAR VerbList + paged,
+// projected), optionally namespace-scoped and label-filtered (e.g.
+// managed-by=agent-engine-mcp for the BYO-server surfaces). labels are AND-ed
+// equality filters, matching the store's ListOptions.Labels.
 func (s *Server) mcpListToolRegistries(ctx context.Context, caller client.Client, ns string, labels map[string]string) (*agentsv1alpha1.ToolRegistryList, error) {
-	if !s.retireToolRegistry {
-		var opts []client.ListOption
-		if ns != "" {
-			opts = append(opts, client.InNamespace(ns))
-		}
-		if len(labels) > 0 {
-			opts = append(opts, client.MatchingLabels(labels))
-		}
-		var list agentsv1alpha1.ToolRegistryList
-		if err := caller.List(ctx, &list, opts...); err != nil {
-			return nil, err
-		}
-		return &list, nil
-	}
 	if err := s.authorizeStore(ctx, caller, authz.VerbList, resourceToolRegistries, ns, ""); err != nil {
 		return nil, toolRegistryReadErrAsAPIError(err, "")
 	}

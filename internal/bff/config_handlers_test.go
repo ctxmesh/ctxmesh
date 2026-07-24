@@ -39,6 +39,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
@@ -547,20 +548,23 @@ func TestExpandSeamNotWiredServes501(t *testing.T) {
 // against expand's hardcoded default. Ambiguity resolves first-wins (sorted); an
 // unknown tool keeps the default.
 func TestBindingRegistryResolution(t *testing.T) {
-	scalekit := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{Name: "scalekit-mcp-server", Namespace: "default"},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
+	// ToolRegistry is retired (ADR 0044): the tool→registry index reads the store.
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: "default", Name: "scalekit-mcp-server",
+		Tools: []toolregistry.ToolEntry{
 			{Name: "create_organization", URL: "https://mcp.scalekit.com/"},
 			{Name: "list_environments", URL: "https://mcp.scalekit.com/"},
-		}},
-	}
-	acme := &agentsv1alpha1.ToolRegistry{
-		ObjectMeta: metav1.ObjectMeta{Name: "acme-mcp", Namespace: "default"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "search", URL: "https://acme/mcp"}}},
-	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(scalekit, acme).Build()
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: "default", Name: "acme-mcp",
+		Tools: []toolregistry.ToolEntry{{Name: "search", URL: "https://acme/mcp"}},
+	})
+	require.NoError(t, err)
 
-	idx := toolRegistryIndex(context.Background(), c, nil, "default")
+	idx := toolRegistryIndex(context.Background(), store, "default")
 	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
 	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
 	assert.Equal(t, "acme-mcp", idx["search"].registry)

@@ -125,18 +125,20 @@ type ToolRegistryStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// +kubebuilder:object:root=true
-// +kubebuilder:deprecatedversion
-// +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=tr
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
-// ToolRegistry is the Schema for the toolregistries API — the operator's
-// catalog of approved MCP tools that MCPToolBindings must reference.
+// ToolRegistry is the MCP-tool CATALOG shape — the operator's catalog of approved
+// MCP tools that MCPToolBindings reference by name. It is RETIRED as a CRD (ADR
+// 0044 / M45): it lives only in Postgres now (internal/controlplane/toolregistry).
+// The Go struct is KEPT — not as a CRD (no object:root marker, not scheme-
+// registered, no DeepCopyObject) but as the plain projection shape the control-
+// plane store round-trips through (the RegistryReader, the BFF read/write seams,
+// and validateBinding operate on it as a value). It embeds ObjectMeta (NOT
+// TypeMeta) so the existing field accesses (.Namespace/.Name/.Annotations/.Labels/
+// .Spec.Tools) are unchanged while controller-gen no longer treats it as a CRD root.
 type ToolRegistry struct {
-	metav1.TypeMeta `json:",inline"`
-
-	// metadata is standard Kubernetes object metadata.
+	// metadata is standard Kubernetes object metadata. ToolRegistry embeds only
+	// ObjectMeta (not TypeMeta) so the projection code keeps its
+	// .Namespace/.Name/.Labels/.Annotations accessors while controller-gen no
+	// longer treats it as a CRD root (ADR 0044 — ToolRegistry is not a CRD).
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
@@ -149,18 +151,9 @@ type ToolRegistry struct {
 	Status ToolRegistryStatus `json:"status,omitzero"`
 }
 
-// +kubebuilder:object:root=true
-
-// ToolRegistryList contains a list of ToolRegistry.
+// ToolRegistryList contains a list of ToolRegistry — kept as the plain container
+// the BFF's store-backed list projection returns (no longer a CRD list type).
 type ToolRegistryList struct {
-	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
 	Items           []ToolRegistry `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(func(s *k8sruntime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &ToolRegistry{}, &ToolRegistryList{})
-		return nil
-	})
 }

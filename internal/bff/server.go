@@ -74,18 +74,10 @@ type Server struct {
 	// the read-switch land (m40.5). nil ⇒ CRD-only (CONTROLPLANE_DSN unset) — behaviour unchanged.
 	promptStore promptversion.Store
 
-	// toolRegistryStore, when set, is the control-plane Postgres store for ToolRegistries (ADR 0042
-	// Amendment 2, m41.2). Reads are store-backed whenever it is set (m43.4). Writes dual-write to the
-	// CRD unless retireToolRegistry flips them store-only. nil ⇒ CRD-only.
+	// toolRegistryStore is the control-plane Postgres store for ToolRegistries — the
+	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
+	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
-
-	// retireToolRegistry (env RETIRE_TR, M45 / ADR 0044) flips the ToolRegistry WRITE path to
-	// store-only: create/update/delete write Postgres behind a caller-scoped SSAR + in-app validation
-	// instead of the CRD + best-effort mirror, and agent-create resolves tool→registry locations from the
-	// store. It MUST track the operator's RETIRE_TR (both switch together): with the operator retired the
-	// sync reconciler is stopped, so a CRD write here would never reach the store. false ⇒ the M43
-	// dual-write path (CRD source of truth). Requires toolRegistryStore.
-	retireToolRegistry bool
 
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
 	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
@@ -315,12 +307,10 @@ type Options struct {
 	// PromptStore is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4). Optional —
 	// nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
 	PromptStore promptversion.Store
-	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries (ADR 0042 Amdt 2, m41.2).
-	// Optional — nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries — the
+	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Wired from
+	// CONTROLPLANE_DSN in cmd/bff/main.go; nil ⇒ the ToolRegistry/MCP APIs serve 501.
 	ToolRegistryStore toolregistry.Store
-	// RetireToolRegistry (env RETIRE_TR, M45 / ADR 0044) flips the ToolRegistry write path store-only.
-	// MUST be set in lockstep with the operator's RETIRE_TR. Requires ToolRegistryStore.
-	RetireToolRegistry bool
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -356,7 +346,6 @@ func NewServer(opts Options) *Server {
 		runStore:                 opts.RunStore,
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
-		retireToolRegistry:       opts.RetireToolRegistry,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,

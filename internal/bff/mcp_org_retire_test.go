@@ -41,7 +41,6 @@ func retireOrgServer(t *testing.T, c client.Client, auth authz.Authorizer) (*Ser
 	s, _, _ := newMCPServer(t, c, false)
 	store := toolregistry.NewMemStore()
 	s.toolRegistryStore = store
-	s.retireToolRegistry = true
 	s.authorizer = auth
 	_, err := store.Upsert(context.Background(),
 		crdToolRegistryToStore(scopedRegistry("scalekit", scopePersonal, userGrantHash("alice@example.com"))))

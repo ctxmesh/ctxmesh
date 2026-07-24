@@ -20,24 +20,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
+
+// The console ToolRegistry CRUD endpoints are Postgres-authoritative (ADR 0044):
+// the CRD is retired, so these tests seed a memstore (via wireTRStore) and gate
+// RBAC through the control-plane SSAR authorizer, not the caller-scoped fake
+// client. callerClient still authenticates the request (token → 401), but the
+// data + RBAC live in the store path.
 
 // trNS is the namespace used in ToolRegistry tests.
 const trNS = "team-tools"
@@ -78,17 +79,17 @@ func mockToolRegistryWithPending(name, ns string) *agentsv1alpha1.ToolRegistry {
 	}
 }
 
-// readyTR sets the Ready condition on a ToolRegistry.
-func readyTR(tr *agentsv1alpha1.ToolRegistry) *agentsv1alpha1.ToolRegistry {
-	tr.Status.Conditions = []metav1.Condition{
-		{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			Reason:             "Reconciled",
-			LastTransitionTime: metav1.Now(),
-		},
-	}
-	return tr
+// newTRConsoleServer builds a caller-scoped BFF server with a memstore wired as
+// the ToolRegistry source, seeded with regs and gated by auth (nil ⇒ a permissive
+// recordingAuthorizer). It returns the server, the caller-client factory (so token
+// routing can be asserted) and the store (for post-request state assertions).
+func newTRConsoleServer(t *testing.T, auth authz.Authorizer, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	factory := &fakeCallerClientFactory{client: c}
+	s := newCallerServer(t, factory)
+	wireTRStore(t, s, auth, regs...)
+	return s, factory
 }
 
 // --- request helpers --------------------------------------------------------
@@ -170,10 +171,9 @@ func deleteToolRegistry(t *testing.T, s *Server, name string) *httptest.Response
 // GET /api/toolregistries — list contract
 // =============================================================================
 
-// TestListToolRegistriesEmpty proves an empty cluster yields [] not null.
+// TestListToolRegistriesEmpty proves an empty store yields [] not null.
 func TestListToolRegistriesEmpty(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
 
 	body, code := getToolRegistries(t, s, "")
 	require.Equal(t, http.StatusOK, code)
@@ -185,12 +185,10 @@ func TestListToolRegistriesEmpty(t *testing.T) {
 // TestListToolRegistriesReturnsItems proves seeded ToolRegistries appear in the
 // response with the correct projections.
 func TestListToolRegistriesReturnsItems(t *testing.T) {
-	objs := []client.Object{
+	s, _ := newTRConsoleServer(t, nil,
 		mockToolRegistry("catalog-a", trNS),
 		mockToolRegistry("catalog-b", trNS),
-	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	)
 
 	body, code := getToolRegistries(t, s, "namespace="+trNS)
 	require.Equal(t, http.StatusOK, code)
@@ -207,15 +205,13 @@ func TestListToolRegistriesReturnsItems(t *testing.T) {
 }
 
 // TestListToolRegistriesQFilter proves ?q is a case-insensitive windowed
-// substring filter on the registry name.
+// substring filter on the registry name (pushed down to the store).
 func TestListToolRegistriesQFilter(t *testing.T) {
-	objs := []client.Object{
+	s, _ := newTRConsoleServer(t, nil,
 		mockToolRegistry("prod-catalog", trNS),
 		mockToolRegistry("PROD-staging", trNS),
 		mockToolRegistry("dev-catalog", trNS),
-	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	)
 
 	body, code := getToolRegistries(t, s, "q=prod")
 	require.Equal(t, http.StatusOK, code)
@@ -237,12 +233,10 @@ func TestListToolRegistriesQFilter(t *testing.T) {
 
 // TestListToolRegistriesNamespaceScoping proves ?namespace scopes the list.
 func TestListToolRegistriesNamespaceScoping(t *testing.T) {
-	objs := []client.Object{
+	s, _ := newTRConsoleServer(t, nil,
 		mockToolRegistry("prod-tr", "prod"),
 		mockToolRegistry("dev-tr", "dev"),
-	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	)
 
 	body, code := getToolRegistries(t, s, "namespace=prod")
 	require.Equal(t, http.StatusOK, code)
@@ -254,48 +248,16 @@ func TestListToolRegistriesNamespaceScoping(t *testing.T) {
 	assert.Len(t, body.Items, 2)
 }
 
-// TestListToolRegistriesLimitAndCursor proves limit/cursor paging works.
+// TestListToolRegistriesLimitAndCursor proves limit/cursor paging works through
+// the store's offset pagination.
 func TestListToolRegistriesLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.ToolRegistry{
+	s, _ := newTRConsoleServer(t, nil,
 		mockToolRegistry("tr-000", trNS),
 		mockToolRegistry("tr-001", trNS),
 		mockToolRegistry("tr-002", trNS),
 		mockToolRegistry("tr-003", trNS),
 		mockToolRegistry("tr-004", trNS),
-	}
-
-	pagingFn := interceptor.Funcs{
-		List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			var lo client.ListOptions
-			lo.ApplyOptions(opts)
-			start := 0
-			if lo.Continue != "" {
-				n, err := strconv.Atoi(lo.Continue)
-				if err != nil {
-					return fmt.Errorf("bad continue token %q", lo.Continue)
-				}
-				start = n
-			}
-			end := len(all)
-			if lo.Limit > 0 && start+int(lo.Limit) < end {
-				end = start + int(lo.Limit)
-			}
-			trList, ok := list.(*agentsv1alpha1.ToolRegistryList)
-			if !ok {
-				return fmt.Errorf("unexpected list type %T", list)
-			}
-			for _, tr := range all[start:end] {
-				trList.Items = append(trList.Items, *tr)
-			}
-			if end < len(all) {
-				trList.Continue = strconv.Itoa(end)
-			}
-			return nil
-		},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(pagingFn).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	)
 
 	page1, code := getToolRegistries(t, s, "limit=2")
 	require.Equal(t, http.StatusOK, code)
@@ -318,20 +280,14 @@ func TestListToolRegistriesLimitAndCursor(t *testing.T) {
 	assert.Equal(t, 5, seen, "paging must visit every registry exactly once")
 }
 
-// TestListToolRegistriesForbiddenIs403 proves a Forbidden on the list surfaces as 403.
+// TestListToolRegistriesForbiddenIs403 proves a denied SSAR on the list → 403.
 func TestListToolRegistriesForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: agentsAPIGroup, Resource: "toolregistries"},
-					"", errors.New("viewer denied"))
-			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, &recordingAuthorizer{err: authz.ErrForbidden},
+		mockToolRegistry("secret-catalog", trNS))
 
-	_, code := getToolRegistries(t, s, "")
+	body, code := getToolRegistries(t, s, "")
 	require.Equal(t, http.StatusForbidden, code)
+	assert.Empty(t, body.Items, "a denied read must not leak store rows")
 }
 
 // =============================================================================
@@ -339,11 +295,10 @@ func TestListToolRegistriesForbiddenIs403(t *testing.T) {
 // =============================================================================
 
 // TestGetToolRegistryReturnsDetail proves a seeded ToolRegistry is returned with
-// correct projection including the tool entries and approval status.
+// correct projection including the tool entries and approval status. A store-backed
+// registry is always Ready (ADR 0044): the controller reconcile loop is retired.
 func TestGetToolRegistryReturnsDetail(t *testing.T) {
-	tr := readyTR(mockToolRegistry("my-catalog", trNS))
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	detail, code, body := getToolRegistry(t, s, "my-catalog")
 	require.Equal(t, http.StatusOK, code, "body: %s", body)
@@ -359,8 +314,7 @@ func TestGetToolRegistryReturnsDetail(t *testing.T) {
 
 // TestGetToolRegistryNotFoundIs404 proves a missing ToolRegistry yields 404.
 func TestGetToolRegistryNotFoundIs404(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
 
 	_, code, body := getToolRegistry(t, s, "ghost")
 	assert.Equal(t, http.StatusNotFound, code)
@@ -369,29 +323,23 @@ func TestGetToolRegistryNotFoundIs404(t *testing.T) {
 
 // TestGetToolRegistryForbiddenIs403 proves a caller denied Get sees 403.
 func TestGetToolRegistryForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: agentsAPIGroup, Resource: "toolregistries"},
-					"my-catalog", errors.New("viewer denied"))
-			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, &recordingAuthorizer{err: authz.ErrForbidden},
+		mockToolRegistry("my-catalog", trNS))
 
 	_, code, body := getToolRegistry(t, s, "my-catalog")
 	require.Equal(t, http.StatusForbidden, code)
-	assert.Contains(t, body, "forbidden")
+	assert.Contains(t, body, "permission")
 }
 
 // =============================================================================
 // POST /api/toolregistries — create
 // =============================================================================
 
-// TestCreateToolRegistrySucceeds proves a valid ToolRegistry create returns 201.
+// TestCreateToolRegistrySucceeds proves a valid ToolRegistry create returns 201
+// and lands in the store.
 func TestCreateToolRegistrySucceeds(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
+	store := s.toolRegistryStore
 
 	req := ToolRegistryCreateRequest{
 		Name:      "new-catalog",
@@ -408,17 +356,16 @@ func TestCreateToolRegistrySucceeds(t *testing.T) {
 	require.Len(t, detail.Tools, 1)
 	assert.Equal(t, "web-search", detail.Tools[0].Name)
 
-	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: trNS, Name: "new-catalog"}, &got))
-	assert.Len(t, got.Spec.Tools, 1)
-	assert.Equal(t, "web-search", got.Spec.Tools[0].Name)
+	// Confirm it landed in the store.
+	got, err := store.Get(context.Background(), trNS, "new-catalog")
+	require.NoError(t, err)
+	require.Len(t, got.Tools, 1)
+	assert.Equal(t, "web-search", got.Tools[0].Name)
 }
 
 // TestCreateToolRegistryMissingNameIs400 proves a missing name yields 400.
 func TestCreateToolRegistryMissingNameIs400(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
 
 	req := ToolRegistryCreateRequest{
 		Namespace: trNS,
@@ -431,8 +378,7 @@ func TestCreateToolRegistryMissingNameIs400(t *testing.T) {
 
 // TestCreateToolRegistryEmptyToolsIs400 proves an empty tools list yields 400.
 func TestCreateToolRegistryEmptyToolsIs400(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
 
 	req := ToolRegistryCreateRequest{
 		Name:      "bad-catalog",
@@ -443,11 +389,10 @@ func TestCreateToolRegistryEmptyToolsIs400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, code, "body: %s", body)
 }
 
-// TestCreateToolRegistryAlreadyExistsIs409 proves a duplicate create yields 409.
+// TestCreateToolRegistryAlreadyExistsIs409 proves a duplicate create yields 409
+// via the store's atomic Create.
 func TestCreateToolRegistryAlreadyExistsIs409(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryCreateRequest{
 		Name:      "my-catalog",
@@ -459,40 +404,28 @@ func TestCreateToolRegistryAlreadyExistsIs409(t *testing.T) {
 	assert.Contains(t, body, "already exists")
 }
 
-// TestCreateToolRegistryAPIServerRejectionSurfaces4xx proves API server Invalid
-// surfaces as 4xx (422).
-func TestCreateToolRegistryAPIServerRejectionSurfaces4xx(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
-				return apierrors.NewInvalid(
-					schema.GroupKind{Group: agentsAPIGroup, Kind: toolRegistryKind},
-					obj.GetName(), nil)
-			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+// TestCreateToolRegistryInvalidSpecSurfaces422 proves an in-app validation failure
+// (duplicate tool names) surfaces as 422 — the store-path replacement for the CRD's
+// API-server schema rejection (ADR 0044).
+func TestCreateToolRegistryInvalidSpecSurfaces422(t *testing.T) {
+	s, _ := newTRConsoleServer(t, nil)
 
 	req := ToolRegistryCreateRequest{
 		Name:      "bad-catalog",
 		Namespace: trNS,
-		Tools:     []ToolEntryCreateDTO{{Name: "search"}},
+		Tools: []ToolEntryCreateDTO{
+			{Name: "search"},
+			{Name: "search"}, // duplicate name ⇒ Validate rejects
+		},
 	}
 	_, code, body := createToolRegistry(t, s, req)
-	assert.True(t, code >= 400 && code < 500, "API server rejection must surface as 4xx, got %d: %s", code, body)
+	assert.Equal(t, http.StatusUnprocessableEntity, code, "in-app validation must surface as 422, got %d: %s", code, body)
 }
 
-// TestCreateToolRegistryForbiddenIs403 proves a viewer's create returns 403.
+// TestCreateToolRegistryForbiddenIs403 proves a denied SSAR on create returns 403,
+// and the caller's token still reached the client factory (authenticated first).
 func TestCreateToolRegistryForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: agentsAPIGroup, Resource: "toolregistries"},
-					obj.GetName(), errors.New("viewer cannot create"))
-			},
-		}).Build()
-	factory := &fakeCallerClientFactory{client: c}
-	s := newCallerServer(t, factory)
+	s, factory := newTRConsoleServer(t, &recordingAuthorizer{err: authz.ErrForbidden})
 
 	req := ToolRegistryCreateRequest{
 		Name:      "no-perm",
@@ -501,21 +434,16 @@ func TestCreateToolRegistryForbiddenIs403(t *testing.T) {
 	}
 	_, code, body := createToolRegistry(t, s, req)
 	require.Equal(t, http.StatusForbidden, code, "body: %s", body)
-	assert.Contains(t, body, "forbidden")
+	assert.Contains(t, body, "permission")
 	assert.Equal(t, "caller-token", factory.gotToken)
 }
 
-// TestCreateToolRegistryWithoutTokenIs401 proves a token-less POST is rejected 401.
+// TestCreateToolRegistryWithoutTokenIs401 proves a token-less POST is rejected 401
+// before any store write.
 func TestCreateToolRegistryWithoutTokenIs401(t *testing.T) {
-	createCalled := false
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
-				createCalled = true
-				return nil
-			},
-		}).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c, requireToken: true})
+	store := wireTRStore(t, s, nil)
 
 	b, _ := json.Marshal(ToolRegistryCreateRequest{
 		Name:      "catalog",
@@ -526,18 +454,18 @@ func TestCreateToolRegistryWithoutTokenIs401(t *testing.T) {
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/toolregistries", bytes.NewReader(b)))
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.False(t, createCalled, "no K8s create must run for a token-less request")
+	page, err := store.List(context.Background(), controlplane.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, page.Items, "no store write must run for a token-less request")
 }
 
 // =============================================================================
-// PUT /api/toolregistries/{ns}/{name} — update (SSA) + don't-flip-approval test
+// PUT /api/toolregistries/{ns}/{name} — update + don't-flip-approval test
 // =============================================================================
 
-// TestUpdateToolRegistryEditsTools proves a PUT updates tool entries via SSA.
+// TestUpdateToolRegistryEditsTools proves a PUT updates tool entries.
 func TestUpdateToolRegistryEditsTools(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryUpdateRequest{
 		Name: "my-catalog",
@@ -554,17 +482,11 @@ func TestUpdateToolRegistryEditsTools(t *testing.T) {
 
 // TestUpdateToolRegistryDoesNotFlipApprovalStatus is THE APPROVAL-PRESERVATION
 // TEST. It proves that a PUT cannot change a tool entry's approvalStatus — the
-// approval state is controller/approval-owned. When the live entry has
-// "pending", the updated entry must still be "pending" after the PUT, even if
-// the caller tries to sneak an approvalStatus field in the JSON body (which is
-// silently ignored by the update request DTO — ToolEntryCreateDTO has no
-// approvalStatus field). This is the "don't-break-approval/register property"
-// from the task description.
+// approval state is controller/approval-owned. When the live entry has "pending",
+// the updated entry must still be "pending" after the PUT.
 func TestUpdateToolRegistryDoesNotFlipApprovalStatus(t *testing.T) {
-	// Seed with a pending-approved user-added tool.
-	existing := mockToolRegistryWithPending("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistryWithPending("my-catalog", trNS))
+	store := s.toolRegistryStore
 
 	// PUT with a curated-field edit — no approvalStatus field in the request.
 	// The ToolEntryCreateDTO has no approvalStatus field, so even if a crafty
@@ -584,19 +506,17 @@ func TestUpdateToolRegistryDoesNotFlipApprovalStatus(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.ApprovalPending, detail.Tools[0].ApprovalStatus,
 		"PUT must NOT flip a tool entry's approvalStatus — approval is controller-owned")
 
-	// Also verify in the fake store.
-	var got agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: trNS, Name: "my-catalog"}, &got))
-	require.Len(t, got.Spec.Tools, 1)
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, got.Spec.Tools[0].ApprovalStatus,
+	// Also verify in the store.
+	got, err := store.Get(context.Background(), trNS, "my-catalog")
+	require.NoError(t, err)
+	require.Len(t, got.Tools, 1)
+	assert.Equal(t, agentsv1alpha1.ApprovalPending, got.Tools[0].ApprovalStatus,
 		"stored approvalStatus must be preserved, not overwritten by the PUT")
 }
 
 // TestUpdateToolRegistryRenameGuardIs400 proves a name mismatch yields 400.
 func TestUpdateToolRegistryRenameGuardIs400(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryUpdateRequest{
 		Name:  "different-name", // mismatch
@@ -610,9 +530,7 @@ func TestUpdateToolRegistryRenameGuardIs400(t *testing.T) {
 // TestUpdateToolRegistryAbsentNameInBodyIsOK proves omitting Name does not
 // trigger the rename guard.
 func TestUpdateToolRegistryAbsentNameInBodyIsOK(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryUpdateRequest{
 		Tools: []ToolEntryCreateDTO{{Name: "search", Description: "updated"}},
@@ -623,131 +541,115 @@ func TestUpdateToolRegistryAbsentNameInBodyIsOK(t *testing.T) {
 	assert.Equal(t, "my-catalog", detail.Name)
 }
 
-// TestUpdateToolRegistryForbiddenIs403 proves a viewer's PUT returns 403.
+// TestUpdateToolRegistryNotFoundIs404 proves a PUT to a missing registry is a 404
+// — the store PUT edits, it does not create.
+func TestUpdateToolRegistryNotFoundIs404(t *testing.T) {
+	s, _ := newTRConsoleServer(t, nil)
+
+	req := ToolRegistryUpdateRequest{Tools: []ToolEntryCreateDTO{{Name: "search"}}}
+	_, code, body := putToolRegistry(t, s, "ghost", req)
+	assert.Equal(t, http.StatusNotFound, code, "body: %s", body)
+}
+
+// TestUpdateToolRegistryForbiddenIs403 proves a denied SSAR on update returns 403.
 func TestUpdateToolRegistryForbiddenIs403(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: agentsAPIGroup, Resource: "toolregistries"},
-					obj.GetName(), errors.New("viewer cannot update"))
-			},
-		}).Build()
-	factory := &fakeCallerClientFactory{client: c}
-	s := newCallerServer(t, factory)
+	s, factory := newTRConsoleServer(t, &recordingAuthorizer{err: authz.ErrForbidden},
+		mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryUpdateRequest{
 		Tools: []ToolEntryCreateDTO{{Name: "search"}},
 	}
 	_, code, body := putToolRegistry(t, s, "my-catalog", req)
 	require.Equal(t, http.StatusForbidden, code, "body: %s", body)
-	assert.Contains(t, body, "forbidden")
+	assert.Contains(t, body, "permission")
+	assert.Equal(t, "caller-token", factory.gotToken)
 }
 
-// TestUpdateToolRegistryInvalidWriteSurfaces422 proves API server Invalid → 422.
-func TestUpdateToolRegistryInvalidWriteSurfaces422(t *testing.T) {
-	existing := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
-				return apierrors.NewInvalid(
-					schema.GroupKind{Group: agentsAPIGroup, Kind: toolRegistryKind},
-					obj.GetName(), nil)
-			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+// TestUpdateToolRegistryInvalidSpecSurfaces422 proves an in-app validation failure
+// (duplicate tool names) on update surfaces as 422 (ADR 0044).
+func TestUpdateToolRegistryInvalidSpecSurfaces422(t *testing.T) {
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
 
 	req := ToolRegistryUpdateRequest{
-		Tools: []ToolEntryCreateDTO{{Name: "search"}},
+		Tools: []ToolEntryCreateDTO{
+			{Name: "search"},
+			{Name: "search"}, // duplicate ⇒ Validate rejects
+		},
 	}
 	_, code, body := putToolRegistry(t, s, "my-catalog", req)
-	assert.Equal(t, http.StatusUnprocessableEntity, code, "API-server Invalid must surface as 422, got %d: %s", code, body)
+	assert.Equal(t, http.StatusUnprocessableEntity, code, "in-app validation must surface as 422, got %d: %s", code, body)
 }
 
-// TestUpdateToolRegistryWithoutTokenIs401 proves a token-less PUT is rejected 401.
+// TestUpdateToolRegistryWithoutTokenIs401 proves a token-less PUT is rejected 401
+// before any store write.
 func TestUpdateToolRegistryWithoutTokenIs401(t *testing.T) {
-	patchCalled := false
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
-				patchCalled = true
-				return nil
-			},
-		}).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c, requireToken: true})
+	store := wireTRStore(t, s, nil, mockToolRegistry("my-catalog", trNS))
 
-	b, _ := json.Marshal(ToolRegistryUpdateRequest{Tools: []ToolEntryCreateDTO{{Name: "search"}}})
+	b, _ := json.Marshal(ToolRegistryUpdateRequest{Tools: []ToolEntryCreateDTO{{Name: "renamed"}}})
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/toolregistries/"+trNS+"/my-catalog", bytes.NewReader(b)))
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.False(t, patchCalled, "no K8s patch must run for a token-less request")
+	got, err := store.Get(context.Background(), trNS, "my-catalog")
+	require.NoError(t, err)
+	require.Len(t, got.Tools, 1)
+	assert.Equal(t, "search", got.Tools[0].Name, "no store write must run for a token-less request")
 }
 
 // =============================================================================
 // DELETE /api/toolregistries/{ns}/{name} — delete
 // =============================================================================
 
-// TestDeleteToolRegistryRemovesObject proves a DELETE succeeds (204).
+// TestDeleteToolRegistryRemovesObject proves a DELETE succeeds (204) and removes
+// the store row.
 func TestDeleteToolRegistryRemovesObject(t *testing.T) {
-	tr := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil, mockToolRegistry("my-catalog", trNS))
+	store := s.toolRegistryStore
 
 	rec := deleteToolRegistry(t, s, "my-catalog")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.ToolRegistry
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: trNS, Name: "my-catalog"}, &got)
-	require.True(t, apierrors.IsNotFound(err), "ToolRegistry must be gone after a successful DELETE")
+	_, err := store.Get(context.Background(), trNS, "my-catalog")
+	assert.ErrorIs(t, err, controlplane.ErrNotFound, "ToolRegistry must be gone after a successful DELETE")
 }
 
 // TestDeleteToolRegistryNotFoundIs404 proves deleting a missing ToolRegistry yields 404.
 func TestDeleteToolRegistryNotFoundIs404(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s, _ := newTRConsoleServer(t, nil)
 
 	rec := deleteToolRegistry(t, s, "ghost")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "not found")
 }
 
-// TestDeleteToolRegistryForbiddenIs403 proves a viewer's DELETE returns 403.
+// TestDeleteToolRegistryForbiddenIs403 proves a denied SSAR on delete returns 403,
+// and the store row survives.
 func TestDeleteToolRegistryForbiddenIs403(t *testing.T) {
-	tr := mockToolRegistry("my-catalog", trNS)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: agentsAPIGroup, Resource: "toolregistries"},
-					obj.GetName(), errors.New("viewer cannot delete"))
-			},
-		}).Build()
-	factory := &fakeCallerClientFactory{client: c}
-	s := newCallerServer(t, factory)
+	s, factory := newTRConsoleServer(t, &recordingAuthorizer{err: authz.ErrForbidden},
+		mockToolRegistry("my-catalog", trNS))
+	store := s.toolRegistryStore
 
 	rec := deleteToolRegistry(t, s, "my-catalog")
 	require.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Contains(t, rec.Body.String(), "forbidden")
+	assert.Contains(t, rec.Body.String(), "permission")
 	assert.Equal(t, "caller-token", factory.gotToken)
+	_, err := store.Get(context.Background(), trNS, "my-catalog")
+	assert.NoError(t, err, "a denied delete leaves the store row intact")
 }
 
-// TestDeleteToolRegistryWithoutTokenIs401 proves a token-less DELETE is rejected 401.
+// TestDeleteToolRegistryWithoutTokenIs401 proves a token-less DELETE is rejected 401
+// before any store write.
 func TestDeleteToolRegistryWithoutTokenIs401(t *testing.T) {
-	deleteCalled := false
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
-				deleteCalled = true
-				return nil
-			},
-		}).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c, requireToken: true})
+	store := wireTRStore(t, s, nil, mockToolRegistry("my-catalog", trNS))
 
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/toolregistries/"+trNS+"/my-catalog", nil))
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.False(t, deleteCalled, "no K8s delete must run for a token-less request")
+	_, err := store.Get(context.Background(), trNS, "my-catalog")
+	assert.NoError(t, err, "no store delete must run for a token-less request")
 }

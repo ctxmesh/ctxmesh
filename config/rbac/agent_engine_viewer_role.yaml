@@ -24,6 +24,10 @@ rules:
   - modelroutes
   - secretbindings
   - mcptoolbindings
+  # toolregistries is retired as a CRD (ADR 0044) but stays in this persona RBAC:
+  # the BFF gates every store read with a SelfSubjectAccessReview on this resource,
+  # so the persona's RBAC on toolregistries IS the authorization policy. Do NOT
+  # remove — dropping it would fail-closed every ToolRegistry read for viewers.
   - toolregistries
   - memorybindings
   - agentregistries
@@ -41,7 +45,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - toolregistries/status
   - memorybindings/status
   - agentregistries/status
   - agentscalingpolicies/status

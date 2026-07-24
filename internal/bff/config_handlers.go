@@ -174,7 +174,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
 		callerOwner = userGrantHash(username)
 	}
-	created, err := createAgentFromYAML(r.Context(), caller, caller, s.promptStore, s.retiredToolRegistryStore(), s.scheme, agentYAML, ns, callerOwner)
+	created, err := createAgentFromYAML(r.Context(), caller, caller, s.promptStore, s.toolRegistryStore, s.scheme, agentYAML, ns, callerOwner)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {

@@ -228,23 +228,23 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("durable run store enabled (ADR 0034): runs persist to Postgres")
 	}
 
-	// Control-plane store (ADR 0042, m40.4): during the CRD→Postgres migration window PromptVersions
-	// dual-write to Postgres (the CRD stays the source of truth). CONTROLPLANE_DSN unset ⇒ CRD-only.
-	// OpenDB runs the goose migrations (with a session lock) at start-up.
-	var (
-		promptStore promptversion.Store
-		toolStore   toolregistry.Store
-	)
-	if cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN")); cpDSN != "" {
-		cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
-		if cpErr != nil {
-			return fmt.Errorf("open control-plane postgres: %w", cpErr)
-		}
-		defer func() { _ = cpDB.Close() }()
-		promptStore = promptversion.NewPostgresStore(cpDB)
-		toolStore = toolregistry.NewPostgresStore(cpDB) // shares the handle + migrations (m41.2)
-		log.Info("control-plane store enabled (ADR 0042): PromptVersions + ToolRegistries dual-write to Postgres")
+	// Control-plane store (ADR 0042): PromptVersion and ToolRegistry are retired to Postgres
+	// (ADR 0044) — the API server is no longer in their path, so CONTROLPLANE_DSN is REQUIRED,
+	// matching the operator (cmd/main.go) and token-service. Without it the BFF would 501 every
+	// ToolRegistry/PromptVersion/MCP endpoint, so fail loud at start-up instead. OpenDB runs the
+	// goose migrations (with a session lock) at start-up.
+	cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN"))
+	if cpDSN == "" {
+		return errors.New("CONTROLPLANE_DSN is required: PromptVersion + ToolRegistry are retired to Postgres (ADR 0044)")
 	}
+	cpDB, cpErr := controlplane.OpenDB(context.Background(), cpDSN)
+	if cpErr != nil {
+		return fmt.Errorf("open control-plane postgres: %w", cpErr)
+	}
+	defer func() { _ = cpDB.Close() }()
+	promptStore := promptversion.NewPostgresStore(cpDB)
+	toolStore := toolregistry.NewPostgresStore(cpDB) // shares the handle + migrations
+	log.Info("control-plane store enabled (ADR 0042/0044): PromptVersions + ToolRegistries served from Postgres")
 
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
 	// `queued` for a KEDA-scaled worker pool (this pod, or a dedicated worker Deployment) to claim +
@@ -254,21 +254,11 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return errors.New("RUN_WORKER_DISPATCH requires a durable run store (set RUN_STORE_DSN)")
 	}
 
-	// ToolRegistry retirement (M45, ADR 0044): RETIRE_TR flips the ToolRegistry write path store-only
-	// (SSAR + in-app validation). It MUST be set in lockstep with the operator's RETIRE_TR — with the
-	// operator retired the sync reconciler is stopped, so a CRD write here would never reach the store.
-	// Fail closed: retire without the store would write nowhere authoritative.
-	retireToolRegistry := envTrue(os.Getenv("RETIRE_TR"))
-	if retireToolRegistry && toolStore == nil {
-		return errors.New("RETIRE_TR requires the control-plane store (set CONTROLPLANE_DSN)")
-	}
-
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
-		RetireToolRegistry:          retireToolRegistry,
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,

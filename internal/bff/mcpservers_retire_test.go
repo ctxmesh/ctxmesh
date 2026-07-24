@@ -7,8 +7,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -24,7 +22,6 @@ func TestDeleteMCPServer_RetireDeletesStore(t *testing.T) {
 	auth := &recordingAuthorizer{}
 	s, _, _ := newMCPServer(t, c, false)
 	s.toolRegistryStore = toolregistry.NewMemStore()
-	s.retireToolRegistry = true
 	s.authorizer = auth
 	_, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(scopedRegistry("scalekit-mcp", scopeOrg, "")))
 	require.NoError(t, err)
@@ -43,7 +40,6 @@ func TestDeleteMCPServer_RetireDeleteDenied(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
 	s.toolRegistryStore = toolregistry.NewMemStore()
-	s.retireToolRegistry = true
 	s.authorizer = &verbAuthorizer{deny: map[string]bool{authz.VerbDelete: true}}
 	_, err := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(scopedRegistry("scalekit-mcp", scopeOrg, "")))
 	require.NoError(t, err)
@@ -87,11 +83,6 @@ func TestCreateMCPObjects_RetireWritesStore(t *testing.T) {
 	assert.Equal(t, scopePersonal, got.Labels[labelMCPScope])
 	assert.Equal(t, "owner-hash", got.Labels[labelMCPOwner])
 	assert.Equal(t, authz.VerbCreate, auth.last.Verb)
-
-	// The catalog is NOT in the K8s API.
-	var crd agentsv1alpha1.ToolRegistry
-	err = c.Get(ctx, client.ObjectKey{Namespace: trNS, Name: "byo-mcp"}, &crd)
-	assert.True(t, apierrors.IsNotFound(err), "no ToolRegistry CRD when retired")
 }
 
 // A denied caller cannot register — 403, no store row.

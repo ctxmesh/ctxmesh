@@ -166,7 +166,7 @@ func createAgentFromYAML(
 	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
 	// default reference is RegistryNotFound and the binding never goes Ready. Best-
 	// effort: a tool not found in any registry keeps expand's default.
-	idx := toolRegistryIndex(ctx, reader, regStore, ns)
+	idx := toolRegistryIndex(ctx, regStore, ns)
 	rewriteBindingRegistries(objs, idx)
 	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
 	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
@@ -400,52 +400,17 @@ type toolLoc struct {
 	owner string
 }
 
-// toolRegistryIndex lists the namespace's ToolRegistries and maps each tool NAME to
-// its registry + pinned URL/image, so a generated MCPToolBinding can reference the
-// registry the tool actually lives in AND the pin it must use. Registries are sorted
-// by name so a tool present in more than one resolves deterministically (first wins;
-// bare-name collisions are unavoidable and rare given per-server registries). A list
-// error → nil map (the caller keeps expand's default rather than failing the create).
-//
-// regStore is non-nil only when ToolRegistry is retired (RETIRE_TR): the CRD no
-// longer exists, so the catalog is read from the Postgres store instead of the K8s
-// API. Otherwise the CRD read is byte-for-byte the pre-retirement path.
-func toolRegistryIndex(ctx context.Context, reader AgentReader, regStore toolregistry.Store, ns string) map[string]toolLoc {
-	if regStore != nil {
-		return toolRegistryIndexFromStore(ctx, regStore, ns)
-	}
-	if reader == nil {
+// toolRegistryIndex lists the namespace's ToolRegistries from the Postgres store
+// (ToolRegistry is retired as a CRD, ADR 0044) and maps each tool NAME to its
+// registry + pinned URL/image, so a generated MCPToolBinding can reference the
+// registry the tool actually lives in AND the pin it must use. Registries are
+// sorted by name so a tool present in more than one resolves deterministically
+// (first wins). A nil store or a list error → nil map (the caller keeps expand's
+// default rather than failing the create).
+func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string) map[string]toolLoc {
+	if store == nil {
 		return nil
 	}
-	var list agentsv1alpha1.ToolRegistryList
-	if err := reader.List(ctx, &list, client.InNamespace(ns)); err != nil {
-		return nil
-	}
-	regs := list.Items
-	slices.SortFunc(regs, func(a, b agentsv1alpha1.ToolRegistry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	idx := make(map[string]toolLoc)
-	for i := range regs {
-		for _, t := range regs[i].Spec.Tools {
-			if _, seen := idx[t.Name]; !seen {
-				idx[t.Name] = toolLoc{
-					registry: regs[i].Name, url: t.URL, image: t.Image,
-					scope: regs[i].Labels[labelMCPScope], owner: regs[i].Labels[labelMCPOwner],
-				}
-			}
-		}
-	}
-	return idx
-}
-
-// toolRegistryIndexFromStore is toolRegistryIndex's store-backed twin (ADR 0044 /
-// M45): once the ToolRegistry CRD is retired, the tool→registry index is built by
-// paging the namespace's registries out of Postgres. A list error → nil map, the
-// same graceful degradation as the CRD path (keep expand's defaults, don't fail
-// the create). The tool-location fields (registry, pinned url/image, scope/owner
-// labels) are identical to the CRD projection.
-func toolRegistryIndexFromStore(ctx context.Context, store toolregistry.Store, ns string) map[string]toolLoc {
 	var regs []toolregistry.ToolRegistry
 	token := ""
 	for {
