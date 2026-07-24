@@ -297,6 +297,7 @@ func TestReconcile_PromptUnresolvable(t *testing.T) {
 		Client:         k8sClient,
 		Scheme:         k8sClient.Scheme(),
 		PromptResolver: prompt.NewFixtureResolver().SeedNotFound(git),
+		Registry:       NewPostgresRegistryReader(testRegStore),
 	}
 
 	deploy := &agentsv1alpha1.AgentDeployment{

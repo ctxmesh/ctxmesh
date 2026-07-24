@@ -29,9 +29,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
@@ -83,14 +85,20 @@ type MCPToolBindingReconciler struct {
 	// reconcilers compute the pushed manifest and the pod template from the same
 	// resolveAgentBindings logic, so different readers would silently drift them.
 	Registry RegistryReader
+	// RegistryChanges, when non-nil, feeds ToolRegistry-change events from the
+	// Postgres poll source (registryPollSource, ADR 0044 §1) INSTEAD OF the CRD
+	// watch — wired once the ToolRegistry CRD is retired (M45), because a deleted
+	// CRD can no longer be watched. Nil ⇒ the CRD watch (pre-retirement, fully
+	// reversible). Both feed the SAME mapRegistryToBindings map function, so the
+	// fan-out semantics are identical; only the event source differs.
+	RegistryChanges <-chan event.GenericEvent
 }
 
-// registryReader returns the configured RegistryReader or the CRD-backed default.
+// registryReader returns the configured RegistryReader. It is REQUIRED now that
+// ToolRegistry is retired (ADR 0044) — there is no CRD to fall back to; main.go
+// wires the Postgres reader and the envtests inject a memstore-backed one.
 func (r *MCPToolBindingReconciler) registryReader() RegistryReader {
-	if r.Registry != nil {
-		return r.Registry
-	}
-	return NewCRDRegistryReader(r.Client)
+	return r.Registry
 }
 
 // pusher returns the configured pusher or a lazily-created default.
@@ -108,7 +116,6 @@ func (r *MCPToolBindingReconciler) pusher() *toolpush.Pusher {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings/finalizers,verbs=update
-// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=toolregistries,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile resolves the agent referenced by the triggering binding and syncs
@@ -415,19 +422,22 @@ func podReady(pod *corev1.Pod) bool {
 func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// ToolRegistry → requeue every binding that references it (a catalog change
 	// can flip bindings valid/invalid).
+	// The event carries only the changed registry's namespace/name (a lightweight
+	// metav1.PartialObjectMetadata from the poll source — ToolRegistry is no longer
+	// a CRD object), so read them off the client.Object rather than type-asserting.
 	mapRegistryToBindings := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			reg, ok := obj.(*agentsv1alpha1.ToolRegistry)
-			if !ok {
+			regNS, regName := obj.GetNamespace(), obj.GetName()
+			if regName == "" {
 				return nil
 			}
 			var list agentsv1alpha1.MCPToolBindingList
-			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(reg.Namespace)); err != nil {
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(regNS)); err != nil {
 				return nil
 			}
 			var reqs []reconcile.Request
 			for i := range list.Items {
-				if list.Items[i].Spec.RegistryRef == reg.Name {
+				if list.Items[i].Spec.RegistryRef == regName {
 					reqs = append(reqs, reconcile.Request{
 						NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
 					})
@@ -461,10 +471,18 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.MCPToolBinding{}).
-		Watches(&agentsv1alpha1.ToolRegistry{}, mapRegistryToBindings).
 		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToBindings).
-		Named("mcptoolbinding").
-		Complete(r)
+		Named("mcptoolbinding")
+
+	// ToolRegistry change trigger: the leader-elected Postgres poll source
+	// (registryPollSource, ADR 0044 §1) feeds ToolRegistry-change events through the
+	// channel — the CRD is retired, so there is no CRD to watch. Tests that don't
+	// exercise catalog changes leave RegistryChanges nil (no registry watch).
+	if r.RegistryChanges != nil {
+		b = b.WatchesRawSource(source.Channel(r.RegistryChanges, mapRegistryToBindings))
+	}
+
+	return b.Complete(r)
 }

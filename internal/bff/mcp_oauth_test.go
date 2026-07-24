@@ -265,6 +265,7 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, factory, lb := newMCPServer(t, c, false)
+	store := wireTRStore(t, s, nil) // ToolRegistry is retired (ADR 0044): register writes the store
 
 	// --- register (leg 1): 202 + authorization URL ---
 	rec, pending := registerOAuth(t, s, "My OAuth MCP", mcp.URL, authFor(oauth))
@@ -322,10 +323,10 @@ func TestMCPOAuthFullFlow(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "my-oauth-mcp", Namespace: "prod"}, &binding))
 	assert.Equal(t, secretKeyOAuthAccessToken, binding.Spec.SecretRef.Key)
 
-	// The ToolRegistry carries the non-secret auth-type annotation, NEVER a token.
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "my-oauth-mcp", Namespace: "prod"}, &tr))
-	require.Len(t, tr.Spec.Tools, 2, "tools/list is probed with the fresh access token and cataloged")
+	// The ToolRegistry (store row) carries the non-secret auth-type annotation, NEVER a token.
+	tr, trErr := store.Get(context.Background(), "prod", "my-oauth-mcp")
+	require.NoError(t, trErr)
+	require.Len(t, tr.Tools, 2, "tools/list is probed with the fresh access token and cataloged")
 	assert.Equal(t, oauthAuthType, tr.Annotations[annMCPAuthType])
 	for _, v := range tr.Annotations {
 		assert.NotContains(t, v, theOAuthAccessToken)
@@ -439,6 +440,7 @@ func TestMCPOAuthCallbackReplayIsRejected(t *testing.T) {
 	mcp := fakeMCPServerRequiringToken(t, theOAuthAccessToken)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
 	_, pending := registerOAuth(t, s, "replay-mcp", mcp.URL, authFor(oauth))
 	// First callback succeeds → redirect to the catalog.

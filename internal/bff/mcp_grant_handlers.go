@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -440,8 +440,8 @@ func (s *Server) upsertGrantSecret(ctx context.Context, caller client.Client, se
 // caller then overlays an explicitly-supplied config (or fails validation), so a
 // one-click Playground connect works for new servers and legacy stays connectable.
 func (s *Server) recoverRegisteredOAuth(ctx context.Context, caller client.Client, ns, server string) (mcpOAuthConfig, string, *createError) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(ctx, caller, ns, server)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return mcpOAuthConfig{}, "", &createError{status: http.StatusNotFound, msg: "no such registered MCP server"}
 		}
@@ -526,8 +526,8 @@ func fillEmptyOAuthConfig(base, src mcpOAuthConfig) mcpOAuthConfig {
 // failed read/write is logged, never fatal — the current consent still proceeds. Runs
 // caller-scoped (a viewer who cannot update the registry just skips the backfill).
 func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Client, ns, server string, cfg mcpOAuthConfig) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: server}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(ctx, caller, ns, server)
+	if err != nil {
 		s.log.Info("oauth-config backfill skipped: could not read ToolRegistry", "server", server)
 		return
 	}
@@ -544,8 +544,15 @@ func (s *Server) backfillMCPOAuthConfig(ctx context.Context, caller client.Clien
 	set(annMCPOAuthClientID, cfg.ClientID)
 	set(annMCPOAuthScope, cfg.Scope)
 	set(annMCPOAuthRedirectURI, cfg.RedirectURI)
-	if err := caller.Update(ctx, &tr); err != nil {
-		s.log.Info("oauth-config backfill skipped: could not persist annotations (non-fatal)", "server", server)
+	// Persist to the store — best-effort throughout (a failed authz/write just skips
+	// the backfill; the current consent still proceeds) behind SSAR VerbUpdate (a
+	// caller who cannot update just skips, as on the old CRD path). ADR 0044.
+	if aErr := s.authorizeStore(ctx, caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
+		s.log.Info("oauth-config backfill skipped: not permitted to update (non-fatal)", "server", server)
+		return
+	}
+	if _, uErr := s.toolRegistryStore.Upsert(ctx, crdToolRegistryToStore(tr)); uErr != nil {
+		s.log.Info("oauth-config backfill skipped: could not persist to store (non-fatal)", "server", server)
 	}
 }
 

@@ -34,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 )
 
@@ -150,7 +151,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if consoleManaged {
-		s.editRoundTrip(w, r, caller, caller, ns, name, editedYAML)
+		s.editRoundTrip(w, r, caller, ns, name, editedYAML)
 		return
 	}
 	s.editDegraded(w, r, caller, &live, editedYAML)
@@ -300,8 +301,8 @@ func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 // Carry-forward (NOT this task): objects a prior version of expand emitted but the
 // new spec no longer emits (e.g. a removed tool's MCPToolBinding) are left in
 // place — orphan pruning is a later concern; this path never deletes anything.
-func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, reader AgentReader, ns, name, editedYAML string) {
-	if err := applyEditedSpec(r.Context(), applier, reader, s.promptStore, s.scheme, []byte(editedYAML), ns, name); err != nil {
+func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, ns, name, editedYAML string) {
+	if err := applyEditedSpec(r.Context(), applier, s.promptStore, s.toolRegistryStore, s.scheme, []byte(editedYAML), ns, name); err != nil {
 		s.writeEditError(w, err)
 		return
 	}
@@ -313,7 +314,7 @@ func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier A
 // SSA-apply every manifest under the console field-manager. It refuses to apply a
 // spec whose AgentDeployment name does not match the object being edited so a PUT
 // can never rename/re-target the agent (the {name} in the URL is authoritative).
-func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentReader, promptStore promptversion.Store, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
+func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore promptversion.Store, regStore toolregistry.Store, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
 	if scheme == nil {
 		return &createError{status: 500, msg: "server misconfigured: no scheme"}
 	}
@@ -354,7 +355,7 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, reader AgentRead
 	// Point regenerated MCPToolBindings at the registry their tool actually lives in
 	// (m25 S18) — same fix as create: expand's hardcoded default registry doesn't
 	// exist for BYO-MCP tools, so the binding would be RegistryNotFound forever.
-	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, reader, ns))
+	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, regStore, ns))
 
 	// Re-stamp the NEW source-spec on the AgentDeployment so the next edit
 	// round-trips from the just-submitted intent (ADR 0017 §1).

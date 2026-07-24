@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
+
+// wireTRStore wires a memstore onto the server as the ToolRegistry source (retired;
+// no CRD, ADR 0044), seeded with regs, and sets the SSAR authorizer (permissive by
+// default; a RBAC-denial case passes a denying one). Shared by the MCP test files
+// that used to seed ToolRegistries into a fake client.
+func wireTRStore(t *testing.T, s *Server, auth authz.Authorizer, regs ...*agentsv1alpha1.ToolRegistry) toolregistry.Store {
+	t.Helper()
+	store := toolregistry.NewMemStore()
+	s.toolRegistryStore = store
+	if auth != nil {
+		s.authorizer = auth
+	} else {
+		s.authorizer = &recordingAuthorizer{}
+	}
+	for _, reg := range regs {
+		_, err := store.Upsert(context.Background(), crdToolRegistryToStore(reg))
+		require.NoError(t, err)
+	}
+	return store
+}
 
 // scopedRegistry builds a register-managed ToolRegistry with a scope + owner label.
 func scopedRegistry(name, scope, owner string) *agentsv1alpha1.ToolRegistry {
@@ -66,11 +89,9 @@ func TestMCPScopeVisibleTo(t *testing.T) {
 // and returns the server names in the response.
 func listServersAs(t *testing.T, objs []*agentsv1alpha1.ToolRegistry, username string) []string {
 	t.Helper()
-	builder := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(ssrInterceptor(username, nil))
-	for _, o := range objs {
-		builder = builder.WithObjects(o)
-	}
-	s, _, _ := newMCPServer(t, builder.Build(), false)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(ssrInterceptor(username, nil)).Build()
+	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil, objs...) // ToolRegistry is retired (ADR 0044): the list reads the store
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcpservers?namespace=prod", nil)

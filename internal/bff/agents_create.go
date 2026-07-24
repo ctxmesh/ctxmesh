@@ -36,6 +36,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/expand"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 )
@@ -99,6 +100,7 @@ func createAgentFromYAML(
 	w AgentWriter,
 	reader AgentReader,
 	promptStore promptversion.Store,
+	regStore toolregistry.Store,
 	scheme *runtime.Scheme,
 	agentYAML []byte,
 	namespace string,
@@ -164,7 +166,7 @@ func createAgentFromYAML(
 	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
 	// default reference is RegistryNotFound and the binding never goes Ready. Best-
 	// effort: a tool not found in any registry keeps expand's default.
-	idx := toolRegistryIndex(ctx, reader, ns)
+	idx := toolRegistryIndex(ctx, regStore, ns)
 	rewriteBindingRegistries(objs, idx)
 	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
 	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
@@ -398,27 +400,38 @@ type toolLoc struct {
 	owner string
 }
 
-// toolRegistryIndex lists the namespace's ToolRegistries and maps each tool NAME to
-// its registry + pinned URL/image, so a generated MCPToolBinding can reference the
-// registry the tool actually lives in AND the pin it must use. Registries are sorted
-// by name so a tool present in more than one resolves deterministically (first wins;
-// bare-name collisions are unavoidable and rare given per-server registries). A list
-// error → nil map (the caller keeps expand's default rather than failing the create).
-func toolRegistryIndex(ctx context.Context, reader AgentReader, ns string) map[string]toolLoc {
-	if reader == nil {
+// toolRegistryIndex lists the namespace's ToolRegistries from the Postgres store
+// (ToolRegistry is retired as a CRD, ADR 0044) and maps each tool NAME to its
+// registry + pinned URL/image, so a generated MCPToolBinding can reference the
+// registry the tool actually lives in AND the pin it must use. Registries are
+// sorted by name so a tool present in more than one resolves deterministically
+// (first wins). A nil store or a list error → nil map (the caller keeps expand's
+// default rather than failing the create).
+func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string) map[string]toolLoc {
+	if store == nil {
 		return nil
 	}
-	var list agentsv1alpha1.ToolRegistryList
-	if err := reader.List(ctx, &list, client.InNamespace(ns)); err != nil {
-		return nil
+	var regs []toolregistry.ToolRegistry
+	token := ""
+	for {
+		page, err := store.List(ctx, controlplane.ListOptions{
+			Namespace: ns, PageSize: controlplane.MaxPageSize, PageToken: token,
+		})
+		if err != nil {
+			return nil
+		}
+		regs = append(regs, page.Items...)
+		if page.NextPage == "" {
+			break
+		}
+		token = page.NextPage
 	}
-	regs := list.Items
-	slices.SortFunc(regs, func(a, b agentsv1alpha1.ToolRegistry) int {
+	slices.SortFunc(regs, func(a, b toolregistry.ToolRegistry) int {
 		return strings.Compare(a.Name, b.Name)
 	})
 	idx := make(map[string]toolLoc)
 	for i := range regs {
-		for _, t := range regs[i].Spec.Tools {
+		for _, t := range regs[i].Tools {
 			if _, seen := idx[t.Name]; !seen {
 				idx[t.Name] = toolLoc{
 					registry: regs[i].Name, url: t.URL, image: t.Image,

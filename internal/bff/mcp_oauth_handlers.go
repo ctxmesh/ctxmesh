@@ -337,7 +337,7 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// (3) Store the tokens in a Secret + create the catalog, egress, and binding —
 	// all caller-scoped. The tokens land ONLY in the Secret's data (oauthSecretData);
 	// they are never in an annotation/label/DTO/log.
-	if _, crErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
+	if _, crErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
 		name:            flow.serverName,
 		namespace:       flow.namespace,
 		url:             flow.serverURL,

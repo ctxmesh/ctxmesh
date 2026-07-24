@@ -36,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // The BYO-MCP register + tool-catalog handlers (ADR 0016). All are CALLER-SCOPED
@@ -185,7 +187,7 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 		// create below), register without an owner label rather than failing the whole flow.
 		s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
 	}
-	created, cErr := createMCPObjects(r.Context(), caller, s.scheme, mcpCreateSpec{
+	created, cErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
 		name:      name,
 		namespace: ns,
 		url:       strings.TrimSpace(req.URL),
@@ -304,7 +306,7 @@ type mcpCreateSpec struct {
 // It returns the flat identity of every created object, or a typed *createError
 // with the right HTTP status on the first failure (a viewer's denied create → an
 // honest 403).
-func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme, spec mcpCreateSpec) ([]createdObject, *createError) {
+func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spec mcpCreateSpec) ([]createdObject, *createError) {
 	labels := map[string]string{
 		labelManagedBy: managedByMCP,
 	}
@@ -368,6 +370,8 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 		entries = append(entries, entry)
 	}
 
+	// registry is the server catalog — a plain projection shape (ToolRegistry is
+	// retired to Postgres, ADR 0044); it is written to the store, not the K8s API.
 	registry := &agentsv1alpha1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
@@ -378,14 +382,15 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: entries},
 	}
 
-	// Assemble the create list in dependency order. The Secret/SecretBinding come
-	// first (the key store), then the ToolRegistry (the catalog), then the egress
-	// NetworkPolicy (the connectivity).
+	// The bundle is created in dependency order: the credential Secret +
+	// SecretBinding (the key store) BEFORE the ToolRegistry catalog, then the egress
+	// NetworkPolicy — those three are K8s objects created via the caller; the
+	// ToolRegistry goes to the Postgres store between them.
 	type kindObj struct {
 		kind string
 		o    client.Object
 	}
-	objs := make([]kindObj, 0, 4)
+	var beforeTR, afterTR []kindObj
 
 	if hasSecret {
 		// The Secret holds EITHER the bearer key (key tier) OR the OAuth grant
@@ -421,10 +426,8 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: bindingKey},
 			},
 		}
-		objs = append(objs, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
+		beforeTR = append(beforeTR, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
 	}
-
-	objs = append(objs, kindObj{toolRegistryKind, registry})
 
 	// The per-server egress NetworkPolicy — opened for an APPROVED server ONLY
 	// (ADR 0016 §4: "egress opens per approved server only"). Self-serve (default →
@@ -438,21 +441,40 @@ func createMCPObjects(ctx context.Context, w AgentWriter, scheme *runtime.Scheme
 		if npErr != nil {
 			return nil, npErr
 		}
-		objs = append(objs, kindObj{networkPolicyKind, np})
+		afterTR = append(afterTR, kindObj{networkPolicyKind, np})
 	}
 
-	created := make([]createdObject, 0, len(objs))
-	for _, ko := range objs {
-		if err := w.Create(ctx, ko.o); err != nil {
-			return created, classifyCreateError(err, ko.kind, ko.o.GetName())
+	created := make([]createdObject, 0, len(beforeTR)+1+len(afterTR))
+	createK8s := func(kos []kindObj) *createError {
+		for _, ko := range kos {
+			if err := caller.Create(ctx, ko.o); err != nil {
+				return classifyCreateError(err, ko.kind, ko.o.GetName())
+			}
+			created = append(created, createdObject{Kind: ko.kind, Name: ko.o.GetName(), Namespace: ko.o.GetNamespace()})
 		}
-		created = append(created, createdObject{
-			Kind:      ko.kind,
-			Name:      ko.o.GetName(),
-			Namespace: ko.o.GetNamespace(),
-		})
+		return nil
 	}
-	_ = scheme // scheme reserved for future decode paths; kept for signature parity
+
+	if cErr := createK8s(beforeTR); cErr != nil {
+		return created, cErr
+	}
+	// The ToolRegistry → the store, behind a caller-scoped SSAR VerbCreate + in-app
+	// validation (atomic Create → 409). ADR 0044.
+	if err := s.authorizeStore(ctx, caller, authz.VerbCreate, resourceToolRegistries, registry.Namespace, ""); err != nil {
+		return created, toolRegistryStoreWriteError(err, registry.Name, "register the MCP server")
+	}
+	rec := crdToolRegistryToStore(registry)
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		return created, toolRegistryStoreWriteError(vErr, registry.Name, "register the MCP server")
+	}
+	if _, err := s.toolRegistryStore.Create(ctx, rec); err != nil {
+		return created, toolRegistryStoreWriteError(err, registry.Name, "register the MCP server")
+	}
+	created = append(created, createdObject{Kind: toolRegistryKind, Name: registry.Name, Namespace: registry.Namespace})
+
+	if cErr := createK8s(afterTR); cErr != nil {
+		return created, cErr
+	}
 	return created, nil
 }
 
@@ -662,13 +684,9 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	opts := []client.ListOption{client.MatchingLabels{labelManagedBy: managedByMCP}}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace,
+		map[string]string{labelManagedBy: managedByMCP})
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -748,13 +766,8 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	var opts []client.ListOption
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace, nil)
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return

@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,6 +42,8 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/credstore"
@@ -103,19 +104,27 @@ func run(log logr.Logger) error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// getTR fetches a server's ToolRegistry; a missing registry ⇒ (nil, nil), which the
-	// callers treat conservatively (not-OAuth / not-org) so a transient absence never
-	// masquerades as a consent prompt or an org fallback.
-	getTR := func(ctx context.Context, ns, server string) (*agentsv1alpha1.ToolRegistry, error) {
-		var tr agentsv1alpha1.ToolRegistry
-		if err := k8sClient.Get(ctx, client.ObjectKey{Name: server, Namespace: ns}, &tr); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil, nil
-			}
-			return nil, err
-		}
-		return &tr, nil
+	// getTR fetches a server's ToolRegistry auth-type / org-scope; a missing registry
+	// ⇒ (nil, nil), which the callers treat conservatively (not-OAuth / not-org) so a
+	// transient absence never masquerades as a consent prompt or an org fallback.
+	//
+	// ToolRegistry is retired to Postgres (ADR 0044 / M45): the CRD is gone, so this
+	// per-tool-call read comes from the control-plane store behind a short-TTL,
+	// serve-stale-on-error cache that bounds the blast radius of a Postgres blip on
+	// the OBO hot path (Fable's design gate). CONTROLPLANE_DSN is required.
+	cpDSN := strings.TrimSpace(os.Getenv("CONTROLPLANE_DSN"))
+	if cpDSN == "" {
+		return errors.New("CONTROLPLANE_DSN is required: ToolRegistry is retired to Postgres (ADR 0044)")
 	}
+	cpDB, dbErr := controlplane.Connect(context.Background(), cpDSN)
+	if dbErr != nil {
+		return fmt.Errorf("connect control-plane postgres for ToolRegistry reads: %w", dbErr)
+	}
+	defer func() { _ = cpDB.Close() }()
+	trSource := newToolRegistrySource(
+		toolregistry.NewPostgresStore(cpDB), defaultToolRegistryCacheTTL, log.WithName("toolregistry"))
+	getTR := trSource.getTR
+	log.Info("ToolRegistry served from Postgres (ADR 0044): CRD retired; short-TTL serve-stale cache")
 	authTypeIsOAuth := func(ctx context.Context, ns, server string) (bool, error) {
 		tr, err := getTR(ctx, ns, server)
 		if err != nil || tr == nil {

@@ -34,12 +34,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
 // theMCPKey is the bearer key the BYO-MCP tests paste. DELIBERATELY recognizable
@@ -138,6 +137,7 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	mcp := fakeMCPServer(t, true)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, factory, lb := newMCPServer(t, c, false)
+	store := wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcpservers",
@@ -182,13 +182,12 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	assert.Equal(t, theMCPKey, string(secret.Data[secretKeyAPIKey]))
 	assert.Equal(t, managedByMCP, secret.Labels[labelManagedBy])
 
-	// The ToolRegistry stores each tool's inputSchema verbatim.
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "my-weather-mcp", Namespace: "prod"}, &tr))
-	require.Len(t, tr.Spec.Tools, 2)
-	for _, e := range tr.Spec.Tools {
-		require.NotNil(t, e.InputSchema, "ToolRegistry entry MUST store inputSchema for m14.6b")
-		assert.NotEmpty(t, e.InputSchema.Raw)
+	// The ToolRegistry store row stores each tool's inputSchema verbatim.
+	tr, trErr := store.Get(context.Background(), "prod", "my-weather-mcp")
+	require.NoError(t, trErr)
+	require.Len(t, tr.Tools, 2)
+	for _, e := range tr.Tools {
+		require.NotEmpty(t, e.InputSchema, "ToolRegistry entry MUST store inputSchema for m14.6b")
 		assert.Equal(t, agentsv1alpha1.SourceUserAdded, e.Source)
 		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus)
 		assert.Equal(t, mcp.URL, e.URL)
@@ -216,6 +215,7 @@ func TestRegisterMCPOpenServerNoSecret(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcpservers",
@@ -245,6 +245,7 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, true) // requireApproval = true
+	store := wireTRStore(t, s, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcpservers",
@@ -257,10 +258,10 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, agentsv1alpha1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
 
-	// The catalog entry is pending.
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "hardened-mcp", Namespace: "prod"}, &tr))
-	for _, e := range tr.Spec.Tools {
+	// The catalog entry (store row) is pending.
+	tr, trErr := store.Get(context.Background(), "prod", "hardened-mcp")
+	require.NoError(t, trErr)
+	for _, e := range tr.Tools {
 		assert.Equal(t, agentsv1alpha1.ApprovalPending, e.ApprovalStatus)
 	}
 
@@ -351,16 +352,11 @@ func TestRegisterMCPBadKeyIs422(t *testing.T) {
 // gets a 403 surfaced (the caller-scoped create denial, not a swallowed success).
 func TestRegisterMCPViewerForbiddenIs403(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
-				return apierrors.NewForbidden(
-					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "toolregistries"}, "hardened", assert.AnError)
-			},
-		}).
-		Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	// The register's catalog create is SSAR-gated on toolregistries (ADR 0044); a
+	// viewer's create is denied → 403.
+	wireTRStore(t, s, &recordingAuthorizer{err: authz.ErrForbidden})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcpservers",
@@ -379,8 +375,9 @@ func TestRegisterMCPReconnectIs409(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "dup-mcp", Namespace: "prod"},
 		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "x"}}},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil, existing) // the store already holds this server → atomic Create 409
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/mcpservers",
@@ -445,6 +442,7 @@ func TestRegisterMCPAnonIs401(t *testing.T) {
 func TestListMCPServersEmpty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil) // empty store, permissive SSAR
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcpservers", nil)
@@ -480,8 +478,9 @@ func TestListMCPServersProjectsNoSecrets(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "weather-mcp", Namespace: "prod"},
 		Data:       map[string][]byte{secretKeyAPIKey: []byte(theMCPKey)},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr, curated, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(secret).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil, tr, curated)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcpservers", nil)
@@ -500,11 +499,9 @@ func TestListMCPServersProjectsNoSecrets(t *testing.T) {
 }
 
 func TestListMCPServersForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(forbiddenListInterceptor()).
-		Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, &recordingAuthorizer{err: authz.ErrForbidden}) // the list SSAR is denied
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/mcpservers", nil)
@@ -543,8 +540,9 @@ func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "weather-mcp", Namespace: "prod"},
 		Data:       map[string][]byte{secretKeyAPIKey: []byte(theMCPKey)},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(curated, userAdded, secret).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(secret).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil, curated, userAdded)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/tools", nil)
@@ -582,6 +580,7 @@ func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
 func TestListToolsEmpty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, nil) // empty store, permissive SSAR
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/tools", nil)
@@ -593,11 +592,9 @@ func TestListToolsEmpty(t *testing.T) {
 }
 
 func TestListToolsForbiddenIs403(t *testing.T) {
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(forbiddenListInterceptor()).
-		Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
+	wireTRStore(t, s, &recordingAuthorizer{err: authz.ErrForbidden}) // the catalog list SSAR is denied
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/tools", nil)

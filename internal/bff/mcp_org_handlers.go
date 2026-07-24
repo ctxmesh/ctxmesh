@@ -25,9 +25,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -85,8 +85,8 @@ func (s *Server) handleSetOrgCredential(w http.ResponseWriter, r *http.Request) 
 
 	// 1. Promote the server to org scope (CALLER-SCOPED — the admin gate). A viewer who
 	// cannot update the ToolRegistry gets a 403 here, before any credential is written.
-	var tr agentsv1alpha1.ToolRegistry
-	if gErr := caller.Get(r.Context(), client.ObjectKey{Name: server, Namespace: ns}, &tr); gErr != nil {
+	tr, gErr := s.mcpGetToolRegistry(r.Context(), caller, ns, server)
+	if gErr != nil {
 		writeMCPReadError(w, gErr, "MCP server")
 		return
 	}
@@ -95,8 +95,28 @@ func (s *Server) handleSetOrgCredential(w http.ResponseWriter, r *http.Request) 
 	}
 	tr.Labels[labelMCPScope] = scopeOrg
 	delete(tr.Labels, labelMCPOwner) // org has no single owner
-	if uErr := caller.Update(r.Context(), &tr); uErr != nil {
-		writeMCPReadError(w, uErr, "MCP server")
+
+	// Retired (RETIRE_TR, ADR 0044): the org-promote authz — the SSAR VerbUpdate IS
+	// the admin gate (exact RBAC parity with the CRD update this replaces). It runs
+	// BEFORE the store write AND before the privileged credential Secret write below,
+	// so a denied caller never promotes and no org credential is delivered.
+	// TOCTOU note: the SSAR + store Upsert is not one atomic API call like the CRD
+	// Update was — a bounded window where the caller's permission could change
+	// between the check and the write. Accepted: org-promote RBAC is operator-stable
+	// and the window is sub-millisecond; the alternative (a store-side authz) is out
+	// of scope. (Documented in ADR 0044.)
+	if aErr := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, server); aErr != nil {
+		s.writeAuthzError(w, aErr, "promote the MCP server to org scope")
+		return
+	}
+	rec := crdToolRegistryToStore(tr)
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
+		return
+	}
+	if _, uErr := s.toolRegistryStore.Upsert(r.Context(), rec); uErr != nil {
+		s.log.Error(uErr, "org-promote: store update failed", "namespace", ns, "server", server)
+		writeError(w, http.StatusInternalServerError, "failed to promote the MCP server to org scope")
 		return
 	}
 
