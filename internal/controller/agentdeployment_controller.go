@@ -223,12 +223,11 @@ type AgentDeploymentReconciler struct {
 	Registry RegistryReader
 }
 
-// registryReader returns the configured RegistryReader or the CRD-backed default.
+// registryReader returns the configured RegistryReader. REQUIRED post-retirement
+// (ADR 0044) — there is no CRD to fall back to (main.go wires the Postgres reader;
+// envtests inject a memstore-backed one).
 func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
-	if r.Registry != nil {
-		return r.Registry
-	}
-	return NewCRDRegistryReader(r.Client)
+	return r.Registry
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete

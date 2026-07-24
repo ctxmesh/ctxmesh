@@ -50,6 +50,22 @@ func OpenDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
+// Connect opens a Postgres handle WITHOUT running migrations — for a read-only
+// consumer of a schema the operator/BFF already migrate (e.g. the token-service
+// ToolRegistry read after retirement, ADR 0044 / M45). It pings so a bad DSN fails
+// fast at start-up rather than on the first hot-path read. The caller owns Close.
+func Connect(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane: open postgres: %w", err)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("controlplane: ping postgres: %w", err)
+	}
+	return db, nil
+}
+
 // Migrate applies all pending embedded goose migrations. Safe to call on every start-up (goose records
 // applied versions in goose_db_version and only runs the pending ones). It uses goose's Provider API
 // with a **Postgres session locker** (an advisory lock) so two operator replicas starting at once don't

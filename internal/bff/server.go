@@ -74,9 +74,9 @@ type Server struct {
 	// the read-switch land (m40.5). nil ⇒ CRD-only (CONTROLPLANE_DSN unset) — behaviour unchanged.
 	promptStore promptversion.Store
 
-	// toolRegistryStore, when set, is the control-plane Postgres store for ToolRegistries (ADR 0042
-	// Amendment 2, m41.2). Same dual-write posture as promptStore: the CRD stays the source of truth +
-	// read source, the store is a best-effort mirror. nil ⇒ CRD-only.
+	// toolRegistryStore is the control-plane Postgres store for ToolRegistries — the
+	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
+	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
 
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
@@ -307,8 +307,9 @@ type Options struct {
 	// PromptStore is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4). Optional —
 	// nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
 	PromptStore promptversion.Store
-	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries (ADR 0042 Amdt 2, m41.2).
-	// Optional — nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	// ToolRegistryStore is the control-plane Postgres store for ToolRegistries — the
+	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Wired from
+	// CONTROLPLANE_DSN in cmd/bff/main.go; nil ⇒ the ToolRegistry/MCP APIs serve 501.
 	ToolRegistryStore toolregistry.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.

@@ -72,7 +72,6 @@ rules:
   resources:
   - evalsuites
   - secretbindings
-  - toolregistries
   verbs:
   - get
   - list

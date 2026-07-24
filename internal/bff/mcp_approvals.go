@@ -27,6 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 )
 
 // The MCP APPROVAL QUEUE — the operator-facing surface for the HARDENED trust
@@ -57,10 +59,6 @@ import (
 // behave honestly (the list returns []; an approve of a not-found/already-approved
 // server behaves per the object state, never a lie).
 
-// mcpApprovalKind is the resource label used in approval-path error messages so
-// they name the thing the operator acted on ("MCP server"), not the raw CRD kind.
-const mcpApprovalKind = "MCP server"
-
 // mcpApprovalRejected is the MCPApprovalActionResponse.Status value returned when
 // an operator denies a pending server (the catalog entry is removed).
 const mcpApprovalRejected = "rejected"
@@ -83,13 +81,9 @@ func (s *Server) handleListMCPApprovals(w http.ResponseWriter, r *http.Request) 
 	}
 	namespace := r.URL.Query().Get("namespace")
 
-	opts := []client.ListOption{client.MatchingLabels{labelManagedBy: managedByMCP}}
-	if namespace != "" {
-		opts = append(opts, client.InNamespace(namespace))
-	}
-
-	var registries agentsv1alpha1.ToolRegistryList
-	if err := caller.List(r.Context(), &registries, opts...); err != nil {
+	registries, err := s.mcpListToolRegistries(r.Context(), caller, namespace,
+		map[string]string{labelManagedBy: managedByMCP})
+	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -174,12 +168,22 @@ func (s *Server) handleApproveMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	tr.Annotations[annMCPStatus] = agentsv1alpha1.ApprovalApproved
 
-	if err := caller.Update(r.Context(), tr); err != nil {
-		status, msg := classifyAgentRegistryWriteError(err, mcpApprovalKind, name)
-		if status >= 500 {
-			s.log.Error(err, "approve MCP: status update failed", "namespace", ns, "name", name)
-		}
-		writeError(w, status, msg)
+	// The approve write is the operator-gated flip of the controller-owned
+	// approvalStatus — persist to the store behind SSAR VerbUpdate (the RBAC the CRD
+	// update enforced, ADR 0044). approve OWNS approvalStatus, so this is the one
+	// path allowed to set it.
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "approve the MCP server")
+		return
+	}
+	rec := crdToolRegistryToStore(tr)
+	if vErr := toolregistry.Validate(rec); vErr != nil {
+		s.writeValidationError(w, vErr)
+		return
+	}
+	if _, err := s.toolRegistryStore.Upsert(r.Context(), rec); err != nil {
+		s.log.Error(err, "approve MCP: store update failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to approve the MCP server")
 		return
 	}
 
@@ -231,14 +235,15 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DELETE the catalog entry first — this is the operator-gated write. A viewer/
-	// developer without delete on toolregistries → the API server's real 403.
-	if err := caller.Delete(r.Context(), tr); err != nil && !apierrors.IsNotFound(err) {
-		status, msg := classifyMCPDeleteError(err, mcpApprovalKind, name)
-		if status >= 500 {
-			s.log.Error(err, "reject MCP: delete ToolRegistry failed", "namespace", ns, "name", name)
-		}
-		writeError(w, status, msg)
+	// DELETE the catalog entry first — the operator-gated write, behind SSAR
+	// VerbDelete (the RBAC the CRD delete enforced, ADR 0044).
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbDelete, resourceToolRegistries, ns, name); err != nil {
+		s.writeAuthzError(w, err, "reject the MCP server")
+		return
+	}
+	if err := s.toolRegistryStore.Delete(r.Context(), ns, name); err != nil {
+		s.log.Error(err, "reject MCP: delete from store failed", "namespace", ns, "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to reject the MCP server")
 		return
 	}
 
@@ -268,8 +273,8 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 // flow (no managed-by=agent-engine-mcp label) is a 404 — the approval surface acts
 // ONLY on BYO-MCP servers, never on operator-curated ToolRegistries.
 func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, bool) {
-	var tr agentsv1alpha1.ToolRegistry
-	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &tr); err != nil {
+	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)
+	if err != nil {
 		s.writeGetError(w, err, "MCP server")
 		return nil, false
 	}
@@ -277,7 +282,7 @@ func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, c
 		writeError(w, http.StatusNotFound, "MCP server not found")
 		return nil, false
 	}
-	return &tr, true
+	return tr, true
 }
 
 // openMCPEgress creates the per-server egress NetworkPolicy for an approved server,

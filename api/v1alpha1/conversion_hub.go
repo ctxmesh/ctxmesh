@@ -56,6 +56,3 @@ func (*ModelRoute) Hub() {}
 
 // Hub marks SecretBinding as the conversion hub.
 func (*SecretBinding) Hub() {}
-
-// Hub marks ToolRegistry as the conversion hub.
-func (*ToolRegistry) Hub() {}

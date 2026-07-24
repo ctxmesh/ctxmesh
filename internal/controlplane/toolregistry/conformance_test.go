@@ -82,6 +82,32 @@ func TestStore_UpsertGet_ToolsAndOAuthConfigRoundTrip(t *testing.T) {
 	})
 }
 
+func TestStore_Create_AtomicConflict(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		in := ToolRegistry{Namespace: "default", Name: "c", Tools: sampleTools()}
+
+		created, err := s.Create(ctx, in)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, created.Version)
+		require.Len(t, created.Tools, 2)
+
+		// A second Create of the same (namespace, name) must conflict, not clobber.
+		_, err = s.Create(ctx, ToolRegistry{Namespace: "default", Name: "c", Tools: sampleTools()[:1]})
+		assert.ErrorIs(t, err, controlplane.ErrConflict)
+
+		// The original row is unchanged (still 2 tools, still version 1).
+		got, err := s.Get(ctx, "default", "c")
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, got.Version)
+		assert.Len(t, got.Tools, 2)
+
+		// A different name in the same namespace is fine.
+		_, err = s.Create(ctx, ToolRegistry{Namespace: "default", Name: "c2", Tools: sampleTools()})
+		require.NoError(t, err)
+	})
+}
+
 func TestStore_Delete(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
 		ctx := context.Background()

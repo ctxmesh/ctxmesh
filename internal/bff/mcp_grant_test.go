@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -233,9 +234,9 @@ func newGrantServer(t *testing.T, c client.WithWatch, extra ...interceptor.Funcs
 func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	const server, ns = "grant-mcp", "prod"
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://grant/mcp")).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, lb := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://grant/mcp"))
 
 	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
@@ -292,9 +293,9 @@ func (f *fakeGrantWriter) StoreGrant(_ context.Context, ns, boundary, server, us
 func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	const server, ns = "grant-mcp", "prod"
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://grant/mcp")).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://grant/mcp"))
 	fw := &fakeGrantWriter{}
 	s.grantStore = fw // delegate instead of writing a Secret
 
@@ -330,8 +331,9 @@ func TestMCPGrantConsentNonOAuthServerIs4xx(t *testing.T) {
 			Annotations: map[string]string{annMCPURL: "http://plain/mcp"},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil, tr)
 
 	rec, _ := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -343,6 +345,7 @@ func TestMCPGrantConsentUnknownServerIs404(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil) // empty store ⇒ unregistered server
 
 	rec, _ := beginGrant(t, s, "ghost-mcp", "alice-token", grantAuth(oauth))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -367,9 +370,9 @@ func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agents
 func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	const server = "recover-mcp"
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistryWithConfig(server, "http://recover/mcp", oauth)).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://recover/mcp", oauth))
 
 	rec, pending := beginGrant(t, s, server, "bob-token", nil) // no auth block — recovery only
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
@@ -385,9 +388,9 @@ func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
 // or a broken flow.
 func TestMCPGrantConsentLegacyServerDiscoveryFails(t *testing.T) {
 	const server = "legacy-oauth-mcp"
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://legacy.invalid/mcp")).Build() // unreachable
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://legacy.invalid/mcp")) // unreachable URL
 
 	rec, _ := beginGrant(t, s, server, "alice-token", &MCPAuthRequest{Type: "oauth", RedirectURI: "https://console.example/api/mcp/oauth/callback"})
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, "unrecoverable config → honest 422")
@@ -399,10 +402,11 @@ func TestMCPGrantConsentLegacyServerDiscoveryFails(t *testing.T) {
 // is a one-time recovery. The SPA supplies the redirect (only the browser knows its origin).
 func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 	disco, _ := oauthDiscoveryStub(t, false, false) // DCR available, no CIMD
-	const server = "legacy-discoverable-mcp"
+	const server, ns = "legacy-discoverable-mcp", "prod"
 	tr := oauthToolRegistry(server, disco.URL+"/mcp") // oauth + URL, but NO config annotations
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(tr).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _ := newGrantServer(t, c)
+	store := wireTRStore(t, s, nil, tr)
 	s.consoleURL = "https://console.example" // ADR 0040: the canonical, server-controlled callback origin
 
 	const canonicalRedirect = "https://console.example/api/mcp/oauth/callback"
@@ -413,9 +417,9 @@ func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 	assert.Contains(t, pending.AuthorizationURL, disco.URL+"/authorize", "authorize URL from the DISCOVERED endpoint")
 	assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "client id from DCR")
 
-	// The recovered config is persisted onto the ToolRegistry (one-time recovery).
-	var got agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(tr), &got))
+	// The recovered config is persisted onto the ToolRegistry store row (one-time recovery).
+	got, err := store.Get(context.Background(), ns, server)
+	require.NoError(t, err)
 	assert.Equal(t, disco.URL+"/authorize", got.Annotations[annMCPOAuthAuthEndpoint], "backfilled authorization endpoint")
 	assert.Equal(t, disco.URL+"/token", got.Annotations[annMCPOAuthTokenEndpoint], "backfilled token endpoint")
 	assert.Equal(t, "dyn-client-123", got.Annotations[annMCPOAuthClientID], "backfilled client id")
@@ -429,8 +433,10 @@ func TestMCPGrantConsentLegacyServerBackfillsViaDiscovery(t *testing.T) {
 func TestCreateMCPObjectsPersistsOAuthConfig(t *testing.T) {
 	const server, ns = "cfg-mcp", "prod"
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	_, cErr := createMCPObjects(context.Background(), c, testScheme(t), mcpCreateSpec{
+	s := &Server{toolRegistryStore: toolregistry.NewMemStore(), authorizer: &recordingAuthorizer{}}
+	_, cErr := s.createMCPObjects(context.Background(), c, mcpCreateSpec{
 		name: server, namespace: ns, url: "http://10.0.0.5:8080/mcp", status: "approved",
+		tools:           []discoveredTool{{Name: "list_files", Description: "lists files"}},
 		authType:        oauthAuthType,
 		oauthSecretData: map[string][]byte{secretKeyOAuthAccessToken: []byte(theOAuthAccessToken)},
 		oauthConfig: mcpOAuthConfig{
@@ -443,8 +449,8 @@ func TestCreateMCPObjectsPersistsOAuthConfig(t *testing.T) {
 	})
 	require.Nil(t, cErr)
 
-	var tr agentsv1alpha1.ToolRegistry
-	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: server, Namespace: ns}, &tr))
+	tr, err := s.toolRegistryStore.Get(context.Background(), ns, server)
+	require.NoError(t, err)
 	assert.Equal(t, "https://as.example/authorize", tr.Annotations[annMCPOAuthAuthEndpoint])
 	assert.Equal(t, "https://as.example/token", tr.Annotations[annMCPOAuthTokenEndpoint])
 	assert.Equal(t, "cfg-client", tr.Annotations[annMCPOAuthClientID])
@@ -474,9 +480,9 @@ func TestMCPGrantRevokeThenConsentRequired(t *testing.T) {
 	const server = "revoke-mcp"
 	// "user:alice-token" is what the identity factory reports for "alice-token".
 	grant := seedGrant(server, "user:alice-token", theOAuthAccessToken, theOAuthRefreshToken, "https://x/token", time.Now().Add(time.Hour))
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://revoke/mcp"), grant).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(grant).Build()
 	s, lb := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://revoke/mcp"))
 
 	// Alice revokes HER grant.
 	rec := revokeGrant(t, s, server, "alice-token")
@@ -496,9 +502,9 @@ func TestMCPGrantRevokeThenConsentRequired(t *testing.T) {
 func TestMCPGrantRevokeOnlyOwnGrant(t *testing.T) {
 	const server, ns = "shared-server", "prod"
 	aliceGrant := seedGrant(server, "user:alice-token", "ALICE-token", "a-refresh", "https://x/token", time.Now().Add(time.Hour))
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://shared/mcp"), aliceGrant).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(aliceGrant).Build()
 	s, _ := newGrantServer(t, c)
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://shared/mcp"))
 
 	// Bob (who has NO grant) tries to revoke — his DELETE names HIS own grant object
 	// (which does not exist), so it is a 404 and Alice's grant is untouched.
@@ -516,8 +522,7 @@ func TestMCPGrantRevokeOnlyOwnGrant(t *testing.T) {
 func TestMCPGrantRevokeForbiddenIs403(t *testing.T) {
 	const server, ns = "rbac-mcp", "prod"
 	grant := seedGrant(server, "user:viewer-token", theOAuthAccessToken, "", "", time.Now().Add(time.Hour))
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(oauthToolRegistry(server, "http://rbac/mcp"), grant).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(grant).Build()
 	// SelfSubjectReview still succeeds (the factory handles it); only the grant
 	// Secret DELETE is denied — the caller-scoped 403 must surface.
 	s, _ := newGrantServer(t, c, interceptor.Funcs{
@@ -525,6 +530,7 @@ func TestMCPGrantRevokeForbiddenIs403(t *testing.T) {
 			return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, grant.Name, assert.AnError)
 		},
 	})
+	wireTRStore(t, s, nil, oauthToolRegistry(server, "http://rbac/mcp"))
 
 	rec := revokeGrant(t, s, server, "viewer-token")
 	assert.Equal(t, http.StatusForbidden, rec.Code, "a denied delete must surface a 403")
