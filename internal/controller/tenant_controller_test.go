@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -155,6 +156,62 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 	assert.Equal(t, "100.00", env["TENANT_BUDGET_USD"])
 	assert.Equal(t, "600", env["TENANT_RPM"])
 	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
+}
+
+// networkIsolation stamps a serving-safe cross-tenant NetworkPolicy on member namespaces (opt-in);
+// toggling it off removes the policy.
+func TestTenant_NetworkIsolationPolicy(t *testing.T) {
+	makeNamespace(t, "tnt-iso-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "isoco"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces:       []string{"tnt-iso-ns"},
+			NetworkIsolation: true,
+			Quota:            &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "isoco")
+	reconcileTenant(t, "isoco")
+
+	var np networkingv1.NetworkPolicy
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "tnt-iso-ns", Name: tenantNetworkPolicyName}, &np))
+	assert.Equal(t, "isoco", np.Labels[tenantLabel])
+	assert.Contains(t, np.Spec.PolicyTypes, networkingv1.PolicyTypeIngress)
+	assert.Contains(t, np.Spec.PolicyTypes, networkingv1.PolicyTypeEgress)
+
+	// Serving-safe: an ingress rule allows the knative-serving data plane.
+	allowsKnative := false
+	for _, rule := range np.Spec.Ingress {
+		for _, peer := range rule.From {
+			if peer.NamespaceSelector != nil &&
+				peer.NamespaceSelector.MatchLabels[namespaceNameLabel] == knativeServingNamespace {
+				allowsKnative = true
+			}
+		}
+	}
+	assert.True(t, allowsKnative, "ingress must allow knative-serving or /invoke breaks")
+
+	// Serving-safe: an egress rule allows the model gateway port.
+	allowsGateway := false
+	for _, rule := range np.Spec.Egress {
+		for _, p := range rule.Ports {
+			if p.Port != nil && p.Port.IntValue() == modelGatewayPort {
+				allowsGateway = true
+			}
+		}
+	}
+	assert.True(t, allowsGateway, "egress must allow the model gateway port")
+
+	// Toggle isolation off → the policy is pruned.
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "isoco"}, tenant))
+	tenant.Spec.NetworkIsolation = false
+	require.NoError(t, k8sClient.Update(testCtx, tenant))
+	reconcileTenant(t, "isoco")
+	err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: "tnt-iso-ns", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{})
+	assert.True(t, apierrors.IsNotFound(err), "toggling isolation off must remove the NetworkPolicy")
 }
 
 // A namespace already owned by another tenant is skipped (fail-safe) and surfaced

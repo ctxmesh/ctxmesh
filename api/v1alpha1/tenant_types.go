@@ -96,6 +96,14 @@ type TenantSpec struct {
 	// the launcher gateway proxy. Omitted ⇒ no model quota is injected.
 	// +optional
 	Model *TenantModelQuota `json:"model,omitempty"`
+
+	// networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
+	// (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
+	// platform (knative/kourier/gateway/valkey/langfuse/DNS) but NOT other tenants. Opt-in + OFF by
+	// default — a blanket policy would also restrict non-agent workloads in the namespace, so a tenant
+	// enables it deliberately (the Capsule model). Omitted/false ⇒ no NetworkPolicy is stamped.
+	// +optional
+	NetworkIsolation bool `json:"networkIsolation,omitempty"`
 }
 
 // TenantStatus defines the observed state of a Tenant.

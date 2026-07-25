@@ -22,6 +22,7 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -44,6 +45,8 @@ const (
 	tenantFinalizer = "agents.ctxmesh.ai/tenant-cleanup"
 	// tenantQuotaName is the fixed name of the ResourceQuota stamped per namespace.
 	tenantQuotaName = "tenant-quota"
+	// tenantNetworkPolicyName is the fixed name of the cross-tenant-deny NetworkPolicy (opt-in).
+	tenantNetworkPolicyName = "tenant-isolation"
 )
 
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
@@ -61,6 +64,7 @@ type TenantReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=tenants/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile converges the Tenant's member namespaces: it stamps/updates a
 // ResourceQuota on each owned namespace and prunes any it no longer owns.
@@ -165,6 +169,10 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1a
 		}
 	}
 
+	if err := r.reconcileNetworkPolicy(ctx, tenant, ns); err != nil {
+		return fmt.Errorf("network policy: %w", err)
+	}
+
 	hard := computeHard(tenant.Spec.Quota)
 	quota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: tenantQuotaName, Namespace: ns}}
 	if len(hard) == 0 {
@@ -177,6 +185,76 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1a
 		}
 		quota.Labels[tenantLabel] = tenant.Name
 		quota.Spec.Hard = hard
+		return nil
+	})
+	return err
+}
+
+// reconcileNetworkPolicy stamps (or removes) the opt-in cross-tenant-deny NetworkPolicy on a member
+// namespace. When spec.networkIsolation is off it ensures none exists. The policy is SERVING-SAFE: it
+// default-denies but explicitly allows same-tenant namespaces + the knative/kourier data plane + the
+// platform egress (DNS, langfuse, gateway/valkey/minio) — the exact allowlist the AgentRegistry NP uses,
+// scoped by the tenant namespace-label instead of the registry-id pod-label. A missing allowance would
+// sever /invoke (an m5.7-class landmine — proven live in m47.8, not envtest which has no CNI).
+func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1alpha1.Tenant, ns string) error {
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: tenantNetworkPolicyName, Namespace: ns}}
+	if !tenant.Spec.NetworkIsolation {
+		return client.IgnoreNotFound(r.Delete(ctx, np))
+	}
+	sameTenant := &metav1.LabelSelector{MatchLabels: map[string]string{tenantLabel: tenant.Name}}
+	platformNS := func(name string) networkingv1.NetworkPolicyPeer {
+		return networkingv1.NetworkPolicyPeer{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{namespaceNameLabel: name}},
+		}
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		if np.Labels == nil {
+			np.Labels = map[string]string{}
+		}
+		np.Labels[tenantLabel] = tenant.Name
+		np.Spec = networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{}, // every pod in the member namespace
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{From: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: sameTenant}}}, // intra-tenant
+				{From: []networkingv1.NetworkPolicyPeer{ // the knative/kourier data plane
+					platformNS(knativeServingNamespace),
+					platformNS(kourierSystemNamespace),
+					platformNS(knativeEventingNamespace),
+				}},
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{ // DNS (kube-system CoreDNS), both protocols
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{namespaceNameLabel: kubeSystemNamespace}},
+						PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{dnsAppLabel: dnsAppLabelValue}},
+					}},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: protoPtr(corev1.ProtocolUDP), Port: intstrPtr(dnsPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(dnsPort)},
+					},
+				},
+				{ // collector → Langfuse (:3000) — the m6.4 export landmine
+					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
+				},
+				{ // platform backends in agent-engine-system: gateway :4000, valkey :6379, minio :9000
+					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
+					},
+				},
+				{ // intra-tenant A2A + the knative data plane it egresses through
+					To: []networkingv1.NetworkPolicyPeer{
+						{NamespaceSelector: sameTenant},
+						platformNS(knativeServingNamespace),
+						platformNS(kourierSystemNamespace),
+					},
+				},
+			},
+		}
 		return nil
 	})
 	return err
@@ -230,6 +308,10 @@ func (r *TenantReconciler) pruneNamespaces(ctx context.Context, tenantName strin
 		quota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: tenantQuotaName, Namespace: ns.Name}}
 		if err := r.Delete(ctx, quota); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting quota in %q: %w", ns.Name, err)
+		}
+		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: tenantNetworkPolicyName, Namespace: ns.Name}}
+		if err := r.Delete(ctx, np); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting network policy in %q: %w", ns.Name, err)
 		}
 		delete(ns.Labels, tenantLabel)
 		if err := r.Update(ctx, ns); err != nil {
