@@ -648,20 +648,30 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
 	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
 
-	// Cost budget (M8, specs/cost-governance.md): when spec.budget is set, the
-	// agent's LLM calls must flow through the launcher's in-pod budget proxy so it
-	// can enforce the cap BEFORE the provider is hit. So MODEL_GATEWAY_URL points
-	// at the proxy (localhost:2996), the real LiteLLM address travels as
-	// GATEWAY_UPSTREAM_URL, and the three budget knobs are injected as STATIC env
-	// (values known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine
-	// / tier1 no-valueFrom guard). Unbudgeted agents get the plain LiteLLM URL and
-	// no budget env, so their path is byte-for-byte the M2 behavior.
+	// Tenancy (M47, ADR 0046): resolve the owning tenant EARLY — it decides both whether the gateway
+	// quota proxy is interposed (a tenant's model caps flow through the SAME launcher proxy as an M8
+	// budget) and the TENANT_* env injected below. Read from the namespace's authoritative tenant label
+	// (m47.3). tenantQuota is true only when the tenant actually carries model caps to enforce.
+	tenantCtx, hasTenant, err := resolveTenantForNamespace(ctx, r.Client, deploy.Namespace)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("resolving tenant: %w", err)
+	}
+	tenantQuota := hasTenant && tenantCtx.hasModelCaps()
+
+	// Cost budget (M8, specs/cost-governance.md) + tenant model quota (M47): when EITHER is set, the
+	// agent's LLM calls must flow through the launcher's in-pod gateway proxy so it can enforce the cap
+	// BEFORE the provider is hit. So MODEL_GATEWAY_URL points at the proxy (localhost:2996), the real
+	// LiteLLM address travels as GATEWAY_UPSTREAM_URL, and the knobs are injected as STATIC env (values
+	// known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine / tier1 no-valueFrom guard).
+	// An agent with neither gets the plain LiteLLM URL and no proxy env — byte-for-byte M2 behavior.
 	gatewayURL := litellmGatewayURL
-	if deploy.Spec.Budget != nil {
+	if deploy.Spec.Budget != nil || tenantQuota {
 		gatewayURL = budgetProxyURL
+		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
+	}
+	if deploy.Spec.Budget != nil {
 		env = append(
 			env,
-			corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL},
 			// Either cap may be empty (that dimension unenforced); softThreshold
 			// carries the CRD default (80) when unset because the field defaults
 			// server-side, but guard against a zero value defensively.
@@ -848,6 +858,28 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+		}
+	}
+
+	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
+	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
+	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
+	// quota enforcement (m47.4). tenantCtx/tenantQuota were resolved with the gateway-URL decision above.
+	if hasTenant {
+		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
+		if tenantCtx.budgetUSD != "" {
+			env = append(env, corev1.EnvVar{Name: "TENANT_BUDGET_USD", Value: tenantCtx.budgetUSD})
+		}
+		if tenantCtx.rpm > 0 {
+			env = append(env, corev1.EnvVar{Name: "TENANT_RPM", Value: strconv.Itoa(int(tenantCtx.rpm))})
+		}
+		if tenantCtx.maxConcurrent > 0 {
+			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
+		}
+		// The launcher gateway proxy enforces the tenant caps against a shared Valkey accumulator (m47.4);
+		// inject the shared state-layer address so every tenant agent + replica coordinates on ONE bucket.
+		if tenantQuota {
+			env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 		}
 	}
 
@@ -1059,7 +1091,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the image digest stays IDENTICAL across a prompt swap. "" when no promptRef,
 	// symmetric with the other components (byte-compatible pre-M9 revision name).
 	promptDig := rp.digest
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig)
+	tenantDig := tenantDigest(tenantCtx, hasTenant)
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1432,12 +1465,13 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // revision WITHOUT an image rebuild: a promptRef/ref swap changes promptDigest →
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
-func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest string) string {
-	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" {
+func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest string) string {
+	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
+		tenantDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
-		";g=" + budgetDigest + ";p=" + promptDigest))
+		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -1594,6 +1628,31 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// Tenant → requeue every AgentDeployment in the tenant's namespaces (M47). A
+	// tenant create/delete or a model-cap change alters the TENANT_* env every
+	// member agent carries, so re-resolve + re-render them (the caps also feed the
+	// digest, so a change rolls the revision). Bounded: tenants are few and this
+	// only fires on tenant events.
+	mapTenantToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			t, ok := obj.(*agentsv1alpha1.Tenant)
+			if !ok {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for _, ns := range t.Spec.Namespaces {
+				var list agentsv1alpha1.AgentDeploymentList
+				if err := mgr.GetClient().List(ctx, &list, client.InNamespace(ns)); err != nil {
+					continue
+				}
+				for i := range list.Items {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				}
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
@@ -1607,6 +1666,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
+		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }

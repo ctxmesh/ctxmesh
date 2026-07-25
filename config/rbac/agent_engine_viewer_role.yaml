@@ -33,6 +33,7 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
+  - tenants
   verbs:
   - get
   - list

@@ -42,6 +42,16 @@ rules:
   - patch
   - update
   - watch
+# Tenants are a platform-admin object (namespace grouping + quotas); a developer
+# reads them (console visibility) but does not manage them — that is the operator's.
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - tenants
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

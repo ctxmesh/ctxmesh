@@ -579,6 +579,10 @@ func (s *Server) Handler() http.Handler {
 		// serve 501 honestly. The GET routes do not need the scheme.
 		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
 		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
+
+		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
+		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
+		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)

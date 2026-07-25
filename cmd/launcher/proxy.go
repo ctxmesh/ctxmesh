@@ -106,6 +106,11 @@ func setAgentIdentityTag(span trace.Span, cfg Config) {
 	if tag := agentIdentityTag(cfg); tag != "" {
 		span.SetAttributes(attribute.StringSlice(langfuseTraceTagsAttr, []string{tag}))
 	}
+	// Tenant attribution (M47, ADR 0046): stamp the owning tenant on the run so cost + usage
+	// are attributable per tenant (PRD §13). Empty for an untenanted agent — omitted, not noise.
+	if cfg.TenantID != "" {
+		span.SetAttributes(attribute.String("tenant.id", cfg.TenantID))
+	}
 }
 
 // setupOTel initialises a TracerProvider that exports via OTLP/gRPC to

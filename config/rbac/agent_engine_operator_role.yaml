@@ -34,6 +34,7 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
+  - tenants
   verbs:
   - '*'
 - apiGroups:
