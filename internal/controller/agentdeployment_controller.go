@@ -851,6 +851,27 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
+	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
+	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps for the shared-Valkey quota
+	// enforcement (m47.4). Resolved from the namespace's authoritative tenant label; empty caps are omitted.
+	tenantCtx, hasTenant, err := resolveTenantForNamespace(ctx, r.Client, deploy.Namespace)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("resolving tenant: %w", err)
+	}
+	if hasTenant {
+		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
+		if tenantCtx.budgetUSD != "" {
+			env = append(env, corev1.EnvVar{Name: "TENANT_BUDGET_USD", Value: tenantCtx.budgetUSD})
+		}
+		if tenantCtx.rpm > 0 {
+			env = append(env, corev1.EnvVar{Name: "TENANT_RPM", Value: strconv.Itoa(int(tenantCtx.rpm))})
+		}
+		if tenantCtx.maxConcurrent > 0 {
+			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
+		}
+	}
+
 	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
 	// member, inject the STATIC mesh env the launcher's /a2a server reads
 	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
@@ -1059,7 +1080,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the image digest stays IDENTICAL across a prompt swap. "" when no promptRef,
 	// symmetric with the other components (byte-compatible pre-M9 revision name).
 	promptDig := rp.digest
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig)
+	tenantDig := tenantDigest(tenantCtx, hasTenant)
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1432,12 +1454,13 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // revision WITHOUT an image rebuild: a promptRef/ref swap changes promptDigest →
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
-func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest string) string {
-	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" {
+func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest string) string {
+	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
+		tenantDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
-		";g=" + budgetDigest + ";p=" + promptDigest))
+		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -1594,6 +1617,31 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// Tenant → requeue every AgentDeployment in the tenant's namespaces (M47). A
+	// tenant create/delete or a model-cap change alters the TENANT_* env every
+	// member agent carries, so re-resolve + re-render them (the caps also feed the
+	// digest, so a change rolls the revision). Bounded: tenants are few and this
+	// only fires on tenant events.
+	mapTenantToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			t, ok := obj.(*agentsv1alpha1.Tenant)
+			if !ok {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for _, ns := range t.Spec.Namespaces {
+				var list agentsv1alpha1.AgentDeploymentList
+				if err := mgr.GetClient().List(ctx, &list, client.InNamespace(ns)); err != nil {
+					continue
+				}
+				for i := range list.Items {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				}
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
@@ -1607,6 +1655,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
+		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }

@@ -81,6 +81,13 @@ type Config struct {
 	// the bare name (a visible-but-non-fatal misconfiguration, never a crash).
 	AgentNamespace string
 
+	// TenantID is the tenant that owns this agent's namespace (M47, ADR 0046),
+	// injected as static env TENANT_ID by the controller when a Tenant claims the
+	// namespace. Stamped as the `tenant.id` span attribute so every run is
+	// attributable to a tenant (PRD §13); the tenant model caps (TENANT_*) feed the
+	// gateway-proxy quota enforcement (m47.4). Empty ⇒ the agent is untenanted.
+	TenantID string
+
 	// PromptVersion is the resolved git-pointer prompt identifier (M9), injected
 	// as static env PROMPT_VERSION by the controller when the agent has a
 	// spec.promptRef. It is surfaced as the prompt.version span attribute so
@@ -196,6 +203,7 @@ func loadConfig(lookup func(string) string) (Config, error) {
 		AgentVersion:   lookup("AGENT_VERSION"),
 		AgentRoute:     lookup("AGENT_ROUTE"),
 		AgentNamespace: lookup("POD_NAMESPACE"),
+		TenantID:       lookup("TENANT_ID"),
 		PromptVersion:  lookup("PROMPT_VERSION"),
 		Memory:         mem,
 		A2A:            a2a,
