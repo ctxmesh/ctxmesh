@@ -43,6 +43,7 @@ import {
   type AgentDetailResponse,
   type AgentReference,
   type AgentRunSummary,
+  type AgentMemoryEntry,
   type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
@@ -1448,7 +1449,12 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
   return (
     <div data-testid="memory-panel">
       <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm font-medium">Memory bindings</p>
+        <div>
+          <p className="text-sm font-medium">Memory bindings</p>
+          <p className="text-xs text-muted-foreground">
+            The session &amp; shared memory backends wired to this agent (configuration).
+          </p>
+        </div>
         {canCreate && (
           <Button
             variant="outline"
@@ -1481,7 +1487,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
         <EmptyState
           icon={Boxes}
           title="No memory bindings"
-          description="Attach a memory binding to give this agent long-term memory."
+          description="Attach a memory binding to configure this agent's session and shared memory backend. (Long-term, semantically-retrievable memory is shown separately below.)"
         />
       )}
       {load.kind === "ready" && load.bindings.length > 0 && (
@@ -1590,8 +1596,108 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
           busy={action.busy}
         />
       )}
+
+      <LongTermMemoryPanel ns={ns} agentName={agentName} />
     </div>
   );
+}
+
+// ── Long-term memory viewer (m46.6, ADR 0045) ────────────────────────────────
+// Read-only list of the agent's AGENT-WIDE long-term memories (persistent,
+// semantically-retrievable knowledge). Per-user memories are never shown
+// (privacy). Degrades to "unavailable" on 501 (no control-plane store), and to a
+// friendly empty state when the agent has remembered nothing yet.
+
+type LongTermLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; items: AgentMemoryEntry[] }
+  | { kind: "unavailable" }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const [load, setLoad] = React.useState<LongTermLoad>({ kind: "loading" });
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    setLoad({ kind: "loading" });
+    api
+      .agentMemory(ns, agentName, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setLoad(res === null ? { kind: "unavailable" } : { kind: "ready", items: res.items });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load long-term memory",
+          forbidden: err instanceof ApiError && err.isForbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, agentName]);
+
+  // Unavailable (no store wired) — hide the section entirely, like other degraded surfaces.
+  if (load.kind === "unavailable") return null;
+
+  return (
+    <div className="mt-8 border-t pt-6" data-testid="longterm-memory-panel">
+      <h3 className="mb-1 text-sm font-medium">Long-term memory</h3>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Facts this agent has remembered and can recall by meaning across conversations. Only
+        agent-wide memories appear here; per-user memories are scoped to each end-user's own
+        conversations and are never exposed in the console, for privacy.
+      </p>
+
+      {load.kind === "loading" && (
+        <p className="text-sm text-muted-foreground" data-testid="longterm-loading">Loading…</p>
+      )}
+      {load.kind === "error" && (
+        <p className="text-sm text-destructive" data-testid="longterm-error">
+          {load.forbidden ? "Not allowed to read this agent's memory." : load.message}
+        </p>
+      )}
+      {load.kind === "ready" && load.items.length === 0 && (
+        <div data-testid="longterm-empty">
+          <EmptyState
+            icon={Boxes}
+            title="Nothing remembered yet"
+            description="When this agent stores a long-term memory (via memory.remember), its agent-wide facts will appear here."
+          />
+        </div>
+      )}
+      {load.kind === "ready" && load.items.length > 0 && (
+        <ul className="space-y-2" aria-label="Long-term memories" data-testid="longterm-list">
+          {load.items.map((m, i) => (
+            <li
+              key={`${m.createdAt}-${i}`}
+              className="rounded-md border bg-card p-3 text-sm shadow-card"
+              data-testid="longterm-item"
+            >
+              <p className="whitespace-pre-wrap">{m.content}</p>
+              {m.tags && Object.keys(m.tags).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1" data-testid="longterm-tags">
+                  {Object.entries(m.tags).map(([k, v]) => (
+                    <Badge key={k} variant="secondary" className="text-[10px]">
+                      {k}: {v}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              <p className="mt-1 text-xs text-muted-foreground">{formatTimestamp(m.createdAt)}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// formatTimestamp renders an ISO timestamp in the viewer's locale, falling back to the raw
+// string if it is missing or unparseable (never the literal "Invalid Date").
+function formatTimestamp(ts: string): string {
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
 // ── Scaling panel (m17.11) ────────────────────────────────────────────────────

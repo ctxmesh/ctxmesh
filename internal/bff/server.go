@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -78,6 +79,10 @@ type Server struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
 	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
+
+	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
+	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
+	agentMemoryStore agentmemory.Store
 
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
 	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
@@ -311,6 +316,9 @@ type Options struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Wired from
 	// CONTROLPLANE_DSN in cmd/bff/main.go; nil ⇒ the ToolRegistry/MCP APIs serve 501.
 	ToolRegistryStore toolregistry.Store
+	// AgentMemoryStore is the control-plane pgvector store for long-term memory (ADR 0045). Optional —
+	// nil ⇒ the console memory endpoint returns 501.
+	AgentMemoryStore agentmemory.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -346,6 +354,7 @@ func NewServer(opts Options) *Server {
 		runStore:                 opts.RunStore,
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
+		agentMemoryStore:         opts.AgentMemoryStore,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
@@ -471,6 +480,9 @@ func (s *Server) Handler() http.Handler {
 		// API server (a viewer without update is denied → 403).
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
 		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
+		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
+		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
 		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
 		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
 		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the

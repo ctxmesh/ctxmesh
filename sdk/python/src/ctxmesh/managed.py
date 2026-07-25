@@ -92,6 +92,29 @@ def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
     return ""
 
 
+def _inject_agent_memory(
+    client: Any, messages: List[Dict[str, Any]], user_input: str, config: "ManagedConfig"
+) -> None:
+    """Retrieve relevant long-term memories and prepend them to the system prompt as ephemeral
+    ``<retrieved_context>`` (ADR 0045, RAG-style; not persisted). Best-effort: any failure is
+    swallowed so the turn proceeds without the extra context."""
+    try:
+        hits = client.memory.search_agent(
+            user_input, top_k=config.agent_memory_top_k, threshold=config.agent_memory_threshold
+        )
+    except Exception:  # noqa: BLE001 — best-effort; a retrieval hiccup must never break the turn
+        return
+    if not hits:
+        return
+    lines = "\n".join(f"- {h.get('content', '')}" for h in hits if h.get("content"))
+    if not lines:
+        return
+    messages[0]["content"] = (
+        f"{messages[0]['content']}\n\n<retrieved_context>\n"
+        f"Relevant long-term memory about this user/agent:\n{lines}\n</retrieved_context>"
+    )
+
+
 def _load_history(
     client: Client, conversation_id: str, max_messages: int = MAX_HISTORY_MESSAGES
 ) -> List[Dict[str, Any]]:
@@ -156,6 +179,15 @@ class ManagedConfig:
     #: out of the window (the memory plane still retains the full history, itself capped + TTL'd on
     #: the store side). Defaults to :data:`MAX_HISTORY_MESSAGES`.
     max_history_messages: int = MAX_HISTORY_MESSAGES
+
+    #: Long-term memory auto-retrieval (ADR 0045), OPT-IN. When true + long-term is bound,
+    #: each turn retrieves the most relevant agent memories for the user input and prepends
+    #: them as ephemeral ``<retrieved_context>`` to the system prompt (RAG; never persisted).
+    #: Off by default — explicit ``search_agent`` is the default retrieval path (Fork 4).
+    use_agent_memory: bool = False
+    #: When auto-retrieval is on: how many memories to retrieve + the min cosine similarity.
+    agent_memory_top_k: int = 5
+    agent_memory_threshold: float = 0.75
 
 
 @dataclass
@@ -327,6 +359,12 @@ def run_managed_loop(
         "managed-agent", headers=headers
     ) as root:
         root.set_input(user_input)
+
+        # Opt-in long-term auto-retrieval (ADR 0045): prepend relevant agent memories to THIS
+        # turn's system prompt. Inside capability_scope so per-user retrieval is scoped to the
+        # caller. Best-effort — a memory hiccup never breaks the turn.
+        if config.use_agent_memory and client.config.longterm_wired:
+            _inject_agent_memory(client, messages, user_input, config)
 
         try:
             return _drive_loop(
