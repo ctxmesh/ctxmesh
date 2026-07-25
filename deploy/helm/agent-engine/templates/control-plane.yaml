@@ -292,11 +292,22 @@ rules:
   - ""
   resources:
   - configmaps
+  - resourcequotas
   - secrets
   - services
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
   - get
   - list
   - patch
@@ -336,6 +347,7 @@ rules:
   - agentscalingpolicies/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
+  - tenants/finalizers
   verbs:
   - update
 - apiGroups:
@@ -347,6 +359,7 @@ rules:
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status
+  - tenants/status
   verbs:
   - get
   - patch
@@ -359,6 +372,16 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - tenants
+  verbs:
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - apps
