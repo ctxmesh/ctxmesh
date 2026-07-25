@@ -269,6 +269,14 @@ rules:
 - apiGroups:
   - agents.ctxmesh.ai
   resources:
+  - tenants
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
   - agentdeployments/status
   - agentversions/status
   - modelroutes/status
@@ -508,6 +516,7 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
+  - tenants
   verbs:
   - '*'
 - apiGroups:
@@ -568,6 +577,7 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - evalsuites
+  - tenants
   verbs:
   - get
   - list
