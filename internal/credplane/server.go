@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -39,6 +40,10 @@ const maxRequestBytes = 1 << 16
 type Server struct {
 	resolver credresolve.CredentialResolver
 	log      logr.Logger
+	// Long-term memory (ADR 0045), optional — enabled via WithMemory. nil ⇒ the /v1/memory endpoints
+	// answer errCodeUnsupported (started without CONTROLPLANE_DSN / a gateway).
+	memStore agentmemory.Store
+	embedder Embedder
 }
 
 // NewServer builds a Server over the given (single, shared) resolver.
@@ -52,6 +57,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathResolve, s.handleResolve)
 	mux.HandleFunc(pathRevoke, s.handleRevoke)
 	mux.HandleFunc(pathStore, s.handleStore)
+	mux.HandleFunc(pathMemoryRemember, s.handleMemoryRemember)
+	mux.HandleFunc(pathMemorySearch, s.handleMemorySearch)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	return mux

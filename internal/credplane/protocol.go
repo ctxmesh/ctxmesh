@@ -100,4 +100,5 @@ const (
 	errCodeNoCredential    = "no_credential"
 	errCodeInternal        = "internal"
 	errCodeUnsupported     = "unsupported" // the resolved backend cannot persist grants
+	errCodeInvalid         = "invalid"     // a memory write failed in-app validation (ADR 0045)
 )
