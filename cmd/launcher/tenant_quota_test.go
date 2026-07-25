@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -172,6 +173,58 @@ func TestTenantQuota_PostCallAndNilSafe(t *testing.T) {
 	assert.Nil(t, d)
 	rel() // noop release must not panic
 	nilQ.postCall(context.Background(), 1)
+}
+
+// TestTenantQuota_CrossPodCoordination proves the load-bearing M47 property against a REAL (miniredis)
+// Valkey: two independent launcher instances ("pods") of the SAME tenant, each with its own redis-backed
+// store, collectively share ONE bucket — so their combined rate / spend / concurrency hits the tenant cap
+// (PRD §18: replicas cannot collectively overrun). The unit tests above use a fake; this exercises the
+// actual INCR / GET / INCRBYFLOAT / DECR commands cross-instance.
+func TestTenantQuota_CrossPodCoordination(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ctx := context.Background()
+	// Two "pods" of the same tenant, each with its OWN redis client to the SAME shared Valkey.
+	pod := func(id string, rpm int, budget float64, maxConc int) *tenantQuota {
+		return &tenantQuota{
+			id: id, rpm: rpm, budgetUSD: budget, hasBudget: budget > 0, maxConcurrent: maxConc,
+			store: newRedisTenantStore(mr.Addr()), logf: noopLog,
+		}
+	}
+
+	t.Run("rate is shared across pods", func(t *testing.T) {
+		a, b := pod("rate-t", 3, 0, 0), pod("rate-t", 3, 0, 0)
+		d1, _ := a.preCall(ctx, 0)
+		d2, _ := a.preCall(ctx, 0)
+		d3, _ := b.preCall(ctx, 0) // 3rd across pods — still at the cap
+		require.Nil(t, d1)
+		require.Nil(t, d2)
+		require.Nil(t, d3)
+		d4, _ := b.preCall(ctx, 0) // 4th across pods — over the shared cap of 3
+		require.NotNil(t, d4, "the 4th call across two pods must hit the shared rpm cap")
+		assert.Equal(t, 429, d4.status)
+	})
+
+	t.Run("spend is shared across pods", func(t *testing.T) {
+		a, b := pod("spend-t", 0, 1.0, 0), pod("spend-t", 0, 1.0, 0)
+		a.postCall(ctx, 0.60) // pod A books $0.60
+		// pod B now sees the shared $0.60; another $0.60 estimate would breach the $1.00 cap.
+		deny, _ := b.preCall(ctx, 0.60)
+		require.NotNil(t, deny, "pod B must see pod A's spend and deny over the shared budget")
+		assert.Equal(t, 402, deny.status)
+		assert.InDelta(t, 0.60, deny.spent, 0.001)
+	})
+
+	t.Run("concurrency is shared across pods", func(t *testing.T) {
+		a, b := pod("conc-t", 0, 0, 2), pod("conc-t", 0, 0, 2)
+		d1, _ := a.preCall(ctx, 0) // slot 1 (pod A)
+		d2, _ := b.preCall(ctx, 0) // slot 2 (pod B)
+		require.Nil(t, d1)
+		require.Nil(t, d2)
+		d3, _ := a.preCall(ctx, 0) // slot 3 across pods — over the shared cap of 2
+		require.NotNil(t, d3, "the 3rd concurrent call across two pods must hit the shared cap")
+		assert.Equal(t, 429, d3.status)
+		assert.Equal(t, "tenant_concurrency_exceeded", d3.code)
+	})
 }
 
 func TestMoneyToFloat(t *testing.T) {
