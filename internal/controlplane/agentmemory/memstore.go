@@ -64,6 +64,9 @@ func cloneMemory(in AgentMemory) AgentMemory {
 }
 
 func (s *memStore) Remember(_ context.Context, m AgentMemory) (*AgentMemory, error) {
+	if m.Tags == nil {
+		m.Tags = map[string]string{} // normalize nil→empty (pg parity: tags is jsonb NOT NULL DEFAULT '{}')
+	}
 	if err := validate(m); err != nil {
 		return nil, err
 	}
@@ -112,7 +115,9 @@ func (s *memStore) Search(_ context.Context, q SearchQuery) ([]ScoredMemory, err
 		if score < q.Threshold {
 			continue
 		}
-		scored = append(scored, ScoredMemory{Memory: cloneMemory(m), Score: score})
+		out := cloneMemory(m)
+		out.Embedding = nil // the raw vector is internal; not echoed on reads (pg parity)
+		scored = append(scored, ScoredMemory{Memory: out, Score: score})
 	}
 	// Descending similarity; ties broken by newest-first for determinism.
 	slices.SortStableFunc(scored, func(a, b ScoredMemory) int {
@@ -145,7 +150,9 @@ func (s *memStore) List(_ context.Context, opts ListOptions) ([]AgentMemory, err
 		if !opts.AllSubjects && m.Subject != opts.Subject {
 			continue
 		}
-		out = append(out, cloneMemory(m))
+		c := cloneMemory(m)
+		c.Embedding = nil // reads do not echo the raw vector (pg parity)
+		out = append(out, c)
 	}
 	slices.SortStableFunc(out, func(a, b AgentMemory) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	if opts.Limit > 0 && len(out) > opts.Limit {
