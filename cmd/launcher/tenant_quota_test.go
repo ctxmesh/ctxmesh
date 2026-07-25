@@ -27,12 +27,14 @@ import (
 
 // fakeTenantStore is an in-memory tenantQuotaStore for the enforcer unit tests.
 type fakeTenantStore struct {
-	rpmCount int64
-	rpmErr   error
-	spend    float64
-	spendErr error
-	added    float64
-	addErr   error
+	rpmCount   int64
+	rpmErr     error
+	spend      float64
+	spendErr   error
+	added      float64
+	addErr     error
+	inflight   int
+	acquireErr error
 }
 
 func (f *fakeTenantStore) IncrRPM(_ context.Context, _ string, _ int64) (int64, error) {
@@ -52,6 +54,24 @@ func (f *fakeTenantStore) AddSpend(_ context.Context, _ string, delta float64) e
 	return f.addErr
 }
 
+func (f *fakeTenantStore) AcquireSlot(_ context.Context, _ string, maxSlots int) (bool, error) {
+	if f.acquireErr != nil {
+		return false, f.acquireErr
+	}
+	if f.inflight >= maxSlots {
+		return false, nil
+	}
+	f.inflight++
+	return true, nil
+}
+
+func (f *fakeTenantStore) ReleaseSlot(_ context.Context, _ string) error {
+	if f.inflight > 0 {
+		f.inflight--
+	}
+	return nil
+}
+
 func noopLog(string, ...any) {}
 
 // The RPM cap allows up to the limit, then 429s.
@@ -60,9 +80,11 @@ func TestTenantQuota_RateLimit(t *testing.T) {
 	q := &tenantQuota{id: "acme", rpm: 2, store: store, logf: noopLog}
 	ctx := context.Background()
 
-	assert.Nil(t, q.preCall(ctx, 0), "1st call under the cap")
-	assert.Nil(t, q.preCall(ctx, 0), "2nd call at the cap")
-	deny := q.preCall(ctx, 0)
+	d1, _ := q.preCall(ctx, 0)
+	assert.Nil(t, d1, "1st call under the cap")
+	d2, _ := q.preCall(ctx, 0)
+	assert.Nil(t, d2, "2nd call at the cap")
+	deny, _ := q.preCall(ctx, 0)
 	require.NotNil(t, deny, "3rd call over the cap must be denied")
 	assert.Equal(t, 429, deny.status)
 	assert.Equal(t, "tenant_rate_limited", deny.code)
@@ -74,10 +96,11 @@ func TestTenantQuota_Budget(t *testing.T) {
 	q := &tenantQuota{id: "acme", budgetUSD: 100, hasBudget: true, store: store, logf: noopLog}
 	ctx := context.Background()
 
-	assert.Nil(t, q.preCall(ctx, 5), "90 + 5 ≤ 100 allowed")
+	d, _ := q.preCall(ctx, 5)
+	assert.Nil(t, d, "90 + 5 ≤ 100 allowed")
 
 	store.spend = 98
-	deny := q.preCall(ctx, 5)
+	deny, _ := q.preCall(ctx, 5)
 	require.NotNil(t, deny, "98 + 5 > 100 must be denied")
 	assert.Equal(t, 402, deny.status)
 	assert.Equal(t, "tenant_budget_exceeded", deny.code)
@@ -89,7 +112,7 @@ func TestTenantQuota_Budget(t *testing.T) {
 func TestTenantQuota_BudgetFailsClosed(t *testing.T) {
 	store := &fakeTenantStore{spendErr: errors.New("valkey down")}
 	q := &tenantQuota{id: "acme", budgetUSD: 100, hasBudget: true, store: store, logf: noopLog}
-	deny := q.preCall(context.Background(), 1)
+	deny, _ := q.preCall(context.Background(), 1)
 	require.NotNil(t, deny, "a budget read error must fail closed")
 	assert.Equal(t, 402, deny.status)
 }
@@ -98,7 +121,37 @@ func TestTenantQuota_BudgetFailsClosed(t *testing.T) {
 func TestTenantQuota_RateFailsOpen(t *testing.T) {
 	store := &fakeTenantStore{rpmErr: errors.New("valkey down")}
 	q := &tenantQuota{id: "acme", rpm: 1, store: store, logf: noopLog}
-	assert.Nil(t, q.preCall(context.Background(), 0), "an rpm error must fail open")
+	d, _ := q.preCall(context.Background(), 0)
+	assert.Nil(t, d, "an rpm error must fail open")
+}
+
+// The concurrency cap allows up to maxConcurrent in-flight calls; the next is 429'd, and releasing a slot
+// frees capacity again. Concurrency fails OPEN on a Valkey error.
+func TestTenantQuota_Concurrency(t *testing.T) {
+	store := &fakeTenantStore{}
+	q := &tenantQuota{id: "acme", maxConcurrent: 2, store: store, logf: noopLog}
+	ctx := context.Background()
+
+	d1, rel1 := q.preCall(ctx, 0)
+	require.Nil(t, d1, "1st in-flight allowed")
+	d2, rel2 := q.preCall(ctx, 0)
+	require.Nil(t, d2, "2nd in-flight allowed")
+
+	deny, _ := q.preCall(ctx, 0)
+	require.NotNil(t, deny, "3rd concurrent call must be denied")
+	assert.Equal(t, 429, deny.status)
+	assert.Equal(t, "tenant_concurrency_exceeded", deny.code)
+
+	rel1() // free a slot
+	d3, rel3 := q.preCall(ctx, 0)
+	require.Nil(t, d3, "a call is allowed again after a slot frees")
+	rel2()
+	rel3()
+
+	// A Valkey error on acquire fails open.
+	store.acquireErr = errors.New("valkey down")
+	dOpen, _ := q.preCall(ctx, 0)
+	assert.Nil(t, dOpen, "a concurrency store error must fail open")
 }
 
 // postCall accrues actual spend only when a budget is set; nil-receiver is a no-op.
@@ -115,7 +168,9 @@ func TestTenantQuota_PostCallAndNilSafe(t *testing.T) {
 
 	// Nil receiver is safe on both paths.
 	var nilQ *tenantQuota
-	assert.Nil(t, nilQ.preCall(context.Background(), 1))
+	d, rel := nilQ.preCall(context.Background(), 1)
+	assert.Nil(t, d)
+	rel() // noop release must not panic
 	nilQ.postCall(context.Background(), 1)
 }
 
