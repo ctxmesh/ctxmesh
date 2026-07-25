@@ -116,13 +116,10 @@ func main() {
 	// discipline (goroutine ListenAndServe; graceful Shutdown on child exit;
 	// the child-exit still decides the process exit code — the memory listener
 	// never overrides it). nil when disabled.
-	var memSrv *http.Server
-	if cfg.MemoryEnabled() {
-		memSrv = &http.Server{
-			Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
-			Handler: newMemoryServer(newRedisStore(cfg.Memory.BackendAddr), cfg.Memory, tracer).handler(),
-		}
-	}
+	// Long-term memory (ADR 0045) proxies to the token-service; loaded from env, nil when off. The memory
+	// listener starts when EITHER session memory OR long-term is enabled (an agent may have only one).
+	ltLogf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+	memSrv := buildMemoryHTTPServer(cfg, tracer, newLongTermProxy(ltLogf))
 
 	// ── A2A outbound endpoint (:2997) ─────────────────────────────────────
 	// Started ONLY when the agent is a resolved AgentRegistry member
