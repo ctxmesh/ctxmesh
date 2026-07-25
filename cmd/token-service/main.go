@@ -43,6 +43,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -188,7 +189,18 @@ func run(log logr.Logger) error {
 		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
 	}
 
-	handler := credplane.NewServer(resolver, log).Handler()
+	tsServer := credplane.NewServer(resolver, log)
+	// Long-term memory (ADR 0045): the token-service is the sole holder of the pgvector store + embeds via
+	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
+	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
+	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
+		tsServer.WithMemory(
+			agentmemory.NewPostgresStore(cpDB),
+			credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second}),
+		)
+		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
+	}
+	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 
