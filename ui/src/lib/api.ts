@@ -1821,6 +1821,46 @@ export interface AgentRegistryListResponse {
   nextCursor: string;
 }
 
+// --- Tenants (M47, ADR 0046) — cluster-scoped namespace grouping + quotas -------
+export interface TenantSummary {
+  name: string;
+  memberNamespaces: number;
+  ready: boolean;
+}
+
+export interface TenantQuotaDTO {
+  cpu?: string;
+  memory?: string;
+  pods?: number;
+}
+
+export interface TenantModelDTO {
+  budgetUSD?: string;
+  rpm?: number;
+  maxConcurrent?: number;
+}
+
+export interface TenantConditionDTO {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+}
+
+export interface TenantDetail {
+  name: string;
+  namespaces: string[];
+  quota?: TenantQuotaDTO;
+  model?: TenantModelDTO;
+  memberNamespaces: number;
+  ready: boolean;
+  conditions: TenantConditionDTO[];
+}
+
+export interface TenantListResponse {
+  items: TenantSummary[];
+}
+
 export interface AgentRegistryCreateRequest {
   name: string;
   namespace?: string;
@@ -2712,6 +2752,13 @@ export const api = {
       `/api/agentregistries/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
       signal,
     ),
+
+  // Tenants (M47, ADR 0046) — read-only, cluster-scoped.
+  listTenants: (signal?: AbortSignal) =>
+    getJSON<TenantListResponse>("/api/tenants", signal),
+
+  tenantDetail: (name: string, signal?: AbortSignal) =>
+    getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),
 
   createAgentRegistry: async (
     req: AgentRegistryCreateRequest,
