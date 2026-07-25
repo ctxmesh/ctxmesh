@@ -40,7 +40,10 @@ function renderPage() {
   );
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("TenantsPage", () => {
   it("lists tenants with their member count + status", async () => {
@@ -76,10 +79,11 @@ describe("TenantsPage", () => {
       },
     });
     renderPage();
-    fireEvent.click(await screen.findByText("alpha"));
-    expect(await screen.findByTestId("tenant-detail")).toBeInTheDocument();
-    expect(screen.getByText("a1")).toBeInTheDocument();
-    expect(screen.getByText(/\$100\.00/)).toBeInTheDocument();
+    const row = await screen.findByText("alpha");
+    fireEvent.click(row.closest("tr") ?? row);
+    // The detail fetch resolves into the panel (member namespaces + labelled model caps).
+    expect(await screen.findByText("a1", {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.getByText(/\$100\.00 budget/)).toBeInTheDocument();
   });
 
   it("teaches an empty state when there are no tenants", async () => {
@@ -105,7 +109,8 @@ describe("TenantsPage", () => {
       },
     });
     renderPage();
-    fireEvent.click(await screen.findByText("alpha"));
+    const row = await screen.findByText("alpha");
+    fireEvent.click(row.closest("tr") ?? row);
     expect(await screen.findByTestId("tenant-conflict")).toHaveTextContent(/already owned by another tenant/);
   });
 });

@@ -16,6 +16,14 @@ type Load =
   | { kind: "ready"; items: TenantSummary[] }
   | { kind: "error"; message: string; forbidden: boolean };
 
+// The inline detail panel's own load state, so a row-click gives immediate feedback and a failed fetch is
+// surfaced (never silently opens nothing).
+type Detail =
+  | { kind: "none" }
+  | { kind: "loading"; name: string }
+  | { kind: "ready"; detail: TenantDetail }
+  | { kind: "error"; name: string; message: string };
+
 function quotaSummary(t: TenantDetail): string {
   if (!t.quota) return "—";
   const parts = [
@@ -29,8 +37,8 @@ function quotaSummary(t: TenantDetail): string {
 function modelSummary(t: TenantDetail): string {
   if (!t.model) return "—";
   const parts = [
-    t.model.budgetUSD && `$${t.model.budgetUSD}`,
-    t.model.rpm ? `${t.model.rpm} rpm` : undefined,
+    t.model.budgetUSD && `$${t.model.budgetUSD} budget`,
+    t.model.rpm ? `${t.model.rpm} req/min` : undefined,
     t.model.maxConcurrent ? `${t.model.maxConcurrent} concurrent` : undefined,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "—";
@@ -92,7 +100,7 @@ function TenantDetailPanel({
 export function TenantsPage() {
   const [query, setQuery] = useState("");
   const [state, setState] = useState<Load>({ kind: "loading" });
-  const [selected, setSelected] = useState<TenantDetail | null>(null);
+  const [detail, setDetail] = useState<Detail>({ kind: "none" });
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
@@ -122,11 +130,17 @@ export function TenantsPage() {
   }, [load]);
 
   const openDetail = useCallback((name: string) => {
-    setSelected(null);
+    setDetail({ kind: "loading", name });
     api
       .tenantDetail(name)
-      .then((d) => setSelected(d))
-      .catch(() => setSelected(null));
+      .then((d) => setDetail({ kind: "ready", detail: d }))
+      .catch((err: unknown) =>
+        setDetail({
+          kind: "error",
+          name,
+          message: err instanceof Error ? err.message : "couldn't load tenant detail",
+        }),
+      );
   }, []);
 
   const items = state.kind === "ready" ? state.items : [];
@@ -193,7 +207,29 @@ export function TenantsPage() {
         }}
       />
 
-      {selected && <TenantDetailPanel tenant={selected} onClose={() => setSelected(null)} />}
+      {detail.kind === "loading" && (
+        <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="tenant-detail">
+          <p className="text-sm text-muted-foreground" data-testid="tenant-detail-loading">
+            Loading {detail.name}…
+          </p>
+        </div>
+      )}
+      {detail.kind === "error" && (
+        <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="tenant-detail">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-medium">{detail.name}</h3>
+            <Button variant="ghost" size="sm" onClick={() => setDetail({ kind: "none" })}>
+              Close
+            </Button>
+          </div>
+          <p className="text-sm text-destructive" data-testid="tenant-detail-error">
+            {detail.message}
+          </p>
+        </div>
+      )}
+      {detail.kind === "ready" && (
+        <TenantDetailPanel tenant={detail.detail} onClose={() => setDetail({ kind: "none" })} />
+      )}
     </div>
   );
 }
