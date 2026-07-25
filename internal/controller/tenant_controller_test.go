@@ -91,6 +91,38 @@ func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, ready.Status)
 }
 
+// resolveTenantForNamespace reads the owning tenant + its model caps from the namespace's
+// authoritative tenant label (m47.3 — the AgentDeployment controller's injection source).
+func TestTenant_ResolveForNamespace(t *testing.T) {
+	makeNamespace(t, "tnt-resolve-1")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "resolveco"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-resolve-1"},
+			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "50.00", RPM: 300, MaxConcurrent: 12},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "resolveco") // finalizer
+	reconcileTenant(t, "resolveco") // labels the namespace
+
+	tc, found, err := resolveTenantForNamespace(testCtx, k8sClient, "tnt-resolve-1")
+	require.NoError(t, err)
+	require.True(t, found, "the labelled namespace must resolve to its tenant")
+	assert.Equal(t, "resolveco", tc.id)
+	assert.Equal(t, "50.00", tc.budgetUSD)
+	assert.Equal(t, int32(300), tc.rpm)
+	assert.Equal(t, int32(12), tc.maxConcurrent)
+	assert.NotEmpty(t, tenantDigest(tc, true))
+
+	// A namespace with no tenant label resolves to nothing (untenanted agent).
+	makeNamespace(t, "tnt-untenanted")
+	_, found, err = resolveTenantForNamespace(testCtx, k8sClient, "tnt-untenanted")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
 // A namespace already owned by another tenant is skipped (fail-safe) and surfaced
 // as a NamespaceConflict warning — never double-stamped.
 func TestTenant_NamespaceUniqueness(t *testing.T) {
