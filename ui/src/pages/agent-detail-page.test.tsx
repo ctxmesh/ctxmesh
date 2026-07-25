@@ -33,6 +33,8 @@ interface DetailOpts {
   refsStatus?: number;
   agentRuns?: unknown[] | null; // null → 501 (Langfuse not configured)
   agentRunsStatus?: number;
+  longTermMemory?: unknown[] | null; // null → 501 (no control-plane store), m46.6
+  longTermMemoryError?: boolean; // true → 500 (store read failed), m46.6
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
   // m17.11 additions: memory + scaling panels
@@ -132,6 +134,16 @@ function installFetch(opts: DetailOpts = {}) {
         }
         const runs = opts.agentRuns ?? [];
         return j({ runs }, true, 200);
+      }
+      // m46.6: long-term memory (GET .../memory)
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) {
+        if (opts.longTermMemory === null) {
+          return j({ error: "not implemented" }, false, 501);
+        }
+        if (opts.longTermMemoryError) {
+          return j({ error: "store read failed" }, false, 500);
+        }
+        return j({ namespace: "prod", name: "billing", items: opts.longTermMemory ?? [] }, true, 200);
       }
       // m15.11: references (GET .../references)
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) {
@@ -759,6 +771,59 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     // Only the billing binding should be visible
     expect(screen.getByTestId("memory-binding-mb-billing-global")).toBeInTheDocument();
     expect(screen.queryByTestId("memory-binding-mb-other")).toBeNull();
+  });
+
+  it("long-term memory: lists the agent's remembered facts (m46.6)", async () => {
+    installFetch({
+      longTermMemory: [{ content: "the team prefers metric units", createdAt: "2026-07-25T00:00:00Z" }],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-list");
+    expect(screen.getByText(/prefers metric units/)).toBeInTheDocument();
+  });
+
+  it("long-term memory: hides the section when no store is wired (501)", async () => {
+    installFetch({ longTermMemory: null });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("memory-panel");
+    expect(screen.queryByTestId("longterm-memory-panel")).toBeNull();
+  });
+
+  it("long-term memory: teaches an empty state when nothing is remembered (m46.6)", async () => {
+    installFetch({ longTermMemory: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-empty");
+    expect(screen.getByText(/Nothing remembered yet/)).toBeInTheDocument();
+  });
+
+  it("long-term memory: renders tags as badges (m46.6)", async () => {
+    installFetch({
+      longTermMemory: [{ content: "prefers metric units", tags: { topic: "units" }, createdAt: "2026-07-25T00:00:00Z" }],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-tags");
+    expect(screen.getByText(/topic: units/)).toBeInTheDocument();
+  });
+
+  it("long-term memory: surfaces a store error, not a blank panel (m46.6)", async () => {
+    installFetch({ longTermMemoryError: true });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-error");
   });
 
   it("attach: createMemoryBinding is called with agentRef = the agent name", async () => {

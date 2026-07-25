@@ -249,13 +249,31 @@ const memoryScopeShared = "shared"
 // prefix, and the tracer. It is safe for concurrent use — every field is
 // read-only after construction and the store is concurrency-safe.
 type memoryServer struct {
-	store  MemoryStore
-	prefix string // "mem:{namespace}/{agent}:"
-	agent  string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
-	tracer trace.Tracer
+	store    MemoryStore
+	prefix   string // "mem:{namespace}/{agent}:"
+	agent    string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
+	tracer   trace.Tracer
+	longTerm *longTermProxy // optional (ADR 0045); nil ⇒ no long-term endpoints
 }
 
-func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer) *memoryServer {
+// buildMemoryHTTPServer builds the :2998 listener, or nil when neither session nor long-term memory is
+// enabled. It serves the session/shared (Valkey) routes when a backend is wired + the long-term
+// (token-service proxy) routes when ltProxy is set — an agent may have either or both (ADR 0045).
+func buildMemoryHTTPServer(cfg Config, tracer trace.Tracer, ltProxy *longTermProxy) *http.Server {
+	if !cfg.MemoryEnabled() && ltProxy == nil {
+		return nil
+	}
+	var store MemoryStore
+	if cfg.MemoryEnabled() {
+		store = newRedisStore(cfg.Memory.BackendAddr)
+	}
+	return &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
+		Handler: newMemoryServer(store, cfg.Memory, tracer, ltProxy).handler(),
+	}
+}
+
+func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer, longTerm *longTermProxy) *memoryServer {
 	// Shared scope (m33.3): key under the registry trust boundary so every agent in the
 	// conversation reads/writes ONE scratchpad. It requires a registry — without one there is no
 	// boundary to share within, so fall back to the private per-agent layout (the controller gates
@@ -265,10 +283,11 @@ func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer) *
 		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
 	}
 	return &memoryServer{
-		store:  store,
-		prefix: prefix,
-		agent:  cfg.Agent,
-		tracer: tracer,
+		store:    store,
+		prefix:   prefix,
+		agent:    cfg.Agent,
+		tracer:   tracer,
+		longTerm: longTerm,
 	}
 }
 
@@ -345,10 +364,18 @@ func (m *memoryServer) handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /memory/{conversationId}", m.traced("get", m.handleGet))
-	mux.HandleFunc("PUT /memory/{conversationId}", m.traced("put", m.handlePut))
-	mux.HandleFunc("POST /memory/{conversationId}/append", m.traced("append", m.handleAppend))
-	mux.HandleFunc("GET /memory/{conversationId}/search", m.traced("search", m.handleSearch))
+	// Session/shared conversation memory (Valkey) — only when a backend is wired. An agent may run with
+	// ONLY long-term memory (no session backend), so guard the conversation routes on the store.
+	if m.store != nil {
+		mux.HandleFunc("GET /memory/{conversationId}", m.traced("get", m.handleGet))
+		mux.HandleFunc("PUT /memory/{conversationId}", m.traced("put", m.handlePut))
+		mux.HandleFunc("POST /memory/{conversationId}/append", m.traced("append", m.handleAppend))
+		mux.HandleFunc("GET /memory/{conversationId}/search", m.traced("search", m.handleSearch))
+	}
+	// Long-term (agent-scope) memory (ADR 0045) — proxied to the token-service.
+	if m.longTerm != nil {
+		m.longTerm.register(mux)
+	}
 	return mux
 }
 

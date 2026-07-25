@@ -49,6 +49,7 @@ func newTestMemoryServer(t *testing.T) (*miniredis.Miniredis, *httptest.Server) 
 		newRedisStore(mr.Addr()),
 		memoryConfig{BackendAddr: mr.Addr(), Port: defaultMemoryPort, Namespace: "test-ns", Agent: "test-agent"},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -457,6 +458,7 @@ func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
 			Scope: "shared", Registry: "team-x",
 		},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -480,6 +482,7 @@ func TestMemorySharedScopeFallsBackToPrivateWithoutRegistry(t *testing.T) {
 		nil,
 		memoryConfig{Namespace: "ns", Agent: "a", Scope: "shared", Registry: ""},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	if ms.prefix != "mem:ns/a:" {
 		t.Errorf("prefix = %q, want the private fallback mem:ns/a:", ms.prefix)
@@ -494,6 +497,7 @@ func TestMemoryPrivateScopeUnchanged(t *testing.T) {
 		nil,
 		memoryConfig{Namespace: "ns", Agent: "a", Registry: "team-x"},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	if ms.prefix != "mem:ns/a:" {
 		t.Errorf("prefix = %q, want mem:ns/a: (private is the default even with a registry)", ms.prefix)
@@ -691,6 +695,7 @@ func TestMemoryBackendDownReturns502(t *testing.T) {
 		&failingStore{err: errors.New("connection refused")},
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -731,6 +736,7 @@ func TestMemoryBackendUnreachable(t *testing.T) {
 		newRedisStore(addr),
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -756,6 +762,7 @@ func TestMemorySpansEmitted(t *testing.T) {
 		newRedisStore(mr.Addr()),
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)

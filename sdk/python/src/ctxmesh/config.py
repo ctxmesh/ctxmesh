@@ -85,6 +85,9 @@ class PlaneConfig:
     #: Whether each capability was actually wired by the launcher. A client for
     #: an unwired capability raises ConfigError rather than hitting a dead port.
     memory_wired: bool = False
+    #: Whether long-term (agent-scope, ADR 0045) memory is enabled — the launcher
+    #: exposes /memory/agent/{remember,search}. Gate: MEMORY_LONGTERM_ENABLED=true.
+    longterm_wired: bool = False
     feedback_wired: bool = False
     #: Model gateway base URL ($MODEL_GATEWAY_URL) — LiteLLM directly, or the
     #: launcher's in-pod budget proxy when the agent is budgeted (transparent).
@@ -160,6 +163,7 @@ class PlaneConfig:
             tools_json_path=env("TOOLS_JSON_PATH") or DEFAULT_TOOLS_JSON_PATH,
             run=run,
             memory_wired=memory_wired,
+            longterm_wired=(env("MEMORY_LONGTERM_ENABLED") or "").strip().lower() == "true",
             feedback_wired=feedback_wired,
             model_gateway_url=model_gateway_url,
             model_gateway_key=model_gateway_key,
