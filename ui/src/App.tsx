@@ -20,6 +20,7 @@ import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { ProvidersPage } from "@/pages/providers-page";
+import { TenantsPage } from "@/pages/tenants-page";
 import { CreateAgentPage } from "@/pages/create-agent-page";
 import { DashboardPage } from "@/pages/dashboard-page";
 import { LoginPage } from "@/pages/login-page";
@@ -192,6 +193,8 @@ export function App() {
                 add-MCP flows, the first UI of the aha. */}
             <Route path="providers" element={<ProvidersPage />} />
             <Route path="providers/connect" element={<ConnectProviderPage />} />
+            {/* Tenants (M47) — the multi-tenant quota surface (read-only). */}
+            <Route path="tenants" element={<TenantsPage />} />
             {/* m25 S10: MCP Servers list — the primary MCP surface (Add is in-page) */}
             <Route path="tools/mcp-servers" element={<McpServersPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />

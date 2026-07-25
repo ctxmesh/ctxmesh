@@ -13,6 +13,7 @@ import {
   Users,
   Wrench,
   BookOpen,
+  Building2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -32,7 +33,7 @@ import type { LucideIcon } from "lucide-react";
 
 // Milestone is duplicated from design/scaffold to keep this module independent of
 // the design gallery (the wireframes' own tag type). It is display-only.
-export type Milestone = "M13" | "M14" | "M15" | "M16" | "M17" | "M18";
+export type Milestone = "M13" | "M14" | "M15" | "M16" | "M17" | "M18" | "M47";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -45,6 +46,7 @@ export const RES_MEMORY = "memorybindings";
 export const RES_SCALING = "agentscalingpolicies";
 export const RES_EVALSUITES = "evalsuites";
 export const RES_PROMPTVERSIONS = "promptversions";
+export const RES_TENANTS = "tenants";
 
 export interface NavItem {
   id: string;
@@ -215,6 +217,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: PlugZap,
         milestone: "M14",
         route: "/providers",
+      },
+      {
+        // Tenants (M47) — cluster-scoped namespace groupings with compute + model
+        // quotas. Read-only for everyone (viewers/developers); operators manage
+        // them (the RBAC split is enforced at the API server, ADR 0011).
+        id: "tenants",
+        label: "Tenants",
+        icon: Building2,
+        milestone: "M47",
+        route: "/tenants",
       },
     ],
   },
