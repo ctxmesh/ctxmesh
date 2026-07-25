@@ -223,6 +223,21 @@ export interface AgentRunListResponse {
   runs: AgentRunSummary[];
 }
 
+// --- Long-term memory viewer (GET /api/agents/{ns}/{name}/memory, m46.6) ------
+// An agent's AGENT-WIDE long-term memories (ADR 0045) — persistent, semantically
+// retrievable knowledge. Per-user memories are NOT listed (privacy). No embedding.
+export interface AgentMemoryEntry {
+  content: string;
+  tags?: Record<string, string>;
+  createdAt: string;
+}
+
+export interface AgentMemoryListResponse {
+  namespace: string;
+  name: string;
+  items: AgentMemoryEntry[];
+}
+
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
 // The native run-summary source (first-agent-flow.md §5): a FLAT span list +
 // the trace-level rollup. The UI builds the tree/waterfall CLIENT-side from the
@@ -2841,6 +2856,28 @@ export const api = {
       );
     }
     return (await res.json()) as AgentRunListResponse;
+  },
+
+  // agentMemory reads an agent's AGENT-WIDE long-term memories (ADR 0045, m46.6).
+  // Returns null on 501 (no control-plane store wired) so the caller degrades to
+  // "unavailable" rather than an error toast — same discipline as agentRuns.
+  agentMemory: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<AgentMemoryListResponse | null> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/memory`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `agent memory failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AgentMemoryListResponse;
   },
 
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------

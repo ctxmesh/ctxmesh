@@ -50,6 +50,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/bff"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
@@ -259,6 +260,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
+		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
