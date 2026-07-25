@@ -29,6 +29,17 @@ import (
 
 const embModel = "text-embedding-3-small"
 
+// testDim matches the schema's vector(1536) column. pad grows a short test vector to it, zero-filling the
+// tail — the leading values carry the direction, so cosine similarity between two padded prefixes is
+// unchanged (this lets the tests reason in 2-3 dims while the pg column enforces the real dimension).
+const testDim = 1536
+
+func pad(vec ...float32) []float32 {
+	out := make([]float32, testDim)
+	copy(out, vec)
+	return out
+}
+
 // eachStore holds the in-memory twin and the Postgres (pgvector) store to ONE behavioural contract (the M40
 // pattern). The twin always runs; Postgres runs only when CONTROLPLANE_TEST_DSN points at a throwaway DB whose
 // Postgres has the `vector` extension available (the 0003 migration creates it).
@@ -52,7 +63,7 @@ func eachStore(t *testing.T, fn func(t *testing.T, s Store)) {
 func mem(scope, subject, content string, vec ...float32) AgentMemory {
 	return AgentMemory{
 		Namespace: "prod", AgentName: "assistant", Scope: scope, Subject: subject,
-		Content: content, EmbeddingModel: embModel, EmbeddingDim: len(vec), Embedding: vec,
+		Content: content, EmbeddingModel: embModel, EmbeddingDim: testDim, Embedding: pad(vec...),
 	}
 }
 
@@ -67,7 +78,7 @@ func TestStore_RememberAndSearchByCosine(t *testing.T) {
 
 		got, err := s.Search(ctx, SearchQuery{
 			Namespace: "prod", AgentName: "assistant", Scope: ScopeAgent, EmbeddingModel: embModel,
-			Vector: []float32{1, 0, 0}, TopK: 1,
+			Vector: pad(1, 0, 0), TopK: 1,
 		})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
@@ -101,7 +112,7 @@ func TestStore_SearchPerUserIsolation(t *testing.T) {
 
 		got, err := s.Search(ctx, SearchQuery{
 			Namespace: "prod", AgentName: "assistant", Scope: ScopeAgentUser, Subject: "bob",
-			EmbeddingModel: embModel, Vector: []float32{1, 0, 0}, TopK: 5,
+			EmbeddingModel: embModel, Vector: pad(1, 0, 0), TopK: 5,
 		})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a user must never retrieve another user's memory")
@@ -119,7 +130,7 @@ func TestStore_SearchEmbeddingModelFilter(t *testing.T) {
 
 		got, err := s.Search(ctx, SearchQuery{
 			Namespace: "prod", AgentName: "assistant", Scope: ScopeAgent, EmbeddingModel: embModel,
-			Vector: []float32{1, 0, 0}, TopK: 5,
+			Vector: pad(1, 0, 0), TopK: 5,
 		})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a row embedded with a different model must not be compared")
@@ -135,7 +146,7 @@ func TestStore_SearchThreshold(t *testing.T) {
 
 		got, err := s.Search(ctx, SearchQuery{
 			Namespace: "prod", AgentName: "assistant", Scope: ScopeAgent, EmbeddingModel: embModel,
-			Vector: []float32{1, 0, 0}, TopK: 5, Threshold: 0.5,
+			Vector: pad(1, 0, 0), TopK: 5, Threshold: 0.5,
 		})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a cosine-0 match is below the 0.5 threshold")
