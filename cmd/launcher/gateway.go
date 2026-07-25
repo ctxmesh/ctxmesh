@@ -114,10 +114,11 @@ type gatewayConfig struct {
 	// TenantBudgetUSD / TenantRPM are the aggregate caps; QuotaAddr is the shared
 	// state-layer Valkey the caps accumulate in (TENANT_QUOTA_ADDR — every agent +
 	// replica in the tenant coordinates on ONE bucket). Empty TenantID ⇒ untenanted.
-	TenantID        string
-	TenantBudgetUSD string
-	TenantRPM       int
-	QuotaAddr       string
+	TenantID          string
+	TenantBudgetUSD   string
+	TenantRPM         int
+	TenantMaxInFlight int
+	QuotaAddr         string
 }
 
 // GatewayProxyEnabled reports whether the outbound gateway proxy should start.
@@ -163,25 +164,29 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		}
 	}
 
-	tenantRPM := 0
-	if raw := strings.TrimSpace(lookup("TENANT_RPM")); raw != "" {
-		if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
-			tenantRPM = v
+	return gatewayConfig{
+		UpstreamURL:       strings.TrimRight(upstream, "/"),
+		Port:              port,
+		AgentName:         agentName,
+		ConvCapUSD:        strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
+		AgentCapUSD:       strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
+		SoftPct:           softPct,
+		TenantID:          strings.TrimSpace(lookup("TENANT_ID")),
+		TenantBudgetUSD:   strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
+		TenantRPM:         positiveIntEnv(lookup, "TENANT_RPM"),
+		TenantMaxInFlight: positiveIntEnv(lookup, "TENANT_MAX_CONCURRENT"),
+		QuotaAddr:         strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
+	}, nil
+}
+
+// positiveIntEnv parses a positive integer env var, returning 0 when unset/blank/invalid/≤0.
+func positiveIntEnv(lookup func(string) string, name string) int {
+	if raw := strings.TrimSpace(lookup(name)); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			return v
 		}
 	}
-
-	return gatewayConfig{
-		UpstreamURL:     strings.TrimRight(upstream, "/"),
-		Port:            port,
-		AgentName:       agentName,
-		ConvCapUSD:      strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
-		AgentCapUSD:     strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
-		SoftPct:         softPct,
-		TenantID:        strings.TrimSpace(lookup("TENANT_ID")),
-		TenantBudgetUSD: strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
-		TenantRPM:       tenantRPM,
-		QuotaAddr:       strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
-	}, nil
+	return 0
 }
 
 // budgetErrorBody is the typed budget_exceeded response body (§14). spent/cap are
@@ -274,7 +279,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	// no QuotaAddr ⇒ we cannot coordinate cross-pod — log loudly + leave it unenforced (a visible misconfig;
 	// the controller always injects the addr when caps exist, so this is defence-in-depth).
 	if cfg.TenantID != "" {
-		tq := &tenantQuota{id: cfg.TenantID, rpm: cfg.TenantRPM, logf: logf}
+		tq := &tenantQuota{id: cfg.TenantID, rpm: cfg.TenantRPM, maxConcurrent: cfg.TenantMaxInFlight, logf: logf}
 		if cfg.TenantBudgetUSD != "" {
 			tq.budgetUSD = moneyToFloat(cfg.TenantBudgetUSD)
 			tq.hasBudget = tq.budgetUSD > 0
@@ -347,11 +352,14 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// M47 tenant model quota (rate + aggregate budget), independent of the M8 caps (nil-safe).
-	if deny := gp.tenant.preCall(ctx, moneyToFloat(est.String())); deny != nil {
+	// M47 tenant model quota (rate + aggregate budget + concurrency), independent of the M8 caps (nil-safe).
+	// releaseSlot frees the concurrency slot when this call finishes (noop when no slot was taken).
+	deny, releaseSlot := gp.tenant.preCall(ctx, moneyToFloat(est.String()))
+	if deny != nil {
 		gp.writeTenantDeny(w, span, deny)
 		return
 	}
+	defer releaseSlot()
 
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
 	resp, body, err := gp.forward(ctx, r)

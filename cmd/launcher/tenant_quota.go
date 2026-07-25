@@ -39,6 +39,11 @@ type tenantQuotaStore interface {
 	Spend(ctx context.Context, tenantID string) (float64, error)
 	// AddSpend atomically adds deltaUSD to the tenant's accumulated spend.
 	AddSpend(ctx context.Context, tenantID string, deltaUSD float64) error
+	// AcquireSlot increments the tenant's in-flight counter, returning false (and rolling back) when it
+	// would exceed max — the streaming-concurrency guard RPM does not cover (a slow stream holds a slot).
+	AcquireSlot(ctx context.Context, tenantID string, max int) (bool, error)
+	// ReleaseSlot decrements the tenant's in-flight counter (called when a held call finishes).
+	ReleaseSlot(ctx context.Context, tenantID string) error
 }
 
 // redisTenantStore is the production store over the shared state-layer Valkey (TENANT_QUOTA_ADDR) — the
@@ -54,6 +59,8 @@ func rpmKey(tenantID string, window int64) string {
 }
 
 func spendKey(tenantID string) string { return "tenant:" + tenantID + ":spend" }
+
+func inflightKey(tenantID string) string { return "tenant:" + tenantID + ":inflight" }
 
 func (s *redisTenantStore) IncrRPM(ctx context.Context, tenantID string, window int64) (int64, error) {
 	key := rpmKey(tenantID, window)
@@ -80,15 +87,36 @@ func (s *redisTenantStore) AddSpend(ctx context.Context, tenantID string, deltaU
 	return s.rdb.IncrByFloat(ctx, spendKey(tenantID), deltaUSD).Err()
 }
 
+func (s *redisTenantStore) AcquireSlot(ctx context.Context, tenantID string, maxSlots int) (bool, error) {
+	key := inflightKey(tenantID)
+	n, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	// Refresh a generous safety TTL on every acquire so a busy key stays alive but a leaked slot (a holder
+	// that crashed without releasing) self-heals once the tenant goes idle — a coarse guard, never money.
+	_ = s.rdb.Expire(ctx, key, 10*time.Minute).Err()
+	if int(n) > maxSlots {
+		_ = s.rdb.Decr(ctx, key).Err() // roll back — we did not get the slot
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *redisTenantStore) ReleaseSlot(ctx context.Context, tenantID string) error {
+	return s.rdb.Decr(ctx, inflightKey(tenantID)).Err()
+}
+
 // tenantQuota is the launcher's per-process view of the owning tenant's model caps + the shared store.
 // nil ⇒ the agent is untenanted or its tenant has no model caps (the proxy still enforces an M8 budget).
 type tenantQuota struct {
-	id        string
-	budgetUSD float64 // 0 ⇒ no budget cap
-	hasBudget bool
-	rpm       int // 0 ⇒ no rate cap
-	store     tenantQuotaStore
-	logf      func(string, ...any)
+	id            string
+	budgetUSD     float64 // 0 ⇒ no budget cap
+	hasBudget     bool
+	rpm           int // 0 ⇒ no rate cap
+	maxConcurrent int // 0 ⇒ no concurrency cap
+	store         tenantQuotaStore
+	logf          func(string, ...any)
 }
 
 // tenantDeny is a pre-call rejection: an HTTP status + a machine code + (for budget) the spent/cap USD.
@@ -99,13 +127,18 @@ type tenantDeny struct {
 	capUSD float64
 }
 
-// preCall enforces the tenant's RPM then budget BEFORE the model call — returns a *tenantDeny to reject or
-// nil to allow. Fail policy (ADR 0046 §3): the RATE check fails OPEN on a Valkey error (a transient blip
-// must not 429 a whole tenant), but the BUDGET check fails CLOSED (never let spend run past the cap on a
-// read error — money is the load-bearing invariant). Nil-receiver safe.
-func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) *tenantDeny {
+// noopRelease is returned whenever no concurrency slot was acquired (so callers can `defer release()`
+// unconditionally).
+func noopRelease() {}
+
+// preCall enforces the tenant's RPM → budget → concurrency BEFORE the model call. It returns a *tenantDeny
+// to reject (nil to allow) AND a release func the caller MUST defer — it frees the concurrency slot when a
+// held call finishes (noop when none was taken). Fail policy (ADR 0046 §3): RATE + CONCURRENCY fail OPEN on
+// a Valkey error (a transient blip must not throttle a whole tenant), but BUDGET fails CLOSED (never let
+// spend run past the cap on a read error — money is the load-bearing invariant). Nil-receiver safe.
+func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) (*tenantDeny, func()) {
 	if q == nil || q.id == "" {
-		return nil
+		return nil, noopRelease
 	}
 	if q.rpm > 0 {
 		window := time.Now().Unix() / 60
@@ -114,20 +147,35 @@ func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) *tenantDeny {
 		case err != nil:
 			q.logf("launcher: tenant rpm check failed (fail-open): %v", err)
 		case n > int64(q.rpm):
-			return &tenantDeny{status: 429, code: "tenant_rate_limited"}
+			return &tenantDeny{status: 429, code: "tenant_rate_limited"}, noopRelease
 		}
 	}
 	if q.hasBudget {
 		spent, err := q.store.Spend(ctx, q.id)
 		if err != nil {
 			q.logf("launcher: tenant budget check failed (fail-closed): %v", err)
-			return &tenantDeny{status: 402, code: "tenant_budget_exceeded", capUSD: q.budgetUSD}
+			return &tenantDeny{status: 402, code: "tenant_budget_exceeded", capUSD: q.budgetUSD}, noopRelease
 		}
 		if spent+estUSD > q.budgetUSD {
-			return &tenantDeny{status: 402, code: "tenant_budget_exceeded", spent: spent, capUSD: q.budgetUSD}
+			return &tenantDeny{status: 402, code: "tenant_budget_exceeded", spent: spent, capUSD: q.budgetUSD}, noopRelease
 		}
 	}
-	return nil
+	if q.maxConcurrent > 0 {
+		ok, err := q.store.AcquireSlot(ctx, q.id, q.maxConcurrent)
+		switch {
+		case err != nil:
+			q.logf("launcher: tenant concurrency check failed (fail-open): %v", err)
+		case !ok:
+			return &tenantDeny{status: 429, code: "tenant_concurrency_exceeded"}, noopRelease
+		default:
+			return nil, func() {
+				if rerr := q.store.ReleaseSlot(context.WithoutCancel(ctx), q.id); rerr != nil {
+					q.logf("launcher: tenant slot release failed: %v", rerr)
+				}
+			}
+		}
+	}
+	return nil, noopRelease
 }
 
 // postCall books the actual model spend against the tenant (best-effort — a lost add merely under-counts;

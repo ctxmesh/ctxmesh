@@ -145,7 +145,10 @@ type modelEntry struct {
 //     proxies to that OpenAI-compatible upstream (e.g. the tool-call mock); no
 //     SecretBinding required (keyless upstream).
 //   - non-mock renders api_key: os.environ/SB_<sanitized-binding-name>.
-//   - rateLimit.tenantRPM → rpm on every provider entry for that route.
+//   - rateLimit.tenantRPM → rpm on every provider entry for that route. NOTE (M47, ADR 0046): despite the
+//     field name this is a per-ROUTE, GLOBAL rpm cap (LiteLLM router-level, shared by ALL callers), NOT a
+//     per-tenant limit — it guards the provider org limit. True per-tenant model rate/budget is enforced
+//     separately in the launcher gateway proxy against a shared Valkey (a Tenant's model caps), not here.
 //   - Routes with any unresolved binding or secret are excluded and reported in
 //     Result.Excluded; other routes still render normally.
 //
