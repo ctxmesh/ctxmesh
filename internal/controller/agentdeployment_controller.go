@@ -648,20 +648,30 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
 	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
 
-	// Cost budget (M8, specs/cost-governance.md): when spec.budget is set, the
-	// agent's LLM calls must flow through the launcher's in-pod budget proxy so it
-	// can enforce the cap BEFORE the provider is hit. So MODEL_GATEWAY_URL points
-	// at the proxy (localhost:2996), the real LiteLLM address travels as
-	// GATEWAY_UPSTREAM_URL, and the three budget knobs are injected as STATIC env
-	// (values known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine
-	// / tier1 no-valueFrom guard). Unbudgeted agents get the plain LiteLLM URL and
-	// no budget env, so their path is byte-for-byte the M2 behavior.
+	// Tenancy (M47, ADR 0046): resolve the owning tenant EARLY — it decides both whether the gateway
+	// quota proxy is interposed (a tenant's model caps flow through the SAME launcher proxy as an M8
+	// budget) and the TENANT_* env injected below. Read from the namespace's authoritative tenant label
+	// (m47.3). tenantQuota is true only when the tenant actually carries model caps to enforce.
+	tenantCtx, hasTenant, err := resolveTenantForNamespace(ctx, r.Client, deploy.Namespace)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("resolving tenant: %w", err)
+	}
+	tenantQuota := hasTenant && tenantCtx.hasModelCaps()
+
+	// Cost budget (M8, specs/cost-governance.md) + tenant model quota (M47): when EITHER is set, the
+	// agent's LLM calls must flow through the launcher's in-pod gateway proxy so it can enforce the cap
+	// BEFORE the provider is hit. So MODEL_GATEWAY_URL points at the proxy (localhost:2996), the real
+	// LiteLLM address travels as GATEWAY_UPSTREAM_URL, and the knobs are injected as STATIC env (values
+	// known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine / tier1 no-valueFrom guard).
+	// An agent with neither gets the plain LiteLLM URL and no proxy env — byte-for-byte M2 behavior.
 	gatewayURL := litellmGatewayURL
-	if deploy.Spec.Budget != nil {
+	if deploy.Spec.Budget != nil || tenantQuota {
 		gatewayURL = budgetProxyURL
+		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
+	}
+	if deploy.Spec.Budget != nil {
 		env = append(
 			env,
-			corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL},
 			// Either cap may be empty (that dimension unenforced); softThreshold
 			// carries the CRD default (80) when unset because the field defaults
 			// server-side, but guard against a zero value defensively.
@@ -853,12 +863,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
-	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps for the shared-Valkey quota
-	// enforcement (m47.4). Resolved from the namespace's authoritative tenant label; empty caps are omitted.
-	tenantCtx, hasTenant, err := resolveTenantForNamespace(ctx, r.Client, deploy.Namespace)
-	if err != nil {
-		return podTemplate{}, fmt.Errorf("resolving tenant: %w", err)
-	}
+	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
+	// quota enforcement (m47.4). tenantCtx/tenantQuota were resolved with the gateway-URL decision above.
 	if hasTenant {
 		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
 		if tenantCtx.budgetUSD != "" {
@@ -869,6 +875,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 		if tenantCtx.maxConcurrent > 0 {
 			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
+		}
+		// The launcher gateway proxy enforces the tenant caps against a shared Valkey accumulator (m47.4);
+		// inject the shared state-layer address so every tenant agent + replica coordinates on ONE bucket.
+		if tenantQuota {
+			env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 		}
 	}
 

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -121,6 +122,39 @@ func TestTenant_ResolveForNamespace(t *testing.T) {
 	_, found, err = resolveTenantForNamespace(testCtx, k8sClient, "tnt-untenanted")
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+// An agent in a tenant-with-model-caps namespace has its gateway proxy interposed (even with NO
+// per-agent budget) and the TENANT_* quota env injected (m47.4 — the enforcement wiring).
+func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
+	makeNamespace(t, "tnt-inject-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "injectco"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-inject-ns"},
+			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "injectco")
+	reconcileTenant(t, "injectco") // label the namespace
+
+	mkAgent(t, "tnt-inject-agent", "tnt-inject-ns")
+	reconcileNN(t, newReconciler(), "tnt-inject-agent", "tnt-inject-ns")
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: "tnt-inject-agent", Namespace: "tnt-inject-ns"}, &ksvc))
+	env := envByName(ksvc.Spec.Template.Spec.Containers[0].Env)
+
+	// The gateway proxy is interposed even with NO per-agent budget — tenant caps alone repoint it.
+	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"], "tenant caps must repoint MODEL_GATEWAY_URL at the proxy")
+	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"])
+	assert.Equal(t, "injectco", env["TENANT_ID"])
+	assert.Equal(t, "100.00", env["TENANT_BUDGET_USD"])
+	assert.Equal(t, "600", env["TENANT_RPM"])
+	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
 }
 
 // A namespace already owned by another tenant is skipped (fail-safe) and surfaced
