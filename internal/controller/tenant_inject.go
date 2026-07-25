@@ -36,6 +36,12 @@ type tenantContext struct {
 	maxConcurrent int32
 }
 
+// hasModelCaps reports whether the tenant carries any model cap the launcher gateway proxy must
+// enforce (budget / rate / concurrency) — the gate for interposing the proxy + injecting TENANT_QUOTA_ADDR.
+func (tc tenantContext) hasModelCaps() bool {
+	return tc.budgetUSD != "" || tc.rpm > 0 || tc.maxConcurrent > 0
+}
+
 // resolveTenantForNamespace returns the Tenant that owns ns and its model caps, read from the
 // AUTHORITATIVE namespace label the Tenant controller stamps (tenantLabel) — NOT re-derived from Tenant
 // specs, so an agent can never be injected with a tenant the controller has not actually reconciled onto

@@ -109,6 +109,15 @@ type gatewayConfig struct {
 	AgentCapUSD string
 	// SoftPct is the soft-alert percentage (BUDGET_SOFT_PCT), default 80.
 	SoftPct int
+
+	// Tenant model quota (M47, ADR 0046). TenantID gates the tenant enforcement;
+	// TenantBudgetUSD / TenantRPM are the aggregate caps; QuotaAddr is the shared
+	// state-layer Valkey the caps accumulate in (TENANT_QUOTA_ADDR — every agent +
+	// replica in the tenant coordinates on ONE bucket). Empty TenantID ⇒ untenanted.
+	TenantID        string
+	TenantBudgetUSD string
+	TenantRPM       int
+	QuotaAddr       string
 }
 
 // GatewayProxyEnabled reports whether the outbound gateway proxy should start.
@@ -118,7 +127,7 @@ type gatewayConfig struct {
 // MODEL_GATEWAY_URL keeps pointing straight at LiteLLM.
 func (c Config) GatewayProxyEnabled() bool {
 	g := c.Gateway
-	return g.UpstreamURL != "" && (g.ConvCapUSD != "" || g.AgentCapUSD != "")
+	return g.UpstreamURL != "" && (g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "")
 }
 
 // loadGatewayConfig parses the outbound-gateway-proxy configuration from env.
@@ -154,13 +163,24 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		}
 	}
 
+	tenantRPM := 0
+	if raw := strings.TrimSpace(lookup("TENANT_RPM")); raw != "" {
+		if v, convErr := strconv.Atoi(raw); convErr == nil && v > 0 {
+			tenantRPM = v
+		}
+	}
+
 	return gatewayConfig{
-		UpstreamURL: strings.TrimRight(upstream, "/"),
-		Port:        port,
-		AgentName:   agentName,
-		ConvCapUSD:  strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
-		AgentCapUSD: strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
-		SoftPct:     softPct,
+		UpstreamURL:     strings.TrimRight(upstream, "/"),
+		Port:            port,
+		AgentName:       agentName,
+		ConvCapUSD:      strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
+		AgentCapUSD:     strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
+		SoftPct:         softPct,
+		TenantID:        strings.TrimSpace(lookup("TENANT_ID")),
+		TenantBudgetUSD: strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
+		TenantRPM:       tenantRPM,
+		QuotaAddr:       strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
 	}, nil
 }
 
@@ -188,7 +208,10 @@ type gatewayProxy struct {
 	// construction so a malformed cap fails fast at startup, not per request.
 	convCap  *budget.Money
 	agentCap *budget.Money
-	logf     func(string, ...any)
+	// tenant enforces the M47 tenant model quota (rate + aggregate budget) against
+	// the shared Valkey. nil ⇒ untenanted or no tenant model caps.
+	tenant *tenantQuota
+	logf   func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -247,6 +270,23 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		gp.agentCap = &m
 	}
 
+	// Tenant model quota (M47): enforce against the SHARED Valkey so every replica coordinates. Caps but
+	// no QuotaAddr ⇒ we cannot coordinate cross-pod — log loudly + leave it unenforced (a visible misconfig;
+	// the controller always injects the addr when caps exist, so this is defence-in-depth).
+	if cfg.TenantID != "" {
+		tq := &tenantQuota{id: cfg.TenantID, rpm: cfg.TenantRPM, logf: logf}
+		if cfg.TenantBudgetUSD != "" {
+			tq.budgetUSD = moneyToFloat(cfg.TenantBudgetUSD)
+			tq.hasBudget = tq.budgetUSD > 0
+		}
+		if cfg.QuotaAddr == "" {
+			logf("launcher: gateway: tenant %s has model caps but no TENANT_QUOTA_ADDR — quota NOT enforced", cfg.TenantID)
+		} else {
+			tq.store = newRedisTenantStore(cfg.QuotaAddr)
+			gp.tenant = tq
+		}
+	}
+
 	return gp, nil
 }
 
@@ -297,14 +337,20 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── PRE-CALL hard check ────────────────────────────────────────────────
-	// Only when a dimension is actually enforceable (cap set + its identity key
-	// present). Estimate is conservative: the last observed cost on this route.
+	// Estimate is conservative: the last observed cost on this route. It feeds BOTH the M8 per-agent
+	// budget and the M47 tenant aggregate budget.
+	est := gp.estimator.Estimate(route)
+	// M8 per-conversation/agent budget — only when a dimension is enforceable (cap set + identity key).
 	if caps.Enforced() {
-		est := gp.estimator.Estimate(route)
 		if dec := gp.enforcer.PreCall(caps, est); !dec.Allowed {
 			gp.writeBudgetExceeded(w, span, dec)
 			return
 		}
+	}
+	// M47 tenant model quota (rate + aggregate budget), independent of the M8 caps (nil-safe).
+	if deny := gp.tenant.preCall(ctx, moneyToFloat(est.String())); deny != nil {
+		gp.writeTenantDeny(w, span, deny)
+		return
 	}
 
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
@@ -329,12 +375,18 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// Only book cost for a successful completion (a 4xx/5xx from LiteLLM cost the
 	// tenant nothing and must not accrue spend). Price prefers LiteLLM's own cost
 	// header; falls back to the deterministic token table.
-	if resp.StatusCode != http.StatusOK || !caps.Enforced() {
+	if resp.StatusCode != http.StatusOK {
 		return
 	}
 	actual := budget.PriceCall(resp.Header.Get(budget.LiteLLMCostHeader), body)
 	gp.estimator.Observe(route, actual)
+	// M47: accrue the tenant's aggregate spend to the shared Valkey (nil-safe; only when a tenant budget
+	// is set). Runs even when the M8 per-agent budget is not enforced for this agent.
+	gp.tenant.postCall(ctx, moneyToFloat(actual.String()))
 
+	if !caps.Enforced() {
+		return
+	}
 	convSpent, agentSpent, state, alert := gp.enforcer.PostCall(caps, actual)
 	gp.annotateSpan(span, caps, convSpent, agentSpent, state, actual)
 
@@ -385,6 +437,29 @@ func (gp *gatewayProxy) forward(ctx context.Context, r *http.Request) (*http.Res
 		return nil, nil, fmt.Errorf("read upstream response: %w", err)
 	}
 	return resp, body, nil
+}
+
+// writeTenantDeny emits the typed tenant-quota rejection (402 tenant_budget_exceeded / 429
+// tenant_rate_limited, dimension "tenant") and marks the span. The provider is NOT called (M47
+// circuit-break). Reuses budgetErrorBody so a caller parses tenant + per-agent denials the same way.
+func (gp *gatewayProxy) writeTenantDeny(w http.ResponseWriter, span trace.Span, deny *tenantDeny) {
+	span.SetAttributes(
+		attribute.String("tenant.quota.code", deny.code),
+		attribute.Int("tenant.quota.status", deny.status),
+	)
+	span.SetStatus(codes.Error, deny.code)
+
+	body := budgetErrorBody{Error: deny.code, Dimension: "tenant"}
+	if deny.status == http.StatusPaymentRequired {
+		body.Spent = strconv.FormatFloat(deny.spent, 'f', -1, 64)
+		body.Cap = strconv.FormatFloat(deny.capUSD, 'f', -1, 64)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(deny.status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		gp.logf("launcher: gateway: encode tenant deny: %v", err)
+	}
+	gp.logf("launcher: gateway: %s (tenant=%s status=%d, call refused)", deny.code, gp.tenant.id, deny.status)
 }
 
 // writeBudgetExceeded emits the typed 402 budget_exceeded response and marks the
