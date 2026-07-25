@@ -31,6 +31,29 @@ type MemoryBackend struct {
 	Addr string `json:"addr,omitempty"`
 }
 
+// LongTermMemory enables `agent`/long-term semantic memory (ADR 0045): memory that persists ACROSS
+// conversations and is retrieved by MEANING (pgvector), as opposed to the conversation-scoped session/shared
+// memory selected by spec.scope. It is a CAPABILITY orthogonal to scope (ADR 0045 Amendment 1) — an agent can
+// have conversation memory AND long-term memory. The store lives in the control-plane Postgres and is reached
+// via the token-service (agent pods hold no DB credentials); the agent's launcher exposes memory.remember /
+// memory.search_agent that proxy there with the capability token.
+type LongTermMemory struct {
+	// enabled turns on long-term memory for the agent.
+	Enabled bool `json:"enabled"`
+
+	// perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+	// caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+	// isolation means one user's remembered facts never surface in another user's retrieved context.
+	// +optional
+	PerUser bool `json:"perUser,omitempty"`
+
+	// embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+	// applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	EmbeddingRoute string `json:"embeddingRoute,omitempty"`
+}
+
 // MemoryBindingSpec defines the desired state of a MemoryBinding (PRD §10).
 type MemoryBindingSpec struct {
 	// agentRef names the AgentDeployment (same namespace) that this binding
@@ -52,6 +75,10 @@ type MemoryBindingSpec struct {
 	// If omitted the controller applies the cluster-default address.
 	// +optional
 	Backend *MemoryBackend `json:"backend,omitempty"`
+
+	// longTerm optionally enables `agent`/long-term semantic memory (ADR 0045), orthogonal to scope.
+	// +optional
+	LongTerm *LongTermMemory `json:"longTerm,omitempty"`
 }
 
 // MemoryBindingStatus defines the observed state of a MemoryBinding.
