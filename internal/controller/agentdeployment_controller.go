@@ -124,6 +124,9 @@ const (
 	// host resolution) and the memory key namespace. STATIC (deploy.Namespace),
 	// NEVER a downward-API valueFrom (the m5.7 Knative ksvc landmine).
 	envPodNamespace = "POD_NAMESPACE"
+	// envTokenServiceURL points the launcher at the control-plane token-service (OBO + long-term
+	// memory proxy, ADR 0045 Amд 1). Reused from the OBO egress config.
+	envTokenServiceURL = "TOKEN_SERVICE_URL"
 
 	// memoryScopeShared is the MemoryBinding scope + MEMORY_SCOPE env value that selects the shared
 	// team scratchpad (ADR 0035, m33.3) instead of private per-agent memory.
@@ -804,6 +807,35 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// Long-term memory (M46, ADR 0045): when spec.longTermMemory.enabled, the launcher exposes
+	// memory.remember / memory.search_agent that PROXY to the token-service (which holds the pgvector
+	// store + CONTROLPLANE_DSN — agent pods never get DB credentials, ADR 0045 Amд 1). Inject the store
+	// scope (agent-wide vs per-user), the embedding route (empty ⇒ launcher/token-service default), and
+	// reuse the OBO token-service URL. AGENT_NAME (already ensured for a memory agent above) is the store
+	// partition key.
+	if lt := deploy.Spec.LongTermMemory; lt != nil && lt.Enabled {
+		ltScope := "agent"
+		if lt.PerUser {
+			ltScope = "agent_user"
+		}
+		env = append(env,
+			corev1.EnvVar{Name: "MEMORY_LONGTERM_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "MEMORY_LONGTERM_SCOPE", Value: ltScope},
+		)
+		if lt.EmbeddingRoute != "" {
+			env = append(env, corev1.EnvVar{Name: "EMBEDDING_ROUTE", Value: lt.EmbeddingRoute})
+		}
+		// The launcher proxies memory.remember/search_agent to the token-service; reuse the OBO
+		// token-service URL (guard against a duplicate the OBO path may already have set).
+		if r.OBOEgress.TokenServiceURL != "" &&
+			!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+			env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
+		}
+		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
+			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+		}
+	}
+
 	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
 	// member, inject the STATIC mesh env the launcher's /a2a server reads
 	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
@@ -986,6 +1018,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		toolDigest += "e" + ed
 	}
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
+	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the
+	// memory digest so enabling/disabling it or changing perUser/embeddingRoute rolls a new revision
+	// (even when the agent has no session memory, i.e. memDigest is "").
+	if lt := deploy.Spec.LongTermMemory; lt != nil && lt.Enabled {
+		sum := sha256.Sum256([]byte(memDigest + fmt.Sprintf("|lt:%t:%s", lt.PerUser, lt.EmbeddingRoute)))
+		memDigest = fmt.Sprintf("%x", sum[:])[:8]
+	}
 	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
 	// and its values are package constants (objectStoreAddr + the dev creds,
 	// identical for every member), so it needs no digest component of its own: the

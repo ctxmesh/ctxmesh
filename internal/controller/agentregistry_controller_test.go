@@ -496,6 +496,33 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 	assert.NotContains(t, envMap, "MEMORY_SCOPE", "private scope injects no MEMORY_SCOPE")
 }
 
+// TestMemory_LongTermFoldedField: spec.longTermMemory (ADR 0045) injects the launcher's long-term-memory
+// env (enabled + store scope + embedding route), orthogonal to sessionMemory. perUser ⇒ agent_user scope.
+func TestMemory_LongTermFoldedField(t *testing.T) {
+	const namespace = "default"
+	const agentName = "longterm-mem-agent"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+			LongTermMemory: &agentsv1alpha1.LongTermMemorySpec{
+				Enabled: true, PerUser: true, EmbeddingRoute: "embed-v1",
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, namespace)
+
+	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "true", envMap["MEMORY_LONGTERM_ENABLED"], "long-term memory enabled")
+	assert.Equal(t, "agent_user", envMap["MEMORY_LONGTERM_SCOPE"], "perUser ⇒ per-user store scope")
+	assert.Equal(t, "embed-v1", envMap["EMBEDDING_ROUTE"], "the embedding route is injected")
+	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME is the store partition key")
+}
+
 // TestMemory_FoldedSharedScopeForMember: the folded field with scope=shared on a registry member
 // injects MEMORY_SCOPE=shared — the m33.3 shared scope works through the m34.2 fold too.
 func TestMemory_FoldedSharedScopeForMember(t *testing.T) {

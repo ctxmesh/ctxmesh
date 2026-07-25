@@ -106,6 +106,29 @@ type SessionMemorySpec struct {
 	Backend *MemoryBackend `json:"backend,omitempty"`
 }
 
+// LongTermMemorySpec is the folded long-term-memory config (ADR 0045): `agent`-scope memory that persists
+// ACROSS conversations and is retrieved by MEANING (pgvector), orthogonal to sessionMemory's conversation
+// scope — an agent can have both. Like sessionMemory it folds into the AgentDeployment (a per-agent 1:1
+// capability, ADR 0037). The store lives in the control-plane Postgres, reached via the token-service (agent
+// pods hold no DB credentials, ADR 0045 Amд 1); the launcher exposes memory.remember / memory.search_agent
+// that proxy there with the capability token.
+type LongTermMemorySpec struct {
+	// enabled turns on long-term memory for the agent.
+	Enabled bool `json:"enabled"`
+
+	// perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+	// caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+	// isolation means one user's remembered facts never surface in another user's retrieved context.
+	// +optional
+	PerUser bool `json:"perUser,omitempty"`
+
+	// embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+	// applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	EmbeddingRoute string `json:"embeddingRoute,omitempty"`
+}
+
 // AgentDeploymentSpec defines the desired state of an AgentDeployment.
 type AgentDeploymentSpec struct {
 	// image is the fully-qualified container image for the agent,
@@ -156,6 +179,11 @@ type AgentDeploymentSpec struct {
 	// deprecation window; this field wins when both are present.
 	// +optional
 	SessionMemory *SessionMemorySpec `json:"sessionMemory,omitempty"`
+
+	// longTermMemory optionally enables `agent`/long-term semantic memory (ADR 0045) — persistent across
+	// conversations, retrieved by meaning — orthogonal to sessionMemory.
+	// +optional
+	LongTermMemory *LongTermMemorySpec `json:"longTermMemory,omitempty"`
 
 	// role is the agent's role within its AgentRegistry (PRD §12.4 role-based
 	// access control). The three built-in roles always exist: "orchestrator",
