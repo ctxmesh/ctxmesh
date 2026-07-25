@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // fakeTokenService records the last remember payload (on a channel) + answers search with a fixed body.
@@ -53,7 +54,8 @@ func fakeTokenService(t *testing.T, remembered chan<- map[string]any) *httptest.
 func ltProxyTo(url, scope string) *longTermProxy {
 	return &longTermProxy{
 		tokenServiceURL: url, namespace: "prod", agent: "asst", scope: scope, embeddingModel: "embed-v1",
-		client: &http.Client{Timeout: 5 * time.Second}, logf: func(string, ...any) {},
+		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
+		logf: func(string, ...any) {},
 	}
 }
 

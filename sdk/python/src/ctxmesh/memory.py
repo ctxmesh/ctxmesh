@@ -15,10 +15,11 @@ enforces so a bad id surfaces as a clear ConfigError instead of a mangled URL.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from ctxmesh import _http
+from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError
 
@@ -114,3 +115,61 @@ class MemoryClient:
         resp = _http.request("GET", url, expect=(200,))
         data = resp.json()
         return data if isinstance(data, list) else []
+
+    # ── Long-term (agent-scope) memory (ADR 0045) ──────────────────────────────────
+    # Persists ACROSS conversations and is retrieved by MEANING (embeddings), unlike
+    # the conversation memory above. The launcher proxies these to the token-service.
+    # For per-user memory the run capability is forwarded automatically (request-scoped)
+    # so a user's memories are isolated from other users of the same agent.
+
+    def _require_longterm(self) -> None:
+        if not self._config.longterm_wired:
+            raise ConfigError(
+                "long-term memory is not enabled for this agent: set "
+                "spec.longTermMemory.enabled (the launcher injects "
+                "MEMORY_LONGTERM_ENABLED). Use remember / search_agent only when bound."
+            )
+
+    def _longterm_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        cap = current_capability()
+        if cap:
+            headers[CAPABILITY_HEADER] = cap  # per-user scoping (launcher verifies+hashes)
+        return headers
+
+    def remember(self, content: str, tags: Optional[Dict[str, str]] = None) -> None:
+        """Store a long-term memory (ADR 0045). Returns immediately; the launcher embeds
+        + persists it in the background (best-effort, like ``append`` — never blocks)."""
+        self._require_longterm()
+        if not content or not content.strip():
+            raise ConfigError("memory.remember requires non-empty content")
+        body: Dict[str, Any] = {"content": content}
+        if tags:
+            body["tags"] = tags
+        _http.request(
+            "POST",
+            f"{self._config.memory_base_url}/memory/agent/remember",
+            body=_http.json_body(body),
+            headers=self._longterm_headers(),
+            expect=(202,),
+        )
+
+    def search_agent(
+        self, query: str, top_k: int = 5, threshold: float = 0.0
+    ) -> List[Dict[str, Any]]:
+        """Semantically retrieve the agent's most relevant long-term memories (ADR 0045).
+
+        Returns a ranked list of ``{"content": str, "score": float}`` (score = cosine similarity in
+        [0,1]); empty when nothing clears *threshold*. Traced as a ``memory.agent_recall`` span."""
+        self._require_longterm()
+        body = {"query": query, "topK": top_k, "threshold": threshold}
+        resp = _http.request(
+            "POST",
+            f"{self._config.memory_base_url}/memory/agent/search",
+            body=_http.json_body(body),
+            headers=self._longterm_headers(),
+            expect=(200,),
+        )
+        data = resp.json()
+        results = data.get("results") if isinstance(data, dict) else None
+        return results if isinstance(results, list) else []
