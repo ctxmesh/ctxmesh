@@ -129,8 +129,8 @@ func (s *memStore) Search(_ context.Context, q SearchQuery) ([]ScoredMemory, err
 		}
 		return b.Memory.CreatedAt.Compare(a.Memory.CreatedAt)
 	})
-	if q.TopK > 0 && len(scored) > q.TopK {
-		scored = scored[:q.TopK]
+	if limit := resolveTopK(q.TopK); len(scored) > limit {
+		scored = scored[:limit]
 	}
 	return scored, nil
 }

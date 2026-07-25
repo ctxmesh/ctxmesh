@@ -66,10 +66,7 @@ func (s *pgStore) Remember(ctx context.Context, m AgentMemory) (*AgentMemory, er
 }
 
 func (s *pgStore) Search(ctx context.Context, q SearchQuery) ([]ScoredMemory, error) {
-	limit := q.TopK
-	if limit <= 0 {
-		limit = 10
-	}
+	limit := resolveTopK(q.TopK)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, namespace, agent_name, scope, subject, content, tags, embedding_model, embedding_dim,
 			created_at, updated_at, 1 - (embedding <=> $1) AS score

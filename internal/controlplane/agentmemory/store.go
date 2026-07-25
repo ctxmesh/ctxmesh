@@ -42,6 +42,27 @@ const (
 	ScopeAgentUser = "agent_user"
 )
 
+// TopK bounds (hardening, M46 close). An unset/non-positive TopK defaults to defaultTopK; any request is capped
+// at maxTopK so a caller can never demand an unbounded LIMIT (an oversized response + a degraded HNSW scan).
+// Both stores route TopK through resolveTopK, so the twin behaviour agrees and the cap holds at the store
+// boundary — the right layer, since the Store owns the "TopK caps the results" contract.
+const (
+	defaultTopK = 10
+	maxTopK     = 100
+)
+
+// resolveTopK normalizes a requested TopK: ≤0 → defaultTopK, > maxTopK → maxTopK, else the request.
+func resolveTopK(k int) int {
+	switch {
+	case k <= 0:
+		return defaultTopK
+	case k > maxTopK:
+		return maxTopK
+	default:
+		return k
+	}
+}
+
 // AgentMemory is one stored long-term memory. ID is assigned by the store on Remember. Embedding is the raw
 // vector (its length MUST equal EmbeddingDim, which MUST match the store's configured vector dimension).
 type AgentMemory struct {

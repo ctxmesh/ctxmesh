@@ -18,6 +18,7 @@ package agentmemory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -150,6 +151,32 @@ func TestStore_SearchThreshold(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a cosine-0 match is below the 0.5 threshold")
+	})
+}
+
+// TopK is bounded at both ends (hardening, M46 close): an unset TopK defaults to 10, and a request larger than
+// the cap (100) is clamped — a caller can never demand an unbounded result set. Both stores must agree.
+func TestStore_SearchTopKBounds(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		// Remember more rows than the cap, all in one partition and all matching the query direction.
+		for i := range maxTopK + 5 {
+			_, err := s.Remember(ctx, mem(ScopeAgent, "", fmt.Sprintf("fact number %d", i), 1, 0, 0))
+			require.NoError(t, err)
+		}
+		q := SearchQuery{
+			Namespace: "prod", AgentName: "assistant", Scope: ScopeAgent, EmbeddingModel: embModel, Vector: pad(1, 0, 0),
+		}
+
+		q.TopK = 0 // unset → default
+		got, err := s.Search(ctx, q)
+		require.NoError(t, err)
+		assert.Len(t, got, defaultTopK, "an unset TopK returns the default page size")
+
+		q.TopK = 1_000_000 // absurd → clamped to the cap
+		got, err = s.Search(ctx, q)
+		require.NoError(t, err)
+		assert.Len(t, got, maxTopK, "an over-cap TopK is clamped to maxTopK")
 	})
 }
 

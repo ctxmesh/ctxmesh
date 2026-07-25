@@ -34,6 +34,7 @@ interface DetailOpts {
   agentRuns?: unknown[] | null; // null → 501 (Langfuse not configured)
   agentRunsStatus?: number;
   longTermMemory?: unknown[] | null; // null → 501 (no control-plane store), m46.6
+  longTermMemoryError?: boolean; // true → 500 (store read failed), m46.6
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
   // m17.11 additions: memory + scaling panels
@@ -138,6 +139,9 @@ function installFetch(opts: DetailOpts = {}) {
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) {
         if (opts.longTermMemory === null) {
           return j({ error: "not implemented" }, false, 501);
+        }
+        if (opts.longTermMemoryError) {
+          return j({ error: "store read failed" }, false, 500);
         }
         return j({ namespace: "prod", name: "billing", items: opts.longTermMemory ?? [] }, true, 200);
       }
@@ -789,6 +793,37 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
 
     await screen.findByTestId("memory-panel");
     expect(screen.queryByTestId("longterm-memory-panel")).toBeNull();
+  });
+
+  it("long-term memory: teaches an empty state when nothing is remembered (m46.6)", async () => {
+    installFetch({ longTermMemory: [] });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-empty");
+    expect(screen.getByText(/Nothing remembered yet/)).toBeInTheDocument();
+  });
+
+  it("long-term memory: renders tags as badges (m46.6)", async () => {
+    installFetch({
+      longTermMemory: [{ content: "prefers metric units", tags: { topic: "units" }, createdAt: "2026-07-25T00:00:00Z" }],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-tags");
+    expect(screen.getByText(/topic: units/)).toBeInTheDocument();
+  });
+
+  it("long-term memory: surfaces a store error, not a blank panel (m46.6)", async () => {
+    installFetch({ longTermMemoryError: true });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-error");
   });
 
   it("attach: createMemoryBinding is called with agentRef = the agent name", async () => {
