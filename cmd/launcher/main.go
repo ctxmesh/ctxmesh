@@ -119,7 +119,7 @@ func main() {
 	// Long-term memory (ADR 0045) proxies to the token-service; loaded from env, nil when off. The memory
 	// listener starts when EITHER session memory OR long-term is enabled (an agent may have only one).
 	ltLogf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
-	memSrv := buildMemoryHTTPServer(cfg, tracer, newLongTermProxy(ltLogf))
+	memSrv := buildMemoryHTTPServer(cfg, tracer, newLongTermProxy(ltLogf, tracer))
 
 	// ── A2A outbound endpoint (:2997) ─────────────────────────────────────
 	// Started ONLY when the agent is a resolved AgentRegistry member

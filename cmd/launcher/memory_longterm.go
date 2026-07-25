@@ -27,6 +27,10 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
@@ -42,6 +46,7 @@ type longTermProxy struct {
 	embeddingModel  string
 	verifier        *runcap.Verifier // nil ⇒ per-user memory is refused (no way to trust the user id)
 	client          *http.Client
+	tracer          trace.Tracer
 	logf            func(string, ...any)
 }
 
@@ -52,7 +57,7 @@ const (
 
 // newLongTermProxy builds the proxy from the controller-injected env, or nil when long-term memory is off
 // (MEMORY_LONGTERM_ENABLED unset) or misconfigured (no token-service URL) — a visible no-op, never a panic.
-func newLongTermProxy(logf func(string, ...any)) *longTermProxy {
+func newLongTermProxy(logf func(string, ...any), tracer trace.Tracer) *longTermProxy {
 	if strings.TrimSpace(os.Getenv("MEMORY_LONGTERM_ENABLED")) != "true" {
 		return nil
 	}
@@ -76,6 +81,7 @@ func newLongTermProxy(logf func(string, ...any)) *longTermProxy {
 		scope:           scope,
 		embeddingModel:  strings.TrimSpace(os.Getenv("EMBEDDING_ROUTE")),
 		client:          &http.Client{Timeout: 30 * time.Second},
+		tracer:          tracer,
 		logf:            logf,
 	}
 	// A verifier is needed only for per-user scope (to trust the invoking user's id). Reuse the OBO
@@ -162,10 +168,16 @@ type searchBody struct {
 	Threshold float32 `json:"threshold,omitempty"`
 }
 
-// handleSearch accepts {query, topK, threshold} and returns the token-service's ranked results synchronously.
+// handleSearch accepts {query, topK, threshold} and returns the token-service's ranked results synchronously,
+// wrapped in a memory.agent_recall span (ADR 0045 — a wrong answer from stale/irrelevant retrieved context
+// must be debuggable in the trace: the query, scope, hit count, top score, and threshold are all recorded).
 func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
+	ctx, span := p.tracer.Start(r.Context(), "memory.agent_recall")
+	defer span.End()
+
 	subject, err := p.subjectFor(r)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -173,15 +185,31 @@ func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	span.SetAttributes(
+		attribute.String("memory.scope", p.scope),
+		attribute.Int("memory.top_k", body.TopK),
+		attribute.Float64("memory.threshold", float64(body.Threshold)),
+	)
 	payload := map[string]any{
 		"namespace": p.namespace, "agentName": p.agent, "scope": p.scope, "subject": subject,
 		"query": body.Query, "topK": body.TopK, "threshold": body.Threshold, "embeddingModel": p.embeddingModel,
 	}
 	var out json.RawMessage
-	if err := p.post(r.Context(), "/v1/memory/search", payload, &out); err != nil {
+	if err := p.post(ctx, "/v1/memory/search", payload, &out); err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		p.logf("launcher: long-term search forward failed: %v", err)
 		http.Error(w, "long-term memory search failed", http.StatusBadGateway)
 		return
+	}
+	var parsed struct {
+		Results []struct {
+			Score float32 `json:"score"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(out, &parsed)
+	span.SetAttributes(attribute.Int("memory.hits", len(parsed.Results)))
+	if len(parsed.Results) > 0 {
+		span.SetAttributes(attribute.Float64("memory.top_score", float64(parsed.Results[0].Score)))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(out)
