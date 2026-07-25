@@ -1449,7 +1449,12 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
   return (
     <div data-testid="memory-panel">
       <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm font-medium">Memory bindings</p>
+        <div>
+          <p className="text-sm font-medium">Memory bindings</p>
+          <p className="text-xs text-muted-foreground">
+            The session &amp; shared memory backends wired to this agent (configuration).
+          </p>
+        </div>
         {canCreate && (
           <Button
             variant="outline"
@@ -1482,7 +1487,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
         <EmptyState
           icon={Boxes}
           title="No memory bindings"
-          description="Attach a memory binding to give this agent long-term memory."
+          description="Attach a memory binding to configure this agent's session and shared memory backend. (Long-term, semantically-retrievable memory is shown separately below.)"
         />
       )}
       {load.kind === "ready" && load.bindings.length > 0 && (
@@ -1637,10 +1642,11 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
 
   return (
     <div className="mt-8 border-t pt-6" data-testid="longterm-memory-panel">
-      <p className="mb-1 text-sm font-medium">Long-term memory</p>
+      <h3 className="mb-1 text-sm font-medium">Long-term memory</h3>
       <p className="mb-3 text-xs text-muted-foreground">
-        Persistent knowledge this agent has remembered across conversations (agent-wide;
-        per-user memories are private and not shown).
+        Facts this agent has remembered and can recall by meaning across conversations. Only
+        agent-wide memories appear here; per-user memories are scoped to each end-user's own
+        conversations and are never exposed in the console, for privacy.
       </p>
 
       {load.kind === "loading" && (
@@ -1652,12 +1658,16 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
         </p>
       )}
       {load.kind === "ready" && load.items.length === 0 && (
-        <p className="text-sm text-muted-foreground" data-testid="longterm-empty">
-          Nothing remembered yet — this agent hasn't stored any long-term memories.
-        </p>
+        <div data-testid="longterm-empty">
+          <EmptyState
+            icon={Boxes}
+            title="Nothing remembered yet"
+            description="When this agent stores a long-term memory (via memory.remember), its agent-wide facts will appear here."
+          />
+        </div>
       )}
       {load.kind === "ready" && load.items.length > 0 && (
-        <ul className="space-y-2" data-testid="longterm-list">
+        <ul className="space-y-2" aria-label="Long-term memories" data-testid="longterm-list">
           {load.items.map((m, i) => (
             <li
               key={`${m.createdAt}-${i}`}
@@ -1665,15 +1675,29 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
               data-testid="longterm-item"
             >
               <p className="whitespace-pre-wrap">{m.content}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {new Date(m.createdAt).toLocaleString()}
-              </p>
+              {m.tags && Object.keys(m.tags).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1" data-testid="longterm-tags">
+                  {Object.entries(m.tags).map(([k, v]) => (
+                    <Badge key={k} variant="secondary" className="text-[10px]">
+                      {k}: {v}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              <p className="mt-1 text-xs text-muted-foreground">{formatTimestamp(m.createdAt)}</p>
             </li>
           ))}
         </ul>
       )}
     </div>
   );
+}
+
+// formatTimestamp renders an ISO timestamp in the viewer's locale, falling back to the raw
+// string if it is missing or unparseable (never the literal "Invalid Date").
+function formatTimestamp(ts: string): string {
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
 // ── Scaling panel (m17.11) ────────────────────────────────────────────────────
