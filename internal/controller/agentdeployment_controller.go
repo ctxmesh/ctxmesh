@@ -127,6 +127,10 @@ const (
 	// envTokenServiceURL points the launcher at the control-plane token-service (OBO + long-term
 	// memory proxy, ADR 0045 Amд 1). Reused from the OBO egress config.
 	envTokenServiceURL = "TOKEN_SERVICE_URL"
+	// envMCPCapPublicKey / envMCPCapAudience let the launcher VERIFY a run capability for per-user
+	// long-term memory (ADR 0045) — the same envs the OBO egress sidecar uses.
+	envMCPCapPublicKey = "MCP_CAPABILITY_PUBLIC_KEY"
+	envMCPCapAudience  = "MCP_CAPABILITY_AUDIENCE"
 
 	// memoryScopeShared is the MemoryBinding scope + MEMORY_SCOPE env value that selects the shared
 	// team scratchpad (ADR 0035, m33.3) instead of private per-agent memory.
@@ -830,6 +834,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if r.OBOEgress.TokenServiceURL != "" &&
 			!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
 			env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
+		}
+		// Per-user memory: the launcher verifies the invoking user's run capability, so inject the platform
+		// capability public key + audience on the MAIN container (the OBO path sets them on the egress
+		// sidecar). Without them the launcher fail-closes per-user memory (never falls back to agent-wide).
+		if lt.PerUser && r.OBOEgress.CapabilityPublicKeyB64 != "" &&
+			!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+			env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
+			if r.OBOEgress.CapabilityAudience != "" &&
+				!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+				env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
+			}
 		}
 		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
