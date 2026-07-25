@@ -297,6 +297,29 @@ spec:
                   e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
                 minLength: 1
                 type: string
+              longTermMemory:
+                description: |-
+                  longTermMemory optionally enables `agent`/long-term semantic memory (ADR 0045) — persistent across
+                  conversations, retrieved by meaning — orthogonal to sessionMemory.
+                properties:
+                  embeddingRoute:
+                    description: |-
+                      embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+                      applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+                    maxLength: 253
+                    type: string
+                  enabled:
+                    description: enabled turns on long-term memory for the agent.
+                    type: boolean
+                  perUser:
+                    description: |-
+                      perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+                      caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+                      isolation means one user's remembered facts never surface in another user's retrieved context.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               port:
                 default: 8080
                 description: |-
@@ -874,6 +897,29 @@ spec:
                   e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
                 minLength: 1
                 type: string
+              longTermMemory:
+                description: |-
+                  longTermMemory optionally enables `agent`/long-term semantic memory (ADR 0045) — persistent across
+                  conversations, retrieved by meaning — orthogonal to sessionMemory.
+                properties:
+                  embeddingRoute:
+                    description: |-
+                      embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+                      applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+                    maxLength: 253
+                    type: string
+                  enabled:
+                    description: enabled turns on long-term memory for the agent.
+                    type: boolean
+                  perUser:
+                    description: |-
+                      perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+                      caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+                      isolation means one user's remembered facts never surface in another user's retrieved context.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               port:
                 default: 8080
                 description: |-
@@ -2419,6 +2465,29 @@ spec:
                       e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
                     minLength: 1
                     type: string
+                  longTermMemory:
+                    description: |-
+                      longTermMemory optionally enables `agent`/long-term semantic memory (ADR 0045) — persistent across
+                      conversations, retrieved by meaning — orthogonal to sessionMemory.
+                    properties:
+                      embeddingRoute:
+                        description: |-
+                          embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+                          applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+                        maxLength: 253
+                        type: string
+                      enabled:
+                        description: enabled turns on long-term memory for the agent.
+                        type: boolean
+                      perUser:
+                        description: |-
+                          perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+                          caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+                          isolation means one user's remembered facts never surface in another user's retrieved context.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
                   port:
                     default: 8080
                     description: |-
@@ -2870,6 +2939,29 @@ spec:
                       e.g. "ghcr.io/ctxmesh/echo-agent:latest". Required.
                     minLength: 1
                     type: string
+                  longTermMemory:
+                    description: |-
+                      longTermMemory optionally enables `agent`/long-term semantic memory (ADR 0045) — persistent across
+                      conversations, retrieved by meaning — orthogonal to sessionMemory.
+                    properties:
+                      embeddingRoute:
+                        description: |-
+                          embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
+                          applies the cluster-default embedding route. The route must exist on the agent's model gateway.
+                        maxLength: 253
+                        type: string
+                      enabled:
+                        description: enabled turns on long-term memory for the agent.
+                        type: boolean
+                      perUser:
+                        description: |-
+                          perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
+                          caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
+                          isolation means one user's remembered facts never surface in another user's retrieved context.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
                   port:
                     default: 8080
                     description: |-
@@ -5158,28 +5250,6 @@ spec:
                     maxLength: 256
                     type: string
                 type: object
-              longTerm:
-                description: longTerm optionally enables `agent`/long-term semantic
-                  memory (ADR 0045), orthogonal to scope.
-                properties:
-                  embeddingRoute:
-                    description: |-
-                      embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
-                      applies the cluster-default embedding route. The route must exist on the agent's model gateway.
-                    maxLength: 253
-                    type: string
-                  enabled:
-                    description: enabled turns on long-term memory for the agent.
-                    type: boolean
-                  perUser:
-                    description: |-
-                      perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
-                      caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
-                      isolation means one user's remembered facts never surface in another user's retrieved context.
-                    type: boolean
-                required:
-                - enabled
-                type: object
               scope:
                 default: session
                 description: |-
@@ -5317,28 +5387,6 @@ spec:
                       agent-engine-statelayer.agent-engine-system.svc:6379.
                     maxLength: 256
                     type: string
-                type: object
-              longTerm:
-                description: longTerm optionally enables `agent`/long-term semantic
-                  memory (ADR 0045), orthogonal to scope.
-                properties:
-                  embeddingRoute:
-                    description: |-
-                      embeddingRoute names the gateway model route used to embed memories + queries. If omitted the controller
-                      applies the cluster-default embedding route. The route must exist on the agent's model gateway.
-                    maxLength: 253
-                    type: string
-                  enabled:
-                    description: enabled turns on long-term memory for the agent.
-                    type: boolean
-                  perUser:
-                    description: |-
-                      perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
-                      caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
-                      isolation means one user's remembered facts never surface in another user's retrieved context.
-                    type: boolean
-                required:
-                - enabled
                 type: object
               scope:
                 default: session
