@@ -43,6 +43,7 @@ import {
   type AgentDetailResponse,
   type AgentReference,
   type AgentRunSummary,
+  type AgentMemoryEntry,
   type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
@@ -1589,6 +1590,87 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
           confirmLabel="Detach"
           busy={action.busy}
         />
+      )}
+
+      <LongTermMemoryPanel ns={ns} agentName={agentName} />
+    </div>
+  );
+}
+
+// ── Long-term memory viewer (m46.6, ADR 0045) ────────────────────────────────
+// Read-only list of the agent's AGENT-WIDE long-term memories (persistent,
+// semantically-retrievable knowledge). Per-user memories are never shown
+// (privacy). Degrades to "unavailable" on 501 (no control-plane store), and to a
+// friendly empty state when the agent has remembered nothing yet.
+
+type LongTermLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; items: AgentMemoryEntry[] }
+  | { kind: "unavailable" }
+  | { kind: "error"; message: string; forbidden: boolean };
+
+function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const [load, setLoad] = React.useState<LongTermLoad>({ kind: "loading" });
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    setLoad({ kind: "loading" });
+    api
+      .agentMemory(ns, agentName, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setLoad(res === null ? { kind: "unavailable" } : { kind: "ready", items: res.items });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load long-term memory",
+          forbidden: err instanceof ApiError && err.isForbidden,
+        });
+      });
+    return () => controller.abort();
+  }, [ns, agentName]);
+
+  // Unavailable (no store wired) — hide the section entirely, like other degraded surfaces.
+  if (load.kind === "unavailable") return null;
+
+  return (
+    <div className="mt-8 border-t pt-6" data-testid="longterm-memory-panel">
+      <p className="mb-1 text-sm font-medium">Long-term memory</p>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Persistent knowledge this agent has remembered across conversations (agent-wide;
+        per-user memories are private and not shown).
+      </p>
+
+      {load.kind === "loading" && (
+        <p className="text-sm text-muted-foreground" data-testid="longterm-loading">Loading…</p>
+      )}
+      {load.kind === "error" && (
+        <p className="text-sm text-destructive" data-testid="longterm-error">
+          {load.forbidden ? "Not allowed to read this agent's memory." : load.message}
+        </p>
+      )}
+      {load.kind === "ready" && load.items.length === 0 && (
+        <p className="text-sm text-muted-foreground" data-testid="longterm-empty">
+          Nothing remembered yet — this agent hasn't stored any long-term memories.
+        </p>
+      )}
+      {load.kind === "ready" && load.items.length > 0 && (
+        <ul className="space-y-2" data-testid="longterm-list">
+          {load.items.map((m, i) => (
+            <li
+              key={`${m.createdAt}-${i}`}
+              className="rounded-md border bg-card p-3 text-sm shadow-card"
+              data-testid="longterm-item"
+            >
+              <p className="whitespace-pre-wrap">{m.content}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {new Date(m.createdAt).toLocaleString()}
+              </p>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
