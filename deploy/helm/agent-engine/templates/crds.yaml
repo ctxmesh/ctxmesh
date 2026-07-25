@@ -6313,6 +6313,14 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: set
+              networkIsolation:
+                description: |-
+                  networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
+                  (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
+                  platform (knative/kourier/gateway/valkey/langfuse/DNS) but NOT other tenants. Opt-in + OFF by
+                  default — a blanket policy would also restrict non-agent workloads in the namespace, so a tenant
+                  enables it deliberately (the Capsule model). Omitted/false ⇒ no NetworkPolicy is stamped.
+                type: boolean
               quota:
                 description: |-
                   quota is the compute ceiling reconciled onto each member namespace as a
