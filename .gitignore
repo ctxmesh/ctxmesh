@@ -6,8 +6,6 @@
 *.dylib
 bin/*
 Dockerfile.cross
-# Build output: build-installer's install.yaml + m50 release build metadata (dist/release/*.metadata.json).
-/dist/
 
 # Test binary, built with `go test -c`
 *.test
