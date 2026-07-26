@@ -13,7 +13,7 @@
 # See agent-brain specs/mcp-tools.md §"Discovery sidecar" for the full
 # contract.
 
-FROM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
