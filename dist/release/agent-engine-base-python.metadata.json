@@ -1,0 +1,135 @@
+{
+  "buildx.build.provenance/linux/amd64": {
+    "builder": {
+      "id": ""
+    },
+    "buildType": "https://mobyproject.org/buildkit@v1",
+    "materials": [
+      {
+        "uri": "pkg:docker/golang@1.26?platform=linux%2Farm64",
+        "digest": {
+          "sha256": "3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647"
+        }
+      },
+      {
+        "uri": "pkg:docker/python@3.12-slim?platform=linux%2Famd64",
+        "digest": {
+          "sha256": "57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+        }
+      }
+    ],
+    "invocation": {
+      "configSource": {
+        "entryPoint": "Dockerfile"
+      },
+      "parameters": {
+        "frontend": "dockerfile.v0",
+        "args": {
+          "label:org.opencontainers.image.created": "2026-07-26T06:42:49Z",
+          "label:org.opencontainers.image.revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+          "label:org.opencontainers.image.source": "https://github.com/ctxmesh/agent-engine",
+          "label:org.opencontainers.image.title": "agent-engine-base-python",
+          "label:org.opencontainers.image.version": "756c6db-dirty"
+        },
+        "locals": [
+          {
+            "name": "context"
+          },
+          {
+            "name": "dockerfile"
+          }
+        ],
+        "root": {
+          "configSource": {
+            "path": "Dockerfile"
+          },
+          "request": {
+            "args": {
+              "label:org.opencontainers.image.created": "2026-07-26T06:42:49Z",
+              "label:org.opencontainers.image.revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+              "label:org.opencontainers.image.source": "https://github.com/ctxmesh/agent-engine",
+              "label:org.opencontainers.image.title": "agent-engine-base-python",
+              "label:org.opencontainers.image.version": "756c6db-dirty",
+              "vcs:localdir:context": ".",
+              "vcs:localdir:dockerfile": "images/base-python",
+              "vcs:revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+              "vcs:source": "git@github.com:ctxmesh/agent-engine.git"
+            }
+          }
+        },
+        "compatibilityVersion": 30
+      },
+      "environment": {
+        "dockerfileVersion": "1.25.0",
+        "platform": "linux/arm64"
+      }
+    }
+  },
+  "buildx.build.provenance/linux/arm64": {
+    "builder": {
+      "id": ""
+    },
+    "buildType": "https://mobyproject.org/buildkit@v1",
+    "materials": [
+      {
+        "uri": "pkg:docker/golang@1.26?platform=linux%2Farm64",
+        "digest": {
+          "sha256": "3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647"
+        }
+      },
+      {
+        "uri": "pkg:docker/python@3.12-slim?platform=linux%2Farm64",
+        "digest": {
+          "sha256": "57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
+        }
+      }
+    ],
+    "invocation": {
+      "configSource": {
+        "entryPoint": "Dockerfile"
+      },
+      "parameters": {
+        "frontend": "dockerfile.v0",
+        "args": {
+          "label:org.opencontainers.image.created": "2026-07-26T06:42:49Z",
+          "label:org.opencontainers.image.revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+          "label:org.opencontainers.image.source": "https://github.com/ctxmesh/agent-engine",
+          "label:org.opencontainers.image.title": "agent-engine-base-python",
+          "label:org.opencontainers.image.version": "756c6db-dirty"
+        },
+        "locals": [
+          {
+            "name": "context"
+          },
+          {
+            "name": "dockerfile"
+          }
+        ],
+        "root": {
+          "configSource": {
+            "path": "Dockerfile"
+          },
+          "request": {
+            "args": {
+              "label:org.opencontainers.image.created": "2026-07-26T06:42:49Z",
+              "label:org.opencontainers.image.revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+              "label:org.opencontainers.image.source": "https://github.com/ctxmesh/agent-engine",
+              "label:org.opencontainers.image.title": "agent-engine-base-python",
+              "label:org.opencontainers.image.version": "756c6db-dirty",
+              "vcs:localdir:context": ".",
+              "vcs:localdir:dockerfile": "images/base-python",
+              "vcs:revision": "756c6db581dc473d594d822cd67cc418fd7279e8",
+              "vcs:source": "git@github.com:ctxmesh/agent-engine.git"
+            }
+          }
+        },
+        "compatibilityVersion": 30
+      },
+      "environment": {
+        "dockerfileVersion": "1.25.0",
+        "platform": "linux/arm64"
+      }
+    }
+  },
+  "buildx.build.ref": "agent-engine-release/agent-engine-release0/pd3dbq6t7m049mq0gq9mkcs0k"
+}

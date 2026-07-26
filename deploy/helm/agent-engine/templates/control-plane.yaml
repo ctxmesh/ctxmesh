@@ -835,7 +835,7 @@ metadata:
   name: agent-engine-gateway
   namespace: {{ .Values.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.gateway.replicas | default 1 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-engine
@@ -901,7 +901,7 @@ metadata:
   name: agent-engine-token-service
   namespace: {{ .Values.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.tokenService.replicas | default 1 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-engine
