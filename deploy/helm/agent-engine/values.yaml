@@ -37,6 +37,17 @@ controllerManager:
     enabled: false
     minAvailable: 1
 
+# Optional PodDisruptionBudgets for the stateless request-serving components
+# (bff / gateway / token-service), M48 / ADR 0047. OFF by default (no-drift).
+# Enable ALONGSIDE their replicas>1 so a node drain/upgrade can't evict a whole
+# component at once. These components are stateless request-servers (the token-
+# service reads the shared credential store; the gateway is a config-rendered
+# proxy; the bff is caller-scoped) — but note bff replicas>1 requires the durable
+# run-worker path (runWorkerDispatch, ADR 0034), else runs execute in-process.
+componentPodDisruptionBudgets:
+  enabled: false
+  minAvailable: 1
+
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
 crds:
