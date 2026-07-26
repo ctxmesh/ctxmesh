@@ -35,6 +35,7 @@ interface DetailOpts {
   agentRunsStatus?: number;
   longTermMemory?: unknown[] | null; // null → 501 (no control-plane store), m46.6
   longTermMemoryError?: boolean; // true → 500 (store read failed), m46.6
+  longTermConfig?: { enabled: boolean; perUser: boolean; embeddingRoute?: string }; // m49.3 enable surface
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
   // m17.11 additions: memory + scaling panels
@@ -134,6 +135,13 @@ function installFetch(opts: DetailOpts = {}) {
         }
         const runs = opts.agentRuns ?? [];
         return j({ runs }, true, 200);
+      }
+      // m49.3: long-term memory config (GET/PUT .../longtermmemory) — the ENABLE surface.
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) {
+        if (method === "PUT") {
+          return j(init?.body ? JSON.parse(init.body as string) : {}, true, 200);
+        }
+        return j(opts.longTermConfig ?? { enabled: false, perUser: false }, true, 200);
       }
       // m46.6: long-term memory (GET .../memory)
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) {
@@ -255,6 +263,8 @@ describe("AgentDetailPage (landing page)", () => {
     // Overview shows bindings + versions.
     expect(screen.getByTestId("versions-list")).toHaveTextContent("billing-v2");
     expect(screen.getByTestId("binding-get-invoice-binding")).toHaveTextContent("get_invoice");
+    // The namespace links to its governing tenant (m49.4 — closes the agent→tenant leg).
+    expect(screen.getByTestId("agent-namespace-link")).toHaveAttribute("href", "/tenants?q=prod");
   });
 
   it("groups tool bindings by MCP server, collapsed by default, with a ready rollup", async () => {
@@ -773,6 +783,18 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     expect(screen.queryByTestId("memory-binding-mb-other")).toBeNull();
   });
 
+  it("opens directly on the Memory tab via ?tab=Memory (m49.3 trace→memory deep-link)", async () => {
+    installFetch({
+      memoryBindings: [
+        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", backend: "redis", ready: true },
+      ],
+    });
+    renderAt("/agents/prod/billing?tab=Memory");
+    await screen.findByTestId("agent-detail-page");
+    // No tab click — the Memory panel is active from the deep-link alone.
+    expect(await screen.findByTestId("memory-panel")).toBeInTheDocument();
+  });
+
   it("long-term memory: lists the agent's remembered facts (m46.6)", async () => {
     installFetch({
       longTermMemory: [{ content: "the team prefers metric units", createdAt: "2026-07-25T00:00:00Z" }],
@@ -897,6 +919,25 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     expect(screen.queryByTestId("memory-attach")).toBeNull();
     expect(screen.queryByTestId("memory-detach-mb-billing-global")).toBeNull();
     expect(screen.queryByTestId("memory-edit-mb-billing-global")).toBeNull();
+  });
+
+  it("long-term memory: enables the capability via the config panel (m49.3)", async () => {
+    const calls = installFetch({ longTermConfig: { enabled: false, perUser: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-config");
+    expect(screen.getByTestId("longterm-state")).toHaveTextContent("Disabled");
+    // Turn on per-user, then Enable → a PUT patches the folded field.
+    fireEvent.click(screen.getByTestId("longterm-peruser"));
+    fireEvent.click(screen.getByTestId("longterm-enable"));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.includes("/longtermmemory") && c.method === "PUT");
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put!.body)).toMatchObject({ enabled: true, perUser: true });
+    });
   });
 });
 

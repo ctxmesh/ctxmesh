@@ -1,6 +1,6 @@
 import * as React from "react";
-import { useParams } from "react-router-dom";
-import { ExternalLink } from "lucide-react";
+import { Link, useParams } from "react-router-dom";
+import { ExternalLink, Boxes, Brain } from "lucide-react";
 
 import { buttonVariants } from "@/components/ui/button";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
@@ -159,6 +159,30 @@ export function TracePage() {
           <p className="text-sm text-muted-foreground">
             {fmtTimestamp(rollup.timestamp)}
           </p>
+          {/* Trace→agent + trace→memory back-links (m49.3) — close the loop from an
+              observed run back to the agent that produced it AND to that agent's memory
+              (memory is otherwise undiscoverable, M46 review P1). Only when the trace
+              carries a full agent identity. */}
+          {rollup.agentNs && rollup.agentName && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Link
+                to={`/agents/${encodeURIComponent(rollup.agentNs)}/${encodeURIComponent(rollup.agentName)}`}
+                data-testid="trace-agent-link"
+                className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+              >
+                <Boxes className="h-3.5 w-3.5" />
+                {rollup.agentNs}/{rollup.agentName}
+              </Link>
+              <Link
+                to={`/agents/${encodeURIComponent(rollup.agentNs)}/${encodeURIComponent(rollup.agentName)}?tab=Memory`}
+                data-testid="trace-memory-link"
+                className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground hover:underline"
+              >
+                <Brain className="h-3.5 w-3.5" />
+                Memory
+              </Link>
+            </div>
+          )}
         </div>
 
         <dl className="flex shrink-0 flex-wrap gap-x-6 gap-y-2 text-sm">

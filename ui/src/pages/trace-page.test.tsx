@@ -46,11 +46,13 @@ function installFetch(opts: {
   linkOk?: boolean;
   feedbackOk?: boolean;
   feedbackStatus?: number;
+  rollup?: Record<string, unknown>;
 } = {}) {
   const {
     detailOk = true, detailStatus = 200,
     linkOk = true,
     feedbackOk = true, feedbackStatus = 200,
+    rollup = ROLLUP,
   } = opts;
 
   vi.stubGlobal(
@@ -61,7 +63,7 @@ function installFetch(opts: {
       if (url.includes("/detail")) {
         return Promise.resolve({
           ok: detailOk, status: detailStatus,
-          json: async () => ({ rollup: ROLLUP, spans: SPANS }),
+          json: async () => ({ rollup, spans: SPANS }),
           text: async () => JSON.stringify({ error: "forbidden" }),
         } as Response);
       }
@@ -178,6 +180,26 @@ describe("TracePage (m16.7)", () => {
       expect(screen.getByTestId("trace-page-unconfigured")).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("trace-page-error")).toBeNull();
+  });
+
+  it("renders a trace→agent back-link when the trace carries an agent identity (m49.3)", async () => {
+    installFetch({ rollup: { ...ROLLUP, agentNs: "prod", agentName: "billing-agent" } });
+    renderPage();
+
+    const link = await screen.findByTestId("trace-agent-link");
+    expect(link).toHaveAttribute("href", "/agents/prod/billing-agent");
+    expect(link).toHaveTextContent("prod/billing-agent");
+    // …and a companion deep-link straight to that agent's Memory tab.
+    const memLink = screen.getByTestId("trace-memory-link");
+    expect(memLink).toHaveAttribute("href", "/agents/prod/billing-agent?tab=Memory");
+  });
+
+  it("omits the back-link when the trace has no agent identity", async () => {
+    installFetch(); // ROLLUP has no agentNs/agentName
+    renderPage();
+
+    await screen.findByTestId("trace-header");
+    expect(screen.queryByTestId("trace-agent-link")).toBeNull();
   });
 
   it("includes the FeedbackPanel (feedback-panel testid)", async () => {

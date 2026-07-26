@@ -44,6 +44,7 @@ import {
   type AgentReference,
   type AgentRunSummary,
   type AgentMemoryEntry,
+  type LongTermMemoryConfig,
   type AgentScalingPolicySummary,
   type AgentSimplifiedSpec,
   type LogEventType,
@@ -80,7 +81,13 @@ export function AgentDetailPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [state, setState] = React.useState<Load>({ kind: "loading" });
-  const [tab, setTab] = React.useState<Tab>("Overview");
+  // The initial tab is deep-linkable via ?tab=<Name> (m49.3) — a trace→memory
+  // back-link lands directly on the Memory tab. Unknown/absent ⇒ Overview.
+  const initialTab = ((): Tab => {
+    const t = searchParams.get("tab");
+    return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : "Overview";
+  })();
+  const [tab, setTab] = React.useState<Tab>(initialTab);
   // The trace to inspect — set when a run returns a traceId; opens the inspector
   // drawer over the page (list context preserved).
   const [inspectTrace, setInspectTrace] = React.useState<string | null>(null);
@@ -155,7 +162,7 @@ export function AgentDetailPage() {
           <EmptyState
             icon={Boxes}
             title="Agent not found"
-            description={`No AgentDeployment "${name}" in ${ns || "this namespace"}. It may have been deleted, or the name is wrong.`}
+            description={`No agent "${name}" in ${ns || "this namespace"}. It may have been deleted, or the name is wrong.`}
             action={{ label: "Back to agents", onClick: () => history.back() }}
           />
         </div>
@@ -298,7 +305,17 @@ function AgentHeader({
             drift
           </Badge>
         )}
-        <span className="text-sm text-muted-foreground">{detail.namespace}</span>
+        {/* The namespace links to the tenant that governs it (m49.4 UX-review P1 —
+            closes the observe→agent→…→tenant loop). The Tenants filter matches on
+            namespace; an unowned namespace lands on an honest empty list. */}
+        <Link
+          to={`/tenants?q=${encodeURIComponent(detail.namespace)}`}
+          data-testid="agent-namespace-link"
+          title={`View the tenant governing namespace "${detail.namespace}"`}
+          className="text-sm text-muted-foreground hover:text-foreground hover:underline"
+        >
+          {detail.namespace}
+        </Link>
         {/* RBAC-aware write affordances — hidden for viewers */}
         <div className="ml-auto flex items-center gap-2">
           {canEdit && (
@@ -638,7 +655,7 @@ function EditWizard({
         {saveState.kind === "error" && saveState.forbidden && (
           <ForbiddenInline
             title="Not allowed to edit this agent"
-            description="Your account can't update AgentDeployments in this cluster."
+            description="Your account can't update agents in this cluster."
             detail={saveState.message}
           />
         )}
@@ -1597,6 +1614,7 @@ function MemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
         />
       )}
 
+      <LongTermMemoryConfigPanel ns={ns} agentName={agentName} />
       <LongTermMemoryPanel ns={ns} agentName={agentName} />
     </div>
   );
@@ -1613,6 +1631,118 @@ type LongTermLoad =
   | { kind: "ready"; items: AgentMemoryEntry[] }
   | { kind: "unavailable" }
   | { kind: "error"; message: string; forbidden: boolean };
+
+// LongTermMemoryConfigPanel (m49.3) — the ENABLE surface for M46's folded long-term-memory capability. The
+// console could VIEW an agent's long-term memories (LongTermMemoryPanel) but had no way to TURN THE
+// CAPABILITY ON (the m49.1 capability pocket). Patches spec.longTermMemory via the BFF (the tracepolicy
+// pattern). Read-only for viewers (the form is gated on the agent-update capability); hides if unreadable.
+function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
+  const { can } = useCapabilities();
+  const canUpdate = can(RES_AGENTS, "update");
+  const [config, setConfig] = React.useState<LongTermMemoryConfig | null>(null);
+  const [route, setRoute] = React.useState("");
+  const [perUser, setPerUser] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const apply = React.useCallback((c: LongTermMemoryConfig) => {
+    setConfig(c);
+    setRoute(c.embeddingRoute ?? "");
+    setPerUser(c.perUser);
+  }, []);
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    api
+      .longTermMemoryConfig(ns, agentName, controller.signal)
+      .then((c) => !controller.signal.aborted && apply(c))
+      .catch(() => !controller.signal.aborted && setConfig(null));
+    return () => controller.abort();
+  }, [ns, agentName, apply]);
+
+  function save(enabled: boolean) {
+    setBusy(true);
+    setErr(null);
+    api
+      .setLongTermMemory(ns, agentName, {
+        enabled,
+        perUser,
+        embeddingRoute: route.trim() || undefined,
+      })
+      .then(apply)
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : "update failed"))
+      .finally(() => setBusy(false));
+  }
+
+  if (config === null) return null; // unreadable (403/404) — hide, no noise
+
+  return (
+    <div className="mt-8 border-t pt-6" data-testid="longterm-config">
+      <h3 className="mb-1 text-sm font-medium">Long-term memory</h3>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Let this agent remember facts across conversations and recall them by meaning (ADR 0045).
+      </p>
+      <div className="flex items-center gap-2 text-sm">
+        <Badge variant={config.enabled ? "success" : "secondary"} data-testid="longterm-state">
+          {config.enabled ? "Enabled" : "Disabled"}
+        </Badge>
+        {config.enabled && (
+          <span className="text-xs text-muted-foreground">
+            {config.perUser ? "per-user" : "agent-wide"}
+            {config.embeddingRoute ? ` · route ${config.embeddingRoute}` : ""}
+          </span>
+        )}
+      </div>
+      {canUpdate && (
+        <div className="mt-3 space-y-2" data-testid="longterm-config-form">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={perUser}
+              onChange={(e) => setPerUser(e.target.checked)}
+              data-testid="longterm-peruser"
+            />
+            Per-user memory (each end-user's own facts, isolated)
+          </label>
+          <Input
+            placeholder="Embedding route (optional — a ModelRoute name)"
+            value={route}
+            onChange={(e) => setRoute(e.target.value)}
+            data-testid="longterm-route"
+          />
+          <div className="flex gap-2">
+            {config.enabled ? (
+              <>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => save(true)} data-testid="longterm-save">
+                  Save
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={busy}
+                  onClick={() => save(false)}
+                  data-testid="longterm-disable"
+                >
+                  Disable
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" disabled={busy} onClick={() => save(true)} data-testid="longterm-enable">
+                Enable
+              </Button>
+            )}
+          </div>
+          {err && (
+            <p className="text-sm text-destructive" data-testid="longterm-config-error">
+              {err}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
   const [load, setLoad] = React.useState<LongTermLoad>({ kind: "loading" });

@@ -255,8 +255,16 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return errors.New("RUN_WORKER_DISPATCH requires a durable run store (set RUN_STORE_DSN)")
 	}
 
+	// Live tenant-usage reader (M49): read-only connection to the shared state-layer Valkey so the console
+	// can show a tenant's current spend/rpm/inflight vs the cap. Optional — absent ⇒ the usage endpoint 501s.
+	var tenantUsage bff.TenantUsageReader
+	if addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR")); addr != "" {
+		tenantUsage = bff.NewRedisTenantUsageReader(addr)
+	}
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
+		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
