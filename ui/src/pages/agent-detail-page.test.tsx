@@ -263,6 +263,8 @@ describe("AgentDetailPage (landing page)", () => {
     // Overview shows bindings + versions.
     expect(screen.getByTestId("versions-list")).toHaveTextContent("billing-v2");
     expect(screen.getByTestId("binding-get-invoice-binding")).toHaveTextContent("get_invoice");
+    // The namespace links to its governing tenant (m49.4 — closes the agent→tenant leg).
+    expect(screen.getByTestId("agent-namespace-link")).toHaveAttribute("href", "/tenants?q=prod");
   });
 
   it("groups tool bindings by MCP server, collapsed by default, with a ready rollup", async () => {

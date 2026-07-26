@@ -305,7 +305,17 @@ function AgentHeader({
             drift
           </Badge>
         )}
-        <span className="text-sm text-muted-foreground">{detail.namespace}</span>
+        {/* The namespace links to the tenant that governs it (m49.4 UX-review P1 —
+            closes the observe→agent→…→tenant loop). The Tenants filter matches on
+            namespace; an unowned namespace lands on an honest empty list. */}
+        <Link
+          to={`/tenants?q=${encodeURIComponent(detail.namespace)}`}
+          data-testid="agent-namespace-link"
+          title={`View the tenant governing namespace "${detail.namespace}"`}
+          className="text-sm text-muted-foreground hover:text-foreground hover:underline"
+        >
+          {detail.namespace}
+        </Link>
         {/* RBAC-aware write affordances — hidden for viewers */}
         <div className="ml-auto flex items-center gap-2">
           {canEdit && (
