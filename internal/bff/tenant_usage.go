@@ -52,9 +52,12 @@ type redisTenantUsage struct{ rdb *redis.Client }
 // launcher's bounded memory/dedupe clients (cmd/launcher/memory.go, async.go).
 const usageOpTimeout = 2 * time.Second
 
-// NewRedisTenantUsageReader connects (read-only) to the shared state-layer Valkey at addr. No password: it
-// matches the launcher's tenant-store writer (cmd/launcher/tenant_quota.go), which also connects unauthed
-// to the in-cluster Valkey. When the in-cluster requirepass hardening lands, BOTH must gain the password.
+// NewRedisTenantUsageReader connects (read-only) to the shared state-layer Valkey at addr. No password by
+// design: the in-cluster Valkey is unauthenticated on purpose (ADR 0049 — in-cluster `requirepass` was DECLINED
+// because the Knative no-`valueFrom`-in-ksvc constraint forces the launcher's password to be broadly readable,
+// making it security theater). This reader matches the launcher's unauthed tenant-store writer
+// (cmd/launcher/tenant_quota.go). Password auth is the BYO-external-Valkey posture (`devDataPlane.enabled=false`);
+// real per-tenant isolation of the in-cluster store is the roadmapped memory-proxy + Valkey-ACLs (ADR 0049).
 func NewRedisTenantUsageReader(addr string) TenantUsageReader {
 	return &redisTenantUsage{rdb: redis.NewClient(&redis.Options{
 		Addr:        addr,
