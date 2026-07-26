@@ -143,6 +143,39 @@ func TestLangfuseTraceDetailFlatSpans(t *testing.T) {
 	assert.Equal(t, "/api/public/traces/trace-1", rec.path)
 }
 
+// A trace carrying the launcher's agent:<ns>/<name> identity tag projects the
+// originating agent onto the rollup — the trace→agent back-link (m49.3).
+const traceTaggedJSON = `{
+  "id": "trace-t",
+  "name": "prod/my-agent",
+  "timestamp": "2026-07-01T00:00:00Z",
+  "tags": ["env:dev", "agent:prod/my-agent"],
+  "observations": [
+    {"id": "s1", "type": "SPAN", "name": "step", "startTime": "2026-07-01T00:00:00Z"}
+  ]
+}`
+
+func TestLangfuseTraceDetailAgentBackLink(t *testing.T) {
+	srv, _ := fakeLangfuseTrace(t, traceTaggedJSON)
+	a := newTestLangfuse(t, srv.URL)
+
+	detail, err := a.TraceDetail(context.Background(), "trace-t")
+	require.NoError(t, err)
+	assert.Equal(t, "prod", detail.Rollup.AgentNs, "the ns is parsed from the agent:<ns>/<name> tag")
+	assert.Equal(t, "my-agent", detail.Rollup.AgentName, "the name is parsed from the agent tag")
+}
+
+// An untagged trace leaves the agent identity empty (no back-link is rendered).
+func TestLangfuseTraceDetailNoAgentTag(t *testing.T) {
+	srv, _ := fakeLangfuseTrace(t, traceRedactedJSON) // has no tags
+	a := newTestLangfuse(t, srv.URL)
+
+	detail, err := a.TraceDetail(context.Background(), "trace-r")
+	require.NoError(t, err)
+	assert.Empty(t, detail.Rollup.AgentNs)
+	assert.Empty(t, detail.Rollup.AgentName)
+}
+
 // A redacted observation: M11 scrubs input/output before persistence, so the
 // persisted content may be empty/absent. The span must still show its STRUCTURE
 // (name/timing/tokens) with the *Redacted flags set — never a crash or a leak.

@@ -540,6 +540,12 @@ type TraceRollup struct {
 	LatencyMs float64 `json:"latencyMs"`
 	// SpanCount is len(Spans) — a convenience the panel shows without counting.
 	SpanCount int `json:"spanCount"`
+	// AgentNs/AgentName are the run's originating agent, parsed from the trace's
+	// agent:<ns>/<name> identity tag (m49.3) — the console renders a back-link to
+	// /agents/{ns}/{name}, closing the trace→agent loop (M46 review P1). Empty when
+	// the trace carries no agent tag (an untagged/ambient trace).
+	AgentNs   string `json:"agentNs,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
 }
 
 // TraceDetail is the adapter-level projection of one trace + its observations:

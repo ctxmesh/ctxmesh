@@ -30,11 +30,13 @@ import (
 // compute + model quotas — it carries NO end-user PII (only namespaces + caps + status), so the DTOs project
 // the whole object. Read-only; caller-scoped (ADR 0011) so a viewer's 403 is the API server's real answer.
 
-// TenantSummary is one tenants-list row.
+// TenantSummary is one tenants-list row. Namespaces is the tenant's claimed set (spec) so the list can be
+// filtered by namespace — the M47-review ask "which tenant owns namespace X?" — without a per-row detail fetch.
 type TenantSummary struct {
-	Name             string `json:"name"`
-	MemberNamespaces int32  `json:"memberNamespaces"`
-	Ready            bool   `json:"ready"`
+	Name             string   `json:"name"`
+	Namespaces       []string `json:"namespaces"`
+	MemberNamespaces int32    `json:"memberNamespaces"`
+	Ready            bool     `json:"ready"`
 }
 
 // TenantQuotaDTO is the compute ceiling (ResourceQuota) projection.
@@ -85,7 +87,16 @@ func tenantReady(t *agentsv1alpha1.Tenant) bool {
 }
 
 func newTenantSummary(t *agentsv1alpha1.Tenant) TenantSummary {
-	return TenantSummary{Name: t.Name, MemberNamespaces: t.Status.MemberNamespaces, Ready: tenantReady(t)}
+	ns := t.Spec.Namespaces
+	if ns == nil {
+		ns = []string{}
+	}
+	return TenantSummary{
+		Name:             t.Name,
+		Namespaces:       ns,
+		MemberNamespaces: t.Status.MemberNamespaces,
+		Ready:            tenantReady(t),
+	}
 }
 
 func newTenantDetail(t *agentsv1alpha1.Tenant) TenantDetail {

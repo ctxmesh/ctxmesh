@@ -91,8 +91,10 @@ func TestListTenants(t *testing.T) {
 		byName[it.Name] = it
 	}
 	assert.Equal(t, int32(2), byName["alpha"].MemberNamespaces)
+	assert.Equal(t, []string{"a1", "a2"}, byName["alpha"].Namespaces, "summary carries the claimed namespaces for filter-by-namespace")
 	assert.True(t, byName["alpha"].Ready)
 	assert.False(t, byName["beta"].Ready)
+	assert.NotNil(t, byName["beta"].Namespaces, "namespaces is a non-nil [] even for a single-namespace tenant")
 }
 
 func TestGetTenantDetail(t *testing.T) {

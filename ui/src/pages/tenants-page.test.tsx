@@ -8,6 +8,7 @@ import { ToastProvider } from "@/components/kit";
 function installFetch(opts: {
   tenants?: { ok: boolean; status?: number; body: unknown };
   detail?: { ok: boolean; status?: number; body?: unknown };
+  usage?: { ok: boolean; status?: number; body?: unknown };
 }) {
   vi.stubGlobal(
     "fetch",
@@ -20,6 +21,11 @@ function installFetch(opts: {
       if (url === "/api/tenants" && method === "GET") {
         const r = opts.tenants ?? { ok: true, body: { items: [] } };
         return j(r.body, r.ok, r.status ?? (r.ok ? 200 : 500));
+      }
+      // Live usage (M49). Default 501 (no state-layer) so the panel hides the line unless a test opts in.
+      if (url.match(/\/api\/tenants\/[^/]+\/usage$/) && method === "GET") {
+        const r = opts.usage ?? { ok: false, status: 501 };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 501));
       }
       if (url.match(/\/api\/tenants\/[^/]+$/) && method === "GET") {
         const r = opts.detail ?? { ok: true, body: {} };
@@ -52,8 +58,8 @@ describe("TenantsPage", () => {
         ok: true,
         body: {
           items: [
-            { name: "alpha", memberNamespaces: 2, ready: true },
-            { name: "beta", memberNamespaces: 1, ready: false },
+            { name: "alpha", namespaces: ["a1", "a2"], memberNamespaces: 2, ready: true },
+            { name: "beta", namespaces: ["b1"], memberNamespaces: 1, ready: false },
           ],
         },
       },
@@ -63,9 +69,34 @@ describe("TenantsPage", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
+  it("filters by namespace, not just tenant name (M47 — 'who owns X?')", async () => {
+    installFetch({
+      tenants: {
+        ok: true,
+        body: {
+          items: [
+            { name: "alpha", namespaces: ["team-a", "shared"], memberNamespaces: 2, ready: true },
+            { name: "beta", namespaces: ["team-b"], memberNamespaces: 1, ready: true },
+          ],
+        },
+      },
+    });
+    renderPage();
+    await screen.findByText("alpha");
+    // Typing a NAMESPACE that only alpha owns narrows the list to alpha.
+    fireEvent.change(screen.getByPlaceholderText(/name or namespace/i), {
+      target: { value: "team-a" },
+    });
+    expect(screen.getByText("alpha")).toBeInTheDocument();
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+  });
+
   it("opens a detail panel (namespaces + model caps) on row click", async () => {
     installFetch({
-      tenants: { ok: true, body: { items: [{ name: "alpha", memberNamespaces: 2, ready: true }] } },
+      tenants: {
+        ok: true,
+        body: { items: [{ name: "alpha", namespaces: ["a1", "a2"], memberNamespaces: 2, ready: true }] },
+      },
       detail: {
         ok: true,
         body: {
@@ -86,6 +117,55 @@ describe("TenantsPage", () => {
     expect(screen.getByText(/\$100\.00 budget/)).toBeInTheDocument();
   });
 
+  it("shows live usage vs the caps when the state-layer is wired (M49)", async () => {
+    installFetch({
+      tenants: { ok: true, body: { items: [{ name: "alpha", namespaces: ["a1"], memberNamespaces: 1, ready: true }] } },
+      detail: {
+        ok: true,
+        body: {
+          name: "alpha",
+          namespaces: ["a1"],
+          model: { budgetUSD: "100.00", rpm: 600, maxConcurrent: 20 },
+          memberNamespaces: 1,
+          ready: true,
+          conditions: [],
+        },
+      },
+      usage: { ok: true, body: { spendUSD: 42.5, rpm: 120, inFlight: 3 } },
+    });
+    renderPage();
+    const row = await screen.findByText("alpha");
+    fireEvent.click(row.closest("tr") ?? row);
+    const usage = await screen.findByTestId("tenant-usage", {}, { timeout: 3000 });
+    expect(usage).toHaveTextContent(/\$42\.50 \/ \$100\.00 spent/);
+    expect(usage).toHaveTextContent(/120 \/ 600 req\/min/);
+    expect(usage).toHaveTextContent(/3 \/ 20 in-flight/);
+  });
+
+  it("hides the live-usage line when no state-layer is configured (501)", async () => {
+    installFetch({
+      tenants: { ok: true, body: { items: [{ name: "alpha", namespaces: ["a1"], memberNamespaces: 1, ready: true }] } },
+      detail: {
+        ok: true,
+        body: {
+          name: "alpha",
+          namespaces: ["a1"],
+          model: { budgetUSD: "100.00", rpm: 600, maxConcurrent: 20 },
+          memberNamespaces: 1,
+          ready: true,
+          conditions: [],
+        },
+      },
+      // usage omitted → default 501
+    });
+    renderPage();
+    const row = await screen.findByText("alpha");
+    fireEvent.click(row.closest("tr") ?? row);
+    // The panel opens (model caps render) but the live-usage line stays hidden.
+    expect(await screen.findByText(/\$100\.00 budget/)).toBeInTheDocument();
+    expect(screen.queryByTestId("tenant-usage")).not.toBeInTheDocument();
+  });
+
   it("teaches an empty state when there are no tenants", async () => {
     installFetch({ tenants: { ok: true, body: { items: [] } } });
     renderPage();
@@ -94,7 +174,7 @@ describe("TenantsPage", () => {
 
   it("surfaces a NamespaceConflict warning in the detail", async () => {
     installFetch({
-      tenants: { ok: true, body: { items: [{ name: "alpha", memberNamespaces: 1, ready: true }] } },
+      tenants: { ok: true, body: { items: [{ name: "alpha", namespaces: ["a1"], memberNamespaces: 1, ready: true }] } },
       detail: {
         ok: true,
         body: {

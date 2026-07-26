@@ -64,6 +64,11 @@ spec:
           env:
             - name: PROVIDER_CONNECT_ENABLED
               value: "true"
+            # STATELAYER_ADDR (M49): the shared state-layer Valkey the launcher tenant enforcer writes
+            # usage to — the BFF reads it (read-only) for the Tenants live usage-vs-cap surface. Absent ⇒
+            # the /api/tenants/{name}/usage endpoint 501s.
+            - name: STATELAYER_ADDR
+              value: agent-engine-statelayer.agent-engine-system.svc:6379
             # PLATFORM_GENERATION_MODELS is the ADR 0014 create-from-prompt
             # generation-model pin (comma-separated). "" (the default) leaves
             # generation using the caller's connected-provider model unpinned; an
