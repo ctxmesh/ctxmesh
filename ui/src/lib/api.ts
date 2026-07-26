@@ -289,6 +289,10 @@ export interface TraceRollup {
   tokens: number;
   latencyMs: number;
   spanCount: number;
+  // The originating agent (from the agent:<ns>/<name> tag) — the trace→agent
+  // back-link target (m49.3). Both empty for an untagged/ambient trace.
+  agentNs?: string;
+  agentName?: string;
 }
 
 // TraceDetailResponse mirrors GET /api/traces/{id}/detail — the run SUMMARY
@@ -1831,6 +1835,7 @@ export interface AgentRegistryListResponse {
 // --- Tenants (M47, ADR 0046) — cluster-scoped namespace grouping + quotas -------
 export interface TenantSummary {
   name: string;
+  namespaces: string[]; // claimed set — the list is filterable by namespace ("who owns X?")
   memberNamespaces: number;
   ready: boolean;
 }
@@ -1866,6 +1871,13 @@ export interface TenantDetail {
 
 export interface TenantListResponse {
   items: TenantSummary[];
+}
+
+// A tenant's LIVE quota consumption (M49) — the usage-vs-cap answer to "who's about to be throttled?".
+export interface TenantUsage {
+  spendUSD: number;
+  rpm: number;
+  inFlight: number;
 }
 
 export interface AgentRegistryCreateRequest {
@@ -2801,6 +2813,10 @@ export const api = {
 
   tenantDetail: (name: string, signal?: AbortSignal) =>
     getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),
+
+  // Live tenant usage (M49) — spend/rpm/inFlight vs the caps. May 501 when no state-layer is wired.
+  tenantUsage: (name: string, signal?: AbortSignal) =>
+    getJSON<TenantUsage>(`/api/tenants/${encodeURIComponent(name)}/usage`, signal),
 
   createAgentRegistry: async (
     req: AgentRegistryCreateRequest,

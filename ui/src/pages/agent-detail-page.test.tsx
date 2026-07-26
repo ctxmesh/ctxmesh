@@ -781,6 +781,18 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     expect(screen.queryByTestId("memory-binding-mb-other")).toBeNull();
   });
 
+  it("opens directly on the Memory tab via ?tab=Memory (m49.3 trace→memory deep-link)", async () => {
+    installFetch({
+      memoryBindings: [
+        { name: "mb-billing-global", namespace: "prod", agentRef: "billing", scope: "global", backend: "redis", ready: true },
+      ],
+    });
+    renderAt("/agents/prod/billing?tab=Memory");
+    await screen.findByTestId("agent-detail-page");
+    // No tab click — the Memory panel is active from the deep-link alone.
+    expect(await screen.findByTestId("memory-panel")).toBeInTheDocument();
+  });
+
   it("long-term memory: lists the agent's remembered facts (m46.6)", async () => {
     installFetch({
       longTermMemory: [{ content: "the team prefers metric units", createdAt: "2026-07-25T00:00:00Z" }],

@@ -81,7 +81,13 @@ export function AgentDetailPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [state, setState] = React.useState<Load>({ kind: "loading" });
-  const [tab, setTab] = React.useState<Tab>("Overview");
+  // The initial tab is deep-linkable via ?tab=<Name> (m49.3) — a trace→memory
+  // back-link lands directly on the Memory tab. Unknown/absent ⇒ Overview.
+  const initialTab = ((): Tab => {
+    const t = searchParams.get("tab");
+    return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : "Overview";
+  })();
+  const [tab, setTab] = React.useState<Tab>(initialTab);
   // The trace to inspect — set when a run returns a traceId; opens the inspector
   // drawer over the page (list context preserved).
   const [inspectTrace, setInspectTrace] = React.useState<string | null>(null);
