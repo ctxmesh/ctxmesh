@@ -990,6 +990,16 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 	// orderSpansDFS — every span appears exactly once, no infinite loops.
 	ordered, rootID := orderSpansDFS(spans)
 
+	// Parse the agent:<ns>/<name> identity tag so the console can back-link the trace to
+	// its originating agent (m49.3, M46 review P1). Absent tag ⇒ empty (untagged/ambient).
+	var agentNs, agentName string
+	for _, tag := range body.Tags {
+		if ns, name, ok := parseAgentTag(tag); ok {
+			agentNs, agentName = ns, name
+			break
+		}
+	}
+
 	return TraceDetail{
 		Rollup: TraceRollup{
 			TraceID:   body.ID,
@@ -999,6 +1009,8 @@ func (a *langfuseAdapter) TraceDetail(ctx context.Context, traceID string) (Trac
 			Tokens:    tokens,
 			LatencyMs: latencyMsOf(body.lfTrace),
 			SpanCount: len(ordered),
+			AgentNs:   agentNs,
+			AgentName: agentName,
 		},
 		Spans:      ordered,
 		RootSpanID: rootID,

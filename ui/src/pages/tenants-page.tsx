@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Building2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
-import { api, ApiError, type TenantSummary, type TenantDetail } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  type TenantSummary,
+  type TenantDetail,
+  type TenantUsage,
+} from "@/lib/api";
 
 // TenantsPage (M47, ADR 0046) — a read-only list of cluster-scoped Tenants (namespace groupings + compute +
 // model quotas). Row-click opens an inline detail panel (member namespaces + quota/model caps + conflicts).
@@ -44,6 +51,20 @@ function modelSummary(t: TenantDetail): string {
   return parts.length ? parts.join(" · ") : "—";
 }
 
+// usageSummary renders the tenant's LIVE consumption vs its caps (M49 — "who's about to be throttled?").
+function usageSummary(tenant: TenantDetail, u: TenantUsage): string {
+  const parts = [
+    tenant.model?.budgetUSD
+      ? `$${u.spendUSD.toFixed(2)} / $${tenant.model.budgetUSD} spent`
+      : `$${u.spendUSD.toFixed(2)} spent`,
+    tenant.model?.rpm ? `${u.rpm} / ${tenant.model.rpm} req/min` : `${u.rpm} req/min`,
+    tenant.model?.maxConcurrent
+      ? `${u.inFlight} / ${tenant.model.maxConcurrent} in-flight`
+      : `${u.inFlight} in-flight`,
+  ];
+  return parts.join(" · ");
+}
+
 function TenantDetailPanel({
   tenant,
   onClose,
@@ -54,6 +75,17 @@ function TenantDetailPanel({
   const conflict = tenant.conditions.find(
     (c) => c.type === "NamespaceConflict" && c.status === "True",
   );
+  const [usage, setUsage] = useState<TenantUsage | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .tenantUsage(tenant.name)
+      .then((u) => live && setUsage(u))
+      .catch(() => live && setUsage(null)); // 501 (no state-layer) or 403 → hide the usage line
+    return () => {
+      live = false;
+    };
+  }, [tenant.name]);
   return (
     <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="tenant-detail">
       <div className="mb-3 flex items-center justify-between">
@@ -87,18 +119,36 @@ function TenantDetailPanel({
             <dd className="mt-1">{modelSummary(tenant)}</dd>
           </div>
         </div>
+        {usage && (
+          <div data-testid="tenant-usage">
+            <dt className="text-xs text-muted-foreground">Live usage (this period)</dt>
+            <dd className="mt-1">{usageSummary(tenant, usage)}</dd>
+          </div>
+        )}
       </dl>
       {conflict && (
-        <p className="mt-3 text-xs text-destructive" data-testid="tenant-conflict">
-          {conflict.message}
-        </p>
+        <div
+          className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 p-2.5"
+          data-testid="tenant-conflict"
+        >
+          <p className="text-xs font-medium text-destructive">Namespace conflict</p>
+          <p className="mt-1 text-xs text-destructive/90">{conflict.message}</p>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            A namespace belongs to at most one tenant. An operator must remove the contested
+            namespace from this tenant&rsquo;s <code>spec.namespaces</code> (or from the tenant that
+            already owns it) — then this tenant re-reconciles clean.
+          </p>
+        </div>
       )}
     </div>
   );
 }
 
 export function TenantsPage() {
-  const [query, setQuery] = useState("");
+  // Pre-fill the filter from ?q= so an agent's namespace link (agent-detail →
+  // /tenants?q=<namespace>) lands with the owning tenant already filtered (m49.4).
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [state, setState] = useState<Load>({ kind: "loading" });
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
   const abortRef = useRef<AbortController | null>(null);
@@ -145,7 +195,14 @@ export function TenantsPage() {
 
   const items = state.kind === "ready" ? state.items : [];
   const filtered = query
-    ? items.filter((t) => t.name.toLowerCase().includes(query.toLowerCase()))
+    ? items.filter((t) => {
+        const q = query.toLowerCase();
+        // Match the tenant name OR any of its namespaces — "which tenant owns X?" (M47 review).
+        return (
+          t.name.toLowerCase().includes(q) ||
+          t.namespaces.some((ns) => ns.toLowerCase().includes(q))
+        );
+      })
     : items;
 
   const error: DataTableError | null =
@@ -196,7 +253,7 @@ export function TenantsPage() {
         error={error}
         query={query}
         onQueryChange={setQuery}
-        queryPlaceholder="Filter tenants…"
+        queryPlaceholder="Filter by name or namespace…"
         ariaLabel="Tenants"
         onRowClick={(t) => openDetail(t.name)}
         empty={{

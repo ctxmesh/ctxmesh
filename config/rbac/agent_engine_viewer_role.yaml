@@ -29,6 +29,12 @@ rules:
   # so the persona's RBAC on toolregistries IS the authorization policy. Do NOT
   # remove — dropping it would fail-closed every ToolRegistry read for viewers.
   - toolregistries
+  # promptversions is likewise store-backed (Postgres-authoritative, ADR 0044):
+  # the BFF authorizes every PromptVersion store read with a caller-scoped
+  # SelfSubjectAccessReview on this resource, so the persona's RBAC on
+  # promptversions IS the authz policy. Omitting it fail-closes every PromptVersion
+  # read for viewers — the same contract as toolregistries above.
+  - promptversions
   - memorybindings
   - agentregistries
   - agentscalingpolicies

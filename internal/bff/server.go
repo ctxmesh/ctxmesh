@@ -84,6 +84,10 @@ type Server struct {
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
 	agentMemoryStore agentmemory.Store
 
+	// tenantUsage reads a tenant's LIVE quota consumption from the shared state-layer Valkey (M49). nil ⇒
+	// the tenant usage endpoint returns 501 (no state-layer configured).
+	tenantUsage TenantUsageReader
+
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
 	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
 	// caller-scoped SSAR (exact RBAC parity with the CRD path). Always non-nil (defaulted to
@@ -316,6 +320,10 @@ type Options struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Wired from
 	// CONTROLPLANE_DSN in cmd/bff/main.go; nil ⇒ the ToolRegistry/MCP APIs serve 501.
 	ToolRegistryStore toolregistry.Store
+	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
+	// nil ⇒ the tenant usage endpoint returns 501.
+	TenantUsage TenantUsageReader
+
 	// AgentMemoryStore is the control-plane pgvector store for long-term memory (ADR 0045). Optional —
 	// nil ⇒ the console memory endpoint returns 501.
 	AgentMemoryStore agentmemory.Store
@@ -355,6 +363,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
+		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		log:                      opts.Log,
@@ -480,6 +489,10 @@ func (s *Server) Handler() http.Handler {
 		// API server (a viewer without update is denied → 403).
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
 		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
+		// Long-term memory ENABLE surface (m49.3, closing the m49.1 pocket): configure the folded
+		// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/longtermmemory", s.handleGetLongTermMemoryConfig)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/longtermmemory", s.handleUpdateLongTermMemory)
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
@@ -583,6 +596,8 @@ func (s *Server) Handler() http.Handler {
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
 		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
+		// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
+		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)

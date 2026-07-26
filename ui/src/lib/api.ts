@@ -238,6 +238,13 @@ export interface AgentMemoryListResponse {
   items: AgentMemoryEntry[];
 }
 
+// The agent's long-term-memory capability (M46 folded field) — the ENABLE surface (m49.3).
+export interface LongTermMemoryConfig {
+  enabled: boolean;
+  perUser: boolean;
+  embeddingRoute?: string;
+}
+
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
 // The native run-summary source (first-agent-flow.md §5): a FLAT span list +
 // the trace-level rollup. The UI builds the tree/waterfall CLIENT-side from the
@@ -282,6 +289,10 @@ export interface TraceRollup {
   tokens: number;
   latencyMs: number;
   spanCount: number;
+  // The originating agent (from the agent:<ns>/<name> tag) — the trace→agent
+  // back-link target (m49.3). Both empty for an untagged/ambient trace.
+  agentNs?: string;
+  agentName?: string;
 }
 
 // TraceDetailResponse mirrors GET /api/traces/{id}/detail — the run SUMMARY
@@ -1824,6 +1835,7 @@ export interface AgentRegistryListResponse {
 // --- Tenants (M47, ADR 0046) — cluster-scoped namespace grouping + quotas -------
 export interface TenantSummary {
   name: string;
+  namespaces: string[]; // claimed set — the list is filterable by namespace ("who owns X?")
   memberNamespaces: number;
   ready: boolean;
 }
@@ -1859,6 +1871,13 @@ export interface TenantDetail {
 
 export interface TenantListResponse {
   items: TenantSummary[];
+}
+
+// A tenant's LIVE quota consumption (M49) — the usage-vs-cap answer to "who's about to be throttled?".
+export interface TenantUsage {
+  spendUSD: number;
+  rpm: number;
+  inFlight: number;
 }
 
 export interface AgentRegistryCreateRequest {
@@ -2483,6 +2502,41 @@ export const api = {
     return (await res.json()) as UpdateAgentResponse;
   },
 
+  // Long-term memory ENABLE surface (m49.3) — read + set the folded spec.longTermMemory capability.
+  longTermMemoryConfig: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<LongTermMemoryConfig> =>
+    getJSON<LongTermMemoryConfig>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/longtermmemory`,
+      signal,
+    ),
+
+  setLongTermMemory: async (
+    ns: string,
+    name: string,
+    config: LongTermMemoryConfig,
+    signal?: AbortSignal,
+  ): Promise<LongTermMemoryConfig> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/longtermmemory`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as LongTermMemoryConfig;
+  },
+
   // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =
   // viewer-can't-read; 404 = no such agent — both typed ApiError.
   getTracePolicy: (ns: string, name: string, signal?: AbortSignal) =>
@@ -2759,6 +2813,10 @@ export const api = {
 
   tenantDetail: (name: string, signal?: AbortSignal) =>
     getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),
+
+  // Live tenant usage (M49) — spend/rpm/inFlight vs the caps. May 501 when no state-layer is wired.
+  tenantUsage: (name: string, signal?: AbortSignal) =>
+    getJSON<TenantUsage>(`/api/tenants/${encodeURIComponent(name)}/usage`, signal),
 
   createAgentRegistry: async (
     req: AgentRegistryCreateRequest,
