@@ -58,7 +58,13 @@ func rpmKey(tenantID string, window int64) string {
 	return fmt.Sprintf("tenant:%s:rpm:%d", tenantID, window)
 }
 
-func spendKey(tenantID string) string { return "tenant:" + tenantID + ":spend" }
+// spendWindow is the current budget PERIOD (UTC calendar month). The tenant budget is a RECURRING
+// monthly ceiling (M48, ADR 0047 — fixing the M47 lifetime-cap finding), NOT a lifetime cap: each month's
+// spend key starts at 0, so a tenant is not permanently blocked once it hits the cap. An operator can
+// reset mid-cycle by DELeting the current window key (`tenant:{id}:spend:{YYYY-MM}`).
+func spendWindow() string { return time.Now().UTC().Format("2006-01") }
+
+func spendKey(tenantID string) string { return "tenant:" + tenantID + ":spend:" + spendWindow() }
 
 func inflightKey(tenantID string) string { return "tenant:" + tenantID + ":inflight" }
 
@@ -84,7 +90,13 @@ func (s *redisTenantStore) Spend(ctx context.Context, tenantID string) (float64,
 }
 
 func (s *redisTenantStore) AddSpend(ctx context.Context, tenantID string, deltaUSD float64) error {
-	return s.rdb.IncrByFloat(ctx, spendKey(tenantID), deltaUSD).Err()
+	key := spendKey(tenantID)
+	if err := s.rdb.IncrByFloat(ctx, key, deltaUSD).Err(); err != nil {
+		return err
+	}
+	// Refresh a generous TTL so a past month's window self-expires (~2 periods) — the ledger doesn't
+	// accumulate dead keys forever. Best-effort: a failed TTL only delays cleanup, never over-counts.
+	return s.rdb.Expire(ctx, key, 62*24*time.Hour).Err()
 }
 
 func (s *redisTenantStore) AcquireSlot(ctx context.Context, tenantID string, maxSlots int) (bool, error) {
