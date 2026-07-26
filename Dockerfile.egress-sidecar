@@ -7,7 +7,7 @@
 # as a bearer, and forwards to the real MCP server — so the agent holds neither the
 # token nor the real URL.
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

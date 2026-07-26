@@ -12,7 +12,7 @@
 #
 # See examples/echo-agent/Dockerfile for the canonical combined pattern.
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

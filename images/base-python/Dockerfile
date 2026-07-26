@@ -21,7 +21,7 @@
 # and reverse-proxies to $AGENT_UPSTREAM_PORT (default 8081).
 
 # ── Stage 1: Build the launcher ───────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.26 AS go-builder
+FROM golang:1.26 AS go-builder
 ARG TARGETOS
 ARG TARGETARCH
 
