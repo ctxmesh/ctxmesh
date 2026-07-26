@@ -82,6 +82,15 @@ devDataPlane:
 # and the chart FAILS loudly if you try. The recommended prod posture is still an
 # externally-managed Valkey (`devDataPlane.enabled=false` + BYO); this is the
 # in-cluster alternative. See ADR 0047 for the migration + node-affinity caveat.
+#
+# SECURITY POSTURE (ADR 0049): the in-cluster Valkey is UNAUTHENTICATED by design
+# and is a SELF-HOST CONVENIENCE TIER. Its isolation is ClusterIP (no external
+# exposure) + in-code key-prefix scoping + the opt-in cross-tenant NetworkPolicy;
+# it has NO protocol-level per-tenant data isolation. `requirepass` was DECLINED
+# (the Knative no-`valueFrom`-in-ksvc constraint forces the launcher's password to
+# be broadly readable → security theater). For SENSITIVE multi-tenant PRODUCTION
+# data use BYO-external Valkey/managed Redis (real, operator-managed auth). The
+# roadmapped real fix is a memory-plane proxy + Valkey ACLs (ADR 0049).
 statelayer:
   persistence:
     enabled: false
