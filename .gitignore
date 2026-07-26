@@ -59,3 +59,6 @@ sdk/python/.venv/
 *.egg-info/
 sdk/python/build/
 sdk/python/dist/
+
+# Build output (release metadata, install.yaml) — never tracked.
+/dist/
