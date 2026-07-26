@@ -479,7 +479,7 @@ export function ConfigBuilderPage() {
                   // terse line (ADR 0012; the ForbiddenInline seam).
                   <ForbiddenInline
                     title="Not allowed to apply"
-                    description="Your account can preview the manifest but can't create AgentDeployments in this cluster."
+                    description="Your account can preview the manifest but can't create agents in this cluster."
                     detail={submit.message}
                   />
                 ) : (

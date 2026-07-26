@@ -155,7 +155,7 @@ export function AgentDetailPage() {
           <EmptyState
             icon={Boxes}
             title="Agent not found"
-            description={`No AgentDeployment "${name}" in ${ns || "this namespace"}. It may have been deleted, or the name is wrong.`}
+            description={`No agent "${name}" in ${ns || "this namespace"}. It may have been deleted, or the name is wrong.`}
             action={{ label: "Back to agents", onClick: () => history.back() }}
           />
         </div>
@@ -638,7 +638,7 @@ function EditWizard({
         {saveState.kind === "error" && saveState.forbidden && (
           <ForbiddenInline
             title="Not allowed to edit this agent"
-            description="Your account can't update AgentDeployments in this cluster."
+            description="Your account can't update agents in this cluster."
             detail={saveState.message}
           />
         )}
