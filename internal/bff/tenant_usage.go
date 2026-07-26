@@ -46,9 +46,21 @@ type TenantUsage struct {
 
 type redisTenantUsage struct{ rdb *redis.Client }
 
-// NewRedisTenantUsageReader connects (read-only) to the shared state-layer Valkey at addr.
+// usageOpTimeout bounds a single dial/read against the state-layer Valkey. This is a UI-facing
+// observability read: a slow/unreachable state-layer must degrade FAST (the handler 500s → the console
+// hides the usage line) rather than stalling the request on go-redis's multi-second defaults. Mirrors the
+// launcher's bounded memory/dedupe clients (cmd/launcher/memory.go, async.go).
+const usageOpTimeout = 2 * time.Second
+
+// NewRedisTenantUsageReader connects (read-only) to the shared state-layer Valkey at addr. No password: it
+// matches the launcher's tenant-store writer (cmd/launcher/tenant_quota.go), which also connects unauthed
+// to the in-cluster Valkey. When the in-cluster requirepass hardening lands, BOTH must gain the password.
 func NewRedisTenantUsageReader(addr string) TenantUsageReader {
-	return &redisTenantUsage{rdb: redis.NewClient(&redis.Options{Addr: addr})}
+	return &redisTenantUsage{rdb: redis.NewClient(&redis.Options{
+		Addr:        addr,
+		DialTimeout: usageOpTimeout,
+		ReadTimeout: usageOpTimeout,
+	})}
 }
 
 func (r *redisTenantUsage) Usage(ctx context.Context, tenantID string) (TenantUsage, error) {
