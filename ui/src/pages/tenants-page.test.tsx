@@ -36,9 +36,9 @@ function installFetch(opts: {
   );
 }
 
-function renderPage() {
+function renderPage(path = "/tenants") {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <ToastProvider>
         <TenantsPage />
       </ToastProvider>
@@ -88,6 +88,24 @@ describe("TenantsPage", () => {
       target: { value: "team-a" },
     });
     expect(screen.getByText("alpha")).toBeInTheDocument();
+    expect(screen.queryByText("beta")).not.toBeInTheDocument();
+  });
+
+  it("pre-fills the filter from ?q= so an agent→tenant namespace link lands filtered (m49.4)", async () => {
+    installFetch({
+      tenants: {
+        ok: true,
+        body: {
+          items: [
+            { name: "alpha", namespaces: ["team-a", "shared"], memberNamespaces: 2, ready: true },
+            { name: "beta", namespaces: ["team-b"], memberNamespaces: 1, ready: true },
+          ],
+        },
+      },
+    });
+    renderPage("/tenants?q=team-a");
+    // The owning tenant is already filtered in from the deep-link (no typing).
+    expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.queryByText("beta")).not.toBeInTheDocument();
   });
 

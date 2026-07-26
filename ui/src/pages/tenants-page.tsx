@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Building2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -144,7 +145,10 @@ function TenantDetailPanel({
 }
 
 export function TenantsPage() {
-  const [query, setQuery] = useState("");
+  // Pre-fill the filter from ?q= so an agent's namespace link (agent-detail →
+  // /tenants?q=<namespace>) lands with the owning tenant already filtered (m49.4).
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [state, setState] = useState<Load>({ kind: "loading" });
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
   const abortRef = useRef<AbortController | null>(null);

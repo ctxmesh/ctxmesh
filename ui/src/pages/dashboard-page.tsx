@@ -170,7 +170,10 @@ export function DashboardPage() {
               to: "/providers/connect",
             },
             { label: "Create an agent", done: hasAgent, to: "/agents/new" },
-            { label: "Run your agent", done: hasRun, to: "/agents" },
+            // Route to the Playground — the taught run surface (nav's "Build" step 3).
+            // Was /agents (a list, not a run affordance); m49.4 UX-review P1 — the
+            // checklist must land on where the rest of the product says you run agents.
+            { label: "Run your agent", done: hasRun, to: "/playground" },
           ];
           const next = steps.find((s) => !s.done);
           return (
