@@ -24,7 +24,14 @@
 #   MAX_STEPS      — bound on tool-call iterations (default: SDK DEFAULT_MAX_STEPS).
 # The bound tools come from the discovery plane (:2999) — the MCPToolBindings the
 # controller renders from expand's `tools: [...]`.
-FROM base-python:latest
+#
+# BASE_IMAGE lets the release build compose FROM the PUBLISHED, multi-arch
+# base-python (ghcr.io/ctxmesh/agent-engine-base-python:<version>@digest, m50/ADR
+# 0048) instead of the local `base-python:latest` — so `managed` is a multi-arch
+# manifest too. Defaults to the local dev image so `make docker-build-managed`
+# (which builds base-python:latest first) is unchanged.
+ARG BASE_IMAGE=base-python:latest
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 

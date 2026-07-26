@@ -288,6 +288,107 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
+##@ Release (m50, ADR 0048) — signed multi-arch publish to ghcr.io/ctxmesh
+
+# Release coordinates. VERSION defaults to a git-derived dev version; a real
+# release invokes with VERSION=vX.Y.Z (the pushed v* tag). REGISTRY is the GHCR
+# org (ADR 0048 §1). BUILDX_OUTPUT is `cacheonly` for LOCAL validation (builds
+# every arch, pushes nothing — the ADR 0006 validate-locally DoD), `push` for a
+# real release, or `load` to import a single-arch image into the local docker.
+REGISTRY ?= ghcr.io/ctxmesh
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.0.0-dev)
+GIT_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+GIT_SHA_SHORT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
+BUILDX_OUTPUT ?= cacheonly
+
+# release_image builds ONE image multi-arch with OCI source labels + captures the
+# build metadata (incl. the digest) to dist/release/<repo>.metadata.json.
+#   $(1) = ghcr repo suffix (e.g. agent-engine-bff)   $(2) = Dockerfile   $(3) = context
+define release_image
+	@mkdir -p dist/release
+	$(CONTAINER_TOOL) buildx build \
+		--builder agent-engine-release \
+		--platform=$(RELEASE_PLATFORMS) \
+		--file $(2) \
+		--tag $(REGISTRY)/$(1):$(VERSION) \
+		--tag $(REGISTRY)/$(1):sha-$(GIT_SHA_SHORT) \
+		--label org.opencontainers.image.title=$(1) \
+		--label org.opencontainers.image.source=https://github.com/ctxmesh/agent-engine \
+		--label org.opencontainers.image.revision=$(GIT_REVISION) \
+		--label org.opencontainers.image.version=$(VERSION) \
+		--label org.opencontainers.image.created=$(BUILD_DATE) \
+		--metadata-file dist/release/$(1).metadata.json \
+		--output=type=$(BUILDX_OUTPUT) \
+		$(3)
+endef
+
+.PHONY: release-buildx-ensure
+release-buildx-ensure: ## Ensure the agent-engine-release buildx builder exists (idempotent, docker-container driver for multi-arch).
+	@$(CONTAINER_TOOL) buildx inspect agent-engine-release >/dev/null 2>&1 || \
+		$(CONTAINER_TOOL) buildx create --name agent-engine-release --driver docker-container >/dev/null
+
+.PHONY: release-image-controller
+release-image-controller: release-buildx-ensure ## Release the controller/manager image (multi-arch, labelled).
+	$(call release_image,agent-engine,Dockerfile,.)
+
+.PHONY: release-image-bff
+release-image-bff: release-buildx-ensure ## Release the BFF image (multi-arch, labelled; builds the SPA in-image, no Node runtime).
+	$(call release_image,agent-engine-bff,Dockerfile.bff,.)
+
+.PHONY: release-image-launcher
+release-image-launcher: release-buildx-ensure ## Release the launcher image (multi-arch, labelled).
+	$(call release_image,agent-engine-launcher,Dockerfile.launcher,.)
+
+.PHONY: release-image-token-service
+release-image-token-service: release-buildx-ensure ## Release the token-service image (multi-arch, labelled).
+	$(call release_image,agent-engine-token-service,Dockerfile.token-service,.)
+
+.PHONY: release-image-egress-sidecar
+release-image-egress-sidecar: release-buildx-ensure ## Release the egress-sidecar image (multi-arch, labelled).
+	$(call release_image,agent-engine-egress-sidecar,Dockerfile.egress-sidecar,.)
+
+.PHONY: release-image-discovery
+release-image-discovery: release-buildx-ensure ## Release the tool-discovery sidecar image (multi-arch, labelled).
+	$(call release_image,agent-engine-discovery,Dockerfile.discovery,.)
+
+.PHONY: release-image-base-python
+release-image-base-python: release-buildx-ensure ## Release the Python base runtime image (multi-arch: launcher + OTel auto-instrumentation).
+	$(call release_image,agent-engine-base-python,images/base-python/Dockerfile,.)
+
+# managed composes FROM the base-python image. On a real release BASE_IMAGE points
+# at the just-published multi-arch base by digest (release.yml wires it, m50.3); the
+# default keeps `make release-image-managed` working against a local base-python.
+MANAGED_BASE_IMAGE ?= $(REGISTRY)/agent-engine-base-python:$(VERSION)
+.PHONY: release-image-managed
+release-image-managed: release-buildx-ensure ## Release the managed-agent runtime image (multi-arch; FROM the published base-python).
+	@mkdir -p dist/release
+	$(CONTAINER_TOOL) buildx build \
+		--builder agent-engine-release \
+		--platform=$(RELEASE_PLATFORMS) \
+		--file images/managed-agent/Dockerfile \
+		--build-arg BASE_IMAGE=$(MANAGED_BASE_IMAGE) \
+		--tag $(REGISTRY)/agent-engine-managed:$(VERSION) \
+		--tag $(REGISTRY)/agent-engine-managed:sha-$(GIT_SHA_SHORT) \
+		--label org.opencontainers.image.title=agent-engine-managed \
+		--label org.opencontainers.image.source=https://github.com/ctxmesh/agent-engine \
+		--label org.opencontainers.image.revision=$(GIT_REVISION) \
+		--label org.opencontainers.image.version=$(VERSION) \
+		--label org.opencontainers.image.created=$(BUILD_DATE) \
+		--metadata-file dist/release/agent-engine-managed.metadata.json \
+		--output=type=$(BUILDX_OUTPUT) \
+		.
+
+# The self-contained Go control-plane/runtime images (no base-image dependency).
+.PHONY: release-images-go
+release-images-go: release-image-controller release-image-bff release-image-launcher release-image-token-service release-image-egress-sidecar release-image-discovery ## Build all 6 self-contained Go product images (multi-arch).
+
+# The full product image set (ADR 0048 §1). base-python before managed (managed
+# composes FROM it). Examples / mcp-echo / dev collector are fixtures — NOT released.
+.PHONY: release-images
+release-images: release-images-go release-image-base-python release-image-managed ## Build ALL product images (multi-arch, labelled). Set BUILDX_OUTPUT=push VERSION=vX.Y.Z for a real release.
+
 ##@ Deployment
 
 ifndef ignore-not-found

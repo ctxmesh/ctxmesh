@@ -5,7 +5,7 @@
 # internal mTLS API; the per-pod egress sidecars delegate cache-miss resolution to it, so
 # grant reads + OAuth refresh are singleflighted globally (one refresh across the fleet).
 
-FROM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
