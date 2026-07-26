@@ -254,6 +254,7 @@ rules:
   - secretbindings
   - mcptoolbindings
   - toolregistries
+  - promptversions
   - memorybindings
   - agentregistries
   - agentscalingpolicies
@@ -512,6 +513,7 @@ rules:
   - secretbindings
   - mcptoolbindings
   - toolregistries
+  - promptversions
   - memorybindings
   - agentregistries
   - agentscalingpolicies
@@ -573,6 +575,7 @@ rules:
   - secretbindings
   - mcptoolbindings
   - toolregistries
+  - promptversions
   - memorybindings
   - agentregistries
   - agentscalingpolicies
