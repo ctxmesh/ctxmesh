@@ -308,19 +308,30 @@ def main() -> None:
     # --- control-plane.yaml --------------------------------------------------
     with open(os.path.join(out_dir, "control-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
-        # Control-plane HA dial (ADR 0037, m34.5): template the controller-manager Deployment's
-        # replica count. --leader-elect is already in the manager args, so >1 replica is safe (one
-        # active leader reconciles; the rest are hot standbys for fast failover). Target ONLY the
-        # manager (the gateway Deployment also has replicas:1). Default 1 renders `replicas: 1` ==
-        # kustomize (helm-verify no-drift); `--set controllerManager.replicas=2` runs the control
-        # plane HA — pair it with controllerManager.podDisruptionBudget.enabled (control-plane-pdb).
+        # Control-plane HA dials (ADR 0037 m34.5 + M50 hardening): template each control-plane
+        # Deployment's replica count. The controller-manager runs --leader-elect, so >1 is a
+        # hot-standby cluster (one leader reconciles). The gateway (config-rendered LiteLLM proxy)
+        # and token-service (stateless credential-plane reader) are stateless request-servers, so
+        # >1 is plain horizontal scale — pairing them with componentPodDisruptionBudgets makes those
+        # PDBs USABLE (a minAvailable:1 PDB on a 1-replica Deployment would wedge node drains; M50
+        # found the dials were missing). The BFF is intentionally NOT dialled here — its in-process
+        # run path assumes a single pod until runWorkerDispatch (ADR 0034), so it stays replicas:1.
+        # Default 1 renders `replicas: 1` == kustomize (helm-verify no-drift).
+        replica_dials = {
+            "controller-manager": "controllerManager.replicas",
+            "gateway": "gateway.replicas",
+            "token-service": "tokenService.replicas",
+        }
         cp_docs = []
         for doc in control_plane:
-            if kind_of(doc) == "Deployment" and "control-plane: controller-manager" in doc:
-                doc = doc.replace(
-                    "  replicas: 1\n",
-                    "  replicas: {{ .Values.controllerManager.replicas | default 1 }}\n",
-                )
+            if kind_of(doc) == "Deployment":
+                for marker, valpath in replica_dials.items():
+                    if f"control-plane: {marker}" in doc:
+                        doc = doc.replace(
+                            "  replicas: 1\n",
+                            "  replicas: {{ .Values.%s | default 1 }}\n" % valpath,
+                        )
+                        break
             cp_docs.append(doc)
         f.write("\n---\n".join(cp_docs))
         f.write("\n")

@@ -48,6 +48,19 @@ componentPodDisruptionBudgets:
   enabled: false
   minAvailable: 1
 
+# Horizontal-scale dials for the stateless request-servers (M50 hardening). The
+# gateway (config-rendered LiteLLM proxy) and token-service (credential-plane
+# reader) are stateless, so >1 replica is plain HA. Set these ALONGSIDE
+# componentPodDisruptionBudgets.enabled: a minAvailable:1 PDB on a 1-replica
+# Deployment would WEDGE node drains — the dials make those PDBs usable. Default
+# 1 renders `replicas: 1` == kustomize (helm-verify no-drift). The BFF has NO dial
+# by design: its in-process run path needs the durable run-worker (runWorkerDispatch,
+# ADR 0034) before it is HA-safe, so it stays single-replica.
+gateway:
+  replicas: 1
+tokenService:
+  replicas: 1
+
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
 crds:
@@ -69,6 +82,15 @@ devDataPlane:
 # and the chart FAILS loudly if you try. The recommended prod posture is still an
 # externally-managed Valkey (`devDataPlane.enabled=false` + BYO); this is the
 # in-cluster alternative. See ADR 0047 for the migration + node-affinity caveat.
+#
+# SECURITY POSTURE (ADR 0049): the in-cluster Valkey is UNAUTHENTICATED by design
+# and is a SELF-HOST CONVENIENCE TIER. Its isolation is ClusterIP (no external
+# exposure) + in-code key-prefix scoping + the opt-in cross-tenant NetworkPolicy;
+# it has NO protocol-level per-tenant data isolation. `requirepass` was DECLINED
+# (the Knative no-`valueFrom`-in-ksvc constraint forces the launcher's password to
+# be broadly readable → security theater). For SENSITIVE multi-tenant PRODUCTION
+# data use BYO-external Valkey/managed Redis (real, operator-managed auth). The
+# roadmapped real fix is a memory-plane proxy + Valkey ACLs (ADR 0049).
 statelayer:
   persistence:
     enabled: false
