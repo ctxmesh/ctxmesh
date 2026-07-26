@@ -35,6 +35,7 @@ interface DetailOpts {
   agentRunsStatus?: number;
   longTermMemory?: unknown[] | null; // null → 501 (no control-plane store), m46.6
   longTermMemoryError?: boolean; // true → 500 (store read failed), m46.6
+  longTermConfig?: { enabled: boolean; perUser: boolean; embeddingRoute?: string }; // m49.3 enable surface
   updateResult?: { ok: boolean; status?: number; body?: unknown };
   deleteResult?: { ok: boolean; status?: number; body?: unknown };
   // m17.11 additions: memory + scaling panels
@@ -134,6 +135,13 @@ function installFetch(opts: DetailOpts = {}) {
         }
         const runs = opts.agentRuns ?? [];
         return j({ runs }, true, 200);
+      }
+      // m49.3: long-term memory config (GET/PUT .../longtermmemory) — the ENABLE surface.
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) {
+        if (method === "PUT") {
+          return j(init?.body ? JSON.parse(init.body as string) : {}, true, 200);
+        }
+        return j(opts.longTermConfig ?? { enabled: false, perUser: false }, true, 200);
       }
       // m46.6: long-term memory (GET .../memory)
       if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) {
@@ -897,6 +905,25 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     expect(screen.queryByTestId("memory-attach")).toBeNull();
     expect(screen.queryByTestId("memory-detach-mb-billing-global")).toBeNull();
     expect(screen.queryByTestId("memory-edit-mb-billing-global")).toBeNull();
+  });
+
+  it("long-term memory: enables the capability via the config panel (m49.3)", async () => {
+    const calls = installFetch({ longTermConfig: { enabled: false, perUser: false } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    await screen.findByTestId("longterm-config");
+    expect(screen.getByTestId("longterm-state")).toHaveTextContent("Disabled");
+    // Turn on per-user, then Enable → a PUT patches the folded field.
+    fireEvent.click(screen.getByTestId("longterm-peruser"));
+    fireEvent.click(screen.getByTestId("longterm-enable"));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.includes("/longtermmemory") && c.method === "PUT");
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put!.body)).toMatchObject({ enabled: true, perUser: true });
+    });
   });
 });
 

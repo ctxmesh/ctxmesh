@@ -238,6 +238,13 @@ export interface AgentMemoryListResponse {
   items: AgentMemoryEntry[];
 }
 
+// The agent's long-term-memory capability (M46 folded field) — the ENABLE surface (m49.3).
+export interface LongTermMemoryConfig {
+  enabled: boolean;
+  perUser: boolean;
+  embeddingRoute?: string;
+}
+
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
 // The native run-summary source (first-agent-flow.md §5): a FLAT span list +
 // the trace-level rollup. The UI builds the tree/waterfall CLIENT-side from the
@@ -2481,6 +2488,41 @@ export const api = {
       );
     }
     return (await res.json()) as UpdateAgentResponse;
+  },
+
+  // Long-term memory ENABLE surface (m49.3) — read + set the folded spec.longTermMemory capability.
+  longTermMemoryConfig: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<LongTermMemoryConfig> =>
+    getJSON<LongTermMemoryConfig>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/longtermmemory`,
+      signal,
+    ),
+
+  setLongTermMemory: async (
+    ns: string,
+    name: string,
+    config: LongTermMemoryConfig,
+    signal?: AbortSignal,
+  ): Promise<LongTermMemoryConfig> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/longtermmemory`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as LongTermMemoryConfig;
   },
 
   // getTracePolicy reads an agent's custom redaction detectors (m18.13). A 403 =

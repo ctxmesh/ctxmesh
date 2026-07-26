@@ -480,6 +480,10 @@ func (s *Server) Handler() http.Handler {
 		// API server (a viewer without update is denied → 403).
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
 		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
+		// Long-term memory ENABLE surface (m49.3, closing the m49.1 pocket): configure the folded
+		// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/longtermmemory", s.handleGetLongTermMemoryConfig)
+		authed.HandleFunc("PUT /api/agents/{ns}/{name}/longtermmemory", s.handleUpdateLongTermMemory)
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
