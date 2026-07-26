@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
@@ -225,6 +226,31 @@ func TestTenantQuota_CrossPodCoordination(t *testing.T) {
 		assert.Equal(t, 429, d3.status)
 		assert.Equal(t, "tenant_concurrency_exceeded", d3.code)
 	})
+}
+
+// The tenant budget is a RECURRING monthly ceiling (M48, ADR 0047), not a lifetime cap: spend lives
+// under a per-month window key, and an operator can reset mid-cycle by DELeting it.
+func TestTenantQuota_RecurringSpendWindow(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store := newRedisTenantStore(mr.Addr())
+	ctx := context.Background()
+
+	require.NoError(t, store.AddSpend(ctx, "acme", 3.50))
+	require.NoError(t, store.AddSpend(ctx, "acme", 1.50))
+	spent, err := store.Spend(ctx, "acme")
+	require.NoError(t, err)
+	assert.InDelta(t, 5.0, spent, 0.001)
+
+	// Spend lives under the current UTC-month window key — a future month is independent (the reset).
+	key := "tenant:acme:spend:" + time.Now().UTC().Format("2006-01")
+	assert.True(t, mr.Exists(key), "spend must live under the monthly window key")
+	assert.False(t, mr.Exists("tenant:acme:spend:2099-01"), "a future period starts at 0")
+
+	// An operator reset (DEL the window) zeroes the budget mid-cycle.
+	mr.Del(key)
+	spent, err = store.Spend(ctx, "acme")
+	require.NoError(t, err)
+	assert.InDelta(t, 0.0, spent, 0.001, "deleting the window key resets the budget")
 }
 
 func TestMoneyToFloat(t *testing.T) {

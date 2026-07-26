@@ -37,6 +37,17 @@ controllerManager:
     enabled: false
     minAvailable: 1
 
+# Optional PodDisruptionBudgets for the stateless request-serving components
+# (bff / gateway / token-service), M48 / ADR 0047. OFF by default (no-drift).
+# Enable ALONGSIDE their replicas>1 so a node drain/upgrade can't evict a whole
+# component at once. These components are stateless request-servers (the token-
+# service reads the shared credential store; the gateway is a config-rendered
+# proxy; the bff is caller-scoped) — but note bff replicas>1 requires the durable
+# run-worker path (runWorkerDispatch, ADR 0034), else runs execute in-process.
+componentPodDisruptionBudgets:
+  enabled: false
+  minAvailable: 1
+
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
 crds:
@@ -48,6 +59,27 @@ crds:
 # `enabled: false` and point the controller at an externally-managed data plane.
 devDataPlane:
   enabled: true
+
+# --- In-cluster PERSISTENT state layer (M48, ADR 0047) — OPT-IN --------------
+# For a self-hosted install that wants DURABLE in-cluster memory without running
+# an external Valkey: a StatefulSet + PVC + AOF Valkey (memory survives a pod
+# restart/reschedule). OFF by default — dev/trial uses the ephemeral
+# `devDataPlane` Valkey above. Enable it TOGETHER with `devDataPlane.enabled:
+# false`; running both is a `control-plane: statelayer` pod-selector collision
+# and the chart FAILS loudly if you try. The recommended prod posture is still an
+# externally-managed Valkey (`devDataPlane.enabled=false` + BYO); this is the
+# in-cluster alternative. See ADR 0047 for the migration + node-affinity caveat.
+statelayer:
+  persistence:
+    enabled: false
+    # PVC size for the AOF/RDB data.
+    size: 8Gi
+    # "" ⇒ the cluster default StorageClass. Set explicitly in prod (and prefer a
+    # network-attached class — a ReadWriteOnce local volume pins the pod to one
+    # node, so a reschedule sticks Pending; see ADR 0047).
+    storageClassName: ""
+    # CPU limit on the Valkey container (bound it — the ClickHouse-heat lesson).
+    cpuLimit: "1"
 
 # --- Prometheus wiring -------------------------------------------------------
 # The controller-manager exposes HTTPS metrics on :8443 (already in the

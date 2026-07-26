@@ -30,6 +30,7 @@ limitations under the License.
 package audit
 
 import (
+	"os"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -87,11 +88,17 @@ type Sink interface {
 // to any log backend.
 type LogSink struct {
 	log logr.Logger
+	pod string
 }
 
-// NewLogSink returns a Sink that writes structured audit entries to log.
+// NewLogSink returns a Sink that writes structured audit entries to log. It captures the pod name
+// (hostname) so each entry is attributable to the emitting replica: the Auditor runs on EVERY
+// control-plane replica by design (NeedLeaderElection=false — a leader handover would leave audit gaps),
+// so at replicas>1 the same mutation is logged once per replica. The `pod` key lets a log consumer
+// deduplicate by source (M48, ADR 0047) while keeping the gap-free property.
 func NewLogSink(log logr.Logger) *LogSink {
-	return &LogSink{log: log.WithName("audit")}
+	pod, _ := os.Hostname()
+	return &LogSink{log: log.WithName("audit"), pod: pod}
 }
 
 // Record writes the entry as a structured log line with stable keys.
@@ -103,6 +110,7 @@ func (s *LogSink) Record(entry AuditEntry) {
 		"name", entry.Name,
 		"namespace", entry.Namespace,
 		"subject", entry.Subject,
+		"pod", s.pod,
 	)
 }
 
