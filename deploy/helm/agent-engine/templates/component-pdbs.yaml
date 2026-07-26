@@ -1,0 +1,29 @@
+{{- /*
+PodDisruptionBudgets for the stateless control-plane components (bff / gateway / token-service) —
+M48, ADR 0047. OPT-IN, Helm-only.
+
+Not part of config/default (kustomize), so with the default (enabled:false) NOTHING renders and
+`helm template` still matches `kustomize build config/default` (helm-verify no-drift). Enable it
+alongside those components' replicas>1 so a voluntary disruption (node drain, cluster upgrade) can never
+evict a whole component at once. Mirrors control-plane-pdb.yaml (the controller-manager PDB).
+*/ -}}
+{{- if .Values.componentPodDisruptionBudgets.enabled }}
+{{- range $c := list "bff" "gateway" "token-service" }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $c }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    control-plane: {{ $c }}
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: Helm
+spec:
+  minAvailable: {{ $.Values.componentPodDisruptionBudgets.minAvailable }}
+  selector:
+    matchLabels:
+      control-plane: {{ $c }}
+      app.kubernetes.io/name: agent-engine
+{{- end }}
+{{- end }}
