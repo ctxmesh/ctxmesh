@@ -295,8 +295,8 @@ export function AgentsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
           <p className="text-sm text-muted-foreground">
-            AgentDeployments listed via the BFF (client-go, RBAC-scoped). The
-            filter is windowed to the loaded page.
+            Your agents, RBAC-scoped to what you can see. The filter is windowed
+            to the loaded page.
           </p>
         </div>
         {/* New agent is a page action, not a nav item (m25 S8): the primary
@@ -339,8 +339,8 @@ export function AgentsPage() {
           title: "No agents yet",
           description:
             namespace
-              ? `No AgentDeployments in ${namespace}. Use “New agent” above to create one.`
-              : "No AgentDeployments visible. Use “New agent” above to create one.",
+              ? `No agents in ${namespace}. Use “New agent” above to create one.`
+              : "No agents visible. Use “New agent” above to create one.",
         }}
       />
     </div>

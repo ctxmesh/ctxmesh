@@ -100,6 +100,18 @@ export const NAV_SECTIONS: NavSection[] = [
     heading: "Build",
     items: [
       {
+        // Connect a provider — the FIRST step of the journey (the dashboard checklist
+        // teaches "Connect a provider" first), so it LEADS "Build" rather than sitting
+        // low under "Platform" where the eye reaches it last (m49.2 — the onboarding-
+        // order fix, M46-close review P0). The connect wizard is the page's CTA; the
+        // write actions (Connect / Rotate / Disconnect) are gated in-page on secretbindings.
+        id: "providers",
+        label: "Providers",
+        icon: PlugZap,
+        milestone: "M14",
+        route: "/providers",
+      },
+      {
         id: "agents",
         label: "Agents",
         icon: Boxes,
@@ -207,17 +219,6 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     heading: "Platform",
     items: [
-      {
-        // Connected-providers LIST page (m18.5). Read-only for everyone (a viewer
-        // sees connected providers); the write actions (Connect / Rotate key /
-        // Disconnect) are gated IN the page on secretbindings create/update/delete.
-        // The connect wizard is reached via the page's "Connect provider" CTA.
-        id: "providers",
-        label: "Providers",
-        icon: PlugZap,
-        milestone: "M14",
-        route: "/providers",
-      },
       {
         // Tenants (M47) — cluster-scoped namespace groupings with compute + model
         // quotas. Read-only for everyone (viewers/developers); operators manage
