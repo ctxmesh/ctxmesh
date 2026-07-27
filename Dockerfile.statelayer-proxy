@@ -1,0 +1,24 @@
+# Dockerfile.statelayer-proxy — the control-plane state-layer proxy (M51, ADR 0050).
+#
+# Builds only the statelayer-proxy binary (cmd/statelayer-proxy) as a distroless/
+# static image. It runs as a control-plane Deployment holding the Valkey credential
+# and enforces per-tenant/agent memory scope SERVER-SIDE from the verified
+# run-capability token — agent workloads hold no credential and can't name another
+# tenant's key.
+
+FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -o statelayer-proxy ./cmd/statelayer-proxy
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /workspace/statelayer-proxy /statelayer-proxy
+USER 65532:65532
+ENTRYPOINT ["/statelayer-proxy"]
