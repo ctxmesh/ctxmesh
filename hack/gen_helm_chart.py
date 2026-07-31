@@ -321,6 +321,10 @@ def main() -> None:
             "controller-manager": "controllerManager.replicas",
             "gateway": "gateway.replicas",
             "token-service": "tokenService.replicas",
+            # The state-layer proxy (M51, ADR 0050) is stateless (auth by token, state in
+            # Valkey), so >1 is plain HA — REQUIRED before the phase-3 credential-removal
+            # cutover so the budget-fail-closed path survives a proxy drain (ADR 0050 §5).
+            "statelayer-proxy": "statelayerProxy.replicas",
         }
         cp_docs = []
         for doc in control_plane:

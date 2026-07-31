@@ -930,7 +930,7 @@ metadata:
   name: agent-engine-statelayer-proxy
   namespace: {{ .Values.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.statelayerProxy.replicas | default 1 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-engine
