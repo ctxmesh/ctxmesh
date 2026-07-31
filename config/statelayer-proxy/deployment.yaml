@@ -51,10 +51,13 @@ spec:
             # templates it (no drift).
             - name: STATELAYER_ADDR
               value: agent-engine-statelayer.agent-engine-system.svc:6379
-            # The DISTINCT verifier audience (ADR 0050 §2). The BFF mints a state-layer
-            # token with this audience alongside the credential-plane one.
+            # The verifier audience. Per ADR 0050 Amд 1, the first cut REUSES the
+            # credential-plane audience (the run capability already on the memory
+            # request, like the long-term memory proxy) — so no 2nd token/SDK change.
+            # Keep it configurable: the separate-audience hardening (for BOTH memory
+            # proxies) is an M52 follow-on = a values change, not code.
             - name: STATELAYER_CAPABILITY_AUDIENCE
-              value: statelayer-proxy
+              value: ctxmesh-credential-plane
             # STATELAYER_USERNAME/PASSWORD for a Valkey ACL user (ADR 0050 §6) — empty by
             # default (the in-cluster Valkey is unauthenticated, ADR 0049). Set for a
             # password-protected/BYO-external Valkey.
