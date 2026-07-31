@@ -199,6 +199,13 @@ type AgentDeploymentReconciler struct {
 	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
 	OBOEgress OBOEgressConfig
 
+	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
+	// is injected into memory-bound agents so the launcher reverse-proxies session/
+	// shared memory to the control-plane state-layer proxy instead of Valkey directly
+	// (M51, ADR 0050 §8 phase 1 — opt-in dual-mode). Empty (default) ⇒ not injected,
+	// agents keep the direct-Valkey path (no drift).
+	StatelayerProxyURL string
+
 	// PromptResolver resolves a PromptVersion git pointer (repo, ref, path) into
 	// prompt content for the prompt-only-deploy path (M9). It is the mock⇄real
 	// seam: production wires a real (e.g. go-git) resolver; dev / envtest / e2e
@@ -818,6 +825,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// — a duplicate container env var is invalid.
 		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
 			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+		}
+		// STATELAYER_PROXY_URL (M51, ADR 0050 §8 phase 1): when the controller is
+		// configured with it, route this agent's session/shared memory through the
+		// state-layer proxy (the launcher reverse-proxies; it still holds MEMORY_BACKEND_ADDR
+		// in phase 1 for dual-mode fallback). Empty ⇒ direct Valkey, no drift.
+		if r.StatelayerProxyURL != "" {
+			env = append(env, corev1.EnvVar{Name: "STATELAYER_PROXY_URL", Value: r.StatelayerProxyURL})
 		}
 	}
 
