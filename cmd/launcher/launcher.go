@@ -277,8 +277,9 @@ func (c Config) ObjectStoreEnabled() bool {
 // misconfiguration rather than a crash on a best-effort path.
 func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfig, error) {
 	addr := lookup("MEMORY_BACKEND_ADDR")
-	if addr == "" {
-		// Not gated on: the listener is skipped entirely.
+	proxyURL := lookup("STATELAYER_PROXY_URL")
+	if addr == "" && proxyURL == "" {
+		// Neither a direct Valkey nor the state-layer proxy is wired ⇒ the listener is skipped.
 		return memoryConfig{}, nil
 	}
 
@@ -301,13 +302,16 @@ func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfi
 		// boundary (AGENT_REGISTRY_ID, already injected for a registry member).
 		Scope:    lookup("MEMORY_SCOPE"),
 		Registry: lookup("AGENT_REGISTRY_ID"),
+		// STATELAYER_PROXY_URL (M51, ADR 0050 §8): when set, the session/shared routes reverse-proxy
+		// to the state-layer proxy instead of hitting Valkey directly (migration phase 1 dual-mode).
+		ProxyURL: proxyURL,
 	}, nil
 }
 
 // MemoryEnabled reports whether the :2998 memory listener should be started —
-// true iff a backend address was injected.
+// true iff a direct Valkey backend OR the state-layer proxy (M51) was injected.
 func (c Config) MemoryEnabled() bool {
-	return c.Memory.BackendAddr != ""
+	return c.Memory.BackendAddr != "" || c.Memory.ProxyURL != ""
 }
 
 // parsePort parses a port string (may be empty) and returns the result.

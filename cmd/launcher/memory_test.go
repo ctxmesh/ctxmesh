@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // newTestMemoryServer spins up a miniredis and returns an httptest server
@@ -80,6 +82,53 @@ func doReq(t *testing.T, method, url string, body string) (*http.Response, []byt
 		t.Fatal(err)
 	}
 	return resp, respBody
+}
+
+// ── state-layer proxy forwarding (M51, ADR 0050 §8/Amд 1) ──────────────────────
+
+// When STATELAYER_PROXY_URL is set, the session routes reverse-proxy to the proxy,
+// translating the run capability (X-Ctxmesh-Run-Capability) into Authorization Bearer
+// — the launcher holds no Valkey path and passes no key/identity of its own.
+func TestMemoryForwardsToProxy(t *testing.T) {
+	t.Parallel()
+	var gotAuth, gotPath, gotScope string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath, gotScope = r.Header.Get("Authorization"), r.URL.Path, r.Header.Get("X-Memory-Scope")
+		w.Header().Set("ETag", "0")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(proxy.Close)
+
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(nil, // no direct store — forward-only (phase 3 shape)
+		memoryConfig{
+			Port: defaultMemoryPort, Namespace: "team-alpha", Agent: "support",
+			Scope: "shared", Registry: "reg-1", ProxyURL: proxy.URL,
+		},
+		tp.Tracer(tracerName), nil)
+	srv := httptest.NewServer(ms.handler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/memory/c1", nil)
+	req.Header.Set(runcap.HeaderName, "run-token-abc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("forwarded GET status = %d, want 200", resp.StatusCode)
+	}
+	if gotAuth != "Bearer run-token-abc" {
+		t.Errorf("proxy Authorization = %q, want the run capability as a Bearer token", gotAuth)
+	}
+	if gotPath != "/memory/c1" {
+		t.Errorf("proxy path = %q, want /memory/c1", gotPath)
+	}
+	if gotScope != "shared" {
+		t.Errorf("proxy X-Memory-Scope = %q, want shared (from the launcher's scope config)", gotScope)
+	}
 }
 
 // ── healthz ───────────────────────────────────────────────────────────────────
