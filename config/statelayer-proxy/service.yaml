@@ -1,0 +1,22 @@
+# State-layer proxy Service (M51, ADR 0050). Launchers reach it via
+# STATELAYER_PROXY_URL (http://agent-engine-statelayer-proxy.<ns>.svc:8080),
+# injected by the controller in migration phase 1 (ADR 0050 §8) — dual-mode, so
+# absent injection the launcher keeps its direct-Valkey path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: statelayer-proxy
+  namespace: system
+  labels:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
