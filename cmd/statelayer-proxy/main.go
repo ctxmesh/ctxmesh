@@ -92,7 +92,10 @@ func run(log logr.Logger) error {
 		}
 		opts.Verifier = runcap.NewVerifier(pub, audience, nil)
 	case devAgent == "":
-		return errors.New("MCP_CAPABILITY_PUBLIC_KEY is required (unless STATELAYER_DEV_AGENT enables the dev bypass)")
+		// No capability key AND no dev bypass: START anyway but refuse every request
+		// (401). A fresh install deploys cleanly before the keypair is provisioned —
+		// an idle proxy in migration phase 1 (ADR 0050 §8), not a CrashLoop.
+		log.Info("no capability key and no dev bypass — proxy refuses all requests until the keypair is provisioned")
 	}
 
 	srv, err := statelayer.NewServer(opts)

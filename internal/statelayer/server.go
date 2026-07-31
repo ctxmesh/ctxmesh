@@ -84,9 +84,11 @@ func NewServer(opts Options) (*Server, error) {
 		}
 		s.devScope = &sc
 	}
-	if opts.Verifier == nil && s.devScope == nil {
-		return nil, errors.New("statelayer: a Verifier or DevAgent (dev bypass) is required")
-	}
+	// A Verifier or dev bypass is REQUIRED to serve requests, but the server still
+	// STARTS without one (it refuses every request with 401) so a fresh install
+	// deploys cleanly before the capability keypair is provisioned — an idle proxy
+	// in migration phase 1 (ADR 0050 §8), not a CrashLoop. authorize() enforces the
+	// deny; NewServer never fails on a missing verifier.
 	return s, nil
 }
 

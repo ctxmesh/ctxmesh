@@ -29,6 +29,11 @@ resources:
 # + credential namespace are values-gated/optional so a plain install degrades to
 # the built-in kubernetes credential backend (ADR 0032). No-drift.
 - ../token-service
+# The state-layer proxy (M51, ADR 0050): holds the Valkey credential + enforces
+# per-tenant/agent memory scope server-side from the run-capability token. Idle
+# until the launcher is wired to it (migration phase 1); refuses requests until the
+# capability keypair is provisioned. No-drift (capability key via optional Secret).
+- ../statelayer-proxy
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
