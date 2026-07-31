@@ -60,6 +60,12 @@ gateway:
   replicas: 1
 tokenService:
   replicas: 1
+# The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. Set >1 +
+# componentPodDisruptionBudgets.enabled BEFORE the phase-3 credential-removal cutover
+# so a proxy drain can't 402 every budget-capped agent (the budget path fails CLOSED
+# through the proxy hop, ADR 0050 §5). Default 1 == kustomize (no-drift).
+statelayerProxy:
+  replicas: 1
 
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
