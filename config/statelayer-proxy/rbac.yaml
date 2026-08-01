@@ -1,0 +1,36 @@
+# State-layer proxy tenant-reader RBAC (M53, ADR 0050 §3 + Amendment 2 Correction 2a).
+# The proxy resolves a namespace → owning tenant by reading the AUTHORITATIVE tenant
+# label (agents.ctxmesh.ai/tenant) the Tenant controller stamps on member namespaces
+# — the same source the controller injects TENANT_ID from — so it scopes quota to the
+# identical Valkey accumulator. The least-privilege surface for that is read-only
+# get/list/watch on namespaces (NOT tenants: Option A keeps cap-enforcement in the
+# launcher, so the proxy never reads the Tenant object itself).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: statelayer-proxy-tenant-reader
+  labels:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: statelayer-proxy-tenant-reader
+  labels:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: statelayer-proxy-tenant-reader
+subjects:
+  - kind: ServiceAccount
+    name: statelayer-proxy
+    namespace: system

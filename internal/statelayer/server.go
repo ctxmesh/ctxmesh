@@ -50,6 +50,10 @@ type Verifier interface {
 type Server struct {
 	store    MemoryStore
 	verifier Verifier
+	// tenants resolves a namespace → owning tenant id for the quota/async endpoints
+	// (M53). nil in memory-only / local-dev deployments (no cluster config); the
+	// quota endpoints report unavailable rather than guessing a tenant.
+	tenants TenantResolver
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -61,6 +65,9 @@ type Server struct {
 type Options struct {
 	Store    MemoryStore
 	Verifier Verifier
+	// TenantResolver maps a namespace → owning tenant id for the quota/async
+	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
+	TenantResolver TenantResolver
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -76,7 +83,7 @@ func NewServer(opts Options) (*Server, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Server{store: opts.Store, verifier: opts.Verifier, now: now}
+	s := &Server{store: opts.Store, verifier: opts.Verifier, tenants: opts.TenantResolver, now: now}
 	if strings.TrimSpace(opts.DevAgent) != "" {
 		sc, err := scopeFromAgent(opts.DevAgent, "", false)
 		if err != nil {
@@ -158,6 +165,22 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 }
 
 const memoryScopeShared = "shared"
+
+// resolveTenant maps a namespace to its owning tenant id via the configured
+// resolver (M53 quota/async paths). It returns ("", false) when no resolver is
+// configured (memory-only deployment) OR the namespace is untenanted — the caller
+// treats both as "no tenant quota applies". A non-nil error is an infrastructure
+// failure the caller must surface (never silently treat as untenanted).
+func (s *Server) resolveTenant(ctx context.Context, namespace string) (id string, ok bool, err error) {
+	if s.tenants == nil {
+		return "", false, nil
+	}
+	id, err = s.tenants.TenantID(ctx, namespace)
+	if err != nil {
+		return "", false, err
+	}
+	return id, id != "", nil
+}
 
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
