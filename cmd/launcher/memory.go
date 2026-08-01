@@ -41,6 +41,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +52,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 const (
@@ -240,6 +245,12 @@ type memoryConfig struct {
 	// Registry is AGENT_REGISTRY_ID — the trust boundary (ADR 0033) the shared scope keys under.
 	// Required for the shared scope; empty ⇒ shared falls back to private (a visible misconfig).
 	Registry string
+	// ProxyURL is STATELAYER_PROXY_URL (M51, ADR 0050 §8): when set, the session/shared routes are
+	// REVERSE-PROXIED to the control-plane state-layer proxy (which holds the Valkey credential and
+	// enforces per-tenant scope server-side) instead of hitting Valkey directly. Empty ⇒ direct
+	// (unchanged, migration phase 1 dual-mode). The launcher forwards its run capability (already on
+	// the request) as the proxy's Authorization Bearer — no SDK change (ADR 0050 Amд 1).
+	ProxyURL string
 }
 
 // memoryScopeShared is the MEMORY_SCOPE value that selects the shared team scratchpad.
@@ -254,6 +265,9 @@ type memoryServer struct {
 	agent    string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
 	tracer   trace.Tracer
 	longTerm *longTermProxy // optional (ADR 0045); nil ⇒ no long-term endpoints
+	// forward, when non-nil (STATELAYER_PROXY_URL set), reverse-proxies the session/shared routes to
+	// the control-plane state-layer proxy — the launcher holds no Valkey path (ADR 0050 §8 phase 1).
+	forward *httputil.ReverseProxy
 }
 
 // buildMemoryHTTPServer builds the :2998 listener, or nil when neither session nor long-term memory is
@@ -263,8 +277,10 @@ func buildMemoryHTTPServer(cfg Config, tracer trace.Tracer, ltProxy *longTermPro
 	if !cfg.MemoryEnabled() && ltProxy == nil {
 		return nil
 	}
+	// Build the direct-Valkey store only when a backend addr is wired. When ONLY the state-layer proxy
+	// is set (phase 3, no MEMORY_BACKEND_ADDR), store stays nil and newMemoryServer forwards instead.
 	var store MemoryStore
-	if cfg.MemoryEnabled() {
+	if cfg.Memory.BackendAddr != "" {
 		store = newRedisStore(cfg.Memory.BackendAddr)
 	}
 	return &http.Server{
@@ -282,12 +298,45 @@ func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer, l
 	if cfg.Scope == memoryScopeShared && cfg.Registry != "" {
 		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
 	}
-	return &memoryServer{
+	m := &memoryServer{
 		store:    store,
 		prefix:   prefix,
 		agent:    cfg.Agent,
 		tracer:   tracer,
 		longTerm: longTerm,
+	}
+	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared)
+	return m
+}
+
+// buildStatelayerForward builds the reverse proxy to the control-plane state-layer proxy (M51, ADR
+// 0050 §8/Amд 1), or nil when STATELAYER_PROXY_URL is unset (direct-Valkey, unchanged). The Director
+// translates the run capability already on the request (X-Ctxmesh-Run-Capability) into the proxy's
+// Authorization Bearer — the proxy derives ALL scope from that verified token, so the launcher passes
+// no key/identity. The scope INTENT (shared vs private) rides X-Memory-Scope; the proxy still keys
+// shared memory under the TOKEN's registry, so a bad scope hint can't cross tenants.
+func buildStatelayerForward(proxyURL string, shared bool) *httputil.ReverseProxy {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
+	}
+	target, err := url.Parse(proxyURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "launcher: memory: bad STATELAYER_PROXY_URL (%v) — falling back to direct Valkey\n", err)
+		return nil
+	}
+	return &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+			if tok := req.Header.Get(runcap.HeaderName); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+			if shared {
+				req.Header.Set("X-Memory-Scope", memoryScopeShared)
+			}
+		},
 	}
 }
 
@@ -364,9 +413,17 @@ func (m *memoryServer) handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// Session/shared conversation memory (Valkey) — only when a backend is wired. An agent may run with
-	// ONLY long-term memory (no session backend), so guard the conversation routes on the store.
-	if m.store != nil {
+	// Session/shared conversation memory. When STATELAYER_PROXY_URL is set (m.forward), REVERSE-PROXY
+	// these routes to the control-plane state-layer proxy (ADR 0050 §8 — the launcher holds no Valkey
+	// path); else serve them from the local direct-Valkey store (unchanged). An agent may run with ONLY
+	// long-term memory (neither store nor forward), so both are guarded.
+	switch {
+	case m.forward != nil:
+		mux.Handle("GET /memory/{conversationId}", m.forward)
+		mux.Handle("PUT /memory/{conversationId}", m.forward)
+		mux.Handle("POST /memory/{conversationId}/append", m.forward)
+		mux.Handle("GET /memory/{conversationId}/search", m.forward)
+	case m.store != nil:
 		mux.HandleFunc("GET /memory/{conversationId}", m.traced("get", m.handleGet))
 		mux.HandleFunc("PUT /memory/{conversationId}", m.traced("put", m.handlePut))
 		mux.HandleFunc("POST /memory/{conversationId}/append", m.traced("append", m.handleAppend))

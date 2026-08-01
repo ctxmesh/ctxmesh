@@ -27,6 +27,16 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
     control-plane: token-service
   name: agent-engine-token-service
   namespace: {{ .Values.namespace }}
@@ -741,6 +751,25 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
     control-plane: token-service
   name: agent-engine-token-service
   namespace: {{ .Values.namespace }}
@@ -890,6 +919,82 @@ spec:
       - configMap:
           name: agent-engine-gateway-config
         name: gateway-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.statelayerProxy.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-engine
+      control-plane: statelayer-proxy
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: statelayer-proxy
+      labels:
+        app.kubernetes.io/name: agent-engine
+        control-plane: statelayer-proxy
+    spec:
+      containers:
+      - env:
+        - name: STATELAYER_ADDR
+          value: agent-engine-statelayer.agent-engine-system.svc:6379
+        - name: STATELAYER_CAPABILITY_AUDIENCE
+          value: ctxmesh-credential-plane
+        - name: STATELAYER_USERNAME
+          value: ""
+        - name: STATELAYER_PASSWORD
+          value: ""
+        envFrom:
+        - secretRef:
+            name: bff-adapters
+            optional: true
+        image: statelayer-proxy:latest
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 20
+        name: statelayer-proxy
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: agent-engine-statelayer-proxy
+      terminationGracePeriodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment

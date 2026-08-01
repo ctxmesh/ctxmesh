@@ -245,6 +245,9 @@ func main() {
 		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:    mgr.GetScheme(),
 		OBOEgress: oboEgress,
+		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
+		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
+		StatelayerProxyURL: strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL")),
 		// Prompt-only deploy (M9): the resolve seam. v1 ships the deterministic,
 		// OFFLINE fixture resolver — the dev/CI environment has no live git remote
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
