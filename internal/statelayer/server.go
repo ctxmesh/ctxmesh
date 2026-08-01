@@ -54,6 +54,10 @@ type Server struct {
 	// (M53). nil in memory-only / local-dev deployments (no cluster config); the
 	// quota endpoints report unavailable rather than guessing a tenant.
 	tenants TenantResolver
+	// podAuth authenticates a launcher's pod-identity token (cached TokenReview) for
+	// the quota/async endpoints — the second principal type alongside the memory
+	// runcap. nil in memory-only deployments.
+	podAuth PodAuthenticator
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -68,6 +72,9 @@ type Options struct {
 	// TenantResolver maps a namespace → owning tenant id for the quota/async
 	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
 	TenantResolver TenantResolver
+	// PodAuthenticator verifies a launcher's pod-identity token for the quota/async
+	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
+	PodAuthenticator PodAuthenticator
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -83,7 +90,13 @@ func NewServer(opts Options) (*Server, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Server{store: opts.Store, verifier: opts.Verifier, tenants: opts.TenantResolver, now: now}
+	s := &Server{
+		store:    opts.Store,
+		verifier: opts.Verifier,
+		tenants:  opts.TenantResolver,
+		podAuth:  opts.PodAuthenticator,
+		now:      now,
+	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
 		sc, err := scopeFromAgent(opts.DevAgent, "", false)
 		if err != nil {
@@ -181,6 +194,22 @@ func (s *Server) resolveTenant(ctx context.Context, namespace string) (id string
 	}
 	return id, id != "", nil
 }
+
+// authenticatePod verifies a launcher's pod-identity token and returns its
+// namespace (M53 quota/async paths). It returns (ns, nil) on success;
+// (\"\", ErrTokenRejected) for an invalid token; and (\"\", errPodAuthUnavailable)
+// when no authenticator is configured (memory-only deployment) — distinct from an
+// auth-infra error so the handler can 503 either way but log the cause.
+func (s *Server) authenticatePod(ctx context.Context, token string) (string, error) {
+	if s.podAuth == nil {
+		return "", errPodAuthUnavailable
+	}
+	return s.podAuth.Namespace(ctx, token)
+}
+
+// errPodAuthUnavailable signals the proxy has no pod authenticator wired (no
+// cluster config) — the quota endpoints are unavailable, not a rejection.
+var errPodAuthUnavailable = errors.New("statelayer: pod authentication is not configured")
 
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
