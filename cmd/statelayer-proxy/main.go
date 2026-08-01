@@ -80,13 +80,15 @@ func run(log logr.Logger) error {
 	if addr == "" {
 		return errors.New("STATELAYER_ADDR is required (the Valkey host:port)")
 	}
-	store := statelayer.NewRedisStore(
-		addr,
-		strings.TrimSpace(os.Getenv("STATELAYER_USERNAME")),
-		os.Getenv("STATELAYER_PASSWORD"), // may contain structural chars — do not trim
-	)
+	username := strings.TrimSpace(os.Getenv("STATELAYER_USERNAME"))
+	password := os.Getenv("STATELAYER_PASSWORD") // may contain structural chars — do not trim
+	store := statelayer.NewRedisStore(addr, username, password)
 
-	opts := statelayer.Options{Store: store}
+	// The quota accumulator shares the same credentialed Valkey (ADR 0050 §5, M53).
+	opts := statelayer.Options{
+		Store:      store,
+		QuotaStore: statelayer.NewRedisQuotaStore(addr, username, password),
+	}
 
 	// The dev bypass (STATELAYER_DEV_AGENT="<ns>/<agent>") scopes unauthenticated
 	// requests to a static identity — NEVER set in production.

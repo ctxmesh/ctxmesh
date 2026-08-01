@@ -58,6 +58,9 @@ type Server struct {
 	// the quota/async endpoints — the second principal type alongside the memory
 	// runcap. nil in memory-only deployments.
 	podAuth PodAuthenticator
+	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
+	// deployments; the quota endpoints then report unavailable.
+	quota QuotaStore
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -75,6 +78,9 @@ type Options struct {
 	// PodAuthenticator verifies a launcher's pod-identity token for the quota/async
 	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
 	PodAuthenticator PodAuthenticator
+	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
+	// quota endpoints report unavailable.
+	QuotaStore QuotaStore
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -95,6 +101,7 @@ func NewServer(opts Options) (*Server, error) {
 		verifier: opts.Verifier,
 		tenants:  opts.TenantResolver,
 		podAuth:  opts.PodAuthenticator,
+		quota:    opts.QuotaStore,
 		now:      now,
 	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
@@ -120,6 +127,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /memory/{conversationId}", s.scoped(s.handlePut))
 	mux.HandleFunc("POST /memory/{conversationId}/append", s.scoped(s.handleAppend))
 	mux.HandleFunc("GET /memory/{conversationId}/search", s.scoped(s.handleSearch))
+	// Quota endpoints (M53) — pod-identity authenticated, tenant-scoped SERVER-SIDE.
+	mux.HandleFunc("POST /quota/rpm", s.handleQuotaRPM)
+	mux.HandleFunc("GET /quota/spend", s.handleQuotaGetSpend)
+	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
+	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
+	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
 	return mux
 }
 
