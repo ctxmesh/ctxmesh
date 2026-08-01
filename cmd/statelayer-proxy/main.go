@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -39,10 +41,20 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/statelayer"
 )
 
-// defaultAudience is the DISTINCT audience the proxy verifies (ADR 0050 §2 — a
-// token minted for the credential plane is not replayable here). The BFF mints a
-// state-layer token with this audience alongside the credential-plane one.
-const defaultAudience = "statelayer-proxy"
+// The proxy verifies TWO unrelated token types, each with its own audience:
+//   - defaultCapabilityAudience — the runcap (Ed25519 JWT) audience for the memory
+//     path (STATELAYER_CAPABILITY_AUDIENCE; ADR 0050 §2 + Amд 1).
+//   - defaultPodAudience — the Kubernetes projected SA-token audience for the
+//     quota/async paths (STATELAYER_POD_AUDIENCE; ADр 3). It MUST match the
+//     `audiences` in the launcher's serviceAccountToken volume projection.
+//
+// They default to the same string but are validated by completely different
+// mechanisms (signature vs TokenReview), so there is no cross-replay between them;
+// kept as separate constants so an operator can diverge one without surprise.
+const (
+	defaultCapabilityAudience = "statelayer-proxy"
+	defaultPodAudience        = "statelayer-proxy"
+)
 
 const (
 	defaultListenAddr   = ":8080"
@@ -81,23 +93,31 @@ func run(log logr.Logger) error {
 	devAgent := strings.TrimSpace(os.Getenv("STATELAYER_DEV_AGENT"))
 	opts.DevAgent = devAgent
 
-	// Tenant resolver (ADR 0050 §3 + Amд 2 Correction 2a): a cache restricted to
-	// Namespaces, read for the AUTHORITATIVE tenant label — the same source the
-	// controller injects TENANT_ID from, so the proxy scopes quota to the identical
-	// accumulator. Best-effort: with no cluster config (local dev/compose) tenant
-	// resolution is disabled and the M53 quota endpoints report unavailable; memory
-	// still serves. Never fail the whole proxy on its absence.
-	if resolver, rerr := startTenantResolver(ctx); rerr != nil {
-		switch {
-		case ctx.Err() != nil:
-			// Shutting down before the cache synced — not a real degradation.
-			log.Info("tenant resolver startup aborted by shutdown", "reason", rerr.Error())
-		default:
-			log.Info("tenant resolution disabled — quota endpoints will be unavailable", "reason", rerr.Error())
-		}
+	// Cluster-backed quota scoping (M53): the tenant resolver (namespace-label →
+	// tenant, ADR 0050 §3 + Amд 2 Correction 2a) + the pod authenticator (cached
+	// TokenReview, Amд 3), both from one in-cluster config. Best-effort — with no
+	// cluster config (local dev/compose) both are disabled and the quota/async
+	// endpoints report unavailable; memory still serves. Never fail the whole proxy
+	// on their absence.
+	if restCfg, cfgErr := ctrl.GetConfig(); cfgErr != nil {
+		log.Info("no cluster config — quota/async endpoints disabled", "reason", cfgErr.Error())
 	} else {
-		log.Info("tenant resolver ready (namespace-label resolution)")
-		opts.TenantResolver = resolver
+		if resolver, rerr := statelayer.StartNamespaceResolver(ctx, restCfg, cacheSyncTimeout); rerr != nil {
+			if ctx.Err() != nil { // shutting down before the cache synced — not a real degradation
+				log.Info("tenant resolver startup aborted by shutdown", "reason", rerr.Error())
+			} else {
+				log.Info("tenant resolution disabled — quota endpoints will be unavailable", "reason", rerr.Error())
+			}
+		} else {
+			opts.TenantResolver = resolver
+			log.Info("tenant resolver ready (namespace-label resolution)")
+		}
+		if podAuth, aerr := buildPodAuthenticator(restCfg); aerr != nil {
+			log.Info("pod authentication disabled — quota endpoints will be unavailable", "reason", aerr.Error())
+		} else {
+			opts.PodAuthenticator = podAuth
+			log.Info("pod authenticator ready (cached TokenReview)")
+		}
 	}
 
 	// The capability verifier: REQUIRED in production (a distinct audience). Optional
@@ -111,7 +131,7 @@ func run(log logr.Logger) error {
 		}
 		audience := strings.TrimSpace(os.Getenv("STATELAYER_CAPABILITY_AUDIENCE"))
 		if audience == "" {
-			audience = defaultAudience
+			audience = defaultCapabilityAudience
 		}
 		opts.Verifier = runcap.NewVerifier(pub, audience, nil)
 	case devAgent == "":
@@ -151,14 +171,18 @@ func run(log logr.Logger) error {
 	}
 }
 
-// startTenantResolver resolves the in-cluster config and builds the
-// namespace-label TenantResolver (ADR 0050 §3 + Amд 2 Correction 2a). It returns
-// an error (rather than crashing the proxy) when there's no cluster config, so a
-// local/dev run without a kubeconfig still serves memory.
-func startTenantResolver(ctx context.Context) (statelayer.TenantResolver, error) {
-	restCfg, err := ctrl.GetConfig()
+// buildPodAuthenticator builds the cached-TokenReview PodAuthenticator (ADR 0050
+// Amд 3) over a client-go clientset. The pod-token audience (STATELAYER_POD_AUDIENCE,
+// default "statelayer-proxy") must match the audience the launcher's projected
+// serviceAccountToken volume is minted for.
+func buildPodAuthenticator(restCfg *rest.Config) (statelayer.PodAuthenticator, error) {
+	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
-		return nil, fmt.Errorf("no cluster config: %w", err)
+		return nil, fmt.Errorf("build kubernetes client: %w", err)
 	}
-	return statelayer.StartNamespaceResolver(ctx, restCfg, cacheSyncTimeout)
+	audience := strings.TrimSpace(os.Getenv("STATELAYER_POD_AUDIENCE"))
+	if audience == "" {
+		audience = defaultPodAudience
+	}
+	return statelayer.NewTokenReviewAuthenticator(clientset, audience, nil), nil
 }

@@ -34,3 +34,25 @@ subjects:
   - kind: ServiceAccount
     name: statelayer-proxy
     namespace: system
+---
+# Pod-identity auth (M53, ADR 0050 Amendment 3): the proxy authenticates a
+# launcher's projected SA token via TokenReview. system:auth-delegator is the
+# well-known cluster role that grants create on tokenreviews (+ subjectaccessreviews);
+# we use only tokenreviews. This is the standard binding for a service that verifies
+# ServiceAccount tokens.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: statelayer-proxy-auth-delegator
+  labels:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: statelayer-proxy
+    namespace: system
