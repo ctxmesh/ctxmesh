@@ -1,0 +1,101 @@
+# State-layer proxy Deployment (M51, ADR 0050) — the control-plane service that holds
+# the Valkey credential and enforces per-tenant/agent memory scope SERVER-SIDE from the
+# verified run-capability token. Agent workloads hold no credential and cannot name
+# another tenant's key.
+#
+# CAPABILITY KEYPAIR: MCP_CAPABILITY_PUBLIC_KEY comes from the OPTIONAL bff-adapters
+# Secret (envFrom, optional: true) — the same Secret that carries the capability
+# material (never a literal here, so kustomize/helm-default stay valid). Absent it, the
+# proxy STARTS but refuses every request (401) until the keypair is provisioned — an
+# idle proxy in migration phase 1, not a CrashLoop. The audience is DISTINCT
+# (statelayer-proxy) from the credential plane's, so a credential-plane token is not
+# replayable here (ADR 0050 §2).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statelayer-proxy
+  namespace: system
+  labels:
+    control-plane: statelayer-proxy
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: statelayer-proxy
+      app.kubernetes.io/name: agent-engine
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: statelayer-proxy
+      labels:
+        control-plane: statelayer-proxy
+        app.kubernetes.io/name: agent-engine
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: statelayer-proxy
+          image: statelayer-proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # The shared state-layer Valkey (same target as the BFF's STATELAYER_ADDR,
+            # m49). BYO-external installs override it (ADR 0049 posture). The Helm chart
+            # templates it (no drift).
+            - name: STATELAYER_ADDR
+              value: agent-engine-statelayer.agent-engine-system.svc:6379
+            # The verifier audience. Per ADR 0050 Amд 1, the first cut REUSES the
+            # credential-plane audience (the run capability already on the memory
+            # request, like the long-term memory proxy) — so no 2nd token/SDK change.
+            # Keep it configurable: the separate-audience hardening (for BOTH memory
+            # proxies) is an M52 follow-on = a values change, not code.
+            - name: STATELAYER_CAPABILITY_AUDIENCE
+              value: ctxmesh-credential-plane
+            # STATELAYER_USERNAME/PASSWORD for a Valkey ACL user (ADR 0050 §6) — empty by
+            # default (the in-cluster Valkey is unauthenticated, ADR 0049). Set for a
+            # password-protected/BYO-external Valkey.
+            - name: STATELAYER_USERNAME
+              value: ""
+            - name: STATELAYER_PASSWORD
+              value: ""
+          # MCP_CAPABILITY_PUBLIC_KEY (+ any capability config) from the OPTIONAL shared
+          # Secret. Absent ⇒ the proxy refuses requests until provisioned (no literal
+          # here → no drift).
+          envFrom:
+            - secretRef:
+                name: bff-adapters
+                optional: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      serviceAccountName: statelayer-proxy
+      terminationGracePeriodSeconds: 10

@@ -225,6 +225,10 @@ docker-build-token-service: ## Build the token-service image (token-service:late
 docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (build-time Node) + Go BFF; serves static assets, NO Node runtime.
 	$(CONTAINER_TOOL) build -t bff:latest -f Dockerfile.bff .
 
+.PHONY: docker-build-statelayer-proxy
+docker-build-statelayer-proxy: ## Build the state-layer proxy image (statelayer-proxy:latest) — server-side tenant isolation (M51, ADR 0050).
+	$(CONTAINER_TOOL) build -t statelayer-proxy:latest -f Dockerfile.statelayer-proxy .
+
 .PHONY: docker-build-discovery
 docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
 	$(CONTAINER_TOOL) build -t dev.local/agent-discovery:0.1.0 -f Dockerfile.discovery .

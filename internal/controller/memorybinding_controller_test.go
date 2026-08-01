@@ -200,6 +200,11 @@ func TestMemoryBinding_BindInjectsEnv(t *testing.T) {
 	require.True(t, ok, "AGENT_NAME must be injected")
 	assert.Equal(t, agent.Name, agentNameEnv.Value)
 
+	// STATELAYER_PROXY_URL must be ABSENT by default (the controller isn't configured
+	// with a proxy) — agents keep the direct-Valkey path, no drift (M51, ADR 0050 §8).
+	_, hasProxy := envMap["STATELAYER_PROXY_URL"]
+	assert.False(t, hasProxy, "STATELAYER_PROXY_URL must not be injected unless the controller is configured with it")
+
 	// Knative constraint guard: NO env var on the ksvc user container may use
 	// valueFrom (fieldRef/resourceFieldRef/secretKeyRef/configMapKeyRef are all
 	// rejected unless the corresponding non-default feature flag is enabled).
@@ -209,6 +214,39 @@ func TestMemoryBinding_BindInjectsEnv(t *testing.T) {
 		assert.Nil(t, e.ValueFrom,
 			"ksvc container env %q must be a static value, not valueFrom (Knative webhook rejects it)", e.Name)
 	}
+}
+
+// When the controller is configured with a state-layer proxy URL (M51, ADR 0050
+// §8 phase 1), a memory-bound agent gets STATELAYER_PROXY_URL injected as a STATIC
+// value, AND keeps MEMORY_BACKEND_ADDR (dual-mode fallback).
+func TestMemoryBinding_StatelayerProxyURLInjected(t *testing.T) {
+	const (
+		namespace = "default"
+		agentName = "mem-proxy-agent"
+		bindName  = "mem-proxy-binding"
+		proxyURL  = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	mkAgent(t, agentName, namespace)
+	_ = mkMemoryBinding(t, bindName, namespace, agentName, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, agentName, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+	envMap := make(map[string]corev1.EnvVar)
+	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+		envMap[e.Name] = e
+	}
+
+	proxyEnv, ok := envMap["STATELAYER_PROXY_URL"]
+	require.True(t, ok, "STATELAYER_PROXY_URL must be injected when the controller is configured")
+	assert.Equal(t, proxyURL, proxyEnv.Value)
+	assert.Nil(t, proxyEnv.ValueFrom, "must be a static value (Knative forbids valueFrom in a ksvc)")
+	_, hasBackend := envMap["MEMORY_BACKEND_ADDR"]
+	assert.True(t, hasBackend, "phase 1 keeps MEMORY_BACKEND_ADDR for dual-mode fallback")
 }
 
 // TestMemoryBinding_CustomAddr verifies that spec.backend.addr overrides the
