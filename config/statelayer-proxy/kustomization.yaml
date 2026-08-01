@@ -1,8 +1,10 @@
-# State-layer proxy — Deployment + Service + SA (M51, ADR 0050). Flows into
-# config/default (namespace agent-engine-system, namePrefix agent-engine-).
+# State-layer proxy — Deployment + Service + SA + tenant-reader RBAC (M51/M53,
+# ADR 0050). Flows into config/default (namespace agent-engine-system, namePrefix
+# agent-engine-).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - service_account.yaml
+  - rbac.yaml
   - service.yaml
   - deployment.yaml

@@ -48,6 +48,7 @@ const (
 	defaultListenAddr   = ":8080"
 	readHeaderTimeout   = 10 * time.Second
 	shutdownGracePeriod = 10 * time.Second
+	cacheSyncTimeout    = 30 * time.Second
 )
 
 func main() {
@@ -60,6 +61,9 @@ func main() {
 }
 
 func run(log logr.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
 	if addr == "" {
 		return errors.New("STATELAYER_ADDR is required (the Valkey host:port)")
@@ -76,6 +80,25 @@ func run(log logr.Logger) error {
 	// requests to a static identity — NEVER set in production.
 	devAgent := strings.TrimSpace(os.Getenv("STATELAYER_DEV_AGENT"))
 	opts.DevAgent = devAgent
+
+	// Tenant resolver (ADR 0050 §3 + Amд 2 Correction 2a): a cache restricted to
+	// Namespaces, read for the AUTHORITATIVE tenant label — the same source the
+	// controller injects TENANT_ID from, so the proxy scopes quota to the identical
+	// accumulator. Best-effort: with no cluster config (local dev/compose) tenant
+	// resolution is disabled and the M53 quota endpoints report unavailable; memory
+	// still serves. Never fail the whole proxy on its absence.
+	if resolver, rerr := startTenantResolver(ctx); rerr != nil {
+		switch {
+		case ctx.Err() != nil:
+			// Shutting down before the cache synced — not a real degradation.
+			log.Info("tenant resolver startup aborted by shutdown", "reason", rerr.Error())
+		default:
+			log.Info("tenant resolution disabled — quota endpoints will be unavailable", "reason", rerr.Error())
+		}
+	} else {
+		log.Info("tenant resolver ready (namespace-label resolution)")
+		opts.TenantResolver = resolver
+	}
 
 	// The capability verifier: REQUIRED in production (a distinct audience). Optional
 	// only when the dev bypass is on (a local Compose/dev loop mints no token).
@@ -109,9 +132,6 @@ func run(log logr.Logger) error {
 	}
 	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: readHeaderTimeout}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("statelayer-proxy listening", "addr", listen, "valkey", addr, "devBypass", devAgent != "")
@@ -129,4 +149,16 @@ func run(log logr.Logger) error {
 		defer cancel()
 		return httpSrv.Shutdown(sctx)
 	}
+}
+
+// startTenantResolver resolves the in-cluster config and builds the
+// namespace-label TenantResolver (ADR 0050 §3 + Amд 2 Correction 2a). It returns
+// an error (rather than crashing the proxy) when there's no cluster config, so a
+// local/dev run without a kubeconfig still serves memory.
+func startTenantResolver(ctx context.Context) (statelayer.TenantResolver, error) {
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("no cluster config: %w", err)
+	}
+	return statelayer.StartNamespaceResolver(ctx, restCfg, cacheSyncTimeout)
 }

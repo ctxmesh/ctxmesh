@@ -39,8 +39,10 @@ import (
 const (
 	// tenantLabel marks every resource + namespace a Tenant stamps, so the
 	// controller can prune them (a cluster-scoped Tenant cannot ownerRef-GC its
-	// namespaced output — K8s disallows cluster→namespaced owner GC).
-	tenantLabel = "agents.ctxmesh.ai/tenant"
+	// namespaced output — K8s disallows cluster→namespaced owner GC). The value is
+	// the shared api/v1alpha1.TenantLabel — one source of truth with the
+	// state-layer proxy's tenant resolver (ADR 0050 Amд 2 Correction 2a).
+	tenantLabel = agentsv1alpha1.TenantLabel
 	// tenantFinalizer guards cross-namespace cleanup on Tenant delete.
 	tenantFinalizer = "agents.ctxmesh.ai/tenant-cleanup"
 	// tenantQuotaName is the fixed name of the ResourceQuota stamped per namespace.
