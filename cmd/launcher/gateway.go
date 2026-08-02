@@ -303,11 +303,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		}
 		switch {
 		case cfg.StatelayerProxyURL != "":
-			tokenPath := cfg.PodTokenPath
-			if tokenPath == "" {
-				tokenPath = defaultPodTokenPath
-			}
-			tq.store = newHTTPTenantStore(cfg.StatelayerProxyURL, tokenPath)
+			tq.store = newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
 			gp.tenant = tq
 		case cfg.QuotaAddr != "":
 			tq.store = newRedisTenantStore(cfg.QuotaAddr)

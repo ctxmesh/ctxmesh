@@ -1010,6 +1010,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
 			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
 		)
+
+		// Async dedup via the state-layer proxy (M53, ADR 0050 §6): a registry member
+		// WITH memory dedupes through the proxy (pod-identity authed) instead of the
+		// direct Valkey — so it needs the projected token too. STATELAYER_PROXY_URL is
+		// already injected by the memory block above (async requires memory). Guard the
+		// token-path env against a duplicate the tenant-quota block may have added.
+		if r.StatelayerProxyURL != "" && hasMemoryBinding {
+			if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
+			}
+			injectPodToken = true
+		}
 	}
 
 	// The user container's volume mounts: the resolved-prompt file (M9) when the

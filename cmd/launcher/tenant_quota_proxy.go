@@ -66,17 +66,31 @@ const quotaProxyTimeout = 3 * time.Second
 // kubelet rotates it in place, so re-reading (rather than caching) always presents
 // the current token without a rotation-staleness bug (ADR 0050 Amд 3).
 func (s *httpTenantStore) token() (string, error) {
-	b, err := os.ReadFile(s.tokenPath)
+	return readPodToken(s.tokenPath)
+}
+
+// readPodToken reads + validates the mounted projected SA token. Shared by the
+// quota and dedup proxy clients. An empty/whitespace file (a mid-rotation partial
+// snapshot) is a hard error, never a silent empty Bearer.
+func readPodToken(path string) (string, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read pod token %s: %w", s.tokenPath, err)
+		return "", fmt.Errorf("read pod token %s: %w", path, err)
 	}
 	tok := strings.TrimSpace(string(b))
 	if tok == "" {
-		// A partial/empty read (mid-rotation snapshot) — surface it as an error (→
-		// preCall fail policy) with a clear diagnostic, never a silent empty Bearer.
-		return "", fmt.Errorf("pod token %s is empty or all-whitespace", s.tokenPath)
+		return "", fmt.Errorf("pod token %s is empty or all-whitespace", path)
 	}
 	return tok, nil
+}
+
+// resolvePodTokenPath returns the explicit STATELAYER_TOKEN_PATH or the default
+// mount path — shared by the gateway quota client and the async dedup client.
+func resolvePodTokenPath(explicit string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		return p
+	}
+	return defaultPodTokenPath
 }
 
 // call issues an authenticated request and returns the response for the caller to
