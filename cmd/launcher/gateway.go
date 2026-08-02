@@ -119,7 +119,20 @@ type gatewayConfig struct {
 	TenantRPM         int
 	TenantMaxInFlight int
 	QuotaAddr         string
+
+	// StatelayerProxyURL (M53, ADR 0050 §8 phase 2): when set, the tenant quota ops
+	// route through the state-layer proxy (which holds the Valkey credential + derives
+	// the tenant from the launcher's pod token) instead of the direct QuotaAddr. Takes
+	// precedence over QuotaAddr — dual-mode during the migration.
+	StatelayerProxyURL string
+	// PodTokenPath is the mounted projected SA-token the proxy authenticates (audience
+	// statelayer-proxy). Defaults to defaultPodTokenPath when the proxy URL is set.
+	PodTokenPath string
 }
+
+// defaultPodTokenPath is where the controller mounts the launcher's projected
+// serviceAccountToken volume (must match the controller's mount path, M53).
+const defaultPodTokenPath = "/var/run/secrets/statelayer-proxy/token"
 
 // GatewayProxyEnabled reports whether the outbound gateway proxy should start.
 // True iff an upstream gateway URL was injected AND at least one budget cap is
@@ -165,17 +178,19 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 	}
 
 	return gatewayConfig{
-		UpstreamURL:       strings.TrimRight(upstream, "/"),
-		Port:              port,
-		AgentName:         agentName,
-		ConvCapUSD:        strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
-		AgentCapUSD:       strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
-		SoftPct:           softPct,
-		TenantID:          strings.TrimSpace(lookup("TENANT_ID")),
-		TenantBudgetUSD:   strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
-		TenantRPM:         positiveIntEnv(lookup, "TENANT_RPM"),
-		TenantMaxInFlight: positiveIntEnv(lookup, "TENANT_MAX_CONCURRENT"),
-		QuotaAddr:         strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
+		UpstreamURL:        strings.TrimRight(upstream, "/"),
+		Port:               port,
+		AgentName:          agentName,
+		ConvCapUSD:         strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
+		AgentCapUSD:        strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
+		SoftPct:            softPct,
+		TenantID:           strings.TrimSpace(lookup("TENANT_ID")),
+		TenantBudgetUSD:    strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
+		TenantRPM:          positiveIntEnv(lookup, "TENANT_RPM"),
+		TenantMaxInFlight:  positiveIntEnv(lookup, "TENANT_MAX_CONCURRENT"),
+		QuotaAddr:          strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
+		StatelayerProxyURL: strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
+		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
 	}, nil
 }
 
@@ -275,20 +290,31 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		gp.agentCap = &m
 	}
 
-	// Tenant model quota (M47): enforce against the SHARED Valkey so every replica coordinates. Caps but
-	// no QuotaAddr ⇒ we cannot coordinate cross-pod — log loudly + leave it unenforced (a visible misconfig;
-	// the controller always injects the addr when caps exist, so this is defence-in-depth).
+	// Tenant model quota (M47/M53): enforce against the SHARED accumulator so every replica coordinates.
+	// The STATE-LAYER PROXY (M53, ADR 0050 §8 phase 2) takes precedence over the direct Valkey: it holds
+	// the credential + derives the tenant from this launcher's pod token, so the agent holds no Valkey
+	// credential. Falls back to the direct QuotaAddr during the migration; neither set ⇒ log loudly and
+	// leave quota unenforced (a visible misconfig — the controller injects one when caps exist).
 	if cfg.TenantID != "" {
 		tq := &tenantQuota{id: cfg.TenantID, rpm: cfg.TenantRPM, maxConcurrent: cfg.TenantMaxInFlight, logf: logf}
 		if cfg.TenantBudgetUSD != "" {
 			tq.budgetUSD = moneyToFloat(cfg.TenantBudgetUSD)
 			tq.hasBudget = tq.budgetUSD > 0
 		}
-		if cfg.QuotaAddr == "" {
-			logf("launcher: gateway: tenant %s has model caps but no TENANT_QUOTA_ADDR — quota NOT enforced", cfg.TenantID)
-		} else {
+		switch {
+		case cfg.StatelayerProxyURL != "":
+			tokenPath := cfg.PodTokenPath
+			if tokenPath == "" {
+				tokenPath = defaultPodTokenPath
+			}
+			tq.store = newHTTPTenantStore(cfg.StatelayerProxyURL, tokenPath)
+			gp.tenant = tq
+		case cfg.QuotaAddr != "":
 			tq.store = newRedisTenantStore(cfg.QuotaAddr)
 			gp.tenant = tq
+		default:
+			logf("launcher: gateway: tenant %s has model caps but no STATELAYER_PROXY_URL or "+
+				"TENANT_QUOTA_ADDR — quota NOT enforced", cfg.TenantID)
 		}
 	}
 

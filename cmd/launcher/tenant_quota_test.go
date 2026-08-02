@@ -76,6 +76,55 @@ func (f *fakeTenantStore) ReleaseSlot(_ context.Context, _ string) error {
 
 func noopLog(string, ...any) {}
 
+// A DEFINITIVE token rejection (proxy 401 → ErrQuotaProxyRejected) fails EVERY
+// dimension CLOSED (auth 403) — never fail-open like a transient blip (ADR 0050
+// Amд 3): an unauthenticated caller must not slip past rate OR concurrency.
+func TestTenantQuota_ProxyRejectedFailsClosed(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rate: rejected → deny (NOT fail-open)", func(t *testing.T) {
+		q := &tenantQuota{id: "acme", rpm: 10, store: &fakeTenantStore{rpmErr: ErrQuotaProxyRejected}, logf: noopLog}
+		deny, _ := q.preCall(ctx, 0)
+		require.NotNil(t, deny, "a rejected token must NOT fail rate open")
+		assert.Equal(t, 403, deny.status)
+		assert.Equal(t, "tenant_quota_unauthorized", deny.code)
+	})
+
+	t.Run("budget: rejected → deny 403 (not the transient 402 path)", func(t *testing.T) {
+		q := &tenantQuota{
+			id: "acme", budgetUSD: 100, hasBudget: true,
+			store: &fakeTenantStore{spendErr: ErrQuotaProxyRejected}, logf: noopLog,
+		}
+		deny, _ := q.preCall(ctx, 1)
+		require.NotNil(t, deny)
+		assert.Equal(t, 403, deny.status)
+	})
+
+	t.Run("concurrency: rejected → deny (NOT fail-open)", func(t *testing.T) {
+		q := &tenantQuota{
+			id: "acme", maxConcurrent: 5,
+			store: &fakeTenantStore{acquireErr: ErrQuotaProxyRejected}, logf: noopLog,
+		}
+		deny, _ := q.preCall(ctx, 0)
+		require.NotNil(t, deny, "a rejected token must NOT fail concurrency open")
+		assert.Equal(t, 403, deny.status)
+	})
+
+	t.Run("a wrapped rejection is still detected (errors.Is through %w)", func(t *testing.T) {
+		wrapped := errors.Join(errors.New("ctx"), ErrQuotaProxyRejected)
+		q := &tenantQuota{id: "acme", rpm: 10, store: &fakeTenantStore{rpmErr: wrapped}, logf: noopLog}
+		deny, _ := q.preCall(ctx, 0)
+		require.NotNil(t, deny)
+		assert.Equal(t, 403, deny.status)
+	})
+
+	t.Run("regression: a TRANSIENT error still fails rate OPEN", func(t *testing.T) {
+		q := &tenantQuota{id: "acme", rpm: 10, store: &fakeTenantStore{rpmErr: errors.New("503 blip")}, logf: noopLog}
+		deny, _ := q.preCall(ctx, 0)
+		assert.Nil(t, deny, "a non-rejection error must still fail rate OPEN (ADR 0046 §3)")
+	})
+}
+
 // The RPM cap allows up to the limit, then 429s.
 func TestTenantQuota_RateLimit(t *testing.T) {
 	store := &fakeTenantStore{}
