@@ -865,6 +865,9 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
+        env:
+        - name: STATELAYER_PROXY_URL
+          value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
         image: {{ printf "%s:%s" .Values.controllerManager.image.repository (.Values.controllerManager.image.tag | default .Chart.AppVersion) }}
         imagePullPolicy: IfNotPresent
         livenessProbe:

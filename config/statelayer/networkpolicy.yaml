@@ -1,0 +1,33 @@
+# State-layer Valkey ingress restriction (M53, ADR 0050 §8 phase 3 + Amд 2 §6d).
+# Post-cutover the ONLY clients of the Valkey :6379 are control-plane components in
+# the install namespace — the state-layer proxy (memory/quota/dedup) and the BFF
+# (console reads). Agent workloads run in OTHER namespaces and now hold no Valkey
+# path at all, so this policy denies any cross-namespace ingress to :6379 —
+# defense-in-depth above the removed credential. Lands AFTER the cutover (never
+# before — it would strand a still-direct agent). Verified live: the statelayer
+# stays Ready (the kubelet tcpSocket probe is not blocked), the proxy + BFF still
+# connect, and an agent-namespace pod's direct :6379 connect times out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: statelayer-ingress
+  namespace: system
+  labels:
+    control-plane: statelayer
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: statelayer
+  policyTypes:
+    - Ingress
+  ingress:
+    # Same-namespace (control-plane) pods only — an empty podSelector with no
+    # namespaceSelector matches pods in THIS policy's namespace. That's the proxy +
+    # the BFF; agents in other namespaces are denied.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 6379
