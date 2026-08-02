@@ -167,8 +167,9 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 
 // When the controller is configured with a state-layer proxy, a tenant-quota agent
 // gets the projected pod-identity token (a Knative-allowed projected VOLUME, bound
-// to the proxy audience with a short expiry), its mount, and the proxy env — while
-// KEEPING TENANT_QUOTA_ADDR for the dual-mode migration (ADR 0050 §8 phase 2).
+// to the proxy audience with a short expiry), its mount, and the proxy env — and,
+// post-cutover (ADR 0050 §8 phase 3), gets NO direct TENANT_QUOTA_ADDR (the agent
+// holds no Valkey path; quota flows through the proxy).
 func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
 	makeNamespace(t, "tnt-proxytok-ns")
 	tenant := &agentsv1alpha1.Tenant{
@@ -196,7 +197,8 @@ func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
 
 	assert.Equal(t, r.StatelayerProxyURL, env["STATELAYER_PROXY_URL"])
 	assert.Equal(t, statelayerPodTokenFilePath, env["STATELAYER_TOKEN_PATH"])
-	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "dual-mode keeps the direct addr until the m53.7 cutover")
+	_, hasDirectAddr := env["TENANT_QUOTA_ADDR"]
+	assert.False(t, hasDirectAddr, "cutover: with the proxy configured the agent gets NO direct TENANT_QUOTA_ADDR")
 
 	// The projected token volume: audience-bound, short expiry, file "token".
 	var tokVol *corev1.Volume

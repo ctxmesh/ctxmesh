@@ -817,9 +817,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
 	if hasMemoryBinding {
+		// MEMORY_BACKEND_ADDR is the DIRECT Valkey path. Injected ONLY when the
+		// state-layer proxy is NOT configured; once the proxy is on (the m53.7
+		// cutover, ADR 0050 §8 phase 3), the agent memory-forwards THROUGH it and
+		// holds no direct Valkey path — the launcher's :2998 listener uses the proxy
+		// forward when MEMORY_BACKEND_ADDR is absent + STATELAYER_PROXY_URL is set.
+		if r.StatelayerProxyURL == "" {
+			env = append(env, corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr})
+		}
 		env = append(
 			env,
-			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
 			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
 			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
 			// prefix. Set as a STATIC value (the pod always runs in the
@@ -828,7 +835,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// which forbids valueFrom in a ksvc pod template unless the
 			// non-default kubernetes.podspec-fieldref feature flag is enabled.
 			// The key prefix is the agent's own namespace regardless of where
-			// the backend lives, so no downward reference is needed.
+			// the backend lives, so no downward reference is needed. (Unused on the
+			// proxy path — the proxy derives the key namespace from the token — but
+			// harmless + still correct for a proxy-less install.)
 			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
 		)
 		// AGENT_NAME: inject only if not already present. The launcher uses
@@ -907,11 +916,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
 		}
 		if tenantQuota {
-			// M53 (ADR 0050 §8 phase 2): route tenant quota through the state-layer proxy
-			// (pod-identity authed) when the controller is configured with it — the launcher
-			// then holds NO Valkey credential for quota. DUAL-MODE: keep TENANT_QUOTA_ADDR so
-			// the launcher can fall back until the m53.7 cutover removes it. The launcher
-			// prefers STATELAYER_PROXY_URL over the direct addr.
+			// M53 (ADR 0050 §8): route tenant quota through the state-layer proxy
+			// (pod-identity authed) when the controller is configured with it — the
+			// launcher then holds NO Valkey credential for quota.
 			if r.StatelayerProxyURL != "" {
 				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
@@ -920,11 +927,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 				}
 				injectPodToken = true
+			} else {
+				// Proxy NOT configured (proxy-less install): the launcher gateway enforces
+				// the caps against the shared Valkey DIRECTLY, so inject its address. Once
+				// the proxy is on (the m53.7 cutover, phase 3), this is NOT injected — the
+				// agent has no direct Valkey path; quota flows through the proxy on the
+				// SAME accumulator.
+				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 			}
-			// The launcher gateway proxy enforces the tenant caps against a shared accumulator
-			// (m47.4); inject the shared state-layer address so every tenant agent + replica
-			// coordinates on ONE bucket (the proxy path uses the SAME accumulator).
-			env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 		}
 	}
 
