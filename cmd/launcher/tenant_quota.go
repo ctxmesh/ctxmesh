@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -143,6 +144,12 @@ type tenantDeny struct {
 // unconditionally).
 func noopRelease() {}
 
+// quotaRejectedDeny is the fail-CLOSED denial for a DEFINITIVELY rejected pod token
+// (proxy 401, ErrQuotaProxyRejected) — an auth/config failure, so a 403 (not a cap
+// 402/429). Shared + never mutated. Per ADR 0050 Amд 3, EVERY dimension fails closed
+// on a rejected token, so this single denial covers rate, budget, and concurrency.
+var quotaRejectedDeny = &tenantDeny{status: 403, code: "tenant_quota_unauthorized"}
+
 // preCall enforces the tenant's RPM → budget → concurrency BEFORE the model call. It returns a *tenantDeny
 // to reject (nil to allow) AND a release func the caller MUST defer — it frees the concurrency slot when a
 // held call finishes (noop when none was taken). Fail policy (ADR 0046 §3): RATE + CONCURRENCY fail OPEN on
@@ -156,6 +163,10 @@ func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) (*tenantDeny,
 		window := time.Now().Unix() / 60
 		n, err := q.store.IncrRPM(ctx, q.id, window)
 		switch {
+		case errors.Is(err, ErrQuotaProxyRejected):
+			// A DEFINITIVE token rejection (401) is not a transient blip — fail CLOSED
+			// (Amд 3), never let an unauthenticated caller slip past the rate cap.
+			return quotaRejectedDeny, noopRelease
 		case err != nil:
 			q.logf("launcher: tenant rpm check failed (fail-open): %v", err)
 		case n > int64(q.rpm):
@@ -164,7 +175,10 @@ func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) (*tenantDeny,
 	}
 	if q.hasBudget {
 		spent, err := q.store.Spend(ctx, q.id)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrQuotaProxyRejected):
+			return quotaRejectedDeny, noopRelease // rejected token → fail closed (auth 403)
+		case err != nil:
 			q.logf("launcher: tenant budget check failed (fail-closed): %v", err)
 			return &tenantDeny{status: 402, code: "tenant_budget_exceeded", capUSD: q.budgetUSD}, noopRelease
 		}
@@ -175,6 +189,8 @@ func (q *tenantQuota) preCall(ctx context.Context, estUSD float64) (*tenantDeny,
 	if q.maxConcurrent > 0 {
 		ok, err := q.store.AcquireSlot(ctx, q.id, q.maxConcurrent)
 		switch {
+		case errors.Is(err, ErrQuotaProxyRejected):
+			return quotaRejectedDeny, noopRelease // rejected token → fail closed
 		case err != nil:
 			q.logf("launcher: tenant concurrency check failed (fail-open): %v", err)
 		case !ok:
