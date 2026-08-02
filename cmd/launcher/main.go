@@ -77,8 +77,14 @@ func main() {
 	// when the agent is not a registry member — its request path is unchanged.
 	var consumer asyncHandler
 	if cfg.A2AEnabled() {
+		// The seen-set prefers the state-layer proxy (M53, ADR 0050 §6): it presents
+		// the pod token and the proxy scopes the seen-key by namespace + holds the
+		// Valkey credential. Falls back to the direct Valkey until the m53.7 cutover.
 		var seen SeenSet
-		if cfg.MemoryEnabled() {
+		switch {
+		case cfg.Memory.ProxyURL != "":
+			seen = newHTTPSeenSet(cfg.Memory.ProxyURL, resolvePodTokenPath(os.Getenv("STATELAYER_TOKEN_PATH")))
+		case cfg.Memory.BackendAddr != "":
 			seen = newRedisSeenSet(cfg.Memory.BackendAddr)
 		}
 		// Blob offload (m7.6b): wired when OBJECT_STORE_ADDR is injected. The

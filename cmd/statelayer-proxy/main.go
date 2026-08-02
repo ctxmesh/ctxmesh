@@ -84,10 +84,12 @@ func run(log logr.Logger) error {
 	password := os.Getenv("STATELAYER_PASSWORD") // may contain structural chars — do not trim
 	store := statelayer.NewRedisStore(addr, username, password)
 
-	// The quota accumulator shares the same credentialed Valkey (ADR 0050 §5, M53).
+	// The quota accumulator + async seen-set share the same credentialed Valkey
+	// (ADR 0050 §5/§6, M53) — the proxy fronts all three call sites.
 	opts := statelayer.Options{
 		Store:      store,
 		QuotaStore: statelayer.NewRedisQuotaStore(addr, username, password),
+		DedupStore: statelayer.NewRedisDedupStore(addr, username, password),
 	}
 
 	// The dev bypass (STATELAYER_DEV_AGENT="<ns>/<agent>") scopes unauthenticated

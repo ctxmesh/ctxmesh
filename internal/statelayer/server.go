@@ -61,6 +61,9 @@ type Server struct {
 	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
 	// deployments; the quota endpoints then report unavailable.
 	quota QuotaStore
+	// dedup is the async seen-set (M53). nil in memory-only deployments; the dedup
+	// endpoint then reports unavailable (the launcher fails CLOSED).
+	dedup DedupStore
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -81,6 +84,9 @@ type Options struct {
 	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
 	// quota endpoints report unavailable.
 	QuotaStore QuotaStore
+	// DedupStore is the async seen-set (M53). Optional: nil ⇒ the dedup endpoint
+	// reports unavailable.
+	DedupStore DedupStore
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -102,6 +108,7 @@ func NewServer(opts Options) (*Server, error) {
 		tenants:  opts.TenantResolver,
 		podAuth:  opts.PodAuthenticator,
 		quota:    opts.QuotaStore,
+		dedup:    opts.DedupStore,
 		now:      now,
 	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
@@ -133,6 +140,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
 	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
+	// Async dedup (M53) — pod-identity authenticated, namespace-scoped SERVER-SIDE.
+	mux.HandleFunc("POST /dedup", s.handleDedup)
 	return mux
 }
 
