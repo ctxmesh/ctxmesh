@@ -211,6 +211,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 		if !isRunTrace(t) {
 			continue
 		}
+		ns, name := traceAgent(t)
 		runs = append(runs, RunSummary{
 			TraceID: t.ID,
 			// Name the run by its AGENT (from the identity tag) so the list reads as
@@ -221,6 +222,8 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
 			LatencyMs: latencyMsOf(t),
+			AgentNs:   ns,
+			AgentName: name,
 		})
 		if len(runs) >= limit {
 			break
@@ -245,6 +248,19 @@ func runDisplayName(t lfTrace) string {
 		}
 	}
 	return t.Name
+}
+
+// traceAgent extracts the originating agent's (namespace, name) from a trace's
+// agent:<ns>/<name> identity tag (m54.2). Both empty when the trace carries no
+// agent tag. The single source the RunSummary construction sites share, so the
+// runs list can back-link each row to its agent.
+func traceAgent(t lfTrace) (ns, name string) {
+	for _, tag := range t.Tags {
+		if pns, pname, ok := parseAgentTag(tag); ok {
+			return pns, pname
+		}
+	}
+	return "", ""
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
@@ -536,6 +552,7 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 		if q2 != "" && !strings.Contains(strings.ToLower(display), q2) {
 			continue
 		}
+		ns, name := traceAgent(t)
 		dst = append(dst, RunSummary{
 			TraceID:   t.ID,
 			Name:      display,
@@ -543,6 +560,8 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 			CostUSD:   t.TotalCost,
 			Tokens:    traceTokens(t),
 			LatencyMs: latencyMsOf(t),
+			AgentNs:   ns,
+			AgentName: name,
 		})
 	}
 	return dst

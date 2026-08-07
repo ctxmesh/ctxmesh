@@ -95,6 +95,45 @@ describe("RunsPage — basic rendering (m16.8)", () => {
     expect(screen.getByText("support-agent")).toBeInTheDocument();
   });
 
+  it("links each run to its originating agent (m54.2), and shows — when untagged", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({ traceId: "t1", name: "billing-agent", agentNs: "prod", agentName: "billing" }),
+          run({ traceId: "t2", name: "ambient", agentNs: undefined, agentName: undefined }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+
+    const link = await screen.findByTestId("run-agent-link-t1");
+    expect(link).toHaveAttribute("href", "/agents/prod/billing");
+    expect(link).toHaveTextContent("prod/billing");
+    // A run with no agent identity shows a dash, not a broken link.
+    expect(screen.queryByTestId("run-agent-link-t2")).not.toBeInTheDocument();
+  });
+
+  it("the agent link does NOT trigger the row→trace navigation (stopPropagation)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [run({ traceId: "t1", name: "billing-agent", agentNs: "prod", agentName: "billing" })],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+
+    const link = await screen.findByTestId("run-agent-link-t1");
+    fireEvent.click(link);
+    // The row-click's trace stub must NOT appear — the link navigated to the agent,
+    // not the trace.
+    expect(screen.queryByTestId("trace-page-stub")).not.toBeInTheDocument();
+  });
+
   it("navigates to /traces/:traceId on row click", async () => {
     installFetch(() => ({
       ok: true,

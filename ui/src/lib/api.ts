@@ -493,6 +493,11 @@ export interface RunSummary {
   costUSD: number;
   tokens: number;
   latencyMs: number;
+  // The run's originating agent (m54.2), parsed from the trace's agent:<ns>/<name>
+  // tag — lets the runs list link each row straight to the agent. Absent for an
+  // ambient/untagged trace.
+  agentNs?: string;
+  agentName?: string;
 }
 
 // RunListResponse mirrors the BFF's list-contract DTO for runs (m16.3):
