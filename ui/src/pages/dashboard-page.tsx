@@ -9,6 +9,7 @@ import { CostPanel } from "@/components/dashboard/cost-panel";
 import { DashboardStats } from "@/components/dashboard/dashboard-stats";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
 import { useNamespace } from "@/lib/namespace";
+import { FIRST_RUN_CHECKLIST } from "@/lib/nav";
 import {
   api,
   ApiError,
@@ -163,18 +164,18 @@ export function DashboardPage() {
           const hasAgent = topology.data.nodes.some((n) => n.kind === "agent");
           const hasRun = runs.data.runs.length > 0;
           if (hasProvider && hasAgent && hasRun) return null; // fully set up
-          const steps = [
-            {
-              label: "Connect a provider",
-              done: hasProvider,
-              to: "/providers/connect",
-            },
-            { label: "Create an agent", done: hasAgent, to: "/agents/new" },
-            // Route to the Playground — the taught run surface (nav's "Build" step 3).
-            // Was /agents (a list, not a run affordance); m49.4 UX-review P1 — the
-            // checklist must land on where the rest of the product says you run agents.
-            { label: "Run your agent", done: hasRun, to: "/playground" },
-          ];
+          // The steps + routes are the shared FIRST_RUN_CHECKLIST (nav.ts, m54.4) so
+          // they can't drift from the IA; only the live `done` signal is computed here.
+          const done: Record<string, boolean> = {
+            provider: hasProvider,
+            agent: hasAgent,
+            run: hasRun,
+          };
+          const steps = FIRST_RUN_CHECKLIST.map((s) => ({
+            label: s.label,
+            to: s.to,
+            done: done[s.doneKey],
+          }));
           const next = steps.find((s) => !s.done);
           return (
             <div
