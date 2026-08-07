@@ -53,6 +53,13 @@ spec:
             - name: RUN_WORKER_CONCURRENCY
               value: {{ .Values.bff.runStore.worker.concurrency | quote }}
           envFrom:
+            # The worker runs the SAME bff binary, so it needs the SAME operator env the
+            # BFF gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at
+            # startup, ADR 0044) + the adapter creds (m55.5 finding: the M32 worker config
+            # wired only bff-capability and CrashLooped on the missing CONTROLPLANE_DSN).
+            - secretRef:
+                name: bff-adapters
+                optional: true
             # The capability signing key + audience (shared with the BFF, ADR 0030) so
             # the worker can re-mint each run's capability from its stored caller identity.
             - secretRef:

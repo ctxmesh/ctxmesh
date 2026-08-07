@@ -54,10 +54,16 @@ spec:
             # front-end BFF is what dispatches (RUN_WORKER_DISPATCH=true on the bff Deployment).
             - name: RUN_WORKER_CONCURRENCY
               value: "4"
-          # The capability signing key + credential-plane audience (shared with the BFF, ADR 0030),
-          # so the worker can re-mint a run capability on the caller's behalf. Optional so the
-          # manifest builds before the Secret exists.
+          # The worker runs the SAME bff binary, so it needs the SAME operator env the BFF
+          # gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at startup,
+          # ADR 0044). m55.5 finding: wiring only bff-capability CrashLooped the worker on
+          # the missing CONTROLPLANE_DSN. Plus the capability signing key (ADR 0030) so the
+          # worker re-mints a run capability on the caller's behalf. Optional so the manifest
+          # builds before the Secrets exist.
           envFrom:
+            - secretRef:
+                name: bff-adapters
+                optional: true
             - secretRef:
                 name: bff-capability
                 optional: true
