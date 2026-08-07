@@ -9,6 +9,7 @@ function installFetch(opts: {
   tenants?: { ok: boolean; status?: number; body: unknown };
   detail?: { ok: boolean; status?: number; body?: unknown };
   usage?: { ok: boolean; status?: number; body?: unknown };
+  listUsage?: { ok: boolean; status?: number; body?: unknown };
 }) {
   vi.stubGlobal(
     "fetch",
@@ -21,6 +22,12 @@ function installFetch(opts: {
       if (url === "/api/tenants" && method === "GET") {
         const r = opts.tenants ?? { ok: true, body: { items: [] } };
         return j(r.body, r.ok, r.status ?? (r.ok ? 200 : 500));
+      }
+      // Batched near-cap usage (m54.5). Default 501 (no state-layer) so the column
+      // hides unless a test opts in.
+      if (url === "/api/tenants/usage" && method === "GET") {
+        const r = opts.listUsage ?? { ok: false, status: 501 };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 501));
       }
       // Live usage (M49). Default 501 (no state-layer) so the panel hides the line unless a test opts in.
       if (url.match(/\/api\/tenants\/[^/]+\/usage$/) && method === "GET") {
@@ -67,6 +74,55 @@ describe("TenantsPage", () => {
     renderPage();
     expect(await screen.findByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
+  });
+
+  it("flags near-cap / at-cap tenants on the list (m54.5)", async () => {
+    installFetch({
+      tenants: {
+        ok: true,
+        body: {
+          items: [
+            // near cap: 85 rpm of a 100 cap → "Near cap"
+            { name: "warm", namespaces: ["w1"], memberNamespaces: 1, ready: true, model: { rpm: 100 } },
+            // over cap: $120 spent of a $100 budget → "At cap"
+            { name: "hot", namespaces: ["h1"], memberNamespaces: 1, ready: true, model: { budgetUSD: "100.00" } },
+            // comfortable: 10 rpm of 100 → no badge
+            { name: "cool", namespaces: ["c1"], memberNamespaces: 1, ready: true, model: { rpm: 100 } },
+            // no caps → no badge (nothing to be near)
+            { name: "uncapped", namespaces: ["u1"], memberNamespaces: 1, ready: true },
+          ],
+        },
+      },
+      listUsage: {
+        ok: true,
+        body: {
+          items: [
+            { name: "warm", spendUSD: 0, rpm: 85, inFlight: 0 },
+            { name: "hot", spendUSD: 120, rpm: 0, inFlight: 0 },
+            { name: "cool", spendUSD: 0, rpm: 10, inFlight: 0 },
+            { name: "uncapped", spendUSD: 999, rpm: 999, inFlight: 9 },
+          ],
+        },
+      },
+    });
+    renderPage();
+    expect(await screen.findByTestId("tenant-nearcap-warm")).toHaveTextContent("Near cap");
+    expect(screen.getByTestId("tenant-nearcap-hot")).toHaveTextContent("At cap");
+    expect(screen.queryByTestId("tenant-nearcap-cool")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tenant-nearcap-uncapped")).not.toBeInTheDocument();
+  });
+
+  it("the near-cap column hides gracefully when the state-layer is absent (501)", async () => {
+    installFetch({
+      tenants: {
+        ok: true,
+        body: { items: [{ name: "alpha", namespaces: ["a1"], memberNamespaces: 1, ready: true, model: { rpm: 100 } }] },
+      },
+      // listUsage defaults to 501 → the column shows nothing, never errors.
+    });
+    renderPage();
+    expect(await screen.findByText("alpha")).toBeInTheDocument();
+    expect(screen.queryByTestId("tenant-nearcap-alpha")).not.toBeInTheDocument();
   });
 
   it("filters by namespace, not just tenant name (M47 — 'who owns X?')", async () => {
