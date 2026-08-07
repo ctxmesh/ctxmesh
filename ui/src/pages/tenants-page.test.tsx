@@ -107,7 +107,7 @@ describe("TenantsPage", () => {
     });
     renderPage();
     expect(await screen.findByTestId("tenant-nearcap-warm")).toHaveTextContent("Near cap");
-    expect(screen.getByTestId("tenant-nearcap-hot")).toHaveTextContent("At cap");
+    expect(screen.getByTestId("tenant-nearcap-hot")).toHaveTextContent("Over cap");
     expect(screen.queryByTestId("tenant-nearcap-cool")).not.toBeInTheDocument();
     expect(screen.queryByTestId("tenant-nearcap-uncapped")).not.toBeInTheDocument();
   });

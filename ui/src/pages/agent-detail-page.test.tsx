@@ -850,12 +850,13 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     await screen.findByTestId("agent-detail-page");
     fireEvent.click(screen.getByTestId("tab-memory"));
 
-    const link = await screen.findByTestId("longterm-trace-link-0");
+    const link = await screen.findByTestId("longterm-trace-link-tr-99");
     expect(link).toHaveAttribute("href", "/traces/tr-99");
+    expect(link).toHaveAttribute("aria-label", expect.stringContaining("tr-99"));
     // The trace id is NOT rendered as a user-facing tag chip (lifted to the link).
     expect(screen.queryByText(/traceId/)).not.toBeInTheDocument();
-    // A memory with no trace shows no link.
-    expect(screen.queryByTestId("longterm-trace-link-1")).not.toBeInTheDocument();
+    // A memory with no trace shows no link (only the one tagged entry links).
+    expect(screen.getAllByTestId(/longterm-trace-link-/)).toHaveLength(1);
   });
 
   it("long-term memory: surfaces a store error, not a blank panel (m46.6)", async () => {

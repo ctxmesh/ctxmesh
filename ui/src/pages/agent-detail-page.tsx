@@ -1823,7 +1823,8 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
                 {m.traceId && (
                   <Link
                     to={`/traces/${encodeURIComponent(m.traceId)}`}
-                    data-testid={`longterm-trace-link-${i}`}
+                    data-testid={`longterm-trace-link-${m.traceId}`}
+                    aria-label={`View the trace that produced this memory (${m.traceId})`}
                     className="inline-flex items-center gap-1 text-primary hover:underline"
                   >
                     <Activity className="h-3 w-3" />
