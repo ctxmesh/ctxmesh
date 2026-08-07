@@ -50,6 +50,20 @@ type Verifier interface {
 type Server struct {
 	store    MemoryStore
 	verifier Verifier
+	// tenants resolves a namespace → owning tenant id for the quota/async endpoints
+	// (M53). nil in memory-only / local-dev deployments (no cluster config); the
+	// quota endpoints report unavailable rather than guessing a tenant.
+	tenants TenantResolver
+	// podAuth authenticates a launcher's pod-identity token (cached TokenReview) for
+	// the quota/async endpoints — the second principal type alongside the memory
+	// runcap. nil in memory-only deployments.
+	podAuth PodAuthenticator
+	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
+	// deployments; the quota endpoints then report unavailable.
+	quota QuotaStore
+	// dedup is the async seen-set (M53). nil in memory-only deployments; the dedup
+	// endpoint then reports unavailable (the launcher fails CLOSED).
+	dedup DedupStore
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -61,6 +75,18 @@ type Server struct {
 type Options struct {
 	Store    MemoryStore
 	Verifier Verifier
+	// TenantResolver maps a namespace → owning tenant id for the quota/async
+	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
+	TenantResolver TenantResolver
+	// PodAuthenticator verifies a launcher's pod-identity token for the quota/async
+	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
+	PodAuthenticator PodAuthenticator
+	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
+	// quota endpoints report unavailable.
+	QuotaStore QuotaStore
+	// DedupStore is the async seen-set (M53). Optional: nil ⇒ the dedup endpoint
+	// reports unavailable.
+	DedupStore DedupStore
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -76,7 +102,15 @@ func NewServer(opts Options) (*Server, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Server{store: opts.Store, verifier: opts.Verifier, now: now}
+	s := &Server{
+		store:    opts.Store,
+		verifier: opts.Verifier,
+		tenants:  opts.TenantResolver,
+		podAuth:  opts.PodAuthenticator,
+		quota:    opts.QuotaStore,
+		dedup:    opts.DedupStore,
+		now:      now,
+	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
 		sc, err := scopeFromAgent(opts.DevAgent, "", false)
 		if err != nil {
@@ -100,6 +134,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /memory/{conversationId}", s.scoped(s.handlePut))
 	mux.HandleFunc("POST /memory/{conversationId}/append", s.scoped(s.handleAppend))
 	mux.HandleFunc("GET /memory/{conversationId}/search", s.scoped(s.handleSearch))
+	// Quota endpoints (M53) — pod-identity authenticated, tenant-scoped SERVER-SIDE.
+	mux.HandleFunc("POST /quota/rpm", s.handleQuotaRPM)
+	mux.HandleFunc("GET /quota/spend", s.handleQuotaGetSpend)
+	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
+	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
+	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
+	// Async dedup (M53) — pod-identity authenticated, namespace-scoped SERVER-SIDE.
+	mux.HandleFunc("POST /dedup", s.handleDedup)
 	return mux
 }
 
@@ -158,6 +200,38 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 }
 
 const memoryScopeShared = "shared"
+
+// resolveTenant maps a namespace to its owning tenant id via the configured
+// resolver (M53 quota/async paths). It returns ("", false) when no resolver is
+// configured (memory-only deployment) OR the namespace is untenanted — the caller
+// treats both as "no tenant quota applies". A non-nil error is an infrastructure
+// failure the caller must surface (never silently treat as untenanted).
+func (s *Server) resolveTenant(ctx context.Context, namespace string) (id string, ok bool, err error) {
+	if s.tenants == nil {
+		return "", false, nil
+	}
+	id, err = s.tenants.TenantID(ctx, namespace)
+	if err != nil {
+		return "", false, err
+	}
+	return id, id != "", nil
+}
+
+// authenticatePod verifies a launcher's pod-identity token and returns its
+// namespace (M53 quota/async paths). It returns (ns, nil) on success;
+// (\"\", ErrTokenRejected) for an invalid token; and (\"\", errPodAuthUnavailable)
+// when no authenticator is configured (memory-only deployment) — distinct from an
+// auth-infra error so the handler can 503 either way but log the cause.
+func (s *Server) authenticatePod(ctx context.Context, token string) (string, error) {
+	if s.podAuth == nil {
+		return "", errPodAuthUnavailable
+	}
+	return s.podAuth.Namespace(ctx, token)
+}
+
+// errPodAuthUnavailable signals the proxy has no pod authenticator wired (no
+// cluster config) — the quota endpoints are unavailable, not a rejection.
+var errPodAuthUnavailable = errors.New("statelayer: pod authentication is not configured")
 
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))

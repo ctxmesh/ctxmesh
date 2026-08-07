@@ -36,6 +36,30 @@ spec:
           args:
             - --appendonly
             - "no"
+            # State-layer ACL hardening (M53, ADR 0050 §6): the state-layer proxy is the
+            # ONLY client (post-m53.7-cutover agents hold no Valkey path). Scope the
+            # default (nopass) user to the three state-layer key spaces and deny
+            # destructive/admin commands, so a compromised proxy cannot wipe or
+            # reconfigure the store. No password (dev posture, ADR 0049) — this is
+            # command/key restriction as defense-in-depth, not authentication. Verified
+            # live: the arg form parses AND enforcement denies flushall/config/out-of-
+            # scope keys. BYO-external Valkey operators mirror this ACL (m53.7 guidance).
+            - --user
+            - default
+            - "on"
+            - nopass
+            - sanitize-payload
+            - resetchannels
+            - "~mem:*"
+            - "~tenant:*"
+            - "~a2a:seen:*"
+            - "+@all"
+            - "-flushall"
+            - "-flushdb"
+            - "-config"
+            - "-debug"
+            - "-shutdown"
+            - "-swapdb"
           ports:
             - name: valkey
               containerPort: 6379

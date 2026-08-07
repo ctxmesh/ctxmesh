@@ -216,9 +216,10 @@ func TestMemoryBinding_BindInjectsEnv(t *testing.T) {
 	}
 }
 
-// When the controller is configured with a state-layer proxy URL (M51, ADR 0050
-// §8 phase 1), a memory-bound agent gets STATELAYER_PROXY_URL injected as a STATIC
-// value, AND keeps MEMORY_BACKEND_ADDR (dual-mode fallback).
+// When the controller is configured with a state-layer proxy URL (ADR 0050 §8), a
+// memory-bound agent gets STATELAYER_PROXY_URL injected as a STATIC value and,
+// post-cutover (phase 3), NO direct MEMORY_BACKEND_ADDR — the launcher memory-
+// forwards through the proxy and holds no Valkey path.
 func TestMemoryBinding_StatelayerProxyURLInjected(t *testing.T) {
 	const (
 		namespace = "default"
@@ -246,7 +247,11 @@ func TestMemoryBinding_StatelayerProxyURLInjected(t *testing.T) {
 	assert.Equal(t, proxyURL, proxyEnv.Value)
 	assert.Nil(t, proxyEnv.ValueFrom, "must be a static value (Knative forbids valueFrom in a ksvc)")
 	_, hasBackend := envMap["MEMORY_BACKEND_ADDR"]
-	assert.True(t, hasBackend, "phase 1 keeps MEMORY_BACKEND_ADDR for dual-mode fallback")
+	assert.False(t, hasBackend, "cutover: with the proxy configured the agent gets NO direct MEMORY_BACKEND_ADDR")
+	// The listener port is still injected (it's the launcher's OWN :2998 memory
+	// listener, not the backend), so the proxy-forward path still serves.
+	_, hasPort := envMap["MEMORY_PORT"]
+	assert.True(t, hasPort, "MEMORY_PORT (the launcher listener) is still injected on the proxy path")
 }
 
 // TestMemoryBinding_CustomAddr verifies that spec.backend.addr overrides the

@@ -156,6 +156,77 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 	assert.Equal(t, "100.00", env["TENANT_BUDGET_USD"])
 	assert.Equal(t, "600", env["TENANT_RPM"])
 	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
+
+	// Without a configured proxy the pod-identity token is NOT injected.
+	_, hasTokenPath := env["STATELAYER_TOKEN_PATH"]
+	assert.False(t, hasTokenPath, "no proxy configured ⇒ no projected-token env")
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		assert.NotEqual(t, statelayerTokenVolume, v.Name, "no proxy configured ⇒ no projected-token volume")
+	}
+}
+
+// When the controller is configured with a state-layer proxy, a tenant-quota agent
+// gets the projected pod-identity token (a Knative-allowed projected VOLUME, bound
+// to the proxy audience with a short expiry), its mount, and the proxy env — and,
+// post-cutover (ADR 0050 §8 phase 3), gets NO direct TENANT_QUOTA_ADDR (the agent
+// holds no Valkey path; quota flows through the proxy).
+func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
+	makeNamespace(t, "tnt-proxytok-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxytokco"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-proxytok-ns"},
+			Model:      &agentsv1alpha1.TenantModelQuota{RPM: 600},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "proxytokco")
+	reconcileTenant(t, "proxytokco")
+
+	mkAgent(t, "tnt-proxytok-agent", "tnt-proxytok-ns")
+	r := newReconciler()
+	r.StatelayerProxyURL = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+	reconcileNN(t, r, "tnt-proxytok-agent", "tnt-proxytok-ns")
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: "tnt-proxytok-agent", Namespace: "tnt-proxytok-ns"}, &ksvc))
+	podSpec := ksvc.Spec.Template.Spec
+	env := envByName(podSpec.Containers[0].Env)
+
+	assert.Equal(t, r.StatelayerProxyURL, env["STATELAYER_PROXY_URL"])
+	assert.Equal(t, statelayerPodTokenFilePath, env["STATELAYER_TOKEN_PATH"])
+	_, hasDirectAddr := env["TENANT_QUOTA_ADDR"]
+	assert.False(t, hasDirectAddr, "cutover: with the proxy configured the agent gets NO direct TENANT_QUOTA_ADDR")
+
+	// The projected token volume: audience-bound, short expiry, file "token".
+	var tokVol *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == statelayerTokenVolume {
+			tokVol = &podSpec.Volumes[i]
+		}
+	}
+	require.NotNil(t, tokVol, "the projected proxy-token volume must be present")
+	require.NotNil(t, tokVol.Projected)
+	require.Len(t, tokVol.Projected.Sources, 1)
+	sat := tokVol.Projected.Sources[0].ServiceAccountToken
+	require.NotNil(t, sat, "must be a serviceAccountToken projection (pod identity)")
+	assert.Equal(t, statelayerPodAudience, sat.Audience)
+	assert.Equal(t, "token", sat.Path)
+	require.NotNil(t, sat.ExpirationSeconds)
+	assert.Equal(t, statelayerTokenExpirySecs, *sat.ExpirationSeconds)
+
+	// The user container mounts it read-only at the path the launcher reads.
+	var mount *corev1.VolumeMount
+	for i := range podSpec.Containers[0].VolumeMounts {
+		if podSpec.Containers[0].VolumeMounts[i].Name == statelayerTokenVolume {
+			mount = &podSpec.Containers[0].VolumeMounts[i]
+		}
+	}
+	require.NotNil(t, mount, "the launcher container must mount the token")
+	assert.Equal(t, statelayerTokenMountPath, mount.MountPath)
+	assert.True(t, mount.ReadOnly)
 }
 
 // networkIsolation stamps a serving-safe cross-tenant NetworkPolicy on member namespaces (opt-in);

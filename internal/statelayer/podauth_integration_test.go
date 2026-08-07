@@ -1,0 +1,91 @@
+//go:build integration
+
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Envtest-backed proof of the pod authenticator against a REAL API server: a
+// genuine ServiceAccount token minted via TokenRequest for the statelayer-proxy
+// audience is accepted (and yields the SA's namespace), while the same token
+// presented for the wrong audience is rejected. Runs only under
+// `make test-integration` (build tag integration). Shares TestMain with
+// tenant_integration_test.go.
+package statelayer
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	authv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+func ptrInt64(i int64) *int64 { return &i }
+
+func TestIntegrationPodAuth(t *testing.T) {
+	ctx := context.Background()
+	cs, err := kubernetes.NewForConfig(itCfg)
+	require.NoError(t, err)
+
+	const ns = "it-podauth"
+	const saName = "launcher"
+	_, nsErr := cs.CoreV1().Namespaces().Create(ctx,
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{})
+	require.NoError(t, ignoreExists(nsErr))
+	_, saErr := cs.CoreV1().ServiceAccounts(ns).Create(ctx,
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: ns}}, metav1.CreateOptions{})
+	require.NoError(t, ignoreExists(saErr))
+
+	// Mint a real projected-style token bound to the statelayer-proxy audience.
+	tr, err := cs.CoreV1().ServiceAccounts(ns).CreateToken(ctx, saName, &authv1.TokenRequest{
+		Spec: authv1.TokenRequestSpec{
+			Audiences:         []string{"statelayer-proxy"},
+			ExpirationSeconds: ptrInt64(600),
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Skipf("envtest apiserver does not support TokenRequest (SA signing not configured): %v — "+
+			"the real TokenReview path is exercised live in m53.6", err)
+	}
+	require.NotEmpty(t, tr.Status.Token)
+
+	// The authenticator (real TokenReview) accepts it and returns the SA's namespace.
+	auth := NewTokenReviewAuthenticator(cs, "statelayer-proxy", nil)
+	got, err := auth.Namespace(ctx, tr.Status.Token)
+	require.NoError(t, err)
+	assert.Equal(t, ns, got, "namespace comes from the verified token, not caller input")
+
+	// The SAME token presented under the WRONG audience is rejected (401), not accepted.
+	wrongAud := NewTokenReviewAuthenticator(cs, "some-other-audience", nil)
+	_, err = wrongAud.Namespace(ctx, tr.Status.Token)
+	assert.ErrorIs(t, err, ErrTokenRejected, "a token for a different audience must be rejected")
+
+	// A structurally-valid-looking but bogus token is rejected, not an infra error.
+	_, err = auth.Namespace(ctx, jwtWithExp(time.Now().Add(time.Hour).Unix()))
+	assert.ErrorIs(t, err, ErrTokenRejected)
+}
+
+func ignoreExists(err error) error {
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}

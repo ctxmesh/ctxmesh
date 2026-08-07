@@ -397,6 +397,70 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 	}
 }
 
+// A registry member WITH memory, when the controller is configured with a
+// state-layer proxy, gets the projected pod-identity token (for the async dedup
+// client) + STATELAYER_TOKEN_PATH — WITHOUT any tenant quota (M53, ADR 0050 §6).
+func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "dedup-mesh"
+		registryID = "dedup-mesh"
+		agentName  = "dedup-mesh-member"
+		proxyURL   = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      agentName,
+			Namespace: namespace,
+			Labels:    map[string]string{"registry": registryID},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:          "ghcr.io/ctxmesh/example-agent:latest",
+			ExecutionModel: "serving",
+			Port:           8080,
+			Role:           "worker",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+	mkMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, agentName, namespace)
+
+	ksvc := getKsvc(t, agentName, namespace)
+	podSpec := ksvc.Spec.Template.Spec
+	env := envByName(podSpec.Containers[0].Env)
+
+	assert.Equal(t, proxyURL, env["STATELAYER_PROXY_URL"], "the memory path injects the proxy URL")
+	assert.Equal(t, statelayerPodTokenFilePath, env["STATELAYER_TOKEN_PATH"],
+		"an async member needs the projected-token path even without tenant quota")
+	_, hasTenant := env["TENANT_ID"]
+	assert.False(t, hasTenant, "this agent has no tenant — the token is for async dedup, not quota")
+
+	var vol *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == statelayerTokenVolume {
+			vol = &podSpec.Volumes[i]
+		}
+	}
+	require.NotNil(t, vol, "a registry member with memory + proxy must get the projected token volume")
+	require.NotNil(t, vol.Projected)
+	require.Len(t, vol.Projected.Sources, 1)
+	assert.Equal(t, statelayerPodAudience, vol.Projected.Sources[0].ServiceAccountToken.Audience)
+
+	var mounted bool
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.Name == statelayerTokenVolume {
+			mounted = true
+			assert.True(t, m.ReadOnly)
+		}
+	}
+	assert.True(t, mounted, "the launcher container must mount the token")
+}
+
 // mkSharedMemoryBinding creates a MemoryBinding with scope=shared (ADR 0035, m33.3).
 func mkSharedMemoryBinding(t *testing.T, name, namespace, agentRef, addr string) {
 	t.Helper()
