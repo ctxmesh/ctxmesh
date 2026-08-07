@@ -211,7 +211,7 @@ export function EvalsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Evals</h2>
           <p className="text-sm text-muted-foreground">
-            Build and run EvalSuites. Results show the controller's gate
+            Build and run eval suites. Results show the controller's gate
             outcome; scores only when Langfuse is wired.
           </p>
         </div>
@@ -259,7 +259,7 @@ export function EvalsPage() {
         <EmptyState
           icon={TestTube2}
           title="No eval suites yet"
-          description="Create an EvalSuite to define a dataset + scorers + gate for your agents."
+          description="Create an eval suite to define a dataset + scorers + gate for your agents."
           action={
             canCreate
               ? {
@@ -366,7 +366,7 @@ export function EvalsPage() {
         <ConfirmDialog
           open
           title={`Delete ${deleteTarget.name}?`}
-          description={`This will delete the EvalSuite "${deleteTarget.name}" in namespace "${deleteTarget.namespace}". This cannot be undone.`}
+          description={`This will delete the eval suite "${deleteTarget.name}" in namespace "${deleteTarget.namespace}". This cannot be undone.`}
           confirmLabel={deleteState.kind === "deleting" ? "Deleting…" : "Delete"}
           busy={deleteState.kind === "deleting"}
           onConfirm={handleDelete}
@@ -601,7 +601,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
       toast({
         variant: "success",
         title: `Created ${created.name}`,
-        description: "EvalSuite is created and will be reconciled.",
+        description: "Eval suite is created and will be reconciled.",
       });
       onCreated();
     } catch (err) {
@@ -754,7 +754,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
     {
       id: "review",
       title: "Review",
-      description: "Confirm the EvalSuite definition",
+      description: "Confirm the eval suite definition",
       review: true,
       content: (
         <div className="space-y-4" data-testid="eval-builder-review-step">
@@ -784,7 +784,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
           )}
           {!canBuild && (
             <p className="text-sm text-muted-foreground">
-              You don't have permission to create EvalSuites.
+              You don't have permission to create eval suites.
             </p>
           )}
         </div>
@@ -799,7 +799,7 @@ function EvalBuilderWizard({ onClose, onCreated }: EvalBuilderWizardProps) {
     >
       <div className="w-full max-w-2xl rounded-xl bg-background shadow-xl">
         <div className="p-6">
-          <h3 className="text-lg font-semibold">New EvalSuite</h3>
+          <h3 className="text-lg font-semibold">New eval suite</h3>
           <p className="mt-1 text-sm text-muted-foreground">
             Define a dataset, scorers, and optional gate to evaluate your agents.
           </p>

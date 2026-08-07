@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,9 +148,20 @@ func (p *longTermProxy) handleRemember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "content is required", http.StatusBadRequest)
 		return
 	}
+	// Tag the memory with its originating run's trace id (m54.3) — the SDK propagates
+	// the active run's W3C traceparent on remember, so the console can back-link each
+	// remembered fact to the trace that produced it. Best-effort: no traceparent (a
+	// remember outside a traced run) ⇒ no tag, no error.
+	tags := body.Tags
+	if traceID := traceIDFromTraceparent(r.Header.Get("traceparent")); traceID != "" {
+		if tags == nil {
+			tags = map[string]string{}
+		}
+		tags["traceId"] = traceID
+	}
 	payload := map[string]any{
 		"namespace": p.namespace, "agentName": p.agent, "scope": p.scope, "subject": subject,
-		"content": body.Content, "tags": body.Tags, "embeddingModel": p.embeddingModel,
+		"content": body.Content, "tags": tags, "embeddingModel": p.embeddingModel,
 	}
 	// Fire-and-forget with a detached context so returning 202 does not cancel the embed+store.
 	go func() {
@@ -160,6 +172,27 @@ func (p *longTermProxy) handleRemember(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// traceIDFromTraceparent extracts the 32-hex trace-id from a W3C traceparent
+// header ("<version>-<trace-id>-<parent-id>-<flags>", e.g. "00-<32hex>-<16hex>-01").
+// It returns "" for a malformed/absent header or the all-zero trace id (the OTel
+// invalid trace). The trace id equals the Langfuse trace id the console links to
+// (both are the OTel trace id).
+func traceIDFromTraceparent(tp string) string {
+	parts := strings.Split(strings.TrimSpace(tp), "-")
+	if len(parts) < 4 {
+		return ""
+	}
+	traceID := parts[1]
+	// 32 hex chars, and not the all-zero OTel invalid trace id.
+	if len(traceID) != 32 || traceID == strings.Repeat("0", 32) {
+		return ""
+	}
+	if _, err := hex.DecodeString(traceID); err != nil {
+		return ""
+	}
+	return traceID
 }
 
 type searchBody struct {

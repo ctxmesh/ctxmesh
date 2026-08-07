@@ -229,6 +229,9 @@ export interface AgentRunListResponse {
 export interface AgentMemoryEntry {
   content: string;
   tags?: Record<string, string>;
+  // The originating run's trace id (m54.3) — the panel back-links each remembered
+  // fact to the trace that produced it. Absent when written outside a traced run.
+  traceId?: string;
   createdAt: string;
 }
 
@@ -493,6 +496,11 @@ export interface RunSummary {
   costUSD: number;
   tokens: number;
   latencyMs: number;
+  // The run's originating agent (m54.2), parsed from the trace's agent:<ns>/<name>
+  // tag — lets the runs list link each row straight to the agent. Absent for an
+  // ambient/untagged trace.
+  agentNs?: string;
+  agentName?: string;
 }
 
 // RunListResponse mirrors the BFF's list-contract DTO for runs (m16.3):
@@ -1838,6 +1846,9 @@ export interface TenantSummary {
   namespaces: string[]; // claimed set — the list is filterable by namespace ("who owns X?")
   memberNamespaces: number;
   ready: boolean;
+  // The tenant's model caps (m54.5), carried on the list row so the near-cap
+  // indicator can compare live usage to the cap without opening each tenant.
+  model?: TenantModelDTO;
 }
 
 export interface TenantQuotaDTO {
@@ -1878,6 +1889,15 @@ export interface TenantUsage {
   spendUSD: number;
   rpm: number;
   inFlight: number;
+}
+
+// TenantUsageItem is one tenant's live usage in the batched list (m54.5).
+export interface TenantUsageItem extends TenantUsage {
+  name: string;
+}
+
+export interface TenantUsageListResponse {
+  items: TenantUsageItem[];
 }
 
 export interface AgentRegistryCreateRequest {
@@ -2817,6 +2837,11 @@ export const api = {
   // Live tenant usage (M49) — spend/rpm/inFlight vs the caps. May 501 when no state-layer is wired.
   tenantUsage: (name: string, signal?: AbortSignal) =>
     getJSON<TenantUsage>(`/api/tenants/${encodeURIComponent(name)}/usage`, signal),
+
+  // Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator on
+  // the tenants list, in one round-trip. May 501 when no state-layer is wired.
+  listTenantUsage: (signal?: AbortSignal) =>
+    getJSON<TenantUsageListResponse>("/api/tenants/usage", signal),
 
   createAgentRegistry: async (
     req: AgentRegistryCreateRequest,

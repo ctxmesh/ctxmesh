@@ -10,8 +10,34 @@ import {
   ApiError,
   type TenantSummary,
   type TenantDetail,
+  type TenantModelDTO,
   type TenantUsage,
 } from "@/lib/api";
+
+// NEAR_CAP_RATIO is the fraction of any model cap at which a tenant is flagged
+// "near cap" on the list (m54.5) — the at-a-glance "who's about to be throttled?".
+const NEAR_CAP_RATIO = 0.8;
+
+// nearCapLevel classifies a tenant against its caps + live usage: "over" (≥100% of
+// any cap), "near" (≥80%), or null (comfortable / no caps / no usage yet).
+function nearCapLevel(
+  model: TenantModelDTO | undefined,
+  u: TenantUsage | undefined,
+): "over" | "near" | null {
+  if (!model || !u) return null;
+  const ratios: number[] = [];
+  if (model.budgetUSD) {
+    const cap = parseFloat(model.budgetUSD);
+    if (cap > 0) ratios.push(u.spendUSD / cap);
+  }
+  if (model.rpm) ratios.push(u.rpm / model.rpm);
+  if (model.maxConcurrent) ratios.push(u.inFlight / model.maxConcurrent);
+  if (ratios.length === 0) return null;
+  const max = Math.max(...ratios);
+  if (max >= 1) return "over";
+  if (max >= NEAR_CAP_RATIO) return "near";
+  return null;
+}
 
 // TenantsPage (M47, ADR 0046) — a read-only list of cluster-scoped Tenants (namespace groupings + compute +
 // model quotas). Row-click opens an inline detail panel (member namespaces + quota/model caps + conflicts).
@@ -151,6 +177,9 @@ export function TenantsPage() {
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [state, setState] = useState<Load>({ kind: "loading" });
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
+  // Live usage per tenant for the near-cap indicator (m54.5) — one batched call,
+  // best-effort (501 no state-layer / 403 → the column simply shows nothing).
+  const [usageByTenant, setUsageByTenant] = useState<Record<string, TenantUsage>>({});
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
@@ -158,6 +187,18 @@ export function TenantsPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     setState({ kind: "loading" });
+    // Batched live usage for the near-cap column — best-effort, never blocks or
+    // fails the list (no state-layer → 501, a viewer → 403; the column just hides).
+    setUsageByTenant({});
+    api
+      .listTenantUsage(controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setUsageByTenant(Object.fromEntries(res.items.map((u) => [u.name, u])));
+      })
+      .catch(() => {
+        /* usage is optional — leave the column empty */
+      });
     api
       .listTenants(controller.signal)
       .then((res) => {
@@ -224,6 +265,28 @@ export function TenantsPage() {
       id: "namespaces",
       header: "Namespaces",
       cell: (t) => <span className="text-muted-foreground">{t.memberNamespaces}</span>,
+    },
+    {
+      id: "usage",
+      header: "Usage",
+      className: "w-28",
+      hideOnMobile: true,
+      // At-a-glance near-cap indicator (m54.5) — "who's about to be throttled?"
+      // without opening each tenant. Empty when the tenant has no caps, no usage
+      // yet, or is comfortably under. "Over cap" (not "At cap") makes clear that
+      // requests are already being dropped, not merely at the boundary (m54.6 UX).
+      cell: (t) => {
+        const level = nearCapLevel(t.model, usageByTenant[t.name]);
+        if (!level) return <span className="text-xs text-muted-foreground">—</span>;
+        return (
+          <Badge
+            variant={level === "over" ? "destructive" : "warning"}
+            data-testid={`tenant-nearcap-${t.name}`}
+          >
+            {level === "over" ? "Over cap" : "Near cap"}
+          </Badge>
+        );
+      },
     },
     {
       id: "status",

@@ -94,6 +94,9 @@ describe("ProvidersPage", () => {
     // The fixture's provider has 2 models — rendered as a count, never key material.
     expect(screen.getByText(/2 models/)).toBeInTheDocument();
     expect(screen.getByTestId("row-actions-anthropic")).toBeInTheDocument();
+    // m54.6: the per-row action reads "Create agent" (parity with the connect
+    // flow's "Create agent with this"), not the ambiguous "Use".
+    expect(screen.getByTestId("use-anthropic")).toHaveTextContent("Create agent");
   });
 
   it("Rotate opens a dialog and POSTs the new key to /rotate", async () => {

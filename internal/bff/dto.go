@@ -417,6 +417,12 @@ type RunSummary struct {
 	CostUSD   float64 `json:"costUSD"`
 	Tokens    int64   `json:"tokens"`
 	LatencyMs float64 `json:"latencyMs"`
+	// AgentNs/AgentName are the run's originating agent, parsed from the trace's
+	// agent:<ns>/<name> identity tag (m54.2, M49 UX review A1) — so the global Runs
+	// list can link each row straight to /agents/{ns}/{name} instead of forcing a
+	// trace→agent hop. Empty when the trace carries no agent tag (an ambient trace).
+	AgentNs   string `json:"agentNs,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
 }
 
 // RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).

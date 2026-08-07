@@ -92,6 +92,45 @@ func TestLongTerm_RememberForwards(t *testing.T) {
 	}
 }
 
+// The remember path stamps the originating run's trace id (from the SDK-propagated
+// traceparent) onto the memory's tags so the console can back-link it (m54.3).
+func TestLongTerm_RememberTagsTraceID(t *testing.T) {
+	remembered := make(chan map[string]any, 1)
+	ts := fakeTokenService(t, remembered)
+	p := ltProxyTo(ts.URL, scopeAgent)
+
+	mux := http.NewServeMux()
+	p.register(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/memory/agent/remember", bytes.NewReader([]byte(`{"content":"c"}`)))
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	select {
+	case body := <-remembered:
+		tags, _ := body["tags"].(map[string]any)
+		require.NotNil(t, tags, "tags must carry the trace id")
+		assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", tags["traceId"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("remember was not forwarded")
+	}
+}
+
+func TestTraceIDFromTraceparent(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "4bf92f3577b34da6a3ce929d0e0e4736"},
+		{"", ""},
+		{"garbage", ""},
+		{"00-tooshort-00f067aa0ba902b7-01", ""},
+		{"00-00000000000000000000000000000000-00f067aa0ba902b7-01", ""}, // all-zero invalid trace
+		{"00-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-00f067aa0ba902b7-01", ""}, // 32 chars but not hex
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, traceIDFromTraceparent(c.in), c.in)
+	}
+}
+
 // per-user memory without a capability verifier fails closed (never falls back to agent-wide).
 func TestLongTerm_PerUserWithoutVerifierIs400(t *testing.T) {
 	ts := fakeTokenService(t, nil)

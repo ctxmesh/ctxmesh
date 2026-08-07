@@ -595,6 +595,10 @@ func (s *Server) Handler() http.Handler {
 
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
+		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
+		// on the list. Registered before the {name} routes; the literal "usage" segment
+		// takes precedence over the {name} wildcard (Go 1.22 ServeMux).
+		authed.HandleFunc("GET /api/tenants/usage", s.handleTenantUsageList)
 		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
 		// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
