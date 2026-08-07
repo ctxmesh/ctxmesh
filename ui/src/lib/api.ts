@@ -229,6 +229,9 @@ export interface AgentRunListResponse {
 export interface AgentMemoryEntry {
   content: string;
   tags?: Record<string, string>;
+  // The originating run's trace id (m54.3) — the panel back-links each remembered
+  // fact to the trace that produced it. Absent when written outside a traced run.
+  traceId?: string;
   createdAt: string;
 }
 

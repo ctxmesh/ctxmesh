@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  Activity,
   AlertTriangle,
   Boxes,
   ChevronRight,
@@ -1814,7 +1815,22 @@ function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string 
                   ))}
                 </div>
               )}
-              <p className="mt-1 text-xs text-muted-foreground">{formatTimestamp(m.createdAt)}</p>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+                <span>{formatTimestamp(m.createdAt)}</span>
+                {/* memory→trace back-link (m54.3, M49 UX review A2): jump from a
+                    remembered fact to the run/trace that produced it. Absent when
+                    the memory was written outside a traced run. */}
+                {m.traceId && (
+                  <Link
+                    to={`/traces/${encodeURIComponent(m.traceId)}`}
+                    data-testid={`longterm-trace-link-${i}`}
+                    className="inline-flex items-center gap-1 text-primary hover:underline"
+                  >
+                    <Activity className="h-3 w-3" />
+                    trace
+                  </Link>
+                )}
+              </div>
             </li>
           ))}
         </ul>

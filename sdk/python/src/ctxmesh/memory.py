@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 from ctxmesh import _http
 from ctxmesh._capability import CAPABILITY_HEADER, current_capability
+from ctxmesh._tracing import current_traceparent
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError
 
@@ -135,6 +136,13 @@ class MemoryClient:
         cap = current_capability()
         if cap:
             headers[CAPABILITY_HEADER] = cap  # per-user scoping (launcher verifies+hashes)
+        # Propagate the active run's W3C traceparent (m54.3) so the launcher can tag
+        # the stored memory with its originating run's trace id — the console then
+        # back-links each remembered fact to the trace that produced it. Best-effort:
+        # absent when remember is called outside a traced run.
+        tp = current_traceparent()
+        if tp:
+            headers["traceparent"] = tp
         return headers
 
     def remember(self, content: str, tags: Optional[Dict[str, str]] = None) -> None:
