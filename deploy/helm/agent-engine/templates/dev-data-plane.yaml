@@ -163,6 +163,22 @@ spec:
       - args:
         - --appendonly
         - "no"
+        - --user
+        - default
+        - "on"
+        - nopass
+        - sanitize-payload
+        - resetchannels
+        - ~mem:*
+        - ~tenant:*
+        - ~a2a:seen:*
+        - +@all
+        - -flushall
+        - -flushdb
+        - -config
+        - -debug
+        - -shutdown
+        - -swapdb
         image: valkey/valkey:8.1.3
         livenessProbe:
           failureThreshold: 3
@@ -192,4 +208,26 @@ spec:
       volumes:
       - emptyDir: {}
         name: data
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: statelayer
+  name: agent-engine-statelayer-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector: {}
+    ports:
+    - port: 6379
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: statelayer
+  policyTypes:
+  - Ingress
 {{- end }}

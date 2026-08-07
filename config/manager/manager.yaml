@@ -66,6 +66,15 @@ spec:
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+          # STATELAYER_PROXY_URL (M53, ADR 0050 §8 phase 3 — the cutover default): every
+          # agent's memory + quota + async-dedup route through the state-layer proxy
+          # (which holds the Valkey credential + derives tenant/namespace from the pod
+          # token), so agent workloads hold NO Valkey path. Points at the in-cluster proxy
+          # Service (the namespace is Helm-templated). Set to "" to run PROXY-LESS — agents
+          # then get the direct Valkey address (the legacy pre-cutover path).
+          - name: STATELAYER_PROXY_URL
+            value: http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080
         ports:
         - containerPort: 8081
           name: health

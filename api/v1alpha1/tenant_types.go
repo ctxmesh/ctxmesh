@@ -21,6 +21,16 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// TenantLabel is the AUTHORITATIVE label the Tenant controller stamps on every
+// member namespace (and every resource a Tenant owns) carrying the owning
+// Tenant's name. It is the single source of truth for namespace → tenant
+// resolution: the controller injects TENANT_ID from it (internal/controller
+// resolveTenantForNamespace) and the state-layer proxy scopes quota from it
+// (ADR 0050 §3 + Amendment 2) — both MUST read this exact key so their tenant id
+// agrees. Exported here so those packages share one constant, not duplicated
+// string literals of a security-critical key.
+const TenantLabel = "agents.ctxmesh.ai/tenant"
+
 // TenantComputeQuota is the compute ceiling reconciled onto every member
 // namespace as a Kubernetes ResourceQuota + LimitRange (ADR 0046 §3, M47). Empty
 // fields are omitted from the ResourceQuota, so a Tenant can cap only what it

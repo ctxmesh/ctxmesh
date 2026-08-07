@@ -200,6 +200,18 @@ def substitute(doc: str) -> str:
         r"\1{{ .Values.namespace }}",
         doc,
     )
+    # State-layer proxy URL on the manager (M53, ADR 0050 §8 phase-3 cutover default):
+    # the in-cluster proxy Service FQDN embeds the install namespace, which the generic
+    # `namespace:` rule above can't reach (it lives inside an env VALUE string). Template
+    # just the namespace segment so a non-default-namespace install still resolves.
+    # ORDERING: this must run AFTER the `namespace:`-key re.sub above — that regex
+    # anchors on a `namespace:` key so it never touches this env-value FQDN, but a future
+    # value-matching namespace rule would need to run after this exact-string replace.
+    # The FQDN literal appears exactly once (manager.yaml), so the replace can't over-match.
+    doc = doc.replace(
+        f"agent-engine-statelayer-proxy.{NS_KUSTOMIZE}.svc",
+        "agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc",
+    )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at
     # "true" == kustomize (no drift), while `--set …=false` disables it.

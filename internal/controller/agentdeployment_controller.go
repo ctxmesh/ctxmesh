@@ -135,6 +135,20 @@ const (
 	// memoryScopeShared is the MemoryBinding scope + MEMORY_SCOPE env value that selects the shared
 	// team scratchpad (ADR 0035, m33.3) instead of private per-agent memory.
 	memoryScopeShared = "shared"
+
+	// State-layer proxy pod-identity token (M53, ADR 0050 §8 phase 2 + Amд 3): when the
+	// tenant quota routes through the proxy, the controller mounts a PROJECTED
+	// serviceAccountToken (a Knative-allowed volume, NEVER valueFrom) bound to the
+	// proxy audience; the launcher presents it so the proxy derives the tenant from the
+	// pod's namespace. The mount path + audience + expiry must match the launcher
+	// (defaultPodTokenPath) and the proxy (STATELAYER_POD_AUDIENCE) respectively.
+	envStatelayerProxyURL      = "STATELAYER_PROXY_URL"
+	envStatelayerTokenPath     = "STATELAYER_TOKEN_PATH"
+	statelayerTokenVolume      = "statelayer-proxy-token"
+	statelayerTokenMountPath   = "/var/run/secrets/statelayer-proxy"
+	statelayerPodTokenFilePath = statelayerTokenMountPath + "/token"
+	statelayerPodAudience      = "statelayer-proxy"
+	statelayerTokenExpirySecs  = int64(600)
 )
 
 // Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
@@ -803,9 +817,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
 	}
 	if hasMemoryBinding {
+		// MEMORY_BACKEND_ADDR is the DIRECT Valkey path. Injected ONLY when the
+		// state-layer proxy is NOT configured; once the proxy is on (the m53.7
+		// cutover, ADR 0050 §8 phase 3), the agent memory-forwards THROUGH it and
+		// holds no direct Valkey path — the launcher's :2998 listener uses the proxy
+		// forward when MEMORY_BACKEND_ADDR is absent + STATELAYER_PROXY_URL is set.
+		if r.StatelayerProxyURL == "" {
+			env = append(env, corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr})
+		}
 		env = append(
 			env,
-			corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr},
 			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
 			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
 			// prefix. Set as a STATIC value (the pod always runs in the
@@ -814,7 +835,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// which forbids valueFrom in a ksvc pod template unless the
 			// non-default kubernetes.podspec-fieldref feature flag is enabled.
 			// The key prefix is the agent's own namespace regardless of where
-			// the backend lives, so no downward reference is needed.
+			// the backend lives, so no downward reference is needed. (Unused on the
+			// proxy path — the proxy derives the key namespace from the token — but
+			// harmless + still correct for a proxy-less install.)
 			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
 		)
 		// AGENT_NAME: inject only if not already present. The launcher uses
@@ -879,6 +902,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
 	// quota enforcement (m47.4). tenantCtx/tenantQuota were resolved with the gateway-URL decision above.
+	// injectPodToken records whether to mount the projected proxy token (set below).
+	injectPodToken := false
 	if hasTenant {
 		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
 		if tenantCtx.budgetUSD != "" {
@@ -890,10 +915,26 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if tenantCtx.maxConcurrent > 0 {
 			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
 		}
-		// The launcher gateway proxy enforces the tenant caps against a shared Valkey accumulator (m47.4);
-		// inject the shared state-layer address so every tenant agent + replica coordinates on ONE bucket.
 		if tenantQuota {
-			env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+			// M53 (ADR 0050 §8): route tenant quota through the state-layer proxy
+			// (pod-identity authed) when the controller is configured with it — the
+			// launcher then holds NO Valkey credential for quota.
+			if r.StatelayerProxyURL != "" {
+				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
+				}
+				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
+				}
+				injectPodToken = true
+			} else {
+				// Proxy NOT configured (proxy-less install): the launcher gateway enforces
+				// the caps against the shared Valkey DIRECTLY, so inject its address. Once
+				// the proxy is on (the m53.7 cutover, phase 3), this is NOT injected — the
+				// agent has no direct Valkey path; quota flows through the proxy on the
+				// SAME accumulator.
+				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+			}
 		}
 	}
 
@@ -979,6 +1020,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
 			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
 		)
+
+		// Async dedup via the state-layer proxy (M53, ADR 0050 §6): a registry member
+		// WITH memory dedupes through the proxy (pod-identity authed) instead of the
+		// direct Valkey — so it needs the projected token too. STATELAYER_PROXY_URL is
+		// already injected by the memory block above (async requires memory). Guard the
+		// token-path env against a duplicate the tenant-quota block may have added.
+		if r.StatelayerProxyURL != "" && hasMemoryBinding {
+			if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
+			}
+			injectPodToken = true
+		}
 	}
 
 	// The user container's volume mounts: the resolved-prompt file (M9) when the
@@ -986,6 +1039,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	var userMounts []corev1.VolumeMount
 	if promptMount != nil {
 		userMounts = append(userMounts, *promptMount)
+	}
+	if injectPodToken {
+		// Mount the projected proxy token read-only (M53). The launcher runs in this
+		// container (baked into the agent image), so the token is co-resident with agent
+		// code — acceptable: the token scopes to the pod's OWN namespace/tenant, so it is
+		// bounded self-harm within the tenant, never cross-tenant (ADR 0050 §8, Option A).
+		userMounts = append(userMounts, corev1.VolumeMount{
+			Name:      statelayerTokenVolume,
+			MountPath: statelayerTokenMountPath,
+			ReadOnly:  true,
+		})
 	}
 
 	containers := []corev1.Container{
@@ -1031,6 +1095,27 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// mount resolves. No image change — this is a pod-VOLUME + config-revision
 		// change only.
 		volumes = append(volumes, *promptVol)
+	}
+	if injectPodToken {
+		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
+		// A projected VOLUME (not valueFrom) — Knative admits it (verified on 1.22.1). The
+		// short expiry (10 min) keeps the revocation/stale window tight; kubelet rotates it
+		// in place and the launcher re-reads on each request.
+		expiry := statelayerTokenExpirySecs
+		volumes = append(volumes, corev1.Volume{
+			Name: statelayerTokenVolume,
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							Audience:          statelayerPodAudience,
+							ExpirationSeconds: &expiry,
+						},
+					}},
+				},
+			},
+		})
 	}
 
 	if hasBindings {
@@ -1106,7 +1191,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// symmetric with the other components (byte-compatible pre-M9 revision name).
 	promptDig := rp.digest
 	tenantDig := tenantDigest(tenantCtx, hasTenant)
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig)
+	// The proxy URL is injected for a memory binding (M51) OR tenant quota + token (M53);
+	// fold it into the digest so enabling/changing it rolls a new revision (M4 landmine).
+	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken)
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1479,13 +1567,30 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // revision WITHOUT an image rebuild: a promptRef/ref swap changes promptDigest →
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
-func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest string) string {
+func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest,
+	proxyDigest string,
+) string {
 	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
-		tenantDigest == "" {
+		tenantDigest == "" && proxyDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
-		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest))
+		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// statelayerProxyDigest captures the state-layer proxy URL as a revision-digest
+// component (M53). It is non-empty ONLY when the proxy URL is set AND this agent
+// actually gets it injected (a memory binding OR tenant quota) — so flipping the
+// proxy on/off, or changing its URL, rolls a new revision for exactly the agents
+// whose pod template changes (fixing the M4-landmine gap where enabling the proxy
+// on live agents would otherwise NOT roll — the pod would keep the old direct-Valkey
+// wiring). No spurious roll for agents that don't inject it.
+func statelayerProxyDigest(proxyURL string, injected bool) string {
+	if proxyURL == "" || !injected {
+		return ""
+	}
+	h := sha256.Sum256([]byte(proxyURL))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

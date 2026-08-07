@@ -554,6 +554,24 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy-tenant-reader
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
     control-plane: token-service
   name: agent-engine-token-service-clusterrole
 rules:
@@ -674,6 +692,40 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: agent-engine-controller-manager
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: agent-engine-statelayer-proxy
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+    control-plane: statelayer-proxy
+  name: agent-engine-statelayer-proxy-tenant-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-engine-statelayer-proxy-tenant-reader
+subjects:
+- kind: ServiceAccount
+  name: agent-engine-statelayer-proxy
   namespace: {{ .Values.namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -813,6 +865,9 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
+        env:
+        - name: STATELAYER_PROXY_URL
+          value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
         image: {{ printf "%s:%s" .Values.controllerManager.image.repository (.Values.controllerManager.image.tag | default .Chart.AppVersion) }}
         imagePullPolicy: IfNotPresent
         livenessProbe:

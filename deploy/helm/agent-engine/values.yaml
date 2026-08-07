@@ -60,10 +60,14 @@ gateway:
   replicas: 1
 tokenService:
   replicas: 1
-# The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. Set >1 +
-# componentPodDisruptionBudgets.enabled BEFORE the phase-3 credential-removal cutover
-# so a proxy drain can't 402 every budget-capped agent (the budget path fails CLOSED
-# through the proxy hop, ADR 0050 §5). Default 1 == kustomize (no-drift).
+# The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. As of M53
+# the phase-3 cutover is the DEFAULT (agents route memory/quota/dedup through the
+# proxy and hold no direct Valkey path), so a PRODUCTION install MUST set
+# statelayerProxy.replicas>=2 + componentPodDisruptionBudgets.enabled — else a proxy
+# drain (node upgrade) 402s every budget-capped agent for the drain window (budget
+# fails CLOSED through the proxy hop, ADR 0050 §5). Default 1 == kustomize (no-drift)
+# is the DEV posture only (single-node kind, no drains). Enforcing this HA at the
+# default cutover is tracked in m52 Theme D (control-plane HA completion).
 statelayerProxy:
   replicas: 1
 
