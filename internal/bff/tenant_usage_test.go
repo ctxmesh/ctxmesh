@@ -89,6 +89,42 @@ func TestTenantUsage(t *testing.T) {
 	assert.Equal(t, int64(3), u.InFlight)
 }
 
+// The batched endpoint returns live usage for every listable tenant in one call
+// (m54.5), so the tenants list can render a near-cap indicator without a per-row
+// fan-out.
+func TestTenantUsageList(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		mockTenant("alpha", []string{"a1"}, &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600}, true),
+		mockTenant("beta", []string{"b1"}, &agentsv1alpha1.TenantModelQuota{RPM: 300}, true),
+	).Build()
+	reader := &fakeTenantUsage{usage: TenantUsage{SpendUSD: 5, RPM: 10, InFlight: 1}}
+	s := newUsageServer(t, &fakeCallerClientFactory{client: c}, reader)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tenants/usage", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "the literal /usage route must win over /{name}")
+
+	var resp TenantUsageListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Items, 2)
+	names := map[string]bool{resp.Items[0].Name: true, resp.Items[1].Name: true}
+	assert.True(t, names["alpha"] && names["beta"], "every listable tenant has a usage row")
+	assert.InDelta(t, 5, resp.Items[0].SpendUSD, 0.001)
+}
+
+// No usage reader wired ⇒ the batched endpoint is an honest 501, never a 500.
+func TestTenantUsageListNoReaderIs501(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newUsageServer(t, &fakeCallerClientFactory{client: c}, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tenants/usage", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
+
 // A missing tenant → 404, authorized via the caller-scoped Get BEFORE any usage read.
 func TestTenantUsageMissingTenant(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
