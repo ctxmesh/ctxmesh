@@ -169,6 +169,25 @@ bff:
   consoleURL: ""
   providerConnect:
     enabled: true
+  # Durable run store + HA run-worker (ADR 0051, M55). When enabled, the BFF
+  # DISPATCHES runs to the durable run-worker (a separate Deployment that claims +
+  # executes queued runs against the Postgres run store) instead of executing them
+  # in-process — so the BFF can scale replicas>1 (a pod loss mid-run no longer drops
+  # the run; the worker owns it via the durable store). Requires an operator-provided
+  # Secret named `dsnSecretName` with key `dsn` (the run-store Postgres DSN). Default
+  # OFF ⇒ in-process / mem-store, single-pod (the dev default) — helm-default renders
+  # NO worker + no BFF run-store env == `kustomize build config/default` (no-drift).
+  runStore:
+    enabled: false
+    dsnSecretName: run-store
+    worker:
+      # Concurrent claim loops per worker pod.
+      concurrency: 4
+      # KEDA autoscale bounds on the queued-run backlog. Dev: 0 (scale-to-zero). The
+      # production overlay sets minReplicaCount: 2 (a WARM pool — avoid a scale-from-0
+      # cold start on an interactive run; a drain never zeroes the pool, ADR 0051 Fork-C).
+      minReplicaCount: 0
+      maxReplicaCount: 10
   # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
   # leaves generation using the caller's connected-provider model unpinned — the
   # zero-config dev/trial path. An operator that wants a GOVERNED generation model
