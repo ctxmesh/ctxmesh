@@ -117,3 +117,54 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, u)
 }
+
+// TenantUsageItem pairs a tenant name with its live usage (the batched list row).
+type TenantUsageItem struct {
+	Name string `json:"name"`
+	TenantUsage
+}
+
+// TenantUsageListResponse is the batched usage payload (GET /api/tenants/usage).
+type TenantUsageListResponse struct {
+	Items []TenantUsageItem `json:"items"`
+}
+
+// handleTenantUsageList serves GET /api/tenants/usage — the LIVE usage for every
+// tenant the caller can list, in ONE round-trip (m54.5), so the tenants list can
+// render a near-cap indicator per row without a per-row fan-out. Caller-scoped: the
+// set is exactly the tenants the caller's own List returns (ADR 0011). 501 when no
+// usage reader is wired; a single tenant's read error is skipped (best-effort — one
+// unreadable tenant must not blank the whole list).
+func (s *Server) handleTenantUsageList(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	if s.tenantUsage == nil {
+		writeError(w, http.StatusNotImplemented, "tenant usage is not available (no state-layer configured)")
+		return
+	}
+	var list agentsv1alpha1.TenantList
+	if err := caller.List(r.Context(), &list); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "list Tenants for usage failed")
+		writeError(w, http.StatusInternalServerError, "failed to list tenants")
+		return
+	}
+	items := make([]TenantUsageItem, 0, len(list.Items))
+	for i := range list.Items {
+		name := list.Items[i].Name
+		u, err := s.tenantUsage.Usage(r.Context(), name)
+		if err != nil {
+			// Best-effort: skip a tenant whose usage is momentarily unreadable rather
+			// than failing the whole list (the row simply shows no indicator).
+			s.log.Error(err, "read tenant usage failed (skipped in batch)", "tenant", name)
+			continue
+		}
+		items = append(items, TenantUsageItem{Name: name, TenantUsage: u})
+	}
+	writeJSON(w, http.StatusOK, TenantUsageListResponse{Items: items})
+}

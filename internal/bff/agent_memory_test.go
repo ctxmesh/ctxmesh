@@ -85,6 +85,25 @@ func TestHandleAgentMemory_ListsAgentWideOnly(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "alice", "no per-user content or hashed identity leaks")
 }
 
+// splitTraceTag lifts the traceId tag into the typed field and removes it from the
+// tag chips, without mutating the input (m54.3).
+func TestSplitTraceTag(t *testing.T) {
+	orig := map[string]string{"traceId": "abc123", "topic": "prefs"}
+	traceID, rest := splitTraceTag(orig)
+	assert.Equal(t, "abc123", traceID)
+	assert.Equal(t, map[string]string{"topic": "prefs"}, rest, "traceId is removed from the chips")
+	assert.Contains(t, orig, "traceId", "the input map must not be mutated")
+
+	// No traceId tag ⇒ empty id, tags returned as-is.
+	id2, rest2 := splitTraceTag(map[string]string{"topic": "prefs"})
+	assert.Equal(t, "", id2)
+	assert.Equal(t, map[string]string{"topic": "prefs"}, rest2)
+
+	// Nil tags ⇒ no panic, empty id.
+	id3, _ := splitTraceTag(nil)
+	assert.Equal(t, "", id3)
+}
+
 // A missing agent is a 404 (the caller-scoped existence gate), not an empty 200.
 func TestHandleAgentMemory_MissingAgentIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()

@@ -37,6 +37,10 @@ type TenantSummary struct {
 	Namespaces       []string `json:"namespaces"`
 	MemberNamespaces int32    `json:"memberNamespaces"`
 	Ready            bool     `json:"ready"`
+	// Model is the tenant's model-usage caps (m54.5) — carried on the list row so the
+	// tenants list can compute a near-cap indicator against the batched live usage
+	// (GET /api/tenants/usage) without opening each tenant. Read from the CRD, so free.
+	Model *TenantModelDTO `json:"model,omitempty"`
 }
 
 // TenantQuotaDTO is the compute ceiling (ResourceQuota) projection.
@@ -91,12 +95,16 @@ func newTenantSummary(t *agentsv1alpha1.Tenant) TenantSummary {
 	if ns == nil {
 		ns = []string{}
 	}
-	return TenantSummary{
+	sum := TenantSummary{
 		Name:             t.Name,
 		Namespaces:       ns,
 		MemberNamespaces: t.Status.MemberNamespaces,
 		Ready:            tenantReady(t),
 	}
+	if m := t.Spec.Model; m != nil {
+		sum.Model = &TenantModelDTO{BudgetUSD: m.BudgetUSD, RPM: m.RPM, MaxConcurrent: m.MaxConcurrent}
+	}
+	return sum
 }
 
 func newTenantDetail(t *agentsv1alpha1.Tenant) TenantDetail {

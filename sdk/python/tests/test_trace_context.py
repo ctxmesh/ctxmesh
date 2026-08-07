@@ -105,6 +105,27 @@ def test_absent_traceparent_starts_fresh_root(
     assert plan.parent is None  # a fresh root
 
 
+def test_longterm_remember_headers_carry_active_traceparent(
+    traced_client: Client, span_exporter: InMemorySpanExporter
+):
+    # m54.3: a remember issued INSIDE a traced run propagates the run's traceparent,
+    # so the launcher can tag the memory with its originating trace id.
+    _, headers = _synthesize_agent_invoke()
+    with traced_client.trace.request_context(headers):
+        with traced_client.trace.step("plan"):
+            hdrs = traced_client.memory._longterm_headers()
+            assert "traceparent" in hdrs
+            # Same trace id as the active run (the 2nd traceparent segment).
+            assert hdrs["traceparent"].split("-")[1] == headers["traceparent"].split("-")[1]
+
+
+def test_longterm_remember_headers_no_trace_outside_run(traced_client: Client):
+    # Outside any traced run there is no active span → no traceparent header (the
+    # launcher then simply doesn't tag the memory). Never raises.
+    hdrs = traced_client.memory._longterm_headers()
+    assert "traceparent" not in hdrs
+
+
 def test_garbage_traceparent_does_not_crash(
     traced_client: Client, span_exporter: InMemorySpanExporter
 ):

@@ -81,6 +81,19 @@ Bundled dev data plane (dev/trial ONLY — PRD §23):
         `--set devDataPlane.enabled=false` and supply your own data plane.
 {{- end }}
 
+{{- if lt (int (.Values.statelayerProxy.replicas | default 1)) 2 }}
+
+  ⚠️  PRODUCTION HA WARNING — the state-layer proxy is running a SINGLE replica.
+      The M53 credential cutover is the DEFAULT: agents route memory/quota/dedup
+      through the state-layer proxy and hold no direct Valkey path. The budget
+      check fails CLOSED through the proxy hop (ADR 0050 §5), so a proxy drain
+      (node upgrade) on one replica 402s EVERY budget-capped agent for the drain
+      window. This single-replica posture is DEV-ONLY.
+      For production, install with the HA overlay:
+        helm install ... -f deploy/helm/agent-engine/values-production.yaml
+      (statelayerProxy.replicas>=2 + componentPodDisruptionBudgets.enabled).
+{{- end }}
+
 Check readiness:
   kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-controller-manager
   kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-gateway

@@ -32,9 +32,36 @@ import (
 // never included, and per-user memories are NOT listed — only agent-wide knowledge — so no user's private
 // remembered facts (nor their hashed identity) are exposed in the admin console.
 type AgentMemoryDTO struct {
-	Content   string            `json:"content"`
-	Tags      map[string]string `json:"tags,omitempty"`
-	CreatedAt string            `json:"createdAt"`
+	Content string            `json:"content"`
+	Tags    map[string]string `json:"tags,omitempty"`
+	// TraceID is the originating run's trace id (m54.3), lifted from the internal
+	// `traceId` tag the launcher stamps — the console back-links each remembered
+	// fact to the trace that produced it (M49 UX review A2). Empty when the memory
+	// was written outside a traced run. It is removed from Tags so it does not also
+	// render as a user-facing tag chip.
+	TraceID   string `json:"traceId,omitempty"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// memoryTraceTagKey is the tag key the launcher stamps the originating trace id
+// under (cmd/launcher/memory_longterm.go). Lifted into the typed DTO field.
+const memoryTraceTagKey = "traceId"
+
+// splitTraceTag lifts the traceId tag out of a memory's tags into a typed value,
+// returning the trace id and the tags WITHOUT it (so it isn't shown as a chip). The
+// input map is not mutated.
+func splitTraceTag(tags map[string]string) (traceID string, rest map[string]string) {
+	traceID = tags[memoryTraceTagKey]
+	if traceID == "" {
+		return "", tags
+	}
+	rest = make(map[string]string, len(tags))
+	for k, v := range tags {
+		if k != memoryTraceTagKey {
+			rest[k] = v
+		}
+	}
+	return traceID, rest
 }
 
 // AgentMemoryResponse is returned by GET /api/agents/{ns}/{name}/memory.
@@ -89,9 +116,11 @@ func (s *Server) handleAgentMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]AgentMemoryDTO, 0, len(mems))
 	for i := range mems {
+		traceID, tags := splitTraceTag(mems[i].Tags)
 		items = append(items, AgentMemoryDTO{
 			Content:   mems[i].Content,
-			Tags:      mems[i].Tags,
+			Tags:      tags,
+			TraceID:   traceID,
 			CreatedAt: mems[i].CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}

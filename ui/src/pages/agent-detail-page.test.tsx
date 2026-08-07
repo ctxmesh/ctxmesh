@@ -839,6 +839,26 @@ describe("AgentDetailPage — Memory panel (m17.11)", () => {
     expect(screen.getByText(/topic: units/)).toBeInTheDocument();
   });
 
+  it("long-term memory: back-links each fact to its originating trace (m54.3)", async () => {
+    installFetch({
+      longTermMemory: [
+        { content: "from a run", traceId: "tr-99", createdAt: "2026-07-25T00:00:00Z" },
+        { content: "ambient (no trace)", createdAt: "2026-07-25T00:01:00Z" },
+      ],
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("tab-memory"));
+
+    const link = await screen.findByTestId("longterm-trace-link-tr-99");
+    expect(link).toHaveAttribute("href", "/traces/tr-99");
+    expect(link).toHaveAttribute("aria-label", expect.stringContaining("tr-99"));
+    // The trace id is NOT rendered as a user-facing tag chip (lifted to the link).
+    expect(screen.queryByText(/traceId/)).not.toBeInTheDocument();
+    // A memory with no trace shows no link (only the one tagged entry links).
+    expect(screen.getAllByTestId(/longterm-trace-link-/)).toHaveLength(1);
+  });
+
   it("long-term memory: surfaces a store error, not a blank panel (m46.6)", async () => {
     installFetch({ longTermMemoryError: true });
     renderAt();
