@@ -280,3 +280,37 @@ export const NAV_SECTIONS: NavSection[] = [
 
 // NAV_ITEMS is the flat list (every section's items) — handy for route/lookup.
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
+
+// navRoute resolves a nav item's router path by id — the single lookup so any
+// route the console references stays anchored to the IA source of truth above. It
+// throws on an unknown id (a nav rename then fails loudly at module-load in tests,
+// not silently at runtime).
+export function navRoute(id: string): string {
+  const item = NAV_ITEMS.find((i) => i.id === id);
+  if (!item?.route) {
+    throw new Error(`navRoute: no routed nav item with id "${id}"`);
+  }
+  return item.route;
+}
+
+// FirstRunStep is one guided step in the dashboard's first-run checklist. `doneKey`
+// maps to the dashboard's live setup signals (provider/agent/run); `to` is derived
+// from the nav surface the step drives so the checklist can't drift from the IA.
+export interface FirstRunStep {
+  label: string;
+  to: string;
+  doneKey: "provider" | "agent" | "run";
+}
+
+// FIRST_RUN_CHECKLIST — the dashboard's guided "get started" steps (m18.10),
+// co-located with NAV_SECTIONS (m54.4) so the steps + the IA are the ONE source of
+// truth reviewed together. Each `to` derives from the nav route it drives (the
+// connect/new suffixes are the action affordances ON those surfaces) — a nav route
+// change follows automatically instead of leaving a stale hardcoded path.
+export const FIRST_RUN_CHECKLIST: FirstRunStep[] = [
+  { label: "Connect a provider", to: `${navRoute("providers")}/connect`, doneKey: "provider" },
+  { label: "Create an agent", to: `${navRoute("agents")}/new`, doneKey: "agent" },
+  // The Playground — the taught run surface (nav's Build step). Was /agents (a
+  // list, not a run affordance); m49.4 UX-review P1.
+  { label: "Run your agent", to: navRoute("playground"), doneKey: "run" },
+];

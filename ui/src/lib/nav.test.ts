@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { NAV_SECTIONS, NAV_ITEMS } from "@/lib/nav";
+import {
+  NAV_SECTIONS,
+  NAV_ITEMS,
+  navRoute,
+  FIRST_RUN_CHECKLIST,
+} from "@/lib/nav";
 
 // The intent-shaped IA (m20.8): the object-shaped CRD surfaces (Model routes,
 // Secret bindings, Registries) are demoted OUT of the primary nav into an "Advanced"
@@ -60,5 +65,25 @@ describe("nav consolidation (m23.7)", () => {
     expect(sectionOf("Tool catalog")).toBe("Tools");
     expect(buildLabels()).not.toContain("MCP Servers");
     expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
+  });
+});
+
+// The first-run checklist (m54.4) derives its routes from the nav IA, so a nav
+// route change can't leave a stale hardcoded checklist path.
+describe("first-run checklist derives from nav (m54.4)", () => {
+  it("navRoute resolves a nav id to its route and throws on an unknown id", () => {
+    expect(navRoute("providers")).toBe("/providers");
+    expect(navRoute("playground")).toBe("/playground");
+    expect(() => navRoute("does-not-exist")).toThrow(/no routed nav item/);
+  });
+
+  it("each checklist step's route is anchored to its nav surface", () => {
+    const byKey = Object.fromEntries(FIRST_RUN_CHECKLIST.map((s) => [s.doneKey, s]));
+    // Base routes come from nav (the connect/new suffixes are the on-page actions).
+    expect(byKey.provider.to).toBe(`${navRoute("providers")}/connect`);
+    expect(byKey.agent.to).toBe(`${navRoute("agents")}/new`);
+    expect(byKey.run.to).toBe(navRoute("playground"));
+    // Three steps, each mapped to a distinct live signal.
+    expect(FIRST_RUN_CHECKLIST.map((s) => s.doneKey)).toEqual(["provider", "agent", "run"]);
   });
 });
