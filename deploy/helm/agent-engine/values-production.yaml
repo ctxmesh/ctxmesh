@@ -1,0 +1,45 @@
+# Production HA overlay for the agent-engine chart.
+#
+#   helm install agent-engine ./deploy/helm/agent-engine -f values-production.yaml [+ your own overrides]
+#
+# The chart DEFAULT values (values.yaml) are the DEV/kind posture: single-replica
+# control-plane components, no PodDisruptionBudgets — correct for a single-node
+# cluster where >1 replica gives no HA (both pods land on the one node) and a
+# minAvailable PDB would WEDGE node drains. This overlay is the PRODUCTION posture:
+# it makes the components that must survive a voluntary disruption (node drain,
+# cluster upgrade) highly available.
+#
+# WHY THIS EXISTS — the M53 cutover (ADR 0050 §8 phase 3) is the DEFAULT: agents
+# route memory/quota/dedup through the state-layer proxy and hold no direct Valkey
+# path. Per ADR 0050 §5 the budget check fails CLOSED through the proxy hop, so a
+# proxy drain on a single-replica deployment 402s EVERY budget-capped agent for the
+# drain window. A production install MUST therefore run the proxy with >=2 replicas
+# + a PDB. This overlay does that (and the same for the other stateless servers).
+
+# The state-layer proxy — the load-bearing one (ADR 0050 §5). >=2 + PDB is REQUIRED
+# at the default cutover.
+statelayerProxy:
+  replicas: 2
+
+# The other stateless request-servers — plain HA (they hold no per-pod state).
+gateway:
+  replicas: 2
+tokenService:
+  replicas: 2
+
+# The controller-manager runs active/standby via leader election, so >=2 is a warm
+# standby (a failover, not load-sharing). Its own PDB is nested (control-plane-pdb.yaml).
+controllerManager:
+  replicas: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# Turn on the PodDisruptionBudgets for the stateless components ALONGSIDE their
+# replicas>1 above (bff / gateway / token-service / statelayer-proxy). minAvailable:1
+# keeps at least one pod through a drain. NOTE: the BFF stays replicas:1 (its
+# in-process run path needs the durable run-worker, ADR 0034 — m52.D1) so its PDB is
+# capped at 1; that's expected until that lands.
+componentPodDisruptionBudgets:
+  enabled: true
+  minAvailable: 1
