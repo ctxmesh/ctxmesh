@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { MessagesSquare } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { Boxes, MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -277,6 +277,28 @@ export function RunsPage() {
       id: "name",
       header: "Name",
       cell: (r) => <span className="font-medium">{r.name || "—"}</span>,
+    },
+    {
+      id: "agent",
+      header: "Agent",
+      hideOnMobile: true,
+      // Per-row link straight to the originating agent (m54.2, M49 UX review A1) —
+      // no trace→agent hop. stopPropagation so the link doesn't also trigger the
+      // row-click's navigate-to-trace. "—" when the run carries no agent identity.
+      cell: (r) =>
+        r.agentNs && r.agentName ? (
+          <Link
+            to={`/agents/${encodeURIComponent(r.agentNs)}/${encodeURIComponent(r.agentName)}`}
+            data-testid={`run-agent-link-${r.traceId}`}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+          >
+            <Boxes className="h-3.5 w-3.5" />
+            {r.agentNs}/{r.agentName}
+          </Link>
+        ) : (
+          <span className="text-sm text-muted-foreground">—</span>
+        ),
     },
     {
       id: "traceId",

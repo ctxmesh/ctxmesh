@@ -179,6 +179,13 @@ func TestLangfuseRecentRuns(t *testing.T) {
 	assert.Equal(t, int64(900), runs[2].Tokens, "prefers usage.totalTokens")
 	assert.InDelta(t, 1200.0, runs[2].LatencyMs, 1e-9, "Langfuse latency is SECONDS → exposed as ms")
 
+	// m54.2: each run carries its originating agent (ns, name) from the agent tag,
+	// so the runs list can back-link straight to /agents/{ns}/{name}.
+	assert.Equal(t, "prod", runs[0].AgentNs)
+	assert.Equal(t, "scalekit-agent", runs[0].AgentName)
+	assert.Equal(t, "prod", runs[2].AgentNs)
+	assert.Equal(t, "chatbot", runs[2].AgentName)
+
 	// Creds are sent server-side as HTTP Basic; they must NEVER appear in a DTO.
 	assert.True(t, rec.hadAuth, "public-API creds must be sent as Basic auth")
 	assert.Equal(t, "pk-test", rec.user)
