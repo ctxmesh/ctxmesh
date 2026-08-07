@@ -406,7 +406,19 @@ def main() -> None:
             " server enforces the caller's RBAC.\n"
         )
         f.write("{{- if .Values.ui.enabled }}\n")
-        f.write("\n---\n".join(bff))
+        # BFF replicas dial (ADR 0051, M55): now that runWorkerDispatch (m55.2) lets the
+        # BFF offload runs to the durable worker, it can scale >1. Default 1 == kustomize
+        # (no-drift). The consistency guard (templates/ha-guards.yaml) forbids replicas>1
+        # without dispatch — in-process runs would split across pods (some lost).
+        bff_docs = []
+        for doc in bff:
+            if kind_of(doc) == "Deployment" and "control-plane: bff" in doc:
+                doc = doc.replace(
+                    "  replicas: 1\n",
+                    "  replicas: {{ .Values.bff.replicas | default 1 }}\n",
+                )
+            bff_docs.append(doc)
+        f.write("\n---\n".join(bff_docs))
         f.write("\n{{- end }}\n")
 
 

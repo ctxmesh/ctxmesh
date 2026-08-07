@@ -167,6 +167,11 @@ bff:
   # exception accepts; the chatbox then resumes via the popup-close poll (the relay only fires
   # when the callback shares the agents' base domain). Verified on kind (M38).
   consoleURL: ""
+  # BFF replica count (ADR 0051, M55). Default 1 == kustomize (no-drift). Scaling >1
+  # REQUIRES runStore.enabled (dispatch) — else in-process runs split across pods and
+  # some are lost on a pod loss; the render FAILS on replicas>1 without dispatch
+  # (templates/ha-guards.yaml). The production overlay sets 2 + the BFF PDB.
+  replicas: 1
   providerConnect:
     enabled: true
   # Durable run store + HA run-worker (ADR 0051, M55). When enabled, the BFF
