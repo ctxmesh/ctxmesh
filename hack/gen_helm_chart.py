@@ -52,6 +52,26 @@ PROVIDER_CONNECT_ENV_HELM = (
     "          value: {{ .Values.bff.providerConnect.enabled | quote }}"
 )
 
+# The BFF's durable-run-store dispatch (ADR 0051, M55). config/bff has NO run-store
+# env (the dev default is in-process/mem-store), so there's no kustomize placeholder
+# to swap — instead INJECT a conditional block after the provider-connect env (a
+# BFF-only anchor). With bff.runStore.enabled=false (default) the `{{- if }}` renders
+# nothing, so the BFF env is byte-identical to kustomize (no-drift); enabled, the BFF
+# gets RUN_STORE_DSN (from the operator Secret) + RUN_WORKER_DISPATCH=true so it
+# dispatches runs to the run-worker (run-worker.yaml) instead of executing in-process.
+RUN_STORE_ENV_INJECT = (
+    PROVIDER_CONNECT_ENV_HELM + "\n"
+    "{{- if .Values.bff.runStore.enabled }}\n"
+    "        - name: RUN_STORE_DSN\n"
+    "          valueFrom:\n"
+    "            secretKeyRef:\n"
+    "              name: {{ .Values.bff.runStore.dsnSecretName }}\n"
+    "              key: dsn\n"
+    "        - name: RUN_WORKER_DISPATCH\n"
+    '          value: "true"\n'
+    "{{- end }}"
+)
+
 # The BFF's create-from-prompt platform generation-model pin (ADR 0014). config/bff
 # hardcodes the env value "" (unpinned — the default; so `kustomize build`/`make
 # deploy` stay valid); the chart templates it from a Helm value so an operator can
@@ -219,6 +239,10 @@ def substitute(doc: str) -> str:
         PROVIDER_CONNECT_ENV_KUSTOMIZE,
         PROVIDER_CONNECT_ENV_HELM,
     )
+    # BFF durable-run-store dispatch (ADR 0051): inject the run-store env AFTER the
+    # provider-connect env (now in its Helm form) — a BFF-only anchor. Default OFF ⇒
+    # renders nothing ⇒ no-drift; enabled ⇒ RUN_STORE_DSN + RUN_WORKER_DISPATCH.
+    doc = doc.replace(PROVIDER_CONNECT_ENV_HELM, RUN_STORE_ENV_INJECT)
     # BFF create-from-prompt platform generation-model pin -> Helm value (ADR 0014).
     # Default renders the quoted empty string == kustomize (no drift); an operator's
     # `--set …=<list>` pins the generation models.
@@ -382,7 +406,19 @@ def main() -> None:
             " server enforces the caller's RBAC.\n"
         )
         f.write("{{- if .Values.ui.enabled }}\n")
-        f.write("\n---\n".join(bff))
+        # BFF replicas dial (ADR 0051, M55): now that runWorkerDispatch (m55.2) lets the
+        # BFF offload runs to the durable worker, it can scale >1. Default 1 == kustomize
+        # (no-drift). The consistency guard (templates/ha-guards.yaml) forbids replicas>1
+        # without dispatch — in-process runs would split across pods (some lost).
+        bff_docs = []
+        for doc in bff:
+            if kind_of(doc) == "Deployment" and "control-plane: bff" in doc:
+                doc = doc.replace(
+                    "  replicas: 1\n",
+                    "  replicas: {{ .Values.bff.replicas | default 1 }}\n",
+                )
+            bff_docs.append(doc)
+        f.write("\n---\n".join(bff_docs))
         f.write("\n{{- end }}\n")
 
 

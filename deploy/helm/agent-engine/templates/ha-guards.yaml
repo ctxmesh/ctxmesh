@@ -1,0 +1,11 @@
+{{- /*
+HA consistency guards (ADR 0051, M55) — Helm-only, render NO resources.
+
+These `fail` the render on internally-contradictory HA settings in ANY profile
+(not just production) — a contradiction is wrong on a laptop too. Distinct from the
+`profile: production` invariants (ha-profile-guards, m55.4), which enforce that a
+DECLARED-production install is actually HA.
+*/ -}}
+{{- if and (gt (int .Values.bff.replicas) 1) (not .Values.bff.runStore.enabled) }}
+{{- fail "\n\nHA misconfiguration: bff.replicas > 1 requires bff.runStore.enabled.\nWithout the durable run-worker (dispatch), the BFF executes runs IN-PROCESS on a\nsingle pod — with >1 replica, runs split across pods and are lost on a pod loss\n(ADR 0051). Set bff.runStore.enabled=true (with a run-store DSN Secret) to scale the\nBFF, or keep bff.replicas=1.\n" }}
+{{- end }}

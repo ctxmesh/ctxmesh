@@ -5,6 +5,14 @@
 # defaults below unchanged, `helm template` renders byte-for-byte the same
 # resources as `make deploy` (proven by `make helm-verify`).
 
+# Deployment profile (ADR 0051, M55). "production" makes the HA invariants HARD:
+# `helm template` FAILS unless the control plane is actually highly available
+# (templates/ha-profile-guards.yaml) — the state-layer proxy, BFF, and run-worker
+# all >=2, dispatch on, no bundled dev data plane. Helm can't infer production, so
+# the operator DECLARES it (values-production.yaml sets this). Default "" (dev)
+# renders leniently, preserving the lean single-replica dev default + no-drift.
+profile: ""
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (agent-engine-system) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
@@ -167,8 +175,32 @@ bff:
   # exception accepts; the chatbox then resumes via the popup-close poll (the relay only fires
   # when the callback shares the agents' base domain). Verified on kind (M38).
   consoleURL: ""
+  # BFF replica count (ADR 0051, M55). Default 1 == kustomize (no-drift). Scaling >1
+  # REQUIRES runStore.enabled (dispatch) — else in-process runs split across pods and
+  # some are lost on a pod loss; the render FAILS on replicas>1 without dispatch
+  # (templates/ha-guards.yaml). The production overlay sets 2 + the BFF PDB.
+  replicas: 1
   providerConnect:
     enabled: true
+  # Durable run store + HA run-worker (ADR 0051, M55). When enabled, the BFF
+  # DISPATCHES runs to the durable run-worker (a separate Deployment that claims +
+  # executes queued runs against the Postgres run store) instead of executing them
+  # in-process — so the BFF can scale replicas>1 (a pod loss mid-run no longer drops
+  # the run; the worker owns it via the durable store). Requires an operator-provided
+  # Secret named `dsnSecretName` with key `dsn` (the run-store Postgres DSN). Default
+  # OFF ⇒ in-process / mem-store, single-pod (the dev default) — helm-default renders
+  # NO worker + no BFF run-store env == `kustomize build config/default` (no-drift).
+  runStore:
+    enabled: false
+    dsnSecretName: run-store
+    worker:
+      # Concurrent claim loops per worker pod.
+      concurrency: 4
+      # KEDA autoscale bounds on the queued-run backlog. Dev: 0 (scale-to-zero). The
+      # production overlay sets minReplicaCount: 2 (a WARM pool — avoid a scale-from-0
+      # cold start on an interactive run; a drain never zeroes the pool, ADR 0051 Fork-C).
+      minReplicaCount: 0
+      maxReplicaCount: 10
   # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
   # leaves generation using the caller's connected-provider model unpinned — the
   # zero-config dev/trial path. An operator that wants a GOVERNED generation model
