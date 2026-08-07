@@ -16,6 +16,11 @@
 # drain window. A production install MUST therefore run the proxy with >=2 replicas
 # + a PDB. This overlay does that (and the same for the other stateless servers).
 
+# profile: production makes the HA invariants HARD — `helm template` FAILS if this
+# overlay (or an operator override) leaves any of them unmet (ADR 0051, M55). This
+# file is self-consistent: it satisfies every invariant below.
+profile: production
+
 # The state-layer proxy — the load-bearing one (ADR 0050 §5). >=2 + PDB is REQUIRED
 # at the default cutover.
 statelayerProxy:
@@ -35,11 +40,29 @@ controllerManager:
     enabled: true
     minAvailable: 1
 
+# The BFF — HA via run-worker dispatch (ADR 0051, M55). It scales >=2 because runs
+# are OFFLOADED to the durable run-worker (below), not executed in-process. REQUIRES
+# an operator-provided run-store Secret (bff.runStore.dsnSecretName, key `dsn`) with
+# an EXTERNAL, HA Postgres DSN — the run store must not be a bundled dev instance.
+bff:
+  replicas: 2
+  runStore:
+    enabled: true
+    dsnSecretName: run-store   # create this Secret with your managed-Postgres DSN
+    worker:
+      # A WARM pool (>=2) — a scale-from-0 cold start on an interactive run is the
+      # wrong trade, and a drain must not zero the pool (ADR 0051 Fork-C).
+      minReplicaCount: 2
+      maxReplicaCount: 10
+
+# The bundled dev data plane (Valkey + MinIO, deterministic dev creds) is FORBIDDEN
+# in production — bring your own externally-managed, HA data plane (PRD §23).
+devDataPlane:
+  enabled: false
+
 # Turn on the PodDisruptionBudgets for the stateless components ALONGSIDE their
 # replicas>1 above (bff / gateway / token-service / statelayer-proxy). minAvailable:1
-# keeps at least one pod through a drain. NOTE: the BFF stays replicas:1 (its
-# in-process run path needs the durable run-worker, ADR 0034 — m52.D1) so its PDB is
-# capped at 1; that's expected until that lands.
+# keeps at least one pod through a drain. Each PDB renders only at replicas>=2 (m55.3).
 componentPodDisruptionBudgets:
   enabled: true
   minAvailable: 1

@@ -1,0 +1,27 @@
+{{- /*
+Production-profile HA invariants (ADR 0051, M55) — Helm-only, render NO resources.
+
+Helm can't infer "production", so the operator declares `profile: production`
+(values-production.yaml). Under it, `helm template` FAILS unless the control plane
+is actually HA — so a declared-production install can't silently ship
+single-replica. The DEFAULT profile ("") renders leniently → dev stays lean +
+no-drift. Distinct from ha-guards.yaml (contradictions that are wrong in ANY
+profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
+*/ -}}
+{{- if eq .Values.profile "production" }}
+{{- if lt (int .Values.statelayerProxy.replicas) 2 }}
+{{- fail "\n\nprofile=production requires statelayerProxy.replicas>=2.\nThe M53 cutover routes agent memory/quota/dedup through the state-layer proxy, and\nthe budget check fails CLOSED through it (ADR 0050 §5) — a single-replica proxy drain\n402s every budget-capped agent. Set statelayerProxy.replicas>=2 + a PDB.\n" }}
+{{- end }}
+{{- if lt (int .Values.bff.replicas) 2 }}
+{{- fail "\n\nprofile=production requires bff.replicas>=2 (control-plane HA, ADR 0051).\n" }}
+{{- end }}
+{{- if not .Values.bff.runStore.enabled }}
+{{- fail "\n\nprofile=production requires bff.runStore.enabled — the BFF must dispatch runs to\nthe durable run-worker (an external Postgres run store), else runs execute in-process\non one pod and can't survive a BFF loss / scale >1 (ADR 0051).\n" }}
+{{- end }}
+{{- if lt (int .Values.bff.runStore.worker.minReplicaCount) 2 }}
+{{- fail "\n\nprofile=production requires bff.runStore.worker.minReplicaCount>=2 — a WARM worker\npool (avoid a scale-from-0 cold start on an interactive run; a drain never zeroes the\npool, ADR 0051 Fork-C).\n" }}
+{{- end }}
+{{- if .Values.devDataPlane.enabled }}
+{{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster Valkey +\nMinIO use DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
+{{- end }}
+{{- end }}

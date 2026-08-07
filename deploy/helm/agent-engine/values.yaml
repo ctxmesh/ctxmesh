@@ -5,6 +5,14 @@
 # defaults below unchanged, `helm template` renders byte-for-byte the same
 # resources as `make deploy` (proven by `make helm-verify`).
 
+# Deployment profile (ADR 0051, M55). "production" makes the HA invariants HARD:
+# `helm template` FAILS unless the control plane is actually highly available
+# (templates/ha-profile-guards.yaml) — the state-layer proxy, BFF, and run-worker
+# all >=2, dispatch on, no bundled dev data plane. Helm can't infer production, so
+# the operator DECLARES it (values-production.yaml sets this). Default "" (dev)
+# renders leniently, preserving the lean single-replica dev default + no-drift.
+profile: ""
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (agent-engine-system) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
