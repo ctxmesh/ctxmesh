@@ -8,7 +8,16 @@ alongside those components' replicas>1 so a voluntary disruption (node drain, cl
 evict a whole component at once. Mirrors control-plane-pdb.yaml (the controller-manager PDB).
 */ -}}
 {{- if .Values.componentPodDisruptionBudgets.enabled }}
+{{- /* Per-component replicas — a PDB renders ONLY at replicas>=2 (ADR 0051): a
+       minAvailable:1 PDB on a 1-replica Deployment WEDGES node drains. The value
+       keys don't match the label names 1:1, so map them explicitly. */ -}}
+{{- $replicas := dict
+      "bff" (.Values.bff.replicas | default 1)
+      "gateway" (.Values.gateway.replicas | default 1)
+      "token-service" (.Values.tokenService.replicas | default 1)
+      "statelayer-proxy" (.Values.statelayerProxy.replicas | default 1) }}
 {{- range $c := list "bff" "gateway" "token-service" "statelayer-proxy" }}
+{{- if ge (int (index $replicas $c)) 2 }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -25,5 +34,6 @@ spec:
     matchLabels:
       control-plane: {{ $c }}
       app.kubernetes.io/name: agent-engine
+{{- end }}
 {{- end }}
 {{- end }}

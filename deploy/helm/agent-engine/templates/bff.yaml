@@ -76,7 +76,7 @@ metadata:
   name: agent-engine-bff
   namespace: {{ .Values.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.bff.replicas | default 1 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-engine
