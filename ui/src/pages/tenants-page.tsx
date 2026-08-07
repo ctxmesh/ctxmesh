@@ -270,9 +270,11 @@ export function TenantsPage() {
       id: "usage",
       header: "Usage",
       className: "w-28",
+      hideOnMobile: true,
       // At-a-glance near-cap indicator (m54.5) — "who's about to be throttled?"
       // without opening each tenant. Empty when the tenant has no caps, no usage
-      // yet, or is comfortably under.
+      // yet, or is comfortably under. "Over cap" (not "At cap") makes clear that
+      // requests are already being dropped, not merely at the boundary (m54.6 UX).
       cell: (t) => {
         const level = nearCapLevel(t.model, usageByTenant[t.name]);
         if (!level) return <span className="text-xs text-muted-foreground">—</span>;
@@ -281,7 +283,7 @@ export function TenantsPage() {
             variant={level === "over" ? "destructive" : "warning"}
             data-testid={`tenant-nearcap-${t.name}`}
           >
-            {level === "over" ? "At cap" : "Near cap"}
+            {level === "over" ? "Over cap" : "Near cap"}
           </Badge>
         );
       },
