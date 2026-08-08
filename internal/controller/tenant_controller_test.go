@@ -265,16 +265,24 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 	}
 	assert.True(t, allowsKnative, "ingress must allow knative-serving or /invoke breaks")
 
-	// Serving-safe: an egress rule allows the model gateway port.
-	allowsGateway := false
+	// Serving-safe: egress allows the model gateway AND the state-layer proxy :8080
+	// (the m53.7 cutover default — omitting it 402s a member's quota, audit SEC-1).
+	allowsGateway, allowsProxy := false, false
 	for _, rule := range np.Spec.Egress {
 		for _, p := range rule.Ports {
-			if p.Port != nil && p.Port.IntValue() == modelGatewayPort {
+			if p.Port == nil {
+				continue
+			}
+			switch p.Port.IntValue() {
+			case modelGatewayPort:
 				allowsGateway = true
+			case statelayerProxyPort:
+				allowsProxy = true
 			}
 		}
 	}
 	assert.True(t, allowsGateway, "egress must allow the model gateway port")
+	assert.True(t, allowsProxy, "egress MUST allow the state-layer proxy :8080 (audit SEC-1)")
 
 	// Toggle isolation off → the policy is pruned.
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "isoco"}, tenant))

@@ -111,19 +111,27 @@ const (
 	langfusePort      = 3000
 
 	// agentEngineSystemNamespace hosts the platform backends the agent pod's
-	// launcher reaches on the model/memory/object-store paths:
+	// launcher reaches on the model/memory/object-store/proxy paths:
 	//   - the LiteLLM model gateway (agent-engine-gateway :4000) — MODEL_GATEWAY_URL;
 	//     breaking it breaks every LLM call.
 	//   - the Valkey state layer (agent-engine-statelayer :6379) —
-	//     MEMORY_BACKEND_ADDR; breaking it breaks M5 memory + M7 async dedupe.
+	//     MEMORY_BACKEND_ADDR; the PROXY-LESS (pre-cutover) memory + async-dedupe path.
 	//   - the MinIO object store (agent-engine-objectstore :9000) —
 	//     OBJECT_STORE_ADDR; breaking it breaks m7.6b blob offload.
-	// All three live in this one namespace, so a single namespace-scoped egress
-	// peer (restricted to their three ports) covers them.
+	//   - the state-layer proxy (agent-engine-statelayer-proxy :8080) — the m53.7
+	//     cutover DEFAULT for memory + quota + async-dedup (STATELAYER_PROXY_URL); with
+	//     no direct-Valkey fallback, omitting it makes a registry member's quota
+	//     fail-closed (402 on every LLM call) + dedup NACK-loop + memory silently lost.
+	//   - the token-service (agent-engine-token-service :8443) — long-term-memory OBO
+	//     (ADR 0045); omitting it breaks per-user long-term memory for members.
+	// All live in this one namespace, so a single namespace-scoped egress peer
+	// (restricted to these ports) covers them.
 	agentEngineSystemNamespace = "agent-engine-system"
 	modelGatewayPort           = 4000
 	memoryBackendPort          = 6379
 	objectStorePort            = 9000
+	statelayerProxyPort        = 8080
+	tokenServicePort           = 8443
 
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
@@ -442,11 +450,11 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform backends in agent-engine-system: the LiteLLM model
-					// gateway (:4000, MODEL_GATEWAY_URL — every LLM call), the
-					// Valkey state layer (:6379, MEMORY_BACKEND_ADDR — M5 memory +
-					// M7 async dedupe), and the MinIO object store (:9000,
-					// OBJECT_STORE_ADDR — m7.6b blob offload). One namespace peer,
-					// scoped to their three ports.
+					// gateway (:4000), the direct Valkey state layer (:6379,
+					// proxy-less path), the MinIO object store (:9000), the
+					// state-layer PROXY (:8080, the m53.7 cutover default for
+					// memory/quota/dedup), and the token-service (:8443, long-term
+					// memory OBO). One namespace peer, scoped to these ports.
 					To: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: agentEngineSystemNamespace},
@@ -456,6 +464,8 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
 					},
 				},
 				{
