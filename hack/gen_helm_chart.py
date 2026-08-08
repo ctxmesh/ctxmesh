@@ -257,6 +257,18 @@ def substitute(doc: str) -> str:
         f"agent-engine-statelayer-proxy.{NS_KUSTOMIZE}.svc",
         "agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc",
     )
+    # State-layer Valkey backend address STATELAYER_ADDR (OPS-4c). The kustomize literal is the
+    # in-cluster Valkey Service (fixed namespace); template it so (a) a non-default-namespace install
+    # resolves it, and (b) a BYO-external Valkey (statelayer.externalAddr) repoints the fail-closed
+    # proxy off the in-cluster Service — which does NOT exist in a production render without
+    # devDataPlane/persistence. Default (externalAddr empty) renders the in-cluster addr in the
+    # install namespace == kustomize on the default namespace (no drift). Appears once per backend
+    # Deployment; the exact-string replace hits each.
+    doc = doc.replace(
+        f"agent-engine-statelayer.{NS_KUSTOMIZE}.svc:6379",
+        "{{ .Values.statelayer.externalAddr | "
+        'default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}',
+    )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at
     # "true" == kustomize (no drift), while `--set …=false` disables it.

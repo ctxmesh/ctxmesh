@@ -126,6 +126,13 @@ devDataPlane:
 # data use BYO-external Valkey/managed Redis (real, operator-managed auth). The
 # roadmapped real fix is a memory-plane proxy + Valkey ACLs (ADR 0049).
 statelayer:
+  # BYO-external Valkey/managed Redis address (host:port) for the state-layer backend (OPS-4c).
+  # Empty ⇒ the in-cluster Valkey Service (agent-engine-statelayer.<namespace>.svc:6379 — exists
+  # only when devDataPlane.enabled or persistence.enabled). Set this to point the fail-closed proxy
+  # at an operator-managed Valkey/Redis for production (ADR 0049/0053). A `profile: production`
+  # render REQUIRES this OR persistence.enabled, else it would point at a nonexistent Service and
+  # 402 every budget-capped agent (ha-profile-guards).
+  externalAddr: ""
   persistence:
     enabled: false
     # PVC size for the AOF/RDB data.
