@@ -316,7 +316,7 @@ func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, d
 		return nil, fmt.Errorf("listing Revisions for prompt GC: %w", err)
 	}
 	for i := range revs.Items {
-		for _, v := range revs.Items[i].Spec.PodSpec.Volumes {
+		for _, v := range revs.Items[i].Spec.Volumes {
 			if v.Name == promptVolumeName && v.ConfigMap != nil {
 				inUse[v.ConfigMap.Name] = true
 			}

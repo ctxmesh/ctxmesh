@@ -173,8 +173,10 @@ func TestRenderCarriesDescription(t *testing.T) {
 	t.Parallel()
 
 	m, _ := Render([]Binding{
-		{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp",
-			Description: "Count whitespace-separated words."},
+		{
+			BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp",
+			Description: "Count whitespace-separated words.",
+		},
 		{BindingName: "sc", ToolName: "s-tool", Mode: ModeSidecar, Image: "img-s"}, // no description
 	})
 

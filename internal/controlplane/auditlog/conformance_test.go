@@ -80,8 +80,10 @@ func TestStore_BFFRowsNeverDedupe(t *testing.T) {
 		ctx := context.Background()
 		// A BFF row supplies no DedupKey → the store mints a fresh UUID each time (single-writer).
 		mk := func() Entry {
-			return Entry{Source: "bff", Actor: "alice", ActorKind: "user", Action: "grant.create",
-				ResourceKind: "MCPGrant", ResourceName: "scalekit", Namespace: "ns1"}
+			return Entry{
+				Source: "bff", Actor: "alice", ActorKind: "user", Action: "grant.create",
+				ResourceKind: "MCPGrant", ResourceName: "scalekit", Namespace: "ns1",
+			}
 		}
 		require.NoError(t, s.Append(ctx, mk()))
 		require.NoError(t, s.Append(ctx, mk()))
@@ -118,7 +120,7 @@ func TestStore_KeysetPagingNoGapNoDup(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
 		ctx := context.Background()
 		base := time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC)
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			require.NoError(t, s.Append(ctx, at(base.Add(time.Duration(i)*time.Minute), "create", "ns1", "u")))
 		}
 		seen := map[int64]bool{}

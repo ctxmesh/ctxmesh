@@ -31,6 +31,11 @@ const (
 	auditActionConnect     = "connect"      // a provider connection was created/rotated
 	auditActionGrantCreate = "grant.create" // a per-user MCP OAuth grant was stored (consent)
 	auditActionGrantRevoke = "grant.revoke" // a per-user MCP grant was revoked
+
+	// actorUnknown is the fallback actor when the authenticated username can't be resolved (never an
+	// error — audit is observability, never a gate). actorKindUser marks a caller-authenticated row.
+	actorUnknown  = "unknown"
+	actorKindUser = "user"
 )
 
 // auditActor resolves the PRECISE authenticated username for an audit row (ADR 0056 §1: store the real
@@ -38,11 +43,11 @@ const (
 // can't be resolved, never an error: audit is observability, never a gate on the audited action.
 func (s *Server) auditActor(ctx context.Context, caller client.Client) string {
 	if caller == nil {
-		return "unknown"
+		return actorUnknown
 	}
 	username, err := callerUsername(ctx, caller)
 	if err != nil || username == "" {
-		return "unknown"
+		return actorUnknown
 	}
 	return username
 }
@@ -57,7 +62,7 @@ func (s *Server) appendAudit(ctx context.Context, e auditlog.Entry) {
 	}
 	e.Source = "bff"
 	if e.ActorKind == "" {
-		e.ActorKind = "user"
+		e.ActorKind = actorKindUser
 	}
 	if err := s.auditStore.Append(ctx, e); err != nil {
 		s.log.Error(err, "audit event not persisted (the action succeeded regardless)",
