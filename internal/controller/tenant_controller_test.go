@@ -76,9 +76,16 @@ func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 		q, err := getQuota(t, ns)
 		require.NoError(t, err, "a ResourceQuota must exist in %s", ns)
 		assert.Equal(t, "alpha", q.Labels[tenantLabel])
-		assert.Equal(t, "8", q.Spec.Hard.Name(corev1.ResourceLimitsCPU, "").String())
+		// The quota caps REQUESTS, not limits (audit FUNC-2): a limits.* quota forces every
+		// pod to declare limits, but agent pods + Knative's queue-proxy are requests-only, so
+		// a limits quota would REJECT every agent pod (brick the namespace).
+		assert.Equal(t, "8", q.Spec.Hard.Name(corev1.ResourceRequestsCPU, "").String())
 		assert.Equal(t, "16Gi", q.Spec.Hard.Name(corev1.ResourceRequestsMemory, "").String())
 		assert.Equal(t, "20", q.Spec.Hard.Name(corev1.ResourcePods, "").String())
+		_, hasLimitsCPU := q.Spec.Hard[corev1.ResourceLimitsCPU]
+		_, hasLimitsMem := q.Spec.Hard[corev1.ResourceLimitsMemory]
+		assert.False(t, hasLimitsCPU, "quota must NOT track limits.cpu (would reject requests-only agent pods)")
+		assert.False(t, hasLimitsMem, "quota must NOT track limits.memory (would reject requests-only agent pods)")
 
 		var namespace corev1.Namespace
 		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: ns}, &namespace))
@@ -265,16 +272,24 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 	}
 	assert.True(t, allowsKnative, "ingress must allow knative-serving or /invoke breaks")
 
-	// Serving-safe: an egress rule allows the model gateway port.
-	allowsGateway := false
+	// Serving-safe: egress allows the model gateway AND the state-layer proxy :8080
+	// (the m53.7 cutover default — omitting it 402s a member's quota, audit SEC-1).
+	allowsGateway, allowsProxy := false, false
 	for _, rule := range np.Spec.Egress {
 		for _, p := range rule.Ports {
-			if p.Port != nil && p.Port.IntValue() == modelGatewayPort {
+			if p.Port == nil {
+				continue
+			}
+			switch p.Port.IntValue() {
+			case modelGatewayPort:
 				allowsGateway = true
+			case statelayerProxyPort:
+				allowsProxy = true
 			}
 		}
 	}
 	assert.True(t, allowsGateway, "egress must allow the model gateway port")
+	assert.True(t, allowsProxy, "egress MUST allow the state-layer proxy :8080 (audit SEC-1)")
 
 	// Toggle isolation off → the policy is pruned.
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "isoco"}, tenant))

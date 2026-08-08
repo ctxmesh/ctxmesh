@@ -225,13 +225,17 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	assert.True(t, egressTCPPorts[langfusePort],
 		"Langfuse egress must allow the langfuse-web :3000 port")
 
-	// Platform backends: model gateway / memory / object store all live in
-	// agent-engine-system, on :4000 / :6379 / :9000.
+	// Platform backends: model gateway / direct-valkey / object store / state-layer
+	// PROXY / token-service all live in agent-engine-system.
 	assert.True(t, egressNS[agentEngineSystemNamespace],
-		"egress must allow the platform backends (gateway/memory/object-store)")
+		"egress must allow the platform backends (gateway/memory/object-store/proxy)")
 	assert.True(t, egressTCPPorts[modelGatewayPort], "egress must allow the model gateway :4000")
 	assert.True(t, egressTCPPorts[memoryBackendPort], "egress must allow the memory backend :6379")
 	assert.True(t, egressTCPPorts[objectStorePort], "egress must allow the object store :9000")
+	assert.True(t, egressTCPPorts[statelayerProxyPort],
+		"egress MUST allow the state-layer proxy :8080 — the m53.7 cutover default (audit SEC-1); else a member's quota fail-closes (402)")
+	assert.True(t, egressTCPPorts[tokenServicePort],
+		"egress must allow the token-service :8443 (long-term-memory OBO)")
 
 	// Intra-registry A2A: same-registry pods (pod-to-pod) AND the Knative data
 	// plane (activator + kourier) the A2A route egresses through.
