@@ -305,6 +305,9 @@ func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfi
 		// STATELAYER_PROXY_URL (M51, ADR 0050 §8): when set, the session/shared routes reverse-proxy
 		// to the state-layer proxy instead of hitting Valkey directly (migration phase 1 dual-mode).
 		ProxyURL: proxyURL,
+		// STATELAYER_TOKEN_PATH: the projected SA-token file the forward authenticates to the proxy
+		// with (ADR 0052 §C6 RESOLUTION). Empty ⇒ the default mount path.
+		TokenPath: lookup("STATELAYER_TOKEN_PATH"),
 	}, nil
 }
 
