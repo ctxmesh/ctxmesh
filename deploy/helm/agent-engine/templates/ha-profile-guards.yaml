@@ -24,6 +24,9 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- if .Values.devDataPlane.enabled }}
 {{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster Valkey +\nMinIO use DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
 {{- end }}
+{{- if and (not .Values.statelayer.externalAddr) (not .Values.statelayer.persistence.enabled) }}
+{{- fail "\n\nprofile=production requires statelayer.externalAddr (BYO-external Valkey/managed Redis) OR\nstatelayer.persistence.enabled (in-cluster persistent Valkey). With neither — and devDataPlane\ndisabled (required above) — STATELAYER_ADDR points at the agent-engine-statelayer Service, which\nis NOT rendered, so the fail-closed state-layer proxy can't reach Valkey and 402s every\nbudget-capped agent (audit OPS-4c/OPS-3). Prefer externalAddr for HA (ADR 0053).\n" }}
+{{- end }}
 {{- /* OPS-3: the rest of the control/data plane must be HA too. The proxy is a
    fail-closed critical path (above); the gateway (every LLM call), the token-service
    (OBO credential plane), and the controller-manager (leader-elected warm standby) are

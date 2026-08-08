@@ -27,6 +27,10 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Trigger",type="string",JSONPath=".spec.trigger"
+// +kubebuilder:printcolumn:name="Min",type="integer",JSONPath=".spec.min"
+// +kubebuilder:printcolumn:name="Max",type="integer",JSONPath=".spec.max"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // AgentScalingPolicy is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentScalingPolicy (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.

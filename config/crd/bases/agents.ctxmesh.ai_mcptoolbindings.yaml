@@ -183,7 +183,20 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentRef
+      name: Agent
+      type: string
+    - jsonPath: .spec.toolName
+      name: Tool
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-

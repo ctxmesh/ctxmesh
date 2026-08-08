@@ -224,6 +224,20 @@ def substitute(doc: str) -> str:
         'image: {{ printf "%s:%s" .Values.controllerManager.image.repository '
         "(.Values.controllerManager.image.tag | default .Chart.AppVersion) }}",
     )
+    # Other component images -> Helm values (OPS-4b): bff / statelayer-proxy / token-service were
+    # hardcoded `<name>:latest`, un-overridable for a real registry. Each literal appears exactly
+    # once in the render (one Deployment each), so an exact-string replace is safe. Empty tag →
+    # Chart.AppVersion ("latest") keeps the DEFAULT render == kustomize (no drift).
+    for _repo, _val in (
+        ("bff:latest", ".Values.bff.image"),
+        ("statelayer-proxy:latest", ".Values.statelayerProxy.image"),
+        ("token-service:latest", ".Values.tokenService.image"),
+    ):
+        doc = doc.replace(
+            f"image: {_repo}",
+            'image: {{ printf "%s:%s" ' + _val + ".repository (" + _val
+            + ".tag | default .Chart.AppVersion) }}",
+        )
     # Install namespace -> Helm value. Match only the standalone token so we do
     # not touch e.g. a substring inside another name.
     doc = re.sub(
@@ -242,6 +256,18 @@ def substitute(doc: str) -> str:
     doc = doc.replace(
         f"agent-engine-statelayer-proxy.{NS_KUSTOMIZE}.svc",
         "agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc",
+    )
+    # State-layer Valkey backend address STATELAYER_ADDR (OPS-4c). The kustomize literal is the
+    # in-cluster Valkey Service (fixed namespace); template it so (a) a non-default-namespace install
+    # resolves it, and (b) a BYO-external Valkey (statelayer.externalAddr) repoints the fail-closed
+    # proxy off the in-cluster Service — which does NOT exist in a production render without
+    # devDataPlane/persistence. Default (externalAddr empty) renders the in-cluster addr in the
+    # install namespace == kustomize on the default namespace (no drift). Appears once per backend
+    # Deployment; the exact-string replace hits each.
+    doc = doc.replace(
+        f"agent-engine-statelayer.{NS_KUSTOMIZE}.svc:6379",
+        "{{ .Values.statelayer.externalAddr | "
+        'default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}',
     )
     # BFF connect-a-provider kill-switch -> Helm value (ADR 0015). Only the BFF
     # deployment carries this exact env block; the default keeps the render at

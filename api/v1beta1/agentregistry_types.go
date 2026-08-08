@@ -27,6 +27,9 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="RegistryID",type="string",JSONPath=".spec.registryId"
+// +kubebuilder:printcolumn:name="Members",type="string",JSONPath=".status.members"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // AgentRegistry is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentRegistry (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.
