@@ -75,6 +75,15 @@ spec:
           # then get the direct Valkey address (the legacy pre-cutover path).
           - name: STATELAYER_PROXY_URL
             value: http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080
+        # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
+        # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
+        # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
+        # literal here. optional:true so the manifest builds before the Secret exists — but
+        # a real install MUST provision it, else the operator CrashLoops (audit FUNC-1).
+        envFrom:
+          - secretRef:
+              name: bff-adapters
+              optional: true
         ports:
         - containerPort: 8081
           name: health
