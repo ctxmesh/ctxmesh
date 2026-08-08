@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -36,11 +37,13 @@ import (
 )
 
 const (
-	// promoteAnnotation is the human-approval signal (PRD §17.4). Setting it to
-	// "true" on the AgentDeployment (e.g. `kubectl annotate agentdeployment <name>
-	// agents.ctxmesh.ai/promote=true`) flips a gate at awaiting-promotion → promoted
-	// for the reviewed candidate. v1 promotion is human-gated: a passing score does
-	// NOT auto-promote. Auto-promotion/rollback are phase 2.
+	// promoteAnnotation is the human-approval signal (PRD §17.4). Set it to the CANDIDATE
+	// REVISION NAME (from status.gate.scoredRevision) on the AgentDeployment — e.g.
+	// `kubectl annotate agentdeployment <name> agents.ctxmesh.ai/promote=<revision>` — to
+	// flip a gate at awaiting-promotion → promoted for THAT candidate only. A later
+	// candidate (new revision) re-gates (audit FUNC-4 — a bare "true" no longer permanently
+	// auto-promotes every future passing revision). v1 promotion is human-gated: a passing
+	// score does NOT auto-promote. Auto-promotion/rollback are phase 2.
 	promoteAnnotation = "agents.ctxmesh.ai/promote"
 
 	// warnAnnotation records that a below-threshold candidate was promoted under
@@ -183,7 +186,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 	case passes:
 		// Passing score is human-gated: promote ONLY when the approval signal is set
 		// for this candidate; otherwise rest at awaiting-promotion (candidate held).
-		if r.promotionApproved(deploy) {
+		if r.promotionApproved(deploy, candidateRev) {
 			out := &gateOutcome{
 				promote:  true,
 				terminal: true,
@@ -279,17 +282,21 @@ func (r *AgentDeploymentReconciler) gateUnscored(
 	return out
 }
 
-// promotionApproved reports whether the human approval signal is set on the
-// AgentDeployment (the agents.ctxmesh.ai/promote annotation == "true"). This is
-// the kubectl-driven promotion gate (§17.4): a passing candidate stays at
-// awaiting-promotion until an operator sets it.
-func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1alpha1.AgentDeployment) bool {
-	v, ok := deploy.Annotations[promoteAnnotation]
-	if !ok {
+// promotionApproved reports whether the human approval signal authorizes THIS candidate
+// revision. The kubectl-driven promotion gate (§17.4): a passing candidate stays at
+// awaiting-promotion until an operator sets `agents.ctxmesh.ai/promote=<candidate-revision>`
+// (the revision from status.gate.scoredRevision).
+//
+// The approval names the SPECIFIC revision it authorizes (audit FUNC-4): a match promotes
+// exactly that candidate; a LATER candidate (a new revision) does NOT match and re-gates,
+// so one approval can no longer permanently auto-promote every future passing revision. A
+// legacy bare "true" (or any non-matching value) matches nothing → fails safe (never
+// auto-promotes).
+func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1alpha1.AgentDeployment, candidateRev string) bool {
+	if candidateRev == "" {
 		return false
 	}
-	approved, err := strconv.ParseBool(v)
-	return err == nil && approved
+	return strings.TrimSpace(deploy.Annotations[promoteAnnotation]) == candidateRev
 }
 
 // emitGateSpan emits the eval.gate span carrying eval.score / eval.threshold /
