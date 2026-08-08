@@ -282,8 +282,9 @@ func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
 			Spec: corev1.PodSpec{
-				Containers: pod.containers,
-				Volumes:    pod.volumes,
+				ServiceAccountName: pod.serviceAccountName,
+				Containers:         pod.containers,
+				Volumes:            pod.volumes,
 			},
 		}
 		return ctrl.SetControllerReference(deploy, dep, r.Scheme)
@@ -463,10 +464,11 @@ func jobPodTemplateSpec(pod podTemplate) corev1.PodTemplateSpec {
 			Labels: pod.labels,
 		},
 		Spec: corev1.PodSpec{
-			InitContainers: initContainers,
-			Containers:     regular,
-			Volumes:        pod.volumes,
-			RestartPolicy:  corev1.RestartPolicyNever,
+			ServiceAccountName: pod.serviceAccountName,
+			InitContainers:     initContainers,
+			Containers:         regular,
+			Volumes:            pod.volumes,
+			RestartPolicy:      corev1.RestartPolicyNever,
 		},
 	}
 }
