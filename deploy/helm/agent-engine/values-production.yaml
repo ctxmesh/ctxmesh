@@ -26,6 +26,17 @@ profile: production
 statelayerProxy:
   replicas: 2
 
+# The state-layer BACKEND (OPS-4c). production forbids the dev in-cluster Valkey, so a real
+# backend must be declared or STATELAYER_ADDR points at a Service that isn't rendered (the
+# fail-closed proxy then 402s every budget-capped agent). This overlay ships the in-cluster
+# PERSISTENT Valkey (AOF-durable) so it renders + deploys self-contained. For true HA (replication
+# / failover) set statelayer.externalAddr to an operator-managed Valkey/managed Redis instead and
+# set persistence.enabled=false — the recommended production posture (ADR 0053).
+statelayer:
+  # externalAddr: my-valkey.prod.svc:6379   # <- prefer this (BYO-external HA) in real production
+  persistence:
+    enabled: true
+
 # The other stateless request-servers — plain HA (they hold no per-pod state).
 gateway:
   replicas: 2

@@ -22,8 +22,9 @@ spec:
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        # insecureSkipVerify: enable cert-manager for production TLS verification.
-        insecureSkipVerify: true
+        # Value-gated (OTH-5): true (default) for the self-signed metrics cert; set
+        # prometheus.serviceMonitor.insecureSkipVerify=false + cert-manager TLS in production.
+        insecureSkipVerify: {{ .Values.prometheus.serviceMonitor.insecureSkipVerify }}
   selector:
     matchLabels:
       control-plane: controller-manager

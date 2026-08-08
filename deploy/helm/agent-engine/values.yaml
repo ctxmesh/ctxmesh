@@ -68,6 +68,12 @@ gateway:
   replicas: 1
 tokenService:
   replicas: 1
+  image:
+    # The token-service (credential plane) image. Empty tag → Chart.appVersion ("latest"),
+    # matching token-service:latest in config/default. PRODUCTION: point at a signed image in
+    # your registry, pinned to an immutable digest (OPS-4b).
+    repository: token-service
+    tag: ""
   tls:
     # SEC-5: false ⇒ absent mTLS certs degrade to plain HTTP (dev default; renders ==
     # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
@@ -83,6 +89,11 @@ tokenService:
 # default cutover is tracked in m52 Theme D (control-plane HA completion).
 statelayerProxy:
   replicas: 1
+  image:
+    # The state-layer proxy image. Empty tag → Chart.appVersion ("latest"), matching
+    # statelayer-proxy:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
+    repository: statelayer-proxy
+    tag: ""
 
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
@@ -115,6 +126,13 @@ devDataPlane:
 # data use BYO-external Valkey/managed Redis (real, operator-managed auth). The
 # roadmapped real fix is a memory-plane proxy + Valkey ACLs (ADR 0049).
 statelayer:
+  # BYO-external Valkey/managed Redis address (host:port) for the state-layer backend (OPS-4c).
+  # Empty ⇒ the in-cluster Valkey Service (agent-engine-statelayer.<namespace>.svc:6379 — exists
+  # only when devDataPlane.enabled or persistence.enabled). Set this to point the fail-closed proxy
+  # at an operator-managed Valkey/Redis for production (ADR 0049/0053). A `profile: production`
+  # render REQUIRES this OR persistence.enabled, else it would point at a nonexistent Service and
+  # 402 every budget-capped agent (ha-profile-guards).
+  externalAddr: ""
   persistence:
     enabled: false
     # PVC size for the AOF/RDB data.
@@ -136,6 +154,10 @@ prometheus:
   # Install the ServiceMonitor (requires the Prometheus Operator CRDs).
   serviceMonitor:
     enabled: false
+    # Skip TLS verification of the metrics endpoint's serving cert (OTH-5). Defaults true for
+    # the self-signed metrics cert on a vanilla cluster; set false + provide cert-manager TLS
+    # (a CA + serverName) for production so Prometheus actually verifies the manager's cert.
+    insecureSkipVerify: true
 networkPolicy:
   # Install the NetworkPolicy that restricts /metrics ingress to namespaces
   # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).
@@ -165,6 +187,11 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  image:
+    # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
+    # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
+    repository: bff
+    tag: ""
   # The canonical, browser-reachable console origin (ADR 0040) — e.g.
   # "https://console.agents.example.com". Used as the ONE MCP-consent redirect_uri
   # registered with providers + the trusted cross-origin relay target, so "Connect"

@@ -16,11 +16,12 @@ metadata:
     app.kubernetes.io/name: agent-engine
     app.kubernetes.io/managed-by: kustomize
 rules:
-  # Per-user grant Secrets in the LOCKED credential namespace: read to resolve, update to write
-  # back a rotated token (or persist a new grant), delete on revoke (RFC 7009: forget locally).
-  # NO create is needed beyond update. Grants live only in this one namespace (ADR 0029 §7), so
-  # this stays a namespaced Role. (ToolRegistry + CredentialStore reads are cluster-wide — the
-  # plane serves requests from ANY namespace — see the ClusterRole.)
+  # Per-user grant Secrets in the LOCKED credential namespace: read to resolve, CREATE a
+  # first-time (user, server) grant, update to write back a rotated token / re-consent, delete on
+  # revoke (RFC 7009: forget locally). create IS required — K8sBackend.StoreGrant upserts, calling
+  # Client.Create on a not-found grant (internal/credresolve/backend.go). Grants live only in this
+  # one namespace (ADR 0029 §7), so this stays a namespaced Role. (ToolRegistry + CredentialStore
+  # reads are cluster-wide — the plane serves requests from ANY namespace — see the ClusterRole.)
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

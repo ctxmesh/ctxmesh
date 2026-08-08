@@ -27,6 +27,9 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".spec.agentRef"
+// +kubebuilder:printcolumn:name="Scope",type="string",JSONPath=".spec.scope"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // MemoryBinding is the v1beta1 schema — a field-identical graduation of the v1alpha1 MemoryBinding (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.
