@@ -94,8 +94,11 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// Production-safe logging by default (OTH-5): Development=true uses a console encoder +
+	// DPanic-level stacktraces meant for local dev, not the prod manager. Default to structured
+	// (JSON) production logging; an operator can still opt into dev logging via --zap-devel.
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -184,7 +187,10 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "7ab0b236.ctxmesh.io",
+		// Domain matches the API group ctxmesh.ai (was ctxmesh.io — a kubebuilder-init
+		// inconsistency, OTH-5). Safe to rename pre-release: no deployed manager holds the old
+		// lease, so there is no cross-upgrade dual-leader window.
+		LeaderElectionID: "7ab0b236.ctxmesh.ai",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

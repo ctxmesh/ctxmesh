@@ -54,6 +54,41 @@ func getQuota(t *testing.T, ns string) (*corev1.ResourceQuota, error) {
 	return &q, err
 }
 
+// OTH-5: an invalid CPU/Memory quantity is REJECTED at admission (CEL) instead of being
+// silently dropped by computeHard — so an operator's typo can't leave the quota unenforced.
+func TestTenant_InvalidQuotaQuantityRejectedAtAdmission(t *testing.T) {
+	badCPU := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-cpu"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-badq"},
+			Quota:      &agentsv1alpha1.TenantComputeQuota{CPU: "10x"}, // not a quantity
+		},
+	}
+	err := k8sClient.Create(testCtx, badCPU)
+	require.Error(t, err, "an invalid cpu quantity must be rejected, not silently unenforced")
+	require.Contains(t, err.Error(), "cpu must be a valid")
+
+	badMem := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-mem"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-badq"},
+			Quota:      &agentsv1alpha1.TenantComputeQuota{Memory: "lots"}, // not a quantity
+		},
+	}
+	require.Error(t, k8sClient.Create(testCtx, badMem))
+
+	// A VALID quota (+ empty, meaning "no cap") is still accepted.
+	ok := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "ok-quota"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-badq"},
+			Quota:      &agentsv1alpha1.TenantComputeQuota{CPU: "8", Memory: "16Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, ok))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, ok) })
+}
+
 // A Tenant stamps a ResourceQuota (with the requested caps) and its label on every
 // member namespace, and reports Ready + the member count.
 func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
