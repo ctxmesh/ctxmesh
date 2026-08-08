@@ -22,7 +22,12 @@ import {
   openRunStream,
   type CreatedObject,
 } from "@/lib/api";
-import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import {
+  isValidHttpUrl,
+  MCP_OAUTH_MESSAGE,
+  type McpOAuthPopupMessage,
+  readMcpOAuthReturn,
+} from "@/lib/oauth-popup";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 import {
@@ -96,6 +101,9 @@ export function PlaygroundPage() {
   const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
   const [agentOptions, setAgentOptions] = useState<string[]>([]);
   const didInitRef = useRef(false);
+  // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced as
+  // a notice so consent-on-a-blocked-popup no longer ends in silence.
+  const [oauthReturn, setOauthReturn] = useState<McpOAuthPopupMessage | null>(null);
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -111,6 +119,8 @@ export function PlaygroundPage() {
     const nsParam = searchParams.get("ns") ?? searchParams.get("namespace") ?? "";
     if (agentParam) setForm((f) => ({ ...f, name: agentParam }));
     if (nsParam) setNamespace(nsParam);
+    // Surface a same-tab (popup-blocked) MCP OAuth outcome the boot handler stashed (DX-6).
+    setOauthReturn(readMcpOAuthReturn());
     const ctrl = new AbortController();
     api
       .namespaces(ctrl.signal)
@@ -334,9 +344,16 @@ export function PlaygroundPage() {
       "width=520,height=680,menubar=no,toolbar=no",
     );
     if (!popup) {
-      // Popup blocked → fall back to a full-page redirect. The run state is lost, but
-      // the connect completes and the user re-runs on return.
-      window.location.href = authorizationURL;
+      // Popup blocked → fall back to a full-page SAME-TAB redirect. Validate the URL first
+      // (DX-6) so a relative/`javascript:` value can't hijack the tab. The run state is lost,
+      // but the connect completes and the boot handler surfaces the outcome on return so the
+      // user knows to re-run. An invalid URL surfaces inline instead of a silent no-op.
+      if (isValidHttpUrl(authorizationURL)) {
+        window.location.href = authorizationURL;
+      } else {
+        setConnecting(null);
+        setConnectError("the authorization URL returned by the server was invalid");
+      }
       return;
     }
 
@@ -418,6 +435,28 @@ export function PlaygroundPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
+            {oauthReturn && (
+              <div
+                data-testid="mcp-oauth-return"
+                className={`rounded-md border p-3 text-xs ${
+                  oauthReturn.error
+                    ? "border-destructive/40 text-destructive"
+                    : "border-success/40 text-success"
+                }`}
+              >
+                {oauthReturn.error
+                  ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
+                  : `Connected ${oauthReturn.server || "your account"} — run again to continue.`}
+                <button
+                  type="button"
+                  className="ml-2 underline"
+                  onClick={() => setOauthReturn(null)}
+                >
+                  dismiss
+                </button>
+              </div>
+            )}
+
             <FormField
               id="namespace"
               label="Namespace"

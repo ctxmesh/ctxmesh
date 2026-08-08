@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import { App } from "@/App";
-import { maybeCloseOAuthPopup } from "@/lib/oauth-popup";
+import { consumeOpenerlessMcpReturn, maybeCloseOAuthPopup } from "@/lib/oauth-popup";
 import "@/index.css";
 
 // If this window is an inline-consent popup that just returned from the MCP OAuth
@@ -12,6 +12,10 @@ import "@/index.css";
 if (maybeCloseOAuthPopup()) {
   // Popup handled; window.close() is in flight — do not mount the app.
 } else {
+  // Not a popup, but the SAME-TAB (popup-blocked) MCP redirect may have returned with
+  // ?mcp_connected/?mcp_error and no opener (DX-6): stash the outcome + clean the URL BEFORE
+  // render, so the mounting page can surface it instead of the connect ending in silence.
+  consumeOpenerlessMcpReturn();
   const rootEl = document.getElementById("root");
   if (!rootEl) {
     throw new Error("root element not found");

@@ -9,7 +9,7 @@ import { api, ApiError } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 import { extractAgentOutput } from "@/lib/agent-output";
-import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import { isValidHttpUrl, MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
 
 // mcpCallbackOrigin is the canonical console origin the BFF injects (ADR 0040): the MCP-consent
 // callback runs THERE, so a chatbox served at an agent hostname must also trust its cross-origin
@@ -193,7 +193,9 @@ export function ChatPanel({
       "width=520,height=680,menubar=no,toolbar=no",
     );
     if (!popup) {
-      window.location.href = authorizationURL;
+      // Popup blocked → same-tab redirect, but validate the URL first (DX-6) so a bad
+      // authorizationURL can't hijack the tab.
+      if (isValidHttpUrl(authorizationURL)) window.location.href = authorizationURL;
       return;
     }
 
