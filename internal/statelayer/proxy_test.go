@@ -228,6 +228,18 @@ func TestProxyRejectedToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+// An agent literally named "shared" keys its PRIVATE memory under mem:{ns}/shared: — the
+// "/" separator keeps it disjoint from the shared-scratchpad space mem:shared:{reg}:, so
+// the name can never collide across the private/shared key spaces (ADR 0052 §C6 nit N3).
+func TestProxyAgentNamedSharedNoCollision(t *testing.T) {
+	s, mr, auth := newTestProxy(t)
+	tok := podToken(auth, "team-x/shared")
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"x"}`, nil).Code)
+	require.Equal(t, "mem:team-x/shared:c1", mr.Keys()[0],
+		"a private agent named 'shared' keys under mem:{ns}/shared:, disjoint from mem:shared:{reg}:")
+}
+
 // A verified pod token that is NOT a per-agent identity SA (e.g. the namespace default
 // SA) has no agent scope → 403, never a guessed key.
 func TestProxyNonAgentSARejected(t *testing.T) {
