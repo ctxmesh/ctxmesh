@@ -1,244 +1,41 @@
 """managed-agent entrypoint — the stock, config-driven agent runtime (M14, ADR 0013).
 
-This is the thin entrypoint for the **managed-agent image**: a first-class agent
-whose behaviour is supplied by its ``AgentDeployment``, not baked into code. It
-reads its configuration from the environment, then hands it to the reusable
-``ctxmesh.run_managed_loop`` — the substance lives in the SDK (the M10 pattern:
-SDK = substance, image = packaging), so the loop is testable in isolation and
-this file stays tiny.
+This is the thin entrypoint for the **managed-agent image**: a first-class agent whose
+behaviour is supplied by its ``AgentDeployment``, not baked into code. Since DX-3 the entire
+runtime — the ``POST /invoke`` contract, the ``/healthz``/``/readyz`` probes, the ``$AGENT_PORT``
+the launcher proxies to, the ``traceparent`` capture, the run-capability binding, the autonomous
+conversation-id mint, and the SSE token stream — lives in ``ctxmesh.serve``. Called with no
+handler it runs the stock tool-calling loop (:func:`ctxmesh.run_managed_loop`) with its config
+resolved from the environment (:meth:`ctxmesh.ManagedConfig.from_env`), so this file is a
+one-liner and every agent (managed or hand-rolled) shares ONE serving contract.
 
-Where the behaviour comes from (config → behaviour; nothing agent-specific is
-hardcoded here):
+Where the behaviour comes from (config → behaviour; nothing agent-specific is hardcoded here):
 
-  * **System prompt** — ``SYSTEM_PROMPT`` env, or, when absent, the M9
-    launcher-served prompt file (``PROMPT_FILE`` — a ConfigMap the controller
-    materialises from the agent's promptRef; see internal/controller/prompt_inject.go).
-    The expand ``systemPrompt`` field is delivered to the pod as the ``SYSTEM_PROMPT``
-    env; the ``PROMPT_FILE`` fallback keeps it aligned with how every other agent
-    gets its prompt, so a managed agent can also carry a git-backed PromptVersion.
-  * **Model route** — ``MODEL_ROUTE`` env (the agent.yaml ``model.route``); the
-    gateway resolves it to a real provider.
-  * **Tools** — discovered live from the discovery plane (:2999): the bound
-    MCPToolBindings the controller rendered from expand's ``tools: [...]``. The
-    loop advertises their schemas to the model and dispatches via tools.call().
-  * **Max steps** — ``MAX_STEPS`` env (a bound on tool-call iterations); defaults
-    to the SDK's ``DEFAULT_MAX_STEPS``. Mandatory runaway guard (ADR 0013).
+  * **System prompt** — ``SYSTEM_PROMPT`` env, or, when absent, the M9 launcher-served prompt
+    file (``PROMPT_FILE`` — a ConfigMap the controller materialises from the agent's promptRef).
+  * **Model route** — ``MODEL_ROUTE`` env (the agent.yaml ``model.route``).
+  * **Tools** — discovered live from the discovery plane (:2999): the bound MCPToolBindings the
+    controller rendered from expand's ``tools: [...]``.
+  * **Max steps** — ``MAX_STEPS`` env; defaults to the SDK's ``DEFAULT_MAX_STEPS`` (ADR 0013).
 
-Runtime contract (mirrors the other agents — echo-agent / sdk-custom-agent):
+Runtime contract (mirrors every other agent — echo-agent / sdk-custom-agent):
 
-  * POST /invoke   — body: {"input": "<prompt>"}
-                     response: {"agent": <name>, "output": "<text>",
-                                "steps": <int>, "tools_called": [<name>...]}
+  * POST /invoke   — body: {"input": "<prompt>"} → {"agent", "output", "steps", "tools_called"}
+                     (SSE token stream when the caller sends ``Accept: text/event-stream``)
   * GET  /healthz  — 200 ok
   * GET  /readyz   — 200 ok
-
-The launcher (PID 1) owns $AGENT_PORT and reverse-proxies to this listener; it
-injects the W3C ``traceparent`` on every /invoke request, which the loop binds so
-the whole step → tool → model tree roots under the launcher's ``agent.invoke``
-span (the M10 invariant).
 """
 
 from __future__ import annotations
 
-import json
-import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict
-
-from ctxmesh import (
-    DEFAULT_MAX_STEPS,
-    ManagedConfig,
-    agent,
-    mint_conversation_id,
-    run_managed_loop,
-)
-
-# ---------------------------------------------------------------------------
-# Initialise the SDK client once (reads the launcher-injected env). from_env()
-# fails fast with NotInPodError when no launcher env is present, surfacing at
-# start-up rather than silently at first request.
-# ---------------------------------------------------------------------------
-_client = agent.from_env()
-
-# The launcher owns the external $AGENT_PORT and proxies to our upstream port.
-PORT = int(os.environ.get("AGENT_PORT", "8081"))
-
-# The agent's display name (for the response envelope + trace).
-AGENT_NAME = os.environ.get("AGENT_NAME", "managed-agent")
-
-
-def _load_system_prompt() -> str:
-    """Resolve the system prompt: SYSTEM_PROMPT env, else the M9 PROMPT_FILE.
-
-    ``SYSTEM_PROMPT`` (expand's ``systemPrompt`` delivered as env) wins. When it
-    is absent, fall back to the launcher-served prompt file (``PROMPT_FILE`` — the
-    per-agent prompt ConfigMap the controller materialises from a promptRef, M9),
-    so a managed agent can also source a git-backed PromptVersion. When neither is
-    present, a minimal default keeps the agent functional rather than empty.
-    """
-    inline = os.environ.get("SYSTEM_PROMPT")
-    if inline is not None and inline != "":
-        return inline
-
-    prompt_file = os.environ.get("PROMPT_FILE")
-    if prompt_file:
-        try:
-            with open(prompt_file, encoding="utf-8") as fh:
-                content = fh.read().strip()
-            if content:
-                return content
-        except OSError:
-            # A missing/unreadable prompt file is not fatal — fall through to the
-            # default so the agent still serves (and surfaces its own errors on
-            # the model plane rather than crashing at start-up).
-            pass
-
-    return "You are a helpful assistant."
-
-
-def _autonomous_conversation_id(headers: Dict[str, str]):
-    """A minted per-run conversation id (m33.5) when the caller supplied NO session — else None so
-    run_managed_loop uses the inbound X-Conversation-Id (a console chat / A2A hop). Case-insensitive."""
-    for key, value in headers.items():
-        if key.lower() == "x-conversation-id" and (value or "").strip():
-            return None
-    return mint_conversation_id()
-
-
-def _load_config() -> ManagedConfig:
-    """Build the ManagedConfig from the environment (config → behaviour)."""
-    raw_max = os.environ.get("MAX_STEPS", "")
-    try:
-        max_steps = int(raw_max) if raw_max else DEFAULT_MAX_STEPS
-    except ValueError:
-        max_steps = DEFAULT_MAX_STEPS
-    if max_steps < 1:
-        max_steps = DEFAULT_MAX_STEPS
-
-    return ManagedConfig(
-        system_prompt=_load_system_prompt(),
-        # MODEL_ROUTE mirrors the other agents; empty is a config error surfaced
-        # by the gateway call, not silently swallowed.
-        model_route=os.environ.get("MODEL_ROUTE", ""),
-        max_steps=max_steps,
-    )
-
-
-# Resolve config once at start-up (behaviour is fixed for the pod's lifetime).
-_config = _load_config()
-
-
-class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: dict) -> None:
-        payload = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path in ("/healthz", "/readyz"):
-            self._send(200, {"status": "ok"})
-        else:
-            self._send(404, {"error": "not found"})
-
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/invoke":
-            self._send(404, {"error": "not found"})
-            return
-
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
-        approvals: list = []
-        try:
-            body = json.loads(raw or b"{}")
-            user_input = str(body.get("input", ""))
-            # Human-in-the-loop resume (m32.4): the BFF re-invokes an approved run with the granted
-            # approval keys, so pause_for_approval(key) proceeds instead of pausing again.
-            raw_approvals = body.get("approvals")
-            if isinstance(raw_approvals, list):
-                approvals = [str(a) for a in raw_approvals]
-        except json.JSONDecodeError:
-            user_input = raw.decode(errors="replace")
-
-        # Capture request headers for OTel context extraction — the launcher
-        # injects ``traceparent`` so the loop roots under agent.invoke.
-        req_headers = dict(self.headers)
-
-        # Autonomous per-run thread (m33.5, ADR 0035): with no inbound session id, mint one so an
-        # autonomous run is its own thread/trace. A console/A2A caller supplies X-Conversation-Id,
-        # which run_managed_loop reads from headers and which takes precedence over this.
-        conversation_id = _autonomous_conversation_id(req_headers)
-
-        # Streaming (m32.7): when the caller Accepts text/event-stream, stream token events as the
-        # model generates + a final `done`/`error` frame — the source for the run event stream.
-        if "text/event-stream" in (self.headers.get("Accept") or ""):
-            self._stream_invoke(user_input, req_headers, approvals, conversation_id)
-            return
-
-        try:
-            result = run_managed_loop(
-                _client, _config, user_input, headers=req_headers,
-                approvals=approvals, conversation_id=conversation_id,
-            )
-            self._send(200, self._envelope(result))
-        except Exception as exc:  # noqa: BLE001
-            self._send(502, {"agent": AGENT_NAME, "error": str(exc)})
-
-    def _envelope(self, result) -> dict:
-        """The /invoke response envelope. consent_required drives the "Connect your account" CTA
-        (ADR 0029 §2); approval_required drives the human-in-the-loop approve/deny (m32.4)."""
-        body = {
-            "agent": AGENT_NAME,
-            "output": result.output,
-            "steps": result.steps,
-            "tools_called": result.tools_called,
-            "consent_required": result.consent_required,
-        }
-        if result.approval_required:
-            body["approval_required"] = result.approval_required
-        return body
-
-    def _stream_invoke(
-        self, user_input: str, req_headers: dict, approvals: list, conversation_id
-    ) -> None:
-        """Run the loop and stream Server-Sent Events: a `token` frame per content delta, then a
-        terminal `done` frame (the same envelope the JSON path returns) or an `error` frame. The
-        BFF's streaming adapter republishes these into the run event stream (m32.7)."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-
-        def emit(obj: dict) -> None:
-            self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
-            self.wfile.flush()
-
-        try:
-            result = run_managed_loop(
-                _client,
-                _config,
-                user_input,
-                headers=req_headers,
-                approvals=approvals,
-                conversation_id=conversation_id,
-                on_token=lambda text: emit({"type": "token", "text": text}),
-            )
-            done = self._envelope(result)
-            done["type"] = "done"
-            emit(done)
-        except Exception as exc:  # noqa: BLE001
-            emit({"type": "error", "agent": AGENT_NAME, "error": str(exc)})
-
-    def log_message(self, *_args: Any) -> None:  # quiet default access logging
-        pass
+import ctxmesh
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)  # noqa: S104
-    print(f"managed-agent {AGENT_NAME!r} listening on :{PORT}", flush=True)
-    server.serve_forever()
+    # No handler ⇒ the stock managed loop, config from the environment. serve() reads
+    # $AGENT_NAME / $AGENT_PORT and builds the client via ctxmesh.agent.from_env() (which
+    # fails fast with NotInPodError at start-up if the launcher env is absent).
+    ctxmesh.serve()
 
 
 if __name__ == "__main__":

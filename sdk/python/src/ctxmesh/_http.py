@@ -39,6 +39,12 @@ from ctxmesh.errors import EndpointError
 #: for the memory path; callers may override for slower endpoints.
 DEFAULT_TIMEOUT = 5.0
 
+#: SSE read timeout (seconds, FUNC-7). A long-lived event stream (runs.stream) may idle
+#: between events for a slow model turn or a run parked at requires_action — far longer
+#: than DEFAULT_TIMEOUT. The server heartbeats well within this window, so a live-but-idle
+#: stream never trips it; a genuinely dead connection still errors after it (not never).
+STREAM_READ_TIMEOUT = 120.0
+
 #: Maximum number of 307/308 hops before we give up to prevent infinite loops.
 _MAX_REDIRECTS = 3
 
@@ -203,9 +209,19 @@ def stream(
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise EndpointError(f"{method} {url} failed: {exc}", status=None) from exc
 
-    with resp:
-        for raw in resp:
-            yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
+    # The read loop is INSIDE its own try/except (FUNC-7): urllib's `timeout` is a
+    # per-socket-op timeout, so a mid-stream gap between SSE events raised a RAW
+    # socket TimeoutError here — outside the connect try/except above — killing any
+    # stream with a >timeout idle gap (a slow model turn, or a run parked at
+    # requires_action). Translate it (and any transport error) to EndpointError so the
+    # caller sees the SDK's typed error, never a bare TimeoutError. SSE callers pass a
+    # long read timeout (STREAM_READ_TIMEOUT) and the server heartbeats within it.
+    try:
+        with resp:
+            for raw in resp:
+                yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise EndpointError(f"{method} {url} stream interrupted: {exc}", status=None) from exc
 
 
 def json_body(value: Any) -> bytes:

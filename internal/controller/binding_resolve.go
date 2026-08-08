@@ -151,6 +151,26 @@ func registryInputSchema(
 	return nil
 }
 
+// registryDescription returns the matched catalog entry's human-readable description
+// (FUNC-10) — "" when the registry, the entry, or its description is absent, so the
+// manifest omits it and the SDK falls back to a generic description. Mirrors
+// registryInputSchema: same registry/entry lookup, a different field.
+func registryDescription(
+	b *agentsv1alpha1.MCPToolBinding,
+	registries map[string]agentsv1alpha1.ToolRegistry,
+) string {
+	reg, ok := registries[b.Spec.RegistryRef]
+	if !ok {
+		return ""
+	}
+	for i := range reg.Spec.Tools {
+		if reg.Spec.Tools[i].Name == b.Spec.ToolName {
+			return reg.Spec.Tools[i].Description
+		}
+	}
+	return ""
+}
+
 // listAgentBindings returns the agent's live bindings, sorted by binding name
 // for deterministic port/container assignment. It lists all bindings in the
 // namespace and filters by agentRef IN MEMORY (no field index exists for this
@@ -250,6 +270,9 @@ func resolveAgentBindings(
 			// model exact tool-call parameters. Nil when the entry has none
 			// (curated/legacy) → manifest omits it → SDK permissive fallback.
 			InputSchema: registryInputSchema(b, registries),
+			// Carry the entry's human-readable description so the managed loop
+			// advertises it to the model (FUNC-10) instead of a name-only stub.
+			Description: registryDescription(b, registries),
 			// OBO egress (ADR 0030): the server (ToolRegistry) is the credential-
 			// resolution key + the sidecar route key; OAuth gates consent-required vs
 			// open on a missing grant. Populated always (metadata-only); the rewrite +

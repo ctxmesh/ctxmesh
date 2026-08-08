@@ -60,6 +60,31 @@ def test_tool_from_dict_absent_input_schema_is_none():
     assert Tool.from_dict({**base, "inputSchema": "not-an-object"}).input_schema is None
 
 
+def test_tool_from_dict_parses_description():
+    """A manifest tool carrying a description exposes it on the Tool (FUNC-10); absent or a
+    non-string degrades to "" so the loop synthesises a generic one."""
+    base = {"name": "word-count", "mode": "remote", "endpoint": "http://wc.svc/mcp",
+            "transport": "streamable-http"}
+    assert Tool.from_dict({**base, "description": "Count words."}).description == "Count words."
+    assert Tool.from_dict(base).description == ""
+    assert Tool.from_dict({**base, "description": None}).description == ""
+    assert Tool.from_dict({**base, "description": 123}).description == ""
+
+
+def test_list_carries_description_from_manifest(discovery_stub: DiscoveryStub):
+    """tools.list() surfaces a manifest tool's description on the discovered Tool (FUNC-10)."""
+
+    def manifest_with_desc():
+        m = DiscoveryStub._manifest(discovery_stub)
+        m["tools"][0]["description"] = "Count whitespace-separated words."
+        return m
+
+    discovery_stub._manifest = manifest_with_desc  # type: ignore[method-assign]
+    cfg = PlaneConfig.for_test(discovery_base_url=discovery_stub.base_url)
+    tools = agent.from_config(cfg).tools.list()
+    assert tools[0].description == "Count whitespace-separated words."
+
+
 def test_list_carries_input_schema_from_manifest(discovery_stub: DiscoveryStub):
     """tools.list() surfaces a manifest's inputSchema on the discovered Tool."""
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}

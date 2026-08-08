@@ -51,6 +51,7 @@ from ctxmesh.managed import (
 )
 from ctxmesh.model import ChatResponse, ModelClient
 from ctxmesh.runs import Run, RunEvent, RunsClient
+from ctxmesh.serve import InvokeRequest, serve
 from ctxmesh.trace import SpanHandle, TraceClient
 
 __all__ = [
@@ -75,6 +76,8 @@ __all__ = [
     "RunsClient",
     "Run",
     "RunEvent",
+    "serve",
+    "InvokeRequest",
 ]
 
 __version__ = "0.1.0"
