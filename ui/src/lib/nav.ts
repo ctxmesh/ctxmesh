@@ -73,9 +73,15 @@ export interface NavItem {
    */
   route?: string;
   /**
-   * When set, this destination is a WRITE affordance — hidden from a viewer's
-   * chrome (display-only, ADR 0011). Gated on `allowed[requiresWrite.resource]
-   * [requiresWrite.verb]`. Read-only destinations omit it and are always shown.
+   * When set, this destination is capability-gated — hidden from any chrome whose
+   * caller isn't `allowed[requiresWrite.resource][requiresWrite.verb]` (display-only,
+   * ADR 0011). Read-open destinations omit it and are always shown. The COMMON case
+   * is a write affordance hidden from a viewer (verb "create"/"update"). But a `list`
+   * (read) verb is also valid here as a deliberate OPERATOR-ONLY *visibility* gate —
+   * e.g. Audit (`list auditlogs`, M63): a read-only page whose data spans users/
+   * namespaces, so it's shown only to the operator persona, exactly like MCP approvals.
+   * (The field name predates this read-gate use; a rename to `requiresCapability` is
+   * carded — m52 M63-UX residue.)
    */
   requiresWrite?: { resource: string; verb: string };
 }

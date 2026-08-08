@@ -388,7 +388,7 @@ export function AuditPage() {
           description:
             actorFilter || actionFilter || kindFilter
               ? "No events match these filters. Try clearing the actor, action, or resource-kind filter."
-              : "No audit events recorded yet in this scope. Connect a provider or grant an MCP server to see events here.",
+              : "No audit events in this scope yet. Try widening the namespace scope (top bar), or check back after activity occurs.",
         }}
       />
     </div>
