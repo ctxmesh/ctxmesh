@@ -1484,7 +1484,17 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.registryId
+      name: RegistryID
+      type: string
+    - jsonPath: .status.members
+      name: Members
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -1952,7 +1962,20 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.trigger
+      name: Trigger
+      type: string
+    - jsonPath: .spec.min
+      name: Min
+      type: integer
+    - jsonPath: .spec.max
+      name: Max
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -3481,7 +3504,14 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -4142,7 +4172,14 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -4665,7 +4702,17 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.gate
+      name: Gate
+      type: string
+    - jsonPath: .spec.threshold
+      name: Threshold
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -5022,7 +5069,20 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentRef
+      name: Agent
+      type: string
+    - jsonPath: .spec.toolName
+      name: Tool
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -5347,7 +5407,17 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentRef
+      name: Agent
+      type: string
+    - jsonPath: .spec.scope
+      name: Scope
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -5707,7 +5777,14 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -6338,12 +6415,23 @@ spec:
                       cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
                       quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
                       namespace's ResourceQuota.
+                      Validated as a quantity at admission (OTH-5): an invalid value used to parse-fail in
+                      computeHard and be SILENTLY dropped → the quota went unenforced with no signal. Now it is
+                      rejected up front. Empty is allowed (means "no CPU cap").
                     type: string
+                    x-kubernetes-validations:
+                    - message: cpu must be a valid Kubernetes quantity (e.g. "20"
+                        or "20000m")
+                      rule: self == '' || isQuantity(self)
                   memory:
                     description: |-
                       memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
                       "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
+                      Validated as a quantity at admission (OTH-5) — see cpu. Empty is allowed.
                     type: string
+                    x-kubernetes-validations:
+                    - message: memory must be a valid Kubernetes quantity (e.g. "40Gi")
+                      rule: self == '' || isQuantity(self)
                   pods:
                     description: pods caps the number of pods per member namespace.
                     format: int64
