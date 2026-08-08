@@ -74,8 +74,10 @@ func (p *PostgresSink) Record(e AuditEntry) {
 	select {
 	case p.ch <- entry:
 	default:
-		// Queue full: drop + count. The LogSink tee still recorded it, so nothing is truly lost.
+		// Queue full: drop + count (local accessor + the Prometheus counter). The LogSink tee still
+		// recorded it, so nothing is truly lost.
 		p.dropped.Add(1)
+		auditDroppedTotal.Inc()
 	}
 }
 
@@ -115,5 +117,6 @@ func (p *PostgresSink) drain() {
 // inserts dedupe the resulting duplicate observations).
 func (p *PostgresSink) NeedLeaderElection() bool { return false }
 
-// Dropped reports how many entries were dropped due to a full queue (surfaced as a metric in m63.6).
+// Dropped reports how many entries were dropped due to a full queue (also exported as the
+// agentengine_audit_dropped_rows_total Prometheus counter, m63.6).
 func (p *PostgresSink) Dropped() int64 { return p.dropped.Load() }

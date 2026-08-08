@@ -21,7 +21,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/go-logr/logr"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -351,6 +355,15 @@ func main() {
 		setupLog.Error(err, "Failed to set up control-plane audit")
 		os.Exit(1)
 	}
+	// Audit retention pruner (M63, ADR 0056 §5): a LEADER-ELECTED Runnable that keeps the audit_log
+	// bounded to AUDIT_RETENTION_DAYS (default 90). Unlike the sink it must NOT run on every replica —
+	// the delete is bounded and one leader suffices. audit_log is a HOT store, not the compliance record.
+	auditPruner := audit.NewRetentionPruner(
+		auditlog.NewPostgresStore(cpDB), auditRetention(setupLog), ctrl.Log)
+	if err := mgr.Add(auditPruner); err != nil {
+		setupLog.Error(err, "Failed to register the audit retention pruner")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
@@ -366,4 +379,21 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// auditRetention resolves the audit_log retention window from AUDIT_RETENTION_DAYS (a positive integer
+// number of days). Unset/blank/invalid/non-positive ⇒ the default (audit.DefaultRetention, 90d), logged
+// so a fat-fingered value fails loud rather than silently disabling retention.
+func auditRetention(log logr.Logger) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("AUDIT_RETENTION_DAYS"))
+	if raw == "" {
+		return audit.DefaultRetention
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || days <= 0 {
+		log.Info("AUDIT_RETENTION_DAYS is not a positive integer; using the default",
+			"value", raw, "default", audit.DefaultRetention.String())
+		return audit.DefaultRetention
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
