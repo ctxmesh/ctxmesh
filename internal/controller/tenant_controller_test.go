@@ -334,6 +334,15 @@ func TestTenant_NamespaceUniqueness(t *testing.T) {
 	conflict := meta.FindStatusCondition(got.Status.Conditions, "NamespaceConflict")
 	require.NotNil(t, conflict, "the intruder must report a NamespaceConflict")
 	assert.Equal(t, metav1.ConditionTrue, conflict.Status)
+
+	// FUNC-5 regression: re-reconciling the OWNER after the intruder's spec-only claim must
+	// NOT prune its own quota/label — the STAMPED label-owner wins over a spec-only lister
+	// (the bug had the incumbent prune itself the moment a 2nd tenant listed its namespace).
+	reconcileTenant(t, "owner")
+	q2, err := getQuota(t, "tnt-shared")
+	require.NoError(t, err, "the owner must STILL have its ResourceQuota after a 2nd tenant lists the ns (audit FUNC-5)")
+	assert.Equal(t, "owner", q2.Labels[tenantLabel], "the owner keeps its label")
+	assert.Equal(t, "5", q2.Spec.Hard.Name(corev1.ResourcePods, "").String(), "the owner's quota is not pruned")
 }
 
 // Dropping a namespace from spec prunes its quota + label; deleting the tenant
