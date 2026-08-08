@@ -45,6 +45,9 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- if not .Values.controllerManager.podDisruptionBudget.enabled }}
 {{- fail "\n\nprofile=production requires controllerManager.podDisruptionBudget.enabled (audit OPS-3).\n" }}
 {{- end }}
+{{- if not .Values.tokenService.tls.required }}
+{{- fail "\n\nprofile=production requires tokenService.tls.required — the credential plane dispenses\nthird-party USER credentials and must not silently downgrade to plain HTTP (audit SEC-5).\nProvision the platform mTLS certs (token-service-tls Secret) and set tokenService.tls.required=true.\n" }}
+{{- end }}
 {{- /* SEC-4: MCP per-user grant Secrets (3rd-party OAuth tokens) must live in a LOCKED,
    dedicated namespace — else they land in the agent's OWN namespace where a tenant can
    read another user's grant tokens (internal/bff/server.go). Helm can't inspect the

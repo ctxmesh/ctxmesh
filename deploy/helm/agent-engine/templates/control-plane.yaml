@@ -1124,6 +1124,8 @@ spec:
           value: /etc/token-service/tls/tls.key
         - name: TOKEN_SERVICE_CLIENT_CA_FILE
           value: /etc/token-service/tls/ca.crt
+        - name: TOKEN_SERVICE_TLS_REQUIRED
+          value: {{ .Values.tokenService.tls.required | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters

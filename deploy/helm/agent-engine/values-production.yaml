@@ -31,6 +31,8 @@ gateway:
   replicas: 2
 tokenService:
   replicas: 2
+  tls:
+    required: true # SEC-5: the credential plane must not serve plain HTTP in production
 
 # The controller-manager runs active/standby via leader election, so >=2 is a warm
 # standby (a failover, not load-sharing). Its own PDB is nested (control-plane-pdb.yaml).

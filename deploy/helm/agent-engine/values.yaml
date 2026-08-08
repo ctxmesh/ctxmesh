@@ -68,6 +68,11 @@ gateway:
   replicas: 1
 tokenService:
   replicas: 1
+  tls:
+    # SEC-5: false ⇒ absent mTLS certs degrade to plain HTTP (dev default; renders ==
+    # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
+    # without mTLS — no silent HTTP downgrade. profile=production requires this true.
+    required: false
 # The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. As of M53
 # the phase-3 cutover is the DEFAULT (agents route memory/quota/dedup through the
 # proxy and hold no direct Valkey path), so a PRODUCTION install MUST set
