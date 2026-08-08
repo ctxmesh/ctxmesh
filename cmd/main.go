@@ -326,6 +326,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentscalingpolicy")
 		os.Exit(1)
 	}
+	if err := (&controller.AgentTeamReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "agentteam")
+		os.Exit(1)
+	}
 	if err := (&controller.TenantReconciler{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
