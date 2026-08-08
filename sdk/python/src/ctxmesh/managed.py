@@ -32,6 +32,7 @@ system prompt, the model route) and hands it to :func:`run_managed_loop`.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -41,6 +42,11 @@ from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
+
+#: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
+#: here so it surfaces in the pod's stderr instead of being silently wrong (OTH-3). With no
+#: handler configured, Python's logging.lastResort still emits WARNINGs to stderr.
+_log = logging.getLogger("ctxmesh")
 
 #: A sane default bound: enough for a few tool round-trips, low enough that a
 #: runaway (a model that keeps calling tools) trips it quickly. Overridable via
@@ -209,8 +215,14 @@ class ManagedConfig:
         try:
             max_steps = int(raw_max) if raw_max else DEFAULT_MAX_STEPS
         except ValueError:
+            # A non-numeric MAX_STEPS is a misconfig — warn (visible in pod stderr) rather than
+            # silently using the default, so the operator sees their value was ignored (OTH-3).
+            _log.warning(
+                "MAX_STEPS=%r is not an integer; using the default %d", raw_max, DEFAULT_MAX_STEPS
+            )
             max_steps = DEFAULT_MAX_STEPS
         if max_steps < 1:
+            _log.warning("MAX_STEPS=%d is < 1; using the default %d", max_steps, DEFAULT_MAX_STEPS)
             max_steps = DEFAULT_MAX_STEPS
         return cls(
             system_prompt=_load_system_prompt_from_env(),
@@ -233,8 +245,17 @@ def _load_system_prompt_from_env() -> str:
                 content = fh.read().strip()
             if content:
                 return content
-        except OSError:
-            pass
+            # A set-but-empty prompt file is almost certainly a mis-materialised ConfigMap —
+            # warn instead of silently serving the generic default (OTH-3).
+            _log.warning("PROMPT_FILE=%r is empty; using the default system prompt", prompt_file)
+        except OSError as exc:
+            # A set-but-unreadable PROMPT_FILE is a misconfig (bad mount / wrong path) — warn so it
+            # is visible in stderr rather than silently degrading to the generic default (OTH-3).
+            _log.warning(
+                "PROMPT_FILE=%r could not be read (%s); using the default system prompt",
+                prompt_file,
+                exc,
+            )
     return "You are a helpful assistant."
 
 
