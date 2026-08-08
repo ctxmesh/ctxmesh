@@ -96,6 +96,14 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 	return signingInput + "." + b64(sig), nil
 }
 
+// Verifier returns a Verifier over this signer's PUBLIC key (derived from the private key) and the same
+// audience. It lets the minting side (the BFF) also VERIFY a relayed capability — e.g. to authorize the
+// sub-run spawn edge (M64, ADR 0057): the launcher relays the supervisor's capability, and the BFF
+// re-verifies it (fail-closed, never trusting the caller) before creating a sub-run.
+func (s *Signer) Verifier() *Verifier {
+	return NewVerifier(s.priv.Public().(ed25519.PublicKey), s.audience, s.now)
+}
+
 // Verifier verifies run capabilities. It holds the platform PUBLIC key (sidecar / central
 // service side) and the audience it will accept. Now is injectable for tests.
 type Verifier struct {
