@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Play, Rocket } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ForbiddenInline } from "@/components/kit";
+import { ComboSelect, ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import {
   api,
@@ -88,9 +88,47 @@ export function PlaygroundPage() {
   // The active run's SSE stream canceller (m32.8) — aborts on New-run / cancel / unmount.
   const streamCancelRef = useRef<(() => void) | null>(null);
 
+  // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
+  // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
+  // agent fields are PICKERS over the caller's known set (listNamespaces / listAgents — the
+  // console's "finite set → Select" principle) while still allowing a new name (define+export).
+  const [searchParams] = useSearchParams();
+  const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
+  const [agentOptions, setAgentOptions] = useState<string[]>([]);
+  const didInitRef = useRef(false);
+
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
   }
+
+  // Deep-link pre-fill + namespace load, ONCE on mount (a ref guards against re-applying the
+  // pre-fill over the user's later edits). A 403/failure just leaves the picker empty — the
+  // field still accepts a custom value.
+  useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+    const agentParam = searchParams.get("agent") ?? "";
+    const nsParam = searchParams.get("ns") ?? searchParams.get("namespace") ?? "";
+    if (agentParam) setForm((f) => ({ ...f, name: agentParam }));
+    if (nsParam) setNamespace(nsParam);
+    const ctrl = new AbortController();
+    api
+      .namespaces(ctrl.signal)
+      .then((res) => setNamespaceOptions(res.namespaces.map((n) => n.name)))
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [searchParams]);
+
+  // Load the agents in the selected namespace so the agent field is a picker of what's
+  // actually deployed there; re-scopes when the namespace changes (prior request aborted).
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .listAgents({ namespace: namespace.trim() || undefined, limit: 100 }, ctrl.signal)
+      .then((res) => setAgentOptions(res.agents.map((a) => a.name)))
+      .catch(() => setAgentOptions([]));
+    return () => ctrl.abort();
+  }, [namespace]);
 
   // Run invokes the DEFINED agent by name. The agent must already be deployed
   // (the run resolves its endpoint server-side); the Playground's define form is
@@ -380,21 +418,36 @@ export function PlaygroundPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
-            <FormField id="name" label="Agent name" error={errors.name} hint="DNS label, ≤ 44 chars.">
-              <Input
-                id="name"
-                value={form.name}
-                onChange={(e) => set("name", e.target.value)}
-                placeholder="echo-agent"
+            <FormField
+              id="namespace"
+              label="Namespace"
+              hint="Pick a namespace you can access — empty → the default namespace."
+            >
+              <ComboSelect
+                id="namespace"
+                value={namespace}
+                options={namespaceOptions}
+                onChange={setNamespace}
+                placeholder="default namespace"
+                customPlaceholder="namespace"
+                testId="playground-namespace"
               />
             </FormField>
 
-            <FormField id="namespace" label="Namespace" hint="Empty → the default namespace.">
-              <Input
-                id="namespace"
-                value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
-                placeholder="default"
+            <FormField
+              id="name"
+              label="Agent"
+              error={errors.name}
+              hint="Pick a deployed agent to run, or name a new one to define + export (≤ 44 chars)."
+            >
+              <ComboSelect
+                id="name"
+                value={form.name}
+                options={agentOptions}
+                onChange={(v) => set("name", v)}
+                placeholder="— pick an agent —"
+                customPlaceholder="new agent name"
+                testId="playground-agent"
               />
             </FormField>
 
