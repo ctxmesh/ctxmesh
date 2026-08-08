@@ -1052,7 +1052,7 @@ spec:
           value: ""
         - name: STATELAYER_PASSWORD
           value: ""
-        image: statelayer-proxy:latest
+        image: {{ printf "%s:%s" .Values.statelayerProxy.image.repository (.Values.statelayerProxy.image.tag | default .Chart.AppVersion) }}
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -1130,7 +1130,7 @@ spec:
         - secretRef:
             name: bff-adapters
             optional: true
-        image: token-service:latest
+        image: {{ printf "%s:%s" .Values.tokenService.image.repository (.Values.tokenService.image.tag | default .Chart.AppVersion) }}
         imagePullPolicy: IfNotPresent
         livenessProbe:
           initialDelaySeconds: 10

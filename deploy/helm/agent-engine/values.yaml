@@ -68,6 +68,12 @@ gateway:
   replicas: 1
 tokenService:
   replicas: 1
+  image:
+    # The token-service (credential plane) image. Empty tag → Chart.appVersion ("latest"),
+    # matching token-service:latest in config/default. PRODUCTION: point at a signed image in
+    # your registry, pinned to an immutable digest (OPS-4b).
+    repository: token-service
+    tag: ""
   tls:
     # SEC-5: false ⇒ absent mTLS certs degrade to plain HTTP (dev default; renders ==
     # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
@@ -83,6 +89,11 @@ tokenService:
 # default cutover is tracked in m52 Theme D (control-plane HA completion).
 statelayerProxy:
   replicas: 1
+  image:
+    # The state-layer proxy image. Empty tag → Chart.appVersion ("latest"), matching
+    # statelayer-proxy:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
+    repository: statelayer-proxy
+    tag: ""
 
 # CRDs are installed with the chart by default. Set false to manage CRD
 # lifecycle out of band (e.g. a shared cluster where CRDs are pre-applied).
@@ -169,6 +180,11 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  image:
+    # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
+    # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
+    repository: bff
+    tag: ""
   # The canonical, browser-reachable console origin (ADR 0040) — e.g.
   # "https://console.agents.example.com". Used as the ONE MCP-consent redirect_uri
   # registered with providers + the trusted cross-origin relay target, so "Connect"
