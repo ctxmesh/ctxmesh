@@ -42,6 +42,14 @@ type Tool struct {
 	Endpoint string `json:"endpoint"`
 	// Transport is the MCP transport (always streamable-http in M4).
 	Transport string `json:"transport"`
+	// Description is the tool's human-readable description, carried from the matched
+	// ToolRegistry entry (ToolEntry.Description). The managed loop advertises it as the
+	// OpenAI function `description` so a real model selects the tool by what it DOES, not
+	// by name alone (FUNC-10). Absent (omitempty) for a curated/legacy entry with no
+	// description — the SDK then falls back to a generic "<name> tool bound to this agent".
+	// Part of the marshaled tool, so a description change rolls a new content-addressed
+	// Version (same contract as InputSchema).
+	Description string `json:"description,omitempty"`
 	// InputSchema is the tool's argument JSON Schema, carried VERBATIM from the
 	// ToolRegistry entry (ToolEntry.InputSchema, captured from the MCP server's
 	// tools/list). It is raw JSON so the managed loop (m14.6b) can hand a real

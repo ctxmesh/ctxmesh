@@ -32,6 +32,7 @@ system prompt, the model route) and hands it to :func:`run_managed_loop`.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -189,6 +190,53 @@ class ManagedConfig:
     agent_memory_top_k: int = 5
     agent_memory_threshold: float = 0.75
 
+    @classmethod
+    def from_env(cls) -> "ManagedConfig":
+        """Build a ManagedConfig from the launcher-injected environment (config → behaviour).
+
+        The stock resolution the managed-agent image used to hand-roll, moved into the SDK so
+        :func:`ctxmesh.serve` (and the image's thin entrypoint) share ONE definition:
+
+          * **system prompt** — ``SYSTEM_PROMPT`` env wins; else the M9 launcher-served
+            ``PROMPT_FILE`` (the per-agent prompt ConfigMap the controller materialises from a
+            promptRef); else a minimal default so the agent still serves rather than starting empty.
+          * **model route** — ``MODEL_ROUTE`` (empty is a config error surfaced by the gateway
+            call, never silently swallowed here).
+          * **max steps** — ``MAX_STEPS`` (a bad/absent/<1 value falls back to
+            ``DEFAULT_MAX_STEPS``, the mandatory runaway guard of ADR 0013).
+        """
+        raw_max = os.environ.get("MAX_STEPS", "")
+        try:
+            max_steps = int(raw_max) if raw_max else DEFAULT_MAX_STEPS
+        except ValueError:
+            max_steps = DEFAULT_MAX_STEPS
+        if max_steps < 1:
+            max_steps = DEFAULT_MAX_STEPS
+        return cls(
+            system_prompt=_load_system_prompt_from_env(),
+            model_route=os.environ.get("MODEL_ROUTE", ""),
+            max_steps=max_steps,
+        )
+
+
+def _load_system_prompt_from_env() -> str:
+    """Resolve the system prompt: ``SYSTEM_PROMPT`` env, else the M9 ``PROMPT_FILE`` contents,
+    else a minimal default. A missing/unreadable prompt file is non-fatal — fall through to the
+    default so the agent still serves (surfacing its own errors on the model plane, not at boot)."""
+    inline = os.environ.get("SYSTEM_PROMPT")
+    if inline:
+        return inline
+    prompt_file = os.environ.get("PROMPT_FILE")
+    if prompt_file:
+        try:
+            with open(prompt_file, encoding="utf-8") as fh:
+                content = fh.read().strip()
+            if content:
+                return content
+        except OSError:
+            pass
+    return "You are a helpful assistant."
+
 
 @dataclass
 class ManagedResult:
@@ -235,11 +283,16 @@ def _tool_schema(tool: Any) -> Dict[str, Any]:
     """
     schema = getattr(tool, "input_schema", None)
     parameters = schema if isinstance(schema, dict) and schema else _PERMISSIVE_PARAMETERS
+    # Advertise the tool's REAL description (FUNC-10) so the model selects it by what it
+    # does, not by name alone. The manifest carries it from the ToolRegistry entry; when
+    # it is absent (a curated/legacy entry) fall back to a generic name-derived line so a
+    # tool is never advertised with an empty description.
+    description = getattr(tool, "description", "") or f"The {tool.name} tool bound to this agent."
     return {
         "type": "function",
         "function": {
             "name": tool.name,
-            "description": f"The {tool.name} tool bound to this agent.",
+            "description": description,
             "parameters": parameters,
         },
     }

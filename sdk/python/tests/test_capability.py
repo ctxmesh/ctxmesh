@@ -103,3 +103,13 @@ def test_no_global_setter_exists():
         and ("set" in name.lower() or "put" in name.lower())
     ]
     assert public_setters == [], f"unexpected capability setters: {public_setters}"
+
+
+def test_client_request_scope_binds_capability(client):
+    """DX-2: client.request_scope binds the run capability from the inbound /invoke headers,
+    so a CUSTOM agent loop's tool egress relays the user's OBO capability instead of silently
+    resolving org/public creds. Resets on exit (no cross-request bleed)."""
+    assert current_capability() is None
+    with client.request_scope({CAPABILITY_HEADER: "cap-dx2"}):
+        assert current_capability() == "cap-dx2"
+    assert current_capability() is None

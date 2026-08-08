@@ -18,10 +18,13 @@ node in that tree.
 
 from __future__ import annotations
 
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterable, Iterator, Mapping, Optional
 
 from opentelemetry.sdk.trace import SpanProcessor
 
+from ctxmesh._approval import approval_scope
+from ctxmesh._capability import capability_scope
 from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.feedback import FeedbackClient
 from ctxmesh.memory import MemoryClient
@@ -53,6 +56,31 @@ class Client:
             endpoint=config.otlp_endpoint or None,
         )
         self.model = ModelClient(config, self.trace)
+
+    @contextmanager
+    def request_scope(
+        self,
+        headers: Optional[Mapping[str, str]] = None,
+        *,
+        approvals: Optional[Iterable[str]] = None,
+    ) -> Iterator[None]:
+        """Bind the invoking user's run capability (+ any granted approvals) from the
+        inbound /invoke headers for the duration of the block (DX-2).
+
+        A CUSTOM agent loop MUST enter this — otherwise the ContextVar is unset, so every
+        tool-call egress relays NO run capability and silently resolves ORG/PUBLIC creds
+        instead of the user's OBO grant (a silent auth downgrade), and ``pause_for_approval``
+        can never resume (its resume-binding was private). The managed loop
+        (``run_managed_loop`` / ``ctxmesh.serve``) enters it for you; this makes the same
+        binding public for hand-rolled loops. Pair it with
+        ``client.trace.request_context(headers)`` (or use ``ctxmesh.serve``, which does both)
+        to also root the trace under the launcher's agent.invoke span.
+
+            with client.request_scope(request.headers):
+                client.tools.call("search", {...})   # relays the user's capability
+        """
+        with capability_scope(headers), approval_scope(approvals):
+            yield
 
     @property
     def config(self) -> PlaneConfig:
