@@ -17,8 +17,9 @@ limitations under the License.
 package auditlog
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -72,11 +73,11 @@ func (s *memStore) List(_ context.Context, q Query) (Page, error) {
 	s.mu.Unlock()
 
 	// Newest first: occurred_at DESC, id DESC.
-	sort.Slice(matched, func(i, j int) bool {
-		if !matched[i].OccurredAt.Equal(matched[j].OccurredAt) {
-			return matched[i].OccurredAt.After(matched[j].OccurredAt)
+	slices.SortFunc(matched, func(a, b Entry) int {
+		if !a.OccurredAt.Equal(b.OccurredAt) {
+			return b.OccurredAt.Compare(a.OccurredAt) // DESC
 		}
-		return matched[i].ID > matched[j].ID
+		return cmp.Compare(b.ID, a.ID) // id DESC
 	})
 
 	page := Page{Items: []Entry{}}

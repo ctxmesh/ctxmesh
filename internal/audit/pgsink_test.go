@@ -12,10 +12,12 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 )
 
-func mutation(verb Verb, name, ns, rv string) AuditEntry {
+// mutation builds a controller AuditEntry with a fixed object identity ("a"/"ns1"); only the verb
+// and resourceVersion vary across the sink tests (dedup keys off resourceVersion).
+func mutation(verb Verb, rv string) AuditEntry {
 	return AuditEntry{
 		Timestamp: time.Now().UTC(), Verb: verb, Kind: "AgentDeployment",
-		Name: name, Namespace: ns, Subject: "kubectl", ResourceVersion: rv,
+		Name: "a", Namespace: "ns1", Subject: "kubectl", ResourceVersion: rv,
 	}
 }
 
@@ -23,8 +25,8 @@ func TestPostgresSink_RecordDrainsToStore(t *testing.T) {
 	store := auditlog.NewMemStore()
 	sink := NewPostgresSink(store, logr.Discard())
 
-	sink.Record(mutation(VerbCreate, "a", "ns1", "100"))
-	sink.Record(mutation(VerbDelete, "a", "ns1", "105"))
+	sink.Record(mutation(VerbCreate, "100"))
+	sink.Record(mutation(VerbDelete, "105"))
 	sink.drain() // synchronous flush (same-package)
 
 	page, err := store.List(context.Background(), auditlog.Query{})
@@ -44,7 +46,7 @@ func TestPostgresSink_IdempotentAcrossReplicas(t *testing.T) {
 	sink := NewPostgresSink(store, logr.Discard())
 
 	// The SAME mutation (same resourceVersion) observed on 3 replicas → 3 Records → one row.
-	e := mutation(VerbUpdate, "a", "ns1", "200")
+	e := mutation(VerbUpdate, "200")
 	sink.Record(e)
 	sink.Record(e)
 	sink.Record(e)
@@ -62,8 +64,8 @@ func TestPostgresSink_RecordNeverBlocksAndCountsDrops(t *testing.T) {
 	// Fill the buffer + overflow WITHOUT a drainer running — Record must not block.
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < pgSinkBuffer+50; i++ {
-			sink.Record(mutation(VerbCreate, "a", "ns1", time.Now().Format(time.RFC3339Nano)+string(rune(i))))
+		for i := range pgSinkBuffer + 50 {
+			sink.Record(mutation(VerbCreate, time.Now().Format(time.RFC3339Nano)+string(rune(i))))
 		}
 		close(done)
 	}()
@@ -80,7 +82,7 @@ func TestPostgresSink_StartStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- sink.Start(ctx) }()
-	sink.Record(mutation(VerbCreate, "a", "ns1", "1"))
+	sink.Record(mutation(VerbCreate, "1"))
 	cancel()
 	select {
 	case err := <-errCh:
@@ -97,8 +99,8 @@ func TestMultiSink_FansToEverySink(t *testing.T) {
 		SinkFunc(func(AuditEntry) { a++ }),
 		SinkFunc(func(AuditEntry) { b++ }),
 	}
-	sink.Record(mutation(VerbCreate, "a", "ns1", "1"))
-	sink.Record(mutation(VerbDelete, "a", "ns1", "2"))
+	sink.Record(mutation(VerbCreate, "1"))
+	sink.Record(mutation(VerbDelete, "2"))
 	assert.Equal(t, 2, a)
 	assert.Equal(t, 2, b)
 }

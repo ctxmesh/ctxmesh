@@ -35,6 +35,13 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
+const (
+	// resourceKindMCPGrant is the audit ResourceKind for a per-user MCP grant create/revoke (ADR 0056 §2).
+	resourceKindMCPGrant = "MCPGrant"
+	// detailKeyUserHash is the audit detail key carrying the (non-secret) per-user grant hash.
+	detailKeyUserHash = "userHash"
+)
+
 // parseGrantConsentRequest decodes + validates the POST /api/mcp/oauth/grant body.
 // It returns a typed *createError (status + client-safe message) on a bad request.
 // The OAuth config is validated by the handler (cfg.validate); here we only ensure
@@ -260,8 +267,8 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 		})
 		s.appendAudit(ctx, auditlog.Entry{
 			Actor: s.auditActor(ctx, caller), Action: auditActionGrantCreate,
-			ResourceKind: "MCPGrant", ResourceName: flow.serverName, Namespace: flow.namespace,
-			Detail: map[string]any{"userHash": flow.grantUserHash, "boundary": flow.boundary},
+			ResourceKind: resourceKindMCPGrant, ResourceName: flow.serverName, Namespace: flow.namespace,
+			Detail: map[string]any{detailKeyUserHash: flow.grantUserHash, "boundary": flow.boundary},
 		})
 		oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 		return
@@ -312,8 +319,8 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 	})
 	s.appendAudit(ctx, auditlog.Entry{
 		Actor: s.auditActor(ctx, caller), Action: auditActionGrantCreate,
-		ResourceKind: "MCPGrant", ResourceName: flow.serverName, Namespace: flow.namespace,
-		Detail: map[string]any{"userHash": flow.grantUserHash, "boundary": flow.boundary},
+		ResourceKind: resourceKindMCPGrant, ResourceName: flow.serverName, Namespace: flow.namespace,
+		Detail: map[string]any{detailKeyUserHash: flow.grantUserHash, "boundary": flow.boundary},
 	})
 
 	// This callback is browser-facing (the OAuth redirect target): send the user back
@@ -416,8 +423,8 @@ func (s *Server) handleRevokeMCPGrant(w http.ResponseWriter, r *http.Request) {
 	// username is the precise caller (resolved above); use it directly as the audit actor.
 	s.appendAudit(r.Context(), auditlog.Entry{
 		Actor: username, Action: auditActionGrantRevoke,
-		ResourceKind: "MCPGrant", ResourceName: server, Namespace: ns,
-		Detail: map[string]any{"userHash": userHash},
+		ResourceKind: resourceKindMCPGrant, ResourceName: server, Namespace: ns,
+		Detail: map[string]any{detailKeyUserHash: userHash},
 	})
 
 	writeJSON(w, http.StatusOK, MCPGrantResponse{
