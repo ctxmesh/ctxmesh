@@ -193,10 +193,10 @@ func BasicAuthHeader(publicKey, secretKey string) string {
 // Container builds the collector sidecar. langfuseEnv carries
 // LANGFUSE_OTLP_ENDPOINT + LANGFUSE_OTLP_AUTH when Langfuse export is enabled;
 // pass nil for debug-only.
-func Container(configMapName string, langfuseEnv []corev1.EnvVar) corev1.Container {
+func Container(configMapName string, langfuseEnv []corev1.EnvVar, image string) corev1.Container {
 	return corev1.Container{
 		Name:  CollectorContainerName,
-		Image: CollectorImage,
+		Image: image,
 		Args:  []string{"--config", collectorConfigMountPath + "/config.yaml"},
 		Env:   langfuseEnv,
 		// No ContainerPorts: Knative allows exactly one port across all

@@ -605,3 +605,23 @@ func TestReconcile_NotFound(t *testing.T) {
 	require.NoError(t, err, "not-found must not return an error")
 	assert.Equal(t, ctrl.Result{}, result)
 }
+
+// TestSidecarImageOverride proves the OPS-1 override: COLLECTOR_IMAGE / DISCOVERY_IMAGE
+// (Reconciler fields) replace the dev.local default constants on the injected sidecars,
+// so agents are schedulable off a kind cluster. Empty ⇒ the project defaults.
+func TestSidecarImageOverride(t *testing.T) {
+	def := &AgentDeploymentReconciler{}
+	assert.Equal(t, telemetry.CollectorImage, def.collectorImage(), "empty ⇒ collector default")
+	assert.Equal(t, DiscoveryImage, def.discoveryImage(), "empty ⇒ discovery default")
+
+	ov := &AgentDeploymentReconciler{
+		CollectorImage: "reg.example.com/collector:1.2",
+		DiscoveryImage: "reg.example.com/discovery:3.4",
+	}
+	assert.Equal(t, "reg.example.com/collector:1.2", ov.collectorImage())
+	assert.Equal(t, "reg.example.com/discovery:3.4", ov.discoveryImage())
+	assert.Equal(t, "reg.example.com/collector:1.2",
+		telemetry.Container("cm", nil, ov.collectorImage()).Image, "override flows to the collector sidecar")
+	assert.Equal(t, "reg.example.com/discovery:3.4",
+		discoverySidecarContainer(ov.discoveryImage()).Image, "override flows to the discovery sidecar")
+}

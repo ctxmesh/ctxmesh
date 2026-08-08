@@ -245,6 +245,10 @@ func main() {
 		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:    mgr.GetScheme(),
 		OBOEgress: oboEgress,
+		// Injected sidecar image overrides (audit OPS-1): empty ⇒ the dev.local defaults,
+		// which ImagePullBackOff off a kind cluster, so a real install sets these.
+		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
+		DiscoveryImage: strings.TrimSpace(os.Getenv("DISCOVERY_IMAGE")),
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
 		StatelayerProxyURL: strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL")),

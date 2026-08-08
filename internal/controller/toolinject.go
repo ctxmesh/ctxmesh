@@ -51,11 +51,12 @@ const (
 
 // discoverySidecarContainer builds the discovery sidecar container. It declares
 // no container ports (Knative single-port rule), mounts the <agent>-tools
-// ConfigMap read-only, and carries the cold-start env the sidecar reads.
-func discoverySidecarContainer() corev1.Container {
+// ConfigMap read-only, and carries the cold-start env the sidecar reads. image is the
+// resolved sidecar image (COLLECTOR_IMAGE-style override, OPS-1) — DiscoveryImage default.
+func discoverySidecarContainer(image string) corev1.Container {
 	return corev1.Container{
 		Name:  DiscoveryContainerName,
-		Image: DiscoveryImage,
+		Image: image,
 		Env: []corev1.EnvVar{
 			{Name: "DISCOVERY_PORT", Value: fmt.Sprintf("%d", discoveryPort)},
 			{Name: "TOOLS_JSON_PATH", Value: toolsMountPath + "/" + toolsConfigMapKey},
