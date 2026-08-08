@@ -33,6 +33,7 @@ import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
+import { AuditPage } from "@/pages/audit-page";
 import {
   SecretBindingDetailPage,
   NewSecretBindingPage,
@@ -229,6 +230,9 @@ export function App() {
             <Route path="traces/:id" element={<TracePage />} />
             {/* m16.10: cost drill-down — per-agent breakdown (recent window). */}
             <Route path="cost" element={<CostPage />} />
+            {/* m63.5: the compliance audit trail viewer (operator-only; ADR 0056). */}
+            <Route path="audit" element={<AuditPage />} />
+
             {/* m17.12: EvalSuite builder + results browser */}
             <Route path="evals" element={<EvalsPage />} />
             {/* m17.12: PromptVersion list + textual diff viewer */}
