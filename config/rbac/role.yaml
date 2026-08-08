@@ -9,7 +9,6 @@ rules:
   resources:
   - configmaps
   - resourcequotas
-  - secrets
   - serviceaccounts
   - services
   verbs:
@@ -34,6 +33,7 @@ rules:
   - ""
   resources:
   - pods
+  - secrets
   verbs:
   - get
   - list
@@ -174,3 +174,19 @@ rules:
   - patch
   - update
   - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: agent-engine-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - patch
+  - update

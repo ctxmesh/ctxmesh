@@ -71,7 +71,12 @@ type ModelRouteReconciler struct {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=modelroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=secretbindings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// SEC-3: cluster-wide READ (provider-key Secrets live in arbitrary tenant namespaces —
+// unavoidable, same posture as cert-manager/ESO) but the WRITES (the gateway-Secret mirror,
+// syncGatewaySecrets) only ever land in agent-engine-system, so scope create/update/delete
+// to a namespaced Role there — a compromised manager can't write Secrets cluster-wide.
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,namespace=agent-engine-system,verbs=create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
@@ -389,7 +394,11 @@ func (r *ModelRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.ModelRoute{}).
 		Watches(&agentsv1alpha1.SecretBinding{}, enqueueAll).
-		Watches(&corev1.Secret{}, enqueueAll).
+		// SEC-3: metadata-only Secret watch — the informer caches PartialObjectMetadata
+		// (name/ns/labels/RV), NEVER Secret Data, so cluster-wide Secret events (rotation)
+		// still roll the gateway without mirroring every Secret's payload into memory. Reads
+		// go live (DisableFor Secret on the manager client).
+		WatchesMetadata(&corev1.Secret{}, enqueueAll).
 		Named("modelroute").
 		Complete(r)
 }
