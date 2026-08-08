@@ -240,12 +240,17 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in agent-engine-system: gateway :4000, valkey :6379, minio :9000
+				{ // platform backends in agent-engine-system: gateway :4000, direct valkey :6379,
+					// minio :9000, state-layer PROXY :8080 (the m53.7 cutover default for
+					// memory/quota/dedup), token-service :8443 (long-term-memory OBO). Omitting
+					// :8080 makes a member's quota fail-closed (402) post-cutover (audit SEC-1).
 					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
 					},
 				},
 				{ // intra-tenant A2A + the knative data plane it egresses through
