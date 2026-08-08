@@ -23,6 +23,8 @@ function CodeBlock({ text, testId }: { text: string; testId?: string }) {
       </pre>
       <button
         type="button"
+        aria-label={copied ? "copied to clipboard" : "copy to clipboard"}
+        aria-live="polite"
         className="absolute right-2 top-2 rounded border bg-card px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
         onClick={() => {
           void navigator.clipboard?.writeText(text).then(
