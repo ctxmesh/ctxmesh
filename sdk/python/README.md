@@ -84,6 +84,41 @@ telemetry blip is not an error); this is deliberately distinct from the plane
 clients, which *surface* endpoint errors (a rejected memory write is a real
 error).
 
+## Serving an agent (`ctxmesh.serve`)
+
+You don't hand-roll the HTTP server, the `/invoke` body/​envelope, the
+`/healthz`/`/readyz` probes, the `$AGENT_PORT` the launcher proxies to, the
+`traceparent` capture, or the SSE token stream — `ctxmesh.serve` encodes the whole
+runtime contract, and it binds `request_scope` for you (so a custom loop keeps the
+invoking user's run capability instead of silently downgrading to org/public creds):
+
+```python
+import ctxmesh
+
+def handle(req: ctxmesh.InvokeRequest) -> str:
+    # req.client is scoped to the caller (capability + granted approvals bound) and
+    # conversation-aware (req.conversation_id); req.headers roots the trace.
+    with req.client.trace.loop("my-agent", headers=req.headers):
+        answer = req.client.model.chat(
+            "gpt-4o-mini", [{"role": "user", "content": req.input}]
+        )
+    return answer.text          # or return a ctxmesh.ManagedResult for steps/tools/approval
+
+ctxmesh.serve(handle)           # blocks; serves /invoke + health on $AGENT_PORT
+```
+
+- **Streaming** is transparent: call `req.emit_token(delta)` as your loop produces
+  content — it emits an SSE `token` frame when the caller sent
+  `Accept: text/event-stream`, and is a no-op otherwise (same handler, both modes).
+- **The stock managed agent** is just `ctxmesh.serve()` with **no** handler — it runs
+  the config-driven tool-calling loop (`run_managed_loop`) with `ManagedConfig.from_env()`.
+  That is exactly the managed-agent image's entrypoint.
+- `serve(handler, *, client=…, agent_name=…, port=…)` overrides the env defaults
+  (`agent.from_env()` / `$AGENT_NAME` / `$AGENT_PORT`) — handy for local runs and tests.
+
+`examples/sdk-custom-agent` shows the same loop with the HTTP handler written out by
+hand — the "under the hood" reference for what `serve` collapses into one call.
+
 ## Dev
 
 The toolchain (ruff + pytest, pinned) is wired into the engine `Makefile`:
