@@ -18,6 +18,7 @@ package run
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,4 +182,33 @@ func TestStoreEvents_BacklogAndCursor(t *testing.T) {
 		seqs2 = append(seqs2, ev.Seq)
 	}
 	assert.Equal(t, []int{3}, seqs2)
+}
+
+// TestSpawnRunID_Deterministic proves the spawn id is a pure function of (parent, step, callID) — the
+// M64 idempotency backbone: a reclaimed supervisor re-issuing the same delegate_to recomputes the same
+// id (so the store dedups it), while different steps/calls diverge.
+func TestSpawnRunID_Deterministic(t *testing.T) {
+	a := SpawnRunID("root", "step-1", "call-1")
+	assert.Equal(t, a, SpawnRunID("root", "step-1", "call-1"), "same inputs → same id (idempotent)")
+	assert.NotEqual(t, a, SpawnRunID("root", "step-1", "call-2"), "a different call diverges (fan-out)")
+	assert.NotEqual(t, a, SpawnRunID("root", "step-2", "call-1"), "a different step diverges")
+	assert.NotEqual(t, a, SpawnRunID("other", "step-1", "call-1"), "a different parent diverges")
+	assert.True(t, strings.HasPrefix(a, "sub-"), "a spawned run id is recognizable")
+}
+
+// TestMemStore_RoundTripsSpawnLineage proves the in-memory twin preserves the M64 lineage fields
+// (parity with the Postgres store).
+func TestMemStore_RoundTripsSpawnLineage(t *testing.T) {
+	s := NewMemStore()
+	sub := New("sub-x", "ns", "worker", nil, "conv", t0)
+	sub.ParentRunID = "sup"
+	sub.RootRunID = "sup"
+	sub.SpawnDepth = 2
+	require.NoError(t, s.Create(sub))
+
+	got, err := s.Get("sub-x")
+	require.NoError(t, err)
+	assert.Equal(t, "sup", got.ParentRunID)
+	assert.Equal(t, "sup", got.RootRunID)
+	assert.Equal(t, 2, got.SpawnDepth)
 }

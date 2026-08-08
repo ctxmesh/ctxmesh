@@ -123,6 +123,36 @@ func TestPostgresStore_RoundTripsFields(t *testing.T) {
 	assert.Equal(t, []string{"gh", "slack"}, got.RequiresAction.Servers)
 }
 
+// TestPostgresStore_RoundTripsSpawnLineage proves the M64 spawn-lineage columns (parent/root/depth)
+// persist + reload, and that the deterministic sub-run id gives idempotent Create (a reclaimed
+// supervisor re-issuing the same delegate_to collapses to one sub-run, not two).
+func TestPostgresStore_RoundTripsSpawnLineage(t *testing.T) {
+	s := openPGStore(t)
+
+	root := New("root-run", "ns", "supervisor", nil, "conv-1", t0)
+	root.RootRunID = "root-run" // a root's RootRunID == its own id
+	require.NoError(t, s.Create(root))
+
+	subID := SpawnRunID("root-run", "step-2", "call-abc")
+	sub := New(subID, "ns", "web-researcher", []byte(`"go"`), "conv-1", t0)
+	sub.ParentRunID = "root-run"
+	sub.RootRunID = "root-run"
+	sub.SpawnDepth = 1
+	require.NoError(t, s.Create(sub))
+
+	got, err := s.Get(subID)
+	require.NoError(t, err)
+	assert.Equal(t, "root-run", got.ParentRunID)
+	assert.Equal(t, "root-run", got.RootRunID)
+	assert.Equal(t, 1, got.SpawnDepth)
+	assert.Equal(t, "conv-1", got.ConversationID, "the sub-run threads the parent conversation")
+
+	// Idempotency: the SAME (parent, step, callID) → the SAME id → Create is a no-op-conflict.
+	dup := New(SpawnRunID("root-run", "step-2", "call-abc"), "ns", "web-researcher", nil, "conv-1", t0)
+	assert.Error(t, s.Create(dup), "a re-issued spawn (same deterministic id) does not create a second sub-run")
+	assert.Len(t, s.List(), 2, "still exactly root + one sub-run")
+}
+
 // TestPostgresStore_Durability is the headline: a run + its full event log survive the store
 // object being discarded and rebuilt over the SAME database (i.e. a pod restart).
 func TestPostgresStore_Durability(t *testing.T) {
