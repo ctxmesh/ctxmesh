@@ -61,6 +61,12 @@ spec:
               value: /etc/token-service/tls/tls.key
             - name: TOKEN_SERVICE_CLIENT_CA_FILE
               value: /etc/token-service/tls/ca.crt
+            # TOKEN_SERVICE_TLS_REQUIRED (SEC-5): false ⇒ absent certs degrade to plain HTTP
+            # (dev). The chart templates it from tokenService.tls.required; true ⇒ the
+            # token-service refuses to start without mTLS (no silent HTTP downgrade of the
+            # credential plane in production). Default "false" so kustomize/helm-default match.
+            - name: TOKEN_SERVICE_TLS_REQUIRED
+              value: "false"
           # CONTROLPLANE_DSN (ADR 0044) — the token-service REQUIRES it at startup
           # (cmd/token-service/main.go:118 hard-exits without it). Sourced from the shared
           # bff-adapters Secret, never a literal here. optional:true so the manifest builds

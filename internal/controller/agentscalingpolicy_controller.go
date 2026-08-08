@@ -208,8 +208,12 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 			return nil
 		}
 		msg := fmt.Sprintf("upserting ScaledObject %s: %v", so.Name, err)
-		log.Error(err, "failed to upsert ScaledObject", "scaledobject", so.Name)
-		return r.setReadyFalse(ctx, policy, "BackendError", msg)
+		// Record Ready=False, then RETURN the error so a transient KEDA/API failure REQUEUES
+		// (audit FUNC-6) — Ready=False + nil left the policy un-retried until an unrelated event.
+		if sErr := r.setReadyFalse(ctx, policy, "BackendError", msg); sErr != nil {
+			log.Error(sErr, "recording ScaledObject backend error", "scaledobject", so.Name)
+		}
+		return fmt.Errorf("upserting ScaledObject %s: %w", so.Name, err)
 	}
 
 	log.Info("ScaledObject converged", "scaledobject", so.Name, "min", min, "max", max, "cooldown", cooldown)
@@ -318,10 +322,8 @@ func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 		return nil
 	}
 	if err := r.Status().Update(ctx, policy); err != nil {
-		if apierrors.IsConflict(err) {
-			logf.FromContext(ctx).Info("conflict updating AgentScalingPolicy status; will requeue", "policy", policy.Name)
-			return nil
-		}
+		// Return the error (conflict included) so the reconcile REQUEUES — returning nil on
+		// conflict left status stale until an unrelated event (audit FUNC-6).
 		return fmt.Errorf("updating AgentScalingPolicy status: %w", err)
 	}
 	return nil

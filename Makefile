@@ -331,6 +331,10 @@ HELM_CHART ?= deploy/helm/agent-engine
 helm-generate: manifests kustomize ## Regenerate the Helm chart templates from config/default. Run after any config/ change.
 	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh
 
+.PHONY: crd-version-parity
+crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
+	./hack/check-crd-version-parity.sh config/crd/bases
+
 .PHONY: helm-verify
 helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).
 	@set -e; \

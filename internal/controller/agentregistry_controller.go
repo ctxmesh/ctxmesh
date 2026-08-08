@@ -627,8 +627,6 @@ func (r *AgentRegistryReconciler) setStatus(
 	status metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	log := logf.FromContext(ctx)
-
 	membersChanged := !slices.Equal(registry.Status.Members, members)
 	condChanged := apimeta.SetStatusCondition(&registry.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
@@ -643,10 +641,8 @@ func (r *AgentRegistryReconciler) setStatus(
 	registry.Status.Members = members
 
 	if err := r.Status().Update(ctx, registry); err != nil {
-		if apierrors.IsConflict(err) {
-			log.Info("conflict updating AgentRegistry status; will requeue", "registry", registry.Name)
-			return nil
-		}
+		// Return the error (conflict included) so the reconcile REQUEUES — returning nil on
+		// conflict left status stale until an unrelated event (audit FUNC-6).
 		return fmt.Errorf("updating AgentRegistry status: %w", err)
 	}
 	return nil

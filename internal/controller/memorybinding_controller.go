@@ -109,7 +109,6 @@ func (r *MemoryBindingReconciler) setReady(
 	status metav1.ConditionStatus,
 	reason, message string,
 ) error {
-	log := logf.FromContext(ctx)
 	changed := apimeta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             status,
@@ -121,10 +120,8 @@ func (r *MemoryBindingReconciler) setReady(
 		return nil
 	}
 	if err := r.Status().Update(ctx, binding); err != nil {
-		if apierrors.IsConflict(err) {
-			log.Info("conflict updating MemoryBinding status; will requeue", "binding", binding.Name)
-			return nil
-		}
+		// Return the error (conflict included) so the reconcile REQUEUES — returning nil on
+		// conflict left status stale until an unrelated event (audit FUNC-6).
 		return fmt.Errorf("updating MemoryBinding status: %w", err)
 	}
 	return nil
