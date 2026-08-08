@@ -96,6 +96,14 @@ func run(log logr.Logger) error {
 	if restCfg, cfgErr := ctrl.GetConfig(); cfgErr != nil {
 		log.Info("no cluster config — quota/async endpoints disabled", "reason", cfgErr.Error())
 	} else {
+		// SEC-6: the dev bypass (STATELAYER_DEV_AGENT) scopes UNAUTHENTICATED requests to a
+		// static identity with no verification — it must NEVER run against a real cluster. A
+		// cluster config is present here, so a set dev-agent is a production misconfiguration;
+		// fail closed at startup rather than silently serving unauthenticated memory.
+		if devAgent != "" {
+			return fmt.Errorf("STATELAYER_DEV_AGENT (%q) is set alongside a real cluster config — "+
+				"the dev bypass must never run in a cluster; unset it", devAgent)
+		}
 		if resolver, rerr := statelayer.StartNamespaceResolver(ctx, restCfg, cacheSyncTimeout); rerr != nil {
 			if ctx.Err() != nil { // shutting down before the cache synced — not a real degradation
 				log.Info("tenant resolver startup aborted by shutdown", "reason", rerr.Error())
