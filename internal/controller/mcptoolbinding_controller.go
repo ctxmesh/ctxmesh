@@ -252,7 +252,6 @@ func (r *MCPToolBindingReconciler) writeBindingStatuses(
 	namespace, agentName string,
 	validations map[string]bindingValidation,
 ) error {
-	log := logf.FromContext(ctx)
 	bindings, err := listAgentBindings(ctx, r.Client, namespace, agentName)
 	if err != nil {
 		return fmt.Errorf("listing bindings for status write: %w", err)
@@ -282,11 +281,9 @@ func (r *MCPToolBindingReconciler) writeBindingStatuses(
 			continue
 		}
 		if err := r.Status().Update(ctx, b); err != nil {
-			if apierrors.IsConflict(err) {
-				log.Info("conflict updating MCPToolBinding status; will requeue", "binding", b.Name)
-			} else {
-				log.Error(err, "updating MCPToolBinding status", "binding", b.Name)
-			}
+			// Return the error so the reconcile REQUEUES (audit FUNC-6) rather than leaving
+			// status stale until an unrelated event (the old "will requeue" log never did).
+			return fmt.Errorf("updating MCPToolBinding status %s: %w", b.Name, err)
 		}
 	}
 	return nil
