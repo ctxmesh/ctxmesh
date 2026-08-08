@@ -283,11 +283,16 @@ def _tool_schema(tool: Any) -> Dict[str, Any]:
     """
     schema = getattr(tool, "input_schema", None)
     parameters = schema if isinstance(schema, dict) and schema else _PERMISSIVE_PARAMETERS
+    # Advertise the tool's REAL description (FUNC-10) so the model selects it by what it
+    # does, not by name alone. The manifest carries it from the ToolRegistry entry; when
+    # it is absent (a curated/legacy entry) fall back to a generic name-derived line so a
+    # tool is never advertised with an empty description.
+    description = getattr(tool, "description", "") or f"The {tool.name} tool bound to this agent."
     return {
         "type": "function",
         "function": {
             "name": tool.name,
-            "description": f"The {tool.name} tool bound to this agent.",
+            "description": description,
             "parameters": parameters,
         },
     }

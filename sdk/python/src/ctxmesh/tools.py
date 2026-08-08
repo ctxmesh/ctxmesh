@@ -58,9 +58,15 @@ class Tool:
     the tool's ``parameters`` so the model produces correct ``arguments``. It is
     ``None`` when the manifest omits it (a curated/legacy entry with no captured
     schema); the loop then falls back to a permissive object-parameters schema.
+
+    ``description`` is the tool's human-readable description as the manifest carries
+    it (the ``description`` key, from the ToolRegistry entry — FUNC-10). The managed
+    loop advertises it as the model's function ``description`` so the model selects a
+    tool by what it does, not by name alone. ``""`` when the manifest omits it (a
+    curated/legacy entry); the loop then synthesises a generic description.
     """
 
-    __slots__ = ("name", "mode", "endpoint", "transport", "input_schema")
+    __slots__ = ("name", "mode", "endpoint", "transport", "input_schema", "description")
 
     def __init__(
         self,
@@ -69,12 +75,14 @@ class Tool:
         endpoint: str,
         transport: str,
         input_schema: Optional[Dict[str, Any]] = None,
+        description: str = "",
     ):
         self.name = name
         self.mode = mode
         self.endpoint = endpoint
         self.transport = transport
         self.input_schema = input_schema
+        self.description = description
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> Tool:
@@ -84,12 +92,15 @@ class Tool:
         # than handing the model a schema it can't use.
         raw_schema = d.get("inputSchema")
         input_schema = raw_schema if isinstance(raw_schema, dict) else None
+        raw_desc = d.get("description")
+        description = raw_desc if isinstance(raw_desc, str) else ""
         return cls(
             name=d.get("name", ""),
             mode=d.get("mode", ""),
             endpoint=d.get("endpoint", ""),
             transport=d.get("transport", ""),
             input_schema=input_schema,
+            description=description,
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid

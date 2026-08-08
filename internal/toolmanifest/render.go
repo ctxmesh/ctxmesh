@@ -72,6 +72,11 @@ type Binding struct {
 	// schema (curated/legacy entries) — the manifest then omits inputSchema and
 	// the SDK falls back to a permissive schema (m14.6b).
 	InputSchema json.RawMessage
+	// Description is the matched ToolRegistry entry's human-readable description,
+	// carried into the manifest so the managed loop advertises it to the model
+	// (FUNC-10). Empty when the entry has none — the manifest omits it and the SDK
+	// falls back to a generic description.
+	Description string
 	// ServerName is the MCP server (ToolRegistry) this tool belongs to — the
 	// credential-resolution key for OBO egress (ADR 0030). When OBO egress is on,
 	// the rewrite keys the sidecar route + the grant lookup on it. Empty when OBO
@@ -125,6 +130,7 @@ func Render(bindings []Binding) (Manifest, []SidecarTool) {
 				Mode:        ModeSidecar,
 				Endpoint:    fmt.Sprintf("http://%s:%d%s", SidecarLoopbackHost, port, MCPPath),
 				Transport:   Transport,
+				Description: b.Description,
 				InputSchema: normalizeSchema(b.InputSchema),
 			})
 			sidecars = append(sidecars, SidecarTool{
@@ -139,6 +145,7 @@ func Render(bindings []Binding) (Manifest, []SidecarTool) {
 				Mode:        ModeRemote,
 				Endpoint:    b.URL, // verbatim — binding URLs carry /mcp
 				Transport:   Transport,
+				Description: b.Description,
 				InputSchema: normalizeSchema(b.InputSchema),
 			})
 		}

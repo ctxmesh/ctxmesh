@@ -515,6 +515,21 @@ def test_tool_schema_uses_discovered_input_schema_verbatim():
     assert fn["parameters"]["required"] == ["text"]
 
 
+def test_tool_schema_advertises_real_description():
+    """FUNC-10: a Tool carrying a description advertises it as the model function
+    `description`; absent, the loop synthesises a generic name-derived one (never empty)."""
+    described = Tool(
+        name="word_count", mode="remote", endpoint="http://x/mcp", transport="streamable-http",
+        description="Count whitespace-separated words.",
+    )
+    assert _tool_schema(described)["function"]["description"] == "Count whitespace-separated words."
+
+    plain = Tool(name="word_count", mode="remote", endpoint="http://x/mcp",
+                 transport="streamable-http")
+    desc = _tool_schema(plain)["function"]["description"]
+    assert desc == "The word_count tool bound to this agent."  # generic fallback, not empty
+
+
 def test_tool_schema_falls_back_to_permissive_when_absent():
     """A Tool without an inputSchema → the permissive empty-object fallback."""
     tool = Tool(
