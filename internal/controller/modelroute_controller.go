@@ -233,11 +233,10 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 		})
 
 		if err := r.Status().Update(ctx, mr); err != nil {
-			if apierrors.IsConflict(err) {
-				log.Info("conflict updating ModelRoute status; will requeue", "route", routeKey)
-			} else {
-				log.Error(err, "updating ModelRoute status", "route", routeKey)
-			}
+			// Return the error so the reconcile REQUEUES (audit FUNC-6): a conflict or a
+			// transient API failure otherwise left status stale until an unrelated event —
+			// the old "will requeue" log was a lie (it returned nil and never requeued).
+			return ctrl.Result{}, fmt.Errorf("updating ModelRoute status %s: %w", routeKey, err)
 		}
 	}
 
