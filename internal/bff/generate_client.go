@@ -230,9 +230,12 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 
 // doChat executes the chat request and returns the raw response body, or a typed
 // providerError. The key already sits on req's headers; this function never reads
-// or logs it. Auth rejections (401/403) become a clean 401 with an honest,
-// key-free message; any other non-2xx or transport error becomes a 502. The body
-// is bounded so a hostile upstream cannot force unbounded buffering.
+// or logs it. An UPSTREAM auth rejection (401/403) becomes a 422 — NOT a bare 401,
+// which the SPA would treat as the caller's OWN session expiring and log them out
+// mid-create, losing their description (ADR 0027; the same class as the MCP-probe
+// 401→logout bug, fixed for connect in provider_client.go — missed here). Any other
+// non-2xx or transport error becomes a 502. The body is bounded so a hostile upstream
+// cannot force unbounded buffering.
 func doChat(c *http.Client, req *http.Request, provider string) ([]byte, error) {
 	resp, err := c.Do(req)
 	if err != nil {
@@ -244,8 +247,11 @@ func doChat(c *http.Client, req *http.Request, provider string) ([]byte, error) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// The stored provider key was rejected (a rotated/revoked key — a supported
+		// lifecycle event), NOT the caller's session. Return 422 so the "Describe it"
+		// form shows the rejection inline and the user is NEVER logged out (ADR 0027).
 		return nil, &providerError{
-			status: http.StatusUnauthorized,
+			status: http.StatusUnprocessableEntity,
 			msg:    fmt.Sprintf("the %s API rejected the key (check the connected provider and try again)", provider),
 		}
 	}

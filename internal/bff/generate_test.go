@@ -384,10 +384,11 @@ func TestGeneratePlatformPinnedModelResolves(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec2.Code, "a model outside the pinned list is a 400")
 }
 
-// TestGenerateBadKeyIs401 proves that if the stored key is rejected by the provider
-// (fake returns 401), the endpoint surfaces a clean 401 — not a 500 — and does not
-// apply anything.
-func TestGenerateBadKeyIs401(t *testing.T) {
+// TestGenerateBadKeyIs422 proves that if the stored key is rejected by the provider
+// (fake returns 401), the endpoint surfaces a 422 — NOT a bare 401 (FUNC-9, ADR 0027):
+// an upstream key rejection is a rotated/revoked key, not the caller's session dying,
+// so the SPA must NOT log the user out mid-create. Never a 500, never leaks the key.
+func TestGenerateBadKeyIs422(t *testing.T) {
 	prov, _ := fakeChatProvider(t, validGeneratedYAML)
 	// Seed the Secret with a WRONG key so the fake provider 401s.
 	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
@@ -405,7 +406,8 @@ func TestGenerateBadKeyIs401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code, "a rejected key is a clean 401, not a 500")
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+		"an upstream key rejection is a 422, not a bare 401 that logs the user out (FUNC-9)")
 	assert.NotContains(t, rec.Body.String(), "wrong-key")
 	assert.NotContains(t, lb.String(), "wrong-key")
 }

@@ -153,17 +153,26 @@ export function DashboardPage() {
         topology={topology.kind === "ready" ? topology.data : undefined}
       />
 
-      {/* First-run checklist (m18.10) — the guided aha path. Rendered only when all
-          three signals are loaded (accurate checkmarks) AND the setup is incomplete
-          (a fully set-up or errored cluster shows nothing — no false invitation). */}
+      {/* First-run checklist (m18.10) — the guided aha path. Rendered when the two
+          signals that DRIVE onboarding (providers + topology) are loaded AND the setup
+          is incomplete (a fully set-up or errored cluster shows nothing — no false
+          invitation). The runs signal is NOT required (DX-4): on a minimal install
+          observability is unwired (api.runs → 501 → "unavailable"), and gating on
+          runs.kind === "ready" made the whole checklist vanish on exactly the empty
+          cluster a new user needs it. Treat a non-ready runs signal as "no run yet" —
+          the run step just stays unchecked. */}
       {providers.kind === "ready" &&
         topology.kind === "ready" &&
-        runs.kind === "ready" &&
         (() => {
           const hasProvider = providers.data.providers.length > 0;
           const hasAgent = topology.data.nodes.some((n) => n.kind === "agent");
-          const hasRun = runs.data.runs.length > 0;
-          if (hasProvider && hasAgent && hasRun) return null; // fully set up
+          // Only a "ready" runs feed can confirm a run happened; unavailable/loading/error
+          // ⇒ unknown ⇒ treat as not-yet-run (show the checklist, run step unchecked).
+          const hasRun = runs.kind === "ready" && runs.data.runs.length > 0;
+          // Fully set up ⇒ nothing to show. A cluster with a provider + agent whose runs feed is
+          // "unavailable" (observability off) is ALSO treated as set up (DX-4): we can't verify a
+          // run, so don't nag it forever — only a "ready" feed showing zero runs keeps nudging.
+          if (hasProvider && hasAgent && (hasRun || runs.kind === "unavailable")) return null;
           // The steps + routes are the shared FIRST_RUN_CHECKLIST (nav.ts, m54.4) so
           // they can't drift from the IA; only the live `done` signal is computed here.
           const done: Record<string, boolean> = {
