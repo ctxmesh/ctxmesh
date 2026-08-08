@@ -27,9 +27,12 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="metadata.name must be at most 44 characters: the controller appends a 19-character revision-name suffix and Knative revision names are DNS-1035 labels capped at 63 characters"
 
 // AgentDeployment is the v1beta1 schema — a field-identical graduation of the v1alpha1 AgentDeployment (ADR 0037, M34),
-// reusing the v1alpha1 spec/status so conversion is a direct copy.
+// reusing the v1alpha1 spec/status so conversion is a direct copy. The name-length CEL guard MUST match v1alpha1
+// (audit FUNC-8): conversion is None, so a 45+-char name admitted via one version wedges reconcile at the Knative
+// revision-name webhook. A CRD schema-parity CI check (hack/check-crd-version-parity.sh) guards the drift.
 type AgentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -165,6 +165,10 @@ jobs:
         run: make helm-verify
       - name: helm lint
         run: make helm-lint
+      # CRD version-parity: conversion is None, so multi-version CRDs must keep matching
+      # top-level CEL validations across versions (audit FUNC-8).
+      - name: CRD version-parity gate
+        run: make crd-version-parity
 
   envtest:
     name: envtest
