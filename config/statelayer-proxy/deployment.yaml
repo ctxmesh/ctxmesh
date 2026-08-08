@@ -1,15 +1,10 @@
-# State-layer proxy Deployment (M51, ADR 0050) — the control-plane service that holds
-# the Valkey credential and enforces per-tenant/agent memory scope SERVER-SIDE from the
-# verified run-capability token. Agent workloads hold no credential and cannot name
-# another tenant's key.
-#
-# CAPABILITY KEYPAIR: MCP_CAPABILITY_PUBLIC_KEY comes from the OPTIONAL bff-adapters
-# Secret (envFrom, optional: true) — the same Secret that carries the capability
-# material (never a literal here, so kustomize/helm-default stay valid). Absent it, the
-# proxy STARTS but refuses every request (401) until the keypair is provisioned — an
-# idle proxy in migration phase 1, not a CrashLoop. The audience is DISTINCT
-# (statelayer-proxy) from the credential plane's, so a credential-plane token is not
-# replayable here (ADR 0050 §2).
+# State-layer proxy Deployment (M51, ADR 0050; ADR 0052 §C6 RESOLUTION) — the
+# control-plane service that holds the Valkey credential and enforces per-tenant/agent
+# memory scope SERVER-SIDE from the caller's verified POD IDENTITY (projected SA token +
+# TokenReview). Session memory is workload-scoped, so ALL paths (memory, quota, async)
+# authenticate the pod — no runcap, no capability keypair. Agent workloads hold no Valkey
+# credential and cannot name another tenant's key. Absent cluster auth the proxy STARTS
+# but refuses every request (401), not a CrashLoop.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,13 +46,6 @@ spec:
             # templates it (no drift).
             - name: STATELAYER_ADDR
               value: agent-engine-statelayer.agent-engine-system.svc:6379
-            # The verifier audience. Per ADR 0050 Amд 1, the first cut REUSES the
-            # credential-plane audience (the run capability already on the memory
-            # request, like the long-term memory proxy) — so no 2nd token/SDK change.
-            # Keep it configurable: the separate-audience hardening (for BOTH memory
-            # proxies) is an M52 follow-on = a values change, not code.
-            - name: STATELAYER_CAPABILITY_AUDIENCE
-              value: ctxmesh-credential-plane
             # STATELAYER_USERNAME/PASSWORD for a Valkey ACL user (ADR 0050 §6) — empty by
             # default (the in-cluster Valkey is unauthenticated, ADR 0049). Set for a
             # password-protected/BYO-external Valkey.
@@ -65,13 +53,6 @@ spec:
               value: ""
             - name: STATELAYER_PASSWORD
               value: ""
-          # MCP_CAPABILITY_PUBLIC_KEY (+ any capability config) from the OPTIONAL shared
-          # Secret. Absent ⇒ the proxy refuses requests until provisioned (no literal
-          # here → no drift).
-          envFrom:
-            - secretRef:
-                name: bff-adapters
-                optional: true
           livenessProbe:
             httpGet:
               path: /healthz

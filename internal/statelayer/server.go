@@ -27,8 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // maxMemoryBody caps a memory request body (1 MiB).
@@ -39,25 +37,35 @@ const maxMemoryBody = 1 << 20
 // only ever reach its own registry's shared space (never another tenant's).
 const memoryScopeHeader = "X-Memory-Scope"
 
-// Verifier verifies a run-capability token (satisfied by *runcap.Verifier).
-type Verifier interface {
-	Verify(token string) (runcap.Capability, error)
+// RegistryResolver maps a pod identity (namespace + agent SA name) to the agent's
+// registry id — the SERVER-TRUSTED shared-memory boundary (`mem:shared:{registry}:`),
+// which used to be the runcap `bnd` claim (ADR 0052 §C6 RESOLUTION). It reads the
+// registryIDLabel the controller stamps on the identity SA. nil (or "" registry) ⇒ a
+// shared-scope request falls back to the private scope (no registry to key under). A
+// non-nil error is an infra failure the caller MUST fail closed on (never key shared
+// memory under a guessed/missing registry).
+type RegistryResolver interface {
+	Registry(ctx context.Context, namespace, serviceAccount string) (string, error)
 }
 
-// Server is the state-layer proxy's HTTP handler (ADR 0050). It authenticates each
-// request with the run-capability token, derives the access Scope SERVER-SIDE from
-// the verified claims, and serves the memory API over the credentialed store.
+// Server is the state-layer proxy's HTTP handler (ADR 0050; ADR 0052 §C6 RESOLUTION). It
+// authenticates each request by the caller's POD identity (TokenReview), derives the
+// access Scope SERVER-SIDE from the verified identity, and serves the memory API over the
+// credentialed store.
 type Server struct {
-	store    MemoryStore
-	verifier Verifier
+	store MemoryStore
 	// tenants resolves a namespace → owning tenant id for the quota/async endpoints
 	// (M53). nil in memory-only / local-dev deployments (no cluster config); the
 	// quota endpoints report unavailable rather than guessing a tenant.
 	tenants TenantResolver
 	// podAuth authenticates a launcher's pod-identity token (cached TokenReview) for
-	// the quota/async endpoints — the second principal type alongside the memory
-	// runcap. nil in memory-only deployments.
+	// the quota/async AND memory endpoints — all workload-scoped (ADR 0052 §C6
+	// RESOLUTION). nil in memory-only deployments.
 	podAuth PodAuthenticator
+	// registries resolves a pod identity → registry id for SHARED-scope memory (the
+	// server-trusted boundary the controller stamps on the agent SA). nil ⇒ shared
+	// scope falls back to private.
+	registries RegistryResolver
 	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
 	// deployments; the quota endpoints then report unavailable.
 	quota QuotaStore
@@ -73,14 +81,18 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Store    MemoryStore
-	Verifier Verifier
+	Store MemoryStore
 	// TenantResolver maps a namespace → owning tenant id for the quota/async
 	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
 	TenantResolver TenantResolver
 	// PodAuthenticator verifies a launcher's pod-identity token for the quota/async
-	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
+	// AND memory endpoints (ADR 0052 §C6 RESOLUTION). Optional: nil ⇒ those endpoints
+	// report unavailable.
 	PodAuthenticator PodAuthenticator
+	// RegistryResolver resolves the SHARED-scope memory boundary from a pod identity
+	// (ADR 0052 §C6 RESOLUTION). Optional: nil ⇒ shared-scope requests fall back to
+	// the private scope.
+	RegistryResolver RegistryResolver
 	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
 	// quota endpoints report unavailable.
 	QuotaStore QuotaStore
@@ -103,13 +115,13 @@ func NewServer(opts Options) (*Server, error) {
 		now = time.Now
 	}
 	s := &Server{
-		store:    opts.Store,
-		verifier: opts.Verifier,
-		tenants:  opts.TenantResolver,
-		podAuth:  opts.PodAuthenticator,
-		quota:    opts.QuotaStore,
-		dedup:    opts.DedupStore,
-		now:      now,
+		store:      opts.Store,
+		tenants:    opts.TenantResolver,
+		podAuth:    opts.PodAuthenticator,
+		registries: opts.RegistryResolver,
+		quota:      opts.QuotaStore,
+		dedup:      opts.DedupStore,
+		now:        now,
 	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
 		sc, err := scopeFromAgent(opts.DevAgent, "", false)
@@ -118,11 +130,11 @@ func NewServer(opts Options) (*Server, error) {
 		}
 		s.devScope = &sc
 	}
-	// A Verifier or dev bypass is REQUIRED to serve requests, but the server still
-	// STARTS without one (it refuses every request with 401) so a fresh install
-	// deploys cleanly before the capability keypair is provisioned — an idle proxy
-	// in migration phase 1 (ADR 0050 §8), not a CrashLoop. authorize() enforces the
-	// deny; NewServer never fails on a missing verifier.
+	// A PodAuthenticator or dev bypass is REQUIRED to serve memory requests, but the
+	// server still STARTS without one (it refuses every request with 401) so a fresh
+	// install deploys cleanly before cluster auth is wired — an idle proxy, not a
+	// CrashLoop. authorize() enforces the deny; NewServer never fails on a missing
+	// authenticator.
 	return s, nil
 }
 
@@ -166,10 +178,13 @@ func (s *Server) scoped(fn scopedHandler) http.HandlerFunc {
 	}
 }
 
-// authorize derives the request Scope. It verifies the Bearer run-capability token
-// and derives the scope from the claims; when no token is present and the dev
-// bypass is enabled, it uses the static dev scope. The shared-scope request is
-// keyed under the TOKEN's registry, so it can never reach another tenant's data.
+// authorize derives the request Scope from the pod's IDENTITY (ADR 0052 §C6
+// RESOLUTION): session memory is workload-scoped, so it authenticates the launcher's
+// projected ServiceAccount token (TokenReview, via podAuth) and derives the (namespace,
+// agent) scope SERVER-SIDE from the verified SA name — never from caller input. The
+// runcap is gone from this path, so a compromised proxy has no user credential token to
+// replay at the credential plane. A shared-scope request is keyed under the registry the
+// controller stamped on the SA, so it can never reach another tenant's data.
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool) {
 	wantShared := strings.EqualFold(strings.TrimSpace(r.Header.Get(memoryScopeHeader)), memoryScopeShared)
 	token := bearerToken(r)
@@ -177,26 +192,81 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 		if s.devScope != nil {
 			return *s.devScope, true // dev bypass (no verification)
 		}
-		writeJSONError(w, http.StatusUnauthorized, "missing run-capability token")
+		writeJSONError(w, http.StatusUnauthorized, "missing pod-identity token")
 		return Scope{}, false
 	}
-	if s.verifier == nil {
-		writeJSONError(w, http.StatusUnauthorized, "token verification is not configured")
+	if s.podAuth == nil {
+		writeJSONError(w, http.StatusUnauthorized, "pod authentication is not configured")
 		return Scope{}, false
 	}
-	runCap, err := s.verifier.Verify(token)
+	id, err := s.podAuth.Identity(r.Context(), token)
 	if err != nil {
-		writeJSONError(w, http.StatusUnauthorized, "invalid run-capability token")
+		if errors.Is(err, ErrTokenRejected) {
+			writeJSONError(w, http.StatusUnauthorized, "invalid pod-identity token")
+		} else {
+			// TokenReview infra failure (apiserver unreachable) — fail closed, but as
+			// 503 so the launcher retries rather than treating it as a hard rejection.
+			writeJSONError(w, http.StatusServiceUnavailable, "pod authentication unavailable")
+		}
 		return Scope{}, false
 	}
-	sc, err := scopeFromAgent(runCap.Agent, runCap.Boundary, wantShared)
+	agent, ok := agentNameFromSA(id.ServiceAccount)
+	if !ok {
+		// A verified pod token that is NOT a per-agent identity SA (agent-<name>) has no
+		// agent scope — 403 (authenticated, not authorizable), never a guessed key.
+		writeJSONError(w, http.StatusForbidden, "pod identity is not an agent (expected the agent-<name> ServiceAccount)")
+		return Scope{}, false
+	}
+	// Shared scope needs a registry boundary; resolve it SERVER-SIDE from the SA. A
+	// resolver failure fails CLOSED (503) — we never key shared memory under a missing
+	// registry, which would silently split the team scratchpad or cross a boundary.
+	// When NO resolver is wired (memory-only/dev, or a production build failure) a shared
+	// request falls back to the private scope — safe (private is never a cross-tenant
+	// leak); the absence is logged once at startup by cmd/statelayer-proxy, so this is
+	// not a silent-in-production footgun.
+	var boundary string
+	if wantShared && s.registries != nil {
+		reg, rErr := s.registries.Registry(r.Context(), id.Namespace, id.ServiceAccount)
+		if rErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "registry resolution unavailable")
+			return Scope{}, false
+		}
+		if reg != "" {
+			boundary = registryBoundaryPrefix + reg
+		}
+		// reg == "" (agent is not a registry member) → boundary stays empty →
+		// scopeFromAgent falls back to the private scope (matches prior behavior).
+	}
+	// id.Namespace is a Kubernetes namespace (DNS-1123, no "/") and agent is the
+	// prefix-stripped SA name, so the "<ns>/<agent>" join splits back cleanly in
+	// scopeFromAgent — the defense-in-depth check there 403s rather than mis-keys anyway.
+	sc, err := scopeFromAgent(id.Namespace+"/"+agent, boundary, wantShared)
 	if err != nil {
-		// A valid token whose agent claim can't be scoped is a 403 (authenticated,
-		// but not authorizable to any key space) — never a 500.
-		writeJSONError(w, http.StatusForbidden, "token carries no usable agent scope")
+		writeJSONError(w, http.StatusForbidden, "pod identity carries no usable agent scope")
 		return Scope{}, false
 	}
 	return sc, true
+}
+
+// agentSAPrefix is the per-agent identity ServiceAccount prefix the controller mints
+// ("agent-<name>", ADR 0052 §C6 RESOLUTION). The proxy recovers the agent name by
+// stripping it — so the memory key stays `mem:{ns}/{name}:`, byte-identical to the
+// runcap path it replaces (no key migration).
+const agentSAPrefix = "agent-"
+
+// registryBoundaryPrefix is the "r:<registry>" boundary form scopeFromAgent expects for
+// a shared-scope request (mirrors the runcap `bnd` it replaces).
+const registryBoundaryPrefix = "r:"
+
+// agentNameFromSA recovers the agent name from a per-agent identity SA name
+// ("agent-<name>" → "<name>"). ok is false when the SA is not an agent identity (no
+// prefix, or an empty remainder) — such a principal has no memory scope.
+func agentNameFromSA(sa string) (string, bool) {
+	name, ok := strings.CutPrefix(sa, agentSAPrefix)
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 const memoryScopeShared = "shared"

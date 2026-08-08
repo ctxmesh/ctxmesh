@@ -252,6 +252,36 @@ func TestMemoryBinding_StatelayerProxyURLInjected(t *testing.T) {
 	// listener, not the backend), so the proxy-forward path still serves.
 	_, hasPort := envMap["MEMORY_PORT"]
 	assert.True(t, hasPort, "MEMORY_PORT (the launcher listener) is still injected on the proxy path")
+
+	// Per-agent identity SA (ADR 0052 §C6 RESOLUTION). This agent is a PLAIN memory agent —
+	// NOT a registry member, NOT tenant-quota-capped — so it exercises the hoist (Fable
+	// finding E): injectPodToken must fire here too, mounting the projected statelayer token
+	// AND running the pod as its per-agent identity SA so the proxy can scope per-agent via
+	// TokenReview. Before the hoist this agent got no token → its session memory 401s.
+	wantSA := "agent-" + agentName
+	assert.Equal(t, wantSA, ksvc.Spec.Template.Spec.ServiceAccountName,
+		"a proxy-attached memory agent runs as its per-agent identity SA")
+	var tokenVolMounted bool
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		if v.Projected == nil {
+			continue
+		}
+		for _, src := range v.Projected.Sources {
+			if src.ServiceAccountToken != nil && src.ServiceAccountToken.Audience == statelayerPodAudience {
+				tokenVolMounted = true
+			}
+		}
+	}
+	assert.True(t, tokenVolMounted,
+		"the projected statelayer token volume is mounted for a plain memory agent (hoisted injectPodToken)")
+
+	// The identity SA exists and is OWNED by the AgentDeployment (garbage-collected with it).
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: wantSA, Namespace: namespace}, &sa),
+		"the per-agent identity ServiceAccount is created")
+	require.Len(t, sa.OwnerReferences, 1, "the SA is owned")
+	assert.Equal(t, agentName, sa.OwnerReferences[0].Name, "the SA is owned by the AgentDeployment")
 }
 
 // TestMemoryBinding_CustomAddr verifies that spec.backend.addr overrides the

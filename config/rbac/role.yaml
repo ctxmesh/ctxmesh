@@ -10,6 +10,7 @@ rules:
   - configmaps
   - resourcequotas
   - secrets
+  - serviceaccounts
   - services
   verbs:
   - create
