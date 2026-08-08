@@ -9,7 +9,15 @@ import { cn } from "@/lib/utils";
 // wrapper — never shipped in a product surface. They keep each wireframe terse
 // and consistent so the user reviews layout + flow, not pixel polish.
 
-export type Milestone = "M13" | "M14" | "M15" | "M16" | "M17" | "M18" | "M47";
+export type Milestone =
+  | "M13"
+  | "M14"
+  | "M15"
+  | "M16"
+  | "M17"
+  | "M18"
+  | "M47"
+  | "M63";
 
 export const MILESTONE_LABEL: Record<Milestone, string> = {
   M13: "Foundation",
@@ -19,6 +27,7 @@ export const MILESTONE_LABEL: Record<Milestone, string> = {
   M17: "Authoring depth",
   M18: "Everywhere (dev + OIDC)",
   M47: "Tenancy & quotas",
+  M63: "Audit surface",
 };
 
 export function MilestoneTag({ m, className }: { m: Milestone; className?: string }) {
