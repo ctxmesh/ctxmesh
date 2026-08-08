@@ -2482,10 +2482,19 @@ export const api = {
       body: JSON.stringify(req),
       signal,
     });
-    // 200 (valid) and 422 (regenerate) both carry a JSON body the caller uses;
-    // any OTHER non-2xx is a genuine failure (403/404/500) → typed ApiError.
-    if (res.ok || res.status === 422) {
+    if (res.ok) {
       return (await res.json()) as GenerateAgentResponse;
+    }
+    // A 422 is TWO different things (FUNC-9): a REGENERATE outcome (the LLM produced
+    // something `expand` rejected — carries `regenerate: true` + the raw agentYAML), OR a
+    // plain error like an upstream provider key rejection (`{error}`, no agentYAML). Only the
+    // former is a valid GenerateAgentResponse; returning the latter as one made DescribeFlow
+    // take its success branch and render an UNDEFINED agentYAML → a mid-create client crash.
+    // Return the regenerate body; throw everything else so the caller shows it inline.
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => ({}))) as GenerateAgentResponse;
+      if (body.regenerate) return body;
+      throw new ApiError(body.error || body.reason || "generation failed", 422);
     }
     throw new ApiError(
       await errorMessage(res, `generate failed (${res.status})`),

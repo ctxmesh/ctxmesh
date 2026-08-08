@@ -202,6 +202,29 @@ describe("CreateAgentPage — Describe it", () => {
     expect(screen.queryByTestId("shared-review")).toBeNull();
   });
 
+  it("a 422 WITHOUT the regenerate flag (upstream key rejection, FUNC-9) shows the reason inline — no crash, no logout", async () => {
+    // FUNC-9: the BFF maps a rejected provider key to a 422 with a plain {error} (no
+    // regenerate, no agentYAML). The SPA must surface it inline, NOT render an undefined
+    // agentYAML (a mid-create crash) and NOT log the user out.
+    recordingFetch({
+      generate: () => ({
+        ok: false,
+        status: 422,
+        json: { error: "the anthropic API rejected the key (check the connected provider)" },
+      }),
+    });
+    renderPage();
+    await pickDescribe();
+
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+
+    // Surfaced inline as a recoverable state showing the honest reason — never a blank crash.
+    expect(await screen.findByTestId("regenerate-state")).toBeInTheDocument();
+    expect(screen.getByTestId("regenerate-reason")).toHaveTextContent(/rejected the key/);
+    expect(screen.queryByTestId("shared-review")).toBeNull();
+  });
+
   it("even a regenerate keyed on the flag when the BFF returns it with a 200 status", async () => {
     // The client keys off `regenerate`, NOT the status — a 200 carrying the flag
     // is still the regenerate path (no status sniffing).
