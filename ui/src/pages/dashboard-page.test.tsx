@@ -346,6 +346,32 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     expect(screen.getByTestId("first-run-cta")).toHaveTextContent(/Connect a provider/);
   });
 
+  it("does NOT nag a set-up cluster whose runs feed is unavailable (DX-4 P3)", async () => {
+    // provider + agent present but observability off (runs 501/unavailable): we can't verify a
+    // run, so treat it as set up and HIDE the checklist — don't nag it forever.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
+        if (path === "/api/runs" || path === "/api/cost") {
+          return Promise.resolve({
+            ok: false,
+            status: 501,
+            json: async () => ({ error: "not implemented" }),
+          } as Response);
+        }
+        const body = path === "/api/topology" ? topology : providersConnected;
+        return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      }),
+    );
+    renderDashboard();
+
+    // topology-summary renders once providers+topology are ready (so the checklist gate has run);
+    // then wait for runs to settle to "unavailable" — the set-up cluster hides the checklist.
+    await screen.findByTestId("topology-summary");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+  });
+
   it("does NOT render the CTA when providers exist", async () => {
     routeFetch({
       "/api/topology": topology,

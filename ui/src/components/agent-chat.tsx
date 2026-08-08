@@ -9,7 +9,12 @@ import { api, ApiError } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 import { extractAgentOutput } from "@/lib/agent-output";
-import { isValidHttpUrl, MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import {
+  isValidHttpUrl,
+  MCP_OAUTH_MESSAGE,
+  type McpOAuthPopupMessage,
+  readMcpOAuthReturn,
+} from "@/lib/oauth-popup";
 
 // mcpCallbackOrigin is the canonical console origin the BFF injects (ADR 0040): the MCP-consent
 // callback runs THERE, so a chatbox served at an agent hostname must also trust its cross-origin
@@ -79,6 +84,9 @@ export function ChatPanel({
   // credential surfaces a "Connect <server>" CTA in that agent turn.
   const [connecting, setConnecting] = React.useState<string | null>(null);
   const [connectError, setConnectError] = React.useState<string | null>(null);
+  // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced so
+  // consent-on-a-blocked-popup doesn't end in silence on the chat surface either.
+  const [oauthReturn, setOauthReturn] = React.useState<McpOAuthPopupMessage | null>(null);
   const idRef = React.useRef(0);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   // Teardown for an active inline-consent wait (OTH-2): the `message` listener + popup-close
@@ -93,9 +101,11 @@ export function ChatPanel({
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns]);
 
-  // Unmount cleanup (OTH-2): clear any in-flight consent wait so its listener + interval don't
-  // outlive the chat.
+  // On mount: surface a same-tab (popup-blocked) MCP OAuth outcome the boot handler stashed
+  // (DX-6). Unmount cleanup (OTH-2): clear any in-flight consent wait so its listener + interval
+  // don't outlive the chat.
   React.useEffect(() => {
+    setOauthReturn(readMcpOAuthReturn());
     return () => connectCleanupRef.current?.();
   }, []);
 
@@ -366,6 +376,28 @@ export function ChatPanel({
           </Button>
         )}
       </div>
+
+      {oauthReturn && (
+        <div
+          data-testid="mcp-oauth-return"
+          className={`mx-4 mt-3 rounded-md border px-3 py-2 text-xs ${
+            oauthReturn.error
+              ? "border-destructive/40 text-destructive"
+              : "border-success/40 text-success"
+          }`}
+        >
+          {oauthReturn.error
+            ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
+            : `Connected ${oauthReturn.server || "your account"} — send your message again to continue.`}
+          <button
+            type="button"
+            className="ml-2 underline"
+            onClick={() => setOauthReturn(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
 
       {!canRun ? (
         <p

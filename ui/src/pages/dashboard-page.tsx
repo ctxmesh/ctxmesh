@@ -169,7 +169,10 @@ export function DashboardPage() {
           // Only a "ready" runs feed can confirm a run happened; unavailable/loading/error
           // ⇒ unknown ⇒ treat as not-yet-run (show the checklist, run step unchecked).
           const hasRun = runs.kind === "ready" && runs.data.runs.length > 0;
-          if (hasProvider && hasAgent && hasRun) return null; // fully set up
+          // Fully set up ⇒ nothing to show. A cluster with a provider + agent whose runs feed is
+          // "unavailable" (observability off) is ALSO treated as set up (DX-4): we can't verify a
+          // run, so don't nag it forever — only a "ready" feed showing zero runs keeps nudging.
+          if (hasProvider && hasAgent && (hasRun || runs.kind === "unavailable")) return null;
           // The steps + routes are the shared FIRST_RUN_CHECKLIST (nav.ts, m54.4) so
           // they can't drift from the IA; only the live `done` signal is computed here.
           const done: Record<string, boolean> = {
