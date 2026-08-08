@@ -129,6 +129,22 @@ function recordingFetch(opts: {
           json: async () => ({ error: r.text }),
         } as Response);
       }
+      // GET /api/agents (list) + /api/namespaces — the DX-5 identity pickers load these on
+      // mount. Empty well-formed lists (each test drives the agent field via custom entry).
+      if (path === "/api/agents" && method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ agents: [] }),
+        } as Response);
+      }
+      if (path === "/api/namespaces") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ namespaces: [] }),
+        } as Response);
+      }
       if (path === "/api/agents") {
         const r = opts.create
           ? opts.create(body)
@@ -159,11 +175,26 @@ function fill(label: RegExp | string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
 
+// The agent field is a ComboSelect (DX-5): a picker over deployed agents with a "Custom…"
+// escape. With no agents listed (the tests mock an empty list), enter custom mode then type
+// the name — the define-a-new-agent path a real user takes for a not-yet-deployed name.
+function fillAgent(name: string) {
+  fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "__custom__" } });
+  fireEvent.change(screen.getByLabelText("Agent"), { target: { value: name } });
+}
+
+// Namespace is likewise a ComboSelect (DX-5); with no namespaces listed, enter custom mode
+// then type — the same pick-or-type contract.
+function fillNamespace(name: string) {
+  fireEvent.change(screen.getByLabelText("Namespace"), { target: { value: "__custom__" } });
+  fireEvent.change(screen.getByLabelText("Namespace"), { target: { value: name } });
+}
+
 // PlaygroundPage uses <Link> (react-router-dom); wrap in MemoryRouter so tests
 // don't need the full app router (the pattern mirrors agents-page.test.tsx).
-function renderPage() {
+function renderPage(initialEntry = "/playground") {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <PlaygroundPage />
     </MemoryRouter>,
   );
@@ -174,12 +205,26 @@ afterEach(() => {
 });
 
 describe("PlaygroundPage", () => {
+  it("pre-fills the agent + namespace from ?agent=/?ns= and runs without re-typing (DX-5 deep link)", async () => {
+    const calls = recordingFetch({ run: {} });
+
+    // create→run / the checklist "Run" step deep-link here — the identity is pre-filled.
+    renderPage("/playground?agent=deployed-agent&ns=prod");
+    fill("Input (JSON)", '{"prompt":"hi"}');
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    const payload = JSON.parse(createCall!.body) as { agent: string; namespace: string };
+    expect(payload.agent).toBe("deployed-agent"); // pre-filled from ?agent=, no typing
+    expect(payload.namespace).toBe("prod"); // pre-filled from ?ns=
+  });
+
   it("defines and runs an agent, then offers a 'View full trace' Link → /traces/:id (no Langfuse iframe)", async () => {
     const calls = recordingFetch({ run: {} });
 
     renderPage();
-    fill("Agent name", "echo-agent");
-    fill("Namespace", "prod");
+    fillAgent("echo-agent");
+    fillNamespace("prod");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fill("Input (JSON)", '{"prompt":"hi"}');
 
@@ -230,8 +275,8 @@ describe("PlaygroundPage", () => {
     });
 
     renderPage();
-    fill("Agent name", "sk-agent");
-    fill("Namespace", "prod");
+    fillAgent("sk-agent");
+    fillNamespace("prod");
     fill("Image", "ghcr.io/ctxmesh/sk:v1");
     fill("Input (JSON)", '{"prompt":"list orgs"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
@@ -298,8 +343,8 @@ describe("PlaygroundPage", () => {
     });
 
     renderPage();
-    fill("Agent name", "echo-agent");
-    fill("Namespace", "prod");
+    fillAgent("echo-agent");
+    fillNamespace("prod");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
 
     fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
@@ -318,7 +363,7 @@ describe("PlaygroundPage", () => {
     expect(screen.getByText("echo-agent")).toBeInTheDocument();
 
     // The create posted the SAME agent.yaml + the target namespace (no divergence).
-    const createCall = calls.find((c) => c.url === "/api/agents");
+    const createCall = calls.find((c) => c.url === "/api/agents" && c.method === "POST");
     const createPayload = JSON.parse(createCall!.body) as { agentYAML: string; namespace: string };
     expect(createPayload.agentYAML).toContain("name: echo-agent");
     expect(createPayload.namespace).toBe("prod");
@@ -328,7 +373,7 @@ describe("PlaygroundPage", () => {
     const calls = recordingFetch({ run: {} });
     renderPage();
     // Only the agent name — NO Image (Image is a define/export field, not a run field).
-    fill("Agent name", "scalekit-agent");
+    fillAgent("scalekit-agent");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     // The create fires — the full-form validation must not block invoking a live agent.
@@ -356,7 +401,7 @@ describe("PlaygroundPage", () => {
     });
 
     renderPage();
-    fill("Agent name", "echo-agent");
+    fillAgent("echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -371,7 +416,7 @@ describe("PlaygroundPage", () => {
   it("rejects malformed JSON input before any round-trip", async () => {
     const calls = recordingFetch({});
     renderPage();
-    fill("Agent name", "echo-agent");
+    fillAgent("echo-agent");
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fill("Input (JSON)", "{ not json");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
@@ -397,7 +442,7 @@ describe("PlaygroundPage", () => {
       },
     });
     renderPage();
-    fill("Agent name", "echo-agent");
+    fillAgent("echo-agent");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     // The streamed content lands in the response, and the run finalizes to done + trace.
@@ -424,7 +469,7 @@ describe("PlaygroundPage", () => {
       },
     });
     renderPage();
-    fill("Agent name", "mailer");
+    fillAgent("mailer");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     // The approval affordance surfaces the summary + Approve/Deny.
@@ -451,7 +496,7 @@ describe("PlaygroundPage", () => {
       },
     });
     renderPage();
-    fill("Agent name", "mailer");
+    fillAgent("mailer");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
     fireEvent.click(await screen.findByTestId("deny-run"));
