@@ -42,11 +42,17 @@ type TenantComputeQuota struct {
 	// cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
 	// quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
 	// namespace's ResourceQuota.
+	// Validated as a quantity at admission (OTH-5): an invalid value used to parse-fail in
+	// computeHard and be SILENTLY dropped → the quota went unenforced with no signal. Now it is
+	// rejected up front. Empty is allowed (means "no CPU cap").
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="cpu must be a valid Kubernetes quantity (e.g. \"20\" or \"20000m\")"
 	// +optional
 	CPU string `json:"cpu,omitempty"`
 
 	// memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
 	// "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
+	// Validated as a quantity at admission (OTH-5) — see cpu. Empty is allowed.
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="memory must be a valid Kubernetes quantity (e.g. \"40Gi\")"
 	// +optional
 	Memory string `json:"memory,omitempty"`
 

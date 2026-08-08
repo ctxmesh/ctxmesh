@@ -136,6 +136,10 @@ prometheus:
   # Install the ServiceMonitor (requires the Prometheus Operator CRDs).
   serviceMonitor:
     enabled: false
+    # Skip TLS verification of the metrics endpoint's serving cert (OTH-5). Defaults true for
+    # the self-signed metrics cert on a vanilla cluster; set false + provide cert-manager TLS
+    # (a CA + serverName) for production so Prometheus actually verifies the manager's cert.
+    insecureSkipVerify: true
 networkPolicy:
   # Install the NetworkPolicy that restricts /metrics ingress to namespaces
   # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).

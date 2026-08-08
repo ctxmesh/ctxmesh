@@ -27,6 +27,9 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Gate",type="string",JSONPath=".spec.gate"
+// +kubebuilder:printcolumn:name="Threshold",type="string",JSONPath=".spec.threshold"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // EvalSuite is the v1beta1 schema — a field-identical graduation of the v1alpha1 EvalSuite (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.

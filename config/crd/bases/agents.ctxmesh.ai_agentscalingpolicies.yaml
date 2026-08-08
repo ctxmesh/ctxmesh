@@ -246,7 +246,20 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.trigger
+      name: Trigger
+      type: string
+    - jsonPath: .spec.min
+      name: Min
+      type: integer
+    - jsonPath: .spec.max
+      name: Max
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-

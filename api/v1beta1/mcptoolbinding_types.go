@@ -27,6 +27,10 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".spec.agentRef"
+// +kubebuilder:printcolumn:name="Tool",type="string",JSONPath=".spec.toolName"
+// +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.mode"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 
 // MCPToolBinding is the v1beta1 schema — a field-identical graduation of the v1alpha1 MCPToolBinding (ADR 0037, M34),
 // reusing the v1alpha1 spec/status so conversion is a direct copy.
