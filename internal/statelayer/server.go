@@ -27,8 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // maxMemoryBody caps a memory request body (1 MiB).
@@ -38,16 +36,6 @@ const maxMemoryBody = 1 << 20
 // proxy keys shared memory under the TOKEN's registry boundary, so a caller can
 // only ever reach its own registry's shared space (never another tenant's).
 const memoryScopeHeader = "X-Memory-Scope"
-
-// Verifier verifies a run-capability token (satisfied by *runcap.Verifier).
-//
-// DEPRECATED (ADR 0052 §C6 RESOLUTION): the memory path no longer verifies a runcap —
-// session memory is workload-scoped and authenticates the POD (PodAuthenticator). This
-// field is retired from the memory path in m56.2b and removed with its cmd wiring in
-// m56.2d; kept transiently so the change stays reviewable.
-type Verifier interface {
-	Verify(token string) (runcap.Capability, error)
-}
 
 // RegistryResolver maps a pod identity (namespace + agent SA name) to the agent's
 // registry id — the SERVER-TRUSTED shared-memory boundary (`mem:shared:{registry}:`),
@@ -60,12 +48,12 @@ type RegistryResolver interface {
 	Registry(ctx context.Context, namespace, serviceAccount string) (string, error)
 }
 
-// Server is the state-layer proxy's HTTP handler (ADR 0050). It authenticates each
-// request with the run-capability token, derives the access Scope SERVER-SIDE from
-// the verified claims, and serves the memory API over the credentialed store.
+// Server is the state-layer proxy's HTTP handler (ADR 0050; ADR 0052 §C6 RESOLUTION). It
+// authenticates each request by the caller's POD identity (TokenReview), derives the
+// access Scope SERVER-SIDE from the verified identity, and serves the memory API over the
+// credentialed store.
 type Server struct {
-	store    MemoryStore
-	verifier Verifier
+	store MemoryStore
 	// tenants resolves a namespace → owning tenant id for the quota/async endpoints
 	// (M53). nil in memory-only / local-dev deployments (no cluster config); the
 	// quota endpoints report unavailable rather than guessing a tenant.
@@ -93,8 +81,7 @@ type Server struct {
 
 // Options configures a Server.
 type Options struct {
-	Store    MemoryStore
-	Verifier Verifier
+	Store MemoryStore
 	// TenantResolver maps a namespace → owning tenant id for the quota/async
 	// endpoints (M53). Optional: nil ⇒ the quota endpoints report unavailable.
 	TenantResolver TenantResolver
@@ -129,7 +116,6 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	s := &Server{
 		store:      opts.Store,
-		verifier:   opts.Verifier,
 		tenants:    opts.TenantResolver,
 		podAuth:    opts.PodAuthenticator,
 		registries: opts.RegistryResolver,
@@ -144,11 +130,11 @@ func NewServer(opts Options) (*Server, error) {
 		}
 		s.devScope = &sc
 	}
-	// A Verifier or dev bypass is REQUIRED to serve requests, but the server still
-	// STARTS without one (it refuses every request with 401) so a fresh install
-	// deploys cleanly before the capability keypair is provisioned — an idle proxy
-	// in migration phase 1 (ADR 0050 §8), not a CrashLoop. authorize() enforces the
-	// deny; NewServer never fails on a missing verifier.
+	// A PodAuthenticator or dev bypass is REQUIRED to serve memory requests, but the
+	// server still STARTS without one (it refuses every request with 401) so a fresh
+	// install deploys cleanly before cluster auth is wired — an idle proxy, not a
+	// CrashLoop. authorize() enforces the deny; NewServer never fails on a missing
+	// authenticator.
 	return s, nil
 }
 
@@ -234,6 +220,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 	// Shared scope needs a registry boundary; resolve it SERVER-SIDE from the SA. A
 	// resolver failure fails CLOSED (503) — we never key shared memory under a missing
 	// registry, which would silently split the team scratchpad or cross a boundary.
+	// When NO resolver is wired (memory-only/dev, or a production build failure) a shared
+	// request falls back to the private scope — safe (private is never a cross-tenant
+	// leak); the absence is logged once at startup by cmd/statelayer-proxy, so this is
+	// not a silent-in-production footgun.
 	var boundary string
 	if wantShared && s.registries != nil {
 		reg, rErr := s.registries.Registry(r.Context(), id.Namespace, id.ServiceAccount)
@@ -247,6 +237,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 		// reg == "" (agent is not a registry member) → boundary stays empty →
 		// scopeFromAgent falls back to the private scope (matches prior behavior).
 	}
+	// id.Namespace is a Kubernetes namespace (DNS-1123, no "/") and agent is the
+	// prefix-stripped SA name, so the "<ns>/<agent>" join splits back cleanly in
+	// scopeFromAgent — the defense-in-depth check there 403s rather than mis-keys anyway.
 	sc, err := scopeFromAgent(id.Namespace+"/"+agent, boundary, wantShared)
 	if err != nil {
 		writeJSONError(w, http.StatusForbidden, "pod identity carries no usable agent scope")

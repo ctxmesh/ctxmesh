@@ -37,24 +37,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/ctxmesh/agent-engine/internal/runcap"
 	"github.com/ctxmesh/agent-engine/internal/statelayer"
 )
 
-// The proxy verifies TWO unrelated token types, each with its own audience:
-//   - defaultCapabilityAudience — the runcap (Ed25519 JWT) audience for the memory
-//     path (STATELAYER_CAPABILITY_AUDIENCE; ADR 0050 §2 + Amд 1).
-//   - defaultPodAudience — the Kubernetes projected SA-token audience for the
-//     quota/async paths (STATELAYER_POD_AUDIENCE; ADр 3). It MUST match the
-//     `audiences` in the launcher's serviceAccountToken volume projection.
-//
-// They default to the same string but are validated by completely different
-// mechanisms (signature vs TokenReview), so there is no cross-replay between them;
-// kept as separate constants so an operator can diverge one without surprise.
-const (
-	defaultCapabilityAudience = "statelayer-proxy"
-	defaultPodAudience        = "statelayer-proxy"
-)
+// defaultPodAudience is the Kubernetes projected SA-token audience the proxy verifies for
+// ALL paths — memory, quota, and async (ADR 0052 §C6 RESOLUTION unified them on pod
+// identity; STATELAYER_POD_AUDIENCE). It MUST match the `audiences` in the launcher's
+// serviceAccountToken volume projection.
+const defaultPodAudience = "statelayer-proxy"
 
 const (
 	defaultListenAddr   = ":8080"
@@ -134,25 +124,12 @@ func run(log logr.Logger) error {
 		}
 	}
 
-	// The capability verifier: REQUIRED in production (a distinct audience). Optional
-	// only when the dev bypass is on (a local Compose/dev loop mints no token).
-	pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"))
-	switch {
-	case pubB64 != "":
-		pub, err := runcap.DecodePublicKey(pubB64)
-		if err != nil {
-			return fmt.Errorf("decode MCP_CAPABILITY_PUBLIC_KEY: %w", err)
-		}
-		audience := strings.TrimSpace(os.Getenv("STATELAYER_CAPABILITY_AUDIENCE"))
-		if audience == "" {
-			audience = defaultCapabilityAudience
-		}
-		opts.Verifier = runcap.NewVerifier(pub, audience, nil)
-	case devAgent == "":
-		// No capability key AND no dev bypass: START anyway but refuse every request
-		// (401). A fresh install deploys cleanly before the keypair is provisioned —
-		// an idle proxy in migration phase 1 (ADR 0050 §8), not a CrashLoop.
-		log.Info("no capability key and no dev bypass — proxy refuses all requests until the keypair is provisioned")
+	// Memory auth is POD IDENTITY (ADR 0052 §C6 RESOLUTION) — the runcap verifier is
+	// retired. Without a pod authenticator (no cluster config, logged above) AND without
+	// the dev bypass, the proxy STARTS but refuses every memory request (401) rather than
+	// CrashLooping — a fresh/memory-only install deploys cleanly.
+	if opts.PodAuthenticator == nil && devAgent == "" {
+		log.Info("no pod authenticator and no dev bypass — proxy refuses all memory requests until cluster auth is wired")
 	}
 
 	srv, err := statelayer.NewServer(opts)
