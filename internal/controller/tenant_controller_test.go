@@ -76,9 +76,16 @@ func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 		q, err := getQuota(t, ns)
 		require.NoError(t, err, "a ResourceQuota must exist in %s", ns)
 		assert.Equal(t, "alpha", q.Labels[tenantLabel])
-		assert.Equal(t, "8", q.Spec.Hard.Name(corev1.ResourceLimitsCPU, "").String())
+		// The quota caps REQUESTS, not limits (audit FUNC-2): a limits.* quota forces every
+		// pod to declare limits, but agent pods + Knative's queue-proxy are requests-only, so
+		// a limits quota would REJECT every agent pod (brick the namespace).
+		assert.Equal(t, "8", q.Spec.Hard.Name(corev1.ResourceRequestsCPU, "").String())
 		assert.Equal(t, "16Gi", q.Spec.Hard.Name(corev1.ResourceRequestsMemory, "").String())
 		assert.Equal(t, "20", q.Spec.Hard.Name(corev1.ResourcePods, "").String())
+		_, hasLimitsCPU := q.Spec.Hard[corev1.ResourceLimitsCPU]
+		_, hasLimitsMem := q.Spec.Hard[corev1.ResourceLimitsMemory]
+		assert.False(t, hasLimitsCPU, "quota must NOT track limits.cpu (would reject requests-only agent pods)")
+		assert.False(t, hasLimitsMem, "quota must NOT track limits.memory (would reject requests-only agent pods)")
 
 		var namespace corev1.Namespace
 		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: ns}, &namespace))

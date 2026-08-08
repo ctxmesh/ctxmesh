@@ -270,6 +270,15 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 // computeHard builds the ResourceQuota hard limits from the tenant's compute quota.
 // Invalid quantities are skipped (a partial quota beats a failed reconcile); an
 // empty quota returns nil (no ResourceQuota stamped).
+//
+// The quota caps REQUESTS only (`requests.cpu`/`requests.memory`), NOT limits (audit
+// FUNC-2). A ResourceQuota that tracks `limits.*` forces EVERY pod in the namespace to
+// declare limits — but the controller builds agent pods requests-only (and Knative's
+// queue-proxy is requests-only too), so a `limits.*` quota made admission REJECT every
+// agent pod, bricking the namespace the moment a tenant set `quota.cpu`. Requests are the
+// scheduler-guaranteed allocation, so capping them is the correct, standard meaning of a
+// tenant compute quota. (Also capping/defaulting limits — via a per-namespace LimitRange —
+// is a follow-on hardening, not needed to make the quota work.)
 func computeHard(q *agentsv1alpha1.TenantComputeQuota) corev1.ResourceList {
 	if q == nil {
 		return nil
@@ -278,13 +287,11 @@ func computeHard(q *agentsv1alpha1.TenantComputeQuota) corev1.ResourceList {
 	if q.CPU != "" {
 		if v, err := resource.ParseQuantity(q.CPU); err == nil {
 			hard[corev1.ResourceRequestsCPU] = v
-			hard[corev1.ResourceLimitsCPU] = v
 		}
 	}
 	if q.Memory != "" {
 		if v, err := resource.ParseQuantity(q.Memory); err == nil {
 			hard[corev1.ResourceRequestsMemory] = v
-			hard[corev1.ResourceLimitsMemory] = v
 		}
 	}
 	if q.Pods > 0 {
