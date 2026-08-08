@@ -144,3 +144,44 @@ def test_run_sugar_returns_on_requires_action(monkeypatch):
 def test_requires_base_url():
     with pytest.raises(ValueError):
         RunsClient("")
+
+
+def test_stream_wraps_midstream_error_as_endpoint_error(monkeypatch):
+    """FUNC-7: a mid-stream read error (e.g. a socket TimeoutError between SSE events, on the
+    5s default) must surface as EndpointError — never a raw TimeoutError — so a caller sees
+    the SDK's typed error instead of an unhandled exception mid-run."""
+    import urllib.request
+
+    class FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def __iter__(self):
+            yield b"data: one\n"
+            raise TimeoutError("read timed out")  # the FUNC-7 stall, between events
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: FakeResp())
+    gen = _http.stream("GET", "https://c/events")
+    assert next(gen) == "data: one"
+    with pytest.raises(_http.EndpointError):
+        next(gen)
+
+
+def test_runs_stream_uses_long_read_timeout(monkeypatch):
+    """FUNC-7: runs.stream must pass a LONG read timeout so a >5s idle gap (a slow model turn
+    or a run parked at requires_action) doesn't kill the stream on the 5s default."""
+    seen = {}
+
+    def fake_stream(method, url, *, headers=None, timeout=None, **_kw):
+        seen["timeout"] = timeout
+        return iter(["event: run.completed", "data: {}", ""])
+
+    monkeypatch.setattr(_http, "stream", fake_stream)
+    list(RunsClient("https://c").stream("run-1"))
+    assert seen["timeout"] == _http.STREAM_READ_TIMEOUT
+    assert seen["timeout"] > _http.DEFAULT_TIMEOUT

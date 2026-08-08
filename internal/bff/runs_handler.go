@@ -354,10 +354,18 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	ctx := r.Context()
+	// SSE heartbeat (FUNC-7): a run parked at requires_action (or a slow model turn) emits
+	// no events for a while, so send a comment line periodically to keep the stream alive
+	// within the client's read timeout — an idle-but-live run must not look dead.
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return // client disconnected
+		case <-heartbeat.C:
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n") // SSE comment — ignored by parsers, resets the read deadline
+			flusher.Flush()
 		case ev, open := <-events:
 			if !open {
 				return // run terminal + backlog drained
@@ -371,6 +379,10 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// sseHeartbeatInterval is how often the run-events SSE stream emits a keep-alive comment.
+// Well within the SDK's STREAM_READ_TIMEOUT so an idle-but-live run never trips it (FUNC-7).
+const sseHeartbeatInterval = 15 * time.Second
 
 // lastEventID reads the SSE resume cursor from the standard Last-Event-ID header, falling back to
 // a `?fromSeq=` query param for clients (EventSource) that cannot set the header on first connect.
