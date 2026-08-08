@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 )
 
 // The connect-a-provider handlers (ADR 0015). All three are CALLER-SCOPED
@@ -175,10 +176,23 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 	if cErr != nil {
 		// classifyCreateError already maps Forbidden→403, AlreadyExists→409, etc.
 		// A viewer's denied create surfaces here as an honest 403, not swallowed.
+		if cErr.status == http.StatusForbidden {
+			// A denied connect is compliance-relevant ("who was refused") — record it, then 403.
+			s.appendAudit(r.Context(), auditlog.Entry{
+				Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+				ResourceKind: "Provider", ResourceName: name, Namespace: ns, Outcome: "denied",
+				Detail: map[string]any{"provider": strings.ToLower(strings.TrimSpace(req.Provider))},
+			})
+		}
 		writeError(w, cErr.status, cErr.msg)
 		return
 	}
 
+	s.appendAudit(r.Context(), auditlog.Entry{
+		Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+		ResourceKind: "Provider", ResourceName: name, Namespace: ns,
+		Detail: map[string]any{"provider": strings.ToLower(strings.TrimSpace(req.Provider))},
+	})
 	writeJSON(w, http.StatusCreated, ConnectProviderResponse{
 		Provider: ProviderSummary{
 			Name:        name,

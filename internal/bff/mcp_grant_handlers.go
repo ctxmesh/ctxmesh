@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
@@ -257,6 +258,11 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 			userHash:  flow.grantUserHash,
 			namespace: flow.namespace,
 		})
+		s.appendAudit(ctx, auditlog.Entry{
+			Actor: s.auditActor(ctx, caller), Action: auditActionGrantCreate,
+			ResourceKind: "MCPGrant", ResourceName: flow.serverName, Namespace: flow.namespace,
+			Detail: map[string]any{"userHash": flow.grantUserHash, "boundary": flow.boundary},
+		})
 		oauthCallbackConnected(w, r, flow.serverName, flow.openerOrigin)
 		return
 	}
@@ -303,6 +309,11 @@ func (s *Server) completeGrantConsent(ctx context.Context, w http.ResponseWriter
 		server:    flow.serverName,
 		userHash:  flow.grantUserHash,
 		namespace: flow.namespace,
+	})
+	s.appendAudit(ctx, auditlog.Entry{
+		Actor: s.auditActor(ctx, caller), Action: auditActionGrantCreate,
+		ResourceKind: "MCPGrant", ResourceName: flow.serverName, Namespace: flow.namespace,
+		Detail: map[string]any{"userHash": flow.grantUserHash, "boundary": flow.boundary},
 	})
 
 	// This callback is browser-facing (the OAuth redirect target): send the user back
@@ -401,6 +412,12 @@ func (s *Server) handleRevokeMCPGrant(w http.ResponseWriter, r *http.Request) {
 		server:    server,
 		userHash:  userHash,
 		namespace: ns,
+	})
+	// username is the precise caller (resolved above); use it directly as the audit actor.
+	s.appendAudit(r.Context(), auditlog.Entry{
+		Actor: username, Action: auditActionGrantRevoke,
+		ResourceKind: "MCPGrant", ResourceName: server, Namespace: ns,
+		Detail: map[string]any{"userHash": userHash},
 	})
 
 	writeJSON(w, http.StatusOK, MCPGrantResponse{
