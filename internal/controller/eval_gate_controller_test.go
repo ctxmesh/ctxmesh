@@ -163,13 +163,22 @@ func TestGate_AboveThreshold_AwaitingPromotion_ThenApproved(t *testing.T) {
 	assert.Equal(t, "0.9000", updated.Status.Gate.Score)
 	assert.NotEmpty(t, updated.Status.Gate.ScoredRevision)
 
-	// ── Human approval: annotate promote=true, re-reconcile → promoted ─────────
+	scoredRev := updated.Status.Gate.ScoredRevision
+
+	// ── FUNC-4: a bare/legacy promote=true must NOT promote (it names no revision) ──
 	updated.Annotations = map[string]string{promoteAnnotation: "true"}
 	require.NoError(t, k8sClient.Update(testCtx, updated))
+	reconcileNN(t, r, name, namespace)
+	assert.False(t, ksvcExists(name, namespace),
+		"a bare promote=true must NOT promote — one approval can't auto-promote every candidate (audit FUNC-4)")
 
+	// ── Human approval: annotate promote=<candidate revision>, re-reconcile → promoted ──
+	approving := getDeploy(t, name, namespace)
+	approving.Annotations = map[string]string{promoteAnnotation: scoredRev}
+	require.NoError(t, k8sClient.Update(testCtx, approving))
 	reconcileNN(t, r, name, namespace)
 	assert.True(t, ksvcExists(name, namespace),
-		"an approved candidate must be promoted to serve (ksvc created)")
+		"an approved candidate (promote=<revision>) must be promoted to serve (ksvc created)")
 
 	promoted := getDeploy(t, name, namespace)
 	require.NotNil(t, promoted.Status.Gate)
