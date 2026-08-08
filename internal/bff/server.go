@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -83,6 +84,8 @@ type Server struct {
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
 	agentMemoryStore agentmemory.Store
+	// auditStore appends the BFF's security events to the audit_log (ADR 0056, M63). nil ⇒ no-op.
+	auditStore auditlog.Store
 
 	// tenantUsage reads a tenant's LIVE quota consumption from the shared state-layer Valkey (M49). nil ⇒
 	// the tenant usage endpoint returns 501 (no state-layer configured).
@@ -327,6 +330,10 @@ type Options struct {
 	// AgentMemoryStore is the control-plane pgvector store for long-term memory (ADR 0045). Optional —
 	// nil ⇒ the console memory endpoint returns 501.
 	AgentMemoryStore agentmemory.Store
+	// AuditStore is the control-plane store the BFF appends security events to (connect / grant.create /
+	// grant.revoke + denials) with the PRECISE authenticated actor (ADR 0056, M63). Optional — nil ⇒ the
+	// BFF audit writes no-op (the controller still persists CRD mutations) and GET /api/audit returns 501.
+	AuditStore auditlog.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -363,6 +370,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
+		auditStore:               opts.AuditStore,
 		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
@@ -484,6 +492,9 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
+		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
+		authed.HandleFunc("GET /api/audit", s.handleListAudit)
 		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
 		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
 		// API server (a viewer without update is denied → 403).

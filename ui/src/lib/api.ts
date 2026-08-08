@@ -543,6 +543,49 @@ export interface TraceLinkResponse {
   url: string;
 }
 
+// --- Audit surface (GET /api/audit) -----------------------------------------
+// The compliance audit trail (ADR 0056, M63): "who connected/consented/invoked
+// what". Operator-only (gated on `list auditlogs`). NEVER carries secret
+// material — `detail` is non-secret context (server name, boundary, userHash).
+
+export interface AuditEvent {
+  id: number;
+  occurredAt: string; // RFC3339
+  source: string; // "controller" | "bff"
+  actor: string;
+  actorKind: string; // "user" | "controller" | "system"
+  action: string;
+  resourceKind?: string;
+  resourceName?: string;
+  namespace?: string;
+  outcome: string; // "success" | "denied" | "error"
+  traceId?: string;
+  detail?: Record<string, unknown>;
+}
+
+// AuditListResponse mirrors the BFF list-contract DTO: `items` is non-null on the
+// wire ([] not null); `nextCursor` is the opaque keyset token — empty = exhausted.
+export interface AuditListResponse {
+  items: AuditEvent[];
+  nextCursor?: string;
+}
+
+// AuditListParams are the query params for GET /api/audit (all server-side):
+//   namespace — scope to one namespace ("" = cluster-wide, operator only)
+//   actor     — exact actor match
+//   action    — exact action match ("connect" | "grant.create" | …)
+//   kind      — exact resourceKind match ("Provider" | "MCPGrant" | …)
+//   limit     — page size (BFF defaults + caps)
+//   cursor    — opaque keyset continue token from a prior page's nextCursor
+export interface AuditListParams {
+  namespace?: string;
+  actor?: string;
+  action?: string;
+  kind?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 // --- Config builder (POST /api/expand, POST /api/agents) --------------------
 // The config-builder submits the SAME simplified agent.yaml the CLI consumes:
 // the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
@@ -2025,6 +2068,38 @@ export const api = {
       );
     }
     return (await res.json()) as RunListResponse;
+  },
+
+  // listAudit reads one keyset page of the compliance audit trail (GET /api/audit,
+  // ADR 0056). Returns null on 501 (the audit store is not configured — control
+  // plane DSN absent) as the calm sentinel: callers render "not enabled", NOT an
+  // error. A 403 (the caller lacks the operator `auditlogs` persona) throws a
+  // typed ApiError (isForbidden) so the page shows an honest forbidden state — never
+  // a fake empty list. Any other non-2xx (e.g. 500 DB) throws too (retryable).
+  listAudit: async (
+    params: AuditListParams = {},
+    signal?: AbortSignal,
+  ): Promise<AuditListResponse | null> => {
+    const qs = new URLSearchParams();
+    if (params.namespace) qs.set("namespace", params.namespace);
+    if (params.actor) qs.set("actor", params.actor);
+    if (params.action) qs.set("action", params.action);
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    const res = await apiFetch(`/api/audit${suffix}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (res.status === 501) return null; // audit store not configured — calm sentinel
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `audit failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AuditListResponse;
   },
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(

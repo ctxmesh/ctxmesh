@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 )
 
 // The connect-a-provider handlers (ADR 0015). All three are CALLER-SCOPED
@@ -77,6 +78,14 @@ const (
 // provider API key. The SecretBinding's secretRef.key points at this.
 const secretKeyAPIKey = "api-key"
 
+const (
+	// resourceKindProvider is the audit ResourceKind for a connect/rotate event (ADR 0056 §2).
+	resourceKindProvider = "Provider"
+	// providerNoun is the lowercase "provider" string reused as the route-name fallback, the
+	// GET-error resource label, and the audit detail key — one const so the literal isn't repeated.
+	providerNoun = "provider"
+)
+
 // secretKind names the Secret object kind for createError messages. (secretBindingKind
 // and modelRouteKind live with their CRUD handlers, same package.)
 const secretKind = "Secret"
@@ -102,7 +111,7 @@ func providerRouteName(provider string) string {
 	base = rfc1123Invalid.ReplaceAllString(base, "-")
 	base = strings.Trim(base, "-")
 	if base == "" {
-		base = "provider"
+		base = providerNoun
 	}
 	if len(base) > 40 {
 		base = strings.Trim(base[:40], "-")
@@ -175,10 +184,23 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 	if cErr != nil {
 		// classifyCreateError already maps Forbidden→403, AlreadyExists→409, etc.
 		// A viewer's denied create surfaces here as an honest 403, not swallowed.
+		if cErr.status == http.StatusForbidden {
+			// A denied connect is compliance-relevant ("who was refused") — record it, then 403.
+			s.appendAudit(r.Context(), auditlog.Entry{
+				Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+				ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: "denied",
+				Detail: map[string]any{providerNoun: strings.ToLower(strings.TrimSpace(req.Provider))},
+			})
+		}
 		writeError(w, cErr.status, cErr.msg)
 		return
 	}
 
+	s.appendAudit(r.Context(), auditlog.Entry{
+		Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+		ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns,
+		Detail: map[string]any{providerNoun: strings.ToLower(strings.TrimSpace(req.Provider))},
+	})
 	writeJSON(w, http.StatusCreated, ConnectProviderResponse{
 		Provider: ProviderSummary{
 			Name:        name,
@@ -527,7 +549,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	// Read the route to learn the provider id + which SecretBinding holds the key.
 	var route agentsv1alpha1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
-		s.writeGetError(w, err, "provider")
+		s.writeGetError(w, err, providerNoun)
 		return
 	}
 	provider, secretName, baseURL := routeProbeInputs(&route)
@@ -648,7 +670,7 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 	// Read the route to learn the provider id + which SecretBinding holds the key.
 	var route agentsv1alpha1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
-		s.writeGetError(w, err, "provider")
+		s.writeGetError(w, err, providerNoun)
 		return
 	}
 	provider, secretName, baseURL := routeProbeInputs(&route)

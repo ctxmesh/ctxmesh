@@ -148,6 +148,11 @@ func (a *Auditor) emit(verb Verb, kind string, obj any) {
 		Name:      meta.GetName(),
 		Namespace: meta.GetNamespace(),
 		Subject:   subjectFromObject(meta),
+		// The mutated object's resourceVersion — stable per mutation, and it survives a delete (the
+		// informer tombstone carries it). A persistent sink folds it into a DETERMINISTIC dedup key so
+		// the same mutation observed on every manager replica (NeedLeaderElection=false) collapses to
+		// one stored row (ADR 0056 §3). Empty in the log sink's view; only the Postgres sink reads it.
+		ResourceVersion: meta.GetResourceVersion(),
 	})
 }
 
