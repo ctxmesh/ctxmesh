@@ -31,19 +31,22 @@ import (
 // string literals of a security-critical key.
 const TenantLabel = "agents.ctxmesh.ai/tenant"
 
-// TenantComputeQuota is the compute ceiling reconciled onto every member
-// namespace as a Kubernetes ResourceQuota + LimitRange (ADR 0046 §3, M47). Empty
-// fields are omitted from the ResourceQuota, so a Tenant can cap only what it
-// cares about.
+// TenantComputeQuota is the compute ceiling reconciled onto every member namespace
+// as a Kubernetes ResourceQuota (ADR 0046 §3, M47). Empty fields are omitted, so a
+// Tenant can cap only what it cares about. It caps scheduler-guaranteed REQUESTS
+// (not limits) — a limits.* quota would force every pod to declare limits, which the
+// controller's requests-only agent pods (and Knative's queue-proxy) don't, rejecting
+// them all (audit FUNC-2). Also capping/defaulting limits via a per-namespace
+// LimitRange is a follow-on (m52.F-LimitRange).
 type TenantComputeQuota struct {
-	// cpu caps the tenant's total requested + limit CPU across member namespaces
-	// (a Kubernetes quantity, e.g. "20" or "20000m"). Applied as requests.cpu
-	// and limits.cpu on each member namespace's ResourceQuota.
+	// cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
+	// quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
+	// namespace's ResourceQuota.
 	// +optional
 	CPU string `json:"cpu,omitempty"`
 
-	// memory caps the tenant's total requested + limit memory (a Kubernetes
-	// quantity, e.g. "40Gi"). Applied as requests.memory and limits.memory.
+	// memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
+	// "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
 	// +optional
 	Memory string `json:"memory,omitempty"`
 
