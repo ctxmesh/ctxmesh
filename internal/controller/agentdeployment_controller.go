@@ -213,6 +213,14 @@ type AgentDeploymentReconciler struct {
 	// ⇒ no sidecar is injected and the pod template is unchanged (no drift).
 	OBOEgress OBOEgressConfig
 
+	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
+	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
+	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
+	// and ImagePullBackOff off a kind cluster, so a real install MUST set these to a
+	// reachable registry (wired through the chart, OPS-4).
+	CollectorImage string
+	DiscoveryImage string
+
 	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
 	// is injected into memory-bound agents so the launcher reverse-proxies session/
 	// shared memory to the control-plane state-layer proxy instead of Valkey directly
@@ -1140,7 +1148,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	if hasBindings {
-		containers = append(containers, discoverySidecarContainer())
+		containers = append(containers, discoverySidecarContainer(r.discoveryImage()))
 		// Sidecar-mode tool containers, in the deterministic binding-name order
 		// Render assigned (matches the manifest's localhost ports).
 		for _, st := range sidecarTools {
@@ -1437,6 +1445,24 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	return annotations, nil
 }
 
+// collectorImage / discoveryImage resolve the injected sidecar images: the configured
+// override (COLLECTOR_IMAGE / DISCOVERY_IMAGE, OPS-1) or the project-default constant. The
+// defaults are dev.local/* (ImagePullBackOff off a kind cluster), so a real install sets
+// these — wired through the chart (OPS-4).
+func (r *AgentDeploymentReconciler) collectorImage() string {
+	if r.CollectorImage != "" {
+		return r.CollectorImage
+	}
+	return telemetry.CollectorImage
+}
+
+func (r *AgentDeploymentReconciler) discoveryImage() string {
+	if r.DiscoveryImage != "" {
+		return r.DiscoveryImage
+	}
+	return DiscoveryImage
+}
+
 // reconcileCollector ensures the per-agent collector-config ConfigMap and
 // returns the collector sidecar container + its config volume. Langfuse export
 // is enabled only when a `langfuse-otlp` Secret exists in the agent's namespace
@@ -1509,7 +1535,7 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
 	}
 
-	return telemetry.Container(cmName, langfuseEnv), telemetry.Volume(cmName), nil
+	return telemetry.Container(cmName, langfuseEnv, r.collectorImage()), telemetry.Volume(cmName), nil
 }
 
 // customDetectors adapts the AgentDeployment's optional spec.tracePolicy into
