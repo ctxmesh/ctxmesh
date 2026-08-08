@@ -484,7 +484,7 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
 	}
-	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName); err != nil {
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -551,7 +551,7 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
 	}
-	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName); err != nil {
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1264,7 +1264,13 @@ func agentIdentitySAName(deployName string) string {
 // imagePullSecrets — so it grants nothing; its sole purpose is a distinct TokenReview
 // subject (system:serviceaccount:<ns>:agent-<name>) the proxy scopes per-agent. Owned by
 // the AgentDeployment, so it is garbage-collected with the agent. Idempotent.
-func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName string) error {
+//
+// registryID, when non-empty, is stamped as the registryIDLabel LABEL on the SA — the
+// SERVER-TRUSTED source the state-layer proxy reads to derive the SHARED-scope memory
+// boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
+// §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
+// registry), so a stale boundary can never linger.
+func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
 	if saName == "" {
 		return nil
 	}
@@ -1272,6 +1278,15 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: deploy.Namespace},
 	}
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		// Manage ONLY our registry label — never clobber labels another actor set.
+		if registryID != "" {
+			if sa.Labels == nil {
+				sa.Labels = map[string]string{}
+			}
+			sa.Labels[registryIDLabel] = registryID
+		} else {
+			delete(sa.Labels, registryIDLabel)
+		}
 		return ctrl.SetControllerReference(deploy, sa, r.Scheme)
 	}); err != nil {
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
@@ -1307,7 +1322,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	if err != nil {
 		return nil, fmt.Errorf("building pod template: %w", err)
 	}
-	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName); err != nil {
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
 		return nil, err
 	}
 

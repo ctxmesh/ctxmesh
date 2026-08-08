@@ -52,14 +52,27 @@ const podTokenSkew = 30 * time.Second
 // parsed — conservative, so a malformed-but-accepted token isn't trusted forever.
 const podTokenFallbackTTL = 60 * time.Second
 
-// PodAuthenticator authenticates a launcher's pod-identity token and returns the
-// pod's namespace. It is the second principal type on the proxy (alongside the
-// memory runcap) for the quota/async paths, which carry no per-user capability.
+// PodIdentity is a verified pod principal: the namespace and the ServiceAccount name
+// the TokenReview attested (system:serviceaccount:<Namespace>:<ServiceAccount>). Both
+// come from the verified token — never caller input.
+type PodIdentity struct {
+	Namespace      string
+	ServiceAccount string
+}
+
+// PodAuthenticator authenticates a launcher's pod-identity token. It is the principal
+// type on the proxy for the quota/async paths AND (ADR 0052 §C6 RESOLUTION) the memory
+// path — all workload-scoped resources whose access is derived from the pod's identity,
+// not a per-user runcap.
 type PodAuthenticator interface {
 	// Namespace verifies the bearer token and returns the pod's namespace. It
 	// returns ErrTokenRejected for an invalid token (→ 401) and any other error for
 	// an auth-infra failure (→ 503).
 	Namespace(ctx context.Context, token string) (string, error)
+	// Identity verifies the bearer token and returns the full pod identity (namespace
+	// + ServiceAccount name) — the memory path derives the per-agent scope from the SA
+	// name. Same error contract as Namespace.
+	Identity(ctx context.Context, token string) (PodIdentity, error)
 }
 
 // tokenReviewer performs a Kubernetes TokenReview. An interface so tests can inject
@@ -122,8 +135,8 @@ func (c clientTokenReviewer) review(
 }
 
 type podCacheEntry struct {
-	namespace string
-	expiry    time.Time
+	identity PodIdentity
+	expiry   time.Time
 }
 
 // tokenReviewAuthenticator verifies pod tokens via a cached TokenReview (ADR 0050
@@ -158,41 +171,50 @@ func newTokenReviewAuthenticator(r tokenReviewer, audience string, now func() ti
 }
 
 func (a *tokenReviewAuthenticator) Namespace(ctx context.Context, token string) (string, error) {
-	if strings.TrimSpace(token) == "" {
-		return "", ErrTokenRejected
+	id, err := a.Identity(ctx, token)
+	if err != nil {
+		return "", err
 	}
-	if ns, ok := a.cachedNamespace(token); ok {
-		return ns, nil
+	return id.Namespace, nil
+}
+
+func (a *tokenReviewAuthenticator) Identity(ctx context.Context, token string) (PodIdentity, error) {
+	if strings.TrimSpace(token) == "" {
+		return PodIdentity{}, ErrTokenRejected
+	}
+	if id, ok := a.cachedIdentity(token); ok {
+		return id, nil
 	}
 
 	authenticated, username, err := a.reviewer.review(ctx, token, []string{a.audience})
 	if err != nil {
-		return "", fmt.Errorf("tokenreview: %w", err) // infra → 503
+		return PodIdentity{}, fmt.Errorf("tokenreview: %w", err) // infra → 503
 	}
 	if !authenticated {
-		return "", ErrTokenRejected // rejected → 401
+		return PodIdentity{}, ErrTokenRejected // rejected → 401
 	}
-	ns, ok := namespaceFromSAUsername(username)
+	ns, sa, ok := identityFromSAUsername(username)
 	if !ok {
 		// Authenticated, but not a ServiceAccount (e.g. a user token) — not a valid
-		// pod identity for quota. Reject rather than guess a namespace.
-		return "", ErrTokenRejected
+		// pod identity. Reject rather than guess an identity.
+		return PodIdentity{}, ErrTokenRejected
 	}
-	a.store(token, ns)
-	return ns, nil
+	id := PodIdentity{Namespace: ns, ServiceAccount: sa}
+	a.store(token, id)
+	return id, nil
 }
 
-func (a *tokenReviewAuthenticator) cachedNamespace(token string) (string, bool) {
+func (a *tokenReviewAuthenticator) cachedIdentity(token string) (PodIdentity, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	e, ok := a.cache[token]
 	if !ok || !a.now().Before(e.expiry) {
-		return "", false
+		return PodIdentity{}, false
 	}
-	return e.namespace, true
+	return e.identity, true
 }
 
-func (a *tokenReviewAuthenticator) store(token, namespace string) {
+func (a *tokenReviewAuthenticator) store(token string, identity PodIdentity) {
 	now := a.now()
 	expiry := now.Add(podTokenFallbackTTL)
 	if exp, ok := tokenExpiry(token); ok {
@@ -211,20 +233,20 @@ func (a *tokenReviewAuthenticator) store(token, namespace string) {
 			delete(a.cache, k)
 		}
 	}
-	a.cache[token] = podCacheEntry{namespace: namespace, expiry: expiry}
+	a.cache[token] = podCacheEntry{identity: identity, expiry: expiry}
 }
 
-// namespaceFromSAUsername extracts <ns> from system:serviceaccount:<ns>:<sa>.
-func namespaceFromSAUsername(username string) (string, bool) {
-	rest, ok := strings.CutPrefix(username, saUsernamePrefix)
-	if !ok {
-		return "", false
+// identityFromSAUsername extracts (<ns>, <sa>) from system:serviceaccount:<ns>:<sa>.
+func identityFromSAUsername(username string) (ns, sa string, ok bool) {
+	rest, found := strings.CutPrefix(username, saUsernamePrefix)
+	if !found {
+		return "", "", false
 	}
-	ns, _, ok := strings.Cut(rest, ":")
-	if !ok || ns == "" {
-		return "", false
+	ns, sa, found = strings.Cut(rest, ":")
+	if !found || ns == "" || sa == "" {
+		return "", "", false
 	}
-	return ns, true
+	return ns, sa, true
 }
 
 // tokenExpiry reads the exp claim from a JWT WITHOUT verifying the signature — the

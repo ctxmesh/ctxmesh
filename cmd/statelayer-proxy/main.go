@@ -122,6 +122,16 @@ func run(log logr.Logger) error {
 			opts.PodAuthenticator = podAuth
 			log.Info("pod authenticator ready (cached TokenReview)")
 		}
+		// Shared-scope memory registry resolution (ADR 0052 §C6 RESOLUTION): reads the
+		// registry the controller stamped on the agent identity SA. Best-effort — without
+		// it, shared-scope memory falls back to the private scope (private memory is
+		// unaffected). Never fail the whole proxy on its absence.
+		if reg, rerr := buildRegistryResolver(restCfg); rerr != nil {
+			log.Info("registry resolution disabled — shared-scope memory falls back to private", "reason", rerr.Error())
+		} else {
+			opts.RegistryResolver = reg
+			log.Info("registry resolver ready (SA-label resolution)")
+		}
 	}
 
 	// The capability verifier: REQUIRED in production (a distinct audience). Optional
@@ -189,4 +199,15 @@ func buildPodAuthenticator(restCfg *rest.Config) (statelayer.PodAuthenticator, e
 		audience = defaultPodAudience
 	}
 	return statelayer.NewTokenReviewAuthenticator(clientset, audience, nil), nil
+}
+
+// buildRegistryResolver builds the SA-label RegistryResolver (ADR 0052 §C6 RESOLUTION)
+// over a client-go clientset — it reads the registry the controller stamped on the agent
+// identity SA to key SHARED-scope memory server-side.
+func buildRegistryResolver(restCfg *rest.Config) (statelayer.RegistryResolver, error) {
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("build kubernetes client: %w", err)
+	}
+	return statelayer.NewSARegistryResolver(clientset), nil
 }
