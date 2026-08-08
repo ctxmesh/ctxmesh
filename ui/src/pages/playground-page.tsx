@@ -92,6 +92,10 @@ export function PlaygroundPage() {
   const canRun = can(RES_AGENTS, "create");
   // The active run's SSE stream canceller (m32.8) — aborts on New-run / cancel / unmount.
   const streamCancelRef = useRef<(() => void) | null>(null);
+  // The active inline-consent wait's teardown (OTH-2): onConnect registers a window `message`
+  // listener + a popup-close poll interval; this holds their cleanup so the unmount effect can
+  // clear them even if the user navigates away with the popup still open (they'd leak otherwise).
+  const connectCleanupRef = useRef<(() => void) | null>(null);
 
   // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
   // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
@@ -139,6 +143,17 @@ export function PlaygroundPage() {
       .catch(() => setAgentOptions([]));
     return () => ctrl.abort();
   }, [namespace]);
+
+  // Unmount cleanup (OTH-2): abort an in-flight run SSE stream and tear down any active
+  // inline-consent wait (the `message` listener + popup-close poll). Without this the fetch
+  // stream keeps reading and the listener/interval outlive the page — real leaks the old
+  // "aborts on unmount" comment claimed but never implemented (there was no effect at all).
+  useEffect(() => {
+    return () => {
+      streamCancelRef.current?.();
+      connectCleanupRef.current?.();
+    };
+  }, []);
 
   // Run invokes the DEFINED agent by name. The agent must already be deployed
   // (the run resolves its endpoint server-side); the Playground's define form is
@@ -360,11 +375,15 @@ export function PlaygroundPage() {
     // Resume when the popup reports back (message) or is closed; re-invoke once.
     let done = false;
     let poll = 0;
+    function teardown() {
+      window.removeEventListener("message", onMessage);
+      window.clearInterval(poll);
+      connectCleanupRef.current = null;
+    }
     function finish() {
       if (done) return;
       done = true;
-      window.removeEventListener("message", onMessage);
-      window.clearInterval(poll);
+      teardown();
       setConnecting(null);
       void onRun(); // re-invoke in place — the resume
     }
@@ -377,6 +396,9 @@ export function PlaygroundPage() {
     poll = window.setInterval(() => {
       if (popup.closed) finish();
     }, 700);
+    // Expose the teardown so the unmount effect can clear the listener + poll (OTH-2) if the
+    // user leaves while the consent popup is still open — otherwise both leak past this page.
+    connectCleanupRef.current = teardown;
   }
 
   // Export-to-CRD: preview the expanded CRD (POST /api/expand), then apply it

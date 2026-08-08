@@ -81,6 +81,9 @@ export function ChatPanel({
   const [connectError, setConnectError] = React.useState<string | null>(null);
   const idRef = React.useRef(0);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  // Teardown for an active inline-consent wait (OTH-2): the `message` listener + popup-close
+  // poll leak past this component if the user closes the chat with the consent popup still open.
+  const connectCleanupRef = React.useRef<(() => void) | null>(null);
 
   const busy = connecting !== null || turns.some((t) => t.pending);
 
@@ -89,6 +92,12 @@ export function ChatPanel({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns]);
+
+  // Unmount cleanup (OTH-2): clear any in-flight consent wait so its listener + interval don't
+  // outlive the chat.
+  React.useEffect(() => {
+    return () => connectCleanupRef.current?.();
+  }, []);
 
   function nextId(): number {
     idRef.current += 1;
@@ -201,11 +210,15 @@ export function ChatPanel({
 
     let done = false;
     let poll = 0;
+    function teardown() {
+      window.removeEventListener("message", onMessage);
+      window.clearInterval(poll);
+      connectCleanupRef.current = null;
+    }
     function finish() {
       if (done) return;
       done = true;
-      window.removeEventListener("message", onMessage);
-      window.clearInterval(poll);
+      teardown();
       setConnecting(null);
       void runInvoke(text, agentTurnId); // resume the same turn with the fresh credential
     }
@@ -222,6 +235,7 @@ export function ChatPanel({
     poll = window.setInterval(() => {
       if (popup.closed) finish();
     }, 700);
+    connectCleanupRef.current = teardown; // let the unmount effect clear this wait (OTH-2)
   }
 
   function newChat() {

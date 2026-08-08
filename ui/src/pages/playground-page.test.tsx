@@ -234,6 +234,39 @@ describe("PlaygroundPage", () => {
     window.sessionStorage.clear();
   });
 
+  it("tears down the consent wait (listener + poll) on unmount — no leak (OTH-2)", async () => {
+    const popup = { closed: false } as Window; // stays open; never reports back
+    vi.stubGlobal("open", vi.fn(() => popup));
+    const calls = recordingFetch({
+      run: {
+        detail: {
+          id: "run-1",
+          status: "requires_action",
+          traceId: "trace-xyz",
+          messages: [{ role: "assistant", content: "connect your account" }],
+          requiresAction: { kind: "consent_required", servers: ["scalekit-mcp-server"] },
+        },
+      },
+    });
+
+    const { unmount } = renderPage();
+    fillAgent("sk-agent");
+    fill("Input (JSON)", '{"prompt":"go"}');
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    // Click Connect → the wait registers a `message` listener + a popup-close poll interval.
+    const connectBtn = await screen.findByTestId("connect-scalekit-mcp-server");
+    fireEvent.click(connectBtn);
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/mcp/oauth/grant")).toBeDefined());
+
+    // Unmount BEFORE the popup reports back — the effect must clear both, or they leak.
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+    const removeListenerSpy = vi.spyOn(window, "removeEventListener");
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalled();
+    expect(removeListenerSpy).toHaveBeenCalledWith("message", expect.any(Function));
+  });
+
   it("defines and runs an agent, then offers a 'View full trace' Link → /traces/:id (no Langfuse iframe)", async () => {
     const calls = recordingFetch({ run: {} });
 
