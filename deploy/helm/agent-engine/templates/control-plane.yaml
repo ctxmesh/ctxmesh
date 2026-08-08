@@ -1047,7 +1047,7 @@ spec:
       containers:
       - env:
         - name: STATELAYER_ADDR
-          value: agent-engine-statelayer.agent-engine-system.svc:6379
+          value: {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: STATELAYER_USERNAME
           value: ""
         - name: STATELAYER_PASSWORD

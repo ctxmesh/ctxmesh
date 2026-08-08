@@ -409,7 +409,7 @@ spec:
                         description: |-
                           addr is the host:port of the Valkey backend.
                           If omitted the controller defaults to
-                          agent-engine-statelayer.agent-engine-system.svc:6379.
+                          {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                         maxLength: 256
                         type: string
                     type: object
@@ -1011,7 +1011,7 @@ spec:
                         description: |-
                           addr is the host:port of the Valkey backend.
                           If omitted the controller defaults to
-                          agent-engine-statelayer.agent-engine-system.svc:6379.
+                          {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                         maxLength: 256
                         type: string
                     type: object
@@ -2607,7 +2607,7 @@ spec:
                             description: |-
                               addr is the host:port of the Valkey backend.
                               If omitted the controller defaults to
-                              agent-engine-statelayer.agent-engine-system.svc:6379.
+                              {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                             maxLength: 256
                             type: string
                         type: object
@@ -3081,7 +3081,7 @@ spec:
                             description: |-
                               addr is the host:port of the Valkey backend.
                               If omitted the controller defaults to
-                              agent-engine-statelayer.agent-engine-system.svc:6379.
+                              {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                             maxLength: 256
                             type: string
                         type: object
@@ -5313,7 +5313,7 @@ spec:
                     description: |-
                       addr is the host:port of the Valkey backend.
                       If omitted the controller defaults to
-                      agent-engine-statelayer.agent-engine-system.svc:6379.
+                      {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                     maxLength: 256
                     type: string
                 type: object
@@ -5461,7 +5461,7 @@ spec:
                     description: |-
                       addr is the host:port of the Valkey backend.
                       If omitted the controller defaults to
-                      agent-engine-statelayer.agent-engine-system.svc:6379.
+                      {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}.
                     maxLength: 256
                     type: string
                 type: object
