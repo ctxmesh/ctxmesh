@@ -8,6 +8,7 @@ import {
   MessagesSquare,
   Network,
   PlugZap,
+  ScrollText,
   SlidersHorizontal,
   TestTube2,
   Users,
@@ -33,7 +34,15 @@ import type { LucideIcon } from "lucide-react";
 
 // Milestone is duplicated from design/scaffold to keep this module independent of
 // the design gallery (the wireframes' own tag type). It is display-only.
-export type Milestone = "M13" | "M14" | "M15" | "M16" | "M17" | "M18" | "M47";
+export type Milestone =
+  | "M13"
+  | "M14"
+  | "M15"
+  | "M16"
+  | "M17"
+  | "M18"
+  | "M47"
+  | "M63";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -47,6 +56,10 @@ export const RES_SCALING = "agentscalingpolicies";
 export const RES_EVALSUITES = "evalsuites";
 export const RES_PROMPTVERSIONS = "promptversions";
 export const RES_TENANTS = "tenants";
+// RES_AUDITLOGS gates the operator-only Audit surface (ADR 0056). It is a virtual
+// resource: only the operator persona's ClusterRole grants `list auditlogs`, so the
+// nav item hides for developer/viewer chrome (display-only; the API still enforces).
+export const RES_AUDITLOGS = "auditlogs";
 
 export interface NavItem {
   id: string;
@@ -60,9 +73,15 @@ export interface NavItem {
    */
   route?: string;
   /**
-   * When set, this destination is a WRITE affordance — hidden from a viewer's
-   * chrome (display-only, ADR 0011). Gated on `allowed[requiresWrite.resource]
-   * [requiresWrite.verb]`. Read-only destinations omit it and are always shown.
+   * When set, this destination is capability-gated — hidden from any chrome whose
+   * caller isn't `allowed[requiresWrite.resource][requiresWrite.verb]` (display-only,
+   * ADR 0011). Read-open destinations omit it and are always shown. The COMMON case
+   * is a write affordance hidden from a viewer (verb "create"/"update"). But a `list`
+   * (read) verb is also valid here as a deliberate OPERATOR-ONLY *visibility* gate —
+   * e.g. Audit (`list auditlogs`, M63): a read-only page whose data spans users/
+   * namespaces, so it's shown only to the operator persona, exactly like MCP approvals.
+   * (The field name predates this read-gate use; a rename to `requiresCapability` is
+   * carded — m52 M63-UX residue.)
    */
   requiresWrite?: { resource: string; verb: string };
 }
@@ -213,6 +232,18 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Coins,
         milestone: "M16",
         route: "/cost",
+      },
+      {
+        // Audit (M63) — the compliance trail ("who connected/consented/invoked
+        // what", ADR 0056). OPERATOR-ONLY: the trail spans users/namespaces, so
+        // like MCP approvals it's gated (here on `list auditlogs`) and hidden from
+        // developer/viewer chrome. A non-operator who deep-links gets an honest 403.
+        id: "audit",
+        label: "Audit",
+        icon: ScrollText,
+        milestone: "M63",
+        route: "/audit",
+        requiresWrite: { resource: RES_AUDITLOGS, verb: "list" },
       },
     ],
   },

@@ -26,6 +26,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -201,6 +202,13 @@ func TestAudit_MutationEmitsRecord(t *testing.T) {
 	assert.Equal(t, "default", deleteEntry.Namespace)
 	assert.NotEmpty(t, deleteEntry.Subject, "subject should be best-effort populated")
 	assert.False(t, deleteEntry.Timestamp.IsZero(), "timestamp should be set")
+
+	// M63 (ADR 0056 §3): the entry now carries the mutated object's resourceVersion — the
+	// PostgresSink folds it into the deterministic dedup key so cross-replica duplicate
+	// observations of the SAME mutation collapse to one audit_log row.
+	updateEntry, ok := sink.find(VerbUpdate, name)
+	require.True(t, ok, "the update entry was recorded")
+	assert.NotEmpty(t, updateEntry.ResourceVersion, "audit entries carry the resourceVersion (M63 dedup key)")
 }
 
 // waitForEntry polls the sink until an entry for verb+name appears, failing the
@@ -228,11 +236,16 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 		file      string
 		roleName  string
 		wantVerbs []string
+		// wantAuditlogs asserts the OPERATOR-ONLY audit-read grant (ADR 0056 §4): only the operator
+		// persona's ClusterRole carries `auditlogs`, so GET /api/audit's SSAR gate hides the trail
+		// from developer/viewer. A regression that leaks it to another persona fails here.
+		wantAuditlogs bool
 	}{
 		{
-			file:      "agent_engine_operator_role.yaml",
-			roleName:  "operator",
-			wantVerbs: []string{"*"},
+			file:          "agent_engine_operator_role.yaml",
+			roleName:      "operator",
+			wantVerbs:     []string{"*"},
+			wantAuditlogs: true,
 		},
 		{
 			file:      "agent_engine_developer_role.yaml",
@@ -278,6 +291,9 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 				assert.Contains(t, primary.Resources, res,
 					"%s must cover CRD %q (authz gap otherwise)", tc.roleName, res)
 			}
+			// M63: auditlogs is operator-ONLY — present on operator, absent from developer/viewer.
+			assert.Equal(t, tc.wantAuditlogs, slices.Contains(primary.Resources, "auditlogs"),
+				"%s auditlogs coverage (operator-only, ADR 0056 §4)", tc.roleName)
 		})
 	}
 }

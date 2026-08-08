@@ -51,6 +51,11 @@ const (
 	resAgentScalingPolicy = "agentscalingpolicies"
 	resEvalSuites         = "evalsuites"
 	resPromptVersions     = "promptversions"
+	// resAuditLogs is the virtual audit resource (ADR 0056, M63). Probed so the console can
+	// gate the operator-only Audit surface on `list auditlogs` — only the operator persona's
+	// ClusterRole grants it, so developer/viewer chrome hides the nav item (display-only; the
+	// API still enforces on GET /api/audit).
+	resAuditLogs = "auditlogs"
 )
 
 // agentsAPIGroup is the API group all the golden CRD kinds live in.
@@ -73,6 +78,7 @@ var (
 		resAgentScalingPolicy,
 		resEvalSuites,
 		resPromptVersions,
+		resAuditLogs,
 	}
 	goldenVerbs = []string{"get", "list", "create", "update", "delete"}
 )

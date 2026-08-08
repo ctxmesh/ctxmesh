@@ -72,6 +72,10 @@ type AuditEntry struct {
 	// field-manager of the most recent apply). "unknown" when undeterminable.
 	// The precise authenticated caller requires an admission webhook (phase-2).
 	Subject string
+	// ResourceVersion is the mutated object's resourceVersion (M63/ADR 0056). A persistent sink uses
+	// it as part of a deterministic dedup key so a mutation observed on every manager replica collapses
+	// to one row; the LogSink ignores it. Empty when the object carried none.
+	ResourceVersion string
 }
 
 // Sink consumes audit entries. The default sink writes to a structured log;
@@ -119,6 +123,18 @@ type SinkFunc func(entry AuditEntry)
 
 // Record calls the underlying function.
 func (f SinkFunc) Record(entry AuditEntry) { f(entry) }
+
+// MultiSink fans each entry to every wrapped sink — e.g. the always-on greppable LogSink + a persistent
+// PostgresSink (ADR 0056 §3): the DB is the queryable projection, the log is the durable fallback. Each
+// Record must itself honour the Sink contract (non-blocking, never error), so the fan-out is safe.
+type MultiSink []Sink
+
+// Record delivers the entry to every sink.
+func (m MultiSink) Record(entry AuditEntry) {
+	for _, s := range m {
+		s.Record(entry)
+	}
+}
 
 // subjectFromObject derives a best-effort actor for the audit entry from the
 // object's managedFields — the field-manager of the most recently updated

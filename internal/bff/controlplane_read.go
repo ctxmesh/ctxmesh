@@ -34,6 +34,10 @@ import (
 const (
 	resourceToolRegistries = "toolregistries"
 	resourcePromptVersions = "promptversions"
+	// resourceAuditLogs is the virtual resource GET /api/audit authorizes against (ADR 0056 §4):
+	// only a persona whose ClusterRole grants `list auditlogs` sees the audit surface. Not a CRD —
+	// the persona's RBAC on this name IS the audit-read policy (the toolregistries pattern).
+	resourceAuditLogs = "auditlogs"
 )
 
 // authorizeStore runs a caller-scoped SelfSubjectAccessReview for a store-backed
