@@ -29,6 +29,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -87,30 +89,38 @@ func doReq(t *testing.T, method, url string, body string) (*http.Response, []byt
 // ── state-layer proxy forwarding (M51, ADR 0050 §8/Amд 1) ──────────────────────
 
 // When STATELAYER_PROXY_URL is set, the session routes reverse-proxy to the proxy,
-// translating the run capability (X-Ctxmesh-Run-Capability) into Authorization Bearer
-// — the launcher holds no Valkey path and passes no key/identity of its own.
+// authenticating with the POD's projected SA token (ADR 0052 §C6 RESOLUTION) — the proxy
+// derives all scope from the verified pod identity, so the launcher passes no runcap. The
+// agent's runcap must be STRIPPED (the proxy doesn't consume it, and it must not leak).
 func TestMemoryForwardsToProxy(t *testing.T) {
 	t.Parallel()
-	var gotAuth, gotPath, gotScope string
+	var gotAuth, gotPath, gotScope, gotRuncap string
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth, gotPath, gotScope = r.Header.Get("Authorization"), r.URL.Path, r.Header.Get("X-Memory-Scope")
+		gotRuncap = r.Header.Get(runcap.HeaderName)
 		w.Header().Set("ETag", "0")
 		_, _ = w.Write([]byte("[]"))
 	}))
 	t.Cleanup(proxy.Close)
 
+	// Mount a projected SA token the forward authenticates with.
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("pod-sa-token-xyz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	_, tp := newTestTracer(t)
 	ms := newMemoryServer(nil, // no direct store — forward-only (phase 3 shape)
 		memoryConfig{
 			Port: defaultMemoryPort, Namespace: "team-alpha", Agent: "support",
-			Scope: "shared", Registry: "reg-1", ProxyURL: proxy.URL,
+			Scope: "shared", Registry: "reg-1", ProxyURL: proxy.URL, TokenPath: tokenPath,
 		},
 		tp.Tracer(tracerName), nil)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/memory/c1", nil)
-	req.Header.Set(runcap.HeaderName, "run-token-abc")
+	req.Header.Set(runcap.HeaderName, "run-token-abc") // must NOT be forwarded
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -120,8 +130,11 @@ func TestMemoryForwardsToProxy(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("forwarded GET status = %d, want 200", resp.StatusCode)
 	}
-	if gotAuth != "Bearer run-token-abc" {
-		t.Errorf("proxy Authorization = %q, want the run capability as a Bearer token", gotAuth)
+	if gotAuth != "Bearer pod-sa-token-xyz" {
+		t.Errorf("proxy Authorization = %q, want the POD SA token as a Bearer token", gotAuth)
+	}
+	if gotRuncap != "" {
+		t.Errorf("proxy still saw the runcap header %q — it must be stripped, not forwarded", gotRuncap)
 	}
 	if gotPath != "/memory/c1" {
 		t.Errorf("proxy path = %q, want /memory/c1", gotPath)
