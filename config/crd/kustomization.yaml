@@ -9,6 +9,7 @@ resources:
 - bases/agents.ctxmesh.ai_mcptoolbindings.yaml
 - bases/agents.ctxmesh.ai_memorybindings.yaml
 - bases/agents.ctxmesh.ai_agentregistries.yaml
+- bases/agents.ctxmesh.ai_agentteams.yaml
 - bases/agents.ctxmesh.ai_agentscalingpolicies.yaml
 - bases/agents.ctxmesh.ai_evalsuites.yaml
 - bases/agents.ctxmesh.ai_credentialstores.yaml

@@ -264,7 +264,7 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 	wantResources := []string{
 		"agentdeployments", "agentversions", "modelroutes", "secretbindings",
 		"mcptoolbindings", "toolregistries", "memorybindings", "agentregistries",
-		"agentscalingpolicies", "evalsuites", "promptversions",
+		"agentteams", "agentscalingpolicies", "evalsuites", "promptversions",
 	}
 
 	for _, tc := range tests {
