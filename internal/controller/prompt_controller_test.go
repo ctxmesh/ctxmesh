@@ -60,6 +60,27 @@ func stampPrompt(t *testing.T, deploy *agentsv1alpha1.AgentDeployment, promptNam
 	deploy.Annotations[prompt.ResolvedPromptAnnotation] = string(raw)
 }
 
+// promptCMByLabel returns the agent's current content-addressed prompt ConfigMap (found by
+// the promptAgentLabel — the name now carries a content digest, FUNC-3). It asserts exactly
+// one exists (in envtest with no live Revisions, superseded CMs are pruned).
+func promptCMByLabel(t *testing.T, agentName, namespace string) corev1.ConfigMap {
+	t.Helper()
+	var cms corev1.ConfigMapList
+	require.NoError(t, k8sClient.List(testCtx, &cms,
+		client.InNamespace(namespace), client.MatchingLabels{promptAgentLabel: agentName}))
+	require.Len(t, cms.Items, 1, "exactly one current prompt ConfigMap for %s", agentName)
+	return cms.Items[0]
+}
+
+// promptCMCount returns how many content-addressed prompt ConfigMaps exist for the agent.
+func promptCMCount(t *testing.T, agentName, namespace string) int {
+	t.Helper()
+	var cms corev1.ConfigMapList
+	require.NoError(t, k8sClient.List(testCtx, &cms,
+		client.InNamespace(namespace), client.MatchingLabels{promptAgentLabel: agentName}))
+	return len(cms.Items)
+}
+
 // TestReconcile_PromptMaterialisedAndRevisionRolls: an agent with a stamped prompt pointer gets the resolved
 // prompt materialised into a <agent>-prompt ConfigMap, mounted read-only with PROMPT_FILE + PROMPT_VERSION
 // static env — and its revision name carries a "-h<digest>" suffix, whereas the SAME agent WITHOUT a prompt
@@ -99,10 +120,7 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	assert.LessOrEqual(t, len(revName), 63, "revision name must stay within the DNS-1035 63-char limit")
 
 	// ── Prompt ConfigMap materialised with the resolved content ────────────────
-	var cm corev1.ConfigMap
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: promptConfigMapName(name), Namespace: namespace}, &cm),
-		"the <agent>-prompt ConfigMap must exist")
+	cm := promptCMByLabel(t, name, namespace)
 	content := cm.Data[promptConfigMapKey]
 	require.NotEmpty(t, content, "prompt ConfigMap must carry the resolved content")
 
@@ -127,7 +145,7 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 		if v.Name == promptVolumeName {
 			hasPromptVol = true
 			require.NotNil(t, v.ConfigMap)
-			assert.Equal(t, promptConfigMapName(name), v.ConfigMap.Name)
+			assert.Equal(t, cm.Name, v.ConfigMap.Name, "volume references the content-addressed prompt CM")
 		}
 	}
 	assert.True(t, hasPromptVol, "pod must carry the prompt ConfigMap volume")
@@ -199,9 +217,7 @@ func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 	rev1 := ksvc1.Spec.Template.Name
 	image1 := ksvc1.Spec.Template.Spec.Containers[0].Image
 
-	var cm1 corev1.ConfigMap
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: promptConfigMapName(name), Namespace: namespace}, &cm1))
+	cm1 := promptCMByLabel(t, name, namespace)
 	content1 := cm1.Data[promptConfigMapKey]
 	promptVer1 := envByName(ksvc1.Spec.Template.Spec.Containers[0].Env)[envPromptVersion]
 
@@ -217,11 +233,12 @@ func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 	rev2 := ksvc2.Spec.Template.Name
 	image2 := ksvc2.Spec.Template.Spec.Containers[0].Image
 
-	var cm2 corev1.ConfigMap
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: promptConfigMapName(name), Namespace: namespace}, &cm2))
+	cm2 := promptCMByLabel(t, name, namespace)
 	content2 := cm2.Data[promptConfigMapKey]
 	promptVer2 := envByName(ksvc2.Spec.Template.Spec.Containers[0].Env)[envPromptVersion]
+	// FUNC-3: the prompt swap produced a NEW content-addressed CM (not an in-place mutation
+	// of the one the prior revision mounts).
+	assert.NotEqual(t, cm1.Name, cm2.Name, "a prompt swap must create a new content-addressed CM")
 
 	// ── Assert: prompt CHANGED, revision ROLLED, image UNCHANGED ───────────────
 	assert.NotEqual(t, content1, content2, "the resolved prompt content must change on a ref swap")
@@ -277,10 +294,8 @@ func TestReconcile_PromptRefMissing(t *testing.T) {
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc)
 	assert.Error(t, err, "no ksvc must be created when the prompt pointer is unstamped")
 
-	var cm corev1.ConfigMap
-	err = k8sClient.Get(testCtx,
-		types.NamespacedName{Name: promptConfigMapName(name), Namespace: namespace}, &cm)
-	assert.Error(t, err, "no prompt ConfigMap must be created on an unstamped promptRef")
+	assert.Equal(t, 0, promptCMCount(t, name, namespace),
+		"no prompt ConfigMap must be created on an unstamped promptRef")
 }
 
 // TestReconcile_PromptUnresolvable: a stamped prompt pointer the resolver cannot resolve (ErrNotFound — a bad
