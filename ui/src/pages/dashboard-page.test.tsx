@@ -320,6 +320,32 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     expect(screen.getByTestId("first-run-step-0")).toBeInTheDocument();
   });
 
+  it("still renders the checklist when runs is unavailable (minimal install, DX-4)", async () => {
+    // On a minimal install observability is unwired → /api/runs 501 → "unavailable".
+    // The checklist must NOT vanish (it used to gate on runs.kind === "ready"): a new
+    // user on an empty cluster needs it most. The run step just stays unchecked.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
+        if (path === "/api/runs" || path === "/api/cost") {
+          return Promise.resolve({
+            ok: false,
+            status: 501,
+            json: async () => ({ error: "not implemented" }),
+          } as Response);
+        }
+        const body = path === "/api/topology" ? { nodes: [], edges: [] } : { providers: [] };
+        return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      }),
+    );
+    renderDashboard();
+
+    // The checklist renders despite runs being unavailable; step 0 (connect) is the CTA.
+    expect(await screen.findByTestId("first-run-checklist")).toBeInTheDocument();
+    expect(screen.getByTestId("first-run-cta")).toHaveTextContent(/Connect a provider/);
+  });
+
   it("does NOT render the CTA when providers exist", async () => {
     routeFetch({
       "/api/topology": topology,
