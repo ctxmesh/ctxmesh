@@ -900,6 +900,7 @@ function OverviewTab({
         name={detail.name}
         executionModel={detail.executionModel}
         url={detail.url}
+        ns={detail.namespace}
       />
 
       <ChatPanel
