@@ -141,7 +141,14 @@ class RunsClient:
         if from_seq:
             headers["Last-Event-ID"] = str(from_seq)
         seq, kind, data = 0, "", None
-        for line in _http.stream("GET", self._url(f"/api/runs/{run_id}/events"), headers=headers):
+        # A long read timeout (FUNC-7): a run can idle between events for a slow model turn
+        # or while parked at requires_action — the 5s default killed the stream mid-flight.
+        for line in _http.stream(
+            "GET",
+            self._url(f"/api/runs/{run_id}/events"),
+            headers=headers,
+            timeout=_http.STREAM_READ_TIMEOUT,
+        ):
             if line == "":
                 # Blank line terminates an SSE event — emit what we accumulated.
                 if data is not None:
