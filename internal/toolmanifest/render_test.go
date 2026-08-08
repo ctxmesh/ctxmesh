@@ -166,6 +166,38 @@ func TestRenderCarriesInputSchemaVerbatim(t *testing.T) {
 	}
 }
 
+// TestRenderCarriesDescription: a binding's Description flows into the manifest tool
+// (FUNC-10) so the managed loop advertises it to the model; an absent description omits
+// the key entirely (omitempty → SDK generic fallback), for both modes.
+func TestRenderCarriesDescription(t *testing.T) {
+	t.Parallel()
+
+	m, _ := Render([]Binding{
+		{BindingName: "wc", ToolName: "word-count", Mode: ModeRemote, URL: "http://wc.svc/mcp",
+			Description: "Count whitespace-separated words."},
+		{BindingName: "sc", ToolName: "s-tool", Mode: ModeSidecar, Image: "img-s"}, // no description
+	})
+
+	byName := map[string]Tool{}
+	for _, tl := range m.Tools {
+		byName[tl.Name] = tl
+	}
+	if got := byName["word-count"].Description; got != "Count whitespace-separated words." {
+		t.Errorf("word-count description = %q, want the registry description", got)
+	}
+	if got := byName["s-tool"].Description; got != "" {
+		t.Errorf("s-tool description = %q, want empty (absent)", got)
+	}
+	// omitempty drops the key for the description-less tool.
+	raw, err := json.Marshal(byName["s-tool"])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(raw, []byte("description")) {
+		t.Errorf("description-less tool JSON still carries the key: %s", raw)
+	}
+}
+
 // TestRenderOmitsAbsentInputSchema: a binding without an inputSchema (or with an
 // empty/whitespace/null one) renders NO inputSchema key — the graceful-absence
 // path that keeps schema-less/curated tools working (SDK permissive fallback).
