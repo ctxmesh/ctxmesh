@@ -1,13 +1,81 @@
 package bff
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	authnv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
+
+// ssrClient builds a caller-scoped fake client whose SelfSubjectReview Create either
+// resolves the given username (a VALID token) or fails (an invalid/rejected token) — the
+// SelfSubjectReview IS the token validation callerUsername performs.
+func ssrClient(username string, rejectErr error) client.Client {
+	return fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+			if rejectErr != nil {
+				return rejectErr
+			}
+			if ssr, ok := obj.(*authnv1.SelfSubjectReview); ok {
+				ssr.Status.UserInfo.Username = username
+			}
+			return nil
+		},
+	}).Build()
+}
+
+func extAuthReq(token, host string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/extauth/invoke", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("X-Forwarded-Host", host)
+	return req
+}
+
+// TestExtAuth_InvalidToken_Denies is the audit SEC-2 regression: a present-but-INVALID
+// bearer must DENY (401), not fall through to allow. Before the fix, callerClient built a
+// lazy unvalidated client for any non-empty token and the swallowed callerUsername error
+// let a garbage bearer invoke any agent on org/public creds.
+func TestExtAuth_InvalidToken_Denies(t *testing.T) {
+	s := &Server{callerClients: &fakeCallerClientFactory{client: ssrClient("", apierrors.NewUnauthorized("token rejected")), requireToken: true}}
+	rec := httptest.NewRecorder()
+	s.handleExtAuth(rec, extAuthReq("garbage-token", "scalekit-agent.default.127.0.0.1.sslip.io"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token: ext-auth status = %d, want 401 (authN bypass must be closed)", rec.Code)
+	}
+}
+
+// TestExtAuth_MissingToken_Denies: no token → 401 before any K8s call (callerClient gate).
+func TestExtAuth_MissingToken_Denies(t *testing.T) {
+	s := &Server{callerClients: &fakeCallerClientFactory{requireToken: true}}
+	rec := httptest.NewRecorder()
+	s.handleExtAuth(rec, extAuthReq("", "scalekit-agent.default.127.0.0.1.sslip.io"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: ext-auth status = %d, want 401", rec.Code)
+	}
+}
+
+// TestExtAuth_ValidToken_Allows: a VALID token allows (200); capability minting is
+// best-effort (nil signer → no header, still 200 — a valid user with no resolvable grant
+// runs unattended, ADR 0033). Proves the fix didn't over-rotate into denying valid callers.
+func TestExtAuth_ValidToken_Allows(t *testing.T) {
+	s := &Server{callerClients: &fakeCallerClientFactory{client: ssrClient("alice@example.com", nil), requireToken: true}}
+	rec := httptest.NewRecorder()
+	s.handleExtAuth(rec, extAuthReq("valid-token", "scalekit-agent.default.127.0.0.1.sslip.io"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid token: ext-auth status = %d, want 200 (allow authenticated)", rec.Code)
+	}
+}
 
 func TestParseAgentFromHost(t *testing.T) {
 	cases := []struct{ in, agent, ns string }{
