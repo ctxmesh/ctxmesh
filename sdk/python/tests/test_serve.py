@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -271,3 +272,23 @@ def test_managed_config_from_env_reads_prompt_file(monkeypatch, tmp_path):
     prompt.write_text("  from the file  ")
     monkeypatch.setenv("PROMPT_FILE", str(prompt))
     assert ManagedConfig.from_env().system_prompt == "from the file"
+
+
+def test_bad_max_steps_warns_and_uses_default(monkeypatch, caplog):
+    """OTH-3: a misconfig degrades SAFELY but is no longer SILENT — it warns to stderr."""
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    monkeypatch.setenv("MAX_STEPS", "not-a-number")
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.max_steps >= 1  # safe default
+    assert any("MAX_STEPS" in r.message and "not-a-number" in r.message for r in caplog.records)
+
+
+def test_unreadable_prompt_file_warns_and_uses_default(monkeypatch, caplog, tmp_path):
+    """OTH-3: a set-but-unreadable PROMPT_FILE warns instead of silently serving the default."""
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    monkeypatch.setenv("PROMPT_FILE", str(tmp_path / "does-not-exist.txt"))
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.system_prompt == "You are a helpful assistant."  # safe default, still serves
+    assert any("PROMPT_FILE" in r.message for r in caplog.records)
