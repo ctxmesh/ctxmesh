@@ -475,6 +475,8 @@ func (s *Server) Handler() http.Handler {
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
+	s.registerSpawnRoute(api)
+
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
 	// permits, enforced by the K8s API server. They are wired only when the
