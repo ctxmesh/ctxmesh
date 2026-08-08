@@ -46,6 +46,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -335,7 +336,17 @@ func main() {
 	// crucially including DELETE, which the reconcilers do not observe without a
 	// finalizer. The "who" is best-effort (managedFields field-manager); the
 	// precise authenticated caller requires an admission webhook (phase-2).
-	if err := audit.NewAuditor(mgr.GetCache(), mgr.GetScheme(), audit.NewLogSink(ctrl.Log)).
+	// Audit sink (M63, ADR 0056): tee the always-on greppable LogSink with an async PostgresSink that
+	// persists mutations to the audit_log store — the queryable projection GET /api/audit reads. The
+	// PostgresSink runs on every replica (like the Auditor, NeedLeaderElection=false); its inserts are
+	// idempotent so cross-replica duplicate observations collapse to one row (never leader-elect it).
+	auditPGSink := audit.NewPostgresSink(auditlog.NewPostgresStore(cpDB), ctrl.Log)
+	if err := mgr.Add(auditPGSink); err != nil {
+		setupLog.Error(err, "Failed to register the audit Postgres sink")
+		os.Exit(1)
+	}
+	auditSink := audit.MultiSink{audit.NewLogSink(ctrl.Log), auditPGSink}
+	if err := audit.NewAuditor(mgr.GetCache(), mgr.GetScheme(), auditSink).
 		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up control-plane audit")
 		os.Exit(1)
