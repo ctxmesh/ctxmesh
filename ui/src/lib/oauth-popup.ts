@@ -54,3 +54,68 @@ export function maybeCloseOAuthPopup(win: Window = window): boolean {
     return false;
   }
 }
+
+// isValidHttpUrl guards a SAME-TAB OAuth redirect (DX-6): when a popup is blocked the connect
+// falls back to `window.location.href = authorizationURL`, and an unvalidated value could be a
+// relative path or a `javascript:`/`data:` URL that hijacks the tab. Only an absolute http(s)
+// URL is a safe navigation target. (Mirrors the guard add-mcp-page.tsx already had.)
+export function isValidHttpUrl(u: string | undefined | null): boolean {
+  if (!u) return false;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// The sessionStorage key a same-tab (opener-less) MCP OAuth return is stashed under so the page
+// that mounts AFTER the redirect can surface the outcome (the popup path uses postMessage).
+const MCP_RETURN_KEY = "ctxmesh:mcp-oauth-return";
+
+// consumeOpenerlessMcpReturn: at boot, when the SPA loads with ?mcp_connected/?mcp_error and there
+// is NO opener — a popup-blocked SAME-TAB redirect returned, not the popup case — the param would
+// otherwise sit unconsumed and the UI end in SILENCE (DX-6: consent succeeded server-side but the
+// user sees nothing and lost their run/chat state). Stash the outcome for the mounting page and
+// strip the MCP params from the URL so a reload/bookmark can't replay it. Returns true when it
+// acted. The popup case (opener set) is left to maybeCloseOAuthPopup.
+export function consumeOpenerlessMcpReturn(win: Window = window): boolean {
+  try {
+    const params = new URLSearchParams(win.location.search);
+    const server = params.get("mcp_connected");
+    const error = params.get("mcp_error");
+    const opener = win.opener as Window | null;
+    if ((server === null && error === null) || (opener && opener !== win)) {
+      return false; // no MCP return, or the popup case (handled by maybeCloseOAuthPopup)
+    }
+    win.sessionStorage?.setItem(
+      MCP_RETURN_KEY,
+      JSON.stringify({ server: server ?? "", error: error ?? "" }),
+    );
+    for (const k of ["mcp_connected", "mcp_error", "opener_origin", "state"]) params.delete(k);
+    const qs = params.toString();
+    win.history.replaceState(
+      null,
+      "",
+      win.location.pathname + (qs ? `?${qs}` : "") + win.location.hash,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// readMcpOAuthReturn: one-shot read (clears it) of a stashed same-tab MCP OAuth outcome, so the
+// mounting page (Playground / chat) can show "Connected <server> — run again" or the error, closing
+// the DX-6 silent dead-end. Returns null when there is nothing stashed.
+export function readMcpOAuthReturn(win: Window = window): McpOAuthPopupMessage | null {
+  try {
+    const raw = win.sessionStorage?.getItem(MCP_RETURN_KEY);
+    if (!raw) return null;
+    win.sessionStorage.removeItem(MCP_RETURN_KEY);
+    const parsed = JSON.parse(raw) as { server?: string; error?: string };
+    return { type: MCP_OAUTH_MESSAGE, server: parsed.server ?? "", error: parsed.error ?? "" };
+  } catch {
+    return null;
+  }
+}

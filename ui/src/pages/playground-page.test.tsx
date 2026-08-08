@@ -219,6 +219,21 @@ describe("PlaygroundPage", () => {
     expect(payload.namespace).toBe("prod"); // pre-filled from ?ns=
   });
 
+  it("surfaces a same-tab MCP OAuth return instead of ending in silence (DX-6)", async () => {
+    recordingFetch({ run: {} });
+    // The boot handler (consumeOpenerlessMcpReturn) stashed the popup-blocked return here.
+    window.sessionStorage.setItem(
+      "ctxmesh:mcp-oauth-return",
+      JSON.stringify({ server: "scalekit-mcp-server", error: "" }),
+    );
+
+    renderPage();
+    const notice = await screen.findByTestId("mcp-oauth-return");
+    expect(notice).toHaveTextContent(/Connected scalekit-mcp-server/);
+    expect(notice).toHaveTextContent(/run again/);
+    window.sessionStorage.clear();
+  });
+
   it("defines and runs an agent, then offers a 'View full trace' Link → /traces/:id (no Langfuse iframe)", async () => {
     const calls = recordingFetch({ run: {} });
 
