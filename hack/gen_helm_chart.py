@@ -139,6 +139,17 @@ MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
     "          value: {{ .Values.bff.mcp.credentialNamespace | quote }}"
 )
 
+# TOKEN_SERVICE_TLS_REQUIRED (SEC-5): config/token-service hardcodes "false" (dev degrades
+# to HTTP). The chart templates it from tokenService.tls.required; true ⇒ the token-service
+# refuses to start without mTLS. values.yaml ships false so the DEFAULT render == kustomize.
+TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE = (
+    '        - name: TOKEN_SERVICE_TLS_REQUIRED\n' '          value: "false"'
+)
+TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM = (
+    "        - name: TOKEN_SERVICE_TLS_REQUIRED\n"
+    "          value: {{ .Values.tokenService.tls.required | quote }}"
+)
+
 # The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
 # (OIDC_ENABLED "false", empty issuer/client — so `kustomize build`/`make deploy` stay
 # valid AND token login is the default); the chart templates them from the auth.oidc
@@ -276,6 +287,13 @@ def substitute(doc: str) -> str:
     doc = doc.replace(
         MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE,
         MCP_CREDENTIAL_NAMESPACE_ENV_HELM,
+    )
+    # token-service fail-closed TLS toggle -> Helm value (SEC-5). Default "false" renders ==
+    # kustomize (no drift); tokenService.tls.required=true makes the credential plane refuse
+    # plain HTTP, enforced under profile=production by ha-profile-guards.yaml.
+    doc = doc.replace(
+        TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE,
+        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM,
     )
     # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
     # disabled (the default) all three render == the kustomize OFF literals (no drift);
