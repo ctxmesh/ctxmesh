@@ -24,4 +24,40 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- if .Values.devDataPlane.enabled }}
 {{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster Valkey +\nMinIO use DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
 {{- end }}
+{{- /* OPS-3: the rest of the control/data plane must be HA too. The proxy is a
+   fail-closed critical path (above); the gateway (every LLM call), the token-service
+   (OBO credential plane), and the controller-manager (leader-elected warm standby) are
+   equally single-points-of-failure at replicas:1. values-production.yaml already declares
+   all of these >=2 + PDBs on — enforce it so a declared-production install can't ship a
+   single-replica data plane. */ -}}
+{{- if lt (int .Values.gateway.replicas) 2 }}
+{{- fail "\n\nprofile=production requires gateway.replicas>=2 — the LiteLLM model gateway fronts\nEVERY LLM call; a single-replica drain stalls all agent runs (audit OPS-3).\n" }}
+{{- end }}
+{{- if lt (int .Values.tokenService.replicas) 2 }}
+{{- fail "\n\nprofile=production requires tokenService.replicas>=2 — the OBO credential plane is\non the tool-call hot path; a single-replica drain fails third-party credential\nresolution (audit OPS-3).\n" }}
+{{- end }}
+{{- if lt (int .Values.controllerManager.replicas) 2 }}
+{{- fail "\n\nprofile=production requires controllerManager.replicas>=2 — leader election makes\nthe extra replica a WARM standby, so a node drain/upgrade doesn't leave the operator\nun-reconciled (audit OPS-3).\n" }}
+{{- end }}
+{{- if not .Values.componentPodDisruptionBudgets.enabled }}
+{{- fail "\n\nprofile=production requires componentPodDisruptionBudgets.enabled — else a voluntary\ndisruption (node drain/upgrade) can evict a whole HA set at once (audit OPS-3).\n" }}
+{{- end }}
+{{- if not .Values.controllerManager.podDisruptionBudget.enabled }}
+{{- fail "\n\nprofile=production requires controllerManager.podDisruptionBudget.enabled (audit OPS-3).\n" }}
+{{- end }}
+{{- if not .Values.tokenService.tls.required }}
+{{- fail "\n\nprofile=production requires tokenService.tls.required — the credential plane dispenses\nthird-party USER credentials and must not silently downgrade to plain HTTP (audit SEC-5).\nProvision the platform mTLS certs (token-service-tls Secret) and set tokenService.tls.required=true.\n" }}
+{{- end }}
+{{- /* SEC-4: MCP per-user grant Secrets (3rd-party OAuth tokens) must live in a LOCKED,
+   dedicated namespace — else they land in the agent's OWN namespace where a tenant can
+   read another user's grant tokens (internal/bff/server.go). Helm can't inspect the
+   operator-provisioned bff-adapters Secret, so it can't verify MCP_GRANT_HMAC_KEY / the
+   capability seed here (unsalted identity hashes without the HMAC key) — those are
+   documented as required alongside CONTROLPLANE_DSN; the enforceable, highest-risk knob is
+   the credential namespace. */ -}}
+{{- if .Values.bff.mcp.enabled }}
+{{- if not .Values.bff.mcp.credentialNamespace }}
+{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.credentialNamespace — else per-user\nMCP grant Secrets (3rd-party OAuth tokens) are stored in the AGENT's own namespace, where a\ntenant CAN read another user's grant tokens (ADR 0029 §7). Set a locked, dedicated\ncredential namespace; also provision MCP_GRANT_HMAC_KEY + the capability seed in the\nbff-adapters Secret (unsalted identity hashes + disabled capability minting otherwise).\n" }}
+{{- end }}
+{{- end }}
 {{- end }}

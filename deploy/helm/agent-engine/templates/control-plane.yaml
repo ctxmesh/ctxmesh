@@ -85,6 +85,22 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  name: agent-engine-manager-role
+  namespace: {{ .Values.namespace }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: agent-engine
@@ -312,7 +328,6 @@ rules:
   resources:
   - configmaps
   - resourcequotas
-  - secrets
   - serviceaccounts
   - services
   verbs:
@@ -337,6 +352,7 @@ rules:
   - ""
   resources:
   - pods
+  - secrets
   verbs:
   - get
   - list
@@ -651,6 +667,23 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: agent-engine-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: agent-engine-controller-manager
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: agent-engine
+  name: agent-engine-manager-rolebinding
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-engine-manager-role
 subjects:
 - kind: ServiceAccount
   name: agent-engine-controller-manager
@@ -1091,6 +1124,8 @@ spec:
           value: /etc/token-service/tls/tls.key
         - name: TOKEN_SERVICE_CLIENT_CA_FILE
           value: /etc/token-service/tls/ca.crt
+        - name: TOKEN_SERVICE_TLS_REQUIRED
+          value: {{ .Values.tokenService.tls.required | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters

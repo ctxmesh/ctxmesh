@@ -215,6 +215,17 @@ func run(log logr.Logger) error {
 	// platform certs degrades to plain HTTP (dev) instead of crash-looping — the operator
 	// drops in the Secret to switch mTLS on with no manifest change.
 	mtls := certFile != "" && keyFile != "" && caFile != "" && filesExist(certFile, keyFile, caFile)
+	// SEC-5: fail CLOSED when TLS is required. The credential plane dispenses third-party
+	// user credentials — a SILENT downgrade to plain HTTP in production is unacceptable. A
+	// production install sets TOKEN_SERVICE_TLS_REQUIRED=true (enforced by the Helm
+	// production guard); if the certs aren't provisioned, refuse to start rather than serve
+	// the credential API unauthenticated over HTTP.
+	tlsRequired := strings.EqualFold(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_REQUIRED")), "true")
+	if tlsRequired && !mtls {
+		return fmt.Errorf("TOKEN_SERVICE_TLS_REQUIRED=true but mTLS is not configured " +
+			"(missing/absent TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE/CLIENT_CA_FILE) — refusing to serve " +
+			"the credential API unauthenticated over HTTP")
+	}
 	if mtls {
 		tlsCfg, err := serverMTLS(certFile, keyFile, caFile)
 		if err != nil {

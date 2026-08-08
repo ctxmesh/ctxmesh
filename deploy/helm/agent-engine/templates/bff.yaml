@@ -124,6 +124,9 @@ spec:
         - secretRef:
             name: bff-adapters
             optional: true
+        - secretRef:
+            name: bff-capability
+            optional: true
         image: bff:latest
         imagePullPolicy: IfNotPresent
         livenessProbe:

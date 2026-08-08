@@ -24,8 +24,11 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -58,10 +61,19 @@ const (
 	envPromptVersion = "PROMPT_VERSION"
 )
 
-// promptConfigMapName returns the per-agent prompt ConfigMap name.
-func promptConfigMapName(agentName string) string {
-	return agentName + promptConfigMapSuffix
+// promptConfigMapName returns the CONTENT-ADDRESSED prompt ConfigMap name
+// (<agent>-prompt-<digest8>, audit FUNC-3). Content-addressing keeps each revision's
+// prompt in its OWN immutable CM: a new/blocked candidate's prompt lands in a NEW CM and
+// never overwrites the one the currently-serving revision mounts (the old per-agent
+// <agent>-prompt was mutated in place before the eval-gate decision, leaking a blocked
+// candidate's prompt into the live old revision).
+func promptConfigMapName(agentName, digest string) string {
+	return agentName + promptConfigMapSuffix + "-" + digest
 }
+
+// promptAgentLabel groups an agent's content-addressed prompt ConfigMaps so superseded
+// ones can be listed + GC'd (audit FUNC-3).
+const promptAgentLabel = "agents.ctxmesh.ai/prompt-agent"
 
 // resolvedPrompt is the controller-side result of resolving an agent's promptRef:
 // the resolved content + version and the derived digest component. hasPrompt is
@@ -217,7 +229,7 @@ func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 		return nil, nil, nil, nil
 	}
 
-	cmName := promptConfigMapName(deploy.Name)
+	cmName := promptConfigMapName(deploy.Name, rp.digest)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
 	}
@@ -226,9 +238,22 @@ func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 			cm.Data = map[string]string{}
 		}
 		cm.Data[promptConfigMapKey] = rp.content
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
+		}
+		cm.Labels[promptAgentLabel] = deploy.Name
 		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
 	}); err != nil {
 		return nil, nil, nil, fmt.Errorf("upserting prompt ConfigMap: %w", err)
+	}
+
+	// GC superseded prompt CMs for this agent: content-addressing means each prompt swap
+	// leaves the old CM behind (owner-ref'd, so it only GCs when the AgentDeployment is
+	// deleted). Prune the ones this agent no longer references — SAFELY: keep the current
+	// CM and any still mounted by a live ksvc Revision (a blocked candidate / a rollback
+	// target), so pruning never breaks a servable revision.
+	if err = r.pruneOldPromptConfigMaps(ctx, deploy, cmName); err != nil {
+		return nil, nil, nil, err
 	}
 
 	v := corev1.Volume{
@@ -245,4 +270,57 @@ func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 		{Name: envPromptVersion, Value: rp.version},
 	}
 	return &v, &m, e, nil
+}
+
+// pruneOldPromptConfigMaps deletes this agent's content-addressed prompt ConfigMaps that
+// are neither the current one nor mounted by a live ksvc Revision (audit FUNC-3). Keeping
+// in-use CMs means pruning can never break a servable revision (a held candidate or a
+// rollback target). Best-effort within the reconcile: a prune failure surfaces so the
+// reconcile requeues, but the correctness (no prompt overwrite) is the content-addressing,
+// not the GC.
+func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, currentCM string) error {
+	var cms corev1.ConfigMapList
+	if err := r.List(ctx, &cms,
+		client.InNamespace(deploy.Namespace),
+		client.MatchingLabels{promptAgentLabel: deploy.Name}); err != nil {
+		return fmt.Errorf("listing prompt ConfigMaps for GC: %w", err)
+	}
+	if len(cms.Items) <= 1 {
+		return nil // only the current CM (or none) — nothing to prune
+	}
+	inUse, err := r.promptConfigMapsInUse(ctx, deploy)
+	if err != nil {
+		return err
+	}
+	inUse[currentCM] = true
+	for i := range cms.Items {
+		cm := &cms.Items[i]
+		if inUse[cm.Name] {
+			continue
+		}
+		if err := r.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("pruning superseded prompt ConfigMap %s: %w", cm.Name, err)
+		}
+	}
+	return nil
+}
+
+// promptConfigMapsInUse returns the set of prompt-ConfigMap names still mounted by a live
+// Revision of the agent's ksvc, so they are never pruned.
+func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) (map[string]bool, error) {
+	inUse := map[string]bool{}
+	var revs servingv1.RevisionList
+	if err := r.List(ctx, &revs,
+		client.InNamespace(deploy.Namespace),
+		client.MatchingLabels{knativeServiceLabel: deploy.Name}); err != nil {
+		return nil, fmt.Errorf("listing Revisions for prompt GC: %w", err)
+	}
+	for i := range revs.Items {
+		for _, v := range revs.Items[i].Spec.PodSpec.Volumes {
+			if v.Name == promptVolumeName && v.ConfigMap != nil {
+				inUse[v.ConfigMap.Name] = true
+			}
+		}
+	}
+	return inUse, nil
 }

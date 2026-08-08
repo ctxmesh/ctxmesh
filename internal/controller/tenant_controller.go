@@ -120,20 +120,20 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 // resolveOwnership splits the tenant's requested namespaces into the ones it owns
 // and the ones another tenant already claims (contested, skipped).
 func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv1alpha1.Tenant) (owned, contested []string, err error) {
+	// Which OTHER tenants merely LIST each namespace in spec (a spec-only claim, not yet
+	// stamped). This alone must NOT contest a namespace another tenant already OWNS.
 	var all agentsv1alpha1.TenantList
 	if err := r.List(ctx, &all); err != nil {
 		return nil, nil, err
 	}
-	claimedByOther := map[string]string{} // namespace → owning tenant
+	listedByOther := map[string]bool{}
 	for i := range all.Items {
 		other := &all.Items[i]
 		if other.Name == tenant.Name || !other.DeletionTimestamp.IsZero() {
 			continue
 		}
 		for _, ns := range other.Spec.Namespaces {
-			if _, seen := claimedByOther[ns]; !seen {
-				claimedByOther[ns] = other.Name
-			}
+			listedByOther[ns] = true
 		}
 	}
 	seen := map[string]bool{}
@@ -142,15 +142,43 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 			continue
 		}
 		seen[ns] = true
-		if _, taken := claimedByOther[ns]; taken {
-			contested = append(contested, ns)
-			continue
+		// The STAMPED owner (the tenantLabel on the namespace) is AUTHORITATIVE (audit
+		// FUNC-5): a spec-only claim by a second tenant never contests a namespace THIS
+		// tenant already owns — the old "any other lister ⇒ contested" made the incumbent
+		// prune its own quota/NP/label the moment a second tenant's spec listed the ns. Only
+		// an UNSTAMPED namespace that another tenant also lists is genuinely contested (first
+		// to stamp wins; neither stamps until the operator resolves the overlap).
+		labelOwner, lErr := r.namespaceTenantLabel(ctx, ns)
+		if lErr != nil {
+			return nil, nil, lErr
 		}
-		owned = append(owned, ns)
+		switch {
+		case labelOwner == tenant.Name:
+			owned = append(owned, ns) // incumbent — this tenant already owns it
+		case labelOwner != "":
+			contested = append(contested, ns) // another tenant is the STAMPED owner
+		case listedByOther[ns]:
+			contested = append(contested, ns) // unstamped + multiple listers → contested
+		default:
+			owned = append(owned, ns) // unstamped, sole lister → free to claim
+		}
 	}
 	slices.Sort(owned)
 	slices.Sort(contested)
 	return owned, contested, nil
+}
+
+// namespaceTenantLabel returns the tenant that has STAMPED its ownership label
+// (agents.ctxmesh.ai/tenant) on ns, or "" when the namespace is missing or unstamped.
+func (r *TenantReconciler) namespaceTenantLabel(ctx context.Context, ns string) (string, error) {
+	var namespace corev1.Namespace
+	if err := r.Get(ctx, client.ObjectKey{Name: ns}, &namespace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil // missing namespace → treat as unstamped
+		}
+		return "", err
+	}
+	return namespace.Labels[tenantLabel], nil
 }
 
 // stampNamespace labels the namespace for this tenant and converges its ResourceQuota.

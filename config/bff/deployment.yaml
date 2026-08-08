@@ -130,6 +130,13 @@ spec:
             - secretRef:
                 name: bff-adapters
                 optional: true
+            # bff-capability carries MCP_CAPABILITY_PRIVATE_KEY (audit OPS-4d): the BFF MINTS
+            # the run capability (ADR 0030 §2) — the run-worker reads the same Secret. Absent
+            # this, minting is silently DISABLED (server.go) and every OBO tool call falls
+            # back to org/public creds. Optional so the manifest builds before it's provisioned.
+            - secretRef:
+                name: bff-capability
+                optional: true
           # /api/health needs no cluster access (pure liveness + version), so it
           # is a safe probe target and works before any caller authenticates.
           livenessProbe:
