@@ -121,8 +121,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Server-side chat/completions. The key rides on the request headers only; it
-	// is never returned or logged. A rejected key → 401, an unreachable provider →
-	// 502 (honest, never a 500).
+	// is never returned or logged. A rejected key → 422 (an upstream key rejection,
+	// NOT the caller's session — FUNC-9/ADR 0027), an unreachable provider → 502
+	// (honest, never a 500).
 	output, err := chatComplete(r.Context(), s.providerHTTP,
 		gen.provider, gen.apiKey, gen.baseURL, gen.model, generationSystemPrompt, req.Description)
 	if err != nil {

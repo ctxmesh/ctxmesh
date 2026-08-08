@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Play, Rocket } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ForbiddenInline } from "@/components/kit";
+import { ComboSelect, ForbiddenInline } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import {
   api,
@@ -22,7 +22,12 @@ import {
   openRunStream,
   type CreatedObject,
 } from "@/lib/api";
-import { MCP_OAUTH_MESSAGE } from "@/lib/oauth-popup";
+import {
+  isValidHttpUrl,
+  MCP_OAUTH_MESSAGE,
+  type McpOAuthPopupMessage,
+  readMcpOAuthReturn,
+} from "@/lib/oauth-popup";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS } from "@/lib/nav";
 import {
@@ -87,10 +92,68 @@ export function PlaygroundPage() {
   const canRun = can(RES_AGENTS, "create");
   // The active run's SSE stream canceller (m32.8) — aborts on New-run / cancel / unmount.
   const streamCancelRef = useRef<(() => void) | null>(null);
+  // The active inline-consent wait's teardown (OTH-2): onConnect registers a window `message`
+  // listener + a popup-close poll interval; this holds their cleanup so the unmount effect can
+  // clear them even if the user navigates away with the popup still open (they'd leak otherwise).
+  const connectCleanupRef = useRef<(() => void) | null>(null);
+
+  // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
+  // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
+  // agent fields are PICKERS over the caller's known set (listNamespaces / listAgents — the
+  // console's "finite set → Select" principle) while still allowing a new name (define+export).
+  const [searchParams] = useSearchParams();
+  const [namespaceOptions, setNamespaceOptions] = useState<string[]>([]);
+  const [agentOptions, setAgentOptions] = useState<string[]>([]);
+  const didInitRef = useRef(false);
+  // A same-tab (popup-blocked) MCP OAuth return the boot handler stashed (DX-6) — surfaced as
+  // a notice so consent-on-a-blocked-popup no longer ends in silence.
+  const [oauthReturn, setOauthReturn] = useState<McpOAuthPopupMessage | null>(null);
 
   function set<K extends keyof ConfigForm>(key: K, value: ConfigForm[K]) {
     setForm((f) => ({ ...f, [key]: value }));
   }
+
+  // Deep-link pre-fill + namespace load, ONCE on mount (a ref guards against re-applying the
+  // pre-fill over the user's later edits). A 403/failure just leaves the picker empty — the
+  // field still accepts a custom value.
+  useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+    const agentParam = searchParams.get("agent") ?? "";
+    const nsParam = searchParams.get("ns") ?? searchParams.get("namespace") ?? "";
+    if (agentParam) setForm((f) => ({ ...f, name: agentParam }));
+    if (nsParam) setNamespace(nsParam);
+    // Surface a same-tab (popup-blocked) MCP OAuth outcome the boot handler stashed (DX-6).
+    setOauthReturn(readMcpOAuthReturn());
+    const ctrl = new AbortController();
+    api
+      .namespaces(ctrl.signal)
+      .then((res) => setNamespaceOptions(res.namespaces.map((n) => n.name)))
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [searchParams]);
+
+  // Load the agents in the selected namespace so the agent field is a picker of what's
+  // actually deployed there; re-scopes when the namespace changes (prior request aborted).
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api
+      .listAgents({ namespace: namespace.trim() || undefined, limit: 100 }, ctrl.signal)
+      .then((res) => setAgentOptions(res.agents.map((a) => a.name)))
+      .catch(() => setAgentOptions([]));
+    return () => ctrl.abort();
+  }, [namespace]);
+
+  // Unmount cleanup (OTH-2): abort an in-flight run SSE stream and tear down any active
+  // inline-consent wait (the `message` listener + popup-close poll). Without this the fetch
+  // stream keeps reading and the listener/interval outlive the page — real leaks the old
+  // "aborts on unmount" comment claimed but never implemented (there was no effect at all).
+  useEffect(() => {
+    return () => {
+      streamCancelRef.current?.();
+      connectCleanupRef.current?.();
+    };
+  }, []);
 
   // Run invokes the DEFINED agent by name. The agent must already be deployed
   // (the run resolves its endpoint server-side); the Playground's define form is
@@ -296,20 +359,31 @@ export function PlaygroundPage() {
       "width=520,height=680,menubar=no,toolbar=no",
     );
     if (!popup) {
-      // Popup blocked → fall back to a full-page redirect. The run state is lost, but
-      // the connect completes and the user re-runs on return.
-      window.location.href = authorizationURL;
+      // Popup blocked → fall back to a full-page SAME-TAB redirect. Validate the URL first
+      // (DX-6) so a relative/`javascript:` value can't hijack the tab. The run state is lost,
+      // but the connect completes and the boot handler surfaces the outcome on return so the
+      // user knows to re-run. An invalid URL surfaces inline instead of a silent no-op.
+      if (isValidHttpUrl(authorizationURL)) {
+        window.location.href = authorizationURL;
+      } else {
+        setConnecting(null);
+        setConnectError("the authorization URL returned by the server was invalid");
+      }
       return;
     }
 
     // Resume when the popup reports back (message) or is closed; re-invoke once.
     let done = false;
     let poll = 0;
+    function teardown() {
+      window.removeEventListener("message", onMessage);
+      window.clearInterval(poll);
+      connectCleanupRef.current = null;
+    }
     function finish() {
       if (done) return;
       done = true;
-      window.removeEventListener("message", onMessage);
-      window.clearInterval(poll);
+      teardown();
       setConnecting(null);
       void onRun(); // re-invoke in place — the resume
     }
@@ -322,6 +396,9 @@ export function PlaygroundPage() {
     poll = window.setInterval(() => {
       if (popup.closed) finish();
     }, 700);
+    // Expose the teardown so the unmount effect can clear the listener + poll (OTH-2) if the
+    // user leaves while the consent popup is still open — otherwise both leak past this page.
+    connectCleanupRef.current = teardown;
   }
 
   // Export-to-CRD: preview the expanded CRD (POST /api/expand), then apply it
@@ -380,21 +457,58 @@ export function PlaygroundPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
-            <FormField id="name" label="Agent name" error={errors.name} hint="DNS label, ≤ 44 chars.">
-              <Input
-                id="name"
-                value={form.name}
-                onChange={(e) => set("name", e.target.value)}
-                placeholder="echo-agent"
+            {oauthReturn && (
+              <div
+                data-testid="mcp-oauth-return"
+                className={`rounded-md border p-3 text-xs ${
+                  oauthReturn.error
+                    ? "border-destructive/40 text-destructive"
+                    : "border-success/40 text-success"
+                }`}
+              >
+                {oauthReturn.error
+                  ? `Couldn't connect ${oauthReturn.server || "the server"}: ${oauthReturn.error}`
+                  : `Connected ${oauthReturn.server || "your account"} — run again to continue.`}
+                <button
+                  type="button"
+                  className="ml-2 underline"
+                  onClick={() => setOauthReturn(null)}
+                >
+                  dismiss
+                </button>
+              </div>
+            )}
+
+            <FormField
+              id="namespace"
+              label="Namespace"
+              hint="Pick a namespace you can access — empty → the default namespace."
+            >
+              <ComboSelect
+                id="namespace"
+                value={namespace}
+                options={namespaceOptions}
+                onChange={setNamespace}
+                placeholder="default namespace"
+                customPlaceholder="namespace"
+                testId="playground-namespace"
               />
             </FormField>
 
-            <FormField id="namespace" label="Namespace" hint="Empty → the default namespace.">
-              <Input
-                id="namespace"
-                value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
-                placeholder="default"
+            <FormField
+              id="name"
+              label="Agent"
+              error={errors.name}
+              hint="Pick a deployed agent to run, or name a new one to define + export (≤ 44 chars)."
+            >
+              <ComboSelect
+                id="name"
+                value={form.name}
+                options={agentOptions}
+                onChange={(v) => set("name", v)}
+                placeholder="— pick an agent —"
+                customPlaceholder="new agent name"
+                testId="playground-agent"
               />
             </FormField>
 
