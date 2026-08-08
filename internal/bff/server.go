@@ -492,6 +492,9 @@ func (s *Server) Handler() http.Handler {
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
+		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
+		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
+		authed.HandleFunc("GET /api/audit", s.handleListAudit)
 		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
 		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
 		// API server (a viewer without update is denied → 403).
