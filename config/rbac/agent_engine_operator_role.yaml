@@ -41,6 +41,11 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - tenants
+  # auditlogs is a store-backed VIRTUAL resource (ADR 0056, M63): GET /api/audit gates on a
+  # caller-scoped SelfSubjectAccessReview on this name, so this grant IS the audit-read policy.
+  # Operator ONLY — the audit trail spans users/namespaces (who connected/consented/invoked what),
+  # so developer/viewer personas deliberately do NOT get it. Omitting it fail-closes /api/audit.
+  - auditlogs
   verbs:
   - '*'
 - apiGroups:
