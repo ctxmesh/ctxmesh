@@ -199,24 +199,28 @@ func TestClientTokenReviewerStatusHandling(t *testing.T) {
 	})
 }
 
-func TestNamespaceFromSAUsername(t *testing.T) {
+func TestIdentityFromSAUsername(t *testing.T) {
 	cases := []struct {
 		username string
 		wantNS   string
+		wantSA   string
 		wantOK   bool
 	}{
-		{"system:serviceaccount:team-alpha:launcher", "team-alpha", true},
-		{"system:serviceaccount:kube-system:default", "kube-system", true},
-		{"alice@example.com", "", false},
-		{"system:serviceaccount:", "", false},
-		{"system:serviceaccount::sa", "", false}, // empty namespace (double colon) → rejected
-		{"system:serviceaccount:only-ns", "", false},
-		{"", "", false},
+		{"system:serviceaccount:team-alpha:launcher", "team-alpha", "launcher", true},
+		{"system:serviceaccount:kube-system:default", "kube-system", "default", true},
+		{"system:serviceaccount:default:agent-support-bot", "default", "agent-support-bot", true},
+		{"alice@example.com", "", "", false},
+		{"system:serviceaccount:", "", "", false},
+		{"system:serviceaccount::sa", "", "", false}, // empty namespace → rejected
+		{"system:serviceaccount:ns:", "", "", false}, // empty SA → rejected
+		{"system:serviceaccount:only-ns", "", "", false},
+		{"", "", "", false},
 	}
 	for _, c := range cases {
-		ns, ok := namespaceFromSAUsername(c.username)
+		ns, sa, ok := identityFromSAUsername(c.username)
 		assert.Equal(t, c.wantOK, ok, c.username)
 		assert.Equal(t, c.wantNS, ns, c.username)
+		assert.Equal(t, c.wantSA, sa, c.username)
 	}
 }
 

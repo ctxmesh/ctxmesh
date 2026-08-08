@@ -30,22 +30,32 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// fakePodAuth maps a pod token → namespace (or a fixed error), standing in for the
-// TokenReview authenticator so the quota handlers can be tested without a cluster.
+// fakePodAuth maps a pod token → namespace (and, optionally, → SA name for the memory
+// path) or a fixed error, standing in for the TokenReview authenticator so the handlers
+// can be tested without a cluster.
 type fakePodAuth struct {
-	byToken map[string]string
-	err     error
+	byToken   map[string]string // token → namespace
+	saByToken map[string]string // token → ServiceAccount name (memory-path tests; optional)
+	err       error
 }
 
-func (f fakePodAuth) Namespace(_ context.Context, token string) (string, error) {
+func (f fakePodAuth) Namespace(ctx context.Context, token string) (string, error) {
+	id, err := f.Identity(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	return id.Namespace, nil
+}
+
+func (f fakePodAuth) Identity(_ context.Context, token string) (PodIdentity, error) {
 	if f.err != nil {
-		return "", f.err
+		return PodIdentity{}, f.err
 	}
 	ns, ok := f.byToken[token]
 	if !ok {
-		return "", ErrTokenRejected
+		return PodIdentity{}, ErrTokenRejected
 	}
-	return ns, nil
+	return PodIdentity{Namespace: ns, ServiceAccount: f.saByToken[token]}, nil
 }
 
 func newQuotaProxy(t *testing.T, byToken, nsToTenant map[string]string, auth PodAuthenticator) (*Server, *miniredis.Miniredis) {

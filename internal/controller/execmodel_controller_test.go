@@ -248,6 +248,40 @@ func TestExecModel_Eventing_DeploymentServiceTrigger(t *testing.T) {
 // not a registry member is reported Ready=False (eventing needs a broker) and no
 // Trigger is created — but the Deployment + Service ARE kept (owner-ref'd) so the
 // agent retains a working HTTP endpoint while membership is fixed.
+// TestExecModel_Eventing_MemoryProxy_PerAgentSA guards the per-agent identity SA on the
+// EVENTING Deployment PodSpec site (ADR 0052 §C6 RESOLUTION, m56.2a) — the 4th and last
+// wrapping. A memory-bound eventing member with the proxy configured must run its
+// Deployment pod as agent-<name> and get its identity SA created + owned.
+func TestExecModel_Eventing_MemoryProxy_PerAgentSA(t *testing.T) {
+	const (
+		name       = "eventing-mem-proxy-agent"
+		namespace  = "default"
+		registryID = "evt-mem-reg"
+		proxyURL   = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	createRegistry(t, "evt-mem-registry", namespace, registryID, "registry", registryID)
+	createExecAgent(t, name, namespace, "eventing", map[string]string{"registry": registryID})
+	_ = mkMemoryBinding(t, name+"-binding", namespace, name, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, name, namespace)
+
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &dep))
+	wantSA := "agent-" + name
+	assert.Equal(t, wantSA, dep.Spec.Template.Spec.ServiceAccountName,
+		"the eventing Deployment pod runs as the per-agent identity SA (the eventing PodSpec site)")
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: wantSA, Namespace: namespace}, &sa),
+		"the identity SA is created for a memory-bound eventing agent")
+	require.Len(t, sa.OwnerReferences, 1)
+	assert.Equal(t, name, sa.OwnerReferences[0].Name, "the SA is owned by the AgentDeployment")
+}
+
 func TestExecModel_Eventing_NoRegistry_NotReady(t *testing.T) {
 	const (
 		name      = "eventing-orphan"
@@ -341,6 +375,39 @@ func TestExecModel_Job_BareJob(t *testing.T) {
 // TestExecModel_Job_SchedulePolicy_CronJob asserts a job-model agent with a
 // schedule policy produces a CronJob (with the policy schedule, Forbid
 // concurrency) instead of a bare Job.
+// TestExecModel_Job_MemoryProxy_PerAgentSA guards the per-agent identity SA on the
+// JOB PodSpec site (ADR 0052 §C6 RESOLUTION, m56.2a). The ksvc site is covered by
+// memorybinding_controller_test.go; this pins the batch-Job wrapping (execmodel.go
+// jobPodTemplateSpec) — a memory-bound job-model agent with the proxy configured must
+// run its pod as agent-<name> and get its identity SA created + owned.
+func TestExecModel_Job_MemoryProxy_PerAgentSA(t *testing.T) {
+	const (
+		namespace = "default"
+		name      = "job-mem-proxy-agent"
+		proxyURL  = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	createExecAgent(t, name, namespace, "job", nil)
+	_ = mkMemoryBinding(t, name+"-binding", namespace, name, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, name, namespace)
+
+	var job batchv1.Job
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &job))
+	wantSA := "agent-" + name
+	assert.Equal(t, wantSA, job.Spec.Template.Spec.ServiceAccountName,
+		"the batch-Job pod runs as the per-agent identity SA (the job PodSpec site)")
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: wantSA, Namespace: namespace}, &sa),
+		"the identity SA is created for a memory-bound job-model agent")
+	require.Len(t, sa.OwnerReferences, 1)
+	assert.Equal(t, name, sa.OwnerReferences[0].Name, "the SA is owned by the AgentDeployment")
+}
+
 func TestExecModel_Job_SchedulePolicy_CronJob(t *testing.T) {
 	const (
 		name      = "cron-agent"

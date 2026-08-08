@@ -248,9 +248,13 @@ type memoryConfig struct {
 	// ProxyURL is STATELAYER_PROXY_URL (M51, ADR 0050 §8): when set, the session/shared routes are
 	// REVERSE-PROXIED to the control-plane state-layer proxy (which holds the Valkey credential and
 	// enforces per-tenant scope server-side) instead of hitting Valkey directly. Empty ⇒ direct
-	// (unchanged, migration phase 1 dual-mode). The launcher forwards its run capability (already on
-	// the request) as the proxy's Authorization Bearer — no SDK change (ADR 0050 Amд 1).
+	// (unchanged, migration phase 1 dual-mode). The launcher authenticates to the proxy with the POD's
+	// projected SA token (ADR 0052 §C6 RESOLUTION) — session memory is workload-scoped, so the proxy
+	// derives the (ns,agent) scope from the pod identity, not a per-user runcap.
 	ProxyURL string
+	// TokenPath is the mounted projected SA-token file (STATELAYER_TOKEN_PATH) the forward reads to
+	// authenticate to the proxy. Empty ⇒ the default mount path (resolvePodTokenPath).
+	TokenPath string
 }
 
 // memoryScopeShared is the MEMORY_SCOPE value that selects the shared team scratchpad.
@@ -305,17 +309,20 @@ func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer, l
 		tracer:   tracer,
 		longTerm: longTerm,
 	}
-	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared)
+	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath)
 	return m
 }
 
 // buildStatelayerForward builds the reverse proxy to the control-plane state-layer proxy (M51, ADR
-// 0050 §8/Amд 1), or nil when STATELAYER_PROXY_URL is unset (direct-Valkey, unchanged). The Director
-// translates the run capability already on the request (X-Ctxmesh-Run-Capability) into the proxy's
-// Authorization Bearer — the proxy derives ALL scope from that verified token, so the launcher passes
-// no key/identity. The scope INTENT (shared vs private) rides X-Memory-Scope; the proxy still keys
-// shared memory under the TOKEN's registry, so a bad scope hint can't cross tenants.
-func buildStatelayerForward(proxyURL string, shared bool) *httputil.ReverseProxy {
+// 0050 §8; ADR 0052 §C6 RESOLUTION), or nil when STATELAYER_PROXY_URL is unset (direct-Valkey,
+// unchanged). The Director authenticates to the proxy with the POD's projected SA token
+// (Authorization: Bearer) — session memory is workload-scoped, so the proxy derives ALL scope
+// (namespace + agent, and the shared registry) SERVER-SIDE from the verified pod identity, NOT a
+// per-user runcap. The token is re-read from tokenPath on EVERY request so a kubelet-rotated token is
+// always current. The scope INTENT (shared vs private) rides X-Memory-Scope; the proxy still keys
+// shared memory under the SA-derived registry, so a bad scope hint can't cross tenants. The run
+// capability is stripped — the proxy doesn't consume it, and it must not leak onward.
+func buildStatelayerForward(proxyURL string, shared bool, tokenPath string) *httputil.ReverseProxy {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
 		return nil
@@ -325,14 +332,22 @@ func buildStatelayerForward(proxyURL string, shared bool) *httputil.ReverseProxy
 		fmt.Fprintf(os.Stderr, "launcher: memory: bad STATELAYER_PROXY_URL (%v) — falling back to direct Valkey\n", err)
 		return nil
 	}
+	tokenPath = resolvePodTokenPath(tokenPath)
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
-			if tok := req.Header.Get(runcap.HeaderName); tok != "" {
+			// Authenticate as the POD (projected SA token). A read failure leaves no
+			// Authorization ⇒ the proxy fails closed (401) rather than the launcher serving
+			// an unauthenticated request; the error is surfaced on stderr, not swallowed.
+			if tok, terr := readPodToken(tokenPath); terr == nil {
 				req.Header.Set("Authorization", "Bearer "+tok)
+			} else {
+				fmt.Fprintf(os.Stderr, "launcher: memory: pod token unavailable (%v) — proxy will reject\n", terr)
 			}
+			// The agent's runcap has no meaning to the proxy's memory path; never forward it.
+			req.Header.Del(runcap.HeaderName)
 			if shared {
 				req.Header.Set("X-Memory-Scope", memoryScopeShared)
 			}

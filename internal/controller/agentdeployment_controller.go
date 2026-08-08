@@ -273,6 +273,7 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the AgentDeployment reconciliation loop.
 func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -483,6 +484,9 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
 	}
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// The Deployment + Service are always reconciled (member or not) so a
 	// non-member eventing agent keeps a working HTTP endpoint while membership is
@@ -546,6 +550,9 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("building pod template: %w", err)
+	}
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	schedule, err := r.scheduleForAgent(ctx, deploy)
@@ -644,6 +651,14 @@ type podTemplate struct {
 	membership registryMembership
 	// port is the resolved container port.
 	port int32
+	// serviceAccountName is the per-agent identity ServiceAccount the pod runs as
+	// ("agent-<name>"), set ONLY when the pod presents a projected token to the
+	// state-layer proxy (injectPodToken). It gives the proxy a cryptographic
+	// (ns,agent) identity via TokenReview instead of the shared namespace default
+	// SA — the basis for server-side per-agent scope on the memory/quota/dedup
+	// paths (ADR 0052 §C6 RESOLUTION). Empty ⇒ the pod runs the default SA
+	// (unchanged, no drift for non-proxy agents).
+	serviceAccountName string
 }
 
 // buildPodTemplate resolves all M3-M6 injection (collector sidecar, MCP tool
@@ -1021,17 +1036,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
 		)
 
-		// Async dedup via the state-layer proxy (M53, ADR 0050 §6): a registry member
-		// WITH memory dedupes through the proxy (pod-identity authed) instead of the
-		// direct Valkey — so it needs the projected token too. STATELAYER_PROXY_URL is
-		// already injected by the memory block above (async requires memory). Guard the
-		// token-path env against a duplicate the tenant-quota block may have added.
-		if r.StatelayerProxyURL != "" && hasMemoryBinding {
-			if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
-				env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
-			}
-			injectPodToken = true
+		// (Async dedup through the proxy needs the same pod token; it is now set by the
+		// hoisted block below so a NON-member memory agent gets it too — Fable audit.)
+	}
+
+	// State-layer proxy pod token for the MEMORY (+ async-dedup) path (ADR 0050 §8 / ADR
+	// 0052 §C6 RESOLUTION): a memory-bound agent authenticates to the proxy with its POD
+	// token, so it needs the projected-token env + mount + per-agent SA. HOISTED out of the
+	// registry-member and tenant-quota branches (Fable audit 2026-08-08): a plain memory
+	// agent (non-member, non-quota) MUST still get the token, else its session memory 401s
+	// at the proxy. STATELAYER_PROXY_URL itself is injected by the memory block above for
+	// any memory agent; this adds the token path + flips injectPodToken. The env-present
+	// guard keeps it duplicate-safe against the tenant-quota block.
+	if r.StatelayerProxyURL != "" && hasMemoryBinding {
+		if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+			env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 		}
+		injectPodToken = true
 	}
 
 	// The user container's volume mounts: the resolved-prompt file (M9) when the
@@ -1205,14 +1226,75 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		templateLabels = map[string]string{registryIDLabel: membership.RegistryID}
 	}
 
+	// Per-agent identity SA (ADR 0052 §C6 RESOLUTION): the pod runs as "agent-<name>"
+	// exactly when it presents a projected token to the state-layer proxy, so
+	// TokenReview yields a cryptographic (ns,agent) identity. Empty otherwise (default
+	// SA, no drift). injectPodToken already feeds proxyDig, so enabling it rolls a new
+	// revision — and the "sa" version bump in statelayerProxyDigest re-rolls agents that
+	// were ALREADY proxy-attached onto the new SA (a real pod-spec change must roll a
+	// revision — the M4 silent-loss landmine).
+	var saName string
+	if injectPodToken {
+		saName = agentIdentitySAName(deploy.Name)
+	}
+
 	return podTemplate{
-		containers: containers,
-		volumes:    volumes,
-		labels:     templateLabels,
-		digest:     combinedDigest,
-		membership: membership,
-		port:       port,
+		containers:         containers,
+		volumes:            volumes,
+		labels:             templateLabels,
+		digest:             combinedDigest,
+		membership:         membership,
+		port:               port,
+		serviceAccountName: saName,
 	}, nil
+}
+
+// agentIdentitySAName is the per-agent identity ServiceAccount name for an
+// AgentDeployment: "agent-<name>". Identity-only (no RBAC) — its sole purpose is a
+// distinct TokenReview subject so the state-layer proxy can scope per-agent (ADR
+// 0052 §C6 RESOLUTION).
+func agentIdentitySAName(deployName string) string {
+	return "agent-" + deployName
+}
+
+// ensureAgentIdentitySA reconciles the per-agent identity ServiceAccount the pod runs
+// as when it presents a projected token to the state-layer proxy (ADR 0052 §C6
+// RESOLUTION). saName == "" (a non-proxy agent) is a no-op: the pod keeps the namespace
+// default SA and nothing is created. The SA is IDENTITY-ONLY — no RoleBindings, no
+// imagePullSecrets — so it grants nothing; its sole purpose is a distinct TokenReview
+// subject (system:serviceaccount:<ns>:agent-<name>) the proxy scopes per-agent. Owned by
+// the AgentDeployment, so it is garbage-collected with the agent. Idempotent.
+//
+// registryID, when non-empty, is stamped as the registryIDLabel LABEL on the SA — the
+// SERVER-TRUSTED source the state-layer proxy reads to derive the SHARED-scope memory
+// boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
+// §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
+// registry), so a stale boundary can never linger.
+func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
+	if saName == "" {
+		return nil
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: deploy.Namespace},
+	}
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		// Manage ONLY our registry label — never clobber labels another actor set.
+		if registryID != "" {
+			if sa.Labels == nil {
+				sa.Labels = map[string]string{}
+			}
+			sa.Labels[registryIDLabel] = registryID
+		} else {
+			delete(sa.Labels, registryIDLabel)
+		}
+		return ctrl.SetControllerReference(deploy, sa, r.Scheme)
+	}); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return nil // namespace going away — nothing to own; not an error
+		}
+		return fmt.Errorf("reconciling agent identity ServiceAccount %s: %w", saName, err)
+	}
+	return nil
 }
 
 // reconcileKnativeService builds the pod template and wraps it in a Knative
@@ -1240,6 +1322,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	if err != nil {
 		return nil, fmt.Errorf("building pod template: %w", err)
 	}
+	if err = r.ensureAgentIdentitySA(ctx, deploy, pod.serviceAccountName, pod.membership.RegistryID); err != nil {
+		return nil, err
+	}
 
 	revName := deploy.Name + "-" + hash
 	if pod.digest != "" {
@@ -1261,8 +1346,9 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 				},
 				Spec: servingv1.RevisionSpec{
 					PodSpec: corev1.PodSpec{
-						Containers: pod.containers,
-						Volumes:    pod.volumes,
+						ServiceAccountName: pod.serviceAccountName,
+						Containers:         pod.containers,
+						Volumes:            pod.volumes,
 					},
 				},
 			},
@@ -1590,7 +1676,12 @@ func statelayerProxyDigest(proxyURL string, injected bool) string {
 	if proxyURL == "" || !injected {
 		return ""
 	}
-	h := sha256.Sum256([]byte(proxyURL))
+	// "|sa" version tag (ADR 0052 §C6 RESOLUTION): pod-token pods now run a per-agent
+	// identity SA. Folding it here rolls a new revision for agents that were ALREADY
+	// proxy-attached (same proxyURL, previously default SA) so the serviceAccountName
+	// pod-spec change actually lands — a change that didn't move the revision name would
+	// be silently dropped by the CreateOrUpdate name-guard (the M4 landmine).
+	h := sha256.Sum256([]byte(proxyURL + "|sa"))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
