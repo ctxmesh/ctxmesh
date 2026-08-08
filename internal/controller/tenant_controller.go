@@ -240,12 +240,17 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in agent-engine-system: gateway :4000, valkey :6379, minio :9000
+				{ // platform backends in agent-engine-system: gateway :4000, direct valkey :6379,
+					// minio :9000, state-layer PROXY :8080 (the m53.7 cutover default for
+					// memory/quota/dedup), token-service :8443 (long-term-memory OBO). Omitting
+					// :8080 makes a member's quota fail-closed (402) post-cutover (audit SEC-1).
 					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
 					},
 				},
 				{ // intra-tenant A2A + the knative data plane it egresses through
@@ -265,6 +270,15 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 // computeHard builds the ResourceQuota hard limits from the tenant's compute quota.
 // Invalid quantities are skipped (a partial quota beats a failed reconcile); an
 // empty quota returns nil (no ResourceQuota stamped).
+//
+// The quota caps REQUESTS only (`requests.cpu`/`requests.memory`), NOT limits (audit
+// FUNC-2). A ResourceQuota that tracks `limits.*` forces EVERY pod in the namespace to
+// declare limits — but the controller builds agent pods requests-only (and Knative's
+// queue-proxy is requests-only too), so a `limits.*` quota made admission REJECT every
+// agent pod, bricking the namespace the moment a tenant set `quota.cpu`. Requests are the
+// scheduler-guaranteed allocation, so capping them is the correct, standard meaning of a
+// tenant compute quota. (Also capping/defaulting limits — via a per-namespace LimitRange —
+// is a follow-on hardening, not needed to make the quota work.)
 func computeHard(q *agentsv1alpha1.TenantComputeQuota) corev1.ResourceList {
 	if q == nil {
 		return nil
@@ -273,13 +287,11 @@ func computeHard(q *agentsv1alpha1.TenantComputeQuota) corev1.ResourceList {
 	if q.CPU != "" {
 		if v, err := resource.ParseQuantity(q.CPU); err == nil {
 			hard[corev1.ResourceRequestsCPU] = v
-			hard[corev1.ResourceLimitsCPU] = v
 		}
 	}
 	if q.Memory != "" {
 		if v, err := resource.ParseQuantity(q.Memory); err == nil {
 			hard[corev1.ResourceRequestsMemory] = v
-			hard[corev1.ResourceLimitsMemory] = v
 		}
 	}
 	if q.Pods > 0 {

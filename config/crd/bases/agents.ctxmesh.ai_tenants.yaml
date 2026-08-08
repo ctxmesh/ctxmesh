@@ -111,14 +111,14 @@ spec:
                 properties:
                   cpu:
                     description: |-
-                      cpu caps the tenant's total requested + limit CPU across member namespaces
-                      (a Kubernetes quantity, e.g. "20" or "20000m"). Applied as requests.cpu
-                      and limits.cpu on each member namespace's ResourceQuota.
+                      cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
+                      quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
+                      namespace's ResourceQuota.
                     type: string
                   memory:
                     description: |-
-                      memory caps the tenant's total requested + limit memory (a Kubernetes
-                      quantity, e.g. "40Gi"). Applied as requests.memory and limits.memory.
+                      memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
+                      "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
                     type: string
                   pods:
                     description: pods caps the number of pods per member namespace.
