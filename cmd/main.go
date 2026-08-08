@@ -27,12 +27,14 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -168,8 +170,17 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
+		Scheme:  scheme,
+		Metrics: metricsServerOptions,
+		// SEC-3: never cache Secrets on the manager client. The ModelRoute reconciler reads
+		// provider-key Secrets from ARBITRARY tenant namespaces (SecretBinding.spec.secretRef)
+		// — a full-object Secret cache mirrors EVERY Secret in the cluster into manager memory
+		// (128Mi → OOM) and puts every tenant's secret material in one process. Live
+		// (uncached) Secret reads keep memory bounded AND preserve the syncGatewaySecrets
+		// clobber-guard (a filtered/absent cache would return NotFound for an unlabelled
+		// pre-existing Secret → overwrite it). Rotation events still fire via the
+		// metadata-only Watch (builder.OnlyMetadata) in the ModelRoute reconciler.
+		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
