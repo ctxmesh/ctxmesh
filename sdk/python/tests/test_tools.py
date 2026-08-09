@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ctxmesh import agent
+from ctxmesh._capability import CAPABILITY_HEADER
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
 from ctxmesh.tools import Tool
@@ -63,8 +66,12 @@ def test_tool_from_dict_absent_input_schema_is_none():
 def test_tool_from_dict_parses_description():
     """A manifest tool carrying a description exposes it on the Tool (FUNC-10); absent or a
     non-string degrades to "" so the loop synthesises a generic one."""
-    base = {"name": "word-count", "mode": "remote", "endpoint": "http://wc.svc/mcp",
-            "transport": "streamable-http"}
+    base = {
+        "name": "word-count",
+        "mode": "remote",
+        "endpoint": "http://wc.svc/mcp",
+        "transport": "streamable-http",
+    }
     assert Tool.from_dict({**base, "description": "Count words."}).description == "Count words."
     assert Tool.from_dict(base).description == ""
     assert Tool.from_dict({**base, "description": None}).description == ""
@@ -132,11 +139,7 @@ def test_call_full_mcp_handshake_and_parsed_result(client, discovery_stub: Disco
 
     # The MCP endpoint saw initialize + initialized + tools/list + tools/call.
     # After the 307 redirect, all MCP POSTs land at /mcp/ (trailing slash).
-    methods = [
-        r.json().get("method")
-        for r in discovery_stub.requests
-        if r.path == "/mcp/"
-    ]
+    methods = [r.json().get("method") for r in discovery_stub.requests if r.path == "/mcp/"]
     assert methods == [
         "initialize",
         "notifications/initialized",
@@ -160,9 +163,7 @@ def test_call_resolves_catalog_name_to_mcp_name(client, discovery_stub: Discover
 
     # The accepted tools/call carried the RESOLVED underscore name, not the
     # hyphenated catalog name.
-    assert discovery_stub.mcp_calls == [
-        {"name": "word_count", "arguments": {"text": "a b c"}}
-    ]
+    assert discovery_stub.mcp_calls == [{"name": "word_count", "arguments": {"text": "a b c"}}]
     assert discovery_stub.mcp_calls[0]["name"] == DiscoveryStub.MCP_TOOL_NAME
     assert DiscoveryStub.MCP_TOOL_NAME != DiscoveryStub.CATALOG_NAME  # they differ
 
@@ -298,3 +299,72 @@ def test_list_broken_tools_json_raises(tmp_path):
     c = agent.from_config(cfg)
     with pytest.raises(EndpointError):
         c.tools.list()
+
+
+# ── delegate_to synthetic tool (M64, ADR 0057) ────────────────────────────────
+
+
+def test_delegate_tool_present_when_enabled(client, discovery_stub: DiscoveryStub, monkeypatch):
+    """A team supervisor (DELEGATE_ENABLED) gets the synthetic delegate_to tool next to its MCP
+    tools, with the roster driving the schema enum + the description."""
+    monkeypatch.setenv("DELEGATE_ENABLED", "true")
+    monkeypatch.setenv(
+        "DELEGATE_ROSTER",
+        json.dumps(
+            [
+                {"name": "researcher", "description": "searches the web"},
+                {"name": "coder", "description": "writes code"},
+            ]
+        ),
+    )
+    tools = client.tools.list()
+    names = [t.name for t in tools]
+    assert "delegate_to" in names, "the supervisor sees delegate_to next to its MCP tools"
+    assert "word-count" in names, "the MCP tools are still present"
+
+    dt = next(t for t in tools if t.name == "delegate_to")
+    assert dt.mode == "delegate"
+    assert dt.input_schema["properties"]["sub_agent"]["enum"] == ["researcher", "coder"]
+    assert dt.input_schema["required"] == ["sub_agent", "task"]
+    assert "researcher: searches the web" in dt.description
+
+
+def test_delegate_tool_absent_when_disabled(client, discovery_stub: DiscoveryStub, monkeypatch):
+    """A plain agent (no DELEGATE_ENABLED) never sees delegate_to."""
+    monkeypatch.delenv("DELEGATE_ENABLED", raising=False)
+    assert "delegate_to" not in [t.name for t in client.tools.list()]
+
+
+def test_delegate_posts_and_relays_capability(client, monkeypatch):
+    """delegate() POSTs the spawn body to the launcher-local endpoint, relays the run capability,
+    and returns the launcher's {ok, answer} verbatim."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(
+            method=method, url=url, body=json.loads(body), headers=headers, expect=expect
+        )
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
+
+    out = client.tools.delegate(sub_agent="researcher", task="find it", step="2", call_id="c9")
+
+    assert out == {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith(":2994/delegate")
+    assert captured["expect"] == (200,)
+    assert captured["body"] == {
+        "subAgent": "researcher",
+        "input": "find it",
+        "step": "2",
+        "callId": "c9",
+    }
+    assert (
+        captured["headers"][CAPABILITY_HEADER] == "cap-token"
+    ), "the parent capability is relayed (OBO)"
