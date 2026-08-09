@@ -355,3 +355,18 @@ func recvWithin(t *testing.T, ch <-chan Event) Event {
 		return Event{}
 	}
 }
+
+// TestPostgresStore_ReserveSpawn proves the authoritative counter atomically admits/denies vs real
+// Postgres (the ON CONFLICT ... WHERE gate), keyed per root tree.
+func TestPostgresStore_ReserveSpawn(t *testing.T) {
+	s := openPGStore(t)
+	ok, err := s.ReserveSpawn("root-x", 2)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	ok, _ = s.ReserveSpawn("root-x", 2)
+	assert.True(t, ok)
+	ok, _ = s.ReserveSpawn("root-x", 2)
+	assert.False(t, ok, "over the per-root budget → denied, no row updated")
+	ok, _ = s.ReserveSpawn("root-y", 1)
+	assert.True(t, ok, "an independent tree")
+}

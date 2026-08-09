@@ -45,6 +45,15 @@ type SpawnRunRequest struct {
 	// (a reclaimed supervisor re-issuing the SAME delegate_to computes the same sub-run id).
 	Step   string `json:"step"`
 	CallID string `json:"callId"`
+	// MaxSpawnDepth + MaxTotalSpawns are the team's spawn budget, relayed by the launcher from its
+	// controller-injected env (trusted — the agent's user code can't change a pod's env). The BFF
+	// enforces them AUTHORITATIVELY here against the VERIFIED parent's lineage: depth = parent.SpawnDepth+1
+	// vs maxSpawnDepth; a shared per-root counter vs maxTotalSpawns. This closes the gap where the
+	// launcher's Valkey guard read agent-supplied depth/root (the M64 security review's P1-A) — the
+	// launcher guard remains an advisory fast-path; the BFF is the authoritative gate. 0 ⇒ unenforced
+	// (a legacy/unbudgeted caller); the CRD always injects positive values for a real team.
+	MaxSpawnDepth  int `json:"maxSpawnDepth,omitempty"`
+	MaxTotalSpawns int `json:"maxTotalSpawns,omitempty"`
 }
 
 // SpawnRunResponse returns the (possibly pre-existing) sub-run id + status.
@@ -182,19 +191,44 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// (4) Lineage + the deterministic sub-run id. A root parent (no RootRunID) roots the tree at itself.
+	// (4) Lineage + the deterministic sub-run id, both AUTHORITATIVE (derived from the VERIFIED parent,
+	// never the request body). A root parent (no RootRunID) roots the tree at itself.
 	rootRunID := parent.RootRunID
 	if rootRunID == "" {
 		rootRunID = parent.ID
 	}
+	childDepth := parent.SpawnDepth + 1
 	subID := run.SpawnRunID(parent.ID, req.Step, req.CallID)
 
 	// (5) Idempotent create — a reclaimed supervisor re-issuing the same delegate_to resolves the SAME
-	// id, so return the pre-existing sub-run instead of creating a second one.
+	// id, so return the pre-existing sub-run (NO new budget consumed) instead of creating a second one.
 	if existing, gErr := s.runStore.Get(subID); gErr == nil {
 		writeJSON(w, http.StatusOK, SpawnRunResponse{ID: existing.ID, Status: string(existing.Status)})
 		return
 	}
+
+	// (6) AUTHORITATIVE spawn-budget gate (the M64 security review's P1-A fix). Depth uses the verified
+	// parent's lineage; the total counter is keyed on the authoritative root (an agent can't re-key it
+	// for a fresh budget). Fails CLOSED. The launcher relays the budget from its controller-injected env.
+	if req.MaxSpawnDepth > 0 && childDepth > req.MaxSpawnDepth {
+		writeError(w, http.StatusTooManyRequests,
+			"spawn denied: the team's max spawn depth is exceeded")
+		return
+	}
+	if req.MaxTotalSpawns > 0 {
+		ok, rErr := s.runStore.ReserveSpawn(rootRunID, req.MaxTotalSpawns)
+		if rErr != nil {
+			s.log.Error(rErr, "spawn budget reservation failed", "root", rootRunID)
+			writeError(w, http.StatusInternalServerError, "spawn budget check failed") // fail closed
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusTooManyRequests,
+				"spawn denied: the team's total spawn budget is exhausted")
+			return
+		}
+	}
+
 	now := time.Now()
 	sub := run.New(subID, parent.Namespace, req.SubAgent, req.Input, parent.ConversationID, now)
 	sub.Endpoint = req.Endpoint

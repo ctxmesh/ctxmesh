@@ -212,3 +212,23 @@ func TestMemStore_RoundTripsSpawnLineage(t *testing.T) {
 	assert.Equal(t, "sup", got.RootRunID)
 	assert.Equal(t, 2, got.SpawnDepth)
 }
+
+// TestMemStore_ReserveSpawn proves the authoritative aggregate spawn counter: admit up to maxTotal,
+// deny beyond (without recording the rejected spawn), and isolate per root tree.
+func TestMemStore_ReserveSpawn(t *testing.T) {
+	s := NewMemStore()
+	// root "a": budget 2.
+	ok, err := s.ReserveSpawn("a", 2)
+	require.NoError(t, err)
+	assert.True(t, ok, "1st within budget")
+	ok, _ = s.ReserveSpawn("a", 2)
+	assert.True(t, ok, "2nd within budget")
+	ok, _ = s.ReserveSpawn("a", 2)
+	assert.False(t, ok, "3rd exceeds budget → denied")
+	ok, _ = s.ReserveSpawn("a", 2)
+	assert.False(t, ok, "still denied (a rejected spawn did not consume/inflate the count)")
+
+	// A different tree has its own independent budget.
+	ok, _ = s.ReserveSpawn("b", 1)
+	assert.True(t, ok, "root b's counter is independent of root a")
+}
