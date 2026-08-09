@@ -1316,3 +1316,459 @@ def test_forced_and_limit_unit():
     assert _parallel_limit({"parallelLimit": -1}) == 0
     assert _parallel_limit({}) == 0
     assert _parallel_limit({"parallelLimit": True}) == 0
+
+
+# ── Per-turn resilience (m65.7, ADR 0058) ──────────────────────────────────────
+#
+# These drive the model-call / tool-call resilience the managed loop applies when
+# ManagedConfig.resilience is set: timeouts, idempotency-aware retries, and the
+# per-run circuit breaker. Backoff sleeps are monkeypatched to zero so the suite
+# stays fast; failures are simulated by wrapping client.model.chat / client.tools.call.
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch):
+    """Neutralise the resilience backoff sleep for THIS test module so injected retries
+    don't add real wall-clock time (the anti-stall requirement). Only patches the sleep
+    the managed module calls; unrelated timing is untouched."""
+    import ctxmesh.managed as managed_mod
+
+    monkeypatch.setattr(managed_mod.time, "sleep", lambda _s: None)
+
+
+class _NToolTurnsGatewayStub(_BaseStub):
+    """A gateway that returns the SAME single tool call for the first ``turns`` model
+    requests, then a final answer — regardless of what tool results came back. Lets a test
+    drive the same tool N times in one run (to exercise the circuit breaker across turns)."""
+
+    def __init__(self, call: Dict[str, Any], turns: int) -> None:
+        self._call = call
+        self._turns = turns
+        self._seen = 0
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def completions(state: _StubState, req: RecordedRequest):
+            self._seen += 1
+            if self._seen <= self._turns:
+                resp = {
+                    "id": "chatcmpl-nturns",
+                    "object": "chat.completion",
+                    "model": "nturns-mock",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [self._call],
+                            },
+                        }
+                    ],
+                    "usage": USAGE,
+                }
+            else:
+                resp = _plain_final_body("NTURNS_FINAL done")
+            return 200, {"Content-Type": "application/json"}, json.dumps(resp).encode()
+
+        self.state.routes.update({"POST /chat/completions": completions})
+
+
+def _resilience_client(gw, disc):
+    """A client on the given gateway/discovery (no tool monkeypatch — tests install their own)."""
+    plane = PlaneConfig.for_test(discovery_base_url=disc.base_url, model_gateway_url=gw.base_url)
+    return agent.from_config(plane)
+
+
+# ── model-call resilience ───────────────────────────────────────────────────────
+
+
+def test_model_retry_on_transient_failure_then_success(monkeypatch):
+    """resilience.modelCall.maxRetries=2: chat raises EndpointError once then succeeds →
+    the loop retries and returns the eventual final answer. Proves the retry happened."""
+    from ctxmesh.errors import EndpointError
+
+    with _SequentialGatewayStub(["MODEL_FINAL done"]) as gw, _EmptyDiscoveryStub() as disc:
+        client = _resilience_client(gw, disc)
+        real_chat = client.model.chat
+        attempts = {"n": 0}
+
+        def flaky_chat(route, messages, **opts):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise EndpointError("transient gateway blip", status=502)
+            return real_chat(route, messages, **opts)
+
+        monkeypatch.setattr(client.model, "chat", flaky_chat)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            resilience={"modelCall": {"timeoutSeconds": 0, "maxRetries": 2}},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    assert attempts["n"] == 2, "chat was retried exactly once after the transient failure"
+    assert result.output.startswith("MODEL_FINAL")
+
+
+def test_model_timeout_is_passed_into_chat_opts(monkeypatch):
+    """resilience.modelCall.timeoutSeconds>0 → the loop sets chat_opts['timeout'] on the call."""
+    with _SequentialGatewayStub(["MODEL_FINAL done"]) as gw, _EmptyDiscoveryStub() as disc:
+        client = _resilience_client(gw, disc)
+        real_chat = client.model.chat
+        seen_timeout = {"value": "unset"}
+
+        def capturing_chat(route, messages, **opts):
+            seen_timeout["value"] = opts.get("timeout", "unset")
+            return real_chat(route, messages, **opts)
+
+        monkeypatch.setattr(client.model, "chat", capturing_chat)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            resilience={"modelCall": {"timeoutSeconds": 17, "maxRetries": 0}},
+        )
+        run_managed_loop(client, config, "go")
+
+    assert seen_timeout["value"] == 17
+
+
+# ── tool-call resilience: THE idempotency-critical tests ────────────────────────
+
+
+def test_tool_not_retried_by_default_safety(monkeypatch):
+    """THE safety test. A NON-retryable tool (no retryable:true override) that raises on dispatch
+    is attempted EXACTLY ONCE — it is NOT retried — even with toolCall.maxRetries=3. Proven by
+    counting the fake tool's invocations: exactly 1. Blind retry of a non-idempotent tool would
+    double-execute its side effect, so a tool without an explicit retryable marker is never retried.
+
+    The gateway serves a SINGLE tool-calling turn (via _PolicyGatewayStub, which flips to a final
+    answer the moment a tool result appears). So the fake tool is offered exactly one dispatch
+    opportunity — any count above 1 could ONLY come from a retry. The failure is threaded to the
+    model as an honest tool-error result (resilience.toolCall is configured), the loop finishes,
+    and the count is asserted to be exactly 1: no retry happened."""
+    from ctxmesh.errors import EndpointError
+
+    calls = [_tool_call_obj("c1", "send_email", {"to": "a@b.c"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["send_email"]) as disc:
+        client = _resilience_client(gw, disc)
+        attempts = {"n": 0}
+
+        def always_fail(name, **kwargs):
+            attempts["n"] += 1
+            raise EndpointError("tool boom", status=500)
+
+        monkeypatch.setattr(client.tools, "call", always_fail)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            # maxRetries is generous, but send_email is NOT marked retryable → single attempt.
+            tool_policy={"default": "allow"},
+            resilience={"toolCall": {"timeoutSeconds": 0, "maxRetries": 3}},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    # THE load-bearing assertion: the non-retryable tool was dispatched EXACTLY ONCE (no retry),
+    # despite maxRetries=3. A second call could only be a retry — there is exactly one turn.
+    assert attempts["n"] == 1, "a non-retryable tool must be attempted EXACTLY ONCE (no retry)"
+    # The failure surfaced honestly to the model as the tool result (not swallowed, not retried).
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
+    assert "send_email" in tool_msgs[-1]["content"] and "failed" in tool_msgs[-1]["content"]
+    assert result.tools_called == []  # a failed dispatch is not recorded as executed
+
+
+def test_tool_retried_when_explicitly_retryable(monkeypatch):
+    """A tool whose override sets retryable:true raises once then succeeds → the loop retries
+    (exactly TWO attempts) and the run completes. Opt-in retry is only for declared-idempotent
+    tools."""
+    from ctxmesh.errors import EndpointError
+
+    calls = [_tool_call_obj("c1", "read_doc", {"id": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["read_doc"]) as disc:
+        client = _resilience_client(gw, disc)
+        attempts = {"n": 0}
+
+        def fail_once(name, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise EndpointError("transient tool blip", status=503)
+            return {"content": [{"type": "text", "text": "read_doc ok"}]}
+
+        monkeypatch.setattr(client.tools, "call", fail_once)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={
+                "default": "allow",
+                "overrides": [{"name": "read_doc", "rule": "allow", "retryable": True}],
+            },
+            resilience={"toolCall": {"timeoutSeconds": 0, "maxRetries": 2}},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    assert attempts["n"] == 2, "a retryable tool is retried once after the transient failure"
+    assert result.tools_called == ["read_doc"]
+    assert result.output.startswith("POLICY_FINAL")
+
+
+def test_tool_timeout_is_passed_into_tools_call(monkeypatch):
+    """resilience.toolCall.timeoutSeconds>0 → the loop passes timeout=<n> into client.tools.call."""
+    calls = [_tool_call_obj("c1", "search", {"q": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["search"]) as disc:
+        client = _resilience_client(gw, disc)
+        seen = {"timeout": "unset"}
+
+        def capturing_call(name, **kwargs):
+            seen["timeout"] = kwargs.get("timeout", "unset")
+            return {"content": [{"type": "text", "text": "search ran"}]}
+
+        monkeypatch.setattr(client.tools, "call", capturing_call)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "allow"},
+            resilience={"toolCall": {"timeoutSeconds": 9, "maxRetries": 0}},
+        )
+        run_managed_loop(client, config, "go")
+
+    assert seen["timeout"] == 9
+
+
+# ── circuit breaker ─────────────────────────────────────────────────────────────
+
+
+def test_circuit_breaker_opens_and_short_circuits(monkeypatch):
+    """A tool failing failureThreshold times → the breaker OPENS; the next call short-circuits
+    WITHOUT dispatching and the model gets the honest 'circuit open' message. Proven by the
+    dispatch count: exactly `failureThreshold` real dispatches, then no more."""
+    from ctxmesh.errors import EndpointError
+
+    call = _tool_call_obj("c1", "flaky", {})
+    # 4 tool-calling turns: 3 to trip the threshold, a 4th that must short-circuit.
+    with _NToolTurnsGatewayStub(call, turns=4) as gw, _MultiToolDiscoveryStub(["flaky"]) as disc:
+        client = _resilience_client(gw, disc)
+        dispatches = {"n": 0}
+
+        def always_fail(name, **kwargs):
+            dispatches["n"] += 1
+            raise EndpointError("flaky down", status=500)
+
+        monkeypatch.setattr(client.tools, "call", always_fail)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            # flaky is NOT retryable → one dispatch per turn; threshold 3 opens after 3 turns.
+            tool_policy={"default": "allow"},
+            resilience={
+                "toolCall": {
+                    "timeoutSeconds": 0,
+                    "maxRetries": 0,
+                    "circuitBreaker": {"failureThreshold": 3, "cooldownSeconds": 60},
+                }
+            },
+        )
+        result = run_managed_loop(client, config, "go")
+
+    # Exactly 3 real dispatches (the threshold); the 4th turn short-circuited — no 4th dispatch.
+    assert dispatches["n"] == 3, "breaker opened on the 3rd failure; the 4th call did not dispatch"
+    # The run still completed (the short-circuit is not a crash) and returned the final answer.
+    assert result.output.startswith("NTURNS_FINAL")
+    # The 4th turn's tool result carried the honest circuit-open message.
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
+    assert "circuit open for tool 'flaky'" in tool_msgs[-1]["content"]
+
+
+def test_circuit_breaker_half_open_recovers(monkeypatch):
+    """After cooldownSeconds elapse, the open breaker allows ONE probe; a success closes it.
+    The monotonic clock is monkeypatched so no real time passes."""
+    from ctxmesh.errors import EndpointError
+
+    call = _tool_call_obj("c1", "svc", {})
+    # 3 turns: 2 fail to trip threshold=2 (open), turn 3 is the half-open probe (succeeds).
+    with _NToolTurnsGatewayStub(call, turns=3) as gw, _MultiToolDiscoveryStub(["svc"]) as disc:
+        client = _resilience_client(gw, disc)
+        import ctxmesh.managed as managed_mod
+
+        # A monotonic clock that JUMPS forward on every read (by more than the cooldown). So the
+        # allow-check on turn 3 (after the breaker opened on turn 2's failure) always sees the
+        # cooldown elapsed → the half-open probe is admitted. Turns 1-2 still fail and open it,
+        # because record_failure stamps open_until = now + cooldown at the LATEST clock read.
+        ticks = {"t": 1000.0}
+
+        def jumping_monotonic():
+            ticks["t"] += 1000.0  # >> cooldownSeconds (30) so any open breaker is always cooled
+            return ticks["t"]
+
+        monkeypatch.setattr(managed_mod.time, "monotonic", jumping_monotonic)
+
+        dispatches = {"n": 0}
+
+        def two_fail_then_ok(name, **kwargs):
+            dispatches["n"] += 1
+            if dispatches["n"] <= 2:
+                raise EndpointError("svc down", status=500)
+            return {"content": [{"type": "text", "text": "svc ok"}]}
+
+        monkeypatch.setattr(client.tools, "call", two_fail_then_ok)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "allow"},
+            resilience={
+                "toolCall": {
+                    "timeoutSeconds": 0,
+                    "maxRetries": 0,
+                    "circuitBreaker": {"failureThreshold": 2, "cooldownSeconds": 30},
+                }
+            },
+        )
+        result = run_managed_loop(client, config, "go")
+
+    # 2 failures opened it; the probe (dispatch #3) was admitted and succeeded → run finished.
+    assert dispatches["n"] == 3, "the half-open probe was admitted after the cooldown"
+    assert result.tools_called == ["svc"], "the successful probe recorded a real tool call"
+    assert result.output.startswith("NTURNS_FINAL")
+
+
+# ── sub-run retry bounding ──────────────────────────────────────────────────────
+
+
+def test_sub_run_caps_tool_retries(monkeypatch):
+    """Inside a delegated sub-run (X-Ctxmesh-Spawn-Depth: 1), a retryable tool that ALWAYS fails
+    with maxRetries=3 is attempted AT MOST twice (1 retry), not four times — a retry storm inside a
+    synchronously-awaited sub-run amplifies M64's parked-worker limit and multiplies spend."""
+    from ctxmesh.errors import EndpointError
+
+    calls = [_tool_call_obj("c1", "read_doc", {"id": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["read_doc"]) as disc:
+        client = _resilience_client(gw, disc)
+        attempts = {"n": 0}
+
+        def always_fail(name, **kwargs):
+            attempts["n"] += 1
+            raise EndpointError("read_doc down", status=500)
+
+        monkeypatch.setattr(client.tools, "call", always_fail)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={
+                "default": "allow",
+                "overrides": [{"name": "read_doc", "rule": "allow", "retryable": True}],
+            },
+            resilience={"toolCall": {"timeoutSeconds": 0, "maxRetries": 3}},
+        )
+        # One tool turn (the stub flips to a final answer once a tool result appears); the retries
+        # all happen inside the single dispatch, then the failure threads and the loop finishes.
+        run_managed_loop(client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"})
+
+    assert attempts["n"] == 2, "a sub-run caps retries to 1 (2 attempts), not the configured 3"
+
+
+def test_sub_run_caps_model_retries(monkeypatch):
+    """Inside a sub-run, model-call retries are also capped to 1: chat that ALWAYS fails with
+    maxRetries=3 is attempted at most twice (1 retry) before the failure surfaces."""
+    from ctxmesh.errors import EndpointError
+
+    with _PolicyGatewayStub([]) as gw, _MultiToolDiscoveryStub([]) as disc:
+        client = _resilience_client(gw, disc)
+        attempts = {"n": 0}
+
+        def always_fail(route, messages, **opts):
+            attempts["n"] += 1
+            raise EndpointError("gateway down", status=502)
+
+        monkeypatch.setattr(client.model, "chat", always_fail)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            resilience={"modelCall": {"timeoutSeconds": 0, "maxRetries": 3}},
+        )
+        with pytest.raises(EndpointError):
+            run_managed_loop(client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"})
+
+    assert attempts["n"] == 2, "a sub-run caps model retries to 1 (2 attempts), not configured 3"
+
+
+# ── resilience None → unchanged (regression) ────────────────────────────────────
+
+
+def test_resilience_none_is_unchanged(monkeypatch):
+    """resilience=None (the default) → no timeout override on chat OR tool, no retry, no breaker:
+    a single chat call, a single tool dispatch, and no 'timeout' kwarg on either."""
+    calls = [_tool_call_obj("c1", "search", {"q": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["search"]) as disc:
+        client = _resilience_client(gw, disc)
+        chat_opts_seen: List[Dict[str, Any]] = []
+        real_chat = client.model.chat
+
+        def capturing_chat(route, messages, **opts):
+            chat_opts_seen.append(dict(opts))
+            return real_chat(route, messages, **opts)
+
+        tool_kwargs_seen: List[Dict[str, Any]] = []
+
+        def capturing_call(name, **kwargs):
+            tool_kwargs_seen.append(dict(kwargs))
+            return {"content": [{"type": "text", "text": "search ran"}]}
+
+        monkeypatch.setattr(client.model, "chat", capturing_chat)
+        monkeypatch.setattr(client.tools, "call", capturing_call)
+        config = ManagedConfig(system_prompt="sys", model_route="m")  # resilience=None
+        result = run_managed_loop(client, config, "go")
+
+    # No timeout override was injected on any chat call, and the tool call carried no timeout.
+    assert all("timeout" not in o for o in chat_opts_seen)
+    assert all("timeout" not in k for k in tool_kwargs_seen)
+    # Exactly one tool dispatch (no retry, no breaker interference).
+    assert len(tool_kwargs_seen) == 1
+    assert result.tools_called == ["search"]
+    assert result.output.startswith("POLICY_FINAL")
+
+
+# ── resilience helper units ─────────────────────────────────────────────────────
+
+
+def test_resilience_helpers_unit():
+    """Unit coverage for the m65.7 helpers: retryable gate, sub-run cap, breaker build/state."""
+    from ctxmesh.managed import (
+        _CircuitBreaker,
+        _effective_retries,
+        _make_breaker,
+        _tool_retryable,
+    )
+
+    # retryable gate: only an explicit True on a matching override; everything else False.
+    policy = {"overrides": [{"name": "safe", "retryable": True}, {"name": "no", "rule": "allow"}]}
+    assert _tool_retryable(policy, "safe") is True
+    assert _tool_retryable(policy, "no") is False  # override present but no retryable:true
+    assert _tool_retryable(policy, "absent") is False  # no override at all
+    assert _tool_retryable(None, "safe") is False  # no policy
+    assert _tool_retryable({"overrides": [{"name": "x", "retryable": "true"}]}, "x") is False  # str
+
+    # sub-run cap: min(configured, 1) when spawn_depth>0; configured at top level.
+    assert _effective_retries(3, 0) == 3
+    assert _effective_retries(3, 1) == 1
+    assert _effective_retries(0, 1) == 0
+
+    # breaker build: absent circuitBreaker / non-positive threshold → None.
+    assert _make_breaker(None) is None
+    assert _make_breaker({"toolCall": {}}) is None
+    assert _make_breaker({"toolCall": {"circuitBreaker": {"failureThreshold": 0}}}) is None
+    b = _make_breaker(
+        {"toolCall": {"circuitBreaker": {"failureThreshold": 2, "cooldownSeconds": 5}}}
+    )
+    assert isinstance(b, _CircuitBreaker)
+
+    # breaker state machine: closed → open at threshold; a success resets the count.
+    cb = _CircuitBreaker(failure_threshold=2, cooldown_seconds=1000.0)
+    assert cb.allow("t") is True
+    cb.record_failure("t")
+    assert cb.allow("t") is True  # 1 failure < threshold → still closed
+    cb.record_success("t")  # reset
+    cb.record_failure("t")
+    cb.record_failure("t")  # 2 consecutive → open
+    assert cb.allow("t") is False  # open, cooling down → short-circuit

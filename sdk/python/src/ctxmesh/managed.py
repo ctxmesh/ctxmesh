@@ -36,6 +36,8 @@ import contextvars
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -45,7 +47,12 @@ import jsonschema
 from ctxmesh._approval import approval_scope, pause_for_approval
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
-from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
+from ctxmesh.errors import (
+    ApprovalRequiredError,
+    ConfigError,
+    ConsentRequiredError,
+    EndpointError,
+)
 from ctxmesh.tools import DELEGATE_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
@@ -291,6 +298,21 @@ class ManagedConfig:
     #: managed image, not a security perimeter; do not treat it as one.
     tool_policy: Optional[Dict[str, Any]] = None
 
+    #: Per-turn resilience (m65.7, ADR 0058) — the ``AGENT_RUNTIME.resilience`` object, shape:
+    #: ``{"modelCall": {"timeoutSeconds": int, "maxRetries": int},
+    #:    "toolCall": {"timeoutSeconds": int, "maxRetries": int,
+    #:                 "circuitBreaker": {"failureThreshold": int, "cooldownSeconds": int}}}``.
+    #: When set, :func:`run_managed_loop` applies, per turn: a model-call timeout + bounded
+    #: retry (SAFE — just tokens — so on by default when configured), a per-tool-call timeout +
+    #: **idempotency-aware** retry (OPT-IN: a tool is retried ONLY when its policy override marks
+    #: it ``retryable: true`` — blindly retrying a side-effecting tool double-executes; there is
+    #: no manifest idempotency marker, so default is OFF), and a per-run, per-tool in-process
+    #: circuit breaker. Inside a delegated sub-run (spawn_depth > 0) retry counts are capped to
+    #: ``min(configured, 1)`` so a retry storm can't amplify M64's parked-worker limit. ``None``
+    #: (the default) leaves the loop byte-for-byte unchanged: today's 60s model / 30s tool
+    #: timeouts, no retry, no breaker.
+    resilience: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_env(cls) -> "ManagedConfig":
         """Build a ManagedConfig from the launcher-injected environment (config → behaviour).
@@ -339,12 +361,22 @@ class ManagedConfig:
                 type(tool_policy).__name__,
             )
             tool_policy = None
+        # Per-turn resilience (m65.7). Same type-guard: a non-dict value is a misconfig → None,
+        # which leaves the loop byte-for-byte unchanged.
+        resilience: Optional[Dict[str, Any]] = runtime.get("resilience")
+        if resilience is not None and not isinstance(resilience, dict):
+            _log.warning(
+                "AGENT_RUNTIME.resilience is not a JSON object (%r); ignoring",
+                type(resilience).__name__,
+            )
+            resilience = None
         return cls(
             system_prompt=_load_system_prompt_from_env(),
             model_route=os.environ.get("MODEL_ROUTE", ""),
             max_steps=max_steps,
             output_schema=output_schema,
             tool_policy=tool_policy,
+            resilience=resilience,
         )
 
 
@@ -532,6 +564,10 @@ def run_managed_loop(
     # for human approval) from a delegated sub-run (must fail-closed deny — a pause hangs the
     # supervisor's synchronous await).
     spawn_depth = _spawn_depth_from_headers(headers)
+    # Per-run tool circuit breaker (m65.7): a FRESH registry per run — one run's tool
+    # failures never trip another run's calls (per-run scope is the M65 choice; fleet-wide
+    # coordination is the m52.J2 deferral). None when no breaker is configured (unchanged).
+    breaker = _make_breaker(config.resilience)
     threaded = bool(conversation_id) and client.config.memory_wired
     history = (
         _load_history(client, conversation_id, config.max_history_messages) if threaded else []
@@ -580,6 +616,7 @@ def run_managed_loop(
                 user_input,
                 message_id,
                 spawn_depth,
+                breaker,
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -730,6 +767,271 @@ def _parallel_limit(tool_policy: Dict[str, Any]) -> int:
     return limit
 
 
+# ── Per-turn resilience (m65.7, ADR 0058) ──────────────────────────────────────
+#
+# Retries here are IDEMPOTENCY-AWARE BY DESIGN — the load-bearing safety rule.
+# Model-call retries are safe (a re-ask just re-spends tokens with no external side
+# effect) so they are ON whenever resilience.modelCall is configured. Tool-call
+# retries are the dangerous case: an MCP tool ("send email", "charge card") has a
+# real side effect, the manifest carries NO idempotency/read-only marker we could
+# key on (code-verified), and M32.3 gives at-least-once delivery — so a blind retry
+# would DOUBLE-EXECUTE the side effect. Therefore a tool is retried ONLY when its
+# policy override explicitly declares ``retryable: true`` (see _tool_retryable);
+# absent that marker the default is a single attempt, no retry. Do not "helpfully"
+# relax this gate — it is the whole safety argument.
+
+#: Backoff cap (seconds) for the bounded exponential between retry attempts. Small —
+#: a managed turn must stay responsive; the retry is for a transient blip, not an outage.
+_RETRY_BACKOFF_CAP = 2.0
+
+#: Base backoff (seconds); attempt N (1-indexed extra attempt) waits min(cap, base * 2**(N-1)).
+_RETRY_BACKOFF_BASE = 0.1
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    """Bounded capped-exponential backoff for retry *attempt* (1 = first retry).
+
+    Kept tiny and capped so a burst of transient failures can't stall a turn. Tests
+    monkeypatch :func:`time.sleep` to zero so the suite stays fast regardless.
+    """
+    if attempt < 1:
+        return 0.0
+    return min(_RETRY_BACKOFF_CAP, _RETRY_BACKOFF_BASE * (2 ** (attempt - 1)))
+
+
+def _resilience_section(resilience: Optional[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+    """Return ``resilience[key]`` when it is a dict, else ``None`` (a missing/malformed
+    section means "no resilience for this call type" — today's behaviour)."""
+    if not isinstance(resilience, dict):
+        return None
+    section = resilience.get(key)
+    return section if isinstance(section, dict) else None
+
+
+def _positive_int(section: Dict[str, Any], key: str) -> int:
+    """Read a non-negative int config field; a bool / non-int / negative value → 0."""
+    value = section.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _effective_retries(configured: int, spawn_depth: int) -> int:
+    """Cap the retry budget to ``min(configured, 1)`` inside a delegated sub-run (m65.7).
+
+    A retry storm inside a synchronously-awaited sub-run amplifies M64's parked-worker
+    limit and multiplies spend through the budget proxy — so a sub-run gets at most ONE
+    retry regardless of the configured count. A top-level run uses the configured budget.
+    """
+    if configured <= 0:
+        return 0
+    return min(configured, 1) if spawn_depth > 0 else configured
+
+
+def _tool_retryable(tool_policy: Optional[Dict[str, Any]], name: str) -> bool:
+    """Resolve the per-tool ``retryable`` idempotency signal from the tool-policy overrides.
+
+    THE load-bearing safety gate: a tool is retryable ONLY when an override names it AND
+    sets ``retryable: true`` (a real ``True``, not a truthy string). Missing policy, no
+    matching override, or any non-True value → ``False`` — a non-idempotent tool is NEVER
+    retried, because a blind retry would double-execute its side effect and there is no
+    manifest idempotency marker to infer safety from (ADR 0058)."""
+    if not isinstance(tool_policy, dict):
+        return False
+    overrides = tool_policy.get("overrides")
+    if not isinstance(overrides, list):
+        return False
+    for entry in overrides:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            return entry.get("retryable") is True
+    return False
+
+
+class _CircuitBreaker:
+    """A per-run, per-tool in-process circuit breaker (m65.7, ADR 0058).
+
+    Scope is deliberately PER-RUN: a fresh registry is created in
+    :func:`run_managed_loop` and threaded into the loop, so one run's tool failures
+    never trip another run's calls. (Coordinated/per-pod fleet-wide breaking is the
+    conscious deferral m52.J2 — do NOT build shared state here.) It is a health
+    heuristic, not a global safety ceiling.
+
+    State machine per tool:
+      * **closed** — normal. Consecutive failures are counted; a success resets the
+        count to 0. At ``failure_threshold`` consecutive failures → **open**.
+      * **open** — every call short-circuits (no dispatch) until ``open_until``. After
+        the cooldown elapses the next call is admitted as a **half-open** probe.
+      * **half-open** — ONE probe is allowed through: success → closed (count reset),
+        failure → re-open (a fresh cooldown).
+
+    The registry is guarded by a lock because the M64 concurrent-delegate pool can
+    touch it from worker threads; the per-tool state transitions are done under it.
+    """
+
+    def __init__(self, failure_threshold: int, cooldown_seconds: float) -> None:
+        self._threshold = failure_threshold
+        self._cooldown = cooldown_seconds
+        self._lock = threading.Lock()
+        # name -> {"failures": int, "open_until": Optional[float]}
+        self._state: Dict[str, Dict[str, Any]] = {}
+
+    def _entry(self, name: str) -> Dict[str, Any]:
+        return self._state.setdefault(name, {"failures": 0, "open_until": None})
+
+    def allow(self, name: str) -> bool:
+        """Return True if a call to *name* may be dispatched now (closed or half-open probe);
+        False if the breaker is open and still cooling down (short-circuit)."""
+        # A non-positive threshold means "breaker disabled" — always allow.
+        if self._threshold <= 0:
+            return True
+        with self._lock:
+            entry = self._entry(name)
+            open_until = entry["open_until"]
+            # None → closed (allow). Cooldown elapsed → allow ONE half-open probe (leave
+            # open_until set so a concurrent second caller still short-circuits until the probe
+            # resolves). Still cooling down → short-circuit (deny).
+            return open_until is None or time.monotonic() >= open_until
+
+    def record_success(self, name: str) -> None:
+        """A successful call: reset to closed (count 0, not open)."""
+        if self._threshold <= 0:
+            return
+        with self._lock:
+            entry = self._entry(name)
+            entry["failures"] = 0
+            entry["open_until"] = None
+
+    def record_failure(self, name: str) -> None:
+        """A failed call: increment consecutive failures; open (or re-open) at the threshold."""
+        if self._threshold <= 0:
+            return
+        with self._lock:
+            entry = self._entry(name)
+            entry["failures"] += 1
+            if entry["failures"] >= self._threshold:
+                entry["open_until"] = time.monotonic() + self._cooldown
+
+
+def _make_breaker(resilience: Optional[Dict[str, Any]]) -> Optional[_CircuitBreaker]:
+    """Build the per-run tool circuit breaker from ``resilience.toolCall.circuitBreaker``.
+
+    Returns ``None`` when resilience/toolCall/circuitBreaker is absent or the threshold is
+    not a positive int — then the loop dispatches with no breaker (today's behaviour)."""
+    tool_call = _resilience_section(resilience, "toolCall")
+    if tool_call is None:
+        return None
+    cb = tool_call.get("circuitBreaker")
+    if not isinstance(cb, dict):
+        return None
+    threshold = _positive_int(cb, "failureThreshold")
+    if threshold <= 0:
+        return None
+    cooldown = _positive_int(cb, "cooldownSeconds")
+    return _CircuitBreaker(threshold, float(cooldown))
+
+
+def _chat_with_resilience(
+    client: Client,
+    config: ManagedConfig,
+    route: str,
+    messages: List[Dict[str, Any]],
+    chat_opts: Dict[str, Any],
+    on_token: Optional[Callable[[str], None]],
+    spawn_depth: int,
+) -> Any:
+    """Run one model turn with model-call resilience (m65.7): timeout + bounded retry.
+
+    Model retries are SAFE (a re-ask only re-spends tokens) → ON by default whenever
+    ``resilience.modelCall`` is configured. ``timeoutSeconds > 0`` sets ``chat_opts["timeout"]``.
+    On an :class:`EndpointError` (gateway/timeout failure) the call is retried up to the
+    effective budget (``maxRetries``, capped to 1 inside a sub-run) with a small bounded
+    backoff; after the budget is exhausted the error is re-raised so the loop surfaces an
+    honest failure rather than a fabricated answer."""
+    model_call = _resilience_section(config.resilience, "modelCall")
+    if model_call is not None:
+        timeout_seconds = _positive_int(model_call, "timeoutSeconds")
+        if timeout_seconds > 0:
+            chat_opts["timeout"] = timeout_seconds
+        retries = _effective_retries(_positive_int(model_call, "maxRetries"), spawn_depth)
+    else:
+        retries = 0
+
+    attempt = 0
+    while True:
+        try:
+            if on_token is not None:
+                return _stream_turn(client, route, messages, chat_opts, on_token)
+            return client.model.chat(route, messages, **chat_opts)
+        except EndpointError:
+            if attempt >= retries:
+                raise  # budget exhausted → honest failure, never a fabricated answer.
+            attempt += 1
+            time.sleep(_retry_backoff_seconds(attempt))
+
+
+def _call_tool_with_resilience(
+    client: Client,
+    config: ManagedConfig,
+    name: str,
+    args: Dict[str, Any],
+    breaker: Optional[_CircuitBreaker],
+    spawn_depth: int,
+) -> Any:
+    """Dispatch one MCP tool with tool-call resilience (m65.7): timeout + idempotency-aware
+    retry, under the per-run circuit breaker.
+
+    Retry is OPT-IN and idempotency-gated: a tool is retried only when BOTH the configured
+    ``toolCall.maxRetries > 0`` AND the tool's policy override marks it ``retryable: true``.
+    A tool without that explicit marker is dispatched EXACTLY ONCE — a blind retry of a
+    non-idempotent tool ("send email") double-executes its side effect, and the manifest
+    carries no idempotency marker to infer safety from (ADR 0058). Each failed attempt is
+    recorded on the breaker; a success resets it. Raises :class:`_CircuitOpenError` when the
+    breaker is open (the caller threads an honest "circuit open" tool result to the model)."""
+    tool_call = _resilience_section(config.resilience, "toolCall")
+    call_kwargs: Dict[str, Any] = dict(args)
+    retries = 0
+    if tool_call is not None:
+        timeout_seconds = _positive_int(tool_call, "timeoutSeconds")
+        if timeout_seconds > 0:
+            call_kwargs["timeout"] = timeout_seconds
+        # Retry ONLY when configured AND this tool is explicitly retryable (idempotent).
+        if _tool_retryable(config.tool_policy, name):
+            retries = _effective_retries(_positive_int(tool_call, "maxRetries"), spawn_depth)
+
+    attempt = 0
+    while True:
+        if breaker is not None and not breaker.allow(name):
+            raise _CircuitOpenError(name)
+        try:
+            result = client.tools.call(name, **call_kwargs)
+        except ConsentRequiredError:
+            # Consent-required is a user-action outcome, NOT a transient fault: it must not
+            # count toward the breaker or be retried — surface it to the existing handler.
+            raise
+        except EndpointError:
+            if breaker is not None:
+                breaker.record_failure(name)
+            if attempt >= retries:
+                raise
+            attempt += 1
+            time.sleep(_retry_backoff_seconds(attempt))
+            continue
+        if breaker is not None:
+            breaker.record_success(name)
+        return result
+
+
+class _CircuitOpenError(Exception):
+    """Raised inside the tool dispatch when the per-run breaker is open for a tool (m65.7).
+
+    Caught in the loop and turned into an honest ``"circuit open for tool '<name>'"`` tool
+    result the model sees (mirroring the m65.6 blocked-message threading) — never propagated."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"circuit open for tool {name!r}")
+        self.tool_name = name
+
+
 def _drive_loop(
     client: Client,
     config: ManagedConfig,
@@ -745,6 +1047,7 @@ def _drive_loop(
     user_input: str,
     message_id: str = "",
     spawn_depth: int = 0,
+    breaker: Optional["_CircuitBreaker"] = None,
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
@@ -780,13 +1083,14 @@ def _drive_loop(
                 tool_choice = _forced_tool_choice(config.tool_policy)
                 if tool_choice is not None:
                     chat_opts["tool_choice"] = tool_choice
-            # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
-            # push content deltas to on_token as they arrive, then take the assembled response
-            # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
-            if on_token is not None:
-                resp = _stream_turn(client, config.model_route, messages, chat_opts, on_token)
-            else:
-                resp = client.model.chat(config.model_route, messages, **chat_opts)
+            # Per-turn model-call resilience (m65.7, ADR 0058): timeout + bounded retry
+            # around the chat call — SAFE by default because a re-ask only re-spends tokens
+            # (no external side effect). Streams when a token sink is wired (the m32.7
+            # /invoke). When resilience.modelCall is None this is exactly the old call: one
+            # attempt, the historical 60s timeout, no retry.
+            resp = _chat_with_resilience(
+                client, config, config.model_route, messages, chat_opts, on_token, spawn_depth
+            )
 
             if not resp.has_tool_calls:
                 # The model stopped calling tools → this is the final answer.
@@ -936,10 +1240,34 @@ def _drive_loop(
                 else:
                     try:
                         with client.trace.tool(name, input=args) as tool_span:
-                            result = client.tools.call(name, **args)
+                            # Per-turn tool-call resilience (m65.7, ADR 0058): timeout +
+                            # IDEMPOTENCY-AWARE retry under the per-run breaker. A tool is
+                            # retried only when it is explicitly retryable (see
+                            # _call_tool_with_resilience) — a non-idempotent tool is dispatched
+                            # exactly once. When resilience.toolCall is None this is exactly the
+                            # old call: client.tools.call(name, **args), 30s timeout, no retry.
+                            result = _call_tool_with_resilience(
+                                client, config, name, args, breaker, spawn_depth
+                            )
                             tool_span.set_output(result)
                         content = _tool_result_content(result)
                         tools_called.append(name)
+                    except _CircuitOpenError:
+                        # The per-run breaker is open for this tool: short-circuit WITHOUT
+                        # dispatching and thread an honest "circuit open" result so the model
+                        # can adapt (mirrors the m65.6 blocked-message threading). The tool was
+                        # NOT executed, so tools_called does not record it.
+                        content = f"circuit open for tool {name!r}: too many recent failures"
+                    except EndpointError as exc:
+                        # A tool dispatch failed (after any retries + a recorded breaker
+                        # failure). WITH tool-call resilience configured, we thread the failure
+                        # back as an honest tool-error result so the run continues — this is what
+                        # lets the per-run breaker accumulate consecutive failures across turns
+                        # and eventually OPEN. WITHOUT resilience the historical behaviour is
+                        # preserved exactly: the error propagates and ends the run (no swallow).
+                        if _resilience_section(config.resilience, "toolCall") is None:
+                            raise
+                        content = f"tool {name!r} failed: {exc}"
                     except ConsentRequiredError as exc:
                         # The invoking user has not connected their account to this MCP
                         # server (ADR 0029 §2). Record it for the run's "Connect your
