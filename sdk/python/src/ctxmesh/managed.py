@@ -40,6 +40,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+import jsonschema
+
 from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
@@ -71,6 +73,14 @@ MESSAGE_HEADER = "X-Message-Id"
 #: fall out of the window (the memory plane still retains the full history).
 MAX_HISTORY_MESSAGES = 40
 
+#: Bounded repair-retry count for structured-output schema conformance (m65.5).
+#: When the model returns a final answer that fails schema validation, the loop
+#: appends a corrective message and re-asks AT MOST this many times before
+#: returning the last (non-conforming) answer — the platform terminal validator
+#: (m65.4, server-side) is the authoritative backstop that will fail the run;
+#: the SDK's job is best-effort repair, not to raise or loop forever.
+_MAX_SCHEMA_REPAIR = 2
+
 
 def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
     """Pull the conversation id out of inbound *headers* case-insensitively (HTTP header
@@ -100,6 +110,37 @@ def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
         if key.lower() == target:
             return (value or "").strip()
     return ""
+
+
+def _parse_runtime_env() -> Dict[str, Any]:
+    """Parse the controller-injected ``AGENT_RUNTIME`` env var (m65.5, ADR 0058).
+
+    Returns the decoded JSON object when the env var is set and well-formed;
+    returns ``{}`` when absent/blank or on malformed JSON (log a WARNING in the
+    latter case — a bad env must never crash a pod).
+
+    **Extensibility note (m65.6/m65.7):** callers pull specific keys:
+    ``output_schema = runtime.get("outputSchema")`` here (m65.5),
+    ``runtime.get("toolPolicy")`` in m65.6, ``runtime.get("resilience")`` in m65.7.
+    The parse itself is centralised here — add a caller, not a new parse.
+    """
+    raw = os.environ.get("AGENT_RUNTIME", "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "AGENT_RUNTIME env var is not valid JSON (%s); structured-output schema ignored", exc
+        )
+        return {}
+    if not isinstance(parsed, dict):
+        _log.warning(
+            "AGENT_RUNTIME env var parsed to %r (expected a JSON object); ignoring",
+            type(parsed).__name__,
+        )
+        return {}
+    return parsed
 
 
 def _inject_agent_memory(
@@ -199,6 +240,13 @@ class ManagedConfig:
     agent_memory_top_k: int = 5
     agent_memory_threshold: float = 0.75
 
+    #: JSON Schema (as a Python dict) that the final answer MUST conform to (m65.5, ADR 0058).
+    #: When set, the loop injects ``response_format`` on every turn to steer the provider, then
+    #: validates the final answer and repairs up to :data:`_MAX_SCHEMA_REPAIR` times before
+    #: returning the last (possibly non-conforming) answer — the platform terminal validator
+    #: (m65.4) is the authoritative backstop. ``None`` (the default) leaves the loop unchanged.
+    output_schema: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_env(cls) -> "ManagedConfig":
         """Build a ManagedConfig from the launcher-injected environment (config → behaviour).
@@ -227,10 +275,22 @@ class ManagedConfig:
         if max_steps < 1:
             _log.warning("MAX_STEPS=%d is < 1; using the default %d", max_steps, DEFAULT_MAX_STEPS)
             max_steps = DEFAULT_MAX_STEPS
+        # Parse the controller-injected AGENT_RUNTIME once; pull keys by spec below.
+        # m65.6 will read runtime.get("toolPolicy"); m65.7 runtime.get("resilience").
+        runtime = _parse_runtime_env()
+        output_schema: Optional[Dict[str, Any]] = runtime.get("outputSchema")
+        # Guard: only accept a dict (a non-dict value in the JSON is a misconfig).
+        if output_schema is not None and not isinstance(output_schema, dict):
+            _log.warning(
+                "AGENT_RUNTIME.outputSchema is not a JSON object (%r); ignoring",
+                type(output_schema).__name__,
+            )
+            output_schema = None
         return cls(
             system_prompt=_load_system_prompt_from_env(),
             model_route=os.environ.get("MODEL_ROUTE", ""),
             max_steps=max_steps,
+            output_schema=output_schema,
         )
 
 
@@ -540,6 +600,26 @@ def _dispatch_delegate_batch(client: Client, calls: List[tuple], step: str) -> D
     return results
 
 
+def _validate_against_schema(text: str, schema: Dict[str, Any]) -> Optional[str]:
+    """Validate *text* as JSON conforming to *schema* (m65.5, ADR 0058).
+
+    Returns ``None`` when the text is valid JSON that conforms to *schema*.
+    Returns a short human-readable error string otherwise (for the corrective
+    message sent to the model).  Never raises — validation errors are data, not
+    exceptions in this context.
+    """
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return f"response is not valid JSON: {exc}"
+    try:
+        jsonschema.validate(instance=value, schema=schema)
+    except jsonschema.ValidationError as exc:
+        # exc.message is the schema-violation description; keep it short.
+        return exc.message
+    return None
+
+
 def _drive_loop(
     client: Client,
     config: ManagedConfig,
@@ -557,12 +637,30 @@ def _drive_loop(
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
+    # Structured-output repair counter (m65.5): counts corrective re-asks after a
+    # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
+    # the max_steps budget so repair turns have a clear, explicit allowance of their own.
+    schema_repairs = 0
+
     for step in range(1, config.max_steps + 1):
         with client.trace.step(f"turn-{step}") as turn:
             # model.chat emits its own LLM span nested under this step.
             chat_opts: Dict[str, Any] = dict(config.model_opts)
             if tool_schemas:
                 chat_opts["tools"] = tool_schemas
+            # Structured outputs (m65.5, ADR 0058): steer the provider via response_format
+            # on EVERY turn when an output schema is set. strict=False because arbitrary
+            # operator schemas may not meet a provider's strict subset; enforcement is our
+            # validation layer (m65.4 server-side + the in-loop repair below).
+            if config.output_schema is not None:
+                chat_opts["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "output",
+                        "schema": config.output_schema,
+                        "strict": False,
+                    },
+                }
             # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
             # push content deltas to on_token as they arrive, then take the assembled response
             # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
@@ -573,6 +671,42 @@ def _drive_loop(
 
             if not resp.has_tool_calls:
                 # The model stopped calling tools → this is the final answer.
+                # Structured-output schema validation + bounded repair (m65.5, ADR 0058).
+                if config.output_schema is not None:
+                    error = _validate_against_schema(resp.text, config.output_schema)
+                    if error is not None and schema_repairs < _MAX_SCHEMA_REPAIR:
+                        # Schema violation: inject a corrective user message and re-ask.
+                        schema_repairs += 1
+                        _log.warning(
+                            "structured output schema violation (repair %d/%d): %s",
+                            schema_repairs,
+                            _MAX_SCHEMA_REPAIR,
+                            error,
+                        )
+                        messages.append({"role": "assistant", "content": resp.text or ""})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous response was not valid per the required "
+                                    f"JSON schema: {error}. Reply with ONLY a JSON value "
+                                    "that conforms to the schema."
+                                ),
+                            }
+                        )
+                        # Continue the outer loop — the next step re-asks the model.
+                        turn.set_output(f"schema-repair-{schema_repairs}: {error}")
+                        continue
+                    # Either conforms or repair budget exhausted: return the best answer.
+                    # When the budget is exhausted the platform terminal validator (m65.4)
+                    # is the authoritative backstop; the SDK must not raise here.
+                    if error is not None:
+                        _log.warning(
+                            "structured output schema repair budget exhausted after %d attempts; "
+                            "returning last answer for platform validator (m65.4)",
+                            schema_repairs,
+                        )
+
                 turn.set_output(resp.text)
                 root.set_output(resp.text)
                 # Persist the clean user↔assistant exchange so the next turn in this

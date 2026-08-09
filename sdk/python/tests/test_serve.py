@@ -292,3 +292,45 @@ def test_unreadable_prompt_file_warns_and_uses_default(monkeypatch, caplog, tmp_
         cfg = ManagedConfig.from_env()
     assert cfg.system_prompt == "You are a helpful assistant."  # safe default, still serves
     assert any("PROMPT_FILE" in r.message for r in caplog.records)
+
+
+# ── ManagedConfig.from_env: AGENT_RUNTIME / output_schema (m65.5, ADR 0058) ─────
+
+
+def test_managed_config_from_env_output_schema_from_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME='{"outputSchema":{...}}' → from_env().output_schema equals that schema."""
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"outputSchema": schema}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema == schema
+
+
+def test_managed_config_from_env_output_schema_absent_when_no_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME unset → from_env().output_schema is None."""
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
+
+
+def test_managed_config_from_env_malformed_agent_runtime_no_crash(monkeypatch, caplog):
+    """AGENT_RUNTIME='not json' → output_schema is None + a WARNING is logged (never a crash)."""
+    monkeypatch.setenv("AGENT_RUNTIME", "not valid json {{")
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
+    assert any("AGENT_RUNTIME" in r.message for r in caplog.records)
+
+
+def test_managed_config_from_env_agent_runtime_no_output_schema_key(monkeypatch):
+    """AGENT_RUNTIME set but no 'outputSchema' key → output_schema is None (extensible parse)."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": {"deny": []}}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
