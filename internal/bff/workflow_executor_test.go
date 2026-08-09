@@ -913,5 +913,88 @@ func TestWorkflowExecutor_Map_BudgetBomb(t *testing.T) {
 	assert.LessOrEqual(t, len(childrenOf(t, s, wfID)), 2, "no more than the budget's launches were created")
 }
 
+// ── m67.14: opening running-transition regression ─────────────────────────────────────────────────────────
+//
+// When a workflow node launch fails on the in-process / non-dispatch path, the run may still be in `queued`
+// (the worker-claim queued→running flip did not happen). Without an opening transition, failWorkflow would
+// attempt queued→failed which is illegal (ADR 0034 / the state machine), orphaning the run in `queued`.
+// The fix mirrors executeRun's opening transition: executeWorkflow now flips queued→running idempotently
+// before any node work, so a subsequent failure is the legal running→failed.
+
+// TestWorkflowExecutor_QueuedRun_NodeLaunchFailure_RecordsFailed is the regression for m67.14: a workflow
+// run created in `queued` (the in-process path — before the worker-claim queued→running flip) whose first
+// node launch FAILS must end up `failed` (with a non-empty error), NOT orphaned in `queued`, and with NO
+// "illegal transition queued→failed" error. The fix is executeWorkflow's opening queued→running transition.
+func TestWorkflowExecutor_QueuedRun_NodeLaunchFailure_RecordsFailed(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		// A single-node spec with NO pinned endpoint — spawnWorkflowNode will return a "missing pin"
+		// error on the first node launch, triggering failWorkflow. This is the exact failure vector
+		// from the live m67.10 run: a node-launch error on a still-queued workflow run.
+		Steps: []agentsv1beta1.WorkflowStep{stepNode("only", "agent-a")},
+	}
+	snap, err := json.Marshal(spec)
+	require.NoError(t, err)
+	r := run.New("wf-queued-fail", "prod", "the-workflow", json.RawMessage(`{}`), "conv-qfail", time.Now())
+	// Seed as QUEUED with NO NodeEndpoints — spawnWorkflowNode will fail (missing pin) before the run
+	// reaches any state transition through the worker-claim path.
+	r.SpecSnapshot = string(snap)
+	// NodeEndpoints intentionally nil → spawnWorkflowNode returns "missing pinned endpoint" → failWorkflow.
+	require.NoError(t, s.runStore.Create(r))
+
+	// Call executeWorkflow directly on the QUEUED run (exactly the in-process path). Without the opening
+	// transition this would attempt queued→failed (illegal) and orphan the run in queued.
+	s.executeWorkflow(r.ID)
+
+	fin := getRun(t, s, r.ID)
+	// CRITICAL assertion: the run must record `failed`, NOT be orphaned in `queued`.
+	require.Equal(t, run.StatusFailed, fin.Status,
+		"a queued run whose first node launch fails must record failed, not be orphaned in queued")
+	assert.NotEmpty(t, fin.Error,
+		"the failed run must carry a non-empty error surfacing the node-launch failure")
+	// Confirm the error message is about the missing pin (the node-launch failure path), not a transition error.
+	assert.Contains(t, fin.Error, "pinned endpoint",
+		"the error names the missing endpoint (the first-node-launch failure), not a state-machine violation")
+}
+
+// TestWorkflowExecutor_AlreadyRunning_OpeningTransitionIsNoOp: a run already `running` (the normal worker
+// path, where the claim already flipped it) must have executeWorkflow's opening transition be a no-op —
+// the existing m67.3 sequential / advance behavior is unchanged. This is the happy-path regression guard.
+func TestWorkflowExecutor_AlreadyRunning_OpeningTransitionIsNoOp(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			func() agentsv1beta1.WorkflowStep { n := stepNode("one", "agent-a"); n.Next = "two"; return n }(),
+			stepNode("two", "agent-b"),
+		},
+	}
+	// seedWorkflowRun sets status = running (the normal worker-claim path).
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+	require.Equal(t, run.StatusRunning, getRun(t, s, wfID).Status, "pre-condition: the run is already running")
+
+	// First advance: the opening transition is a no-op (running→running is a no-op per Transition);
+	// the executor launches node "one" and parks the run waiting — unchanged from m67.3.
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status,
+		"an already-running run parks waiting after node-one launches (opening transition is a no-op)")
+	child := inFlightChild(t, s, wfID)
+	assert.Equal(t, "agent-a", child.Agent, "node one (agent-a) launches normally — sequential behavior unchanged")
+
+	// Complete node one → advance 2 → node two launches.
+	completeNode(t, s, child.ID, "out-one")
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status)
+	c2 := inFlightChild(t, s, wfID)
+	assert.Equal(t, "agent-b", c2.Agent, "node two launches after node one — sequential advance unchanged")
+
+	// Complete node two → no next node → the workflow succeeds.
+	completeNode(t, s, c2.ID, "final")
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "the workflow succeeds end-to-end — m67.3 behavior unchanged")
+}
+
 // itoa is a tiny int→string for building loop:<n> ids in tests without importing strconv at call sites.
 func itoa(i int) string { return strconv.Itoa(i) }
