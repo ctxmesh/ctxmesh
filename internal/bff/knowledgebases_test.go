@@ -44,7 +44,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
 const kbNS = "team-kb"
@@ -351,4 +353,94 @@ func TestResolveKBSources_ObjectStorePrefixEmpty_ReturnsError(t *testing.T) {
 	_, err := ResolveKBSources(context.Background(), store, "ns", kb)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty")
+}
+
+// --- ingest trigger endpoint (m68.6) ----------------------------------------
+
+// postIngest sends POST /api/knowledgebases/{name}/ingest and returns (status, body).
+func postIngest(t *testing.T, s *Server, kbName, ns string) (int, []byte) {
+	t.Helper()
+	rawURL := "/api/knowledgebases/" + kbName + "/ingest"
+	if ns != "" {
+		rawURL += "?namespace=" + ns
+	}
+	req := httptest.NewRequest(http.MethodPost, rawURL, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// newIngestEndpointServer builds a Server with the KB present + the full ingestion pipeline wired (dev/in-process
+// mode: runWorkerDispatch defaults false, so the created run executes in-process synchronously via a goroutine).
+func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Server, *objectstore.MemObjectStore) {
+	t.Helper()
+	sc := testScheme(t)
+	builder := fake.NewClientBuilder().WithScheme(sc)
+	if kb != nil {
+		builder = builder.WithObjects(kb)
+	}
+	fc := builder.Build()
+	docStore := objectstore.NewMemObjectStore()
+	s := NewServer(Options{
+		CallerClients:  newFakeFactory(fc),
+		Scheme:         sc,
+		Auth:           AllowAll{},
+		Log:            logr.Discard(),
+		DocStore:       docStore,
+		KnowledgeStore: knowledge.NewMemStore(),
+		Embedder:       newMockEmbedder(),
+	})
+	return s, docStore
+}
+
+func TestIngestKB_HappyPath_CreatesRun(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	s, docStore := newIngestEndpointServer(t, kb)
+
+	// Seed a document under the KB's upload prefix so ResolveKBSources finds it.
+	key := objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md")
+	require.NoError(t, docStore.Put(context.Background(), key, bytes.NewReader([]byte("The quick brown fox jumps over the lazy dog, repeatedly.")), -1, "text/markdown"))
+
+	code, body := postIngest(t, s, "my-kb", kbNS)
+	require.Equal(t, http.StatusAccepted, code, "expected 202; body: %s", string(body))
+
+	var resp IngestResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.NotEmpty(t, resp.RunID)
+	assert.Equal(t, string(run.StatusQueued), resp.Status)
+	assert.Equal(t, 1, resp.DocumentCount)
+
+	// The run exists in the store as an ingestion job with the pinned spec.
+	rn, err := s.runStore.Get(resp.RunID)
+	require.NoError(t, err)
+	assert.True(t, rn.IsIngestionJob())
+	assert.Equal(t, "my-kb", rn.IngestionRef)
+	var spec IngestionSpec
+	require.NoError(t, json.Unmarshal([]byte(rn.IngestionSpec), &spec))
+	assert.Equal(t, "embed-v1", spec.EmbeddingRoute)
+	require.Len(t, spec.Documents, 1)
+	assert.Equal(t, key, spec.Documents[0].Key)
+}
+
+func TestIngestKB_UnknownKB_Returns404(t *testing.T) {
+	s, _ := newIngestEndpointServer(t, nil) // no KB
+	code, body := postIngest(t, s, "ghost-kb", kbNS)
+	assert.Equal(t, http.StatusNotFound, code, "expected 404; body: %s", string(body))
+}
+
+func TestIngestKB_Unwired_Returns501(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).Build()
+	// No KnowledgeStore / Embedder / DocStore wired.
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(fc),
+		Scheme:        sc,
+		Auth:          AllowAll{},
+		Log:           logr.Discard(),
+	})
+	code, body := postIngest(t, s, "my-kb", kbNS)
+	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when ingestion is unwired; body: %s", string(body))
 }

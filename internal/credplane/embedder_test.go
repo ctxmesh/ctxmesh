@@ -234,6 +234,39 @@ func TestEmbedBatch_EmptyVectorErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty vector")
 }
 
+// TestEmbedBatch_TypedStatusError asserts that a non-200 gateway response surfaces as a typed *EmbedError
+// carrying the HTTP status, so the ingestion executor can branch on 429 (rate) vs 402 (budget) WITHOUT parsing
+// strings (ADR 0061 Fork 2 — the budget/rate-aware behaviour).
+func TestEmbedBatch_TypedStatusError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"rate-limited", http.StatusTooManyRequests},    // 429 → back off + resume
+		{"budget-exceeded", http.StatusPaymentRequired}, // 402 → fail-soft, resumable
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := &fakeGatewayHandler{t: t, statusCode: tc.status, body: `{"error":"nope"}`}
+			srv := httptest.NewServer(handler)
+			defer srv.Close()
+
+			e := newTestEmbedder(srv)
+			_, _, err := e.EmbedBatch(context.Background(), "embed-v1", []string{"text"})
+			require.Error(t, err)
+
+			var ee *EmbedError
+			require.ErrorAs(t, err, &ee)
+			assert.Equal(t, tc.status, ee.Status)
+			assert.Equal(t, tc.status, EmbedStatus(err)) // the helper the executor uses to branch
+		})
+	}
+	// A non-HTTP error (a dial failure) is NOT a status error → EmbedStatus is 0.
+	e := NewGatewayEmbedder("http://127.0.0.1:1", "", nil)
+	_, _, err := e.EmbedBatch(context.Background(), "embed-v1", []string{"text"})
+	require.Error(t, err)
+	assert.Equal(t, 0, EmbedStatus(err))
+}
+
 // TestEmbedBatch_AuthHeaderSent asserts that the Authorization header is forwarded when apiKey is set.
 func TestEmbedBatch_AuthHeaderSent(t *testing.T) {
 	var authHeader string

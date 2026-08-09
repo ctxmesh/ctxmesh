@@ -32,8 +32,10 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -93,6 +95,18 @@ type Server struct {
 	// OBJECT_STORE_ADDR is unset — the upload endpoint returns 501 honestly rather
 	// than panicking. Constructed once in cmd/bff/main.go.
 	docStore objectstore.ObjectStore
+
+	// knowledgeStore is the control-plane pgvector store for the managed RAG corpus (M68, ADR 0061 Fork 1),
+	// built from cpDB. The ingestion executor (m68.6) WRITES it DIRECTLY — EnsureCorpus/Upsert/SweepOrphans —
+	// because the run-worker is a trusted control-plane workload that holds the controlplane DSN (governance
+	// #8: write-direct-from-worker). nil ⇒ the ingest endpoint + executor degrade honestly (501 / a clear
+	// failed-run reason), never a panic. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN.
+	knowledgeStore knowledge.Store
+	// embedder embeds chunk texts via the model gateway (M68, ADR 0061 Fork 2) for the ingestion executor's
+	// direct write path (governance #8 — the trusted worker embeds + writes, agent pods do not). nil when
+	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
+	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
+	embedder credplane.Embedder
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -360,6 +374,15 @@ type Options struct {
 	// Constructed in cmd/bff/main.go via objectstore.NewMinioStore().
 	DocStore objectstore.ObjectStore
 
+	// KnowledgeStore is the control-plane pgvector store for the managed RAG corpus (M68, ADR 0061 Fork 1),
+	// which the ingestion executor writes directly (governance #8). Optional — nil ⇒ the ingest endpoint +
+	// executor degrade honestly. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN (cpDB).
+	KnowledgeStore knowledge.Store
+	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
+	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
+	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
+	Embedder credplane.Embedder
+
 	Log logr.Logger
 }
 
@@ -398,6 +421,8 @@ func NewServer(opts Options) *Server {
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,
+		knowledgeStore:           opts.KnowledgeStore,
+		embedder:                 opts.Embedder,
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
@@ -644,6 +669,12 @@ func (s *Server) Handler() http.Handler {
 		// when absent; 403 when RBAC denies the GET; 501 when OBJECT_STORE_ADDR is unset;
 		// 413 when the body exceeds maxDocumentUploadBytes). Returns 201 + {documentRef, key, size}.
 		authed.HandleFunc("POST /api/knowledgebases/{name}/documents", s.handleUploadKBDocument)
+
+		// KnowledgeBase ingestion trigger (M68, ADR 0061 Fork 2): resolve the KB's source documents,
+		// pin an IngestionSpec, and create a durable ingestion Run the worker drives (extract → chunk →
+		// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
+		// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
+		authed.HandleFunc("POST /api/knowledgebases/{name}/ingest", s.handleIngestKB)
 
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
