@@ -128,6 +128,14 @@ type gatewayConfig struct {
 	// PodTokenPath is the mounted projected SA-token the proxy authenticates (audience
 	// statelayer-proxy). Defaults to defaultPodTokenPath when the proxy URL is set.
 	PodTokenPath string
+
+	// GuardrailPolicy (M66, ADR 0059 §8): the resolved GuardrailPolicy spec serialized to
+	// JSON (GUARDRAIL_POLICY env), injected by the controller when spec.guardrailPolicyRef
+	// resolves. Its presence FORCES the proxy on so the in-path guardrail engine (m66.3)
+	// can inspect model input/output — even for a guardrailed-but-unbudgeted agent. Empty ⇒
+	// no guardrail (the m66.2 controller fails a dangling/invalid ref closed, so this env is
+	// only ever set for a VALIDATED policy).
+	GuardrailPolicy string
 }
 
 // defaultPodTokenPath is where the controller mounts the launcher's projected
@@ -135,13 +143,16 @@ type gatewayConfig struct {
 const defaultPodTokenPath = "/var/run/secrets/statelayer-proxy/token"
 
 // GatewayProxyEnabled reports whether the outbound gateway proxy should start.
-// True iff an upstream gateway URL was injected AND at least one budget cap is
-// set — the ONLY reason to interpose the proxy is to enforce a cap. With neither
-// cap set the controller does not inject GATEWAY_UPSTREAM_URL, so the agent's
-// MODEL_GATEWAY_URL keeps pointing straight at LiteLLM.
+// True iff an upstream gateway URL was injected AND there is a reason to interpose
+// the proxy: at least one budget cap, a tenant quota, OR a guardrail policy (M66,
+// ADR 0059 §8 — a guarded agent must route its LLM calls THROUGH the proxy so the
+// in-path guardrail engine can inspect them). With none of these the controller does
+// not inject GATEWAY_UPSTREAM_URL, so the agent's MODEL_GATEWAY_URL keeps pointing
+// straight at LiteLLM.
 func (c Config) GatewayProxyEnabled() bool {
 	g := c.Gateway
-	return g.UpstreamURL != "" && (g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "")
+	return g.UpstreamURL != "" &&
+		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" || g.GuardrailPolicy != "")
 }
 
 // loadGatewayConfig parses the outbound-gateway-proxy configuration from env.
@@ -191,6 +202,7 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		QuotaAddr:          strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
 		StatelayerProxyURL: strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
 		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
+		GuardrailPolicy:    strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
 	}, nil
 }
 
