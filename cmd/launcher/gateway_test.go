@@ -114,6 +114,31 @@ func TestGatewayProxyEnabled_Gate(t *testing.T) {
 	assert.Equal(t, "ag", cfg.AgentName)
 }
 
+// TestGatewayProxyEnabled_GuardrailForcesProxyOn proves the M66 (ADR 0059 §8) contract:
+// a GUARDRAIL_POLICY env forces the outbound proxy ON even for an agent with NO budget cap
+// and NO tenant quota — a guarded agent must route its LLM calls THROUGH the proxy so the
+// in-path guardrail engine can inspect them.
+func TestGatewayProxyEnabled_GuardrailForcesProxyOn(t *testing.T) {
+	// Upstream + a guardrail policy, but no budget/tenant ⇒ ENABLED (the guardrail forces it on).
+	cfg, err := loadGatewayConfig(mapLookup(map[string]string{
+		"GATEWAY_UPSTREAM_URL": "http://lite:4000",
+		"GUARDRAIL_POLICY":     `{"failMode":"closed","patternDenylist":[{"name":"jb","pattern":"ignore.*instructions"}]}`,
+	}), "ag")
+	require.NoError(t, err)
+	assert.NotEmpty(t, cfg.GuardrailPolicy, "GUARDRAIL_POLICY must be loaded into the config")
+	assert.True(t, Config{Gateway: cfg}.GatewayProxyEnabled(),
+		"a guardrail policy must force the proxy on even without a budget/tenant")
+
+	// Sanity: upstream present but NO guardrail and NO cap ⇒ still off (byte-compatible pre-M66).
+	cfg, err = loadGatewayConfig(mapLookup(map[string]string{
+		"GATEWAY_UPSTREAM_URL": "http://lite:4000",
+	}), "ag")
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GuardrailPolicy)
+	assert.False(t, Config{Gateway: cfg}.GatewayProxyEnabled(),
+		"no guardrail, no cap, no tenant ⇒ proxy stays off")
+}
+
 func TestGatewayConfig_SoftPctDefault(t *testing.T) {
 	cfg, err := loadGatewayConfig(mapLookup(map[string]string{
 		"GATEWAY_UPSTREAM_URL":        "http://lite:4000",
