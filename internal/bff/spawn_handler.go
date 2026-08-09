@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -108,11 +109,14 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// roleAssistant is the chat-message role of a model turn (the sub-run's answer lives in the last one).
+const roleAssistant = "assistant"
+
 // lastAssistantMessage returns the final assistant turn's content (the sub-run's answer), or "".
 func lastAssistantMessage(rn *run.Run) string {
-	for i := len(rn.Messages) - 1; i >= 0; i-- {
-		if rn.Messages[i].Role == "assistant" {
-			return rn.Messages[i].Content
+	for _, m := range slices.Backward(rn.Messages) {
+		if m.Role == roleAssistant {
+			return m.Content
 		}
 	}
 	return ""

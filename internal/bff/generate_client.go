@@ -52,6 +52,9 @@ const maxGenerationResponseBytes = 1 << 20 // 1 MiB
 // generated YAML from (other block types are ignored).
 const anthropicTextBlockType = "text"
 
+// chatRoleUser is the message role for the description we send to the generation model.
+const chatRoleUser = "user"
+
 // chatComplete issues ONE chat/completions request to the provider and returns
 // the model's raw text output (the emitted agent.yaml, to be expand-validated by
 // the caller). systemPrompt constrains the model to the simplified schema; the
@@ -126,7 +129,7 @@ func anthropicChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, 
 		Model:     model,
 		MaxTokens: maxGenerationTokens,
 		System:    systemPrompt,
-		Messages:  []anthropicChatMessage{{Role: "user", Content: description}},
+		Messages:  []anthropicChatMessage{{Role: chatRoleUser, Content: description}},
 		// Anthropic's Messages API only accepts metadata.user_id; use it as the
 		// visible cost tag so generation spend is attributable (ADR 0014).
 		Metadata: map[string]string{"user_id": generationCostTag},
@@ -195,7 +198,7 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 	if systemPrompt != "" {
 		msgs = append(msgs, openaiChatMessage{Role: "system", Content: systemPrompt})
 	}
-	msgs = append(msgs, openaiChatMessage{Role: "user", Content: description})
+	msgs = append(msgs, openaiChatMessage{Role: chatRoleUser, Content: description})
 	payload := openaiChatRequest{
 		Model:     model,
 		MaxTokens: maxGenerationTokens,
