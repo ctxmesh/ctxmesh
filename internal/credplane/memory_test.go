@@ -32,13 +32,32 @@ import (
 )
 
 // vecEmbedder maps a text to a fixed vector so search is deterministic: "north" → (1,0), else → (0,1).
+// EmbedBatch loops over texts calling the single-embed logic so tests that use the memory handlers still compile
+// and pass without needing a real gateway batch endpoint.
 type vecEmbedder struct{}
 
-func (vecEmbedder) Embed(_ context.Context, _, text string) ([]float32, int, error) {
+func (v vecEmbedder) Embed(_ context.Context, _, text string) ([]float32, int, error) {
 	if text == "north" {
 		return []float32{1, 0}, 2, nil
 	}
 	return []float32{0, 1}, 2, nil
+}
+
+func (v vecEmbedder) EmbedBatch(ctx context.Context, model string, texts []string) ([][]float32, int, error) {
+	if len(texts) == 0 {
+		return nil, 0, nil
+	}
+	vecs := make([][]float32, len(texts))
+	var dim int
+	for i, t := range texts {
+		vec, d, err := v.Embed(ctx, model, t)
+		if err != nil {
+			return nil, 0, err
+		}
+		vecs[i] = vec
+		dim = d
+	}
+	return vecs, dim, nil
 }
 
 func memServer(t *testing.T) *Server {
