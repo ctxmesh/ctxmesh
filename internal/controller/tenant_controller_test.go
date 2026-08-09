@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 )
 
 func makeNamespace(t *testing.T, name string) {
@@ -420,4 +421,220 @@ func TestTenant_PruneAndFinalizerCleanup(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "finalizer must prune the kept namespace's quota")
 	err = k8sClient.Get(testCtx, types.NamespacedName{Name: "beta"}, &agentsv1alpha1.Tenant{})
 	assert.True(t, apierrors.IsNotFound(err), "tenant must be gone after the finalizer is removed")
+}
+
+// ── Storage soft-cap tests (m68.12, ADR 0061 governance #7) ──────────────────────────────────
+//
+// These tests verify:
+//  1. A Tenant with a storage soft cap + member-namespace KBs whose status.sizeBytes sum
+//     EXCEEDS the cap → StorageSoftCapExceeded condition + totalCorpusBytes reported.
+//  2. Under the cap (or no cap set) → no condition set, totalCorpusBytes still reported.
+//  3. Ingestion is NEVER blocked — the soft cap is a warning only.
+//
+// The reconciler reads KB.status.sizeBytes from the K8s object (already populated by
+// m68.10's corpus-status projection) — it never re-queries Postgres.
+
+// mkKBWithSize creates a KnowledgeBase in the given namespace with status.sizeBytes pre-set.
+// This simulates what the ingestion executor wrote via the corpus-status projection (m68.10).
+func mkKBWithSize(t *testing.T, name, ns string, sizeBytes int64) {
+	t.Helper()
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: agentsv1beta1.KnowledgeBaseSpec{
+			EmbeddingRoute: "text-embedding-3-small",
+			Source:         agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+			Chunking:       agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			// Remove the KB finalizer so cleanup does not block.
+			found := false
+			for i, f := range cur.Finalizers {
+				if f == kbFinalizer {
+					cur.Finalizers = append(cur.Finalizers[:i], cur.Finalizers[i+1:]...)
+					found = true
+					break
+				}
+			}
+			if found {
+				_ = k8sClient.Update(testCtx, &cur)
+			}
+			_ = k8sClient.Delete(testCtx, &cur)
+		}
+	})
+	// Set sizeBytes on status (the corpus-status projection writes this sub-resource).
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.SizeBytes = sizeBytes
+	live.Status.Phase = "Ready"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+}
+
+// TestTenant_StorageSoftCap_ExceededSetsCondition verifies that when the sum of
+// KnowledgeBase.status.sizeBytes across member namespaces exceeds the soft cap, the
+// controller sets a StorageSoftCapExceeded condition and reports totalCorpusBytes.
+// It also asserts that ingestion is NOT blocked (soft: no error, no rejection path).
+func TestTenant_StorageSoftCap_ExceededSetsCondition(t *testing.T) {
+	const ns1 = "tnt-cap-ns1"
+	const ns2 = "tnt-cap-ns2"
+	makeNamespace(t, ns1)
+	makeNamespace(t, ns2)
+
+	// Create two KBs: total = 6GiB + 5GiB = 11GiB. Soft cap = 10Gi.
+	mkKBWithSize(t, "kb-cap-a", ns1, 6*1024*1024*1024) // 6GiB
+	mkKBWithSize(t, "kb-cap-b", ns2, 5*1024*1024*1024) // 5GiB (total 11GiB)
+
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "cap-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns1, ns2},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenant(t, "cap-tenant") // adds finalizer
+	reconcileTenant(t, "cap-tenant") // stamps namespaces + checks soft cap
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "cap-tenant"}, &got))
+
+	// The StorageSoftCapExceeded condition must be set.
+	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded")
+	require.NotNil(t, cond, "StorageSoftCapExceeded condition must be set when corpus bytes exceed the soft cap")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "CorpusBytesExceedSoftCap", cond.Reason)
+	assert.Contains(t, cond.Message, "soft cap", "condition message must mention 'soft cap'")
+	assert.Contains(t, cond.Message, "NOT blocked", "condition message must clarify ingestion is not blocked")
+
+	// totalCorpusBytes must be reported on the status.
+	assert.Equal(t, int64(11*1024*1024*1024), got.Status.TotalCorpusBytes,
+		"totalCorpusBytes must be the sum of sizeBytes across all member-namespace KBs")
+
+	// The tenant is still Ready (soft cap exceeded does NOT break the tenant).
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status,
+		"exceeding the soft cap must NOT affect the Ready condition — ingestion is never blocked")
+}
+
+// TestTenant_StorageSoftCap_UnderCapClearsCondition verifies that when the corpus bytes
+// are UNDER the soft cap, the StorageSoftCapExceeded condition is cleared (or never set).
+func TestTenant_StorageSoftCap_UnderCapClearsCondition(t *testing.T) {
+	const ns = "tnt-undercap-ns"
+	makeNamespace(t, ns)
+
+	// KB total = 2GiB; soft cap = 10Gi → under cap.
+	mkKBWithSize(t, "kb-under", ns, 2*1024*1024*1024)
+
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "undercap-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenant(t, "undercap-tenant")
+	reconcileTenant(t, "undercap-tenant")
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "undercap-tenant"}, &got))
+
+	// No StorageSoftCapExceeded condition when under the cap.
+	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded")
+	assert.Nil(t, cond, "StorageSoftCapExceeded must NOT be set when corpus bytes are under the soft cap")
+
+	// totalCorpusBytes is still reported.
+	assert.Equal(t, int64(2*1024*1024*1024), got.Status.TotalCorpusBytes,
+		"totalCorpusBytes must be reported even when under the cap")
+}
+
+// TestTenant_StorageSoftCap_NoCap_NoCondition verifies that when no storage cap is configured,
+// the StorageSoftCapExceeded condition is not set regardless of corpus size.
+func TestTenant_StorageSoftCap_NoCap_NoCondition(t *testing.T) {
+	const ns = "tnt-nocap-ns"
+	makeNamespace(t, ns)
+
+	// A large KB, but the tenant has no storage.corpusBytesSoftCap set.
+	mkKBWithSize(t, "kb-nocap", ns, 100*1024*1024*1024) // 100GiB
+
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "nocap-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			// Storage intentionally omitted — no cap.
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenant(t, "nocap-tenant")
+	reconcileTenant(t, "nocap-tenant")
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "nocap-tenant"}, &got))
+
+	// No StorageSoftCapExceeded condition when no cap is configured.
+	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded")
+	assert.Nil(t, cond, "StorageSoftCapExceeded must NOT be set when no corpusBytesSoftCap is configured")
+
+	// Tenant remains Ready.
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+}
+
+// TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded verifies that the
+// StorageSoftCapExceeded condition is cleared when the corpus shrinks back under the cap
+// (e.g. a KB is deleted). This covers the change-guard: the condition is maintained
+// correctly across reconcile cycles.
+func TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded(t *testing.T) {
+	const ns = "tnt-clear-ns"
+	makeNamespace(t, ns)
+
+	// Start with a large KB (> cap).
+	mkKBWithSize(t, "kb-clear-large", ns, 15*1024*1024*1024) // 15GiB > 10Gi cap
+
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "clear-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenant(t, "clear-tenant")
+	reconcileTenant(t, "clear-tenant")
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "clear-tenant"}, &got))
+	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded")
+	require.NotNil(t, cond, "StorageSoftCapExceeded must be set (15GiB > 10Gi cap)")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+
+	// Shrink the KB to 2GiB (simulates deletion/re-ingest with fewer docs).
+	var livekb agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-clear-large", Namespace: ns}, &livekb))
+	livekb.Status.SizeBytes = 2 * 1024 * 1024 * 1024 // 2GiB < 10Gi cap
+	require.NoError(t, k8sClient.Status().Update(testCtx, &livekb))
+
+	// Reconcile again — condition must be cleared.
+	reconcileTenant(t, "clear-tenant")
+
+	var got2 agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "clear-tenant"}, &got2))
+	cond2 := meta.FindStatusCondition(got2.Status.Conditions, "StorageSoftCapExceeded")
+	assert.Nil(t, cond2,
+		"StorageSoftCapExceeded must be CLEARED once corpus bytes drop back under the soft cap")
+	assert.Equal(t, int64(2*1024*1024*1024), got2.Status.TotalCorpusBytes,
+		"totalCorpusBytes must reflect the updated (smaller) size")
 }

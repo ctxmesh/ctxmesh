@@ -91,6 +91,26 @@ type TenantModelQuota struct {
 	MaxConcurrent int32 `json:"maxConcurrent,omitempty"`
 }
 
+// TenantStorageQuota is the corpus storage soft cap for a tenant (ADR 0061 governance #7,
+// M68). It reports the total KnowledgeBase corpus bytes across all member namespaces and
+// warns (condition + event + metric) when the soft cap is exceeded.
+//
+// SOFT ONLY — exceeding the cap NEVER blocks ingestion or upload. It sets a
+// StorageSoftCapExceeded condition on the Tenant, emits a Warning event, and bumps a
+// Prometheus gauge so operators can alert. Hard storage-quota enforcement (blocking
+// ingestion/uploads at the cap, per-user storage accounting) is deferred to m52 Theme M.
+type TenantStorageQuota struct {
+	// corpusBytesSoftCap is the tenant-aggregate soft cap on total KnowledgeBase corpus bytes
+	// (the sum of KnowledgeBase.status.sizeBytes across all member namespaces). It is a
+	// Kubernetes quantity string (e.g. "10Gi", "50Gi"). When the aggregate exceeds this value
+	// the controller sets a StorageSoftCapExceeded condition on the Tenant and emits a Warning
+	// event. It NEVER blocks ingestion — hard enforcement is m52 Theme M.
+	// Empty means no cap is tracked.
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="corpusBytesSoftCap must be a valid Kubernetes quantity (e.g. \"10Gi\")"
+	// +optional
+	CorpusBytesSoftCap string `json:"corpusBytesSoftCap,omitempty"`
+}
+
 // TenantSpec defines the desired state of a Tenant (ADR 0046). A Tenant groups
 // namespaces (the tenancy unit — 1 namespace ∈ ≤1 tenant) and caps their compute
 // + model usage. Tenant identity is DERIVED from namespace everywhere downstream
@@ -116,6 +136,14 @@ type TenantSpec struct {
 	// +optional
 	Model *TenantModelQuota `json:"model,omitempty"`
 
+	// storage is the corpus storage soft cap (ADR 0061 governance #7, M68). When set and the
+	// aggregate KnowledgeBase.status.sizeBytes across all member namespaces exceeds the cap,
+	// the controller sets a StorageSoftCapExceeded condition and emits a Warning event. It
+	// NEVER blocks ingestion — soft only. Hard enforcement is m52 Theme M.
+	// Omitted ⇒ no storage cap is tracked.
+	// +optional
+	Storage *TenantStorageQuota `json:"storage,omitempty"`
+
 	// networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
 	// (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
 	// platform (knative/kourier/gateway/valkey/langfuse/DNS) but NOT other tenants. Opt-in + OFF by
@@ -132,9 +160,16 @@ type TenantStatus struct {
 	// +optional
 	MemberNamespaces int32 `json:"memberNamespaces,omitempty"`
 
+	// totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
+	// namespaces, updated on every reconcile when storage.corpusBytesSoftCap is set.
+	// Reported for observability; hard storage-quota enforcement is m52 Theme M.
+	// +optional
+	TotalCorpusBytes int64 `json:"totalCorpusBytes,omitempty"`
+
 	// conditions surface the tenant's health. Ready=true when every member
 	// namespace was reconciled; a "NamespaceConflict" warning condition lists any
-	// namespaces skipped because another tenant already claims them.
+	// namespaces skipped because another tenant already claims them;
+	// "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
