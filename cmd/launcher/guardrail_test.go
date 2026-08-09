@@ -587,6 +587,59 @@ func TestGuardrail_NoPolicy_ResponsePathUnchanged(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "here is how to build a bomb", "no policy ⇒ completion relayed as pre-M66")
 }
 
+// ── m66.6: stream:true rejection for guarded agents ─────────────────────────────────
+
+// TestGuardrail_StreamTrue_GuardedProxy_Rejected: a guarded agent sending stream:true →
+// the proxy rejects with the typed guardrail_streaming_unsupported error (422), the
+// upstream is NEVER called. This is the ADR 0059 §4 invariant: you cannot un-send
+// streamed tokens, so output-blocking is incompatible with streaming.
+func TestGuardrail_StreamTrue_GuardedProxy_Rejected(t *testing.T) {
+	mock := newMockGateway(t, 0) // call count must remain 0
+	policy := denylistPolicy("jb", "ignore.*instructions", "block")
+	gp, _ := newGuardedProxy(t, mock.server.URL, policy)
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, "stream:true on a guarded proxy → 422")
+	assert.Equal(t, int64(0), mock.calls.Load(), "upstream NEVER called on stream rejection")
+
+	var body guardrailErrorBody
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, guardrailStreamingUnsupportedType, body.Error.Type, "stable typed error")
+	assert.NotEmpty(t, body.Error.Message, "rejection message is present")
+}
+
+// TestGuardrail_StreamFalse_GuardedProxy_Forwarded: stream:false on a guarded proxy is
+// allowed (the normal buffered path). Regression: stream:false must not trigger the
+// streaming rejection.
+func TestGuardrail_StreamFalse_GuardedProxy_Forwarded(t *testing.T) {
+	mock := newMockGateway(t, 10)
+	policy := denylistPolicy("jb", "ignore.*instructions", "block")
+	gp, _ := newGuardedProxy(t, mock.server.URL, policy)
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	assert.Equal(t, http.StatusOK, rr.Code, "stream:false on guarded proxy is forwarded normally")
+	assert.Equal(t, int64(1), mock.calls.Load(), "upstream IS called for stream:false")
+}
+
+// TestGuardrail_StreamTrue_NoPolicy_Forwarded: with no policy the engine is nil, so a
+// stream:true request is forwarded unchanged (the no-policy byte-for-byte-unchanged
+// invariant). Regression: policy-absent stream requests must not be rejected.
+func TestGuardrail_StreamTrue_NoPolicy_Forwarded(t *testing.T) {
+	mock := newMockGateway(t, 10)
+	_, tp := newTestTracer(t)
+	gp, err := newGatewayProxy(gatewayConfig{
+		UpstreamURL: mock.server.URL, AgentName: "ag", ConvCapUSD: "1.00", SoftPct: 80,
+	}, tp.Tracer("test"), func(string, ...any) {})
+	require.NoError(t, err)
+	require.Nil(t, gp.guardrail, "no GUARDRAIL_POLICY ⇒ nil engine")
+
+	// stream:true with NO policy — must be forwarded, not rejected.
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	assert.Equal(t, http.StatusOK, rr.Code, "no policy ⇒ stream:true forwarded unchanged")
+	assert.Equal(t, int64(1), mock.calls.Load(), "no policy ⇒ upstream is called for stream:true")
+}
+
 func ruleNames(rules []guardrailRule) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {

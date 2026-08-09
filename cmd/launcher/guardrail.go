@@ -94,6 +94,12 @@ const (
 	// (not a budget-style 402, not a 4xx the SDK would retry): the request is refused
 	// on policy grounds, distinct from budget_exceeded (402) and tenant denials.
 	guardrailBlockedStatus = 403
+
+	// guardrailStreamingUnsupportedType is the STABLE error "type" the proxy returns
+	// when a guarded agent sends a stream:true request (m66.6, ADR 0059 §4). Streaming
+	// is incompatible with output-blocking: you cannot un-send tokens already streamed
+	// to the client. Guarded agents are buffered-only; the SDK must never retry this.
+	guardrailStreamingUnsupportedType = "guardrail_streaming_unsupported"
 )
 
 // guardrailAction is the enforcement action carried on a compiled rule. Mirrors the
@@ -599,6 +605,33 @@ type guardrailErrorDetail struct {
 	Type      string `json:"type"`
 	Detector  string `json:"detector"`
 	ScanPoint string `json:"scan_point"`
+	Message   string `json:"message,omitempty"`
+}
+
+// writeGuardrailStreamingUnsupported writes the typed guardrail_streaming_unsupported
+// rejection (422 + OpenAI-shaped error body) when a guarded agent sends a stream:true
+// request. Streaming is incompatible with output-blocking (ADR 0059 §4): tokens already
+// streamed to the client cannot be un-sent if an output rule later trips. Guarded agents
+// MUST use the buffered path (stream:false); the SDK's stream/stream_completion methods
+// are therefore off-limits for guarded agents. The upstream is NOT called.
+func (gp *gatewayProxy) writeGuardrailStreamingUnsupported(w http.ResponseWriter, span trace.Span) {
+	span.SetAttributes(
+		attribute.String("guardrail.decision", string(actionBlock)),
+		attribute.String("guardrail.detector", "streaming-unsupported"),
+		attribute.String("guardrail.scan_point", "input"),
+	)
+	span.SetStatus(codes.Error, guardrailStreamingUnsupportedType)
+
+	body, _ := json.Marshal(guardrailErrorBody{Error: guardrailErrorDetail{
+		Type:    guardrailStreamingUnsupportedType,
+		Message: "guarded agents are buffered-only; remove stream:true from the request",
+	}})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity) // 422
+	if _, err := w.Write(body); err != nil {
+		gp.logf("launcher: gateway: write guardrail_streaming_unsupported: %v", err)
+	}
+	gp.logf("launcher: gateway: guardrail REJECT stream:true (guarded agents are buffered-only, ADR 0059 §4)")
 }
 
 // ── proxy integration ─────────────────────────────────────────────────────────
@@ -617,6 +650,8 @@ type guardrailErrorDetail struct {
 // skipped and the body is never buffered (byte-for-byte-unchanged invariant).
 //
 // Fail-closed cases (all BLOCK, never a silent pass):
+//   - stream:true in the request body when a policy is active ⇒ streaming is incompatible
+//     with output-blocking (ADR 0059 §4): guarded agents are buffered-only.
 //   - body exceeds maxGatewayReqBody ⇒ the content can't be fully scanned.
 //   - body read error ⇒ can't obtain the content to scan.
 //   - unparseable request JSON ⇒ can't locate the messages to scan (scanRequest).
@@ -641,6 +676,19 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 			blocked: true, detector: "oversize-request", action: actionBlock, scanPoint: scanInput,
 		})
 		gp.logf("launcher: gateway: guardrail fail-closed BLOCK (request body exceeds %d bytes)", maxGatewayReqBody)
+		return true
+	}
+
+	// Streaming incompatibility check (m66.6, ADR 0059 §4): a guarded agent MUST NOT
+	// use stream:true. Output-blocking cannot un-send tokens already streamed to the
+	// client, so the guardrail can only work on a fully-buffered response. Reject the
+	// call with a typed guardrail_streaming_unsupported BEFORE content-scanning.
+	// This uses the already-buffered body (parseChatBody is cheap) — no extra read.
+	if requestHasStreamTrue(buffered) {
+		// Restore the body so the caller is not surprised (though we return refused=true).
+		r.Body = io.NopCloser(bytes.NewReader(buffered))
+		r.ContentLength = int64(len(buffered))
+		gp.writeGuardrailStreamingUnsupported(w, span)
 		return true
 	}
 
@@ -792,6 +840,31 @@ func readLimited(rc io.Reader, limit int64) (data []byte, oversize bool, err err
 		return b, true, nil
 	}
 	return b, false, nil
+}
+
+// requestHasStreamTrue reports whether the buffered request body is a JSON object with
+// "stream": true. It is used by the guardrail request path to detect (and reject) streaming
+// calls from guarded agents — output-blocking is incompatible with streaming (ADR 0059 §4).
+// We use parseChatBody (already at hand) to extract the top-level "stream" field without a
+// second JSON parse. Returns false for any unparseable/non-JSON body (the fail-closed scan
+// that follows will block such a body anyway via parseChatBody).
+func requestHasStreamTrue(body []byte) bool {
+	// parseChatBody gives us the top-level map without a second full parse.
+	cb, ok := parseChatBody(body)
+	if !ok {
+		return false
+	}
+	raw, present := cb.top["stream"]
+	if !present {
+		return false
+	}
+	// json.RawMessage "true" is exactly the 4-byte literal; anything else (false, null,
+	// a number) is not a streaming request.
+	var v bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return false
+	}
+	return v
 }
 
 // blockCause returns the blocked decision from a decision list — the refusal cause. It is
