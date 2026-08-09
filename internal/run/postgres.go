@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -72,6 +74,11 @@ CREATE TABLE IF NOT EXISTS runs (
     endpoint         text NOT NULL DEFAULT '',
     worker_id        text NOT NULL DEFAULT '',
     lease_expires_at timestamptz,
+    workflow_ref     text NOT NULL DEFAULT '',
+    spec_snapshot    text NOT NULL DEFAULT '',
+    cursor           text NOT NULL DEFAULT '',
+    wait_on          text NOT NULL DEFAULT '',
+    wait_mode        text NOT NULL DEFAULT '',
     version          bigint NOT NULL DEFAULT 1,
     created_at       timestamptz NOT NULL,
     updated_at       timestamptz NOT NULL
@@ -99,8 +106,20 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS spawn_depth   integer NOT NULL DEFAULT
 -- Output schema (M65, ADR 0058): the agent's spec.runtime.outputSchema pinned at create time.
 -- NULL / absent ⇒ no schema (backward-compat: old rows load as "").
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS output_schema text;
+-- Workflow instance + wait record (M67, ADR 0060): a workflow instance run pins its WorkflowRef +
+-- resolved SpecSnapshot + per-node Cursor; a waiting run parks on wait_on children under wait_mode.
+-- wait_on is a JSON array of child ids (stored as text/JSON, matching the messages/requires_action
+-- convention — no array-driver dependency). Defaults ('' / empty) describe a non-workflow,
+-- non-waiting run, so old rows load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS workflow_ref  text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS spec_snapshot text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS cursor        text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_on       text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_mode     text NOT NULL DEFAULT '';
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
+-- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
+CREATE INDEX IF NOT EXISTS runs_waiting ON runs (id) WHERE status = 'waiting';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
 CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
@@ -130,17 +149,23 @@ func (p *pgStore) Create(r *Run) error {
 	if err != nil {
 		return err
 	}
+	waitOn, err := marshalWaitOn(r.WaitOn)
+	if err != nil {
+		return err
+	}
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		 parent_run_id, root_run_id, spawn_depth, output_schema, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,1,$20,$21)
+		 parent_run_id, root_run_id, spawn_depth, output_schema,
+		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,1,$25,$26)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
 		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
+		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode),
 		r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
@@ -181,7 +206,8 @@ func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
 	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		parent_run_id, root_run_id, spawn_depth, output_schema, version, created_at, updated_at
+		parent_run_id, root_run_id, spawn_depth, output_schema,
+		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
 		r            Run
@@ -191,6 +217,8 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		action       []byte
 		lease        sql.NullTime
 		outputSchema sql.NullString
+		waitOn       string
+		waitMode     string
 		version      int64
 		created      time.Time
 		updated      time.Time
@@ -199,6 +227,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
+		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode,
 		&version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -217,6 +246,12 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 	if outputSchema.Valid {
 		r.OutputSchema = outputSchema.String
 	}
+	r.WaitMode = WaitMode(waitMode)
+	wo, err := unmarshalWaitOn(waitOn)
+	if err != nil {
+		return nil, 0, err
+	}
+	r.WaitOn = wo
 	if len(input) > 0 {
 		r.Input = append(json.RawMessage(nil), input...)
 	}
@@ -283,13 +318,20 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 	if err != nil {
 		return nil, err
 	}
+	waitOn, err := marshalWaitOn(working.WaitOn)
+	if err != nil {
+		return nil, err
+	}
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
-			worker_id=$7, lease_expires_at=$8, version=version+1, updated_at=$9
-		WHERE id=$1 AND version=$10`
+			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11,
+			version=version+1, updated_at=$12
+		WHERE id=$1 AND version=$13`
 	res, err := tx.ExecContext(ctx, upd,
 		id, working.TraceID, string(working.Status), msgs, action, working.Error,
-		working.WorkerID, nullableTime(working.LeaseExpiresAt), working.UpdatedAt.UTC(), version)
+		working.WorkerID, nullableTime(working.LeaseExpiresAt),
+		working.Cursor, waitOn, string(working.WaitMode),
+		working.UpdatedAt.UTC(), version)
 	if err != nil {
 		return nil, fmt.Errorf("run: update: %w", err)
 	}
@@ -308,6 +350,310 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 		return nil, fmt.Errorf("run: commit: %w", err)
 	}
 	return cloneRun(working), nil
+}
+
+// writeRunTx persists a run row inside a transaction, guarded by its OCC version (version=$N),
+// bumping the version. It returns errRunConflict if the row moved under us (the standard OCC loser
+// signal, retried by the caller's retry loop). The caller MUST already hold the row lock. It writes
+// the same mutable column set as tryUpdate's UPDATE, so the child/parent writes in CompleteAndWake
+// persist cursor + wait record + lease exactly like an ordinary Update.
+func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version int64) error {
+	msgs, err := json.Marshal(r.Messages)
+	if err != nil {
+		return fmt.Errorf("run: marshal messages: %w", err)
+	}
+	action, err := marshalAction(r.RequiresAction)
+	if err != nil {
+		return err
+	}
+	waitOn, err := marshalWaitOn(r.WaitOn)
+	if err != nil {
+		return err
+	}
+	const upd = `UPDATE runs SET
+			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
+			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11,
+			version=version+1, updated_at=$12
+		WHERE id=$1 AND version=$13`
+	res, err := tx.ExecContext(ctx, upd,
+		r.ID, r.TraceID, string(r.Status), msgs, action, r.Error,
+		r.WorkerID, nullableTime(r.LeaseExpiresAt), r.Cursor, waitOn, string(r.WaitMode),
+		r.UpdatedAt.UTC(), version)
+	if err != nil {
+		return fmt.Errorf("run: update: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errRunConflict
+	}
+	return nil
+}
+
+// Suspend parks a running run in `waiting` (ADR 0060 §3). It is a single-row read-modify-write, so
+// it rides the existing Update path (row lock + OCC retry): fn checkpoints (e.g. the cursor) first,
+// then suspendToWaiting flips running→waiting, sets the wait record, and releases the lease/worker.
+// The `state` event is auto-emitted by Update from the one place status changes.
+func (p *pgStore) Suspend(id string, waitOn []string, mode WaitMode, fn func(*Run) error) (*Run, error) {
+	return p.Update(id, func(r *Run) error {
+		if fn != nil {
+			if err := fn(r); err != nil {
+				return err
+			}
+		}
+		return r.suspendToWaiting(waitOn, mode, p.clock())
+	})
+}
+
+// CompleteAndWake is the transactional cross-run wake (ADR 0060 §3) — the load-bearing two-row
+// transaction. In ONE BeginTx it terminates the child and, if a `waiting` parent is parked on it,
+// re-queues that parent when the wait is satisfied.
+//
+// Lock order (deadlock-avoidance): we lock the child + its parent by ASCENDING id in a single
+// `SELECT ... FOR UPDATE ORDER BY id`. Any two transactions that touch the same {child, parent} pair
+// acquire the two rows in the SAME order, so they can never hold-and-wait in a cycle. (A child has
+// exactly one parent and a parent's id is fixed, so the pair is well-defined; ordering by id is a
+// total order over the two rows.) We resolve the parent id with a prior unlocked read only to know
+// WHICH two rows to lock; the authoritative state is re-read AFTER the locks are held.
+//
+// Exactly-once / no-double-wake: the child terminal + the parent re-queue commit atomically, so no
+// separate notification can be lost or duplicated. Re-invoking on an already-terminal child is a
+// no-op (guarded before apply) — a reclaimed/duplicated completion neither re-queues the parent nor
+// corrupts the wait set. The parent re-queue only fires when the child is STILL in the parent's
+// persisted wait set (satisfyChild is a no-op otherwise), so two children completing concurrently
+// each remove themselves under the parent row lock and only the one meeting the condition re-queues.
+func (p *pgStore) CompleteAndWake(childID string, apply func(*Run) error) (*Run, *Run, error) {
+	ctx := context.Background()
+	for range runStoreMaxRetries {
+		child, parent, err := p.tryCompleteAndWake(ctx, childID, apply)
+		if errors.Is(err, errRunConflict) {
+			continue // an OCC loser on the child or parent version; re-read and retry
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		return child, parent, nil
+	}
+	return nil, nil, errRunConflict
+}
+
+func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply func(*Run) error) (*Run, *Run, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("run: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Resolve the parent id with an unlocked read so we know which rows to lock (and in what order).
+	// The child's ParentRunID never changes, so this is safe to read before taking locks.
+	childPeek, _, err := p.getWithVersion(ctx, tx, childID)
+	if err != nil {
+		return nil, nil, err
+	}
+	parentID := childPeek.ParentRunID
+
+	// Lock the child (and its parent, if any) in ASCENDING id order — a consistent lock order that
+	// makes a deadlock between two concurrent completions impossible. FOR UPDATE (not SKIP LOCKED):
+	// we MUST wait for the row, not skip it, because we are the sole terminal writer for the child.
+	lockIDs := []string{childID}
+	if parentID != "" {
+		lockIDs = append(lockIDs, parentID)
+	}
+	if _, err := lockRunsOrdered(ctx, tx, lockIDs); err != nil {
+		return nil, nil, err
+	}
+
+	// Re-read the child UNDER the lock — the authoritative state.
+	child, childVersion, err := p.getWithVersion(ctx, tx, childID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Idempotency: an already-terminal child is a no-op. A reclaimed/duplicated completion must not
+	// re-run apply (the state machine would reject terminal→terminal anyway) or re-wake the parent.
+	if child.Status.IsTerminal() {
+		if err := tx.Commit(); err != nil {
+			return nil, nil, fmt.Errorf("run: commit: %w", err)
+		}
+		return cloneRun(child), nil, nil
+	}
+
+	childOld := child.Status
+	if err := apply(child); err != nil {
+		return nil, nil, err // apply's error (e.g. an illegal transition) aborts, nothing written
+	}
+	if !child.Status.IsTerminal() {
+		return nil, nil, fmt.Errorf("run %s: CompleteAndWake apply must reach a terminal state, got %s", childID, child.Status)
+	}
+	if err := p.writeRunTx(ctx, tx, child, childVersion); err != nil {
+		return nil, nil, err
+	}
+	if child.Status != childOld {
+		if err := appendEventTx(ctx, tx, childID, EventState, string(child.Status), p.clock()); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Wake the waiting parent, in the SAME transaction, if it is parked on this child.
+	var wokeParent *Run
+	if parentID != "" {
+		parent, parentVersion, gErr := p.getWithVersion(ctx, tx, parentID)
+		switch {
+		case errors.Is(gErr, ErrNotFound):
+			// Parent gone — nothing to wake (lineage without a live parent). Not an error.
+		case gErr != nil:
+			return nil, nil, gErr
+		case parent.Status == StatusWaiting:
+			met, removed := parent.satisfyChild(childID)
+			if removed {
+				pOld := parent.Status
+				if met {
+					if err := parent.Transition(StatusQueued, p.clock()); err != nil {
+						return nil, nil, err
+					}
+				}
+				if err := p.writeRunTx(ctx, tx, parent, parentVersion); err != nil {
+					return nil, nil, err
+				}
+				if parent.Status != pOld {
+					if err := appendEventTx(ctx, tx, parentID, EventState, string(parent.Status), p.clock()); err != nil {
+						return nil, nil, err
+					}
+					wokeParent = cloneRun(parent)
+				}
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("run: commit: %w", err)
+	}
+	return cloneRun(child), wokeParent, nil
+}
+
+// SweepWaiting re-queues waiting runs whose wait is ALREADY satisfied by their children's persisted
+// terminal states — the belt-and-braces reconciler for the crash window between a child's terminal
+// transition and CompleteAndWake's parent re-queue (ADR 0060 §3). Each candidate is re-queued in its
+// OWN row-locked transaction via the standard Update path, so it is idempotent (a run already woken
+// by CompleteAndWake is no longer `waiting` and is skipped) and OCC-safe against a concurrent wake.
+func (p *pgStore) SweepWaiting() ([]string, error) {
+	ctx := context.Background()
+	// Candidate ids: waiting runs with a non-empty wait set. We evaluate the wait condition below,
+	// per candidate, against the children's current statuses (a small set — the partial index helps).
+	rows, err := p.db.QueryContext(ctx, `SELECT id FROM runs WHERE status='waiting' AND wait_on <> ''`)
+	if err != nil {
+		return nil, fmt.Errorf("run: sweep query: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("run: sweep scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("run: sweep iterate: %w", err)
+	}
+	_ = rows.Close()
+
+	var woke []string
+	for _, id := range ids {
+		requeued, err := p.sweepOne(ctx, id)
+		if err != nil {
+			return woke, err
+		}
+		if requeued {
+			woke = append(woke, id)
+		}
+	}
+	return woke, nil
+}
+
+// sweepOne re-queues one waiting run IF its wait is met by its children's persisted terminal states.
+// The wait is re-checked UNDER the run's row lock so a concurrent CompleteAndWake wake is serialised.
+func (p *pgStore) sweepOne(ctx context.Context, id string) (bool, error) {
+	requeued := false
+	_, err := p.Update(id, func(r *Run) error {
+		requeued = false
+		if r.Status != StatusWaiting || len(r.WaitOn) == 0 {
+			return nil // already woken / no longer waiting — idempotent no-op
+		}
+		met, err := p.waitMet(ctx, r)
+		if err != nil {
+			return err
+		}
+		if !met {
+			return nil
+		}
+		requeued = true
+		return r.Transition(StatusQueued, p.clock())
+	})
+	if err != nil {
+		return false, err
+	}
+	return requeued, nil
+}
+
+// waitMet reports whether a waiting run's condition is met by its children's persisted statuses.
+// all → every WaitOn child is terminal (a missing child counts as satisfied — it can never wake us);
+// any → at least one is terminal. Read on the pool (advisory); the caller re-checks under the lock.
+func (p *pgStore) waitMet(ctx context.Context, r *Run) (bool, error) {
+	terminal := 0
+	for _, cid := range r.WaitOn {
+		var status string
+		err := p.db.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=$1`, cid).Scan(&status)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			terminal++ // missing child → satisfied
+		case err != nil:
+			return false, fmt.Errorf("run: sweep child status: %w", err)
+		default:
+			if Status(status).IsTerminal() {
+				terminal++
+			}
+		}
+	}
+	if r.WaitMode == WaitAny {
+		return terminal > 0, nil
+	}
+	return terminal == len(r.WaitOn), nil
+}
+
+// lockRunsOrdered acquires FOR UPDATE row locks on the given run ids in a single statement, ordered
+// by id, so all callers touching an overlapping set take the locks in the SAME order (deadlock-free).
+// It errors ErrNotFound if any id is missing (all rows must exist to lock the pair coherently).
+func lockRunsOrdered(ctx context.Context, tx *sql.Tx, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// Build ($1,$2,...) and lock in ascending id order (ORDER BY id) — the consistent lock order.
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "$" + strconv.Itoa(i+1)
+		args[i] = id
+	}
+	q := "SELECT id FROM runs WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY id FOR UPDATE"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("run: lock ordered: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("run: lock scan: %w", err)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("run: lock iterate: %w", err)
+	}
+	if n != len(ids) {
+		return n, ErrNotFound // a row we needed to lock is gone
+	}
+	return n, nil
 }
 
 func (p *pgStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error) {
@@ -599,6 +945,31 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// marshalWaitOn serialises a wait-set to JSON text (” for an empty set, so a non-waiting run's
+// column stays the DEFAULT ” — the sweeper's "wait_on <> ”" filter then cheaply skips it).
+func marshalWaitOn(ids []string) (string, error) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", fmt.Errorf("run: marshal wait_on: %w", err)
+	}
+	return string(b), nil
+}
+
+// unmarshalWaitOn parses the wait_on JSON text back to a slice (” → nil, the empty set).
+func unmarshalWaitOn(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(s), &ids); err != nil {
+		return nil, fmt.Errorf("run: unmarshal wait_on: %w", err)
+	}
+	return ids, nil
 }
 
 // marshalAction serialises the optional pending action (nil → NULL column).

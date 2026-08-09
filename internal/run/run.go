@@ -50,7 +50,17 @@ const (
 	StatusRunning Status = "running"
 	// StatusRequiresAction — paused pending an out-of-band action, then a resume: an OBO
 	// consent (the m25.9 consent_required, generalised) or a human-in-the-loop approval (M32).
+	// It is the ONE HUMAN-INPUT pause state (ADR 0034 as amended by ADR 0060): a human resolves
+	// it — the console banner, A2A input-required, ops alerts. Distinct from StatusWaiting, which
+	// is machine-woken.
 	StatusRequiresAction Status = "requires_action"
+	// StatusWaiting — paused parked on one or more CHILD RUNS, MACHINE-woken (vs requires_action =
+	// human-woken), per ADR 0060 §3. A workflow instance run (m67.3) or a suspending supervisor (I1)
+	// enters `waiting` after launching child(ren); when the wait condition is met the store flips it
+	// back to `queued` (resume) in the SAME transaction as the last child's terminal transition —
+	// exactly-once, no notification bus. A `waiting` run holds NO lease and NO worker (it is not
+	// claimed while parked; it re-enters execution only via waiting→queued). NON-terminal.
+	StatusWaiting Status = "waiting"
 	// StatusSucceeded — terminal: produced a final answer.
 	StatusSucceeded Status = "succeeded"
 	// StatusFailed — terminal: an error the run surfaces (never a swallowed failure).
@@ -82,6 +92,7 @@ var transitions = map[Status]map[Status]bool{
 	},
 	StatusRunning: {
 		StatusRequiresAction: true,
+		StatusWaiting:        true, // suspend: parked on child run(s), machine-woken (ADR 0060)
 		StatusSucceeded:      true,
 		StatusFailed:         true,
 		StatusCancelled:      true,
@@ -89,6 +100,14 @@ var transitions = map[Status]map[Status]bool{
 	},
 	StatusRequiresAction: {
 		StatusRunning:   true, // resume
+		StatusCancelled: true,
+		StatusExpired:   true,
+	},
+	// waiting is machine-woken: a satisfied wait re-QUEUES the run (waiting→queued) and the existing
+	// worker pool re-claims it — the worker pool IS the resume loop (ADR 0060 §3). It may also be
+	// cancelled/expired directly (a cancel cascade or a lifetime bound while parked).
+	StatusWaiting: {
+		StatusQueued:    true, // resume — the wake re-queues; the pool re-claims
 		StatusCancelled: true,
 		StatusExpired:   true,
 	},
@@ -171,7 +190,41 @@ type Run struct {
 	// text). m65.4 validates the run's terminal answer against it. Empty ⇒ no schema, no validation.
 	// Pinned so an operator editing the schema mid-run does not retroactively change validation.
 	OutputSchema string `json:"-"`
+
+	// --- Workflow instance + wait record (M67, ADR 0060): set when this run EXECUTES a declarative
+	// Workflow (kind: workflow). A workflow instance is a Run with a WorkflowRef + a pinned SpecSnapshot
+	// (resuming against a live-edited CR is a correctness bug — CRD edits affect NEW instances only) +
+	// a Cursor tracking per-node progress. When the executor (m67.3) launches child node run(s) it
+	// SUSPENDS the run to `waiting` with a wait record; the transactional wake resumes it. None is a
+	// secret (a workflow name, a resolved spec, opaque progress JSON), so they COULD ride the DTO — kept
+	// json:"-" here (the store persists them as their own columns; the API exposure is m67.4's call).
+
+	// WorkflowRef names the Workflow CR this run instantiates (empty ⇒ not a workflow run).
+	WorkflowRef string `json:"-"`
+	// SpecSnapshot is the resolved workflow spec pinned at instance-create time (JSON). Empty ⇒ none.
+	SpecSnapshot string `json:"-"`
+	// Cursor is the executor's per-node progress (JSON, opaque to the store — the executor owns its
+	// shape: pending / launched(childID) / done(outputRef) per node). Resume advances it, never
+	// replays the graph. Empty ⇒ no progress yet.
+	Cursor string `json:"-"`
+	// WaitOn is the set of CHILD run ids this run is parked on while `waiting`. The transactional
+	// wake removes a child as it goes terminal; an empty WaitOn (mode all) or one satisfied child
+	// (mode any) means the wait is met → the run is re-queued. Empty when not waiting.
+	WaitOn []string `json:"-"`
+	// WaitMode is how WaitOn is satisfied: WaitAll (every child terminal) or WaitAny (at least one).
+	// Empty when not waiting.
+	WaitMode WaitMode `json:"-"`
 }
+
+// WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3).
+type WaitMode string
+
+const (
+	// WaitAll — the wait is met when EVERY child in WaitOn has gone terminal (a join / all-of).
+	WaitAll WaitMode = "all"
+	// WaitAny — the wait is met when AT LEAST ONE child in WaitOn has gone terminal (an any-of).
+	WaitAny WaitMode = "any"
+)
 
 // ActionKind classifies what a requires_action run is waiting on.
 type ActionKind string
@@ -228,5 +281,59 @@ func (r *Run) Transition(to Status, now time.Time) error {
 	if to != StatusRequiresAction {
 		r.RequiresAction = nil
 	}
+	// Leaving waiting clears the wait record — a resumed (or cancelled/expired) run is no longer
+	// parked on children. The wake path clears WaitOn as it satisfies it; this is the belt-and-braces
+	// for any other exit (cancel/expire) so a re-queued run never carries a stale wait set.
+	if to != StatusWaiting {
+		r.WaitOn = nil
+		r.WaitMode = ""
+	}
 	return nil
+}
+
+// suspendToWaiting parks a RUNNING run on the given child run ids, releasing its lease so the
+// worker pool does not treat it as claimed (a waiting run holds NO worker/lease, ADR 0060 §3). It
+// is the store-internal primitive the exported Suspend wraps. mode must be WaitAll or WaitAny and
+// waitOn must be non-empty — an empty wait set can never be woken, so it is rejected.
+func (r *Run) suspendToWaiting(waitOn []string, mode WaitMode, now time.Time) error {
+	if len(waitOn) == 0 {
+		return fmt.Errorf("run %s: suspend requires at least one child to wait on", r.ID)
+	}
+	if mode != WaitAll && mode != WaitAny {
+		return fmt.Errorf("run %s: invalid wait mode %q", r.ID, mode)
+	}
+	if err := r.Transition(StatusWaiting, now); err != nil {
+		return err
+	}
+	r.WaitOn = append([]string(nil), waitOn...)
+	r.WaitMode = mode
+	// A waiting run holds no lease and no worker — it is not claimable and not reclaimable while
+	// parked; it re-enters execution only via waiting→queued.
+	r.WorkerID = ""
+	r.LeaseExpiresAt = nil
+	return nil
+}
+
+// satisfyChild removes childID from the wait set and reports whether the wait is NOW met (given the
+// mode): all → the set is empty; any → a child was removed (at least one is satisfied). It returns
+// removed=false when childID was not in the set (an already-satisfied / duplicate completion) so
+// the wake is idempotent — a reclaimed child completion cannot re-fire a wake or corrupt the set.
+func (r *Run) satisfyChild(childID string) (met, removed bool) {
+	idx := -1
+	for i, id := range r.WaitOn {
+		if id == childID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false, false // not waiting on this child (or already satisfied) — no-op
+	}
+	r.WaitOn = append(r.WaitOn[:idx], r.WaitOn[idx+1:]...)
+	switch r.WaitMode {
+	case WaitAny:
+		return true, true // one satisfied child meets an any-wait
+	default: // WaitAll
+		return len(r.WaitOn) == 0, true
+	}
 }
