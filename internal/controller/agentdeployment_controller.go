@@ -756,8 +756,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// engine (m66.3) even for a guardrailed-but-unbudgeted agent. Injected ONLY when the ref resolved and
 	// validated — a broken ref already failed closed above (buildPodTemplate returned a
 	// *guardrailResolveError), so we never reach here with a policy the engine can't enforce.
+	//
+	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
+	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
+	// but a PLAIN guarded agent (guardrailPolicyRef set, not a delegate supervisor) never enters that
+	// branch — its block audit is span-only and the durable row is silently skipped. Fix: inject
+	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
+	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
+	// unchanged (no BFF_INTERNAL_URL injected).
 	if gr.referenced {
 		env = append(env, corev1.EnvVar{Name: envGuardrailPolicy, Value: gr.policyJSON})
+		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
+			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
+		}
 	}
 
 	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher

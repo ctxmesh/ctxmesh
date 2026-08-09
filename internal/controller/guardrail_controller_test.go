@@ -262,6 +262,143 @@ func TestReconcile_GuardrailDigestRoll(t *testing.T) {
 	assert.Contains(t, revB, "-h", "updated revision must still carry the combined digest suffix")
 }
 
+// TestReconcile_GuardedAgentGetsBFFURL proves the m66.15 fix: a guarded (guardrailPolicyRef set,
+// valid), non-delegate agent gets BFF_INTERNAL_URL injected so its guardrail block audit POST
+// reaches the BFF and the durable guardrail.block row is written. Without the fix this env var
+// was silently absent for plain guarded agents, making block audit span-only.
+func TestReconcile_GuardedAgentGetsBFFURL(t *testing.T) {
+	const (
+		name      = "plain-guarded-bff"
+		policyN   = "bff-test-policy"
+		namespace = "default"
+	)
+
+	policy := newGuardrailPolicy(policyN, namespace, "ignore.*instructions")
+	require.NoError(t, k8sClient.Create(testCtx, policy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:              "ghcr.io/ctxmesh/example-agent:latest",
+			GuardrailPolicyRef: policyN,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	env, _ := ksvcEnvMap(t, name, namespace)
+
+	// BFF_INTERNAL_URL must be injected for a guarded non-delegate agent (m66.15).
+	bffEnv, ok := env["BFF_INTERNAL_URL"]
+	require.True(t, ok, "BFF_INTERNAL_URL must be injected for a guarded agent (m66.15 audit sink reachability)")
+	assert.Equal(t, bffInternalURL, bffEnv.Value,
+		"BFF_INTERNAL_URL must equal the operator's in-cluster BFF address")
+	assert.Nil(t, bffEnv.ValueFrom,
+		"BFF_INTERNAL_URL must be static (Knative rejects valueFrom)")
+}
+
+// TestReconcile_GuardedSupervisorGetsBFFURLOnce proves the dedup invariant (m66.15): an agent
+// that is BOTH a guardrail supervisor (guardrailPolicyRef set) AND a delegate supervisor (its
+// AgentTeam.spec.supervisor.agentRef points at it) must get BFF_INTERNAL_URL exactly once — not
+// duplicated. Kubernetes and Knative reject a pod with duplicate env var names.
+func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
+	const (
+		name      = "guarded-supervisor-bff"
+		policyN   = "bff-sup-policy"
+		regName   = "bff-sup-reg"
+		teamName  = "bff-sup-team"
+		namespace = "default"
+	)
+
+	policy := newGuardrailPolicy(policyN, namespace, "ignore.*instructions")
+	require.NoError(t, k8sClient.Create(testCtx, policy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
+
+	// Create a registry so the agent becomes a registry member (required for delegateEnv path).
+	mkRegistryMesh(t, regName, namespace, regName, regName)
+
+	// Supervisor agent: both guarded AND a registry member (label matches the registry selector).
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{"registry": regName},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:              "ghcr.io/ctxmesh/example-agent:latest",
+			GuardrailPolicyRef: policyN,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	// Create a worker for the AgentTeam roster; it must be a registry member too.
+	worker := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bff-sup-worker",
+			Namespace: namespace,
+			Labels:    map[string]string{"registry": regName},
+		},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, worker))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, worker) })
+
+	// AgentTeam that makes the supervisor agent the delegate supervisor.
+	mkAgentTeam(t, teamName, namespace, regName, name, map[string]string{"worker": "bff-sup-worker"})
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	// Fetch the raw env slice (not the map) to count occurrences of BFF_INTERNAL_URL.
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	require.GreaterOrEqual(t, len(ksvc.Spec.Template.Spec.Containers), 1)
+
+	var count int
+	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "BFF_INTERNAL_URL" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count,
+		"BFF_INTERNAL_URL must appear exactly once for a guarded supervisor (no duplicate env — K8s/Knative rejects it)")
+}
+
+// TestReconcile_UnguardedAgentNoBFFURL proves the regression guard: an unguarded
+// (no guardrailPolicyRef), non-delegate agent must NOT get BFF_INTERNAL_URL (m66.15 — no
+// behavior change for the unguarded path).
+func TestReconcile_UnguardedAgentNoBFFURL(t *testing.T) {
+	const (
+		name      = "unguarded-no-bff"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	env, _ := ksvcEnvMap(t, name, namespace)
+
+	_, ok := env["BFF_INTERNAL_URL"]
+	assert.False(t, ok,
+		"BFF_INTERNAL_URL must NOT be injected for an unguarded non-delegate agent (regression guard)")
+}
+
 // TestGuardrailPolicyController_ValidatesAndHashes exercises the minimal GuardrailPolicy status
 // controller (M66, ADR 0059 §8): a valid policy → Validated=True + a policyHash; an invalid
 // policy → Validated=False InvalidPattern.
