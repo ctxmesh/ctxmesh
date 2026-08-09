@@ -31,6 +31,7 @@ import json
 from typing import Any, Dict, Iterator, List
 
 from ctxmesh import _http, _semconv
+from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError, GuardrailBlockedError
 from ctxmesh.trace import TraceClient
@@ -293,10 +294,20 @@ class ModelClient:
         # (offline/mock gateway) we send a harmless placeholder — the mock gateway
         # ignores it — rather than omit the header the real gateway requires.
         key = self._config.model_gateway_key or "sk-agent-engine"
-        return {
+        headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
         }
+        # Relay the invoking user's run capability (ADR 0030 §3, m66.7) on the model
+        # call — the SAME request-scoped capability tools.py attaches to every MCP
+        # egress. It lets the launcher's gateway proxy VERIFY the invoking user and
+        # enforce per-user (OBO) rate/abuse limits at the model-call boundary. Bound
+        # per-request in a ContextVar (managed.run_managed_loop); absent ⇒ an
+        # unattended/offline run — omit it, leaving Content-Type/Authorization intact.
+        capability = current_capability()
+        if capability:
+            headers[CAPABILITY_HEADER] = capability
+        return headers
 
 
 def _first_choice(data: Dict[str, Any]) -> Dict[str, Any]:

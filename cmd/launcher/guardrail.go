@@ -137,9 +137,21 @@ const (
 type guardrailPolicyConfig struct {
 	PIIDetectors    *piiGuardrailConfig `json:"piiDetectors,omitempty"`
 	PatternDenylist []patternRuleConfig `json:"patternDenylist,omitempty"`
+	// UserRateLimit configures per-end-user (OBO) rate/abuse limits (m66.7). Read by the
+	// gateway proxy (gateway.go) to build the per-user quota enforcer; nil ⇒ no per-user
+	// limit. The engine's content rules ignore it.
+	UserRateLimit *userRateLimitConfig `json:"userRateLimit,omitempty"`
 	// failMode is "closed" (default) or "open". Retained so a future task can honor
 	// it at engine-run failures; the load path itself is always fail-closed.
 	FailMode string `json:"failMode,omitempty"`
+}
+
+// userRateLimitConfig mirrors UserRateLimit's JSON (api/v1beta1). Zero/blank fields ⇒
+// that dimension is unenforced (matching the CRD "0 means unlimited" contract).
+type userRateLimitConfig struct {
+	RequestsPerMinute int    `json:"requestsPerMinute,omitempty"`
+	SpendUSD          string `json:"spendUSD,omitempty"`
+	MaxInFlight       int    `json:"maxInFlight,omitempty"`
 }
 
 // piiGuardrailConfig mirrors PIIGuardrail's JSON.
@@ -259,6 +271,23 @@ func newGuardrailEngine(policyJSON string) (*guardrailEngine, error) {
 	}
 
 	return eng, nil
+}
+
+// parseUserRateLimit extracts the userRateLimit section from the raw GUARDRAIL_POLICY
+// JSON (m66.7). Empty policy or no userRateLimit ⇒ (nil, nil): no per-user limit. A
+// policy that does not parse is a hard error — same fail-closed load posture as
+// newGuardrailEngine (the controller already validated the policy, so this is
+// defence-in-depth). Kept separate from newGuardrailEngine because the per-user quota
+// is enforced by the gateway proxy (gateway.go), not the content-scanning engine.
+func parseUserRateLimit(policyJSON string) (*userRateLimitConfig, error) {
+	if policyJSON == "" {
+		return nil, nil
+	}
+	var cfg guardrailPolicyConfig
+	if err := json.Unmarshal([]byte(policyJSON), &cfg); err != nil {
+		return nil, fmt.Errorf("guardrail: parsing GUARDRAIL_POLICY: %w", err)
+	}
+	return cfg.UserRateLimit, nil
 }
 
 // addRule indexes a rule under every scan point its appliesTo covers. "all" fans out
