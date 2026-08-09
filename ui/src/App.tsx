@@ -35,6 +35,7 @@ import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
 import { AuditPage } from "@/pages/audit-page";
 import { TeamsPage } from "@/pages/teams-page";
+import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import {
   SecretBindingDetailPage,
   NewSecretBindingPage,
@@ -179,6 +180,8 @@ export function App() {
             <Route path="agents" element={<AgentsPage />} />
             {/* m64.11: AgentTeams — the orchestration rosters (read-only). */}
             <Route path="teams" element={<TeamsPage />} />
+            {/* m66.10: GuardrailPolicies — the content-governance policies (read-only). */}
+            <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* The agent LANDING page (m14.11) — closes the aha loop: status
                 timeline + live log tail + Run panel + the native run inspector.
                 Reached from the agents list row-click and the create→landing

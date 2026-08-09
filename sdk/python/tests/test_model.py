@@ -113,6 +113,42 @@ def test_timeout_opt_does_not_leak_into_request_body(gateway_stub: GatewayStub):
     assert body["temperature"] == 0.1  # other opts still pass through
 
 
+# ── run-capability on the model call (m66.7, per-user OBO limits) ──────────────
+#
+# The model call carries the invoking user's run capability (the SAME one tools.py
+# attaches to every MCP egress) so the launcher gateway can VERIFY the user and
+# enforce per-user rate/abuse limits. In scope ⇒ the header is attached; out of
+# scope (unattended/offline) ⇒ it is omitted, leaving Content-Type/Authorization
+# untouched.
+
+
+def test_chat_attaches_run_capability_when_in_scope(gateway_stub: GatewayStub):
+    from ctxmesh._capability import CAPABILITY_HEADER, capability_scope
+
+    client = _client(gateway_stub)
+    with capability_scope({CAPABILITY_HEADER: "cap-token-123"}):
+        client.model.chat("m", [{"role": "user", "content": "q"}])
+    req = gateway_stub.requests[-1]
+    # RecordedRequest.headers are lower-cased.
+    assert req.headers.get(CAPABILITY_HEADER.lower()) == "cap-token-123"
+    # The pre-existing contract is untouched.
+    assert req.headers.get("content-type") == "application/json"
+    assert req.headers.get("authorization", "").startswith("Bearer ")
+
+
+def test_chat_omits_run_capability_when_not_in_scope(gateway_stub: GatewayStub):
+    from ctxmesh._capability import CAPABILITY_HEADER
+
+    client = _client(gateway_stub)
+    # No capability_scope active ⇒ an unattended/offline run.
+    client.model.chat("m", [{"role": "user", "content": "q"}])
+    req = gateway_stub.requests[-1]
+    assert CAPABILITY_HEADER.lower() not in req.headers
+    # Content-Type/Authorization are still present.
+    assert req.headers.get("content-type") == "application/json"
+    assert req.headers.get("authorization", "").startswith("Bearer ")
+
+
 # ── the empty-response raise (m14.3 review C1) ─────────────────────────────────
 #
 # The m14.3 SDK fix made a tool_calls turn (content:null + tool_calls) NOT raise.

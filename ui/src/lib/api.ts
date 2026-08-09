@@ -201,6 +201,9 @@ export interface AgentDetailResponse {
   // m65.9 — optional runtime authoring config (ADR 0058). Absent when
   // spec.runtime is not set; the detail page renders nothing new in that case.
   runtime?: AgentRuntimeDetail;
+  // m66.10 — optional guardrail policy reference (ADR 0059). Present when
+  // spec.guardrailPolicyRef is set. The detail page links to /guardrails.
+  guardrailPolicyRef?: string;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -630,6 +633,37 @@ export interface AuditListParams {
   kind?: string;
   limit?: number;
   cursor?: string;
+}
+
+// --- GuardrailPolicies (GET /api/guardrailpolicies) -------------------------
+// The content-governance policies (m66.10, ADR 0059): PII scanning, pattern deny-
+// lists, an optional LLM-judge, per-user rate limits. Read-only surface (caller-scoped).
+
+export interface GuardrailPolicySummary {
+  name: string;
+  namespace: string;
+  // piiEnabled is true when spec.piiDetectors is present.
+  piiEnabled: boolean;
+  // denylistCount is len(spec.patternDenylist).
+  denylistCount: number;
+  // judgeEnabled is true when spec.semanticJudge.enabled is true.
+  judgeEnabled: boolean;
+  // failMode is spec.failMode ("closed" | "open").
+  failMode: string;
+  // userRateLimited is true when spec.userRateLimit is present.
+  userRateLimited: boolean;
+  // validated is true when the controller's Validated condition is True.
+  validated: boolean;
+  // reason carries the condition reason when validated is false.
+  reason?: string;
+  // policyHash mirrors status.policyHash.
+  policyHash?: string;
+  // referencingAgents mirrors status.referencingAgents — blast-radius agents.
+  referencingAgents: string[];
+}
+
+export interface GuardrailPolicyListResponse {
+  items: GuardrailPolicySummary[];
 }
 
 // --- AgentTeams (GET /api/teams) --------------------------------------------
@@ -2997,6 +3031,11 @@ export const api = {
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
   listTeams: (signal?: AbortSignal) =>
     getJSON<AgentTeamListResponse>("/api/teams", signal),
+
+  // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
+  // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
+  listGuardrailPolicies: (signal?: AbortSignal) =>
+    getJSON<GuardrailPolicyListResponse>("/api/guardrailpolicies", signal),
 
   tenantDetail: (name: string, signal?: AbortSignal) =>
     getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),

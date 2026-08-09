@@ -64,7 +64,8 @@
           }
         }
       }
-    }
+    },
+    "guardrailPolicyRef": "pii-and-jailbreak"
   },
   "ConnectProviderResponse": {
     "provider": {
@@ -84,6 +85,24 @@
         "kind": "Secret",
         "name": "anthropic",
         "namespace": "default"
+      }
+    ]
+  },
+  "GuardrailPolicyListResponse": {
+    "items": [
+      {
+        "name": "pii-and-jailbreak",
+        "namespace": "default",
+        "piiEnabled": true,
+        "denylistCount": 2,
+        "judgeEnabled": true,
+        "failMode": "closed",
+        "userRateLimited": true,
+        "validated": true,
+        "policyHash": "sha256-abc123",
+        "referencingAgents": [
+          "echo"
+        ]
       }
     ]
   },
