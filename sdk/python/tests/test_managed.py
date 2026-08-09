@@ -866,11 +866,11 @@ def test_delegate_batch_runs_concurrently_and_propagates_capability():
     from ctxmesh.managed import _dispatch_delegate_batch
 
     seen_caps = []
-    # A barrier of len(calls) is a DETERMINISTIC concurrency proof (fixes the m52.I6 flake): the
-    # only way all N delegations pass a Barrier(N) is if they are genuinely in-flight simultaneously.
-    # Serial execution (a reused pool thread) blocks the first wait() until the timeout → BrokenBarrier
-    # → the delegate returns an error → the results assertion fails. This never depends on distinct
-    # thread IDENTITY (which a fast/loaded machine reuses), so it can't flake on timing.
+    # A barrier of len(calls) is a DETERMINISTIC concurrency proof (fixes the m52.I6 flake):
+    # the only way all N delegations pass a Barrier(N) is if they are genuinely in-flight at
+    # once. Serial execution (a reused pool thread) blocks the first wait() until the timeout
+    # → BrokenBarrier → the delegate returns an error → the results assertion fails. This never
+    # depends on distinct thread IDENTITY (which a fast/loaded machine reuses), so it can't flake.
     calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
     concurrency_barrier = threading.Barrier(len(calls), timeout=10.0)
 
