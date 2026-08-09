@@ -814,7 +814,7 @@ func yamlToJSON(y []byte) ([]byte, error) {
 // the YAML→JSON conversion rendered as null), so an omitted budget/eval/prompt
 // doesn't count as a modeled non-safe change.
 func isJSONNull(raw json.RawMessage) bool {
-	return strings.TrimSpace(string(raw)) == "null"
+	return strings.TrimSpace(string(raw)) == jsonNullLiteral
 }
 
 // execModelEqual compares two executionModel values treating "" as the CRD default

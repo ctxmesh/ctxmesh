@@ -34,6 +34,14 @@ import (
 // (ADR 0034) are unchanged by that swap.
 const runExecTimeout = 90 * time.Second
 
+// jsonNullLiteral is the JSON `null` token, checked when distinguishing an absent/null optional field
+// from a present one in a raw-message body (e.g. the handoff marker detection).
+const jsonNullLiteral = "null"
+
+// handoffOKTrue is the SDK's string-encoded `ok:true` on a SUCCESSFUL handoff marker (ManagedResult's
+// handoff dict is Dict[str,str], so `ok` is the literal "true"/"false").
+const handoffOKTrue = "true"
+
 // CreateRunResponse is returned by POST /api/runs: the run id (the hand-off the client polls or
 // streams) + its initial status. The run executes asynchronously — the response returns before it
 // completes (202 Accepted), which is what unblocks streaming + long-running (ADR 0034).
@@ -168,6 +176,24 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseInvokeRequest(w, r)
 	if !ok {
 		return
+	}
+	// Active-agent routing (m67.6, ADR 0060 §5): when this run is created for a conversation that a
+	// prior handoff transferred to agent B AND the caller gave NO explicit agent override, route to the
+	// active agent B — so the user's next turn continues with whoever the conversation was handed to,
+	// not the original agent. An EXPLICIT agent always wins (the caller can override the pointer). The
+	// pointer is a HINT, not an authorization: the run below still resolves B through the CALLER'S own
+	// client (caller-scoped RBAC) + mints the caller's own capability, exactly as an explicit invoke —
+	// so routing to B grants no access the user did not already have.
+	if strings.TrimSpace(req.Agent) == "" && strings.TrimSpace(req.ConversationID) != "" {
+		if active, aErr := s.convStore.GetActiveAgent(req.ConversationID); aErr == nil {
+			// Adopt the pointer's (namespace, agent) as a PAIR — B's name is only meaningful in B's
+			// namespace (the one resolved at handoff time). Taking the name but keeping a caller-
+			// supplied namespace would resolve "B" in the wrong namespace (a 404, or a different
+			// tenant's same-named agent). The caller's namespace is irrelevant here — they gave no
+			// explicit agent, so they are deferring routing entirely to the pointer.
+			req.Agent = active.Agent
+			req.Namespace = active.Namespace
+		}
 	}
 	if strings.TrimSpace(req.Agent) == "" {
 		writeError(w, http.StatusBadRequest, "agent is required")
@@ -312,6 +338,18 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
+	// Handoff (m67.6, ADR 0060 §5): the agent TRANSFERRED the conversation via handoff_to. The BFF
+	// handoff edge (POST /api/internal/handoff) ALREADY terminated this run (succeeded + HandedOffTo)
+	// and created the target's new run WHILE this /invoke was in flight — so there is no answer to
+	// append and no success transition to make here (both would be no-ops or would append an empty
+	// message over the recorded handoff outcome). Detect the marker and return: the run's terminal
+	// state is the handoff edge's, not this executeRun's. (If the edge somehow did not run, the run is
+	// still non-terminal and the normal path below applies — fail-safe, not fail-open.)
+	if handoffMarkerPresent(resp) {
+		s.log.Info("run: agent handed off the conversation (terminal via the handoff edge)", "run", runID)
+		return
+	}
+
 	output := extractRunOutput(resp)
 
 	// Authoritative structured-output gate (m65.4, ADR 0058): when the run pinned an outputSchema
@@ -387,6 +425,13 @@ type RunDetailDTO struct {
 	// cursor "current" — the node currently in flight (empty between nodes or after completion).
 	WorkflowRef string `json:"workflowRef,omitempty"`
 	CurrentNode string `json:"currentNode,omitempty"`
+
+	// Handoff fields (m67.6, ADR 0060 §5). HandedOffTo is set on the SOURCE run A (this run terminated
+	// by handing the conversation off to that agent); HandoffSourceRunID is set on the TARGET run B (the
+	// run A whose handoff_to created this run — B has no ParentRunID by design, so this is the A→B
+	// lineage link). Both structured (not parsed from prose) so audit/console can render the transfer.
+	HandedOffTo        string `json:"handedOffTo,omitempty"`
+	HandoffSourceRunID string `json:"handoffSourceRunId,omitempty"`
 }
 
 // runToDTO projects a run.Run onto the RunDetailDTO for the GET /api/runs/{id} response.
@@ -394,22 +439,24 @@ type RunDetailDTO struct {
 // json:"-" on run.Run so the store does not accidentally serialize them in other contexts.
 func runToDTO(rn *run.Run) RunDetailDTO {
 	dto := RunDetailDTO{
-		ID:             rn.ID,
-		Namespace:      rn.Namespace,
-		Agent:          rn.Agent,
-		Input:          rn.Input,
-		ConversationID: rn.ConversationID,
-		TraceID:        rn.TraceID,
-		Status:         string(rn.Status),
-		Messages:       rn.Messages,
-		RequiresAction: rn.RequiresAction,
-		Error:          rn.Error,
-		CreatedAt:      rn.CreatedAt,
-		UpdatedAt:      rn.UpdatedAt,
-		ParentRunID:    rn.ParentRunID,
-		RootRunID:      rn.RootRunID,
-		SpawnDepth:     rn.SpawnDepth,
-		WorkflowRef:    rn.WorkflowRef,
+		ID:                 rn.ID,
+		Namespace:          rn.Namespace,
+		Agent:              rn.Agent,
+		Input:              rn.Input,
+		ConversationID:     rn.ConversationID,
+		TraceID:            rn.TraceID,
+		Status:             string(rn.Status),
+		Messages:           rn.Messages,
+		RequiresAction:     rn.RequiresAction,
+		Error:              rn.Error,
+		CreatedAt:          rn.CreatedAt,
+		UpdatedAt:          rn.UpdatedAt,
+		ParentRunID:        rn.ParentRunID,
+		RootRunID:          rn.RootRunID,
+		SpawnDepth:         rn.SpawnDepth,
+		WorkflowRef:        rn.WorkflowRef,
+		HandedOffTo:        rn.HandedOffTo,
+		HandoffSourceRunID: rn.HandoffSourceRunID,
 	}
 	// Surface the executor's current node from the cursor. The cursor JSON includes "current"
 	// as the node name currently in flight; rather than re-parsing the full cursor opaque JSON
@@ -534,6 +581,27 @@ func withApprovals(input []byte, keys []string) []byte {
 		return input
 	}
 	return out
+}
+
+// handoffMarkerPresent reports whether the managed-agent /invoke envelope carries a SUCCESSFUL handoff
+// marker (m67.6, ADR 0060 §5) — i.e. the agent transferred the conversation and this run was already
+// terminated by the BFF handoff edge, so executeRun must NOT append an answer / re-transition it. It
+// requires the marker's `ok` to be true: a REFUSED handoff (`ok:false` — non-member target, launcher
+// unreachable) did NOT terminate the run, so the normal answer path must run and terminate it (else the
+// run is stranded `running` forever — the m67.6 review bug). Belt-and-braces on top of the SDK, which
+// now emits the marker only on a real transfer. A non-object body / absent marker / `ok:false` ⇒ false.
+func handoffMarkerPresent(resp []byte) bool {
+	var env struct {
+		Handoff *struct {
+			OK string `json:"ok"`
+		} `json:"handoff"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		return false
+	}
+	// The SDK serialises the handoff result with string-valued fields (ManagedResult.handoff is
+	// Dict[str,str]), so `ok` is the literal "true"/"false" — a real transfer is exactly "true".
+	return env.Handoff != nil && env.Handoff.OK == handoffOKTrue
 }
 
 // extractRunOutput unwraps the managed-agent /invoke envelope ({output,...}, m25.9) to the human

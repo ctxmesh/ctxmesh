@@ -39,13 +39,28 @@ from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
 #: ``DELEGATE_ENABLED=true`` (a supervisor); a plain agent never sees it.
 DELEGATE_TOOL_NAME = "delegate_to"
 
+#: The synthetic HANDOFF (transfer-of-control) tool (M67, ADR 0060 §5). A team supervisor/member
+#: with a roster is given this built-in tool alongside delegate_to; calling it TRANSFERS the
+#: conversation to another roster member and ENDS this agent's turn (unlike delegate_to, which
+#: awaits + consumes a result). Enabled by the SAME DELEGATE_ENABLED signal (a roster-bearing
+#: agent) — a plain agent never sees it.
+HANDOFF_TOOL_NAME = "handoff_to"
+
 #: The launcher-local delegate endpoint (:2994). Platform-owned — the agent's user code POSTs here;
 #: the launcher stamps the spawn envelope + guard, so the agent can't forge a spawn.
 _DELEGATE_ENDPOINT = "http://127.0.0.1:2994/delegate"
 
+#: The launcher-local handoff endpoint (:2994, same listener as delegate). Platform-owned — the
+#: launcher fail-fast validates roster membership + relays the run capability to the BFF edge.
+_HANDOFF_ENDPOINT = "http://127.0.0.1:2994/handoff"
+
 #: A delegated sub-run executes synchronously (the launcher blocks until it is terminal), so this is
 #: generous — a sub-agent may itself do several tool round-trips.
 _DELEGATE_TIMEOUT = 600.0
+
+#: A handoff is NOT awaited (the transfer terminates this turn) — the launcher only relays to the
+#: BFF, terminates A, and queues B, so this is a short round-trip.
+_HANDOFF_TIMEOUT = 30.0
 
 
 def _delegate_enabled() -> bool:
@@ -108,6 +123,55 @@ def _delegate_tool() -> Tool:
         name=DELEGATE_TOOL_NAME,
         mode="delegate",
         endpoint=_DELEGATE_ENDPOINT,
+        transport="http",
+        input_schema=schema,
+        description=description,
+    )
+
+
+def _handoff_tool() -> Tool:
+    """Build the synthetic ``handoff_to`` tool (M67, ADR 0060 §5): its description lists the roster
+    so the model picks whom to transfer TO, and its schema constrains ``target_agent`` to the roster
+    when known. Unlike ``delegate_to`` (call-and-return), a ``handoff_to`` call TRANSFERS the
+    conversation and ENDS this agent's turn — the agent does not wait for or consume a result; the
+    target continues with the end user."""
+    roster = _delegate_roster()
+    names = [r["name"] for r in roster]
+    listing = (
+        "\n".join(f"- {r['name']}: {r['description']}" for r in roster)
+        or "(configured on the AgentTeam)"
+    )
+    description = (
+        "Hand off the ENTIRE conversation to another agent on your team and END your turn. Use it "
+        "when another specialist should take over the conversation with the user from here — this "
+        "is a TRANSFER, not a delegation: you do NOT get a result back and you do NOT continue "
+        "after calling it. The target agent continues talking with the user directly. "
+        f"Available agents:\n{listing}"
+    )
+    target_schema: Dict[str, Any] = {
+        "type": "string",
+        "description": "The roster member to hand the conversation off to.",
+    }
+    if names:
+        target_schema["enum"] = names
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "target_agent": target_schema,
+            "message": {
+                "type": "string",
+                "description": (
+                    "An optional handoff note for the receiving agent (why you are transferring, "
+                    "what is needed next). The full conversation history transfers automatically."
+                ),
+            },
+        },
+        "required": ["target_agent"],
+    }
+    return Tool(
+        name=HANDOFF_TOOL_NAME,
+        mode="handoff",
+        endpoint=_HANDOFF_ENDPOINT,
         transport="http",
         input_schema=schema,
         description=description,
@@ -197,12 +261,14 @@ class ToolsClient:
 
     # ── discovery ────────────────────────────────────────────────────────────
     def list(self) -> List[Tool]:
-        """Return the live tool manifest (sidecar first, tools.json fallback). A team supervisor
-        also gets the synthetic ``delegate_to`` tool (M64) alongside its MCP tools."""
+        """Return the live tool manifest (sidecar first, tools.json fallback). A team
+        supervisor/member with a roster also gets the synthetic ``delegate_to`` (M64) +
+        ``handoff_to`` (M67) tools alongside its MCP tools."""
         manifest = self._fetch_manifest()
         tools = [Tool.from_dict(t) for t in manifest.get("tools", [])]
         if _delegate_enabled():
             tools.append(_delegate_tool())
+            tools.append(_handoff_tool())
         return tools
 
     def _fetch_manifest(self) -> Dict[str, Any]:
@@ -306,6 +372,35 @@ class ToolsClient:
         if isinstance(data, dict):
             return data
         return {"ok": False, "error": "malformed delegate response"}
+
+    def handoff(self, target_agent: str, message: str = "") -> Dict[str, Any]:
+        """Hand the conversation off to a roster member via the launcher-local endpoint (M67).
+
+        This is a TRANSFER, not a delegation: the launcher fail-fast validates roster membership +
+        relays the run capability to the BFF handoff edge, which TERMINATES this run and creates a
+        NEW run for the target agent on the SAME conversation (OBO minted fresh for the conversation
+        owner against the target's boundary — no capability transfer). There is NO await + NO result
+        to consume — the target continues with the end user. Returns ``{"ok": bool, "runId": str,
+        "sourceRun": str, "handedOffTo": str, "error": str}``. A refusal (a non-member target, a
+        missing capability) comes back as ``ok=false`` (an outcome the loop records), never a raise.
+        """
+        body = json.dumps({"targetAgent": target_agent, "message": message}).encode()
+        headers = {"Content-Type": "application/json"}
+        capability = current_capability()
+        if capability:
+            headers[CAPABILITY_HEADER] = capability
+        resp = _http.request(
+            "POST",
+            _HANDOFF_ENDPOINT,
+            body=body,
+            headers=headers,
+            timeout=_HANDOFF_TIMEOUT,
+            expect=(200,),
+        )
+        data = resp.json()
+        if isinstance(data, dict):
+            return data
+        return {"ok": False, "error": "malformed handoff response"}
 
 
 # ── minimal MCP streamable-http client (stdlib only) ───────────────────────────

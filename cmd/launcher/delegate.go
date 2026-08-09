@@ -92,11 +92,13 @@ type bffSpawnBody struct {
 	MaxTotalSpawns int             `json:"maxTotalSpawns,omitempty"`
 }
 
-// spawnClient creates a sub-run via the BFF + awaits its terminal status. An interface so the delegate
-// handler unit-tests against a fake (no BFF).
+// spawnClient creates a sub-run via the BFF + awaits its terminal status, and relays a handoff to the
+// BFF handoff edge (m67.6). An interface so the delegate + handoff handlers unit-test against a fake
+// (no BFF). The production httpSpawnClient implements all three over the shared BFF base + HTTP client.
 type spawnClient interface {
 	Spawn(ctx context.Context, capToken string, body bffSpawnBody) (subRunID string, err error)
 	Await(ctx context.Context, capToken, subRunID string) (spawnedRunResult, error)
+	handoffClient
 }
 
 // httpSpawnClient is the production client over the BFF's capability-authorized spawn + await endpoints.
@@ -189,7 +191,8 @@ func (c *httpSpawnClient) poll1(ctx context.Context, capToken, subRunID string) 
 type delegateConfig struct {
 	SelfName  string
 	Namespace string
-	Scope     string // the guard counter partition (tenant id, or namespace when untenanted)
+	Scope     string   // the guard counter partition (tenant id, or namespace when untenanted)
+	Roster    []string // the team roster member names (from DELEGATE_ROSTER) — the trust boundary for handoff
 	Budget    SpawnBudget
 }
 
@@ -227,6 +230,7 @@ func loadDelegateConfig(lookup func(string) string) delegateRuntime {
 			SelfName:  strings.TrimSpace(lookup("AGENT_NAME")),
 			Namespace: strings.TrimSpace(lookup("POD_NAMESPACE")),
 			Scope:     scope,
+			Roster:    parseRosterNames(lookup("DELEGATE_ROSTER")),
 			Budget: SpawnBudget{
 				MaxFanOut:      envIntDefault(lookup, "SPAWN_MAX_FANOUT", 4),
 				MaxSpawnDepth:  envIntDefault(lookup, "SPAWN_MAX_DEPTH", 3),
@@ -278,7 +282,34 @@ func (s *delegateServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /delegate", s.handleDelegate)
+	// handoff_to (m67.6, ADR 0060 §5) shares this listener — a supervisor with a roster can both delegate
+	// (call-and-return) and hand off (transfer-of-control) to the same roster.
+	mux.HandleFunc("POST /handoff", s.handleHandoff)
 	return mux
+}
+
+// parseRosterNames extracts the roster member names from the DELEGATE_ROSTER env (a JSON array of
+// {"name","description"} the controller injects from the AgentTeam roster). It is the trust boundary for
+// handoff (B must be a roster member). A malformed/empty env ⇒ nil (an empty roster admits any target at
+// the launcher — the BFF is still authoritative).
+func parseRosterNames(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if n := strings.TrimSpace(e.Name); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
 }
 
 // handleDelegate runs the synchronous delegate: guard → spawn → await → result. It always returns 200 with

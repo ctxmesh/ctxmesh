@@ -54,7 +54,7 @@ from ctxmesh.errors import (
     EndpointError,
     GuardrailBlockedError,
 )
-from ctxmesh.tools import DELEGATE_TOOL_NAME
+from ctxmesh.tools import DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
 #: here so it surfaces in the pod's stderr instead of being silently wrong (OTH-3). With no
@@ -432,6 +432,11 @@ class ManagedResult:
     #: no guardrail block occurred.  Non-None ⇒ the run failed on a content-policy decision (the
     #: content was not retried — a guardrail_blocked 403 is terminal, not transient).
     guardrail_blocked: Optional[Dict[str, str]] = None
+    #: When the agent called ``handoff_to`` (M67, ADR 0060 §5), the transfer outcome — e.g.
+    #: ``{"targetAgent": "…", "ok": "true", "runId": "…"}``. Non-None ⇒ this agent TRANSFERRED the
+    #: conversation and its turn ENDED here (a handoff is terminal for the agent's turn — it does
+    #: not produce a further answer; the target agent continues with the user). ``None`` = none.
+    handoff: Optional[Dict[str, str]] = None
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -689,6 +694,42 @@ def _dispatch_delegate_one(
     if resp.get("ok"):
         return str(resp.get("answer", ""))
     return f"delegation to {sub_agent!r} did not succeed: {resp.get('error', 'unknown error')}"
+
+
+def _dispatch_handoff(client: Client, call: Dict[str, Any]) -> Dict[str, str]:
+    """Dispatch a handoff_to call (M67, ADR 0060 §5): TRANSFER the conversation + END the turn.
+
+    Returns a string-valued result dict recording the transfer (``targetAgent``, ``ok``, and — on
+    success — ``runId``/``sourceRun``; on refusal — ``error``). It is NOT awaited: the launcher
+    relays to the BFF handoff edge, which terminates this run + queues the target's new run; the
+    target then continues with the end user. A refusal (non-member target, missing capability) comes
+    back as ``ok=false`` — recorded, never raised (the turn ends on a handoff regardless).
+    """
+    args = _parse_arguments(_call_arguments(call))
+    target = str(args.get("target_agent", ""))
+    message = str(args.get("message", ""))
+    if not target:
+        return {"ok": "false", "targetAgent": "", "error": "handoff_to requires a 'target_agent'"}
+    with client.trace.tool(
+        HANDOFF_TOOL_NAME, input={"target_agent": target, "message": message}
+    ) as span:
+        try:
+            resp = client.tools.handoff(target_agent=target, message=message)
+        except EndpointError as exc:
+            # The launcher-local handoff edge was unreachable (down / slow / a non-200). Like a
+            # delegate failure, this is an OUTCOME the loop records as ok=false — NEVER a raise that
+            # crashes the turn. The run was NOT terminated (the transfer did not happen), so the
+            # loop keeps the conversation and lets the model recover.
+            span.set_output({"ok": False, "error": str(exc)})
+            return {"ok": "false", "targetAgent": target, "error": f"handoff failed: {exc}"}
+        span.set_output(resp)
+    out: Dict[str, str] = {"targetAgent": target, "ok": "true" if resp.get("ok") else "false"}
+    if resp.get("ok"):
+        out["runId"] = str(resp.get("runId", ""))
+        out["sourceRun"] = str(resp.get("sourceRun", ""))
+    else:
+        out["error"] = str(resp.get("error", "unknown error"))
+    return out
 
 
 def _dispatch_delegate(
@@ -1197,6 +1238,60 @@ def _drive_loop(
             messages.append(_assistant_message_for_history(resp))
             turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
 
+            # Handoff (M67, ADR 0060 §5) — the OPPOSITE of a normal tool call. If the model called
+            # handoff_to (and it is actually bound to this agent — a hallucinated handoff_to on a
+            # non-roster agent falls through to the "not bound" branch below and stays recoverable),
+            # attempt the TRANSFER. A handoff_to wins over any same-turn delegate — checked BEFORE
+            # the tool-policy/delegate dispatch (a transfer is a one-way door — take the FIRST one).
+            #
+            #   * SUCCESS (ok) → TERMINAL: the BFF edge already terminated THIS run + created the
+            #     target's, so we END the loop with a handoff ManagedResult + NO answer (the target
+            #     continues with the user). The `handoff` marker tells the BFF's executeRun this run
+            #     is already terminal (do not append an empty answer over the handoff outcome).
+            #   * REFUSED (non-member target / missing capability / launcher unreachable) → NOT
+            #     terminal + NO marker: the transfer did NOT happen and this run was NOT terminated,
+            #     so we thread the refusal back as a normal tool result and let the model recover
+            #     (answer the user itself, or try a different target). Emitting the marker on a
+            #     refusal would make the BFF skip terminating a still-running run — stranding it
+            #     (the m67.6 review bug). The marker is set ONLY on a real transfer.
+            handoff_call = (
+                next((c for c in resp.tool_calls if _call_name(c) == HANDOFF_TOOL_NAME), None)
+                if HANDOFF_TOOL_NAME in tool_names
+                else None
+            )
+            if handoff_call is not None:
+                result = _dispatch_handoff(client, handoff_call)
+                tools_called.append(HANDOFF_TOOL_NAME)
+                if result.get("ok") == "true":
+                    root.set_output(f"handed off to {result.get('targetAgent', '')}")
+                    # A successful handoff produces NO answer — the target continues the chat.
+                    return ManagedResult(
+                        output="",
+                        steps=step,
+                        tools_called=tools_called,
+                        consent_required=consent_required,
+                        handoff=result,
+                    )
+                # Refused: the transfer did not happen + this run was NOT terminated. Thread the
+                # refusal as the tool result (for THIS call id) so the model can recover, then fall
+                # through to the normal dispatch of any OTHER tool calls in the turn. No marker.
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": handoff_call.get("id", ""),
+                        "name": HANDOFF_TOOL_NAME,
+                        "content": (
+                            f"handoff to {result.get('targetAgent', '')!r} did not happen: "
+                            f"{result.get('error', 'unknown error')}. You still have the "
+                            "conversation — answer the user or try a different agent."
+                        ),
+                    }
+                )
+                # Mark it handled so the dispatch loop below does not also process it.
+                handled_handoff_id = handoff_call.get("id", "")
+            else:
+                handled_handoff_id = ""
+
             # Tool-use policy pre-pass (m65.6, ADR 0058): resolve, PER CALL and BEFORE any
             # dispatch, whether each tool call is executed or short-circuited with honest tool
             # text the model sees. blocked[call_id] holds that text for a short-circuited call;
@@ -1269,6 +1364,10 @@ def _drive_loop(
                 args = _parse_arguments(_call_arguments(call))
                 call_id = call.get("id", "")
 
+                if call_id == handled_handoff_id and handled_handoff_id != "":
+                    # A REFUSED handoff_to (M67): its refusal tool result was appended above; do
+                    # not re-dispatch it (a successful handoff already returned from the loop).
+                    continue
                 if call_id in blocked:
                     # Tool-use policy short-circuited this call (deny / sub-run-deny / skipped).
                     # Return the honest policy text as the tool result so the model can adapt;

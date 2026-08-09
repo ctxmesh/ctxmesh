@@ -39,6 +39,17 @@ func SpawnRunID(parentRunID, step, callID string) string {
 	return "sub-" + hex.EncodeToString(sum[:16])
 }
 
+// HandoffRunID derives a DETERMINISTIC id for the run B that a handoff creates (M67, ADR 0060 §5), so a
+// retried handoff (the SDK re-issuing the SAME handoff_to, or a capability replay) resolves the SAME
+// run B — the store's ON CONFLICT (id) DO NOTHING collapses the duplicate to one transferred run rather
+// than spawning a second B. The key is (sourceRunID=A, targetAgent): one handoff per (A, B) is the
+// transfer. The `hand-` prefix (distinct from the `sub-` spawn prefix) makes a transferred run
+// recognizable and marks it as NOT a sub-run — a handoff is a NEW ROOT run, never a child.
+func HandoffRunID(sourceRunID, targetAgent string) string {
+	sum := sha256.Sum256([]byte(sourceRunID + "\x00handoff\x00" + targetAgent))
+	return "hand-" + hex.EncodeToString(sum[:16])
+}
+
 // Status is the run's lifecycle state. The set + transitions mirror the A2A task states and the
 // OpenAI Assistants run statuses (ADR 0034), so external clients and the mesh interoperate.
 type Status string
@@ -229,6 +240,22 @@ type Run struct {
 	// WaitMode is how WaitOn is satisfied: WaitAll (every child terminal) or WaitAny (at least one).
 	// Empty when not waiting.
 	WaitMode WaitMode `json:"-"`
+
+	// --- Handoff outcome (M67, ADR 0060 §5): set when this run TERMINATED because its agent handed
+	// the conversation off to another roster member (`handoff_to`). Handoff is a CONVERSATION primitive,
+	// NOT a workflow edge: the run's Agent field stays IMMUTABLE (it is the audit record) — A's run ends
+	// here and B's turn is a NEW ROOT run on the same conversation, its own audit identity. HandedOffTo
+	// names the agent the conversation was transferred to; the run itself transitions to `succeeded`
+	// (the outcome IS the handoff — no new terminal state, per ADR 0060 §5). Non-secret (an agent name),
+	// so it rides the API DTO. Empty ⇒ this run did not hand off. Exposed via runToDTO (json:"-" here so
+	// the store persists it as its own column).
+	HandedOffTo string `json:"-"`
+
+	// HandoffSourceRunID is the BACKLINK on B: the run (A) whose `handoff_to` created THIS run. Handoff
+	// is a transfer, so B is a NEW ROOT run with NO ParentRunID (its own audit identity) — this field is
+	// the only forward/backward link between A and B, closing the handoff lineage loop (Fable, 2026-08-09).
+	// Empty ⇒ this run was not created by a handoff (a normal invoke/create). Non-secret (a run id).
+	HandoffSourceRunID string `json:"-"`
 }
 
 // WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3).
