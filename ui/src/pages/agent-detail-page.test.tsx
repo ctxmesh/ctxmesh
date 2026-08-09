@@ -1229,7 +1229,7 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     expect(section).toHaveTextContent("2 retries");
     // Tool call
     expect(section).toHaveTextContent("10s timeout");
-    expect(section).toHaveTextContent("1 retries");
+    expect(section).toHaveTextContent("1 retry");
     // Circuit breaker
     const cb = screen.getByTestId("runtime-circuit-breaker");
     expect(cb).toHaveTextContent("opens at 5 failures");
@@ -1254,6 +1254,15 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
 
   it("no Runtime section rendered when runtime is absent", async () => {
     installFetch({ detail: DEFAULT_DETAIL }); // DEFAULT_DETAIL has no runtime field
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("runtime-section")).toBeNull();
+  });
+
+  it("no Runtime card rendered when runtime is present but all sub-sections are empty", async () => {
+    // runtime: {} — truthy object but outputSchemaSet is false/absent,
+    // toolPolicy is undefined, resilience is undefined → card must NOT appear.
+    installFetch({ detail: { ...DEFAULT_DETAIL, runtime: {} } });
     renderAt();
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("runtime-section")).toBeNull();
