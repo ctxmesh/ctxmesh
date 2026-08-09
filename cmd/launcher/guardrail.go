@@ -19,27 +19,48 @@ package main
 // The in-path guardrail engine (M66, ADR 0059 §8). When the controller resolves a
 // spec.guardrailPolicyRef it injects the validated GuardrailPolicySpec as the
 // GUARDRAIL_POLICY env and FORCES the outbound :2996 proxy on (m66.2). This file
-// builds the deterministic, fail-closed engine from that env and scans the INPUT
-// path (the model REQUEST body) before it reaches LiteLLM:
+// builds the deterministic, fail-closed engine from that env and scans every scan
+// point on the model REQUEST and RESPONSE bodies:
 //
-//   - block:     a matched input rule refuses the call with a typed 403
-//                guardrail_blocked; the upstream is NEVER reached.
-//   - auditOnly: a matched input rule is recorded (span event) and the call proceeds.
-//   - redact:    output/tool scanning + the redact action are m66.5; the engine is
-//                structured so those slot in (rules already carry action + appliesTo).
+//   - input      (request, user-role messages): the untrusted user prompt.
+//   - toolOutput (request, tool-role messages): tool results re-enter as tool-role
+//     messages on the next model call — scanning them here catches injected
+//     instructions BEFORE the model consumes them. This is a TRIPWIRE for known
+//     patterns (posture), NOT injection resistance (ADR 0059 §3).
+//   - output     (response, choices[].message.content): the model completion.
+//
+// Each rule carries an action:
+//
+//   - block:     the matched call is refused with a typed 403 guardrail_blocked.
+//                On an input/tool block the upstream is NEVER reached; on an OUTPUT
+//                block the model already generated, so spend is still booked (ADR
+//                0059 §7) and the completion is REPLACED with the refusal.
+//   - auditOnly: recorded (span event) and the content passes unchanged.
+//   - redact:    the matched substring is replaced with telemetry.RedactString's
+//                [REDACTED:<name>] marker and the body is RE-SERIALIZED — the scrubbed
+//                request is forwarded (input/tool) or the scrubbed response relayed
+//                (output). Only the matched message/completion STRING changes; every
+//                other field (tool_calls, non-string content, role, ...) is preserved.
+//
+// Precedence within a scan point: block > redact > auditOnly. A block short-circuits
+// (a blocked call is never also redacted); redactions are applied to the surviving body.
 //
 // Fail-closed is the invariant: an active policy whose request body cannot be fully
 // scanned (oversize, unparseable JSON, malformed body) is BLOCKED, never truncated
-// and forwarded — a guarded call that can't be inspected must not pass.
+// and forwarded — a guarded call that can't be inspected must not pass. (The response
+// body is already buffered and priced by M8; an unparseable RESPONSE is relayed as-is
+// — a completion is the model's own output being sanitised on the way OUT, not
+// untrusted input inspected before it runs, and failing every non-JSON stream closed
+// would be wrong.)
 //
 // PII-safe audit (ADR 0059 §6): the guardrail.decision span event carries the
 // detector name, action, scan point, a sha256 content HASH, and the match offsets —
 // NEVER the matched substring (else the guardrail audit becomes the largest PII
-// repository the platform holds).
+// repository the platform holds). This holds for redact decisions too.
 //
-// No GUARDRAIL_POLICY ⇒ newGuardrailEngine returns nil and the request path is
-// byte-for-byte unchanged: serve() does not buffer, forward() streams r.Body exactly
-// as pre-M66.
+// No GUARDRAIL_POLICY ⇒ newGuardrailEngine returns nil and BOTH paths are byte-for-byte
+// unchanged: serve() does not buffer the request, forward() streams r.Body exactly as
+// pre-M66, and the response is relayed verbatim.
 
 import (
 	"bytes"
@@ -296,7 +317,7 @@ type guardrailDecision struct {
 	detector string
 	// action is the action of the matched rule.
 	action guardrailAction
-	// scanPoint is where the scan ran (input, for m66.4).
+	// scanPoint is where the scan ran (input | toolOutput | output).
 	scanPoint guardrailScanPoint
 	// contentHash is sha256(scanned text) — the audit key that never leaks content.
 	contentHash string
@@ -306,78 +327,204 @@ type guardrailDecision struct {
 	endOffset   int
 }
 
-// chatCompletionRequest is the minimal shape of an OpenAI-style chat/completions body
-// the input scan reads: the messages array with role + content. Extra fields are
-// ignored. content is decoded as json.RawMessage first so a non-string content (e.g.
-// the multimodal array form) does not fail the whole parse — such a message simply
-// contributes no scannable user text (handled in scanInput).
-type chatCompletionRequest struct {
-	Messages []chatMessage `json:"messages"`
+// chatBody is a fidelity-preserving view of an OpenAI-style chat/completions REQUEST
+// body. The top-level object is kept as an ordered-insensitive map of RawMessage so
+// EVERY field (model, temperature, tools, ...) round-trips untouched; only "messages"
+// is decoded structurally. Redaction mutates a single message's "content" string and
+// re-marshals — non-string content, tool_calls, name, tool_call_id and any other
+// message field are preserved verbatim because each message is itself held as a map of
+// RawMessage (see chatMsg).
+type chatBody struct {
+	top      map[string]json.RawMessage
+	messages []chatMsg
 }
 
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+// chatMsg is one message. raw holds every field of the message object; role and
+// stringContent are the DECODED views the scanner needs. hasStringContent is false when
+// content is absent or a non-string (e.g. the multimodal array form) — such a message
+// contributes no scannable text and is never mutated.
+type chatMsg struct {
+	raw              map[string]json.RawMessage
+	role             string
+	content          string
+	hasStringContent bool
 }
 
-// scanInputResult reports the outcome of scanning the buffered request body.
-type scanInputResult struct {
-	// block is true when the call must be refused: a block rule hit, OR the body could
-	// not be scanned (unparseable JSON) under an active policy — fail-closed.
+// parseChatBody decodes body into a chatBody, or returns ok=false when the body is not
+// a JSON object with a messages array we can read (⇒ the request path fails closed).
+func parseChatBody(body []byte) (*chatBody, bool) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, false
+	}
+	rawMsgs, present := top["messages"]
+	if !present {
+		// No messages key: nothing to scan, but the body is well-formed JSON. Treat it as
+		// an empty message set (a clean scan) rather than a fail-closed block.
+		return &chatBody{top: top}, true
+	}
+	var msgObjs []map[string]json.RawMessage
+	if err := json.Unmarshal(rawMsgs, &msgObjs); err != nil {
+		return nil, false
+	}
+	cb := &chatBody{top: top, messages: make([]chatMsg, 0, len(msgObjs))}
+	for _, mo := range msgObjs {
+		m := chatMsg{raw: mo}
+		if rr, ok := mo["role"]; ok {
+			_ = json.Unmarshal(rr, &m.role) // best-effort; a non-string role stays ""
+		}
+		if cr, ok := mo["content"]; ok {
+			var s string
+			if err := json.Unmarshal(cr, &s); err == nil {
+				m.content = s
+				m.hasStringContent = true
+			}
+		}
+		cb.messages = append(cb.messages, m)
+	}
+	return cb, true
+}
+
+// setMessageContent rewrites the string content of message i and re-marshals ONLY that
+// field back into its raw map, so every other field (tool_calls, name, ...) survives.
+func (cb *chatBody) setMessageContent(i int, content string) error {
+	enc, err := json.Marshal(content)
+	if err != nil {
+		return err
+	}
+	cb.messages[i].raw["content"] = enc
+	cb.messages[i].content = content
+	return nil
+}
+
+// marshal re-serialises the (possibly mutated) body. It rebuilds the messages array from
+// each message's raw map and writes it back under "messages", preserving all other
+// top-level fields. Only fields we deliberately rewrote differ from the input.
+func (cb *chatBody) marshal() ([]byte, error) {
+	if cb.messages != nil {
+		rawMsgs := make([]map[string]json.RawMessage, len(cb.messages))
+		for i := range cb.messages {
+			rawMsgs[i] = cb.messages[i].raw
+		}
+		enc, err := json.Marshal(rawMsgs)
+		if err != nil {
+			return nil, err
+		}
+		cb.top["messages"] = enc
+	}
+	return json.Marshal(cb.top)
+}
+
+// scanResult reports the outcome of scanning (and possibly redacting) a body.
+type scanResult struct {
+	// block is true when the call must be refused: a block rule hit, OR (request path
+	// only) the body could not be scanned under an active policy — fail-closed.
 	block bool
-	// decisions is every recorded decision (block + auditOnly hits) for span emission.
+	// redacted is true when at least one redact rule mutated the body; the caller must
+	// re-serialise and forward/relay the SCRUBBED body.
+	redacted bool
+	// decisions is every recorded decision (block + redact + auditOnly hits) for span
+	// emission. Never carries the raw match.
 	decisions []guardrailDecision
 	// failClosedReason, when non-empty, explains a fail-closed block that was NOT a rule
 	// hit (e.g. malformed JSON). detector on the block decision is then a synthetic name.
 	failClosedReason string
 }
 
-// scanInput scans the user-role message content of a buffered chat/completions body
-// against the input-applicable rules. It returns a scanInputResult:
+// failClosed builds a fail-closed block result whose hash is over the raw body.
+func failClosed(reason, detector string, point guardrailScanPoint, body []byte) scanResult {
+	h := sha256.Sum256(body)
+	return scanResult{
+		block:            true,
+		failClosedReason: reason,
+		decisions: []guardrailDecision{{
+			blocked:     true,
+			detector:    detector,
+			action:      actionBlock,
+			scanPoint:   point,
+			contentHash: fmt.Sprintf("%x", h[:]),
+		}},
+	}
+}
+
+// scanRequest scans the REQUEST body's input (user-role) and toolOutput (tool-role)
+// scan points and applies the redact action in place. It returns a scanResult plus the
+// (possibly re-serialised) body to forward:
 //
-//   - malformed JSON under an active policy ⇒ block=true, fail-closed (can't parse ⇒
-//     can't scan ⇒ deny). This is NOT a silent pass.
-//   - a block rule hit ⇒ block=true, plus the decision.
-//   - auditOnly hits ⇒ block=false, decisions recorded, the caller forwards.
-//   - clean ⇒ block=false, no decisions.
+//   - malformed body under an active policy ⇒ block, fail-closed (can't parse ⇒ can't
+//     scan ⇒ deny). NOT a silent pass.
+//   - a block hit (input or tool) ⇒ block; the caller refuses BEFORE forwarding.
+//   - redact hits ⇒ the matched content is scrubbed in place; block=false, redacted=true,
+//     and the returned body is the re-serialised SCRUBBED request.
+//   - auditOnly / clean ⇒ block=false, redacted=false; the original body forwards.
 //
-// The scanned text is the concatenation of every user-role message's content
-// (newline-joined), so a match's offset is stable relative to that joined text and
-// the hash is over exactly what was scanned.
-func (e *guardrailEngine) scanInput(body []byte) scanInputResult {
-	var req chatCompletionRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		// Fail-closed: an active policy cannot scan a body it cannot parse.
-		h := sha256.Sum256(body)
-		return scanInputResult{
-			block:            true,
-			failClosedReason: "unparseable request body",
-			decisions: []guardrailDecision{{
-				blocked:     true,
-				detector:    "malformed-request",
-				action:      actionBlock,
-				scanPoint:   scanInput,
-				contentHash: fmt.Sprintf("%x", h[:]),
-			}},
+// Precedence: a block on any scanned message wins over redact wins over auditOnly. A
+// block short-circuits (the body is not redacted — the call is refused outright).
+func (e *guardrailEngine) scanRequest(body []byte) (scanResult, []byte) {
+	cb, ok := parseChatBody(body)
+	if !ok {
+		return failClosed("unparseable request body", "malformed-request", scanInput, body), body
+	}
+
+	var res scanResult
+	for i := range cb.messages {
+		m := &cb.messages[i]
+		var rules []guardrailRule
+		var point guardrailScanPoint
+		switch m.role {
+		case "user":
+			rules, point = e.input, scanInput
+		case "tool":
+			rules, point = e.toolOutput, scanToolOutput
+		default:
+			continue // system/assistant content is the agent's own config, not scanned.
+		}
+		if len(rules) == 0 || !m.hasStringContent {
+			continue
+		}
+		mres, newContent, changed := e.scanAndRedact(m.content, point, rules)
+		res.decisions = append(res.decisions, mres.decisions...)
+		if mres.block {
+			// Block wins outright: refuse the whole call, do not redact anything.
+			res.block = true
+			return res, body
+		}
+		if changed {
+			if err := cb.setMessageContent(i, newContent); err != nil {
+				// Re-marshalling a redacted message must not silently forward the RAW content;
+				// fail closed instead (defence-in-depth — marshalling a string cannot realistically fail).
+				return failClosed("redaction re-serialisation failed", "redact-serialize", point, body), body
+			}
+			res.redacted = true
 		}
 	}
 
-	scanned := userContent(req.Messages)
-	return e.scanText(scanned, scanInput, e.input)
+	if !res.redacted {
+		return res, body // nothing mutated: forward the original bytes.
+	}
+	out, err := cb.marshal()
+	if err != nil {
+		return failClosed("request re-serialisation failed", "redact-serialize", scanInput, body), body
+	}
+	return res, out
 }
 
-// scanText runs the given rules over text at a scan point and reduces the hits to a
-// scanInputResult. On the FIRST block-action hit it stops scanning further rules
-// (the call is already refused) and returns a block decision; auditOnly hits are all
-// recorded and the caller proceeds. A clean scan returns an empty result.
-func (e *guardrailEngine) scanText(text string, point guardrailScanPoint, rules []guardrailRule) scanInputResult {
+// scanText runs the given rules over text at a scan point WITHOUT mutating it, reducing
+// the hits to a scanResult. On the FIRST block-action hit it stops (the call is already
+// refused). auditOnly + redact hits are all recorded; a redact hit is reported to the
+// caller via scanAndRedact, which layers the mutation on top. A clean scan is empty.
+//
+// Precedence is realised by scanning in a single pass: block short-circuits, so a later
+// block cannot be masked by an earlier redact/auditOnly, and a block seen first prevents
+// any redaction. Redact vs auditOnly do not conflict (both can apply to disjoint hits).
+func (e *guardrailEngine) scanText(text string, point guardrailScanPoint, rules []guardrailRule) scanResult {
 	if len(rules) == 0 {
-		return scanInputResult{}
+		return scanResult{}
 	}
 	h := sha256.Sum256([]byte(text))
 	hash := fmt.Sprintf("%x", h[:])
 
-	var res scanInputResult
+	var res scanResult
 	for i := range rules {
 		r := rules[i]
 		matches := telemetry.Scan(text, []telemetry.Detector{r.detector})
@@ -395,48 +542,55 @@ func (e *guardrailEngine) scanText(text string, point guardrailScanPoint, rules 
 		}
 		switch r.action {
 		case actionBlock:
-			// A block hit refuses the call. Record it and stop — the decision is made.
+			// A block hit refuses the call. Record it and stop — the decision is made and
+			// block wins over any redact/auditOnly that would otherwise follow.
 			dec.blocked = true
 			res.block = true
 			res.decisions = append(res.decisions, dec)
 			return res
-		case actionAuditOnly:
-			// Record and continue; the call proceeds.
-			res.decisions = append(res.decisions, dec)
-		case actionRedact:
-			// m66.5 implements output/tool redaction. On the input path a redact rule is
-			// recorded as an auditOnly-equivalent (the content is not mutated here) so the
-			// hit is not silently dropped; the call proceeds.
+		case actionAuditOnly, actionRedact:
+			// Record and continue. redact's mutation is layered on by scanAndRedact; here we
+			// only record the (PII-safe) decision so the hit is never silently dropped.
 			res.decisions = append(res.decisions, dec)
 		}
 	}
 	return res
 }
 
-// userContent concatenates the content of every user-role message, newline-joined.
-// This is the input the guardrail scans: the user's own prompt text (system/assistant
-// content is the agent's own configuration, not the untrusted input the input path
-// guards). Empty when there are no user messages (a clean scan).
-func userContent(msgs []chatMessage) string {
-	var b []byte
-	first := true
-	for i := range msgs {
-		if msgs[i].Role != "user" {
-			continue
-		}
-		if !first {
-			b = append(b, '\n')
-		}
-		b = append(b, msgs[i].Content...)
-		first = false
+// scanAndRedact scans text and, when a redact rule matched (and no block short-circuited),
+// returns the redacted text. It reports (result, newText, changed): changed is true only
+// when a redact rule actually altered the text. The redact decisions already recorded by
+// scanText carry the PII-safe hash+offsets of the ORIGINAL text (the audit key), while the
+// forwarded/relayed body carries the [REDACTED:<name>] marker — the raw match appears in
+// neither.
+func (e *guardrailEngine) scanAndRedact(
+	text string, point guardrailScanPoint, rules []guardrailRule,
+) (res scanResult, newText string, changed bool) {
+	res = e.scanText(text, point, rules)
+	if res.block {
+		return res, text, false // block short-circuits: never redact a refused call.
 	}
-	return string(b)
+	// Apply every redact rule's detector to the text. Only the matched substrings change.
+	redactDetectors := make([]telemetry.Detector, 0, len(rules))
+	for i := range rules {
+		if rules[i].action == actionRedact {
+			redactDetectors = append(redactDetectors, rules[i].detector)
+		}
+	}
+	if len(redactDetectors) == 0 {
+		return res, text, false
+	}
+	redacted := telemetry.RedactString(text, redactDetectors)
+	if redacted == text {
+		return res, text, false // a redact rule was configured but nothing matched.
+	}
+	return res, redacted, true
 }
 
 // guardrailErrorBody is the typed refusal body for a blocked call. The "type" field
 // is the STABLE contract the SDK keys non-retryability on (m66.6) — do not rename it.
-// scan_point tells the caller where the block originated (input, for m66.4). No raw
-// matched content is ever included.
+// scan_point tells the caller where the block originated (input | toolOutput | output).
+// No raw matched content is ever included.
 type guardrailErrorBody struct {
 	Error guardrailErrorDetail `json:"error"`
 }
@@ -449,11 +603,15 @@ type guardrailErrorDetail struct {
 
 // ── proxy integration ─────────────────────────────────────────────────────────
 
-// applyInputGuardrail buffers the request body, scans the input path, emits a PII-safe
-// guardrail.decision span event per decision, and — on a block — writes the typed
-// refusal and returns true (refused; the caller must NOT forward). It returns false
-// when the call is cleared to forward, having restored the buffered body onto r.Body
-// for forward() to stream.
+// applyRequestGuardrail buffers the request body, scans BOTH request scan points —
+// input (user-role) and toolOutput (tool-role) — emits a PII-safe guardrail.decision
+// span event per decision, and:
+//
+//   - on a block: writes the typed 403 refusal and returns true (refused; the caller
+//     must NOT forward; the upstream is never reached).
+//   - on a redact hit: scrubs the matched content in place, re-serialises the body, and
+//     restores the SCRUBBED bytes onto r.Body so forward() streams the redacted request.
+//   - clean / auditOnly: restores the exact buffered bytes onto r.Body.
 //
 // It is called ONLY when gp.guardrail != nil; with no policy this whole path is
 // skipped and the body is never buffered (byte-for-byte-unchanged invariant).
@@ -461,8 +619,9 @@ type guardrailErrorDetail struct {
 // Fail-closed cases (all BLOCK, never a silent pass):
 //   - body exceeds maxGatewayReqBody ⇒ the content can't be fully scanned.
 //   - body read error ⇒ can't obtain the content to scan.
-//   - unparseable request JSON ⇒ can't locate the messages to scan (scanInput).
-func (gp *gatewayProxy) applyInputGuardrail(w http.ResponseWriter, span trace.Span, r *http.Request) (refused bool) {
+//   - unparseable request JSON ⇒ can't locate the messages to scan (scanRequest).
+//   - a redaction that cannot be re-serialised ⇒ never forward the raw content.
+func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.Span, r *http.Request) (refused bool) {
 	// Buffer the body with a limit of maxGatewayReqBody + 1 sentinel byte: if the read
 	// yields MORE than the cap, the body is oversize and we fail closed rather than
 	// truncate-and-forward.
@@ -485,24 +644,26 @@ func (gp *gatewayProxy) applyInputGuardrail(w http.ResponseWriter, span trace.Sp
 		return true
 	}
 
-	// Restore the body for forward() BEFORE any decision so the clean/auditOnly paths
-	// stream the exact buffered bytes upstream. Blocked paths return without forwarding,
-	// so the restored reader is simply unused (harmless).
-	r.Body = io.NopCloser(bytes.NewReader(buffered))
-	r.ContentLength = int64(len(buffered))
+	res, forwardBody := gp.guardrail.scanRequest(buffered)
 
-	res := gp.guardrail.scanInput(buffered)
+	// Restore the (possibly scrubbed) body for forward() BEFORE any decision so the
+	// clean/auditOnly/redact paths stream the right bytes upstream. On redact this is the
+	// SCRUBBED body — the model receives [REDACTED:<name>], never the raw content. Blocked
+	// paths return without forwarding, so the restored reader is simply unused (harmless).
+	r.Body = io.NopCloser(bytes.NewReader(forwardBody))
+	r.ContentLength = int64(len(forwardBody))
 
-	// Emit a PII-safe span event for EVERY decision (block + auditOnly). Never carries
-	// the raw matched substring — only the detector, action, scan point, content hash,
-	// and offsets (ADR 0059 §6).
+	// Emit a PII-safe span event for EVERY decision (block + redact + auditOnly). Never
+	// carries the raw matched substring — only the detector, action, scan point, content
+	// hash, and offsets (ADR 0059 §6).
 	for _, dec := range res.decisions {
 		emitGuardrailDecision(span, dec)
 	}
 
 	if res.block {
-		// The first block decision is the refusal cause (scanInput returns it first).
-		cause := res.decisions[0]
+		// The blocked decision is the refusal cause — NOT decisions[0], which may be an
+		// earlier redact/auditOnly hit on the same scan point (block > redact > auditOnly).
+		cause := blockCause(res.decisions)
 		gp.writeGuardrailBlocked(w, span, cause)
 		reason := res.failClosedReason
 		if reason == "" {
@@ -513,7 +674,105 @@ func (gp *gatewayProxy) applyInputGuardrail(w http.ResponseWriter, span trace.Sp
 		return true
 	}
 
+	if res.redacted {
+		gp.logf("launcher: gateway: guardrail REDACT applied to request (scrubbed body forwarded)")
+	}
 	return false
+}
+
+// applyOutputGuardrail scans the buffered RESPONSE completion (choices[].message.content)
+// against the output-applicable rules and returns the body to relay to the client plus
+// whether the call was blocked:
+//
+//   - block: the completion is REPLACED with a typed guardrail_blocked body (scan_point
+//     "output") — the client never sees the flagged completion. Spend is STILL booked by
+//     the caller (the model already generated; ADR 0059 §7). Returns blocked=true.
+//   - redact: the matched completion content is scrubbed in place and the response is
+//     re-serialised — the client receives the completion with [REDACTED:<name>].
+//   - auditOnly / clean: the original response body is relayed byte-for-byte.
+//
+// An unparseable / non-JSON response is relayed unchanged (a completion is the model's own
+// output on the way OUT — failing every non-JSON stream closed would be wrong; the request
+// path, which inspects untrusted input BEFORE it runs, is the one that fails closed).
+// Called ONLY when gp.guardrail != nil and there are output rules; never for a nil engine.
+func (gp *gatewayProxy) applyOutputGuardrail(span trace.Span, body []byte) (out []byte, blocked bool) {
+	if len(gp.guardrail.output) == 0 {
+		return body, false
+	}
+	res, relayBody := gp.guardrail.scanOutput(body)
+	for _, dec := range res.decisions {
+		emitGuardrailDecision(span, dec)
+	}
+	if res.block {
+		cause := blockCause(res.decisions)
+		span.SetAttributes(
+			attribute.String("guardrail.decision", string(actionBlock)),
+			attribute.String("guardrail.detector", cause.detector),
+			attribute.String("guardrail.scan_point", string(cause.scanPoint)),
+		)
+		span.SetStatus(codes.Error, guardrailBlockedType)
+		gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output (policy match; completion withheld)",
+			cause.detector)
+		return guardrailBlockedBody(cause), true
+	}
+	if res.redacted {
+		gp.logf("launcher: gateway: guardrail REDACT applied to completion (scrubbed response relayed)")
+	}
+	return relayBody, false
+}
+
+// scanOutput scans a buffered chat/completions RESPONSE body's completion content
+// (choices[].message.content) against the output rules and applies redaction in place.
+// It returns a scanResult plus the (possibly re-serialised) body to relay. A non-JSON or
+// unparseable response is relayed unchanged (block=false, redacted=false) — see
+// applyOutputGuardrail. Precedence is block > redact > auditOnly, as on the request path.
+func (e *guardrailEngine) scanOutput(body []byte) (scanResult, []byte) {
+	if len(e.output) == 0 {
+		return scanResult{}, body
+	}
+	cr, ok := parseChatResponse(body)
+	if !ok {
+		return scanResult{}, body // relay a completion we can't parse unchanged.
+	}
+
+	var res scanResult
+	for i := range cr.choices {
+		ch := &cr.choices[i]
+		if !ch.hasStringContent {
+			continue
+		}
+		mres, newContent, changed := e.scanAndRedact(ch.content, scanOutput, e.output)
+		res.decisions = append(res.decisions, mres.decisions...)
+		if mres.block {
+			res.block = true
+			return res, body // block wins: the caller substitutes the refusal body.
+		}
+		if changed {
+			if err := cr.setChoiceContent(i, newContent); err != nil {
+				// Never relay the raw completion if we cannot re-serialise the redaction: relay the
+				// original bytes unredacted would leak PII, so drop to a block substitution instead.
+				res.block = true
+				res.decisions = append(res.decisions, guardrailDecision{
+					blocked: true, detector: "redact-serialize", action: actionBlock, scanPoint: scanOutput,
+				})
+				return res, body
+			}
+			res.redacted = true
+		}
+	}
+
+	if !res.redacted {
+		return res, body
+	}
+	out, err := cr.marshal()
+	if err != nil {
+		res.block = true
+		res.decisions = append(res.decisions, guardrailDecision{
+			blocked: true, detector: "redact-serialize", action: actionBlock, scanPoint: scanOutput,
+		})
+		return res, body
+	}
+	return res, out
 }
 
 // readLimited reads up to limit bytes from rc. It returns (bytes, oversize, err):
@@ -533,6 +792,19 @@ func readLimited(rc io.Reader, limit int64) (data []byte, oversize bool, err err
 		return b, true, nil
 	}
 	return b, false, nil
+}
+
+// blockCause returns the blocked decision from a decision list — the refusal cause. It is
+// NOT necessarily decisions[0]: on a scan point with an earlier redact/auditOnly hit and a
+// later block hit, block wins (precedence) and its decision is the one surfaced in the 403
+// and the span. Falls back to decisions[0] defensively (a block result always has one).
+func blockCause(decisions []guardrailDecision) guardrailDecision {
+	for _, d := range decisions {
+		if d.blocked {
+			return d
+		}
+	}
+	return decisions[0]
 }
 
 // emitGuardrailDecision adds the PII-safe guardrail.decision span event (mirrors the
@@ -564,14 +836,116 @@ func (gp *gatewayProxy) writeGuardrailBlocked(w http.ResponseWriter, span trace.
 	)
 	span.SetStatus(codes.Error, guardrailBlockedType)
 
-	body := guardrailErrorBody{Error: guardrailErrorDetail{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(guardrailBlockedStatus) // 403
+	if _, err := w.Write(guardrailBlockedBody(dec)); err != nil {
+		gp.logf("launcher: gateway: write guardrail_blocked: %v", err)
+	}
+}
+
+// guardrailBlockedBody marshals the typed guardrail_blocked refusal body for a decision.
+// Shared by the request-path write (writeGuardrailBlocked) and the OUTPUT-block
+// substitution (applyOutputGuardrail), so both emit the identical OpenAI-shaped body with
+// the stable "type" the SDK keys non-retryability on (m66.6). No raw matched content is
+// ever included. json.Marshal of this fixed struct cannot fail, so the error is dropped.
+func guardrailBlockedBody(dec guardrailDecision) []byte {
+	b, _ := json.Marshal(guardrailErrorBody{Error: guardrailErrorDetail{
 		Type:      guardrailBlockedType,
 		Detector:  dec.detector,
 		ScanPoint: string(dec.scanPoint),
-	}}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(guardrailBlockedStatus) // 403
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		gp.logf("launcher: gateway: encode guardrail_blocked: %v", err)
+	}})
+	return b
+}
+
+// ── the response (completion) body model ───────────────────────────────────────
+//
+// chatResponse mirrors chatBody for the RESPONSE: the top-level object is preserved as a
+// RawMessage map (usage, id, model, ... all round-trip), only "choices" is decoded, and
+// each choice keeps every field (finish_reason, index, tool_calls on the message, ...)
+// as a RawMessage map so redacting choices[i].message.content mutates ONLY that string.
+
+type chatResponse struct {
+	top     map[string]json.RawMessage
+	choices []chatChoice
+}
+
+// chatChoice is one entry of the response choices array. raw holds the whole choice
+// object; msgRaw holds the "message" object's fields; content / hasStringContent are the
+// decoded completion text (absent / non-string ⇒ nothing to scan or mutate).
+type chatChoice struct {
+	raw              map[string]json.RawMessage
+	msgRaw           map[string]json.RawMessage
+	content          string
+	hasStringContent bool
+}
+
+// parseChatResponse decodes a chat/completions response body, or ok=false when it is not a
+// JSON object with a choices array (⇒ relay unchanged).
+func parseChatResponse(body []byte) (*chatResponse, bool) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, false
 	}
+	rawChoices, present := top["choices"]
+	if !present {
+		return &chatResponse{top: top}, true // no choices: nothing to scan (clean).
+	}
+	var choiceObjs []map[string]json.RawMessage
+	if err := json.Unmarshal(rawChoices, &choiceObjs); err != nil {
+		return nil, false
+	}
+	cr := &chatResponse{top: top, choices: make([]chatChoice, 0, len(choiceObjs))}
+	for _, co := range choiceObjs {
+		ch := chatChoice{raw: co}
+		if mr, ok := co["message"]; ok {
+			var msgObj map[string]json.RawMessage
+			if err := json.Unmarshal(mr, &msgObj); err == nil {
+				ch.msgRaw = msgObj
+				if cr2, ok := msgObj["content"]; ok {
+					var s string
+					if err := json.Unmarshal(cr2, &s); err == nil {
+						ch.content = s
+						ch.hasStringContent = true
+					}
+				}
+			}
+		}
+		cr.choices = append(cr.choices, ch)
+	}
+	return cr, true
+}
+
+// setChoiceContent rewrites choice i's message.content string and re-marshals ONLY that
+// field back through the message → choice raw maps, so tool_calls / finish_reason / every
+// other field survives verbatim.
+func (cr *chatResponse) setChoiceContent(i int, content string) error {
+	enc, err := json.Marshal(content)
+	if err != nil {
+		return err
+	}
+	cr.choices[i].msgRaw["content"] = enc
+	msgEnc, err := json.Marshal(cr.choices[i].msgRaw)
+	if err != nil {
+		return err
+	}
+	cr.choices[i].raw["message"] = msgEnc
+	cr.choices[i].content = content
+	return nil
+}
+
+// marshal re-serialises the (possibly mutated) response, rebuilding choices from each
+// choice's raw map and preserving every other top-level field (usage, ...).
+func (cr *chatResponse) marshal() ([]byte, error) {
+	if cr.choices != nil {
+		rawChoices := make([]map[string]json.RawMessage, len(cr.choices))
+		for i := range cr.choices {
+			rawChoices[i] = cr.choices[i].raw
+		}
+		enc, err := json.Marshal(rawChoices)
+		if err != nil {
+			return nil, err
+		}
+		cr.top["choices"] = enc
+	}
+	return json.Marshal(cr.top)
 }
