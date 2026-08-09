@@ -615,6 +615,8 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
 		// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
+		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
+		authed.HandleFunc("GET /api/teams", s.handleListTeams)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)

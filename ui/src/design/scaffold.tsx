@@ -17,7 +17,8 @@ export type Milestone =
   | "M17"
   | "M18"
   | "M47"
-  | "M63";
+  | "M63"
+  | "M64";
 
 export const MILESTONE_LABEL: Record<Milestone, string> = {
   M13: "Foundation",
@@ -28,6 +29,7 @@ export const MILESTONE_LABEL: Record<Milestone, string> = {
   M18: "Everywhere (dev + OIDC)",
   M47: "Tenancy & quotas",
   M63: "Audit surface",
+  M64: "Orchestration I",
 };
 
 export function MilestoneTag({ m, className }: { m: Milestone; className?: string }) {
