@@ -173,7 +173,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent is required")
 		return
 	}
-	endpoint, ok := s.resolveAgentEndpoint(w, r, caller, req.Agent, req.Namespace)
+	deploy, endpoint, ok := s.resolveAgent(w, r, caller, req.Agent, req.Namespace)
 	if !ok {
 		return
 	}
@@ -201,6 +201,12 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
 		rn.CallerUsername = username
 		rn.Boundary = agentBoundary(r.Context(), caller, ns, req.Agent)
+	}
+	// Pin the agent's output schema at create time (m65.3, ADR 0058): m65.4 validates the terminal
+	// answer against it. Captured here — before the run is queued — so a later schema edit by an
+	// operator does not retroactively change validation for in-flight runs.
+	if deploy.Spec.Runtime != nil && deploy.Spec.Runtime.OutputSchema != nil {
+		rn.OutputSchema = string(deploy.Spec.Runtime.OutputSchema.Raw)
 	}
 	if err := s.runStore.Create(rn); err != nil {
 		s.log.Error(err, "create run failed", "agent", req.Agent)
