@@ -71,6 +71,21 @@ const (
 	StatusExpired Status = "expired"
 )
 
+// IsWorkflowInstance reports whether this run EXECUTES a declarative Workflow (M67, ADR 0060) — i.e. it
+// carries a pinned SpecSnapshot. The run-worker routes such a run to the workflow executor (executeWorkflow)
+// instead of the single-agent executeRun. WorkflowRef alone (a name with no resolved snapshot) is NOT a
+// workflow instance: the snapshot is the pinned graph the executor drives, so its presence is the gate.
+func (r *Run) IsWorkflowInstance() bool {
+	return r.SpecSnapshot != ""
+}
+
+// IsSpawned reports whether this run is a SUB-RUN of another (a workflow node or a supervisor delegation) —
+// it has a parent. A spawned run's terminal transition goes through CompleteAndWake so a `waiting` parent
+// (a suspended workflow run) is woken in the same transaction (ADR 0060 §3).
+func (r *Run) IsSpawned() bool {
+	return r.ParentRunID != ""
+}
+
 // IsTerminal reports whether the status admits no further transition.
 func (s Status) IsTerminal() bool {
 	switch s {

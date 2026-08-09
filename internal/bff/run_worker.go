@@ -140,6 +140,14 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease)
 	defer stopHeartbeat()
 
+	// A WORKFLOW INSTANCE (a pinned SpecSnapshot, ADR 0060) is driven by the workflow executor — one
+	// "advance" per claim (launch the next node → suspend), NOT the single-agent executeRun. The executor
+	// participates in this same claim/lease/reclaim machinery (it lives in the worker, not a new Deployment).
+	if rn.IsWorkflowInstance() {
+		s.executeWorkflow(execCtx, rn.ID)
+		return
+	}
+
 	s.executeRun(execCtx, rn.ID, rn.Endpoint, []byte(rn.Input))
 }
 
