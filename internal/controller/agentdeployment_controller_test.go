@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -624,4 +625,175 @@ func TestSidecarImageOverride(t *testing.T) {
 		telemetry.Container("cm", nil, ov.collectorImage()).Image, "override flows to the collector sidecar")
 	assert.Equal(t, "reg.example.com/discovery:3.4",
 		discoverySidecarContainer(ov.discoveryImage()).Image, "override flows to the discovery sidecar")
+}
+
+// TestReconcile_RuntimeInjection verifies the M65.2 runtime env injection: when
+// spec.runtime is set, the reconciler injects AGENT_RUNTIME as a STATIC JSON env
+// var that round-trips back to the original RuntimeSpec (nested fields survive
+// JSON marshal/unmarshal), and the Knative revision name includes the combined
+// structural digest suffix "-h<digest8>" (proving the revision will roll).
+func TestReconcile_RuntimeInjection(t *testing.T) {
+	const (
+		name      = "runtime-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+			Runtime: &agentsv1alpha1.RuntimeSpec{
+				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+					Default:      "allow",
+					ParallelLimit: 4,
+				},
+				Resilience: &agentsv1alpha1.ResilienceSpec{
+					ModelCall: &agentsv1alpha1.CallResilience{
+						TimeoutSeconds: 30,
+						MaxRetries:     2,
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	require.GreaterOrEqual(t, len(ksvc.Spec.Template.Spec.Containers), 1)
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	envMap := make(map[string]corev1.EnvVar, len(userContainer.Env))
+	for _, e := range userContainer.Env {
+		envMap[e.Name] = e
+	}
+
+	// AGENT_RUNTIME must be injected as a STATIC env var.
+	rtEnv, ok := envMap["AGENT_RUNTIME"]
+	require.True(t, ok, "AGENT_RUNTIME must be injected when spec.runtime is set")
+	require.Nil(t, rtEnv.ValueFrom, "AGENT_RUNTIME must be a static value, not valueFrom (Knative webhook rejects it)")
+
+	// The JSON value must round-trip back to the original RuntimeSpec.
+	var got agentsv1alpha1.RuntimeSpec
+	require.NoError(t, json.Unmarshal([]byte(rtEnv.Value), &got),
+		"AGENT_RUNTIME JSON must unmarshal cleanly to RuntimeSpec")
+	require.NotNil(t, got.ToolPolicy, "ToolPolicy must survive the round trip")
+	assert.Equal(t, "allow", got.ToolPolicy.Default,
+		"ToolPolicy.Default must survive the JSON round trip")
+	assert.Equal(t, int32(4), got.ToolPolicy.ParallelLimit,
+		"ToolPolicy.ParallelLimit must survive the JSON round trip")
+	require.NotNil(t, got.Resilience, "Resilience must survive the round trip")
+	require.NotNil(t, got.Resilience.ModelCall, "Resilience.ModelCall must survive the round trip")
+	assert.Equal(t, int32(2), got.Resilience.ModelCall.MaxRetries,
+		"Resilience.ModelCall.MaxRetries must survive the JSON round trip")
+
+	// The revision name must include a combined digest suffix ("-h<digest8>")
+	// because runtime is non-nil: the structural change must be encoded in the name
+	// so a further runtime change will roll the Knative revision.
+	revName := ksvc.Spec.Template.Name
+	assert.Contains(t, revName, "-h", "revision name must carry the combined digest suffix when spec.runtime is set")
+
+	// All env vars must be static (no valueFrom) — Knative webhook rejects valueFrom.
+	for _, e := range userContainer.Env {
+		assert.Nil(t, e.ValueFrom,
+			"ksvc container env %q must be a static value, not valueFrom (Knative webhook rejects it)", e.Name)
+	}
+}
+
+// TestReconcile_RuntimeDigestRoll verifies that changing spec.runtime rolls the
+// Knative revision: the revision name (which encodes the structural digest suffix
+// "-h<digest8>") must change when spec.runtime changes. This is the envtest-level
+// proof that the runtimeDigest feeds combinedBindingDigest, which drives the
+// revision-name suffix — matching the mechanism used for budget (M8).
+func TestReconcile_RuntimeDigestRoll(t *testing.T) {
+	const (
+		name      = "runtime-roll-agent"
+		namespace = "default"
+	)
+
+	deployA := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+			Runtime: &agentsv1alpha1.RuntimeSpec{
+				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+					Default:      "allow",
+					ParallelLimit: 3,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deployA))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deployA) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deployA), deployA))
+
+	// First reconcile — establishes the initial revision name.
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	revNameA := ksvc.Spec.Template.Name
+	require.NotEmpty(t, revNameA)
+	// Must carry the "-h" digest suffix (runtime is non-nil, combinedDigest is non-empty).
+	require.Contains(t, revNameA, "-h", "first revision must carry a combined digest suffix")
+
+	// Update spec.runtime (change ParallelLimit) — must roll the revision.
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deployA), deployA))
+	deployA.Spec.Runtime.ToolPolicy.ParallelLimit = 7
+	require.NoError(t, k8sClient.Update(testCtx, deployA))
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deployA), deployA))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	revNameB := ksvc.Spec.Template.Name
+
+	assert.NotEqual(t, revNameA, revNameB,
+		"revision name must change when spec.runtime changes (proving the revision rolls)")
+	assert.Contains(t, revNameB, "-h", "updated revision must still carry a combined digest suffix")
+}
+
+// TestReconcile_NoRuntimeNoInjection verifies the backward-compat invariant: with
+// spec.runtime unset, AGENT_RUNTIME is never injected and the env set is unchanged
+// relative to a plain (no-budget, no-memory) agent.
+func TestReconcile_NoRuntimeNoInjection(t *testing.T) {
+	const (
+		name      = "noruntime-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	for _, e := range userContainer.Env {
+		assert.NotEqual(t, "AGENT_RUNTIME", e.Name,
+			"AGENT_RUNTIME must NOT be injected when spec.runtime is nil (backward-compat)")
+	}
+
+	// The revision name must NOT carry a "-h" combined digest suffix for a
+	// bare agent with no bindings or structural overrides.
+	revName := ksvc.Spec.Template.Name
+	assert.NotContains(t, revName, "-h",
+		"bare agent (no runtime, no bindings) must NOT have a combined digest suffix")
 }
