@@ -48,7 +48,7 @@ func openPGStore(t *testing.T) *pgStore {
 	ctx := context.Background()
 	s, err := NewPostgresStore(ctx, db)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `TRUNCATE run_events, runs`)
+	_, err = db.ExecContext(ctx, `TRUNCATE run_events, runs, spawn_counters`)
 	require.NoError(t, err)
 
 	ps := s.(*pgStore)
@@ -365,6 +365,211 @@ func TestPostgresStore_ReclaimExpiredLease(t *testing.T) {
 
 	// The dead worker's heartbeat now fails — it lost the lease.
 	assert.ErrorIs(t, s.Heartbeat("r1", "w1", time.Minute), ErrLeaseLost)
+}
+
+// --- M67 (ADR 0060): the waiting state + the transactional cross-run wake, on REAL Postgres --------
+
+// pgMkWaitingParent creates parent "p" parked in `waiting` on the given children (mode) against real
+// Postgres — the two-row wake fixture.
+func pgMkWaitingParent(t *testing.T, s *pgStore, children []string, mode WaitMode) {
+	t.Helper()
+	const parentID = "p"
+	require.NoError(t, s.Create(New(parentID, "ns", "wf", nil, "", t0)))
+	_, err := s.Update(parentID, func(r *Run) error { return r.Transition(StatusRunning, t0) })
+	require.NoError(t, err)
+	for _, cid := range children {
+		c := New(cid, "ns", "worker", nil, "", t0)
+		c.ParentRunID = parentID
+		c.RootRunID = parentID
+		require.NoError(t, s.Create(c))
+		_, err := s.Update(cid, func(r *Run) error { return r.Transition(StatusRunning, t0) })
+		require.NoError(t, err)
+	}
+	_, err = s.Suspend(parentID, children, mode, func(r *Run) error { r.Cursor = `{"node":"launched"}`; return nil })
+	require.NoError(t, err)
+}
+
+// TestPostgresStore_Suspend_RoundTrip proves suspend on REAL Postgres: running→waiting persists the
+// wait record + cursor, releases the lease, and a waiting run is NOT claimable by the worker pool.
+func TestPostgresStore_Suspend_RoundTrip(t *testing.T) {
+	s := openPGStore(t)
+	require.NoError(t, s.Create(New("p", "ns", "wf", nil, "", t0)))
+	claimed, err := s.ClaimQueued("w1", time.Minute) // running + a lease
+	require.NoError(t, err)
+	require.Equal(t, "p", claimed.ID)
+	require.NotNil(t, claimed.LeaseExpiresAt)
+
+	suspended, err := s.Suspend("p", []string{"c1", "c2"}, WaitAll, func(r *Run) error {
+		r.Cursor = `{"node":"launched"}`
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, StatusWaiting, suspended.Status)
+
+	got, err := s.Get("p")
+	require.NoError(t, err)
+	assert.Equal(t, StatusWaiting, got.Status)
+	assert.Equal(t, []string{"c1", "c2"}, got.WaitOn, "wait set persisted")
+	assert.Equal(t, WaitAll, got.WaitMode)
+	assert.Equal(t, `{"node":"launched"}`, got.Cursor, "cursor checkpointed in the suspend tx")
+	assert.Empty(t, got.WorkerID, "the lease/worker was released on suspend")
+	assert.Nil(t, got.LeaseExpiresAt)
+
+	// A waiting run is not claimable and not reclaimable (it holds no lease).
+	_, err = s.ClaimQueued("w2", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run is not queued → not claimed")
+	_, err = s.ClaimReclaimable("w2", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run holds no lease → not reclaimable")
+}
+
+// TestPostgresStore_TransactionalWake_AllMode is the headline: the two-row wake against real Postgres.
+// The parent flips waiting→queued in the SAME CompleteAndWake call as the LAST child's terminal
+// transition (exactly-once by construction — no notification bus), and is then claimable by the pool.
+func TestPostgresStore_TransactionalWake_AllMode(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	// First child terminal: parent stays waiting.
+	child, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	assert.Equal(t, StatusSucceeded, child.Status)
+	assert.Nil(t, woke, "all-mode: one of two children done does not wake")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusWaiting, p.Status)
+	assert.Equal(t, []string{"c2"}, p.WaitOn, "c1 removed from the persisted wait set")
+
+	// Last child terminal: parent flips to queued in THIS call.
+	_, woke, err = s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "the last child wakes the parent in the completing tx")
+	assert.Equal(t, StatusQueued, woke.Status)
+
+	p, _ = s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "parent is queued immediately after the last child's completion")
+	assert.Empty(t, p.WaitOn, "wait record cleared on resume")
+
+	// The woken parent is now claimable by the existing worker pool (the resume loop).
+	reclaim, err := s.ClaimQueued("w", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "p", reclaim.ID)
+	assert.Equal(t, StatusRunning, reclaim.Status)
+}
+
+// TestPostgresStore_TransactionalWake_AnyMode proves the any-mode wake on real Postgres: the first
+// child to complete wakes the parent.
+func TestPostgresStore_TransactionalWake_AnyMode(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAny)
+
+	_, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "any-mode: the first child wakes the parent")
+	assert.Equal(t, StatusQueued, woke.Status)
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status)
+}
+
+// TestPostgresStore_Wake_Idempotent proves no-double-wake on real Postgres: a duplicated child
+// completion (a reclaimed worker re-finishing) does not re-queue an already-running parent.
+func TestPostgresStore_Wake_Idempotent(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	_, _, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	_, woke, err := s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke)
+
+	// Parent claimed → running.
+	_, err = s.ClaimQueued("w", time.Minute)
+	require.NoError(t, err)
+
+	// Duplicate completion of c2 must be a no-op: the parent stays running, wait set intact.
+	child, woke, err := s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	assert.Equal(t, StatusSucceeded, child.Status, "already-terminal child → no-op")
+	assert.Nil(t, woke, "no re-wake of the running parent")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusRunning, p.Status, "the duplicate completion did NOT re-queue the parent")
+}
+
+// TestPostgresStore_SweepWaiting proves the crash-window reconciler on real Postgres: a parent left
+// waiting whose children are already terminal (the wake was skipped) is re-queued by SweepWaiting.
+func TestPostgresStore_SweepWaiting(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	// Crash window: complete both children WITHOUT the wake (plain terminal Updates).
+	for _, cid := range []string{"c1", "c2"} {
+		_, err := s.Update(cid, func(r *Run) error { return r.Transition(StatusSucceeded, t0.Add(time.Minute)) })
+		require.NoError(t, err)
+	}
+	p, _ := s.Get("p")
+	require.Equal(t, StatusWaiting, p.Status, "parent orphaned in waiting")
+
+	woke, err := s.SweepWaiting()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p"}, woke)
+	p, _ = s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "the sweeper re-queued the orphaned parent")
+
+	// Idempotent second sweep.
+	woke, err = s.SweepWaiting()
+	require.NoError(t, err)
+	assert.Empty(t, woke)
+}
+
+// TestPostgresStore_ConcurrentWake proves the two-row lock order holds under contention: two children
+// of the SAME waiting parent complete concurrently (each takes {child,parent} in ascending-id order),
+// so there is no deadlock, both children go terminal, and the parent is re-queued exactly once.
+func TestPostgresStore_ConcurrentWake(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		wakes int
+	)
+	wg.Add(2)
+	for _, cid := range []string{"c1", "c2"} {
+		go func() {
+			defer wg.Done()
+			_, woke, err := s.CompleteAndWake(cid, completeChild)
+			assert.NoError(t, err)
+			if woke != nil {
+				mu.Lock()
+				wakes++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, 1, wakes, "the parent is woken EXACTLY once across concurrent completions")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status)
+	assert.Empty(t, p.WaitOn)
+	for _, cid := range []string{"c1", "c2"} {
+		c, _ := s.Get(cid)
+		assert.Equal(t, StatusSucceeded, c.Status)
+	}
+}
+
+// TestPostgresStore_RoundTripsWorkflowFields proves the M67 workflow-instance columns persist/reload.
+func TestPostgresStore_RoundTripsWorkflowFields(t *testing.T) {
+	s := openPGStore(t)
+	r := New("wf-run", "ns", "wf", nil, "", t0)
+	r.WorkflowRef = "my-workflow"
+	r.SpecSnapshot = `{"nodes":[{"name":"a"}]}`
+	r.Cursor = `{"a":"pending"}`
+	require.NoError(t, s.Create(r))
+	got, err := s.Get("wf-run")
+	require.NoError(t, err)
+	assert.Equal(t, "my-workflow", got.WorkflowRef)
+	assert.Equal(t, `{"nodes":[{"name":"a"}]}`, got.SpecSnapshot)
+	assert.Equal(t, `{"a":"pending"}`, got.Cursor)
 }
 
 // recvWithin receives one event or fails the test on timeout.
