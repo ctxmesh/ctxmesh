@@ -219,6 +219,182 @@ func TestKnowledgeSearch_RealPostgres(t *testing.T) {
 	assert.Empty(t, out.Results, "a cross-model query must return nothing (fail-safe)")
 }
 
+// ── m68.11: retrieval governance — caps + citations + trace span ─────────────────────────────────
+
+// TestKnowledgeSearch_ChunkTruncation verifies that a chunk whose content exceeds KNOWLEDGE_MAX_CHUNK_CHARS is
+// trimmed to the limit (with a trailing "…") and marked Truncated:true. Provenance fields are unaffected.
+func TestKnowledgeSearch_ChunkTruncation(t *testing.T) {
+	t.Setenv(envMaxChunkChars, "20")
+	t.Setenv(envMaxTotalChars, "100000") // effectively no total cap
+
+	ctx := context.Background()
+	store := knowledge.NewMemStore()
+	require.NoError(t, store.EnsureCorpus(ctx, "prod", "docs"))
+	// Insert a chunk whose content (32 chars) exceeds the 20-char per-chunk cap.
+	longContent := "abcdefghijklmnopqrstuvwxyz123456" // 32 chars
+	require.NoError(t, store.Upsert(ctx, []knowledge.Chunk{{
+		Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "doc.md", ChunkIndex: 0,
+		Content: longContent, EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+		Embedding: padKnowledge(1, 0), IngestionRunID: "run-1",
+	}}))
+
+	s := knowledgeServer(t, store)
+	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{
+		Namespace: "prod", KnowledgeBase: "docs", Query: "north", EmbeddingModel: "embed-v1", TopK: 5,
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out knowledgeSearchResponse
+	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))
+	require.Len(t, out.Results, 1)
+	h := out.Results[0]
+	// Content must be truncated to 20 chars + "…" suffix.
+	// 20 chars + "..." (3 ASCII chars) = 23 chars maximum.
+	assert.True(t, len(h.Content) <= 23, "content should be ≤20 chars + '...'; got %d chars", len(h.Content))
+	assert.True(t, h.Truncated, "truncated must be true for an over-cap chunk")
+	// Provenance fields must be intact.
+	assert.Equal(t, "doc.md", h.DocumentRef)
+	assert.Equal(t, 0, h.ChunkIndex)
+}
+
+// TestKnowledgeSearch_ShortChunkNotTruncated verifies that a chunk under the per-chunk cap is returned
+// unchanged (Truncated:false, no ellipsis appended).
+func TestKnowledgeSearch_ShortChunkNotTruncated(t *testing.T) {
+	t.Setenv(envMaxChunkChars, "1000")
+	t.Setenv(envMaxTotalChars, "100000")
+
+	ctx := context.Background()
+	store := knowledge.NewMemStore()
+	require.NoError(t, store.EnsureCorpus(ctx, "prod", "docs"))
+	require.NoError(t, store.Upsert(ctx, []knowledge.Chunk{{
+		Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "doc.md", ChunkIndex: 0,
+		Content: "short content", EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+		Embedding: padKnowledge(1, 0), IngestionRunID: "run-1",
+	}}))
+
+	s := knowledgeServer(t, store)
+	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{
+		Namespace: "prod", KnowledgeBase: "docs", Query: "north", EmbeddingModel: "embed-v1", TopK: 5,
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out knowledgeSearchResponse
+	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))
+	require.Len(t, out.Results, 1)
+	assert.Equal(t, "short content", out.Results[0].Content)
+	assert.False(t, out.Results[0].Truncated, "a short chunk must not be marked truncated")
+}
+
+// TestKnowledgeSearch_TotalBudgetDropsChunks verifies that chunks past the KNOWLEDGE_MAX_TOTAL_CHARS budget are
+// dropped (not truncated — the whole chunk is excluded). Score order must be preserved: the highest-scoring
+// chunks fill the budget first; lower-scoring ones are dropped when the budget is exhausted.
+func TestKnowledgeSearch_TotalBudgetDropsChunks(t *testing.T) {
+	t.Setenv(envMaxChunkChars, "100")
+	// Budget: 25 chars — enough for the first chunk ("north chunk content" = 19 chars) but not
+	// both: "east chunk content here" = 23 chars; 19 + 23 = 42 > 25, so east is dropped.
+	t.Setenv(envMaxTotalChars, "25")
+
+	ctx := context.Background()
+	store := knowledge.NewMemStore()
+	require.NoError(t, store.EnsureCorpus(ctx, "prod", "docs"))
+	// Two chunks: "north"-aligned (high score) and "east"-aligned (lower score).
+	// Insert both; the search will return them score-ordered (north > east for a "north" query).
+	require.NoError(t, store.Upsert(ctx, []knowledge.Chunk{
+		{
+			Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "doc-north.md", ChunkIndex: 0,
+			Content: "north chunk content", EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+			Embedding: padKnowledge(1, 0), IngestionRunID: "run-1",
+		},
+		{
+			Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "doc-east.md", ChunkIndex: 0,
+			Content: "east chunk content here", EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+			Embedding: padKnowledge(0, 1), IngestionRunID: "run-1",
+		},
+	}))
+
+	s := knowledgeServer(t, store)
+	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{
+		Namespace: "prod", KnowledgeBase: "docs", Query: "north", EmbeddingModel: "embed-v1", TopK: 10,
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out knowledgeSearchResponse
+	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))
+	// With a 25-char budget and the north chunk at ~19 chars, the east chunk (23 chars) exceeds the
+	// remaining budget (6 chars) and must be dropped entirely.
+	require.NotEmpty(t, out.Results, "the first (highest-score) chunk must be returned")
+	assert.Equal(t, "doc-north.md", out.Results[0].DocumentRef, "score-ordered: north chunk first")
+	for _, h := range out.Results {
+		assert.NotEqual(t, "doc-east.md", h.DocumentRef, "doc-east.md must be dropped (past the total budget)")
+	}
+}
+
+// TestKnowledgeSearch_KCapHardMax verifies that KNOWLEDGE_MAX_TOPK is applied in the handler even when the
+// request TopK is larger. The store's resolveTopK already caps ≤100; this cap (default 50) is the additional
+// handler-level ceiling.
+func TestKnowledgeSearch_KCapHardMax(t *testing.T) {
+	t.Setenv(envMaxTopK, "3") // tight cap for the test
+	t.Setenv(envMaxChunkChars, "1000")
+	t.Setenv(envMaxTotalChars, "100000")
+
+	ctx := context.Background()
+	store := knowledge.NewMemStore()
+	require.NoError(t, store.EnsureCorpus(ctx, "prod", "docs"))
+	// Insert 5 chunks; with a k=3 cap the handler must return at most 3.
+	for i := range 5 {
+		require.NoError(t, store.Upsert(ctx, []knowledge.Chunk{{
+			Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "doc.md", ChunkIndex: i,
+			Content: "chunk content", EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+			Embedding: padKnowledge(1, 0), IngestionRunID: "run-1",
+		}}))
+	}
+
+	s := knowledgeServer(t, store)
+	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{
+		Namespace: "prod", KnowledgeBase: "docs", Query: "north", EmbeddingModel: "embed-v1",
+		TopK: 100, // request more than the hard cap
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out knowledgeSearchResponse
+	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))
+	assert.LessOrEqual(t, len(out.Results), 3, "handler must cap TopK at KNOWLEDGE_MAX_TOPK=3")
+}
+
+// TestKnowledgeSearch_ProvenanceSurvivesCaps verifies that the citation/provenance fields (documentRef,
+// chunkIndex, startOffset, endOffset, mimeType, score) survive the per-chunk and total-budget caps — the
+// caps trim CONTENT only (ADR 0061 governance #4).
+func TestKnowledgeSearch_ProvenanceSurvivesCaps(t *testing.T) {
+	t.Setenv(envMaxChunkChars, "5") // very tight cap forces truncation
+	t.Setenv(envMaxTotalChars, "100000")
+
+	ctx := context.Background()
+	store := knowledge.NewMemStore()
+	require.NoError(t, store.EnsureCorpus(ctx, "prod", "docs"))
+	require.NoError(t, store.Upsert(ctx, []knowledge.Chunk{{
+		Namespace: "prod", KnowledgeBase: "docs", DocumentRef: "guide.md", ChunkIndex: 7,
+		StartOffset: 500, EndOffset: 600, MimeType: "text/markdown",
+		Content:        "this content is much longer than five characters",
+		EmbeddingModel: "embed-v1", EmbeddingDim: knowledgeDim,
+		Embedding: padKnowledge(1, 0), IngestionRunID: "run-1",
+	}}))
+
+	s := knowledgeServer(t, store)
+	rec := postJSON(t, s, pathKnowledgeSearch, knowledgeSearchRequest{
+		Namespace: "prod", KnowledgeBase: "docs", Query: "north", EmbeddingModel: "embed-v1", TopK: 5,
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out knowledgeSearchResponse
+	require.NoError(t, decodeBody(rec.Body.Bytes(), &out))
+	require.Len(t, out.Results, 1)
+	h := out.Results[0]
+	// Content was truncated.
+	assert.True(t, h.Truncated)
+	// Provenance survives.
+	assert.Equal(t, "guide.md", h.DocumentRef)
+	assert.Equal(t, 7, h.ChunkIndex)
+	assert.Equal(t, 500, h.StartOffset)
+	assert.Equal(t, 600, h.EndOffset)
+	assert.Equal(t, "text/markdown", h.MimeType)
+	assert.Greater(t, h.Score, 0.0)
+}
+
 // setupKnowledgeSchema drops + recreates the knowledge_chunks partitioned parent (mirroring the knowledge package's
 // conformance harness) so each real-Postgres run starts from a clean corpus namespace.
 func setupKnowledgeSchema(t *testing.T, db *sql.DB) {

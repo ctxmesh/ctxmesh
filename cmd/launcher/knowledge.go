@@ -208,13 +208,29 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	var parsed struct {
 		Results []struct {
-			Score float64 `json:"score"`
+			Score       float64 `json:"score"`
+			DocumentRef string  `json:"documentRef"`
 		} `json:"results"`
 	}
 	_ = json.Unmarshal(out, &parsed)
 	span.SetAttributes(attribute.Int("knowledge.hits", len(parsed.Results)))
 	if len(parsed.Results) > 0 {
 		span.SetAttributes(attribute.Float64("knowledge.top_score", parsed.Results[0].Score))
+	}
+	// document_refs: a bounded, deduplicated list of returned document refs — the M46 mandate so
+	// a wrong retrieval is attributable in the trace (ADR 0061 governance #4). PII: doc refs are
+	// document identifiers (paths / titles), not user content — the same category as KB name / score.
+	// Raw query text is NOT recorded here (mirroring memory.agent_recall's PII discipline).
+	seenRefs := make(map[string]bool, len(parsed.Results))
+	docRefs := make([]string, 0, len(parsed.Results))
+	for _, r := range parsed.Results {
+		if r.DocumentRef != "" && !seenRefs[r.DocumentRef] {
+			seenRefs[r.DocumentRef] = true
+			docRefs = append(docRefs, r.DocumentRef)
+		}
+	}
+	if len(docRefs) > 0 {
+		span.SetAttributes(attribute.StringSlice("knowledge.document_refs", docRefs))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(out)

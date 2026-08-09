@@ -360,6 +360,105 @@ def test_knowledge_search_dispatch_empty_query_returns_error(monkeypatch):
     assert "error" in result.lower()
 
 
+# ── m68.11: citation/provenance in tool result ────────────────────────────────
+
+
+def test_knowledge_search_dispatch_result_carries_citation(
+    kb_stub: KnowledgeStub, monkeypatch
+):
+    """_dispatch_knowledge_search adds a 'citation' field ('<documentRef>#<chunkIndex>') to each
+    result chunk (ADR 0061 governance #4 — attributable RAG, m68.11). Raw provenance fields are
+    kept alongside the citation so consuming code can still parse them."""
+    from ctxmesh.managed import _dispatch_knowledge_search
+
+    monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
+    monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "docs", "namespace": "default"}]))
+
+    cfg = _kb_config(kb_stub)
+    c = agent.from_config(cfg)
+
+    result_str = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "docs"})
+    result = json.loads(result_str)
+    assert isinstance(result, list)
+    assert len(result) == 1
+    hit = result[0]
+    # Citation string must be "<documentRef>#<chunkIndex>"
+    assert "citation" in hit, "citation field must be present in the tool result"
+    assert hit["citation"] == "doc-42#0", f"expected 'doc-42#0', got {hit['citation']!r}"
+    # Raw provenance fields must still be present (not replaced by citation).
+    assert hit["documentRef"] == "doc-42"
+    assert hit["chunkIndex"] == 0
+    assert hit["content"] == "The capital of France is Paris."
+    assert hit["score"] == 0.97
+
+
+def test_knowledge_search_dispatch_citation_multiple_chunks(monkeypatch):
+    """Each chunk in a multi-chunk result gets its own correct citation."""
+    from ctxmesh.managed import _dispatch_knowledge_search
+
+    multi_results = [
+        {
+            "content": "Paris is the capital of France.",
+            "documentRef": "france-guide.md",
+            "chunkIndex": 3,
+            "startOffset": 100,
+            "endOffset": 130,
+            "mimeType": "text/markdown",
+            "score": 0.95,
+        },
+        {
+            "content": "The Eiffel Tower is in Paris.",
+            "documentRef": "landmarks.md",
+            "chunkIndex": 0,
+            "startOffset": 0,
+            "endOffset": 29,
+            "mimeType": "text/plain",
+            "score": 0.88,
+        },
+    ]
+    monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
+    monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
+
+    with KnowledgeStub(results=multi_results) as stub:
+        cfg = _kb_config(stub)
+        c = agent.from_config(cfg)
+        result_str = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "kb"})
+
+    result = json.loads(result_str)
+    assert len(result) == 2
+    assert result[0]["citation"] == "france-guide.md#3"
+    assert result[1]["citation"] == "landmarks.md#0"
+
+
+def test_knowledge_search_dispatch_no_citation_when_doc_ref_empty(monkeypatch):
+    """When documentRef is empty or missing, citation is absent (not an empty string key)."""
+    from ctxmesh.managed import _dispatch_knowledge_search
+
+    no_ref_results = [
+        {
+            "content": "Some content without a ref.",
+            "documentRef": "",
+            "chunkIndex": 0,
+            "startOffset": 0,
+            "endOffset": 26,
+            "mimeType": "text/plain",
+            "score": 0.7,
+        },
+    ]
+    monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
+    monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
+
+    with KnowledgeStub(results=no_ref_results) as stub:
+        cfg = _kb_config(stub)
+        c = agent.from_config(cfg)
+        result_str = _dispatch_knowledge_search(c, {"query": "test", "knowledge_base": "kb"})
+
+    result = json.loads(result_str)
+    assert len(result) == 1
+    # No citation key when documentRef is empty.
+    assert "citation" not in result[0] or not result[0]["citation"]
+
+
 # ── multimodal content-parts helpers ─────────────────────────────────────────
 
 
