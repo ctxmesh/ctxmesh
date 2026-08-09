@@ -368,3 +368,66 @@ def test_delegate_posts_and_relays_capability(client, monkeypatch):
     assert (
         captured["headers"][CAPABILITY_HEADER] == "cap-token"
     ), "the parent capability is relayed (OBO)"
+
+
+# ── handoff_to (M67, ADR 0060 §5) ──────────────────────────────────────────────
+
+
+def test_handoff_tool_present_when_enabled(client, discovery_stub: DiscoveryStub, monkeypatch):
+    """A roster-bearing agent (DELEGATE_ENABLED) gets the synthetic handoff_to tool next to
+    delegate_to + its MCP tools, with the roster driving the target_agent enum + the description."""
+    monkeypatch.setenv("DELEGATE_ENABLED", "true")
+    monkeypatch.setenv(
+        "DELEGATE_ROSTER",
+        json.dumps(
+            [
+                {"name": "billing", "description": "handles billing"},
+                {"name": "research", "description": "does research"},
+            ]
+        ),
+    )
+    tools = client.tools.list()
+    names = [t.name for t in tools]
+    assert "handoff_to" in names, "the roster-bearing agent sees handoff_to"
+    assert "delegate_to" in names, "delegate_to is still present (both are offered)"
+
+    ht = next(t for t in tools if t.name == "handoff_to")
+    assert ht.mode == "handoff"
+    assert ht.endpoint.endswith(":2994/handoff")
+    assert ht.input_schema["properties"]["target_agent"]["enum"] == ["billing", "research"]
+    assert ht.input_schema["required"] == ["target_agent"], "only target_agent is required"
+    assert "billing: handles billing" in ht.description
+
+
+def test_handoff_tool_absent_when_disabled(client, discovery_stub: DiscoveryStub, monkeypatch):
+    """A plain agent (no roster) never sees handoff_to."""
+    monkeypatch.delenv("DELEGATE_ENABLED", raising=False)
+    assert "handoff_to" not in [t.name for t in client.tools.list()]
+
+
+def test_handoff_posts_and_relays_capability(client, monkeypatch):
+    """handoff() POSTs the transfer body to the launcher-local :2994/handoff endpoint, relays the
+    run capability (OBO for the conversation owner), and returns the launcher's outcome verbatim."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "runId": "hand-1", "sourceRun": "A-1", "handedOffTo": "billing"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(
+            method=method, url=url, body=json.loads(body), headers=headers, expect=expect
+        )
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
+
+    out = client.tools.handoff(target_agent="billing", message="refund needed")
+
+    assert out == {"ok": True, "runId": "hand-1", "sourceRun": "A-1", "handedOffTo": "billing"}
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith(":2994/handoff")
+    assert captured["expect"] == (200,)
+    assert captured["body"] == {"targetAgent": "billing", "message": "refund needed"}
+    assert captured["headers"][CAPABILITY_HEADER] == "cap-token", "the capability is relayed (OBO)"

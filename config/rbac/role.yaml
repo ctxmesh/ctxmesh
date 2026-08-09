@@ -50,6 +50,7 @@ rules:
   - mcptoolbindings
   - memorybindings
   - modelroutes
+  - workflows
   verbs:
   - create
   - delete
@@ -69,6 +70,7 @@ rules:
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   - tenants/finalizers
+  - workflows/finalizers
   verbs:
   - update
 - apiGroups:
@@ -83,6 +85,7 @@ rules:
   - memorybindings/status
   - modelroutes/status
   - tenants/status
+  - workflows/status
   verbs:
   - get
   - patch

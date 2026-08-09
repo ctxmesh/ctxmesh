@@ -866,29 +866,33 @@ def test_delegate_batch_runs_concurrently_and_propagates_capability():
     from ctxmesh.managed import _dispatch_delegate_batch
 
     seen_caps = []
-    seen_threads = set()
+    # A barrier of len(calls) is a DETERMINISTIC concurrency proof (fixes the m52.I6 flake): the
+    # only way all N delegations pass a Barrier(N) is if they are genuinely in-flight simultaneously.
+    # Serial execution (a reused pool thread) blocks the first wait() until the timeout → BrokenBarrier
+    # → the delegate returns an error → the results assertion fails. This never depends on distinct
+    # thread IDENTITY (which a fast/loaded machine reuses), so it can't flake on timing.
+    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
+    concurrency_barrier = threading.Barrier(len(calls), timeout=10.0)
 
     class _BatchTools:
         def delegate(self, sub_agent, task, step, call_id):
             seen_caps.append(current_capability())
-            seen_threads.add(threading.get_ident())
+            concurrency_barrier.wait()  # all N must reach here at once — proves true concurrency
             return {"ok": True, "answer": f"{sub_agent}:done"}
 
     class _BatchClient:
         trace = _DelTrace()
         tools = _BatchTools()
 
-    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
     with capability_scope({"X-Ctxmesh-Run-Capability": "cap-token"}):
         results = _dispatch_delegate_batch(_BatchClient(), calls, "1")
 
+    # Reaching here with the right results proves all N ran concurrently (the barrier released) AND
+    # each carried the same OBO capability into its worker thread.
     assert results == {"c1": "researcher:done", "c2": "coder:done", "c3": "writer:done"}
     assert (
         seen_caps == ["cap-token"] * 3
     ), "every sub-run acts on-behalf-of the same user (OBO to threads)"
-    assert (
-        len(seen_threads) >= 2
-    ), "the delegations ran on multiple worker threads (concurrent, not serial)"
 
 
 def test_delegate_batch_single_call_no_pool():
@@ -898,6 +902,230 @@ def test_delegate_batch_single_call_no_pool():
     client = _DelClient({"ok": True, "answer": "solo"})
     out = _dispatch_delegate_batch(client, [("c1", "researcher", "t")], "1")
     assert out == {"c1": "solo"}
+
+
+# ── handoff_to dispatch + terminal loop (M67, ADR 0060 §5) ─────────────────────
+
+
+class _HandoffTools:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def handoff(self, target_agent, message=""):
+        self.calls.append({"target_agent": target_agent, "message": message})
+        return self._result
+
+
+class _HandoffClient:
+    def __init__(self, result):
+        self.trace = _DelTrace()
+        self.tools = _HandoffTools(result)
+
+
+def _handoff_call(target_agent="billing", message="please take over"):
+    """An OpenAI handoff_to tool-call object (the shape the model emits)."""
+    return {
+        "id": "call-h1",
+        "type": "function",
+        "function": {
+            "name": "handoff_to",
+            "arguments": json.dumps({"target_agent": target_agent, "message": message}),
+        },
+    }
+
+
+def test_dispatch_handoff_records_the_transfer():
+    """A successful handoff returns a structured transfer result (targetAgent + ok + runId), records
+    the call, and forwards the target + message. It is NOT awaited — the outcome is the transfer."""
+    from ctxmesh.managed import _dispatch_handoff
+
+    client = _HandoffClient(
+        {"ok": True, "runId": "hand-1", "sourceRun": "A-1", "handedOffTo": "billing"}
+    )
+    out = _dispatch_handoff(client, _handoff_call("billing", "refund"))
+    assert out == {"ok": "true", "targetAgent": "billing", "runId": "hand-1", "sourceRun": "A-1"}
+    assert client.tools.calls == [{"target_agent": "billing", "message": "refund"}]
+
+
+def test_dispatch_handoff_refusal_is_recorded():
+    """A refused handoff (non-member target / missing cap) comes back as ok=false + the error —
+    recorded, never raised (the turn ends on a handoff regardless)."""
+    from ctxmesh.managed import _dispatch_handoff
+
+    client = _HandoffClient({"ok": False, "error": "not a member of this team's roster"})
+    out = _dispatch_handoff(client, _handoff_call("attacker"))
+    assert out["ok"] == "false"
+    assert out["targetAgent"] == "attacker"
+    assert "roster" in out["error"]
+
+
+def test_dispatch_handoff_requires_target():
+    """A handoff_to call missing target_agent is refused before any transfer."""
+    from ctxmesh.managed import _dispatch_handoff
+
+    client = _HandoffClient({"ok": True})
+    out = _dispatch_handoff(client, _handoff_call(target_agent=""))
+    assert out["ok"] == "false"
+    assert "requires a 'target_agent'" in out["error"]
+    assert client.tools.calls == [], "no transfer is attempted without a target"
+
+
+def test_managed_loop_handoff_is_terminal(monkeypatch):
+    """A handoff_to tool call ENDS the managed loop with a handoff ManagedResult and NO further
+    answer: the loop does not take another model turn, produces no output, and the model is never
+    re-asked (a handoff is a transfer — the OPPOSITE of a delegate call, which threads a result)."""
+    import ctxmesh.managed as managed
+    from ctxmesh import ManagedConfig
+    from ctxmesh.model import ChatResponse
+
+    config = ManagedConfig(system_prompt="you are a router", model_route="tool-mock")
+
+    # A client whose tools.list() offers handoff_to and whose handoff() records the transfer.
+    handoff_result = {"ok": True, "runId": "hand-9", "sourceRun": "A-9", "handedOffTo": "billing"}
+
+    class _Tool:
+        name = "handoff_to"
+        input_schema = {"type": "object", "properties": {"target_agent": {"type": "string"}}}
+        description = "hand off"
+
+    class _Tools(_HandoffTools):
+        def list(self):
+            return [_Tool()]
+
+    class _Loop:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def set_input(self, v):
+            pass
+
+        def set_output(self, v):
+            pass
+
+    class _LoopTrace(_DelTrace):
+        def loop(self, name, headers=None):
+            return _Loop()
+
+        def step(self, name):
+            return _Loop()
+
+    class _Cfg:
+        memory_wired = False
+        longterm_wired = False
+
+    class _Client:
+        def __init__(self):
+            self.trace = _LoopTrace()
+            self.tools = _Tools(handoff_result)
+            self.config = _Cfg()
+
+    client = _Client()
+
+    # The model's single turn asks to hand off (content:null + a handoff_to tool call).
+    calls = {"n": 0}
+
+    def fake_chat(*args, **kwargs):
+        calls["n"] += 1
+        raw = {
+            "choices": [
+                {"message": {"role": "assistant", "content": None, "tool_calls": [_handoff_call()]}}
+            ]
+        }
+        return ChatResponse(text="", usage={}, model="tool-mock", raw=raw)
+
+    monkeypatch.setattr(managed, "_chat_with_resilience", fake_chat)
+
+    result = managed.run_managed_loop(client, config, "I need billing help")
+
+    assert result.handoff is not None, "the loop returns a handoff outcome"
+    assert result.handoff["targetAgent"] == "billing"
+    assert result.handoff["ok"] == "true"
+    assert result.output == "", "a handoff produces NO further answer (the target continues)"
+    assert result.tools_called == ["handoff_to"]
+    assert calls["n"] == 1, "the loop took exactly ONE model turn — no re-ask after the handoff"
+
+
+def test_managed_loop_refused_handoff_is_recoverable(monkeypatch):
+    """A REFUSED handoff (ok=false — non-member target / launcher down) is NOT terminal: the loop
+    does NOT return a handoff marker, threads the refusal back as a tool result, and lets the model
+    recover with a normal answer — so the BFF terminates the still-running source run (the fix)."""
+    import ctxmesh.managed as managed
+    from ctxmesh import ManagedConfig
+    from ctxmesh.model import ChatResponse
+
+    config = ManagedConfig(system_prompt="you are a router", model_route="tool-mock")
+
+    class _Tool:
+        name = "handoff_to"
+        input_schema = {"type": "object", "properties": {"target_agent": {"type": "string"}}}
+        description = "hand off"
+
+    class _Tools(_HandoffTools):
+        def list(self):
+            return [_Tool()]
+
+    class _Loop:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def set_input(self, v):
+            pass
+
+        def set_output(self, v):
+            pass
+
+    class _LoopTrace(_DelTrace):
+        def loop(self, name, headers=None):
+            return _Loop()
+
+        def step(self, name):
+            return _Loop()
+
+    class _Cfg:
+        memory_wired = False
+        longterm_wired = False
+
+    class _Client:
+        def __init__(self):
+            self.trace = _LoopTrace()
+            # handoff() refuses (non-member target).
+            self.tools = _Tools({"ok": False, "error": "not a member of this team's roster"})
+            self.config = _Cfg()
+
+    client = _Client()
+
+    # Turn 1: the model tries handoff_to (refused). Turn 2: it answers the user itself.
+    calls = {"n": 0}
+
+    def fake_chat(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raw = {
+                "choices": [
+                    {"message": {"role": "assistant", "content": None,
+                                 "tool_calls": [_handoff_call("attacker")]}}
+                ]
+            }
+            return ChatResponse(text="", usage={}, model="tool-mock", raw=raw)
+        answer = "I can help you directly."
+        raw = {"choices": [{"message": {"role": "assistant", "content": answer}}]}
+        return ChatResponse(text=answer, usage={}, model="tool-mock", raw=raw)
+
+    monkeypatch.setattr(managed, "_chat_with_resilience", fake_chat)
+
+    result = managed.run_managed_loop(client, config, "I need help")
+
+    assert result.handoff is None, "a REFUSED handoff sets NO marker (the run was not transferred)"
+    assert result.output == "I can help you directly.", "the model recovered and answered normally"
+    assert calls["n"] == 2, "the loop CONTINUED past the refused handoff (it is not terminal)"
+    assert "handoff_to" in result.tools_called
 
 
 # ── m65.5: structured outputs — response_format + in-loop schema repair ─────────

@@ -39,6 +39,17 @@ func SpawnRunID(parentRunID, step, callID string) string {
 	return "sub-" + hex.EncodeToString(sum[:16])
 }
 
+// HandoffRunID derives a DETERMINISTIC id for the run B that a handoff creates (M67, ADR 0060 §5), so a
+// retried handoff (the SDK re-issuing the SAME handoff_to, or a capability replay) resolves the SAME
+// run B — the store's ON CONFLICT (id) DO NOTHING collapses the duplicate to one transferred run rather
+// than spawning a second B. The key is (sourceRunID=A, targetAgent): one handoff per (A, B) is the
+// transfer. The `hand-` prefix (distinct from the `sub-` spawn prefix) makes a transferred run
+// recognizable and marks it as NOT a sub-run — a handoff is a NEW ROOT run, never a child.
+func HandoffRunID(sourceRunID, targetAgent string) string {
+	sum := sha256.Sum256([]byte(sourceRunID + "\x00handoff\x00" + targetAgent))
+	return "hand-" + hex.EncodeToString(sum[:16])
+}
+
 // Status is the run's lifecycle state. The set + transitions mirror the A2A task states and the
 // OpenAI Assistants run statuses (ADR 0034), so external clients and the mesh interoperate.
 type Status string
@@ -50,7 +61,17 @@ const (
 	StatusRunning Status = "running"
 	// StatusRequiresAction — paused pending an out-of-band action, then a resume: an OBO
 	// consent (the m25.9 consent_required, generalised) or a human-in-the-loop approval (M32).
+	// It is the ONE HUMAN-INPUT pause state (ADR 0034 as amended by ADR 0060): a human resolves
+	// it — the console banner, A2A input-required, ops alerts. Distinct from StatusWaiting, which
+	// is machine-woken.
 	StatusRequiresAction Status = "requires_action"
+	// StatusWaiting — paused parked on one or more CHILD RUNS, MACHINE-woken (vs requires_action =
+	// human-woken), per ADR 0060 §3. A workflow instance run (m67.3) or a suspending supervisor (I1)
+	// enters `waiting` after launching child(ren); when the wait condition is met the store flips it
+	// back to `queued` (resume) in the SAME transaction as the last child's terminal transition —
+	// exactly-once, no notification bus. A `waiting` run holds NO lease and NO worker (it is not
+	// claimed while parked; it re-enters execution only via waiting→queued). NON-terminal.
+	StatusWaiting Status = "waiting"
 	// StatusSucceeded — terminal: produced a final answer.
 	StatusSucceeded Status = "succeeded"
 	// StatusFailed — terminal: an error the run surfaces (never a swallowed failure).
@@ -60,6 +81,21 @@ const (
 	// StatusExpired — terminal: exceeded its lifetime bound before completing.
 	StatusExpired Status = "expired"
 )
+
+// IsWorkflowInstance reports whether this run EXECUTES a declarative Workflow (M67, ADR 0060) — i.e. it
+// carries a pinned SpecSnapshot. The run-worker routes such a run to the workflow executor (executeWorkflow)
+// instead of the single-agent executeRun. WorkflowRef alone (a name with no resolved snapshot) is NOT a
+// workflow instance: the snapshot is the pinned graph the executor drives, so its presence is the gate.
+func (r *Run) IsWorkflowInstance() bool {
+	return r.SpecSnapshot != ""
+}
+
+// IsSpawned reports whether this run is a SUB-RUN of another (a workflow node or a supervisor delegation) —
+// it has a parent. A spawned run's terminal transition goes through CompleteAndWake so a `waiting` parent
+// (a suspended workflow run) is woken in the same transaction (ADR 0060 §3).
+func (r *Run) IsSpawned() bool {
+	return r.ParentRunID != ""
+}
 
 // IsTerminal reports whether the status admits no further transition.
 func (s Status) IsTerminal() bool {
@@ -82,6 +118,7 @@ var transitions = map[Status]map[Status]bool{
 	},
 	StatusRunning: {
 		StatusRequiresAction: true,
+		StatusWaiting:        true, // suspend: parked on child run(s), machine-woken (ADR 0060)
 		StatusSucceeded:      true,
 		StatusFailed:         true,
 		StatusCancelled:      true,
@@ -89,6 +126,14 @@ var transitions = map[Status]map[Status]bool{
 	},
 	StatusRequiresAction: {
 		StatusRunning:   true, // resume
+		StatusCancelled: true,
+		StatusExpired:   true,
+	},
+	// waiting is machine-woken: a satisfied wait re-QUEUES the run (waiting→queued) and the existing
+	// worker pool re-claims it — the worker pool IS the resume loop (ADR 0060 §3). It may also be
+	// cancelled/expired directly (a cancel cascade or a lifetime bound while parked).
+	StatusWaiting: {
+		StatusQueued:    true, // resume — the wake re-queues; the pool re-claims
 		StatusCancelled: true,
 		StatusExpired:   true,
 	},
@@ -171,7 +216,65 @@ type Run struct {
 	// text). m65.4 validates the run's terminal answer against it. Empty ⇒ no schema, no validation.
 	// Pinned so an operator editing the schema mid-run does not retroactively change validation.
 	OutputSchema string `json:"-"`
+
+	// --- Workflow instance + wait record (M67, ADR 0060): set when this run EXECUTES a declarative
+	// Workflow (kind: workflow). A workflow instance is a Run with a WorkflowRef + a pinned SpecSnapshot
+	// (resuming against a live-edited CR is a correctness bug — CRD edits affect NEW instances only) +
+	// a Cursor tracking per-node progress. When the executor (m67.3) launches child node run(s) it
+	// SUSPENDS the run to `waiting` with a wait record; the transactional wake resumes it. None is a
+	// secret (a workflow name, a resolved spec, opaque progress JSON), so they COULD ride the DTO — kept
+	// json:"-" here (the store persists them as their own columns; the API exposure is m67.4's call).
+
+	// WorkflowRef names the Workflow CR this run instantiates (empty ⇒ not a workflow run).
+	WorkflowRef string `json:"-"`
+	// SpecSnapshot is the resolved workflow spec pinned at instance-create time (JSON). Empty ⇒ none.
+	SpecSnapshot string `json:"-"`
+	// NodeEndpoints maps a workflow node's agentRef → its resolved invoke endpoint, pinned at
+	// instance-create time through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the
+	// AgentDeployment reads) and exactly as a single run pins its Endpoint at create (m32.2, ADR 0060
+	// snapshot-pinning). The workflow executor runs OFF-REQUEST in the run-worker and has no caller token,
+	// so it reads these pinned endpoints instead of re-resolving an AgentDeployment — the BFF SA holds NO
+	// agent-CRD RBAC (config/bff/role.yaml is `rules: []`). Keyed by agentRef (a node's agent), so several
+	// nodes backed by the same agent share one entry. Empty ⇒ not a workflow run (or no nodes).
+	NodeEndpoints map[string]string `json:"-"`
+	// Cursor is the executor's per-node progress (JSON, opaque to the store — the executor owns its
+	// shape: pending / launched(childID) / done(outputRef) per node). Resume advances it, never
+	// replays the graph. Empty ⇒ no progress yet.
+	Cursor string `json:"-"`
+	// WaitOn is the set of CHILD run ids this run is parked on while `waiting`. The transactional
+	// wake removes a child as it goes terminal; an empty WaitOn (mode all) or one satisfied child
+	// (mode any) means the wait is met → the run is re-queued. Empty when not waiting.
+	WaitOn []string `json:"-"`
+	// WaitMode is how WaitOn is satisfied: WaitAll (every child terminal) or WaitAny (at least one).
+	// Empty when not waiting.
+	WaitMode WaitMode `json:"-"`
+
+	// --- Handoff outcome (M67, ADR 0060 §5): set when this run TERMINATED because its agent handed
+	// the conversation off to another roster member (`handoff_to`). Handoff is a CONVERSATION primitive,
+	// NOT a workflow edge: the run's Agent field stays IMMUTABLE (it is the audit record) — A's run ends
+	// here and B's turn is a NEW ROOT run on the same conversation, its own audit identity. HandedOffTo
+	// names the agent the conversation was transferred to; the run itself transitions to `succeeded`
+	// (the outcome IS the handoff — no new terminal state, per ADR 0060 §5). Non-secret (an agent name),
+	// so it rides the API DTO. Empty ⇒ this run did not hand off. Exposed via runToDTO (json:"-" here so
+	// the store persists it as its own column).
+	HandedOffTo string `json:"-"`
+
+	// HandoffSourceRunID is the BACKLINK on B: the run (A) whose `handoff_to` created THIS run. Handoff
+	// is a transfer, so B is a NEW ROOT run with NO ParentRunID (its own audit identity) — this field is
+	// the only forward/backward link between A and B, closing the handoff lineage loop (Fable, 2026-08-09).
+	// Empty ⇒ this run was not created by a handoff (a normal invoke/create). Non-secret (a run id).
+	HandoffSourceRunID string `json:"-"`
 }
+
+// WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3).
+type WaitMode string
+
+const (
+	// WaitAll — the wait is met when EVERY child in WaitOn has gone terminal (a join / all-of).
+	WaitAll WaitMode = "all"
+	// WaitAny — the wait is met when AT LEAST ONE child in WaitOn has gone terminal (an any-of).
+	WaitAny WaitMode = "any"
+)
 
 // ActionKind classifies what a requires_action run is waiting on.
 type ActionKind string
@@ -182,6 +285,12 @@ const (
 	ActionConsentRequired ActionKind = "consent_required"
 	// ActionApproval — a human must approve a step before it runs (human-in-the-loop, M32).
 	ActionApproval ActionKind = "approval"
+	// ActionPlanApproval — a human must approve a workflow run's PLAN before the graph executes
+	// (planning mode, M67, ADR 0060 §6). It is the ONE legitimate use of requires_action on a workflow
+	// run: the executor pauses here BEFORE launching node 1; resume-approve runs the graph, resume-deny
+	// terminates the run ("plan rejected"). Distinct from ActionApproval (a mid-run step gate) — this
+	// gates the whole plan up front and is resolved by the workflow executor, not by re-invoking an agent.
+	ActionPlanApproval ActionKind = "plan_approval"
 )
 
 // Action describes why a run is paused in requires_action + what resolves it.
@@ -228,5 +337,59 @@ func (r *Run) Transition(to Status, now time.Time) error {
 	if to != StatusRequiresAction {
 		r.RequiresAction = nil
 	}
+	// Leaving waiting clears the wait record — a resumed (or cancelled/expired) run is no longer
+	// parked on children. The wake path clears WaitOn as it satisfies it; this is the belt-and-braces
+	// for any other exit (cancel/expire) so a re-queued run never carries a stale wait set.
+	if to != StatusWaiting {
+		r.WaitOn = nil
+		r.WaitMode = ""
+	}
 	return nil
+}
+
+// suspendToWaiting parks a RUNNING run on the given child run ids, releasing its lease so the
+// worker pool does not treat it as claimed (a waiting run holds NO worker/lease, ADR 0060 §3). It
+// is the store-internal primitive the exported Suspend wraps. mode must be WaitAll or WaitAny and
+// waitOn must be non-empty — an empty wait set can never be woken, so it is rejected.
+func (r *Run) suspendToWaiting(waitOn []string, mode WaitMode, now time.Time) error {
+	if len(waitOn) == 0 {
+		return fmt.Errorf("run %s: suspend requires at least one child to wait on", r.ID)
+	}
+	if mode != WaitAll && mode != WaitAny {
+		return fmt.Errorf("run %s: invalid wait mode %q", r.ID, mode)
+	}
+	if err := r.Transition(StatusWaiting, now); err != nil {
+		return err
+	}
+	r.WaitOn = append([]string(nil), waitOn...)
+	r.WaitMode = mode
+	// A waiting run holds no lease and no worker — it is not claimable and not reclaimable while
+	// parked; it re-enters execution only via waiting→queued.
+	r.WorkerID = ""
+	r.LeaseExpiresAt = nil
+	return nil
+}
+
+// satisfyChild removes childID from the wait set and reports whether the wait is NOW met (given the
+// mode): all → the set is empty; any → a child was removed (at least one is satisfied). It returns
+// removed=false when childID was not in the set (an already-satisfied / duplicate completion) so
+// the wake is idempotent — a reclaimed child completion cannot re-fire a wake or corrupt the set.
+func (r *Run) satisfyChild(childID string) (met, removed bool) {
+	idx := -1
+	for i, id := range r.WaitOn {
+		if id == childID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false, false // not waiting on this child (or already satisfied) — no-op
+	}
+	r.WaitOn = append(r.WaitOn[:idx], r.WaitOn[idx+1:]...)
+	switch r.WaitMode {
+	case WaitAny:
+		return true, true // one satisfied child meets an any-wait
+	default: // WaitAll
+		return len(r.WaitOn) == 0, true
+	}
 }

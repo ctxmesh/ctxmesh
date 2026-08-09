@@ -38,6 +38,7 @@ rules:
   - memorybindings
   - agentregistries
   - agentteams
+  - workflows
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
@@ -57,6 +58,7 @@ rules:
   - memorybindings/status
   - agentregistries/status
   - agentteams/status
+  - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status

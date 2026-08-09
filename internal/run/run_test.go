@@ -235,6 +235,211 @@ func TestMemStore_RoundTripsOutputSchema(t *testing.T) {
 	assert.Equal(t, "", got2.OutputSchema, "absent OutputSchema must load as empty string")
 }
 
+// --- M67 (ADR 0060): the waiting state + the transactional cross-run wake -------------------------
+
+// TestWaitingStateMachine proves the new waiting transitions: running→waiting (suspend),
+// waiting→queued (resume), waiting→cancelled/expired; waiting is NON-terminal; and illegal skips
+// are still rejected.
+func TestWaitingStateMachine(t *testing.T) {
+	assert.True(t, CanTransition(StatusRunning, StatusWaiting), "running→waiting (suspend)")
+	assert.True(t, CanTransition(StatusWaiting, StatusQueued), "waiting→queued (resume)")
+	assert.True(t, CanTransition(StatusWaiting, StatusCancelled))
+	assert.True(t, CanTransition(StatusWaiting, StatusExpired))
+	assert.False(t, StatusWaiting.IsTerminal(), "waiting is a PAUSE, not terminal")
+	// A waiting run cannot jump straight back to running (it resumes via queued) or to a terminal
+	// answer without re-executing.
+	assert.False(t, CanTransition(StatusWaiting, StatusRunning), "resume is via queued, not direct")
+	assert.False(t, CanTransition(StatusWaiting, StatusSucceeded))
+	// queued cannot go straight to waiting (only a running run suspends).
+	assert.False(t, CanTransition(StatusQueued, StatusWaiting))
+}
+
+// TestSuspendClearsLeaseAndWaitRecord proves suspendToWaiting sets the wait record, releases the
+// lease/worker, and that leaving waiting (resume/cancel) clears the wait record.
+func TestSuspendClearsLeaseAndWaitRecord(t *testing.T) {
+	r := New("p", "ns", "wf", nil, "", t0)
+	require.NoError(t, r.Transition(StatusRunning, t0))
+	exp := t0.Add(time.Minute)
+	r.WorkerID, r.LeaseExpiresAt = "w1", &exp
+
+	require.NoError(t, r.suspendToWaiting([]string{"c1", "c2"}, WaitAll, t0.Add(time.Second)))
+	assert.Equal(t, StatusWaiting, r.Status)
+	assert.Equal(t, []string{"c1", "c2"}, r.WaitOn)
+	assert.Equal(t, WaitAll, r.WaitMode)
+	assert.Empty(t, r.WorkerID, "a waiting run holds no worker")
+	assert.Nil(t, r.LeaseExpiresAt, "a waiting run holds no lease")
+
+	// Resuming (waiting→queued) clears the wait record.
+	require.NoError(t, r.Transition(StatusQueued, t0.Add(2*time.Second)))
+	assert.Nil(t, r.WaitOn)
+	assert.Empty(t, string(r.WaitMode))
+
+	// An empty wait set is rejected (it could never be woken).
+	r2 := New("q", "ns", "wf", nil, "", t0)
+	require.NoError(t, r2.Transition(StatusRunning, t0))
+	assert.Error(t, r2.suspendToWaiting(nil, WaitAll, t0))
+	assert.Error(t, r2.suspendToWaiting([]string{"c"}, "bogus", t0), "invalid mode rejected")
+}
+
+// mkWaitingParent creates parent "p" parked in `waiting` on the given children (mode), and creates
+// the children as running sub-runs of "p". Returns the store ready for a wake.
+func mkWaitingParent(t *testing.T, s Store, children []string, mode WaitMode) {
+	t.Helper()
+	const parentID = "p"
+	require.NoError(t, s.Create(New(parentID, "ns", "wf", nil, "", t0)))
+	_, err := s.Update(parentID, func(r *Run) error { return r.Transition(StatusRunning, t0) })
+	require.NoError(t, err)
+	for _, cid := range children {
+		c := New(cid, "ns", "worker", nil, "", t0)
+		c.ParentRunID = parentID
+		c.RootRunID = parentID
+		require.NoError(t, s.Create(c))
+		_, err := s.Update(cid, func(r *Run) error { return r.Transition(StatusRunning, t0) })
+		require.NoError(t, err)
+	}
+	_, err = s.Suspend(parentID, children, mode, nil)
+	require.NoError(t, err)
+	got, err := s.Get(parentID)
+	require.NoError(t, err)
+	require.Equal(t, StatusWaiting, got.Status)
+}
+
+// completeChild is the terminal-transition apply used across the wake tests.
+func completeChild(r *Run) error { return r.Transition(StatusSucceeded, t0.Add(time.Minute)) }
+
+// TestMemStore_TransactionalWake_AllMode proves the all-mode wake: the parent stays waiting until
+// the LAST child completes, then flips to queued in that same completion call.
+func TestMemStore_TransactionalWake_AllMode(t *testing.T) {
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	// First child terminal: parent stays waiting (all-mode not yet met).
+	child, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	assert.Equal(t, StatusSucceeded, child.Status)
+	assert.Nil(t, woke, "all-mode: one child done does not wake the parent")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusWaiting, p.Status)
+	assert.Equal(t, []string{"c2"}, p.WaitOn, "c1 removed from the wait set")
+
+	// Second (last) child terminal: parent flips to queued IN this completion call.
+	_, woke, err = s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "the last child wakes the parent")
+	assert.Equal(t, StatusQueued, woke.Status)
+	p, _ = s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "parent is queued immediately after the last child completes")
+	assert.Empty(t, p.WaitOn, "the wait record is cleared on resume")
+}
+
+// TestMemStore_TransactionalWake_AnyMode proves the any-mode wake: the FIRST child to complete wakes
+// the parent.
+func TestMemStore_TransactionalWake_AnyMode(t *testing.T) {
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAny)
+
+	_, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "any-mode: the first child wakes the parent")
+	assert.Equal(t, StatusQueued, woke.Status)
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status)
+}
+
+// TestMemStore_Wake_Idempotent proves a reclaimed/duplicated child completion does not re-queue an
+// already-running parent or corrupt the wait set.
+func TestMemStore_Wake_Idempotent(t *testing.T) {
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	_, _, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	_, woke, err := s.CompleteAndWake("c2", completeChild) // last child → parent queued
+	require.NoError(t, err)
+	require.NotNil(t, woke)
+
+	// The parent gets claimed and starts running again.
+	_, err = s.Update("p", func(r *Run) error { return r.Transition(StatusRunning, t0) })
+	require.NoError(t, err)
+
+	// A DUPLICATE completion of c2 (a reclaimed worker re-finishing) must be a no-op: the parent
+	// stays running, not re-queued, and nothing panics on the empty wait set.
+	child, woke, err := s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	assert.Equal(t, StatusSucceeded, child.Status, "re-completing an already-terminal child is a no-op")
+	assert.Nil(t, woke, "no re-wake of the running parent")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusRunning, p.Status, "the parent was NOT re-queued by the duplicate completion")
+}
+
+// TestMemStore_SweepWaiting proves the crash-window reconciler: a parent left waiting whose children
+// are already terminal (the wake was skipped) is re-queued by SweepWaiting.
+func TestMemStore_SweepWaiting(t *testing.T) {
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAll)
+
+	// Simulate the crash window: complete BOTH children WITHOUT the wake (plain terminal Updates), so
+	// the parent is orphaned in waiting.
+	for _, cid := range []string{"c1", "c2"} {
+		_, err := s.Update(cid, func(r *Run) error { return r.Transition(StatusSucceeded, t0.Add(time.Minute)) })
+		require.NoError(t, err)
+	}
+	p, _ := s.Get("p")
+	require.Equal(t, StatusWaiting, p.Status, "parent orphaned in waiting (wake was skipped)")
+
+	woke, err := s.SweepWaiting()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p"}, woke)
+	p, _ = s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "the sweeper re-queued the orphaned parent")
+
+	// Idempotent: a second sweep does nothing.
+	woke, err = s.SweepWaiting()
+	require.NoError(t, err)
+	assert.Empty(t, woke)
+}
+
+// TestMemStore_WaitingNotClaimed proves a waiting run is excluded from ClaimQueued (it is not queued
+// and holds no lease) — the KEDA/worker exclusion at the store level.
+func TestMemStore_WaitingNotClaimed(t *testing.T) {
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1"}, WaitAll)
+
+	// Only the waiting parent + its running child exist; neither is queued.
+	_, err := s.ClaimQueued("w", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "a waiting run is not claimable")
+
+	// The waiting run also holds no lease → not reclaimable.
+	_, err = s.ClaimReclaimable("w", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun)
+
+	// After the child completes, the parent is queued and NOW claimable.
+	_, _, err = s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	claimed, err := s.ClaimQueued("w", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "p", claimed.ID, "the woken parent is re-claimed by the pool")
+	assert.Equal(t, StatusRunning, claimed.Status)
+}
+
+// TestMemStore_RoundTripsWorkflowFields proves the M67 workflow-instance fields survive a round-trip.
+func TestMemStore_RoundTripsWorkflowFields(t *testing.T) {
+	s := NewMemStore()
+	r := New("wf-run", "ns", "wf", nil, "", t0)
+	r.WorkflowRef = "my-workflow"
+	r.SpecSnapshot = `{"nodes":[{"name":"a"}]}`
+	r.Cursor = `{"a":"pending"}`
+	r.NodeEndpoints = map[string]string{"agent-a": "http://agent-a.ns.svc", "agent-b": "http://agent-b.ns.svc"}
+	require.NoError(t, s.Create(r))
+	got, err := s.Get("wf-run")
+	require.NoError(t, err)
+	assert.Equal(t, "my-workflow", got.WorkflowRef)
+	assert.Equal(t, `{"nodes":[{"name":"a"}]}`, got.SpecSnapshot)
+	assert.Equal(t, `{"a":"pending"}`, got.Cursor)
+	assert.Equal(t, map[string]string{"agent-a": "http://agent-a.ns.svc", "agent-b": "http://agent-b.ns.svc"}, got.NodeEndpoints,
+		"pinned node endpoints round-trip through the store")
+}
+
 // TestMemStore_ReserveSpawn proves the authoritative aggregate spawn counter: admit up to maxTotal,
 // deny beyond (without recording the rejected spawn), and isolate per root tree.
 func TestMemStore_ReserveSpawn(t *testing.T) {
