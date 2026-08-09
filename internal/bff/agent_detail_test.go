@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -235,6 +236,90 @@ func TestAgentDetailScalingDefault(t *testing.T) {
 	assert.Equal(t, phasePending, got.Phase)
 	assert.Empty(t, got.Conditions)
 	assert.NotNil(t, got.Conditions)
+}
+
+// TestAgentDetailRuntimeProjected proves that spec.runtime is projected onto the
+// detail DTO when present: outputSchema, toolPolicy (default + overrides +
+// parallelLimit), and resilience (modelCall + toolCall + circuitBreaker).
+func TestAgentDetailRuntimeProjected(t *testing.T) {
+	schemaRaw := []byte(`{"type":"object","properties":{"answer":{"type":"string"}}}`)
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "img:1",
+			Runtime: &agentsv1alpha1.RuntimeSpec{
+				OutputSchema: &k8sruntime.RawExtension{Raw: schemaRaw},
+				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+					Default: "allow",
+					Overrides: []agentsv1alpha1.ToolPolicyOverride{
+						{Name: "send_email", Rule: "require-approval", Retryable: false},
+					},
+					ForcedChoice:  "auto",
+					ParallelLimit: 4,
+				},
+				Resilience: &agentsv1alpha1.ResilienceSpec{
+					ModelCall: &agentsv1alpha1.CallResilience{TimeoutSeconds: 30, MaxRetries: 2},
+					ToolCall: &agentsv1alpha1.ToolCallResilience{
+						TimeoutSeconds: 10,
+						MaxRetries:     1,
+						CircuitBreaker: &agentsv1alpha1.CircuitBreakerSpec{FailureThreshold: 5, CooldownSeconds: 60},
+					},
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+
+	require.NotNil(t, got.Runtime, "runtime must be present when spec.runtime is set")
+	assert.True(t, got.Runtime.OutputSchemaSet, "outputSchemaSet must be true when outputSchema is set")
+	assert.JSONEq(t, string(schemaRaw), got.Runtime.OutputSchema, "outputSchema JSON must round-trip verbatim")
+
+	require.NotNil(t, got.Runtime.ToolPolicy, "toolPolicy must be projected")
+	assert.Equal(t, "allow", got.Runtime.ToolPolicy.Default)
+	require.Len(t, got.Runtime.ToolPolicy.Overrides, 1)
+	assert.Equal(t, "send_email", got.Runtime.ToolPolicy.Overrides[0].Name)
+	assert.Equal(t, "require-approval", got.Runtime.ToolPolicy.Overrides[0].Rule)
+	assert.Equal(t, "auto", got.Runtime.ToolPolicy.ForcedChoice)
+	assert.Equal(t, int32(4), got.Runtime.ToolPolicy.ParallelLimit)
+
+	require.NotNil(t, got.Runtime.Resilience, "resilience must be projected")
+	require.NotNil(t, got.Runtime.Resilience.ModelCall)
+	assert.Equal(t, int32(30), got.Runtime.Resilience.ModelCall.TimeoutSeconds)
+	assert.Equal(t, int32(2), got.Runtime.Resilience.ModelCall.MaxRetries)
+	require.NotNil(t, got.Runtime.Resilience.ToolCall)
+	assert.Equal(t, int32(10), got.Runtime.Resilience.ToolCall.TimeoutSeconds)
+	assert.Equal(t, int32(1), got.Runtime.Resilience.ToolCall.MaxRetries)
+	require.NotNil(t, got.Runtime.Resilience.ToolCall.CircuitBreaker)
+	assert.Equal(t, int32(5), got.Runtime.Resilience.ToolCall.CircuitBreaker.FailureThreshold)
+	assert.Equal(t, int32(60), got.Runtime.Resilience.ToolCall.CircuitBreaker.CooldownSeconds)
+}
+
+// TestAgentDetailRuntimeAbsentIsNil proves that when spec.runtime is absent the
+// JSON field is omitted entirely (nil, not an empty object) so agents without a
+// runtime config don't produce noise on the wire.
+func TestAgentDetailRuntimeAbsentIsNil(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Nil(t, got.Runtime, "runtime must be nil (omitted) when spec.runtime is absent")
+	// Confirm the field is truly absent on the wire, not serialized as null.
+	assert.NotContains(t, rec.Body.String(), `"runtime"`, "the runtime key must not appear in the JSON when absent")
 }
 
 // --- Logs (SSE pod-log tail) -------------------------------------------------

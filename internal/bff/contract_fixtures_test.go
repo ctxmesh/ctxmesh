@@ -84,6 +84,28 @@ func buildContractFixtures() map[string]any {
 			}},
 			Bindings: []AgentBinding{{Kind: "tool", Name: "echo-search", Detail: "search", Ready: true}},
 			Versions: []string{"echo-abc123"},
+			// m65.9: runtime is included in the fixture so the UI mock-drift guard
+			// covers agents that carry a spec.runtime block.
+			Runtime: &AgentRuntimeDetail{
+				OutputSchemaSet: true,
+				OutputSchema:    `{"type":"object","properties":{"answer":{"type":"string"}}}`,
+				ToolPolicy: &AgentToolPolicyDetail{
+					Default: "allow",
+					Overrides: []AgentToolOverrideDetail{
+						{Name: "send_email", Rule: "require-approval", Retryable: false},
+					},
+					ForcedChoice:  "",
+					ParallelLimit: 4,
+				},
+				Resilience: &AgentResilienceDetail{
+					ModelCall: &AgentCallResilienceDetail{TimeoutSeconds: 30, MaxRetries: 2},
+					ToolCall: &AgentToolCallResilienceDetail{
+						TimeoutSeconds: 10,
+						MaxRetries:     1,
+						CircuitBreaker: &AgentCircuitBreakerDetail{FailureThreshold: 5, CooldownSeconds: 60},
+					},
+				},
+			},
 		},
 	}
 }
