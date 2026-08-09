@@ -292,3 +292,133 @@ def test_unreadable_prompt_file_warns_and_uses_default(monkeypatch, caplog, tmp_
         cfg = ManagedConfig.from_env()
     assert cfg.system_prompt == "You are a helpful assistant."  # safe default, still serves
     assert any("PROMPT_FILE" in r.message for r in caplog.records)
+
+
+# ── ManagedConfig.from_env: AGENT_RUNTIME / output_schema (m65.5, ADR 0058) ─────
+
+
+def test_managed_config_from_env_output_schema_from_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME='{"outputSchema":{...}}' → from_env().output_schema equals that schema."""
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"outputSchema": schema}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema == schema
+
+
+def test_managed_config_from_env_output_schema_absent_when_no_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME unset → from_env().output_schema is None."""
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
+
+
+def test_managed_config_from_env_malformed_agent_runtime_no_crash(monkeypatch, caplog):
+    """AGENT_RUNTIME='not json' → output_schema is None + a WARNING is logged (never a crash)."""
+    monkeypatch.setenv("AGENT_RUNTIME", "not valid json {{")
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
+    assert any("AGENT_RUNTIME" in r.message for r in caplog.records)
+
+
+def test_managed_config_from_env_agent_runtime_no_output_schema_key(monkeypatch):
+    """AGENT_RUNTIME set but no 'outputSchema' key → output_schema is None (extensible parse)."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": {"default": "allow"}}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.output_schema is None
+
+
+# ── ManagedConfig.from_env: AGENT_RUNTIME / tool_policy (m65.6, ADR 0058) ───────
+
+
+def test_managed_config_from_env_tool_policy_from_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME='{"toolPolicy":{...}}' → from_env().tool_policy equals that policy."""
+    policy = {
+        "default": "require-approval",
+        "overrides": [{"name": "search", "rule": "allow", "retryable": True}],
+        "forcedChoice": "auto",
+        "parallelLimit": 2,
+    }
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": policy}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.tool_policy == policy
+
+
+def test_managed_config_from_env_tool_policy_absent_when_no_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME unset → from_env().tool_policy is None."""
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.tool_policy is None
+
+
+def test_managed_config_from_env_tool_policy_no_key(monkeypatch):
+    """AGENT_RUNTIME set but no 'toolPolicy' key → tool_policy is None."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"outputSchema": {"type": "object"}}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.tool_policy is None
+
+
+def test_managed_config_from_env_tool_policy_non_dict_ignored(monkeypatch, caplog):
+    """A non-dict toolPolicy is a misconfig → tool_policy is None + a WARNING (never a crash)."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": ["not", "a", "dict"]}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.tool_policy is None
+    assert any("toolPolicy" in r.message for r in caplog.records)
+
+
+# ── ManagedConfig.from_env: AGENT_RUNTIME / resilience (m65.7, ADR 0058) ────────
+
+
+def test_managed_config_from_env_resilience_from_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME='{"resilience":{...}}' → from_env().resilience equals that object."""
+    resilience = {
+        "modelCall": {"timeoutSeconds": 20, "maxRetries": 2},
+        "toolCall": {
+            "timeoutSeconds": 15,
+            "maxRetries": 3,
+            "circuitBreaker": {"failureThreshold": 5, "cooldownSeconds": 30},
+        },
+    }
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"resilience": resilience}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience == resilience
+
+
+def test_managed_config_from_env_resilience_absent_when_no_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME unset → from_env().resilience is None."""
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+
+
+def test_managed_config_from_env_resilience_no_key(monkeypatch):
+    """AGENT_RUNTIME set but no 'resilience' key → resilience is None."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": {"default": "allow"}}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+
+
+def test_managed_config_from_env_resilience_non_dict_ignored(monkeypatch, caplog):
+    """A non-dict resilience is a misconfig → resilience is None + a WARNING (never a crash)."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"resilience": ["not", "a", "dict"]}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+    assert any("resilience" in r.message for r in caplog.records)

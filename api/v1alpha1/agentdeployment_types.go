@@ -243,6 +243,134 @@ type AgentDeploymentSpec struct {
 	// built-in defaults apply.
 	// +optional
 	TracePolicy *TracePolicy `json:"tracePolicy,omitempty"`
+
+	// runtime optionally configures runtime authoring primitives: structured
+	// output schemas, tool-use policies, and per-turn resilience settings.
+	// When omitted, the agent's current behaviour is preserved unchanged.
+	// This field is types-only in m65; injection by the managed loop is a
+	// subsequent task.
+	// +optional
+	Runtime *RuntimeSpec `json:"runtime,omitempty"`
+}
+
+// RuntimeSpec configures runtime authoring primitives applied by the managed
+// loop / platform: structured outputs, tool-use policies, and per-turn resilience.
+// Absent => today's behavior, unchanged.
+type RuntimeSpec struct {
+	// outputSchema is a JSON Schema the agent's final answer must conform to.
+	// The value is stored verbatim (arbitrary JSON) and is not structurally validated
+	// by the CRD admission; it is passed to the platform at runtime.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	OutputSchema *k8sruntime.RawExtension `json:"outputSchema,omitempty"`
+
+	// toolPolicy optionally constrains which tools the agent may use and how.
+	// +optional
+	ToolPolicy *ToolPolicySpec `json:"toolPolicy,omitempty"`
+
+	// resilience optionally configures per-turn retry and circuit-breaker behaviour.
+	// +optional
+	Resilience *ResilienceSpec `json:"resilience,omitempty"`
+}
+
+// ToolPolicySpec constrains tool selection and concurrent tool-call behaviour.
+type ToolPolicySpec struct {
+	// default is the rule applied to any tool without an explicit override.
+	// +optional
+	// +kubebuilder:validation:Enum=allow;deny;require-approval
+	// +kubebuilder:default=allow
+	Default string `json:"default,omitempty"`
+
+	// overrides is the per-tool-name policy list. Items are keyed on name and
+	// applied in order; the first matching entry wins.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Overrides []ToolPolicyOverride `json:"overrides,omitempty"`
+
+	// forcedChoice steers tool selection: "" or "auto" lets the model choose,
+	// "required" forces at least one tool call, or a specific tool name forces
+	// exactly that tool.
+	// +optional
+	ForcedChoice string `json:"forcedChoice,omitempty"`
+
+	// parallelLimit caps concurrent tool calls per turn. 0 means unlimited.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ParallelLimit int32 `json:"parallelLimit,omitempty"`
+}
+
+// ToolPolicyOverride is one named tool-level policy override.
+type ToolPolicyOverride struct {
+	// name is the exact tool name this override applies to.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// rule is the access rule for this tool.
+	// +kubebuilder:validation:Enum=allow;deny;require-approval
+	Rule string `json:"rule"`
+
+	// retryable opts this tool in to retries on transient failure. Default false —
+	// tool retries are off unless the tool is explicitly declared idempotent/safe.
+	// +optional
+	Retryable bool `json:"retryable,omitempty"`
+}
+
+// ResilienceSpec configures per-turn retry and timeout behaviour for model and
+// tool calls.
+type ResilienceSpec struct {
+	// modelCall configures timeout and retry for model API calls.
+	// +optional
+	ModelCall *CallResilience `json:"modelCall,omitempty"`
+
+	// toolCall configures timeout, retry, and circuit-breaker for tool calls.
+	// +optional
+	ToolCall *ToolCallResilience `json:"toolCall,omitempty"`
+}
+
+// CallResilience is timeout + retry settings for a single call category.
+type CallResilience struct {
+	// timeoutSeconds is the per-call hard deadline. 0 means no per-call timeout.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// maxRetries is the maximum number of retries after a transient failure. 0 means no retries.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxRetries int32 `json:"maxRetries,omitempty"`
+}
+
+// ToolCallResilience extends CallResilience with an optional circuit breaker for
+// tool calls.
+type ToolCallResilience struct {
+	// timeoutSeconds is the per-call hard deadline. 0 means no per-call timeout.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// maxRetries is the maximum number of retries after a transient failure. 0 means no retries.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxRetries int32 `json:"maxRetries,omitempty"`
+
+	// circuitBreaker opens the circuit after failureThreshold consecutive failures,
+	// blocking calls for cooldownSeconds before half-opening.
+	// +optional
+	CircuitBreaker *CircuitBreakerSpec `json:"circuitBreaker,omitempty"`
+}
+
+// CircuitBreakerSpec defines the parameters of a simple count-based circuit breaker.
+type CircuitBreakerSpec struct {
+	// failureThreshold is the number of consecutive failures before the circuit opens.
+	// +kubebuilder:validation:Minimum=1
+	FailureThreshold int32 `json:"failureThreshold"`
+
+	// cooldownSeconds is the duration the circuit stays open before half-opening.
+	// 0 means the implementation applies its own default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CooldownSeconds int32 `json:"cooldownSeconds,omitempty"`
 }
 
 // TracePolicy is the per-agent extension of the built-in trace-redaction policy

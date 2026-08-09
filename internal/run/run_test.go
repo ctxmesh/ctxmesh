@@ -213,6 +213,28 @@ func TestMemStore_RoundTripsSpawnLineage(t *testing.T) {
 	assert.Equal(t, 2, got.SpawnDepth)
 }
 
+// TestMemStore_RoundTripsOutputSchema proves the in-memory twin preserves the M65 OutputSchema field
+// (parity with the Postgres store, m65.3 ADR 0058).
+func TestMemStore_RoundTripsOutputSchema(t *testing.T) {
+	s := NewMemStore()
+	schema := `{"type":"object","properties":{"answer":{"type":"string"}}}`
+
+	// Run with a schema: field survives a round-trip through the memStore.
+	withSchema := New("schema-run", "ns", "typed-agent", nil, "", t0)
+	withSchema.OutputSchema = schema
+	require.NoError(t, s.Create(withSchema))
+	got, err := s.Get("schema-run")
+	require.NoError(t, err)
+	assert.Equal(t, schema, got.OutputSchema, "OutputSchema must survive a memStore round-trip")
+
+	// Run with no schema: loads as "".
+	noSchema := New("no-schema-run", "ns", "untyped-agent", nil, "", t0)
+	require.NoError(t, s.Create(noSchema))
+	got2, err := s.Get("no-schema-run")
+	require.NoError(t, err)
+	assert.Equal(t, "", got2.OutputSchema, "absent OutputSchema must load as empty string")
+}
+
 // TestMemStore_ReserveSpawn proves the authoritative aggregate spawn counter: admit up to maxTotal,
 // deny beyond (without recording the rejected spawn), and isolate per root tree.
 func TestMemStore_ReserveSpawn(t *testing.T) {

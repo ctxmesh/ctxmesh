@@ -151,15 +151,19 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	proxyD := statelayerProxyDigest("http://statelayer-proxy.svc:8080", true)
 	require.NotEmpty(t, proxyD)
 
-	neither := combinedBindingDigest("", "", "", "", "", "", "")
-	toolsOnly := combinedBindingDigest(toolD, "", "", "", "", "", "")
-	memOnly := combinedBindingDigest("", memD, "", "", "", "", "")
-	regOnly := combinedBindingDigest("", "", regD, "", "", "", "")
-	budgetOnly := combinedBindingDigest("", "", "", budD, "", "", "")
-	promptOnly := combinedBindingDigest("", "", "", "", promptD, "", "")
-	tenantOnly := combinedBindingDigest("", "", "", "", "", tenantD, "")
-	proxyOnly := combinedBindingDigest("", "", "", "", "", "", proxyD)
-	all := combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD)
+	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
+	require.NotEmpty(t, runtimeD)
+
+	neither := combinedBindingDigest("", "", "", "", "", "", "", "")
+	toolsOnly := combinedBindingDigest(toolD, "", "", "", "", "", "", "")
+	memOnly := combinedBindingDigest("", memD, "", "", "", "", "", "")
+	regOnly := combinedBindingDigest("", "", regD, "", "", "", "", "")
+	budgetOnly := combinedBindingDigest("", "", "", budD, "", "", "", "")
+	promptOnly := combinedBindingDigest("", "", "", "", promptD, "", "", "")
+	tenantOnly := combinedBindingDigest("", "", "", "", "", tenantD, "", "")
+	proxyOnly := combinedBindingDigest("", "", "", "", "", "", proxyD, "")
+	runtimeOnly := combinedBindingDigest("", "", "", "", "", "", "", runtimeD)
+	all := combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD)
 
 	assert.Equal(t, "", neither, "no structural input of any type → empty digest (bare revision name)")
 	assert.NotEmpty(t, toolsOnly)
@@ -169,13 +173,14 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	assert.NotEmpty(t, promptOnly)
 	assert.NotEmpty(t, tenantOnly)
 	assert.NotEmpty(t, proxyOnly)
+	assert.NotEmpty(t, runtimeOnly)
 	assert.NotEmpty(t, all)
-	// All eight non-empty outcomes must be mutually distinct.
+	// All nine non-empty outcomes must be mutually distinct.
 	distinct := map[string]bool{
 		toolsOnly: true, memOnly: true, regOnly: true, budgetOnly: true,
-		promptOnly: true, tenantOnly: true, proxyOnly: true, all: true,
+		promptOnly: true, tenantOnly: true, proxyOnly: true, runtimeOnly: true, all: true,
 	}
-	assert.Len(t, distinct, 8, "tools / memory / registry / budget / prompt / tenant / proxy / all must all differ")
+	assert.Len(t, distinct, 9, "tools / memory / registry / budget / prompt / tenant / proxy / runtime / all must all differ")
 	assert.Len(t, all, 8, "combined digest is 8 hex chars — the bounded suffix budget")
 }
 
@@ -214,21 +219,27 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	proxyD2 := statelayerProxyDigest("http://proxy-b:8080", true)
 	require.NotEqual(t, proxyD1, proxyD2, "precondition: a proxy-URL change flips the proxy digest")
 
-	base := combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1)
-	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1, promptD1, tenantD1, proxyD1),
+	runtimeD1 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 3}})
+	runtimeD2 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 5}})
+	require.NotEqual(t, runtimeD1, runtimeD2, "precondition: a runtime change flips the runtime digest")
+
+	base := combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1)
+	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1),
 		"tool component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1, promptD1, tenantD1, proxyD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1),
 		"memory component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1, promptD1, tenantD1, proxyD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1, promptD1, tenantD1, proxyD1, runtimeD1),
 		"registry component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2, promptD1, tenantD1, proxyD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2, promptD1, tenantD1, proxyD1, runtimeD1),
 		"budget component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD2, tenantD1, proxyD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD2, tenantD1, proxyD1, runtimeD1),
 		"prompt component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD2, proxyD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD2, proxyD1, runtimeD1),
 		"tenant component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD2),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD2, runtimeD1),
 		"proxy component change must flip the combined digest (M53 — the cutover must roll a revision)")
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD2),
+		"runtime component change must flip the combined digest (M65 — a runtime edit must roll a revision)")
 }
 
 // TestCombinedBindingDigest_Deterministic: identical inputs always produce the
@@ -247,14 +258,17 @@ func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 
 	proxyD := statelayerProxyDigest("http://proxy:8080", true)
 
-	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD), combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD))
-	assert.Equal(t, combinedBindingDigest(toolD, "", "", "", "", "", ""), combinedBindingDigest(toolD, "", "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", memD, "", "", "", "", ""), combinedBindingDigest("", memD, "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", regD, "", "", "", ""), combinedBindingDigest("", "", regD, "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", budD, "", "", ""), combinedBindingDigest("", "", "", budD, "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", promptD, "", ""), combinedBindingDigest("", "", "", "", promptD, "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", tenantD, ""), combinedBindingDigest("", "", "", "", "", tenantD, ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", proxyD), combinedBindingDigest("", "", "", "", "", "", proxyD))
+	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
+
+	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD), combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD))
+	assert.Equal(t, combinedBindingDigest(toolD, "", "", "", "", "", "", ""), combinedBindingDigest(toolD, "", "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", memD, "", "", "", "", "", ""), combinedBindingDigest("", memD, "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", regD, "", "", "", "", ""), combinedBindingDigest("", "", regD, "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", budD, "", "", "", ""), combinedBindingDigest("", "", "", budD, "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", promptD, "", "", ""), combinedBindingDigest("", "", "", "", promptD, "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", tenantD, "", ""), combinedBindingDigest("", "", "", "", "", tenantD, "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", proxyD, ""), combinedBindingDigest("", "", "", "", "", "", proxyD, ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", runtimeD), combinedBindingDigest("", "", "", "", "", "", "", runtimeD))
 }
 
 // TestRegistryMembershipDigest_Component pins the registry component's own
@@ -369,8 +383,8 @@ func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 	promptV2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "resolved-v2")
 	require.NotEqual(t, promptV1, promptV2, "precondition: a prompt swap changes the prompt component")
 
-	combinedV1 := combinedBindingDigest("", "", "", "", promptV1, "", "")
-	combinedV2 := combinedBindingDigest("", "", "", "", promptV2, "", "")
+	combinedV1 := combinedBindingDigest("", "", "", "", promptV1, "", "", "")
+	combinedV2 := combinedBindingDigest("", "", "", "", promptV2, "", "", "")
 
 	// The revision-name suffix changes (a new revision rolls) ...
 	assert.NotEqual(t, combinedV1, combinedV2,
@@ -389,4 +403,50 @@ func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 	specB := agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v2"}
 	assert.Equal(t, specA.Image, specB.Image,
 		"a prompt-only change keeps the container image identical (no rebuild)")
+}
+
+// TestRuntimeDigest_Component pins the M65 runtime component's own contract:
+// nil runtime → empty (no env change → no digest component); each structural
+// change (ToolPolicy.Default, ParallelLimit, Resilience.ModelCall.MaxRetries)
+// flips it; 8 hex chars; deterministic.
+func TestRuntimeDigest_Component(t *testing.T) {
+	assert.Equal(t, "", runtimeDigest(nil), "nil runtime → empty component")
+
+	base := &agentsv1alpha1.RuntimeSpec{
+		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
+		Resilience: &agentsv1alpha1.ResilienceSpec{
+			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+		},
+	}
+	d := runtimeDigest(base)
+	require.NotEmpty(t, d)
+	assert.Len(t, d, 8, "runtime digest is 8 hex chars")
+	assert.Equal(t, d, runtimeDigest(base), "deterministic")
+
+	// Changing ToolPolicy.Default flips the digest.
+	changed1 := &agentsv1alpha1.RuntimeSpec{
+		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "deny", ParallelLimit: 4},
+		Resilience: &agentsv1alpha1.ResilienceSpec{
+			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+		},
+	}
+	assert.NotEqual(t, d, runtimeDigest(changed1), "ToolPolicy.Default change must flip the runtime digest")
+
+	// Changing ParallelLimit flips the digest.
+	changed2 := &agentsv1alpha1.RuntimeSpec{
+		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 8},
+		Resilience: &agentsv1alpha1.ResilienceSpec{
+			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+		},
+	}
+	assert.NotEqual(t, d, runtimeDigest(changed2), "ParallelLimit change must flip the runtime digest")
+
+	// Changing Resilience.ModelCall.MaxRetries flips the digest.
+	changed3 := &agentsv1alpha1.RuntimeSpec{
+		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
+		Resilience: &agentsv1alpha1.ResilienceSpec{
+			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 5},
+		},
+	}
+	assert.NotEqual(t, d, runtimeDigest(changed3), "Resilience.ModelCall.MaxRetries change must flip the runtime digest")
 }
