@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
@@ -66,6 +67,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+	// v1beta1 carries the AgentTeam kind (M64) the AgentTeam controller reconciles + the AgentDeployment
+	// controller reads; it MUST be registered or the manager fails to construct those controllers (the
+	// v1alpha1 Hub covers the graduated CRDs, but AgentTeam is v1beta1-only).
+	utilruntime.Must(agentsv1beta1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
 	utilruntime.Must(eventingv1.AddToScheme(scheme))
 	utilruntime.Must(kedatypes.AddToScheme(scheme))
@@ -324,6 +329,12 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentscalingpolicy")
+		os.Exit(1)
+	}
+	if err := (&controller.AgentTeamReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "agentteam")
 		os.Exit(1)
 	}
 	if err := (&controller.TenantReconciler{

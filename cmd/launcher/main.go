@@ -141,6 +141,13 @@ func main() {
 		}
 	}
 
+	// ── Delegate (sub-agent spawn) endpoint (:2994) ───────────────────────
+	// Started ONLY for a team SUPERVISOR (DELEGATE_ENABLED injected by the controller) with the BFF
+	// spawn edge + shared Valkey reachable (M64, ADR 0057). Same lifecycle discipline as the other
+	// listeners: goroutine ListenAndServe, graceful Shutdown on child exit, never overrides the child
+	// exit code. nil for a non-supervisor agent (unchanged).
+	delSrv := loadDelegateConfig(os.Getenv).buildServer()
+
 	// ── Outbound gateway proxy (:2996) ────────────────────────────────────
 	// Started ONLY when spec.budget is set (GATEWAY_UPSTREAM_URL injected AND a
 	// cap present). It sits between the agent and LiteLLM to enforce the cost
@@ -190,47 +197,13 @@ func main() {
 		}
 	}()
 
-	// Start the memory listener (best-effort; a bind failure here must not take
-	// the agent down — the agent's memory path is already best-effort).
-	if memSrv != nil {
-		go func() {
-			if err := memSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fmt.Fprintf(os.Stderr, "launcher: memory: %v\n", err)
-			}
-		}()
-	}
-
-	// Start the A2A outbound listener (best-effort; a bind failure must not take
-	// the agent down — A2A is a best-effort mesh path like memory).
-	if a2aSrv != nil {
-		go func() {
-			if err := a2aSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fmt.Fprintf(os.Stderr, "launcher: a2a: %v\n", err)
-			}
-		}()
-	}
-
-	// Start the outbound gateway proxy (best-effort like the others). A bind
-	// failure is logged; the agent's gateway calls then fail loudly rather than
-	// bypassing the budget.
-	if gwSrv != nil {
-		go func() {
-			if err := gwSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fmt.Fprintf(os.Stderr, "launcher: gateway: %v\n", err)
-			}
-		}()
-	}
-
-	// Start the feedback ingest hook (best-effort like the others). A bind
-	// failure is logged; /feedback calls then return ECONNREFUSED (visible
-	// misconfig) rather than silently dropping feedback.
-	if fbSrv != nil {
-		go func() {
-			if err := fbSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fmt.Fprintf(os.Stderr, "launcher: feedback: %v\n", err)
-			}
-		}()
-	}
+	// Start the optional listeners best-effort (a bind failure is logged, never takes the agent down —
+	// each is a best-effort side path). memory / A2A / delegate / gateway / feedback; nil ones are skipped.
+	startBestEffort(memSrv, "memory")
+	startBestEffort(a2aSrv, "a2a")
+	startBestEffort(delSrv, "delegate")
+	startBestEffort(gwSrv, "gateway")
+	startBestEffort(fbSrv, "feedback")
 
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
@@ -238,20 +211,26 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_ = srv.Shutdown(shutCtx)
-	if memSrv != nil {
-		_ = memSrv.Shutdown(shutCtx)
-	}
-	if a2aSrv != nil {
-		_ = a2aSrv.Shutdown(shutCtx)
-	}
-	if gwSrv != nil {
-		_ = gwSrv.Shutdown(shutCtx)
-	}
-	if fbSrv != nil {
-		_ = fbSrv.Shutdown(shutCtx)
+	for _, listener := range []*http.Server{srv, memSrv, a2aSrv, delSrv, gwSrv, fbSrv} {
+		if listener != nil {
+			_ = listener.Shutdown(shutCtx)
+		}
 	}
 	_ = otelShutdown(shutCtx)
 
 	os.Exit(exitCode)
+}
+
+// startBestEffort runs an optional listener in a goroutine, logging a real bind failure without taking
+// the agent down (each side listener — memory / A2A / delegate / gateway / feedback — is best-effort). A
+// nil server is a no-op (the feature is disabled).
+func startBestEffort(srv *http.Server, name string) {
+	if srv == nil {
+		return
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "launcher: %s: %v\n", name, err)
+		}
+	}()
 }

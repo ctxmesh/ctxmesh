@@ -93,6 +93,13 @@ type Store interface {
 	// The run stays `running` (no state change). Returns ErrNoQueuedRun when none is reclaimable —
 	// the headline resume-on-pod-loss path (m32.3).
 	ClaimReclaimable(workerID string, lease time.Duration) (*Run, error)
+	// ReserveSpawn atomically increments the total-spawn counter for a spawn TREE (keyed by its ROOT
+	// run id) and returns whether the reservation is within maxTotal (M64, ADR 0057). This is the
+	// AUTHORITATIVE aggregate spawn-budget gate: the BFF keys it on the root it derived from the VERIFIED
+	// parent run, so an agent cannot re-key it for a fresh budget (the launcher's Valkey guard reads
+	// agent-supplied inputs and is only advisory). Fails CLOSED — a store error returns (false, err) so
+	// the spawn is denied. Monotonic within the tree (each accepted spawn permanently consumes budget).
+	ReserveSpawn(rootRunID string, maxTotal int) (bool, error)
 }
 
 // subBuffer bounds a subscriber's live channel; a consumer slower than this is dropped (its
@@ -113,13 +120,26 @@ type entry struct {
 
 // memStore is the hot in-memory Store. Safe for concurrent use.
 type memStore struct {
-	mu      sync.Mutex
-	entries map[string]*entry
+	mu       sync.Mutex
+	entries  map[string]*entry
+	spawnCnt map[string]int // rootRunID -> accepted spawns (M64 aggregate budget)
 }
 
 // NewMemStore returns a hot in-memory run store.
 func NewMemStore() Store {
-	return &memStore{entries: map[string]*entry{}}
+	return &memStore{entries: map[string]*entry{}, spawnCnt: map[string]int{}}
+}
+
+// ReserveSpawn increments the tree's total-spawn count and admits when it is within maxTotal.
+func (m *memStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next := m.spawnCnt[rootRunID] + 1
+	if next > maxTotal {
+		return false, nil // over budget — do NOT record the rejected spawn
+	}
+	m.spawnCnt[rootRunID] = next
+	return true, nil
 }
 
 func (m *memStore) Create(r *Run) error {

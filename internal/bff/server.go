@@ -475,6 +475,8 @@ func (s *Server) Handler() http.Handler {
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
+	s.registerSpawnRoute(api)
+
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
 	// permits, enforced by the K8s API server. They are wired only when the
@@ -613,6 +615,8 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
 		// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
+		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
+		authed.HandleFunc("GET /api/teams", s.handleListTeams)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)

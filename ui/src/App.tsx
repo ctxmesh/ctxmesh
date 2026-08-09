@@ -34,6 +34,7 @@ import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
 import { AuditPage } from "@/pages/audit-page";
+import { TeamsPage } from "@/pages/teams-page";
 import {
   SecretBindingDetailPage,
   NewSecretBindingPage,
@@ -176,6 +177,8 @@ export function App() {
           >
             <Route index element={<DashboardPage />} />
             <Route path="agents" element={<AgentsPage />} />
+            {/* m64.11: AgentTeams — the orchestration rosters (read-only). */}
+            <Route path="teams" element={<TeamsPage />} />
             {/* The agent LANDING page (m14.11) — closes the aha loop: status
                 timeline + live log tail + Run panel + the native run inspector.
                 Reached from the agents list row-click and the create→landing

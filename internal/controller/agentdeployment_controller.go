@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/eval"
 	"github.com/ctxmesh/agent-engine/internal/gateway"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -1024,6 +1025,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			})
 		}
 
+		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject
+		// the launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as
+		// sub-runs. The spawn guard shares the tenant Valkey, so ensure TENANT_QUOTA_ADDR is present even
+		// for an UNbudgeted supervisor (otherwise the guard has no counter and can't fail-closed).
+		team, tErr := resolveSupervisedTeam(ctx, r.Client, deploy)
+		if tErr != nil {
+			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
+		}
+		if team != nil {
+			env = append(env, delegateEnv(team)...)
+			if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
+				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+			}
+		}
+
 		// Blob offload (m7.6b): a registry member participates in the async A2A
 		// path — as a publisher (offload a >256KiB payload) and/or a consumer
 		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
@@ -1889,6 +1905,22 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// AgentTeam → requeue its SUPERVISOR AgentDeployment (M64). A roster or spawn-budget change alters
+	// the DELEGATE_* env the supervisor carries, so re-render it (the change also feeds the digest, so it
+	// rolls the revision). Reads spec.supervisor.agentRef straight off the event object (delete events
+	// retain it), matching the other spec-ref maps.
+	mapTeamToSupervisor := handler.EnqueueRequestsFromMapFunc(
+		func(_ context.Context, obj client.Object) []reconcile.Request {
+			t, ok := obj.(*agentsv1beta1.AgentTeam)
+			if !ok || t.Spec.Supervisor.AgentRef == "" {
+				return nil
+			}
+			return []reconcile.Request{{
+				NamespacedName: client.ObjectKey{Namespace: t.Namespace, Name: t.Spec.Supervisor.AgentRef},
+			}}
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
@@ -1903,6 +1935,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
+		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).
 		Named("agentdeployment").
 		Complete(r)
 }
