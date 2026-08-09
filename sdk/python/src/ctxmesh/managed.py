@@ -54,7 +54,7 @@ from ctxmesh.errors import (
     EndpointError,
     GuardrailBlockedError,
 )
-from ctxmesh.tools import DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME
+from ctxmesh.tools import DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
 #: here so it surfaces in the pod's stderr instead of being silently wrong (OTH-3). With no
@@ -674,6 +674,46 @@ def run_managed_loop(
 #: Cap on the delegate thread pool so a runaway turn can't spawn unbounded threads. The spawn GUARD
 #: (the Valkey width counter) is the real ceiling — this just bounds local concurrency.
 _MAX_DELEGATE_WORKERS = 8
+
+
+def _dispatch_knowledge_search(client: Client, args: Dict[str, Any]) -> str:
+    """Dispatch a knowledge_search call (M68, ADR 0061 Fork 3) via client.knowledge.search.
+
+    Returns the results as compact JSON including provenance (documentRef/chunkIndex) so the
+    model can cite sources. A retrieval error is returned as honest tool text so the model can
+    recover — never an exception that crashes the run (mirrors the consent_required pattern).
+    """
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "error: knowledge_search requires a non-empty 'query' argument"
+    knowledge_base = args.get("knowledge_base") or None
+    if isinstance(knowledge_base, str):
+        knowledge_base = knowledge_base.strip() or None
+    top_k = args.get("top_k", 10)
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+        top_k = 10
+
+    with client.trace.tool(
+        KNOWLEDGE_SEARCH_TOOL_NAME,
+        input={"query": query, "knowledge_base": knowledge_base, "top_k": top_k},
+    ) as span:
+        try:
+            results = client.knowledge.search(
+                query=query,
+                knowledge_base=knowledge_base,
+                top_k=top_k,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface as honest tool text, never raise
+            span.set_output({"error": str(exc)})
+            return f"knowledge_search failed: {exc}"
+        span.set_output({"result_count": len(results)})
+
+    if not results:
+        return "No results found for this query."
+    try:
+        return json.dumps(results, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return str(results)
 
 
 def _dispatch_delegate_one(
@@ -1383,6 +1423,14 @@ def _drive_loop(
                     # precomputed result here (in order). step + call_id are the idempotency key.
                     content = delegate_results.get(call_id, "error: delegation was not dispatched")
                     tools_called.append(DELEGATE_TOOL_NAME)
+                elif name == KNOWLEDGE_SEARCH_TOOL_NAME:
+                    # Agentic RAG (M68, ADR 0061 Fork 3): dispatch knowledge_search to the
+                    # launcher's :2998 /knowledge/search endpoint via client.knowledge.search.
+                    # Returns results with provenance (documentRef/chunkIndex) so the model
+                    # can cite sources. A retrieval error is threaded as honest tool text so
+                    # the model can recover rather than crashing the run.
+                    content = _dispatch_knowledge_search(client, args)
+                    tools_called.append(KNOWLEDGE_SEARCH_TOOL_NAME)
                 else:
                     try:
                         with client.trace.tool(name, input=args) as tool_span:

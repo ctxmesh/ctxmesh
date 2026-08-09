@@ -21,6 +21,16 @@ Surface:
 
     client.model.chat(model, messages, **opts)  # $MODEL_GATEWAY_URL; emits LLM span
 
+    # knowledge-base retrieval (M68, ADR 0061 Fork 3):
+    client.knowledge.search("what is X?")    # POST :2998/knowledge/search
+
+    # multimodal content-parts helpers (M68, ADR 0061 Fork 5):
+    from ctxmesh import text_part, image_url, content
+    msgs = [{"role": "user", "content": content(
+        text_part("What is in this image?"),
+        image_url("https://example.com/photo.jpg"),
+    )}]
+
     # step-tracing helpers for a custom loop (the M10 core). Bind the inbound
     # request so the tree roots under the launcher's agent.invoke span:
     with client.trace.request_context(request.headers):
@@ -33,6 +43,7 @@ Surface:
 
 from ctxmesh import agent
 from ctxmesh._approval import pause_for_approval
+from ctxmesh._multimodal import content, image_url, text_part
 from ctxmesh.client import Client
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import (
@@ -43,6 +54,7 @@ from ctxmesh.errors import (
     GuardrailBlockedError,
     NotInPodError,
 )
+from ctxmesh.knowledge import KnowledgeClient
 from ctxmesh.managed import (
     DEFAULT_MAX_STEPS,
     ManagedConfig,
@@ -80,6 +92,12 @@ __all__ = [
     "RunEvent",
     "serve",
     "InvokeRequest",
+    # M68: knowledge-base retrieval
+    "KnowledgeClient",
+    # M68: multimodal content-parts helpers (ADR 0061 Fork 5)
+    "text_part",
+    "image_url",
+    "content",
 ]
 
 __version__ = "0.1.0"
