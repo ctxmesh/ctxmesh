@@ -866,29 +866,33 @@ def test_delegate_batch_runs_concurrently_and_propagates_capability():
     from ctxmesh.managed import _dispatch_delegate_batch
 
     seen_caps = []
-    seen_threads = set()
+    # A barrier of len(calls) is a DETERMINISTIC concurrency proof (fixes the m52.I6 flake): the
+    # only way all N delegations pass a Barrier(N) is if they are genuinely in-flight simultaneously.
+    # Serial execution (a reused pool thread) blocks the first wait() until the timeout → BrokenBarrier
+    # → the delegate returns an error → the results assertion fails. This never depends on distinct
+    # thread IDENTITY (which a fast/loaded machine reuses), so it can't flake on timing.
+    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
+    concurrency_barrier = threading.Barrier(len(calls), timeout=10.0)
 
     class _BatchTools:
         def delegate(self, sub_agent, task, step, call_id):
             seen_caps.append(current_capability())
-            seen_threads.add(threading.get_ident())
+            concurrency_barrier.wait()  # all N must reach here at once — proves true concurrency
             return {"ok": True, "answer": f"{sub_agent}:done"}
 
     class _BatchClient:
         trace = _DelTrace()
         tools = _BatchTools()
 
-    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
     with capability_scope({"X-Ctxmesh-Run-Capability": "cap-token"}):
         results = _dispatch_delegate_batch(_BatchClient(), calls, "1")
 
+    # Reaching here with the right results proves all N ran concurrently (the barrier released) AND
+    # each carried the same OBO capability into its worker thread.
     assert results == {"c1": "researcher:done", "c2": "coder:done", "c3": "writer:done"}
     assert (
         seen_caps == ["cap-token"] * 3
     ), "every sub-run acts on-behalf-of the same user (OBO to threads)"
-    assert (
-        len(seen_threads) >= 2
-    ), "the delegations ran on multiple worker threads (concurrent, not serial)"
 
 
 def test_delegate_batch_single_call_no_pool():
