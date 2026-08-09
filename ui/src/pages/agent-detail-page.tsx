@@ -43,6 +43,7 @@ import {
   type AgentCondition,
   type AgentDetailResponse,
   type AgentReference,
+  type AgentRuntimeDetail,
   type AgentRunSummary,
   type AgentMemoryEntry,
   type LongTermMemoryConfig,
@@ -894,6 +895,8 @@ function OverviewTab({
           <p className="mb-3 text-sm font-medium">Bindings</p>
           <BindingsList bindings={detail.bindings} />
         </div>
+
+        {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
       </div>
 
       <UseAgentPanel
@@ -920,6 +923,179 @@ function SpecKV({ k, v }: { k: string; v: React.ReactNode }) {
       <dt className="text-muted-foreground">{k}</dt>
       <dd>{v}</dd>
     </>
+  );
+}
+
+// ── Runtime section (m65.9, ADR 0058) ────────────────────────────────────────
+// Read-only card rendered in the Overview tab when spec.runtime is present AND
+// at least one sub-section has content (outputSchemaSet, toolPolicy, resilience).
+// When runtime is absent or every sub-section is empty, nothing is rendered —
+// no clutter for agents that don't use it.
+function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
+  const [schemaOpen, setSchemaOpen] = React.useState(false);
+
+  const hasContent =
+    runtime.outputSchemaSet || runtime.toolPolicy != null || runtime.resilience != null;
+  if (!hasContent) return null;
+
+  return (
+    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="runtime-section">
+      <div className="mb-3 flex items-center gap-2">
+        <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+        <p className="text-sm font-medium">Runtime</p>
+      </div>
+
+      <div className="space-y-4">
+        {/* --- Structured output --- */}
+        {runtime.outputSchemaSet && (
+          <div data-testid="runtime-output-schema">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Structured output</span>
+              <Badge variant="success" className="text-[10px]" data-testid="runtime-output-schema-badge">
+                ✓ set
+              </Badge>
+            </div>
+            {runtime.outputSchema && (
+              <details
+                open={schemaOpen}
+                onToggle={(e) => setSchemaOpen((e.currentTarget as HTMLDetailsElement).open)}
+                className="mt-1"
+                data-testid="runtime-schema-details"
+              >
+                <summary className="cursor-pointer text-xs text-primary hover:underline">
+                  {schemaOpen ? "Hide schema" : "Show schema"}
+                </summary>
+                <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-surface-3 p-2 text-xs leading-relaxed">
+                  {(() => {
+                    try {
+                      return JSON.stringify(JSON.parse(runtime.outputSchema), null, 2);
+                    } catch {
+                      return runtime.outputSchema;
+                    }
+                  })()}
+                </pre>
+              </details>
+            )}
+          </div>
+        )}
+
+        {/* --- Tool policy --- */}
+        {runtime.toolPolicy && (
+          <div data-testid="runtime-tool-policy">
+            <p className="mb-1.5 text-sm text-muted-foreground">Tool policy</p>
+            <dl className="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
+              <dt className="text-muted-foreground">Default rule</dt>
+              <dd>
+                <Badge variant="secondary" className="text-[10px]">
+                  {runtime.toolPolicy.default || "allow"}
+                </Badge>
+              </dd>
+              {runtime.toolPolicy.parallelLimit !== undefined && runtime.toolPolicy.parallelLimit > 0 && (
+                <>
+                  <dt className="text-muted-foreground">Parallel limit</dt>
+                  <dd className="text-sm">{runtime.toolPolicy.parallelLimit} concurrent calls</dd>
+                </>
+              )}
+              {runtime.toolPolicy.forcedChoice && (
+                <>
+                  <dt className="text-muted-foreground">Forced choice</dt>
+                  <dd className="font-mono text-xs">
+                    {runtime.toolPolicy.forcedChoice}
+                    <span className="ml-1 font-sans text-[10px] text-muted-foreground">
+                      {runtime.toolPolicy.forcedChoice === "auto"
+                        ? "(model chooses)"
+                        : runtime.toolPolicy.forcedChoice === "required"
+                          ? "(must call a tool)"
+                          : `(must call ${runtime.toolPolicy.forcedChoice})`}
+                    </span>
+                  </dd>
+                </>
+              )}
+            </dl>
+            {runtime.toolPolicy.overrides.length > 0 && (
+              <div className="mt-2" data-testid="runtime-tool-overrides">
+                <p className="mb-1 text-xs text-muted-foreground">
+                  Per-tool overrides ({runtime.toolPolicy.overrides.length})
+                </p>
+                <ul className="space-y-1">
+                  {runtime.toolPolicy.overrides.map((o) => (
+                    <li
+                      key={o.name}
+                      className="flex items-center gap-2 text-sm"
+                      data-testid={`tool-override-${o.name}`}
+                    >
+                      <span className="font-mono text-xs">{o.name}</span>
+                      <Badge variant="secondary" className="text-[10px]">
+                        {o.rule}
+                      </Badge>
+                      {o.retryable && (
+                        <Badge variant="outline" className="text-[10px]">
+                          retryable
+                        </Badge>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- Resilience --- */}
+        {runtime.resilience && (
+          <div data-testid="runtime-resilience">
+            <p className="mb-1.5 text-sm text-muted-foreground">Resilience</p>
+            <dl className="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
+              {runtime.resilience.modelCall && (
+                <>
+                  <dt className="text-muted-foreground">Model call</dt>
+                  <dd className="text-xs">
+                    {[
+                      runtime.resilience.modelCall.timeoutSeconds
+                        ? `${runtime.resilience.modelCall.timeoutSeconds}s timeout`
+                        : null,
+                      runtime.resilience.modelCall.maxRetries
+                        ? `${runtime.resilience.modelCall.maxRetries} ${runtime.resilience.modelCall.maxRetries === 1 ? "retry" : "retries"}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(", ") || "—"}
+                  </dd>
+                </>
+              )}
+              {runtime.resilience.toolCall && (
+                <>
+                  <dt className="text-muted-foreground">Tool call</dt>
+                  <dd className="text-xs">
+                    {[
+                      runtime.resilience.toolCall.timeoutSeconds
+                        ? `${runtime.resilience.toolCall.timeoutSeconds}s timeout`
+                        : null,
+                      runtime.resilience.toolCall.maxRetries
+                        ? `${runtime.resilience.toolCall.maxRetries} ${runtime.resilience.toolCall.maxRetries === 1 ? "retry" : "retries"}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(", ") || "—"}
+                  </dd>
+                  {runtime.resilience.toolCall.circuitBreaker && (
+                    <>
+                      <dt className="text-muted-foreground">Circuit breaker</dt>
+                      <dd className="text-xs" data-testid="runtime-circuit-breaker">
+                        opens at {runtime.resilience.toolCall.circuitBreaker.failureThreshold} failures
+                        {runtime.resilience.toolCall.circuitBreaker.cooldownSeconds
+                          ? `, ${runtime.resilience.toolCall.circuitBreaker.cooldownSeconds}s cooldown`
+                          : ""}
+                      </dd>
+                    </>
+                  )}
+                </>
+              )}
+            </dl>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

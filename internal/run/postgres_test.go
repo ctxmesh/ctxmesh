@@ -123,6 +123,29 @@ func TestPostgresStore_RoundTripsFields(t *testing.T) {
 	assert.Equal(t, []string{"gh", "slack"}, got.RequiresAction.Servers)
 }
 
+// TestPostgresStore_RoundTripsOutputSchema proves the M65 output_schema column (m65.3, ADR 0058)
+// persists and reloads byte-for-byte, and that a run with no schema loads as "".
+func TestPostgresStore_RoundTripsOutputSchema(t *testing.T) {
+	s := openPGStore(t)
+
+	schema := `{"type":"object","properties":{"answer":{"type":"string"}}}`
+
+	// Run with a schema: it survives a round-trip.
+	withSchema := New("schema-run", "ns", "typed-agent", nil, "", t0)
+	withSchema.OutputSchema = schema
+	require.NoError(t, s.Create(withSchema))
+	got, err := s.Get("schema-run")
+	require.NoError(t, err)
+	assert.Equal(t, schema, got.OutputSchema, "OutputSchema must survive a Postgres round-trip byte-for-byte")
+
+	// Run with no schema: loads as "".
+	noSchema := New("no-schema-run", "ns", "untyped-agent", nil, "", t0)
+	require.NoError(t, s.Create(noSchema))
+	got2, err := s.Get("no-schema-run")
+	require.NoError(t, err)
+	assert.Equal(t, "", got2.OutputSchema, "absent output_schema must load as empty string")
+}
+
 // TestPostgresStore_RoundTripsSpawnLineage proves the M64 spawn-lineage columns (parent/root/depth)
 // persist + reload, and that the deterministic sub-run id gives idempotent Create (a reclaimed
 // supervisor re-issuing the same delegate_to collapses to one sub-run, not two).

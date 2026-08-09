@@ -131,6 +131,49 @@ export interface AgentBinding {
   ready: boolean;
 }
 
+// --- Agent runtime detail types (m65.9, ADR 0058) ----------------------------
+
+export interface AgentCircuitBreakerDetail {
+  failureThreshold: number;
+  cooldownSeconds?: number;
+}
+
+export interface AgentCallResilienceDetail {
+  timeoutSeconds?: number;
+  maxRetries?: number;
+}
+
+export interface AgentToolCallResilienceDetail {
+  timeoutSeconds?: number;
+  maxRetries?: number;
+  circuitBreaker?: AgentCircuitBreakerDetail;
+}
+
+export interface AgentResilienceDetail {
+  modelCall?: AgentCallResilienceDetail;
+  toolCall?: AgentToolCallResilienceDetail;
+}
+
+export interface AgentToolOverrideDetail {
+  name: string;
+  rule: string;
+  retryable?: boolean;
+}
+
+export interface AgentToolPolicyDetail {
+  default?: string;
+  overrides: AgentToolOverrideDetail[];
+  forcedChoice?: string;
+  parallelLimit?: number;
+}
+
+export interface AgentRuntimeDetail {
+  outputSchemaSet: boolean;
+  outputSchema?: string;
+  toolPolicy?: AgentToolPolicyDetail;
+  resilience?: AgentResilienceDetail;
+}
+
 export interface AgentDetailResponse {
   name: string;
   namespace: string;
@@ -155,6 +198,9 @@ export interface AgentDetailResponse {
   // console-applied spec. Both absent/false = console-managed, no drift.
   managedOutsideUI?: boolean;
   drift?: boolean;
+  // m65.9 — optional runtime authoring config (ADR 0058). Absent when
+  // spec.runtime is not set; the detail page renders nothing new in that case.
+  runtime?: AgentRuntimeDetail;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------

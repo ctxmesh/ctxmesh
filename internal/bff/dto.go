@@ -185,6 +185,75 @@ type AgentDetailResponse struct {
 	// round-trips from the source-spec, but the UI warns the drift will be
 	// overwritten before the user confirms (ADR 0017 §5).
 	Drift bool `json:"drift"`
+	// Runtime is the optional runtime authoring configuration (m65.9, ADR 0058):
+	// structured-output schema, tool policy, and per-turn resilience settings. Nil
+	// when spec.runtime is absent — the UI renders nothing new in that case.
+	Runtime *AgentRuntimeDetail `json:"runtime,omitempty"`
+}
+
+// AgentRuntimeDetail is the read-only projection of spec.runtime for the agent
+// detail page. It mirrors the CRD types faithfully so the page can render each
+// sub-block without any server-side lossy transformation.
+type AgentRuntimeDetail struct {
+	// OutputSchemaSet is true when spec.runtime.outputSchema is present (i.e. the
+	// agent has a structured-output schema). The raw JSON Schema is not sent here
+	// to keep the payload compact; the UI renders a "Structured output ✓" badge.
+	OutputSchemaSet bool `json:"outputSchemaSet"`
+	// OutputSchema is the raw JSON Schema value (verbatim from the CRD). Present
+	// only when OutputSchemaSet is true; the UI shows it in a collapsible <pre>.
+	OutputSchema string `json:"outputSchema,omitempty"`
+	// ToolPolicy is the projected tool-policy block. Nil when absent.
+	ToolPolicy *AgentToolPolicyDetail `json:"toolPolicy,omitempty"`
+	// Resilience is the projected resilience block. Nil when absent.
+	Resilience *AgentResilienceDetail `json:"resilience,omitempty"`
+}
+
+// AgentToolPolicyDetail projects spec.runtime.toolPolicy for display.
+type AgentToolPolicyDetail struct {
+	// Default is the base rule ("allow", "deny", "require-approval"). Empty means
+	// the CRD defaulted to "allow" (the kubebuilder default); displayed as "allow".
+	Default string `json:"default,omitempty"`
+	// Overrides is the per-tool-name rule list. Non-nil on the wire ([] not null).
+	Overrides []AgentToolOverrideDetail `json:"overrides"`
+	// ForcedChoice is the forced tool-selection value when non-empty.
+	ForcedChoice string `json:"forcedChoice,omitempty"`
+	// ParallelLimit is the per-turn cap on concurrent tool calls. 0 = unlimited.
+	ParallelLimit int32 `json:"parallelLimit,omitempty"`
+}
+
+// AgentToolOverrideDetail is one projected per-tool policy override.
+type AgentToolOverrideDetail struct {
+	Name      string `json:"name"`
+	Rule      string `json:"rule"`
+	Retryable bool   `json:"retryable,omitempty"`
+}
+
+// AgentResilienceDetail projects spec.runtime.resilience for display.
+type AgentResilienceDetail struct {
+	// ModelCall is the model-call retry/timeout block. Nil when absent.
+	ModelCall *AgentCallResilienceDetail `json:"modelCall,omitempty"`
+	// ToolCall is the tool-call retry/timeout+circuit-breaker block. Nil when absent.
+	ToolCall *AgentToolCallResilienceDetail `json:"toolCall,omitempty"`
+}
+
+// AgentCallResilienceDetail projects CallResilience (timeout + retries).
+type AgentCallResilienceDetail struct {
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+	MaxRetries     int32 `json:"maxRetries,omitempty"`
+}
+
+// AgentToolCallResilienceDetail projects ToolCallResilience (timeout + retries +
+// optional circuit breaker).
+type AgentToolCallResilienceDetail struct {
+	TimeoutSeconds int32                      `json:"timeoutSeconds,omitempty"`
+	MaxRetries     int32                      `json:"maxRetries,omitempty"`
+	CircuitBreaker *AgentCircuitBreakerDetail `json:"circuitBreaker,omitempty"`
+}
+
+// AgentCircuitBreakerDetail projects CircuitBreakerSpec.
+type AgentCircuitBreakerDetail struct {
+	FailureThreshold int32 `json:"failureThreshold"`
+	CooldownSeconds  int32 `json:"cooldownSeconds,omitempty"`
 }
 
 // --- Identity & RBAC-aware chrome (ADR 0012, ui-foundation §3) ---------------
@@ -1176,7 +1245,71 @@ func newAgentDetail(
 		Versions:         versionNames,
 		ManagedOutsideUI: managedOutsideUI,
 		Drift:            drift,
+		Runtime:          newAgentRuntimeDetail(ad.Spec.Runtime),
 	}
+}
+
+// newAgentRuntimeDetail projects a *RuntimeSpec onto the detail DTO. Returns nil
+// when rt is nil so the JSON field is omitted entirely — the UI renders nothing new.
+func newAgentRuntimeDetail(rt *agentsv1alpha1.RuntimeSpec) *AgentRuntimeDetail {
+	if rt == nil {
+		return nil
+	}
+
+	detail := &AgentRuntimeDetail{}
+
+	// --- Output schema ---
+	if rt.OutputSchema != nil && len(rt.OutputSchema.Raw) > 0 {
+		detail.OutputSchemaSet = true
+		detail.OutputSchema = string(rt.OutputSchema.Raw)
+	}
+
+	// --- Tool policy ---
+	if rt.ToolPolicy != nil {
+		tp := rt.ToolPolicy
+		overrides := make([]AgentToolOverrideDetail, 0, len(tp.Overrides))
+		for _, o := range tp.Overrides {
+			overrides = append(overrides, AgentToolOverrideDetail{
+				Name:      o.Name,
+				Rule:      o.Rule,
+				Retryable: o.Retryable,
+			})
+		}
+		detail.ToolPolicy = &AgentToolPolicyDetail{
+			Default:       tp.Default,
+			Overrides:     overrides,
+			ForcedChoice:  tp.ForcedChoice,
+			ParallelLimit: tp.ParallelLimit,
+		}
+	}
+
+	// --- Resilience ---
+	if rt.Resilience != nil {
+		res := rt.Resilience
+		rd := &AgentResilienceDetail{}
+		if res.ModelCall != nil {
+			rd.ModelCall = &AgentCallResilienceDetail{
+				TimeoutSeconds: res.ModelCall.TimeoutSeconds,
+				MaxRetries:     res.ModelCall.MaxRetries,
+			}
+		}
+		if res.ToolCall != nil {
+			tc := &AgentToolCallResilienceDetail{
+				TimeoutSeconds: res.ToolCall.TimeoutSeconds,
+				MaxRetries:     res.ToolCall.MaxRetries,
+			}
+			if res.ToolCall.CircuitBreaker != nil {
+				tc.CircuitBreaker = &AgentCircuitBreakerDetail{
+					FailureThreshold: res.ToolCall.CircuitBreaker.FailureThreshold,
+					CooldownSeconds:  res.ToolCall.CircuitBreaker.CooldownSeconds,
+				}
+			}
+			rd.ToolCall = tc
+		}
+		detail.Resilience = rd
+	}
+
+	return detail
 }
 
 // healthFromConditions maps a resource's standard "Ready" condition onto the

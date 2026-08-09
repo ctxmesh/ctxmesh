@@ -96,6 +96,9 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS root_run_id   text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS spawn_depth   integer NOT NULL DEFAULT 0;
+-- Output schema (M65, ADR 0058): the agent's spec.runtime.outputSchema pinned at create time.
+-- NULL / absent ⇒ no schema (backward-compat: old rows load as "").
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS output_schema text;
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
@@ -130,14 +133,14 @@ func (p *pgStore) Create(r *Run) error {
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		 parent_run_id, root_run_id, spawn_depth, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,1,$19,$20)
+		 parent_run_id, root_run_id, spawn_depth, output_schema, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,1,$20,$21)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
-		r.ParentRunID, r.RootRunID, r.SpawnDepth,
+		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
 		r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
@@ -178,23 +181,24 @@ func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
 	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		parent_run_id, root_run_id, spawn_depth, version, created_at, updated_at
+		parent_run_id, root_run_id, spawn_depth, output_schema, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
-		r       Run
-		input   []byte
-		status  string
-		msgs    []byte
-		action  []byte
-		lease   sql.NullTime
-		version int64
-		created time.Time
-		updated time.Time
+		r            Run
+		input        []byte
+		status       string
+		msgs         []byte
+		action       []byte
+		lease        sql.NullTime
+		outputSchema sql.NullString
+		version      int64
+		created      time.Time
+		updated      time.Time
 	)
 	err := q.QueryRowContext(ctx, sel, id).Scan(
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
-		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth,
+		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
 		&version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -209,6 +213,9 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 	if lease.Valid {
 		t := lease.Time.UTC()
 		r.LeaseExpiresAt = &t
+	}
+	if outputSchema.Valid {
+		r.OutputSchema = outputSchema.String
 	}
 	if len(input) > 0 {
 		r.Input = append(json.RawMessage(nil), input...)
@@ -584,6 +591,14 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC()
+}
+
+// nullableString maps an empty string to SQL NULL (preserving the convention that "" means absent).
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // marshalAction serialises the optional pending action (nil → NULL column).

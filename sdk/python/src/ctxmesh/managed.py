@@ -36,14 +36,23 @@ import contextvars
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from ctxmesh._approval import approval_scope
+import jsonschema
+
+from ctxmesh._approval import approval_scope, pause_for_approval
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
-from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
+from ctxmesh.errors import (
+    ApprovalRequiredError,
+    ConfigError,
+    ConsentRequiredError,
+    EndpointError,
+)
 from ctxmesh.tools import DELEGATE_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
@@ -66,10 +75,26 @@ CONVERSATION_HEADER = "X-Conversation-Id"
 #: /invoke from the envelope; the loop relays it to memory writes so entries attribute to THIS hop.
 MESSAGE_HEADER = "X-Message-Id"
 
+#: X-Ctxmesh-Spawn-Depth (m65.6, ADR 0058) — the delegation depth stamped by the BFF on a
+#: delegated sub-run's inbound /invoke (internal/bff/invoke.go sets it via strconv.Itoa; the
+#: spawn-context propagates it). An integer > 0 means THIS run is a delegated sub-run of a
+#: supervisor; absent or "0" means a top-level run. The tool-use policy reads it to decide the
+#: require-approval branch: a top-level run can pause for human approval, a sub-run CANNOT
+#: (pausing a sub-run hangs the supervisor's synchronous await — fail-closed deny instead).
+SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth"
+
 #: The most recent conversation messages the loop replays as context on each turn.
 #: Bounds the prompt so a long chat can't grow the context without limit — older turns
 #: fall out of the window (the memory plane still retains the full history).
 MAX_HISTORY_MESSAGES = 40
+
+#: Bounded repair-retry count for structured-output schema conformance (m65.5).
+#: When the model returns a final answer that fails schema validation, the loop
+#: appends a corrective message and re-asks AT MOST this many times before
+#: returning the last (non-conforming) answer — the platform terminal validator
+#: (m65.4, server-side) is the authoritative backstop that will fail the run;
+#: the SDK's job is best-effort repair, not to raise or loop forever.
+_MAX_SCHEMA_REPAIR = 2
 
 
 def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
@@ -81,6 +106,23 @@ def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
 def _message_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
     """Pull the per-hop message id (X-Message-Id, m33.4) out of inbound headers, "" when absent."""
     return _header_value(headers, MESSAGE_HEADER)
+
+
+def _spawn_depth_from_headers(headers: Optional[Dict[str, str]]) -> int:
+    """Read the delegation depth (X-Ctxmesh-Spawn-Depth, m65.6) from inbound *headers*.
+
+    Returns the parsed integer when the header is present and numeric (the BFF stamps it via
+    ``strconv.Itoa``), else ``0`` — a top-level run has the header absent, blank, "0", or (a
+    corrupt value) unparseable, and ``0`` is the safe top-level reading in every one of those
+    cases. ``> 0`` marks this run as a delegated sub-run.
+    """
+    raw = _header_value(headers, SPAWN_DEPTH_HEADER)
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
 
 
 def mint_conversation_id() -> str:
@@ -100,6 +142,37 @@ def _header_value(headers: Optional[Dict[str, str]], name: str) -> str:
         if key.lower() == target:
             return (value or "").strip()
     return ""
+
+
+def _parse_runtime_env() -> Dict[str, Any]:
+    """Parse the controller-injected ``AGENT_RUNTIME`` env var (m65.5, ADR 0058).
+
+    Returns the decoded JSON object when the env var is set and well-formed;
+    returns ``{}`` when absent/blank or on malformed JSON (log a WARNING in the
+    latter case — a bad env must never crash a pod).
+
+    **Extensibility note (m65.6/m65.7):** callers pull specific keys:
+    ``output_schema = runtime.get("outputSchema")`` here (m65.5),
+    ``runtime.get("toolPolicy")`` in m65.6, ``runtime.get("resilience")`` in m65.7.
+    The parse itself is centralised here — add a caller, not a new parse.
+    """
+    raw = os.environ.get("AGENT_RUNTIME", "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "AGENT_RUNTIME env var is not valid JSON (%s); structured-output schema ignored", exc
+        )
+        return {}
+    if not isinstance(parsed, dict):
+        _log.warning(
+            "AGENT_RUNTIME env var parsed to %r (expected a JSON object); ignoring",
+            type(parsed).__name__,
+        )
+        return {}
+    return parsed
 
 
 def _inject_agent_memory(
@@ -199,6 +272,47 @@ class ManagedConfig:
     agent_memory_top_k: int = 5
     agent_memory_threshold: float = 0.75
 
+    #: JSON Schema (as a Python dict) that the final answer MUST conform to (m65.5, ADR 0058).
+    #: When set, the loop injects ``response_format`` on every turn to steer the provider, then
+    #: validates the final answer and repairs up to :data:`_MAX_SCHEMA_REPAIR` times before
+    #: returning the last (possibly non-conforming) answer — the platform terminal validator
+    #: (m65.4) is the authoritative backstop. ``None`` (the default) leaves the loop unchanged.
+    output_schema: Optional[Dict[str, Any]] = None
+
+    #: Tool-use policy (m65.6, ADR 0058) — the ``AGENT_RUNTIME.toolPolicy`` object, shape:
+    #: ``{"default": "allow"|"deny"|"require-approval",
+    #:    "overrides": [{"name": str, "rule": <same choices>, "retryable": bool}],
+    #:    "forcedChoice": ""|"auto"|"required"|"<toolName>", "parallelLimit": int}``.
+    #: (``retryable`` is read by m65.7, not here.)
+    #: When set, :func:`run_managed_loop` enforces it in the managed loop: per-call rule
+    #: resolution (deny → honest denial to the model; require-approval → HITL pause when
+    #: top-level, fail-closed deny inside a delegated sub-run), a ``tool_choice`` from
+    #: ``forcedChoice`` on the model call, and a per-turn ``parallelLimit`` cap. ``None`` (the
+    #: default) leaves the loop byte-for-byte unchanged (all tools allowed, no forced choice,
+    #: no limit).
+    #:
+    #: **Honesty (not an unbypassable boundary).** These are managed-loop *authoring* controls:
+    #: they shape how the STOCK loop selects and dispatches tools. A custom agent that ignores
+    #: the SDK is not bound by them — the hard, unbypassable boundary stays the MCPToolBinding
+    #: set + the egress sidecar + on-behalf-of auth. This policy is defence-in-depth for the
+    #: managed image, not a security perimeter; do not treat it as one.
+    tool_policy: Optional[Dict[str, Any]] = None
+
+    #: Per-turn resilience (m65.7, ADR 0058) — the ``AGENT_RUNTIME.resilience`` object, shape:
+    #: ``{"modelCall": {"timeoutSeconds": int, "maxRetries": int},
+    #:    "toolCall": {"timeoutSeconds": int, "maxRetries": int,
+    #:                 "circuitBreaker": {"failureThreshold": int, "cooldownSeconds": int}}}``.
+    #: When set, :func:`run_managed_loop` applies, per turn: a model-call timeout + bounded
+    #: retry (SAFE — just tokens — so on by default when configured), a per-tool-call timeout +
+    #: **idempotency-aware** retry (OPT-IN: a tool is retried ONLY when its policy override marks
+    #: it ``retryable: true`` — blindly retrying a side-effecting tool double-executes; there is
+    #: no manifest idempotency marker, so default is OFF), and a per-run, per-tool in-process
+    #: circuit breaker. Inside a delegated sub-run (spawn_depth > 0) retry counts are capped to
+    #: ``min(configured, 1)`` so a retry storm can't amplify M64's parked-worker limit. ``None``
+    #: (the default) leaves the loop byte-for-byte unchanged: today's 60s model / 30s tool
+    #: timeouts, no retry, no breaker.
+    resilience: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_env(cls) -> "ManagedConfig":
         """Build a ManagedConfig from the launcher-injected environment (config → behaviour).
@@ -227,10 +341,42 @@ class ManagedConfig:
         if max_steps < 1:
             _log.warning("MAX_STEPS=%d is < 1; using the default %d", max_steps, DEFAULT_MAX_STEPS)
             max_steps = DEFAULT_MAX_STEPS
+        # Parse the controller-injected AGENT_RUNTIME once; pull keys by spec below.
+        # m65.7 will read runtime.get("resilience").
+        runtime = _parse_runtime_env()
+        output_schema: Optional[Dict[str, Any]] = runtime.get("outputSchema")
+        # Guard: only accept a dict (a non-dict value in the JSON is a misconfig).
+        if output_schema is not None and not isinstance(output_schema, dict):
+            _log.warning(
+                "AGENT_RUNTIME.outputSchema is not a JSON object (%r); ignoring",
+                type(output_schema).__name__,
+            )
+            output_schema = None
+        # Tool-use policy (m65.6). Same type-guard: a non-dict value is a misconfig → None,
+        # which leaves the loop unchanged.
+        tool_policy: Optional[Dict[str, Any]] = runtime.get("toolPolicy")
+        if tool_policy is not None and not isinstance(tool_policy, dict):
+            _log.warning(
+                "AGENT_RUNTIME.toolPolicy is not a JSON object (%r); ignoring",
+                type(tool_policy).__name__,
+            )
+            tool_policy = None
+        # Per-turn resilience (m65.7). Same type-guard: a non-dict value is a misconfig → None,
+        # which leaves the loop byte-for-byte unchanged.
+        resilience: Optional[Dict[str, Any]] = runtime.get("resilience")
+        if resilience is not None and not isinstance(resilience, dict):
+            _log.warning(
+                "AGENT_RUNTIME.resilience is not a JSON object (%r); ignoring",
+                type(resilience).__name__,
+            )
+            resilience = None
         return cls(
             system_prompt=_load_system_prompt_from_env(),
             model_route=os.environ.get("MODEL_ROUTE", ""),
             max_steps=max_steps,
+            output_schema=output_schema,
+            tool_policy=tool_policy,
+            resilience=resilience,
         )
 
 
@@ -413,6 +559,15 @@ def run_managed_loop(
     # Per-hop message id (m33.4): when this turn was reached via A2A, the launcher stamped the hop's
     # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
     message_id = _message_id_from_headers(headers)
+    # Delegation depth (m65.6): computed ONCE per run from the inbound headers and threaded into
+    # the loop so the tool-use policy's require-approval branch can tell a top-level run (may pause
+    # for human approval) from a delegated sub-run (must fail-closed deny — a pause hangs the
+    # supervisor's synchronous await).
+    spawn_depth = _spawn_depth_from_headers(headers)
+    # Per-run tool circuit breaker (m65.7): a FRESH registry per run — one run's tool
+    # failures never trip another run's calls (per-run scope is the M65 choice; fleet-wide
+    # coordination is the m52.J2 deferral). None when no breaker is configured (unchanged).
+    breaker = _make_breaker(config.resilience)
     threaded = bool(conversation_id) and client.config.memory_wired
     history = (
         _load_history(client, conversation_id, config.max_history_messages) if threaded else []
@@ -460,6 +615,8 @@ def run_managed_loop(
                 threaded,
                 user_input,
                 message_id,
+                spawn_depth,
+                breaker,
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -540,6 +697,341 @@ def _dispatch_delegate_batch(client: Client, calls: List[tuple], step: str) -> D
     return results
 
 
+def _validate_against_schema(text: str, schema: Dict[str, Any]) -> Optional[str]:
+    """Validate *text* as JSON conforming to *schema* (m65.5, ADR 0058).
+
+    Returns ``None`` when the text is valid JSON that conforms to *schema*.
+    Returns a short human-readable error string otherwise (for the corrective
+    message sent to the model).  Never raises — validation errors are data, not
+    exceptions in this context.
+    """
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return f"response is not valid JSON: {exc}"
+    try:
+        jsonschema.validate(instance=value, schema=schema)
+    except jsonschema.ValidationError as exc:
+        # exc.message is the schema-violation description; keep it short.
+        return exc.message
+    return None
+
+
+def _resolve_tool_rule(tool_policy: Dict[str, Any], name: str) -> str:
+    """Resolve the effective policy rule for tool *name* (m65.6, ADR 0058).
+
+    An override that names this tool wins; otherwise the policy ``default`` applies (itself
+    defaulting to ``"allow"`` when absent). An override with a non-string / unrecognised
+    ``rule`` is ignored in favour of the default — a corrupt override must never silently
+    widen access. ``overrides`` that isn't a list, or entries that aren't dicts, are skipped.
+    """
+    valid = ("allow", "deny", "require-approval")
+    overrides = tool_policy.get("overrides")
+    if isinstance(overrides, list):
+        for entry in overrides:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                rule = entry.get("rule")
+                if isinstance(rule, str) and rule in valid:
+                    return rule
+                # A named-but-malformed override falls through to the default (fail to the
+                # policy's baseline, not to a silent allow).
+                break
+    default = tool_policy.get("default", "allow")
+    return default if isinstance(default, str) and default in valid else "allow"
+
+
+def _forced_tool_choice(tool_policy: Dict[str, Any]) -> Optional[Any]:
+    """Translate ``toolPolicy.forcedChoice`` into an OpenAI ``tool_choice`` value (m65.6).
+
+    ``""`` (or absent / a non-string) → ``None`` (leave ``tool_choice`` unset = provider auto).
+    ``"auto"`` → ``"auto"``; ``"required"`` → ``"required"``; any other string is treated as a
+    TOOL NAME → ``{"type": "function", "function": {"name": <value>}}`` (force that one tool).
+    """
+    forced = tool_policy.get("forcedChoice")
+    if not isinstance(forced, str) or forced == "":
+        return None
+    if forced in ("auto", "required"):
+        return forced
+    return {"type": "function", "function": {"name": forced}}
+
+
+def _parallel_limit(tool_policy: Dict[str, Any]) -> int:
+    """Return ``toolPolicy.parallelLimit`` as a positive int cap, or ``0`` for unlimited (m65.6).
+
+    A non-int, or a value ``<= 0``, means "no cap" (today's behaviour): the loop executes every
+    tool call the model returns in a turn.
+    """
+    limit = tool_policy.get("parallelLimit")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return 0
+    return limit
+
+
+# ── Per-turn resilience (m65.7, ADR 0058) ──────────────────────────────────────
+#
+# Retries here are IDEMPOTENCY-AWARE BY DESIGN — the load-bearing safety rule.
+# Model-call retries are safe (a re-ask just re-spends tokens with no external side
+# effect) so they are ON whenever resilience.modelCall is configured. Tool-call
+# retries are the dangerous case: an MCP tool ("send email", "charge card") has a
+# real side effect, the manifest carries NO idempotency/read-only marker we could
+# key on (code-verified), and M32.3 gives at-least-once delivery — so a blind retry
+# would DOUBLE-EXECUTE the side effect. Therefore a tool is retried ONLY when its
+# policy override explicitly declares ``retryable: true`` (see _tool_retryable);
+# absent that marker the default is a single attempt, no retry. Do not "helpfully"
+# relax this gate — it is the whole safety argument.
+
+#: Backoff cap (seconds) for the bounded exponential between retry attempts. Small —
+#: a managed turn must stay responsive; the retry is for a transient blip, not an outage.
+_RETRY_BACKOFF_CAP = 2.0
+
+#: Base backoff (seconds); attempt N (1-indexed extra attempt) waits min(cap, base * 2**(N-1)).
+_RETRY_BACKOFF_BASE = 0.1
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    """Bounded capped-exponential backoff for retry *attempt* (1 = first retry).
+
+    Kept tiny and capped so a burst of transient failures can't stall a turn. Tests
+    monkeypatch :func:`time.sleep` to zero so the suite stays fast regardless.
+    """
+    if attempt < 1:
+        return 0.0
+    return min(_RETRY_BACKOFF_CAP, _RETRY_BACKOFF_BASE * (2 ** (attempt - 1)))
+
+
+def _resilience_section(resilience: Optional[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+    """Return ``resilience[key]`` when it is a dict, else ``None`` (a missing/malformed
+    section means "no resilience for this call type" — today's behaviour)."""
+    if not isinstance(resilience, dict):
+        return None
+    section = resilience.get(key)
+    return section if isinstance(section, dict) else None
+
+
+def _positive_int(section: Dict[str, Any], key: str) -> int:
+    """Read a non-negative int config field; a bool / non-int / negative value → 0."""
+    value = section.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _effective_retries(configured: int, spawn_depth: int) -> int:
+    """Cap the retry budget to ``min(configured, 1)`` inside a delegated sub-run (m65.7).
+
+    A retry storm inside a synchronously-awaited sub-run amplifies M64's parked-worker
+    limit and multiplies spend through the budget proxy — so a sub-run gets at most ONE
+    retry regardless of the configured count. A top-level run uses the configured budget.
+    """
+    if configured <= 0:
+        return 0
+    return min(configured, 1) if spawn_depth > 0 else configured
+
+
+def _tool_retryable(tool_policy: Optional[Dict[str, Any]], name: str) -> bool:
+    """Resolve the per-tool ``retryable`` idempotency signal from the tool-policy overrides.
+
+    THE load-bearing safety gate: a tool is retryable ONLY when an override names it AND
+    sets ``retryable: true`` (a real ``True``, not a truthy string). Missing policy, no
+    matching override, or any non-True value → ``False`` — a non-idempotent tool is NEVER
+    retried, because a blind retry would double-execute its side effect and there is no
+    manifest idempotency marker to infer safety from (ADR 0058)."""
+    if not isinstance(tool_policy, dict):
+        return False
+    overrides = tool_policy.get("overrides")
+    if not isinstance(overrides, list):
+        return False
+    for entry in overrides:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            return entry.get("retryable") is True
+    return False
+
+
+class _CircuitBreaker:
+    """A per-run, per-tool in-process circuit breaker (m65.7, ADR 0058).
+
+    Scope is deliberately PER-RUN: a fresh registry is created in
+    :func:`run_managed_loop` and threaded into the loop, so one run's tool failures
+    never trip another run's calls. (Coordinated/per-pod fleet-wide breaking is the
+    conscious deferral m52.J2 — do NOT build shared state here.) It is a health
+    heuristic, not a global safety ceiling.
+
+    State machine per tool:
+      * **closed** — normal. Consecutive failures are counted; a success resets the
+        count to 0. At ``failure_threshold`` consecutive failures → **open**.
+      * **open** — every call short-circuits (no dispatch) until ``open_until``. After
+        the cooldown elapses the next call is admitted as a **half-open** probe.
+      * **half-open** — ONE probe is allowed through: success → closed (count reset),
+        failure → re-open (a fresh cooldown).
+
+    The registry is guarded by a lock because the M64 concurrent-delegate pool can
+    touch it from worker threads; the per-tool state transitions are done under it.
+    """
+
+    def __init__(self, failure_threshold: int, cooldown_seconds: float) -> None:
+        self._threshold = failure_threshold
+        self._cooldown = cooldown_seconds
+        self._lock = threading.Lock()
+        # name -> {"failures": int, "open_until": Optional[float]}
+        self._state: Dict[str, Dict[str, Any]] = {}
+
+    def _entry(self, name: str) -> Dict[str, Any]:
+        return self._state.setdefault(name, {"failures": 0, "open_until": None})
+
+    def allow(self, name: str) -> bool:
+        """Return True if a call to *name* may be dispatched now (closed or half-open probe);
+        False if the breaker is open and still cooling down (short-circuit)."""
+        # A non-positive threshold means "breaker disabled" — always allow.
+        if self._threshold <= 0:
+            return True
+        with self._lock:
+            entry = self._entry(name)
+            open_until = entry["open_until"]
+            # None → closed (allow). Cooldown elapsed → allow ONE half-open probe (leave
+            # open_until set so a concurrent second caller still short-circuits until the probe
+            # resolves). Still cooling down → short-circuit (deny).
+            return open_until is None or time.monotonic() >= open_until
+
+    def record_success(self, name: str) -> None:
+        """A successful call: reset to closed (count 0, not open)."""
+        if self._threshold <= 0:
+            return
+        with self._lock:
+            entry = self._entry(name)
+            entry["failures"] = 0
+            entry["open_until"] = None
+
+    def record_failure(self, name: str) -> None:
+        """A failed call: increment consecutive failures; open (or re-open) at the threshold."""
+        if self._threshold <= 0:
+            return
+        with self._lock:
+            entry = self._entry(name)
+            entry["failures"] += 1
+            if entry["failures"] >= self._threshold:
+                entry["open_until"] = time.monotonic() + self._cooldown
+
+
+def _make_breaker(resilience: Optional[Dict[str, Any]]) -> Optional[_CircuitBreaker]:
+    """Build the per-run tool circuit breaker from ``resilience.toolCall.circuitBreaker``.
+
+    Returns ``None`` when resilience/toolCall/circuitBreaker is absent or the threshold is
+    not a positive int — then the loop dispatches with no breaker (today's behaviour)."""
+    tool_call = _resilience_section(resilience, "toolCall")
+    if tool_call is None:
+        return None
+    cb = tool_call.get("circuitBreaker")
+    if not isinstance(cb, dict):
+        return None
+    threshold = _positive_int(cb, "failureThreshold")
+    if threshold <= 0:
+        return None
+    cooldown = _positive_int(cb, "cooldownSeconds")
+    return _CircuitBreaker(threshold, float(cooldown))
+
+
+def _chat_with_resilience(
+    client: Client,
+    config: ManagedConfig,
+    route: str,
+    messages: List[Dict[str, Any]],
+    chat_opts: Dict[str, Any],
+    on_token: Optional[Callable[[str], None]],
+    spawn_depth: int,
+) -> Any:
+    """Run one model turn with model-call resilience (m65.7): timeout + bounded retry.
+
+    Model retries are SAFE (a re-ask only re-spends tokens) → ON by default whenever
+    ``resilience.modelCall`` is configured. ``timeoutSeconds > 0`` sets ``chat_opts["timeout"]``.
+    On an :class:`EndpointError` (gateway/timeout failure) the call is retried up to the
+    effective budget (``maxRetries``, capped to 1 inside a sub-run) with a small bounded
+    backoff; after the budget is exhausted the error is re-raised so the loop surfaces an
+    honest failure rather than a fabricated answer."""
+    model_call = _resilience_section(config.resilience, "modelCall")
+    if model_call is not None:
+        timeout_seconds = _positive_int(model_call, "timeoutSeconds")
+        if timeout_seconds > 0:
+            chat_opts["timeout"] = timeout_seconds
+        retries = _effective_retries(_positive_int(model_call, "maxRetries"), spawn_depth)
+    else:
+        retries = 0
+
+    attempt = 0
+    while True:
+        try:
+            if on_token is not None:
+                return _stream_turn(client, route, messages, chat_opts, on_token)
+            return client.model.chat(route, messages, **chat_opts)
+        except EndpointError:
+            if attempt >= retries:
+                raise  # budget exhausted → honest failure, never a fabricated answer.
+            attempt += 1
+            time.sleep(_retry_backoff_seconds(attempt))
+
+
+def _call_tool_with_resilience(
+    client: Client,
+    config: ManagedConfig,
+    name: str,
+    args: Dict[str, Any],
+    breaker: Optional[_CircuitBreaker],
+    spawn_depth: int,
+) -> Any:
+    """Dispatch one MCP tool with tool-call resilience (m65.7): timeout + idempotency-aware
+    retry, under the per-run circuit breaker.
+
+    Retry is OPT-IN and idempotency-gated: a tool is retried only when BOTH the configured
+    ``toolCall.maxRetries > 0`` AND the tool's policy override marks it ``retryable: true``.
+    A tool without that explicit marker is dispatched EXACTLY ONCE — a blind retry of a
+    non-idempotent tool ("send email") double-executes its side effect, and the manifest
+    carries no idempotency marker to infer safety from (ADR 0058). Each failed attempt is
+    recorded on the breaker; a success resets it. Raises :class:`_CircuitOpenError` when the
+    breaker is open (the caller threads an honest "circuit open" tool result to the model)."""
+    tool_call = _resilience_section(config.resilience, "toolCall")
+    call_kwargs: Dict[str, Any] = dict(args)
+    retries = 0
+    if tool_call is not None:
+        timeout_seconds = _positive_int(tool_call, "timeoutSeconds")
+        if timeout_seconds > 0:
+            call_kwargs["timeout"] = timeout_seconds
+        # Retry ONLY when configured AND this tool is explicitly retryable (idempotent).
+        if _tool_retryable(config.tool_policy, name):
+            retries = _effective_retries(_positive_int(tool_call, "maxRetries"), spawn_depth)
+
+    attempt = 0
+    while True:
+        if breaker is not None and not breaker.allow(name):
+            raise _CircuitOpenError(name)
+        try:
+            result = client.tools.call(name, **call_kwargs)
+        except ConsentRequiredError:
+            # Consent-required is a user-action outcome, NOT a transient fault: it must not
+            # count toward the breaker or be retried — surface it to the existing handler.
+            raise
+        except EndpointError:
+            if breaker is not None:
+                breaker.record_failure(name)
+            if attempt >= retries:
+                raise
+            attempt += 1
+            time.sleep(_retry_backoff_seconds(attempt))
+            continue
+        if breaker is not None:
+            breaker.record_success(name)
+        return result
+
+
+class _CircuitOpenError(Exception):
+    """Raised inside the tool dispatch when the per-run breaker is open for a tool (m65.7).
+
+    Caught in the loop and turned into an honest ``"circuit open for tool '<name>'"`` tool
+    result the model sees (mirroring the m65.6 blocked-message threading) — never propagated."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"circuit open for tool {name!r}")
+        self.tool_name = name
+
+
 def _drive_loop(
     client: Client,
     config: ManagedConfig,
@@ -554,25 +1046,90 @@ def _drive_loop(
     threaded: bool,
     user_input: str,
     message_id: str = "",
+    spawn_depth: int = 0,
+    breaker: Optional["_CircuitBreaker"] = None,
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
+    # Structured-output repair counter (m65.5): counts corrective re-asks after a
+    # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
+    # the max_steps budget so repair turns have a clear, explicit allowance of their own.
+    schema_repairs = 0
+
     for step in range(1, config.max_steps + 1):
         with client.trace.step(f"turn-{step}") as turn:
             # model.chat emits its own LLM span nested under this step.
             chat_opts: Dict[str, Any] = dict(config.model_opts)
             if tool_schemas:
                 chat_opts["tools"] = tool_schemas
-            # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
-            # push content deltas to on_token as they arrive, then take the assembled response
-            # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
-            if on_token is not None:
-                resp = _stream_turn(client, config.model_route, messages, chat_opts, on_token)
-            else:
-                resp = client.model.chat(config.model_route, messages, **chat_opts)
+            # Structured outputs (m65.5, ADR 0058): steer the provider via response_format
+            # on EVERY turn when an output schema is set. strict=False because arbitrary
+            # operator schemas may not meet a provider's strict subset; enforcement is our
+            # validation layer (m65.4 server-side + the in-loop repair below).
+            if config.output_schema is not None:
+                chat_opts["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "output",
+                        "schema": config.output_schema,
+                        "strict": False,
+                    },
+                }
+            # Tool-use policy (m65.6, ADR 0058): steer which tool the model may pick via
+            # forcedChoice → OpenAI tool_choice. Only when a policy is set AND it resolves to
+            # a value (""/absent leaves it unset = provider auto, today's behaviour). This is
+            # an authoring control on the STOCK loop, not an unbypassable boundary.
+            if config.tool_policy is not None:
+                tool_choice = _forced_tool_choice(config.tool_policy)
+                if tool_choice is not None:
+                    chat_opts["tool_choice"] = tool_choice
+            # Per-turn model-call resilience (m65.7, ADR 0058): timeout + bounded retry
+            # around the chat call — SAFE by default because a re-ask only re-spends tokens
+            # (no external side effect). Streams when a token sink is wired (the m32.7
+            # /invoke). When resilience.modelCall is None this is exactly the old call: one
+            # attempt, the historical 60s timeout, no retry.
+            resp = _chat_with_resilience(
+                client, config, config.model_route, messages, chat_opts, on_token, spawn_depth
+            )
 
             if not resp.has_tool_calls:
                 # The model stopped calling tools → this is the final answer.
+                # Structured-output schema validation + bounded repair (m65.5, ADR 0058).
+                if config.output_schema is not None:
+                    error = _validate_against_schema(resp.text, config.output_schema)
+                    if error is not None and schema_repairs < _MAX_SCHEMA_REPAIR:
+                        # Schema violation: inject a corrective user message and re-ask.
+                        schema_repairs += 1
+                        _log.warning(
+                            "structured output schema violation (repair %d/%d): %s",
+                            schema_repairs,
+                            _MAX_SCHEMA_REPAIR,
+                            error,
+                        )
+                        messages.append({"role": "assistant", "content": resp.text or ""})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous response was not valid per the required "
+                                    f"JSON schema: {error}. Reply with ONLY a JSON value "
+                                    "that conforms to the schema."
+                                ),
+                            }
+                        )
+                        # Continue the outer loop — the next step re-asks the model.
+                        turn.set_output(f"schema-repair-{schema_repairs}: {error}")
+                        continue
+                    # Either conforms or repair budget exhausted: return the best answer.
+                    # When the budget is exhausted the platform terminal validator (m65.4)
+                    # is the authoritative backstop; the SDK must not raise here.
+                    if error is not None:
+                        _log.warning(
+                            "structured output schema repair budget exhausted after %d attempts; "
+                            "returning last answer for platform validator (m65.4)",
+                            schema_repairs,
+                        )
+
                 turn.set_output(resp.text)
                 root.set_output(resp.text)
                 # Persist the clean user↔assistant exchange so the next turn in this
@@ -593,9 +1150,58 @@ def _drive_loop(
             messages.append(_assistant_message_for_history(resp))
             turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
 
+            # Tool-use policy pre-pass (m65.6, ADR 0058): resolve, PER CALL and BEFORE any
+            # dispatch, whether each tool call is executed or short-circuited with honest tool
+            # text the model sees. blocked[call_id] holds that text for a short-circuited call;
+            # a call absent from blocked is dispatched normally. When tool_policy is None this
+            # pass makes NO decisions (blocked stays empty) → behaviour is byte-for-byte unchanged.
+            #
+            #   * deny            → honest "not permitted by policy" (never dispatched)
+            #   * require-approval, sub-run (spawn_depth > 0) → FAIL-CLOSED deny with honest
+            #     text (pausing a sub-run hangs the supervisor's synchronous await — ADR 0058)
+            #   * require-approval, top-level → pause_for_approval; if unapproved it RAISES here,
+            #     before any dispatch, and the outer handler surfaces approval_required
+            #   * parallelLimit L → the first L calls execute; each excess call is skipped with
+            #     honest text so the model can re-request it next turn
+            blocked: Dict[str, str] = {}
+            if config.tool_policy is not None:
+                limit = _parallel_limit(config.tool_policy)
+                dispatched_count = 0
+                for call in resp.tool_calls:
+                    name = _call_name(call)
+                    call_id = call.get("id", "")
+                    # Unknown tools are handled by the existing not-bound branch below; leave the
+                    # policy pass to bound tools so an unbound name still gets its own honest error.
+                    rule = _resolve_tool_rule(config.tool_policy, name)
+                    if rule == "deny":
+                        blocked[call_id] = f"tool {name!r} is not permitted by policy"
+                        continue
+                    if rule == "require-approval":
+                        if spawn_depth > 0:
+                            # ADR 0058 fifth-issue fail-closed rule: a delegated sub-run cannot
+                            # pause for human approval (the pause is invisible to the human and
+                            # hangs the awaiting supervisor). Deny honestly instead of pausing.
+                            blocked[call_id] = (
+                                f"tool {name!r} requires human approval and cannot be used "
+                                "inside a delegated sub-run"
+                            )
+                            continue
+                        # Top-level run: gate on human approval. An unapproved key raises
+                        # ApprovalRequiredError here (before any dispatch) — do NOT swallow it;
+                        # the outer run_managed_loop handler turns it into approval_required.
+                        args = _parse_arguments(_call_arguments(call))
+                        pause_for_approval(f"tool:{name}", f"Run tool {name!r} with args {args!r}?")
+                    # allow (or an approved require-approval) counts toward the parallel limit.
+                    if limit and dispatched_count >= limit:
+                        blocked[call_id] = f"skipped: exceeds the tool parallel-limit of {limit}"
+                        continue
+                    dispatched_count += 1
+
             # v1b fan-out (M64, ADR 0057): run THIS turn's delegate_to calls CONCURRENTLY (the spawn
             # guard bounds the width; the rest come back denied fail-closed). Pre-compute results,
             # then thread them into the append loop below in the model's original tool-call order.
+            # A delegate call the policy pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED
+            # here so it is never dispatched — its honest text is threaded from `blocked` below.
             delegate_calls = [
                 (
                     c.get("id", ""),
@@ -603,7 +1209,7 @@ def _drive_loop(
                     str(_parse_arguments(_call_arguments(c)).get("task", "")),
                 )
                 for c in resp.tool_calls
-                if _call_name(c) == DELEGATE_TOOL_NAME
+                if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
             ]
             delegate_results = (
                 _dispatch_delegate_batch(client, delegate_calls, str(step))
@@ -616,7 +1222,12 @@ def _drive_loop(
                 args = _parse_arguments(_call_arguments(call))
                 call_id = call.get("id", "")
 
-                if name not in tool_names:
+                if call_id in blocked:
+                    # Tool-use policy short-circuited this call (deny / sub-run-deny / skipped).
+                    # Return the honest policy text as the tool result so the model can adapt;
+                    # the tool was NOT dispatched, so tools_called does not record it as executed.
+                    content = blocked[call_id]
+                elif name not in tool_names:
                     # A tool the agent is not bound to — surface it as the
                     # tool result so the model can recover, rather than
                     # crashing the run on a hallucinated tool name.
@@ -629,10 +1240,34 @@ def _drive_loop(
                 else:
                     try:
                         with client.trace.tool(name, input=args) as tool_span:
-                            result = client.tools.call(name, **args)
+                            # Per-turn tool-call resilience (m65.7, ADR 0058): timeout +
+                            # IDEMPOTENCY-AWARE retry under the per-run breaker. A tool is
+                            # retried only when it is explicitly retryable (see
+                            # _call_tool_with_resilience) — a non-idempotent tool is dispatched
+                            # exactly once. When resilience.toolCall is None this is exactly the
+                            # old call: client.tools.call(name, **args), 30s timeout, no retry.
+                            result = _call_tool_with_resilience(
+                                client, config, name, args, breaker, spawn_depth
+                            )
                             tool_span.set_output(result)
                         content = _tool_result_content(result)
                         tools_called.append(name)
+                    except _CircuitOpenError:
+                        # The per-run breaker is open for this tool: short-circuit WITHOUT
+                        # dispatching and thread an honest "circuit open" result so the model
+                        # can adapt (mirrors the m65.6 blocked-message threading). The tool was
+                        # NOT executed, so tools_called does not record it.
+                        content = f"circuit open for tool {name!r}: too many recent failures"
+                    except EndpointError as exc:
+                        # A tool dispatch failed (after any retries + a recorded breaker
+                        # failure). WITH tool-call resilience configured, we thread the failure
+                        # back as an honest tool-error result so the run continues — this is what
+                        # lets the per-run breaker accumulate consecutive failures across turns
+                        # and eventually OPEN. WITHOUT resilience the historical behaviour is
+                        # preserved exactly: the error propagates and ends the run (no swallow).
+                        if _resilience_section(config.resilience, "toolCall") is None:
+                            raise
+                        content = f"tool {name!r} failed: {exc}"
                     except ConsentRequiredError as exc:
                         # The invoking user has not connected their account to this MCP
                         # server (ADR 0029 §2). Record it for the run's "Connect your

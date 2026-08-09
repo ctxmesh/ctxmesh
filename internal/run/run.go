@@ -167,6 +167,10 @@ type Run struct {
 	// the lease so a dead worker's run can be reclaimed and resumed (m32.3).
 	WorkerID       string     `json:"-"`
 	LeaseExpiresAt *time.Time `json:"-"`
+	// OutputSchema is the agent's spec.runtime.outputSchema, pinned at create time (raw JSON Schema
+	// text). m65.4 validates the run's terminal answer against it. Empty ⇒ no schema, no validation.
+	// Pinned so an operator editing the schema mid-run does not retroactively change validation.
+	OutputSchema string `json:"-"`
 }
 
 // ActionKind classifies what a requires_action run is waiting on.

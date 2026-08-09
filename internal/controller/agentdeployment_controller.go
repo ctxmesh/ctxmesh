@@ -743,6 +743,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
 	)
 
+	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
+	// RuntimeSpec as JSON and inject it as AGENT_RUNTIME — a STATIC platform env var
+	// (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses it at startup.
+	// Injected before spec.env, which is appended last; by the platform convention a
+	// user's spec.env may override a platform default (K8s uses the last value for a
+	// duplicate name). That's harmless here — the authoritative output-schema validator
+	// reads spec.runtime from the CRD (m65.4), not this env var. When nil, inject
+	// nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
+	if deploy.Spec.Runtime != nil {
+		rtBytes, err := json.Marshal(deploy.Spec.Runtime)
+		if err != nil {
+			return podTemplate{}, fmt.Errorf("marshaling spec.runtime: %w", err)
+		}
+		env = append(env, corev1.EnvVar{Name: "AGENT_RUNTIME", Value: string(rtBytes)})
+	}
+
 	env = append(env, deploy.Spec.Env...)
 
 	// AGENT_NAME + POD_NAMESPACE identify the agent to the launcher's tracing:
@@ -1239,7 +1255,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// The proxy URL is injected for a memory binding (M51) OR tenant quota + token (M53);
 	// fold it into the digest so enabling/changing it rolls a new revision (M4 landmine).
 	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken)
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig)
+	// Runtime config (M65): a spec.runtime add/remove/change injects/removes the
+	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
+	// folds into the combined digest like the other components.
+	runtimeDig := runtimeDigest(deploy.Spec.Runtime)
+	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1696,14 +1716,15 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
 func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest,
-	proxyDigest string,
+	proxyDigest, runtimeDigest string,
 ) string {
 	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
-		tenantDigest == "" && proxyDigest == "" {
+		tenantDigest == "" && proxyDigest == "" && runtimeDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
-		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest))
+		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest +
+		";rt=" + runtimeDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -1780,6 +1801,29 @@ func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
 	payload := fmt.Sprintf("conv=%s;agent=%s;soft=%d",
 		b.PerConversationUSD, b.PerAgentUSD, budgetSoftPct(b))
 	h := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// runtimeDigest returns a short hash capturing the agent's runtime config as it
+// affects the pod template: whether spec.runtime is set and its marshaled JSON
+// content (→ injected AGENT_RUNTIME env). It is one COMPONENT of
+// combinedBindingDigest so a runtime add/remove/change rolls a new revision —
+// the env change must actually land, and the CreateOrUpdate guard skips
+// re-applying the spec when the revision name is unchanged (the M4
+// silent-loss landmine). Returns "" when spec.runtime is nil (symmetric with
+// the other components, backward-compatible: pre-M65 revision names unchanged).
+func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
+	if rt == nil {
+		return ""
+	}
+	b, err := json.Marshal(rt)
+	if err != nil {
+		// Marshal of a well-typed struct should never fail; treat as empty to
+		// avoid a silent break in the digest path (the injection path returns
+		// the error explicitly, so it will surface before the digest is used).
+		return ""
+	}
+	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

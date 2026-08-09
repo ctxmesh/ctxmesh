@@ -312,13 +312,11 @@ type InvokeErrorResponse struct {
 	TraceID string `json:"traceId"`
 }
 
-// resolveAgentEndpoint reads the named AgentDeployment through the CALLER-SCOPED
-// client and returns its status.url (the base for /invoke). It writes the right
-// error response and returns ok=false on any failure: a K8s Forbidden → 403 (the
-// caller may not read the agent), not-found → 404, and an agent with no url yet
-// (not Ready / no assigned endpoint) → 409. The caller's RBAC — not the BFF — is
-// what gates this read (ADR 0011).
-func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, caller client.Client, name, namespace string) (string, bool) {
+// resolveAgent reads the named AgentDeployment through the CALLER-SCOPED client and returns the
+// resolved deployment + its status.url. It writes the right error response and returns ok=false on
+// any failure: a K8s Forbidden → 403, not-found → 404, and an agent with no url yet → 409.
+// The caller's RBAC — not the BFF — gates this read (ADR 0011).
+func (s *Server) resolveAgent(w http.ResponseWriter, r *http.Request, caller client.Client, name, namespace string) (*agentsv1alpha1.AgentDeployment, string, bool) {
 	ns := namespace
 	if ns == "" {
 		ns = defaultCreateNamespace
@@ -337,7 +335,7 @@ func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, ca
 			s.log.Error(err, "resolve agent for invoke failed", "agent", name, "namespace", ns)
 			writeError(w, http.StatusInternalServerError, "failed to resolve agent")
 		}
-		return "", false
+		return nil, "", false
 	}
 
 	url := strings.TrimSpace(deploy.Status.URL)
@@ -349,14 +347,24 @@ func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, ca
 		if deploy.Spec.ExecutionModel == executionModelJob {
 			writeError(w, http.StatusConflict,
 				"this is a job agent (executionModel: job) — it runs as a one-shot Kubernetes Job, not a live endpoint, so it can't be invoked with a prompt here")
-			return "", false
+			return nil, "", false
 		}
 		// Otherwise the agent exists but has no assigned endpoint yet (not Ready). A run
 		// cannot be dispatched — surface it as a conflict, not a fake success.
 		writeError(w, http.StatusConflict, "agent is not ready (no endpoint assigned yet)")
-		return "", false
+		return nil, "", false
 	}
-	return url, true
+	return &deploy, url, true
+}
+
+// resolveAgentEndpoint reads the named AgentDeployment through the CALLER-SCOPED client and returns
+// its status.url (the base for /invoke). It writes the right error response and returns ok=false on
+// any failure: a K8s Forbidden → 403 (the caller may not read the agent), not-found → 404, and an
+// agent with no url yet (not Ready / no assigned endpoint) → 409. The caller's RBAC — not the BFF
+// — is what gates this read (ADR 0011).
+func (s *Server) resolveAgentEndpoint(w http.ResponseWriter, r *http.Request, caller client.Client, name, namespace string) (string, bool) {
+	_, url, ok := s.resolveAgent(w, r, caller, name, namespace)
+	return url, ok
 }
 
 // executionModelJob is the AgentDeployment executionModel that runs as a one-shot
