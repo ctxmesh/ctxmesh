@@ -377,3 +377,48 @@ def test_managed_config_from_env_tool_policy_non_dict_ignored(monkeypatch, caplo
         cfg = ManagedConfig.from_env()
     assert cfg.tool_policy is None
     assert any("toolPolicy" in r.message for r in caplog.records)
+
+
+# ── ManagedConfig.from_env: AGENT_RUNTIME / resilience (m65.7, ADR 0058) ────────
+
+
+def test_managed_config_from_env_resilience_from_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME='{"resilience":{...}}' → from_env().resilience equals that object."""
+    resilience = {
+        "modelCall": {"timeoutSeconds": 20, "maxRetries": 2},
+        "toolCall": {
+            "timeoutSeconds": 15,
+            "maxRetries": 3,
+            "circuitBreaker": {"failureThreshold": 5, "cooldownSeconds": 30},
+        },
+    }
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"resilience": resilience}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience == resilience
+
+
+def test_managed_config_from_env_resilience_absent_when_no_agent_runtime(monkeypatch):
+    """AGENT_RUNTIME unset → from_env().resilience is None."""
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+
+
+def test_managed_config_from_env_resilience_no_key(monkeypatch):
+    """AGENT_RUNTIME set but no 'resilience' key → resilience is None."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"toolPolicy": {"default": "allow"}}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+
+
+def test_managed_config_from_env_resilience_non_dict_ignored(monkeypatch, caplog):
+    """A non-dict resilience is a misconfig → resilience is None + a WARNING (never a crash)."""
+    monkeypatch.setenv("AGENT_RUNTIME", json.dumps({"resilience": ["not", "a", "dict"]}))
+    monkeypatch.delenv("SYSTEM_PROMPT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="ctxmesh"):
+        cfg = ManagedConfig.from_env()
+    assert cfg.resilience is None
+    assert any("resilience" in r.message for r in caplog.records)

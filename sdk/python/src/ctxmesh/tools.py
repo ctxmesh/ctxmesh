@@ -251,7 +251,7 @@ class ToolsClient:
         raise ConfigError(f"tool {name!r} is not in the current manifest")
 
     # ── invocation ───────────────────────────────────────────────────────────
-    def call(self, name: str, **args: Any) -> Any:
+    def call(self, name: str, *, timeout: Optional[float] = None, **args: Any) -> Any:
         """Invoke a bound MCP tool by its *catalog* name; return its result.
 
         *name* is the discovery-manifest catalog key. The client resolves the
@@ -260,11 +260,18 @@ class ToolsClient:
         ``word-count`` vs ``word_count``) before issuing ``tools/call``. The
         tool's text result is returned parsed as JSON when it is a JSON document,
         else as the raw string.
+
+        *timeout* (m65.7, ADR 0058) is a keyword-only per-tool-call socket timeout
+        in seconds, plumbed to every MCP round-trip of this call; ``None`` (the
+        default) keeps the historical :data:`_TOOL_CALL_TIMEOUT`. The managed loop's
+        per-turn resilience (``ManagedConfig.resilience.toolCall.timeoutSeconds``)
+        supplies it. It is keyword-only so it can never collide with a tool
+        argument literally named ``timeout``.
         """
         tool = self._find(name)
         if not tool.endpoint:
             raise ConfigError(f"tool {name!r} has no endpoint in the manifest")
-        raw_text = _mcp_call_tool(tool.endpoint, name, args)
+        raw_text = _mcp_call_tool(tool.endpoint, name, args, timeout=timeout)
         try:
             return json.loads(raw_text)
         except (json.JSONDecodeError, TypeError):
@@ -358,15 +365,20 @@ def _mcp_post(
     session_id: Optional[str],
     *,
     expect_body: bool,
+    timeout: float = _TOOL_CALL_TIMEOUT,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """POST one JSON-RPC message; return (parsed-result, session-id-header)."""
+    """POST one JSON-RPC message; return (parsed-result, session-id-header).
+
+    *timeout* (m65.7) is the per-request socket timeout; it defaults to the
+    historical :data:`_TOOL_CALL_TIMEOUT` so an un-plumbed caller is unchanged.
+    """
     try:
         resp = _http.request(
             "POST",
             endpoint,
             body=_http.json_body(payload),
             headers=_mcp_headers(session_id),
-            timeout=_TOOL_CALL_TIMEOUT,
+            timeout=timeout,
             expect=(200, 202),
         )
     except EndpointError as exc:
@@ -406,13 +418,26 @@ def _parse_jsonrpc(resp: _http.Response) -> Dict[str, Any]:
         raise EndpointError(f"MCP response was not valid JSON: {exc}") from exc
 
 
-def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) -> str:
+def _mcp_call_tool(
+    endpoint: str,
+    catalog_name: str,
+    arguments: Dict[str, Any],
+    *,
+    timeout: Optional[float] = None,
+) -> str:
     """Full MCP session: handshake -> tools/list -> resolve name -> tools/call.
 
     *catalog_name* is the discovery-manifest key; the actual MCP tool name is
     discovered from the server and may differ (see the module docstring). Returns
     the first text content item of the tool result.
+
+    *timeout* (m65.7, ADR 0058) is the per-round-trip socket timeout applied to
+    every POST of this session; ``None`` keeps the historical
+    :data:`_TOOL_CALL_TIMEOUT` so an un-plumbed caller is byte-for-byte unchanged.
     """
+    call_timeout = (
+        timeout if isinstance(timeout, (int, float)) and timeout > 0 else _TOOL_CALL_TIMEOUT
+    )
     # 1. initialize.
     init_result, session_id = _mcp_post(
         endpoint,
@@ -428,6 +453,7 @@ def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) 
         },
         session_id=None,
         expect_body=True,
+        timeout=call_timeout,
     )
     _ = init_result  # negotiated capabilities unused for a single tools/call
 
@@ -437,6 +463,7 @@ def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) 
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         session_id=session_id,
         expect_body=False,
+        timeout=call_timeout,
     )
 
     # 3. tools/list -> discover the server's real tool names.
@@ -445,6 +472,7 @@ def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) 
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         session_id=session_id,
         expect_body=True,
+        timeout=call_timeout,
     )
     server_names = _server_tool_names(list_result, endpoint)
     mcp_name = _resolve_tool_name(catalog_name, server_names, endpoint)
@@ -460,6 +488,7 @@ def _mcp_call_tool(endpoint: str, catalog_name: str, arguments: Dict[str, Any]) 
         },
         session_id=session_id,
         expect_body=True,
+        timeout=call_timeout,
     )
 
     return _first_text_content(result, endpoint)
