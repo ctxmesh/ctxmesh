@@ -36,7 +36,35 @@
       "echo-abc123"
     ],
     "managedOutsideUI": false,
-    "drift": false
+    "drift": false,
+    "runtime": {
+      "outputSchemaSet": true,
+      "outputSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}",
+      "toolPolicy": {
+        "default": "allow",
+        "overrides": [
+          {
+            "name": "send_email",
+            "rule": "require-approval"
+          }
+        ],
+        "parallelLimit": 4
+      },
+      "resilience": {
+        "modelCall": {
+          "timeoutSeconds": 30,
+          "maxRetries": 2
+        },
+        "toolCall": {
+          "timeoutSeconds": 10,
+          "maxRetries": 1,
+          "circuitBreaker": {
+            "failureThreshold": 5,
+            "cooldownSeconds": 60
+          }
+        }
+      }
+    }
   },
   "ConnectProviderResponse": {
     "provider": {

@@ -1148,3 +1148,114 @@ describe("AgentDetailPage — Scaling panel (m17.11)", () => {
     expect(screen.queryByTestId("save-redaction")).toBeNull();
   });
 });
+
+// ── m65.9: Runtime section on the agent detail Overview tab ─────────────────
+// Tests that spec.runtime is surfaced as a read-only Runtime card:
+//   • Structured output indicator + collapsible schema
+//   • Tool policy: default rule, per-tool overrides (name → rule, retryable), parallelLimit, forcedChoice
+//   • Resilience: model retry/timeout, tool retry/timeout, circuit-breaker
+// And that when runtime is absent nothing new is rendered.
+describe("AgentDetailPage — Runtime section (m65.9)", () => {
+  const RUNTIME_DETAIL = {
+    ...DEFAULT_DETAIL,
+    runtime: {
+      outputSchemaSet: true,
+      outputSchema: JSON.stringify({ type: "object", properties: { answer: { type: "string" } } }),
+      toolPolicy: {
+        default: "allow",
+        overrides: [
+          { name: "send_email", rule: "require-approval", retryable: false },
+          { name: "read_file", rule: "allow", retryable: true },
+        ],
+        forcedChoice: "auto",
+        parallelLimit: 4,
+      },
+      resilience: {
+        modelCall: { timeoutSeconds: 30, maxRetries: 2 },
+        toolCall: {
+          timeoutSeconds: 10,
+          maxRetries: 1,
+          circuitBreaker: { failureThreshold: 5, cooldownSeconds: 60 },
+        },
+      },
+    },
+  };
+
+  it("renders the Runtime card with structured-output indicator when runtime is present", async () => {
+    installFetch({ detail: RUNTIME_DETAIL });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const section = screen.getByTestId("runtime-section");
+    expect(section).toBeInTheDocument();
+    // Structured output badge
+    expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
+  });
+
+  it("renders tool policy — default rule, overrides, parallelLimit, forcedChoice", async () => {
+    installFetch({ detail: RUNTIME_DETAIL });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const section = screen.getByTestId("runtime-tool-policy");
+    expect(section).toBeInTheDocument();
+    // parallelLimit
+    expect(section).toHaveTextContent("4 concurrent calls");
+    // forcedChoice
+    expect(section).toHaveTextContent("auto");
+    // Per-tool overrides
+    const overrides = screen.getByTestId("runtime-tool-overrides");
+    expect(overrides).toHaveTextContent("Per-tool overrides (2)");
+    // First override: send_email → require-approval
+    const sendEmail = screen.getByTestId("tool-override-send_email");
+    expect(sendEmail).toHaveTextContent("send_email");
+    expect(sendEmail).toHaveTextContent("require-approval");
+    // Second override: read_file → allow, retryable
+    const readFile = screen.getByTestId("tool-override-read_file");
+    expect(readFile).toHaveTextContent("read_file");
+    expect(readFile).toHaveTextContent("allow");
+    expect(readFile).toHaveTextContent("retryable");
+  });
+
+  it("renders resilience — model/tool retry+timeout, circuit-breaker", async () => {
+    installFetch({ detail: RUNTIME_DETAIL });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const section = screen.getByTestId("runtime-resilience");
+    expect(section).toBeInTheDocument();
+    // Model call
+    expect(section).toHaveTextContent("30s timeout");
+    expect(section).toHaveTextContent("2 retries");
+    // Tool call
+    expect(section).toHaveTextContent("10s timeout");
+    expect(section).toHaveTextContent("1 retries");
+    // Circuit breaker
+    const cb = screen.getByTestId("runtime-circuit-breaker");
+    expect(cb).toHaveTextContent("opens at 5 failures");
+    expect(cb).toHaveTextContent("60s cooldown");
+  });
+
+  it("schema is hidden by default and reveals on toggling the details summary", async () => {
+    installFetch({ detail: RUNTIME_DETAIL });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const details = screen.getByTestId("runtime-schema-details");
+    // <details> starts closed (no open attribute in the initial render for the
+    // React state which starts false, so the schema pre is not shown yet).
+    // After clicking the summary the schema becomes visible.
+    const summary = within(details).getByText("Show schema");
+    fireEvent.click(summary);
+    await waitFor(() =>
+      expect(screen.getByTestId("runtime-schema-details")).toHaveTextContent("answer"),
+    );
+  });
+
+  it("no Runtime section rendered when runtime is absent", async () => {
+    installFetch({ detail: DEFAULT_DETAIL }); // DEFAULT_DETAIL has no runtime field
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("runtime-section")).toBeNull();
+  });
+});
