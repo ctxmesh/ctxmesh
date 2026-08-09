@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterator, List
 
 from ctxmesh import _http, _semconv
 from ctxmesh.config import PlaneConfig
-from ctxmesh.errors import ConfigError, EndpointError
+from ctxmesh.errors import ConfigError, EndpointError, GuardrailBlockedError
 from ctxmesh.trace import TraceClient
 
 #: A model round-trip is a remote provider call — generous vs the localhost ops.
@@ -142,14 +142,24 @@ class ModelClient:
         # LLM span wraps the round-trip so it appears (and nests) exactly like an
         # auto-instrumented framework LLM span. Input is the messages list.
         with self._trace.llm(name=f"chat {model}", model=model, input=messages) as span:
-            resp = _http.request(
-                "POST",
-                f"{base_url}/chat/completions",
-                body=_http.json_body(payload),
-                headers=self._headers(),
-                timeout=timeout,
-                expect=(200,),
-            )
+            try:
+                resp = _http.request(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    body=_http.json_body(payload),
+                    headers=self._headers(),
+                    timeout=timeout,
+                    expect=(200,),
+                )
+            except EndpointError as exc:
+                # Detect a guardrail_blocked 403: the launcher's in-path guardrail
+                # proxy returns a typed 403 with {"error":{"type":"guardrail_blocked",
+                # "detector":"…","scan_point":"…"}} (m66.6, ADR 0059 §8). This is a
+                # terminal content-policy decision — re-raise as GuardrailBlockedError
+                # so the caller can distinguish it from a retryable EndpointError.
+                # All other statuses propagate as-is.
+                _raise_if_guardrail_blocked(exc)
+                raise
             data = resp.json()
             if not isinstance(data, dict):
                 raise EndpointError(
@@ -388,6 +398,41 @@ def _completion_text(data: Dict[str, Any]) -> str:
     if isinstance(first.get("text"), str):
         return first["text"]
     raise EndpointError("model gateway choice has no message content")
+
+
+def _raise_if_guardrail_blocked(exc: EndpointError) -> None:
+    """Inspect *exc* and, when it is a guardrail_blocked 403, raise :class:`GuardrailBlockedError`.
+
+    The launcher's guardrail proxy (M66, ADR 0059 §8) returns HTTP 403 with a typed body::
+
+        {"error": {"type": "guardrail_blocked", "detector": "…", "scan_point": "…"}}
+
+    ``guardrailBlockedType = "guardrail_blocked"`` is the stable contract string (see
+    guardrail.go); the SDK keys non-retryability on this exact value (m66.6). All other statuses
+    return without raising — the caller re-raises the original EndpointError.
+    """
+    if exc.status != 403 or not exc.body:
+        return
+    try:
+        data = json.loads(exc.body)
+    except (json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    err_obj = data.get("error")
+    if not isinstance(err_obj, dict):
+        return
+    if err_obj.get("type") != "guardrail_blocked":
+        return
+    detector = err_obj.get("detector", "")
+    scan_point = err_obj.get("scan_point", "")
+    raise GuardrailBlockedError(
+        f"blocked by guardrail policy: detector={detector!r} scan_point={scan_point!r}",
+        detector=detector,
+        scan_point=scan_point,
+        status=403,
+        body=exc.body,
+    ) from exc
 
 
 def _stamp_usage(span: Any, usage: Dict[str, Any]) -> None:

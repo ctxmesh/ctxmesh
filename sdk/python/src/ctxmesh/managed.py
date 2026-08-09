@@ -52,6 +52,7 @@ from ctxmesh.errors import (
     ConfigError,
     ConsentRequiredError,
     EndpointError,
+    GuardrailBlockedError,
 )
 from ctxmesh.tools import DELEGATE_TOOL_NAME
 
@@ -426,6 +427,11 @@ class ManagedResult:
     #: m32.4), ``{"key": ..., "summary": ...}`` describing what needs approving. ``None`` ⇒ the run
     #: did not pause for approval. Non-None ⇒ the BFF surfaces a ``requires_action`` (approval).
     approval_required: Optional[Dict[str, str]] = None
+    #: When a model call was blocked by the guardrail engine (m66.6, ADR 0059 §8),
+    #: ``{"detector": "…", "scan_point": "…"}`` naming the rule that refused the call.  ``None`` ⇒
+    #: no guardrail block occurred.  Non-None ⇒ the run failed on a content-policy decision (the
+    #: content was not retried — a guardrail_blocked 403 is terminal, not transient).
+    guardrail_blocked: Optional[Dict[str, str]] = None
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -629,6 +635,22 @@ def run_managed_loop(
                 tools_called=tools_called,
                 consent_required=consent_required,
                 approval_required={"key": exc.key, "summary": exc.summary},
+            )
+        except GuardrailBlockedError as exc:
+            # A model call was blocked by the launcher's guardrail engine (m66.6, ADR 0059
+            # §8). This is a terminal content-policy decision — surface it as an honest
+            # failure outcome rather than crashing the run. The guardrail_blocked result
+            # carries the detector + scan_point so the console can render a clear message;
+            # the model is never told to "retry" — the block is final and retrying burns
+            # budget (see _chat_with_resilience for why GuardrailBlockedError is not retried).
+            msg = f"blocked by guardrail policy: {exc.detector}"
+            root.set_output(msg)
+            return ManagedResult(
+                output=msg,
+                steps=step,
+                tools_called=tools_called,
+                consent_required=consent_required,
+                guardrail_blocked={"detector": exc.detector, "scan_point": exc.scan_point},
             )
 
 
@@ -962,6 +984,12 @@ def _chat_with_resilience(
             if on_token is not None:
                 return _stream_turn(client, route, messages, chat_opts, on_token)
             return client.model.chat(route, messages, **chat_opts)
+        except GuardrailBlockedError:
+            # A guardrail_blocked 403 is a terminal content-policy decision (m66.6,
+            # ADR 0059 §8): do NOT retry. Re-generating the same blocked content burns
+            # budget without changing the policy outcome. Propagate immediately so the
+            # managed loop can surface it as an honest terminal error.
+            raise
         except EndpointError:
             if attempt >= retries:
                 raise  # budget exhausted → honest failure, never a fabricated answer.

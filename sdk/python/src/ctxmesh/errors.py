@@ -63,6 +63,37 @@ class ConsentRequiredError(EndpointError):
         self.server = server
 
 
+class GuardrailBlockedError(EndpointError):
+    """A model call was refused by the launcher's in-path guardrail engine (M66, ADR 0059 §8).
+
+    The guardrail proxy returned HTTP 403 with ``{"error":{"type":"guardrail_blocked",
+    "detector":"…","scan_point":"…"}}``.  This is a **terminal content-policy decision**,
+    not a transient failure: the request was examined and refused on policy grounds, so it
+    MUST NOT be retried (re-generating blocked content burns budget without changing the
+    outcome).  The managed loop surfaces it as an honest run failure rather than crashing
+    or silently succeeding.
+
+    Attributes:
+        detector: the name of the guardrail rule (detector) that triggered the block.
+        scan_point: where the block originated — ``"input"``, ``"toolOutput"``, or
+            ``"output"``.
+        status: always 403 (inherited from :class:`EndpointError`).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        detector: str,
+        scan_point: str,
+        status: int = 403,
+        body: str | None = None,
+    ):
+        super().__init__(message, status=status, body=body)
+        self.detector = detector
+        self.scan_point = scan_point
+
+
 class ApprovalRequiredError(CtxmeshError):
     """A run reached a step gated on human approval (human-in-the-loop, ADR 0034 §HITL, m32.4).
 
