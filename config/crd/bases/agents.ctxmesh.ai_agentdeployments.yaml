@@ -368,6 +368,141 @@ spec:
                   free-form string). Ignored for non-members.
                 maxLength: 63
                 type: string
+              runtime:
+                description: |-
+                  runtime optionally configures runtime authoring primitives: structured
+                  output schemas, tool-use policies, and per-turn resilience settings.
+                  When omitted, the agent's current behaviour is preserved unchanged.
+                  This field is types-only in m65; injection by the managed loop is a
+                  subsequent task.
+                properties:
+                  outputSchema:
+                    description: |-
+                      outputSchema is a JSON Schema the agent's final answer must conform to.
+                      The value is stored verbatim (arbitrary JSON) and is not structurally validated
+                      by the CRD admission; it is passed to the platform at runtime.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  resilience:
+                    description: resilience optionally configures per-turn retry and
+                      circuit-breaker behaviour.
+                    properties:
+                      modelCall:
+                        description: modelCall configures timeout and retry for model
+                          API calls.
+                        properties:
+                          maxRetries:
+                            description: maxRetries is the maximum number of retries
+                              after a transient failure. 0 means no retries.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          timeoutSeconds:
+                            description: timeoutSeconds is the per-call hard deadline.
+                              0 means no per-call timeout.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        type: object
+                      toolCall:
+                        description: toolCall configures timeout, retry, and circuit-breaker
+                          for tool calls.
+                        properties:
+                          circuitBreaker:
+                            description: |-
+                              circuitBreaker opens the circuit after failureThreshold consecutive failures,
+                              blocking calls for cooldownSeconds before half-opening.
+                            properties:
+                              cooldownSeconds:
+                                description: |-
+                                  cooldownSeconds is the duration the circuit stays open before half-opening.
+                                  0 means the implementation applies its own default.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              failureThreshold:
+                                description: failureThreshold is the number of consecutive
+                                  failures before the circuit opens.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - failureThreshold
+                            type: object
+                          maxRetries:
+                            description: maxRetries is the maximum number of retries
+                              after a transient failure. 0 means no retries.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          timeoutSeconds:
+                            description: timeoutSeconds is the per-call hard deadline.
+                              0 means no per-call timeout.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        type: object
+                    type: object
+                  toolPolicy:
+                    description: toolPolicy optionally constrains which tools the
+                      agent may use and how.
+                    properties:
+                      default:
+                        default: allow
+                        description: default is the rule applied to any tool without
+                          an explicit override.
+                        enum:
+                        - allow
+                        - deny
+                        - require-approval
+                        type: string
+                      forcedChoice:
+                        description: |-
+                          forcedChoice steers tool selection: "" or "auto" lets the model choose,
+                          "required" forces at least one tool call, or a specific tool name forces
+                          exactly that tool.
+                        type: string
+                      overrides:
+                        description: |-
+                          overrides is the per-tool-name policy list. Items are keyed on name and
+                          applied in order; the first matching entry wins.
+                        items:
+                          description: ToolPolicyOverride is one named tool-level
+                            policy override.
+                          properties:
+                            name:
+                              description: name is the exact tool name this override
+                                applies to.
+                              minLength: 1
+                              type: string
+                            retryable:
+                              description: |-
+                                retryable opts this tool in to retries on transient failure. Default false —
+                                tool retries are off unless the tool is explicitly declared idempotent/safe.
+                              type: boolean
+                            rule:
+                              description: rule is the access rule for this tool.
+                              enum:
+                              - allow
+                              - deny
+                              - require-approval
+                              type: string
+                          required:
+                          - name
+                          - rule
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      parallelLimit:
+                        description: parallelLimit caps concurrent tool calls per
+                          turn. 0 means unlimited.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    type: object
+                type: object
               scaling:
                 description: |-
                   scaling configures the Knative autoscaler bounds for this agent.
@@ -970,6 +1105,141 @@ spec:
                   free-form string). Ignored for non-members.
                 maxLength: 63
                 type: string
+              runtime:
+                description: |-
+                  runtime optionally configures runtime authoring primitives: structured
+                  output schemas, tool-use policies, and per-turn resilience settings.
+                  When omitted, the agent's current behaviour is preserved unchanged.
+                  This field is types-only in m65; injection by the managed loop is a
+                  subsequent task.
+                properties:
+                  outputSchema:
+                    description: |-
+                      outputSchema is a JSON Schema the agent's final answer must conform to.
+                      The value is stored verbatim (arbitrary JSON) and is not structurally validated
+                      by the CRD admission; it is passed to the platform at runtime.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  resilience:
+                    description: resilience optionally configures per-turn retry and
+                      circuit-breaker behaviour.
+                    properties:
+                      modelCall:
+                        description: modelCall configures timeout and retry for model
+                          API calls.
+                        properties:
+                          maxRetries:
+                            description: maxRetries is the maximum number of retries
+                              after a transient failure. 0 means no retries.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          timeoutSeconds:
+                            description: timeoutSeconds is the per-call hard deadline.
+                              0 means no per-call timeout.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        type: object
+                      toolCall:
+                        description: toolCall configures timeout, retry, and circuit-breaker
+                          for tool calls.
+                        properties:
+                          circuitBreaker:
+                            description: |-
+                              circuitBreaker opens the circuit after failureThreshold consecutive failures,
+                              blocking calls for cooldownSeconds before half-opening.
+                            properties:
+                              cooldownSeconds:
+                                description: |-
+                                  cooldownSeconds is the duration the circuit stays open before half-opening.
+                                  0 means the implementation applies its own default.
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              failureThreshold:
+                                description: failureThreshold is the number of consecutive
+                                  failures before the circuit opens.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - failureThreshold
+                            type: object
+                          maxRetries:
+                            description: maxRetries is the maximum number of retries
+                              after a transient failure. 0 means no retries.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          timeoutSeconds:
+                            description: timeoutSeconds is the per-call hard deadline.
+                              0 means no per-call timeout.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        type: object
+                    type: object
+                  toolPolicy:
+                    description: toolPolicy optionally constrains which tools the
+                      agent may use and how.
+                    properties:
+                      default:
+                        default: allow
+                        description: default is the rule applied to any tool without
+                          an explicit override.
+                        enum:
+                        - allow
+                        - deny
+                        - require-approval
+                        type: string
+                      forcedChoice:
+                        description: |-
+                          forcedChoice steers tool selection: "" or "auto" lets the model choose,
+                          "required" forces at least one tool call, or a specific tool name forces
+                          exactly that tool.
+                        type: string
+                      overrides:
+                        description: |-
+                          overrides is the per-tool-name policy list. Items are keyed on name and
+                          applied in order; the first matching entry wins.
+                        items:
+                          description: ToolPolicyOverride is one named tool-level
+                            policy override.
+                          properties:
+                            name:
+                              description: name is the exact tool name this override
+                                applies to.
+                              minLength: 1
+                              type: string
+                            retryable:
+                              description: |-
+                                retryable opts this tool in to retries on transient failure. Default false —
+                                tool retries are off unless the tool is explicitly declared idempotent/safe.
+                              type: boolean
+                            rule:
+                              description: rule is the access rule for this tool.
+                              enum:
+                              - allow
+                              - deny
+                              - require-approval
+                              type: string
+                          required:
+                          - name
+                          - rule
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      parallelLimit:
+                        description: parallelLimit caps concurrent tool calls per
+                          turn. 0 means unlimited.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    type: object
+                type: object
               scaling:
                 description: |-
                   scaling configures the Knative autoscaler bounds for this agent.
