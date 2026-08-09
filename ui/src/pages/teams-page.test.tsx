@@ -66,8 +66,8 @@ describe("TeamsPage (m64.11)", () => {
     expect(screen.getByRole("table", { name: "Agent teams" })).toBeInTheDocument();
     expect(screen.getByText("research")).toBeInTheDocument();
     expect(screen.getByText("planner")).toBeInTheDocument();
-    // The spawn budget renders as fan-out / depth / total.
-    expect(screen.getAllByText("4 / 3 / 20").length).toBeGreaterThan(0);
+    // The spawn budget renders with inline labels (fan-out / depth / total).
+    expect(screen.getAllByText(/fan-out 4 · depth 3 · total\s*20/).length).toBeGreaterThan(0);
     // Readiness badges: one ready, one with its NotReady reason.
     expect(screen.getByText("ready")).toBeInTheDocument();
     expect(screen.getByText("MemberNotFound")).toBeInTheDocument();
