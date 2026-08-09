@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Play, Rocket } from "lucide-react";
+import { AlertTriangle, CheckCircle2, GitFork, Play, Rocket } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
@@ -21,6 +21,7 @@ import {
   ApiError,
   openRunStream,
   type CreatedObject,
+  type WorkflowNodeStatus,
 } from "@/lib/api";
 import {
   isValidHttpUrl,
@@ -58,8 +59,13 @@ type Run =
       kind: "done";
       traceId: string;
       response: string;
+      runStatus: string;
       consentRequired?: string[];
       approval?: Approval;
+      // Workflow instance fields (m67.9): present when the run is a workflow instance.
+      workflowRef?: string;
+      currentNode?: string;
+      nodes?: WorkflowNodeStatus[];
     }
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
 
@@ -235,7 +241,7 @@ export function PlaygroundPage() {
 
   // finalizeRun reads the structured run state after the stream ends (or pauses at
   // requires_action) and renders the outcome — the SSE stream carries tokens but not the
-  // traceId / requiresAction, which live on the run object.
+  // traceId / requiresAction / workflow nodes, which live on the run object.
   async function finalizeRun(runId: string, streamed: string) {
     try {
       const detail = await api.getRun(runId);
@@ -247,15 +253,28 @@ export function PlaygroundPage() {
         setRun({ kind: "error", message: detail.error || "The run failed." });
         return;
       }
+      // Derive failed node: when the run failed, the node at currentNode is the failed one.
+      // The BFF exposes nodes with their stored status; we overlay "failed" for the
+      // current node when the run itself is failed (UI-side derivation per m67.15).
+      const nodes = detail.nodes?.map((n) => {
+        if (detail.status === "failed" && n.name === detail.currentNode && n.status !== "done") {
+          return { ...n, status: "failed" as const };
+        }
+        return n;
+      });
       setRun({
         kind: "done",
         traceId: detail.traceId ?? "",
         response: lastMessage,
+        runStatus: detail.status,
         consentRequired: ra?.kind === "consent_required" ? ra.servers : undefined,
         approval:
           ra?.kind === "approval"
             ? { runId, key: ra.key ?? "", summary: ra.message ?? "" }
             : undefined,
+        workflowRef: detail.workflowRef,
+        currentNode: detail.currentNode,
+        nodes,
       });
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -305,7 +324,7 @@ export function PlaygroundPage() {
   async function onDeny(runId: string) {
     try {
       await api.resumeRun(runId, "deny");
-      setRun({ kind: "done", traceId: "", response: "Approval denied — run cancelled." });
+      setRun({ kind: "done", traceId: "", response: "Approval denied — run cancelled.", runStatus: "cancelled" });
     } catch (err) {
       if (err instanceof ApiError && err.isForbidden) reprobe();
       setRun(errorRun(err));
@@ -605,7 +624,9 @@ export function PlaygroundPage() {
                 <>
                   <div className="flex items-center gap-2 text-success">
                     <CheckCircle2 className="h-5 w-5" />
-                    <span className="text-sm font-medium">Traced run complete</span>
+                    <span className="text-sm font-medium">
+                      {run.runStatus === "waiting" ? "Suspended — awaiting next node" : "Traced run complete"}
+                    </span>
                   </div>
                   {run.consentRequired && run.consentRequired.length > 0 && (
                     <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
@@ -676,6 +697,13 @@ export function PlaygroundPage() {
                         {run.traceId}
                       </p>
                     </div>
+                  )}
+                  {run.nodes && run.nodes.length > 0 && (
+                    <WorkflowGraphSection
+                      nodes={run.nodes}
+                      currentNode={run.currentNode}
+                      runStatus={run.runStatus}
+                    />
                   )}
                   <Textarea
                     aria-label="Agent response"
@@ -813,6 +841,104 @@ export function PlaygroundPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// WorkflowGraphSection renders the per-node status panel for a workflow instance run (m67.15).
+// It mirrors the RuntimeSection / guardrail-section idiom on agent-detail-page.tsx.
+//
+// When the run status is "waiting", the overall label reads "Suspended — awaiting next node"
+// (surfaced in the run-done banner above). The current node is highlighted.
+// A failed node shows a destructive badge; a running node shows an info badge; pending = muted.
+type NodeBadgeVariant = BadgeProps["variant"];
+const NODE_STATUS_VARIANT: Record<WorkflowNodeStatus["status"], NodeBadgeVariant> = {
+  pending: "secondary",
+  running: "secondary",
+  done: "success",
+  failed: "destructive",
+};
+const NODE_STATUS_LABEL: Record<WorkflowNodeStatus["status"], string> = {
+  pending: "pending",
+  running: "running",
+  done: "done",
+  failed: "failed",
+};
+
+function WorkflowGraphSection({
+  nodes,
+  currentNode,
+  runStatus,
+}: {
+  nodes: WorkflowNodeStatus[];
+  currentNode?: string;
+  runStatus: string;
+}) {
+  return (
+    <div
+      className="rounded-lg border bg-card p-4 shadow-card"
+      data-testid="workflow-graph-section"
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <GitFork className="h-4 w-4 text-muted-foreground" />
+        <p className="text-sm font-medium">Workflow</p>
+        {runStatus === "waiting" && (
+          <Badge variant="warning" className="text-[10px]" data-testid="workflow-suspended-badge">
+            Suspended — awaiting next node
+          </Badge>
+        )}
+      </div>
+      <ol className="space-y-2" data-testid="workflow-node-list">
+        {nodes.map((node) => {
+          const isCurrent = node.name === currentNode;
+          return (
+            <li
+              key={node.name}
+              data-testid={`workflow-node-${node.name}`}
+              className={`flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm ${
+                isCurrent ? "border-primary/40 bg-primary/5" : "bg-surface-2/40"
+              }`}
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                {isCurrent && (
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full bg-primary"
+                    aria-label="current node"
+                    data-testid={`workflow-node-current-${node.name}`}
+                  />
+                )}
+                <span className={`truncate font-medium ${isCurrent ? "" : "text-muted-foreground"}`}>
+                  {node.name}
+                </span>
+                {node.agent && (
+                  <span className="truncate font-mono text-xs text-muted-foreground">
+                    {node.agent}
+                  </span>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Badge
+                  variant={NODE_STATUS_VARIANT[node.status]}
+                  className="text-[10px]"
+                  data-testid={`workflow-node-status-${node.name}`}
+                >
+                  {NODE_STATUS_LABEL[node.status]}
+                </Badge>
+                {node.childRunId && (
+                  <Link
+                    to={`/traces/${encodeURIComponent(node.childRunId)}`}
+                    data-testid={`workflow-node-run-link-${node.name}`}
+                    className="truncate font-mono text-[10px] text-primary hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {node.childRunId.slice(0, 8)}…
+                  </Link>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

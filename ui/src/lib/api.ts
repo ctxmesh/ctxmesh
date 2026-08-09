@@ -693,9 +693,11 @@ export interface WorkflowListResponse {
 // Exposed on RunDetail.nodes when the run is a workflow instance.
 export interface WorkflowNodeStatus {
   name: string;
-  // status is "pending" | "running" | "done".
-  status: "pending" | "running" | "done";
-  // childRunId is the sub-run id the node launched (non-empty when running/done).
+  // agent is the agent ref the node dispatches to (name or ns/name).
+  agent?: string;
+  // status is "pending" | "running" | "done" | "failed".
+  status: "pending" | "running" | "done" | "failed";
+  // childRunId is the sub-run id the node launched (non-empty when running/done/failed).
   childRunId?: string;
 }
 
