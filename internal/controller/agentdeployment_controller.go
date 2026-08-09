@@ -1094,7 +1094,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
 		}
 		if team != nil {
-			env = append(env, delegateEnv(team)...)
+			for _, e := range delegateEnv(team) {
+				// Guard against duplicates: a guarded supervisor already has BFF_INTERNAL_URL
+				// injected by the guardrail block (m66.15). All other delegateEnv vars are
+				// delegate-only so the check is symmetric with the rest of the platform env
+				// injection pattern (envVarPresent before append).
+				if !envVarPresent(env, e.Name) && !envVarPresent(deploy.Spec.Env, e.Name) {
+					env = append(env, e)
+				}
+			}
 			if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
 				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 			}
