@@ -277,6 +277,12 @@ const (
 	ActionConsentRequired ActionKind = "consent_required"
 	// ActionApproval — a human must approve a step before it runs (human-in-the-loop, M32).
 	ActionApproval ActionKind = "approval"
+	// ActionPlanApproval — a human must approve a workflow run's PLAN before the graph executes
+	// (planning mode, M67, ADR 0060 §6). It is the ONE legitimate use of requires_action on a workflow
+	// run: the executor pauses here BEFORE launching node 1; resume-approve runs the graph, resume-deny
+	// terminates the run ("plan rejected"). Distinct from ActionApproval (a mid-run step gate) — this
+	// gates the whole plan up front and is resolved by the workflow executor, not by re-invoking an agent.
+	ActionPlanApproval ActionKind = "plan_approval"
 )
 
 // Action describes why a run is paused in requires_action + what resolves it.

@@ -203,6 +203,107 @@ func TestWorkflowExecutor_Sequential(t *testing.T) {
 	assert.Equal(t, "final-answer", fin.Messages[0].Content, "the terminal output is the last node's output")
 }
 
+// ── plan-approval gate (planning mode, m67.7, ADR 0060 §6) ────────────────────────────────────────────────
+
+// seedGatedWorkflowRun creates a running workflow-instance run whose cursor carries a plan-approval gate
+// (Required=true, Approved=false) — as the inline-run endpoint seeds it when requireApproval is set.
+func seedGatedWorkflowRun(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec, input string) string {
+	t.Helper()
+	snap, err := json.Marshal(spec)
+	require.NoError(t, err)
+	cursor := newCursor()
+	cursor.PlanApproval = &planApproval{Required: true}
+	cursorJSON, err := cursor.marshal()
+	require.NoError(t, err)
+
+	r := run.New("wf-gate", "prod", "the-workflow", json.RawMessage(input), "conv-gate", time.Now())
+	r.Status = run.StatusRunning
+	r.CallerUsername = "alice"
+	r.Boundary = "r:prod"
+	r.SpecSnapshot = string(snap)
+	r.Cursor = cursorJSON
+	require.NoError(t, s.runStore.Create(r))
+	return r.ID
+}
+
+// twoStepSpec is a minimal 2-node sequential spec for gate tests.
+func twoStepSpec() agentsv1beta1.WorkflowSpec {
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			func() agentsv1beta1.WorkflowStep { n := stepNode("one", "agent-a"); n.Next = "two"; return n }(),
+			stepNode("two", "agent-b"),
+		},
+	}
+}
+
+// TestWorkflowExecutor_PlanApprovalGate_PausesBeforeNode1: the FIRST advance of a gated run transitions it
+// to requires_action (plan_approval) and launches NO node — the plan awaits a human.
+func TestWorkflowExecutor_PlanApprovalGate_PausesBeforeNode1(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedGatedWorkflowRun(t, s, twoStepSpec(), `{"q":"hi"}`)
+
+	drive(t, s, wfID)
+
+	rn := getRun(t, s, wfID)
+	require.Equal(t, run.StatusRequiresAction, rn.Status, "a gated run pauses in requires_action before executing")
+	require.NotNil(t, rn.RequiresAction, "the paused run carries a pending action")
+	assert.Equal(t, run.ActionPlanApproval, rn.RequiresAction.Kind, "the action kind is plan_approval")
+
+	// NO node sub-run was launched (the gate is BEFORE node 1).
+	for _, r := range s.runStore.List() {
+		assert.NotEqual(t, wfID, r.ParentRunID, "no node sub-run may be launched while the plan is unapproved")
+	}
+	// The console banner event fired.
+	_, found := wfHasEventPrefix(drainEvents(t, s, wfID), run.EventStep, "plan-approval-required")
+	assert.True(t, found, "a plan-approval-required event is emitted for the console")
+}
+
+// TestWorkflowExecutor_PlanApprovalGate_ApprovedRunsGraph: once the cursor marks the plan approved (as the
+// resume-approve path does), the executor runs the graph — node 1 launches on the next advance.
+func TestWorkflowExecutor_PlanApprovalGate_ApprovedRunsGraph(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedGatedWorkflowRun(t, s, twoStepSpec(), `{"q":"hi"}`)
+
+	// Advance 1: pauses at the gate (requires_action).
+	drive(t, s, wfID)
+	require.Equal(t, run.StatusRequiresAction, getRun(t, s, wfID).Status)
+
+	// Approve: flip the cursor's PlanApproval.Approved and re-enter running (mirrors resumePlanApproval).
+	_, err := s.runStore.Update(wfID, func(x *run.Run) error {
+		cur, cErr := parseCursor(x.Cursor)
+		require.NoError(t, cErr)
+		cur.PlanApproval.Approved = true
+		cj, mErr := cur.marshal()
+		require.NoError(t, mErr)
+		x.Cursor = cj
+		return x.Transition(run.StatusRunning, time.Now())
+	})
+	require.NoError(t, err)
+
+	// Advance 2: with the gate satisfied the graph runs — node "one" launches + the run parks waiting.
+	s.executeWorkflow(context.Background(), wfID)
+	rn := getRun(t, s, wfID)
+	assert.Equal(t, run.StatusWaiting, rn.Status, "the approved plan runs — the run parks on node 1")
+	child := inFlightChild(t, s, wfID)
+	assert.Equal(t, "agent-a", child.Agent, "node one (agent-a) launches after approval")
+}
+
+// TestWorkflowExecutor_NoApproval_RunsImmediately: a run with NO plan-approval gate (requireApproval
+// absent) runs node 1 on the first advance — the m67.3 behavior is unchanged (regression guard).
+func TestWorkflowExecutor_NoApproval_RunsImmediately(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, twoStepSpec(), `{"q":"hi"}`) // no gate seeded
+
+	drive(t, s, wfID)
+
+	rn := getRun(t, s, wfID)
+	assert.Equal(t, run.StatusWaiting, rn.Status, "with no gate the graph runs immediately (parks on node 1)")
+	assert.NotEqual(t, run.StatusRequiresAction, rn.Status, "no gate ⇒ never requires_action before executing")
+	child := inFlightChild(t, s, wfID)
+	assert.Equal(t, "agent-a", child.Agent, "node one launches immediately when no approval is required")
+}
+
 // ── conditional ───────────────────────────────────────────────────────────────────────────────────────────
 
 // conditionalSpec is a classify node branching on steps.classify.output.topic == "billing".
