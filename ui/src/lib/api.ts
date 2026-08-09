@@ -666,6 +666,47 @@ export interface GuardrailPolicyListResponse {
   items: GuardrailPolicySummary[];
 }
 
+// --- Workflows (GET /api/workflows, POST /api/workflows/{name}/runs) ---------
+// The Workflow CR list surface (m67.9, ADR 0060): declarative graphs of agent invocations.
+// Read-only list (caller-scoped); invoke via POST to create a workflow instance run.
+
+export interface WorkflowSummary {
+  name: string;
+  namespace: string;
+  // stepCount is len(spec.steps) — the number of graph nodes.
+  stepCount: number;
+  // registryRef is spec.registryRef — the trust boundary for this workflow.
+  registryRef: string;
+  // validated is true when the controller's "Validated" condition is True.
+  validated: boolean;
+  // reason carries the condition reason when validated is false.
+  reason?: string;
+  // specHash mirrors status.specHash.
+  specHash?: string;
+}
+
+export interface WorkflowListResponse {
+  items: WorkflowSummary[];
+}
+
+// WorkflowNodeStatus is the per-node status entry in the workflow-run graph view (m67.9).
+// Exposed on RunDetail.nodes when the run is a workflow instance.
+export interface WorkflowNodeStatus {
+  name: string;
+  // status is "pending" | "running" | "done".
+  status: "pending" | "running" | "done";
+  // childRunId is the sub-run id the node launched (non-empty when running/done).
+  childRunId?: string;
+}
+
+// CreateWorkflowRunRequest is the POST /api/workflows/{name}/runs body.
+export interface CreateWorkflowRunRequest {
+  input?: unknown;
+  namespace?: string;
+  conversationId?: string;
+  requireApproval?: boolean;
+}
+
 // --- AgentTeams (GET /api/teams) --------------------------------------------
 // The orchestration rosters (M64, ADR 0057): a supervisor + a governed set of
 // summonable sub-agents + a spawn budget. Read-only surface (caller-scoped).
@@ -1722,6 +1763,11 @@ export interface RunDetail {
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
   error?: string;
+  // Workflow instance fields (m67.9, ADR 0060). Present only for workflow instance runs.
+  workflowRef?: string;
+  currentNode?: string;
+  // nodes is the per-node status map — present for workflow instance runs only.
+  nodes?: WorkflowNodeStatus[];
 }
 
 export type RunEventKind = "state" | "message" | "token" | "step";
@@ -3036,6 +3082,33 @@ export const api = {
   // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
   listGuardrailPolicies: (signal?: AbortSignal) =>
     getJSON<GuardrailPolicyListResponse>("/api/guardrailpolicies", signal),
+
+  // listWorkflows reads the Workflow CRs (m67.9, ADR 0060) — declarative agent graphs (caller-scoped).
+  // A 403 surfaces as a typed ApiError (isForbidden).
+  listWorkflows: (signal?: AbortSignal) =>
+    getJSON<WorkflowListResponse>("/api/workflows", signal),
+
+  // createWorkflowRun starts a workflow instance run via POST /api/workflows/{name}/runs (m67.9, ADR 0060).
+  // Returns 202 Accepted with {id, status} on success; throws ApiError on failure.
+  createWorkflowRun: async (
+    name: string,
+    req: CreateWorkflowRunRequest,
+    signal?: AbortSignal,
+  ): Promise<{ id: string; status: string }> => {
+    const res = await apiFetch(`/api/workflows/${encodeURIComponent(name)}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `create workflow run failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as { id: string; status: string };
+  },
 
   tenantDetail: (name: string, signal?: AbortSignal) =>
     getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),

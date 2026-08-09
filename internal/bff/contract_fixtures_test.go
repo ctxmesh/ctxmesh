@@ -68,6 +68,17 @@ func buildContractFixtures() map[string]any {
 				ReferencingAgents: []string{"echo"},
 			}},
 		},
+		"WorkflowListResponse": WorkflowListResponse{
+			Items: []WorkflowSummary{{
+				Name:        "my-pipeline",
+				Namespace:   "default",
+				StepCount:   3,
+				RegistryRef: "prod-registry",
+				Validated:   true,
+				Reason:      "",
+				SpecHash:    "sha256-def456",
+			}},
+		},
 		"ConnectProviderResponse": ConnectProviderResponse{
 			Provider: provider,
 			Created:  []createdObject{{Kind: "Secret", Name: "anthropic", Namespace: "default"}},

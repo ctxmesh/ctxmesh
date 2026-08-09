@@ -433,6 +433,15 @@ type RunDetailDTO struct {
 	// cursor "current" — the node currently in flight (empty between nodes or after completion).
 	WorkflowRef string `json:"workflowRef,omitempty"`
 	CurrentNode string `json:"currentNode,omitempty"`
+	// Nodes is the per-node status map for a workflow instance run (m67.9, ADR 0060 §2-3). The server
+	// parses the executor-owned cursor and projects each reached node's status so the console can render
+	// a node-status map without needing to re-parse opaque cursor JSON. Only present for workflow instance
+	// runs; nil/omitted for single-agent runs.
+	//   Status values: "running" (the node's sub-run is in flight), "done" (the node succeeded),
+	//   "pending" (the node has not yet been reached by the executor).
+	// ChildRunID carries the deterministic sub-run id the node launched (non-empty for running/done nodes),
+	// so the console can link to the child run for detail.
+	Nodes []WorkflowNodeStatus `json:"nodes,omitempty"`
 
 	// Handoff fields (m67.6, ADR 0060 §5). HandedOffTo is set on the SOURCE run A (this run terminated
 	// by handing the conversation off to that agent); HandoffSourceRunID is set on the TARGET run B (the
@@ -442,8 +451,22 @@ type RunDetailDTO struct {
 	HandoffSourceRunID string `json:"handoffSourceRunId,omitempty"`
 }
 
+// WorkflowNodeStatus is the per-node status entry in the RunDetailDTO.Nodes list (m67.9).
+// The server parses the executor cursor and projects it so the console never handles raw cursor JSON.
+type WorkflowNodeStatus struct {
+	// Name is the workflow step name (the node identifier in the SpecSnapshot graph).
+	Name string `json:"name"`
+	// Status is the node's execution status: "pending" (not yet reached), "running" (sub-run in flight),
+	// or "done" (sub-run completed successfully). Failed nodes are "done" at the cursor level — the
+	// workflow run itself moves to "failed" when a node fails.
+	Status string `json:"status"`
+	// ChildRunID is the deterministic sub-run id the node launched (non-empty when status is "running" or
+	// "done"). The console links to GET /api/runs/{childRunID} for the node's detail.
+	ChildRunID string `json:"childRunId,omitempty"`
+}
+
 // runToDTO projects a run.Run onto the RunDetailDTO for the GET /api/runs/{id} response.
-// It selectively exposes the workflow cursor fields (WorkflowRef, CurrentNode) that are stored
+// It selectively exposes the workflow cursor fields (WorkflowRef, CurrentNode, Nodes) that are stored
 // json:"-" on run.Run so the store does not accidentally serialize them in other contexts.
 func runToDTO(rn *run.Run) RunDetailDTO {
 	dto := RunDetailDTO{
@@ -466,18 +489,82 @@ func runToDTO(rn *run.Run) RunDetailDTO {
 		HandedOffTo:        rn.HandedOffTo,
 		HandoffSourceRunID: rn.HandoffSourceRunID,
 	}
-	// Surface the executor's current node from the cursor. The cursor JSON includes "current"
-	// as the node name currently in flight; rather than re-parsing the full cursor opaque JSON
-	// (the executor owns its shape), we extract just the "current" field with a minimal decode.
+	// Surface the executor's cursor fields. We parse the cursor once to populate both CurrentNode
+	// (the in-flight node for backward compatibility) and the Nodes status list (m67.9: the authoritative
+	// per-node status map the console renders as the workflow graph view).
 	if rn.Cursor != "" {
-		var c struct {
-			Current string `json:"current"`
-		}
-		if err := json.Unmarshal([]byte(rn.Cursor), &c); err == nil {
-			dto.CurrentNode = c.Current
+		if nodes, current := nodesFromCursor(rn.Cursor, rn.SpecSnapshot); len(nodes) > 0 || current != "" {
+			dto.CurrentNode = current
+			dto.Nodes = nodes
 		}
 	}
 	return dto
+}
+
+// nodesFromCursor parses the executor-owned cursor JSON and projects it into the RunDetailDTO.Nodes list
+// (m67.9). It derives the full node list from the SpecSnapshot (so even pending/unreached nodes appear),
+// and overlays each node's progress from the cursor. Returns (nodes, currentNode).
+//
+// The node status values are:
+//   - "pending"  — the executor has not yet reached this node (absent from cursor.Nodes).
+//   - "running"  — the node's sub-run is in flight (cursor state "launched").
+//   - "done"     — the node's sub-run completed (cursor state "done").
+//
+// SpecSnapshot may be empty (a non-workflow run or a corrupt snapshot); in that case we still surface
+// whatever the cursor records, but with no step ordering from the spec.
+func nodesFromCursor(cursorJSON, specSnapshot string) ([]WorkflowNodeStatus, string) {
+	// Decode the executor cursor (minimal: we only need Current + Nodes[].{State,ChildID}).
+	var cursor struct {
+		Current string `json:"current"`
+		Nodes   map[string]struct {
+			State   string `json:"state"`
+			ChildID string `json:"childId"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(cursorJSON), &cursor); err != nil {
+		return nil, ""
+	}
+
+	// Build the step name list from the SpecSnapshot (ordered, authoritative). When unavailable
+	// fall back to the names in the cursor (unordered, but still useful for reached nodes).
+	var stepNames []string
+	if specSnapshot != "" {
+		var spec struct {
+			Steps []struct {
+				Name string `json:"name"`
+			} `json:"steps"`
+		}
+		if err := json.Unmarshal([]byte(specSnapshot), &spec); err == nil {
+			for _, s := range spec.Steps {
+				stepNames = append(stepNames, s.Name)
+			}
+		}
+	}
+	if len(stepNames) == 0 {
+		// Fallback: nodes that have cursor progress (no ordering guarantee).
+		for name := range cursor.Nodes {
+			stepNames = append(stepNames, name)
+		}
+	}
+	if len(stepNames) == 0 {
+		return nil, cursor.Current
+	}
+
+	nodes := make([]WorkflowNodeStatus, 0, len(stepNames))
+	for _, name := range stepNames {
+		ns := WorkflowNodeStatus{Name: name, Status: "pending"}
+		if prog, ok := cursor.Nodes[name]; ok {
+			switch prog.State {
+			case "launched":
+				ns.Status = "running"
+			case "done":
+				ns.Status = "done"
+			}
+			ns.ChildRunID = prog.ChildID
+		}
+		nodes = append(nodes, ns)
+	}
+	return nodes, cursor.Current
 }
 
 // handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR
