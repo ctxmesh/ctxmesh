@@ -129,36 +129,25 @@ func TestKnowledgeBase_UploadSource_IsValidated(t *testing.T) {
 }
 
 // TestKnowledgeBase_EmptyEmbeddingRoute_IsInvalid — embeddingRoute="" → Validated=False / InvalidEmbeddingRoute.
-func TestKnowledgeBase_EmptyEmbeddingRoute_IsInvalid(t *testing.T) {
+func TestKnowledgeBase_EmptyEmbeddingRoute_RejectedAtAdmission(t *testing.T) {
 	const ns = "default"
-	spec := agentsv1beta1.KnowledgeBaseSpec{
-		// EmbeddingRoute intentionally left blank (the API server min-length marker enforces it in
-		// real admission, but the controller must surface a clear status too).
-		Source:   agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
-		Chunking: agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
-	}
 	kb := &agentsv1beta1.KnowledgeBase{
 		ObjectMeta: metav1.ObjectMeta{Name: "kb-no-embed", Namespace: ns},
-		Spec:       spec,
+		Spec: agentsv1beta1.KnowledgeBaseSpec{
+			// EmbeddingRoute intentionally blank. It is one-way door #1 (the corpus embedding
+			// model), guarded by the CRD's structural `+kubebuilder:validation:MinLength=1`
+			// marker — a STRUCTURAL OpenAPI validator the API server ALWAYS enforces (unlike a
+			// CEL XValidation rule, which is feature-gated). So the empty route is rejected at
+			// admission and the object never persists; the controller's defensive
+			// EmbeddingRoute=="" branch is unreachable belt-and-suspenders. This test asserts
+			// the real enforcement point: admission.
+			Source:   agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+			Chunking: agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+		},
 	}
-	// Bypass the CRD admission validation (envtest does not enforce CEL validators by default,
-	// so we can create this object to test the controller's own validation path).
-	require.NoError(t, k8sClient.Create(testCtx, kb))
-	t.Cleanup(func() {
-		var current agentsv1beta1.KnowledgeBase
-		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-no-embed", Namespace: ns}, &current); err == nil {
-			controllerutil.RemoveFinalizer(&current, kbFinalizer)
-			_ = k8sClient.Update(testCtx, &current)
-		}
-		_ = k8sClient.Delete(testCtx, kb)
-	})
-
-	reconcileKB(t, newKBReconciler(), "kb-no-embed", ns)
-
-	cond := kbValidatedCond(t, "kb-no-embed", ns)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionFalse, cond.Status, "empty embeddingRoute must produce Validated=False")
-	assert.Equal(t, reasonKBInvalidEmbedding, cond.Reason)
+	err := k8sClient.Create(testCtx, kb)
+	require.Error(t, err, "empty embeddingRoute must be rejected at admission (MinLength=1, one-way door #1)")
+	assert.Contains(t, err.Error(), "embeddingRoute", "the admission rejection should name the offending field")
 }
 
 // TestKnowledgeBase_OverlapGESize_IsInvalid — chunking.overlap >= chunking.size → Validated=False / InvalidChunking.
