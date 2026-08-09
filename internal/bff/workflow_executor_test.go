@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -429,3 +430,321 @@ func TestWorkflowNode_TerminalWakesParent(t *testing.T) {
 	require.Len(t, fin.Messages, 1)
 	assert.Equal(t, "node-answer", fin.Messages[0].Content)
 }
+
+// ── m67.5: map / loop / retries ─────────────────────────────────────────────────────────────────────────────
+//
+// These exercise the v1b constructs. The iteration-index scheme (the idempotency anchor in
+// SpawnRunID(wfRunID, node, iterationIndex)): a map item i ⇒ "map:<i>"; a loop iteration n ⇒ "loop:<n>"; a
+// retry attempt k ⇒ "retry:<k>" (attempt 0 is the original launch at index "0").
+
+// completeChildRun drives a node sub-run to terminal SUCCESS via CompleteAndWake WITHOUT asserting a wake — for
+// a map's WaitAll set only the LAST completing child wakes the parent, so the per-child completer must not
+// require a wake. Returns the woken parent (nil until the wait is satisfied).
+func completeChildRun(t *testing.T, s *Server, childID, answer string) *run.Run {
+	t.Helper()
+	claimChild(t, s, childID)
+	_, woke, err := s.runStore.CompleteAndWake(childID, func(c *run.Run) error {
+		c.Messages = append(c.Messages, run.Message{Role: roleAssistant, Content: answer})
+		return c.Transition(run.StatusSucceeded, time.Now())
+	})
+	require.NoError(t, err)
+	return woke
+}
+
+// childrenOf returns every child sub-run of the workflow run (terminal + non-terminal), by id.
+func childrenOf(t *testing.T, s *Server, wfRunID string) map[string]*run.Run {
+	t.Helper()
+	out := map[string]*run.Run{}
+	for _, r := range s.runStore.List() {
+		if r.ParentRunID == wfRunID {
+			out[r.ID] = r
+		}
+	}
+	return out
+}
+
+// mapWorkflowSpec: a `fan` map node over input.items, each item run by the `worker` do step, reduced by the
+// `join` step. The map's items list is referenced from the workflow input directly (no upstream node needed).
+func mapWorkflowSpec() agentsv1beta1.WorkflowSpec {
+	worker := stepNode("worker", "worker-agent")
+	worker.OutputSchema = rawSchema(`{"type":"object","properties":{"v":{"type":"string"}}}`)
+	join := stepNode("join", "join-agent")
+	join.Input = map[string]string{"parts": `steps.fan.output`} // the collected list feeds the join.
+	fan := stepNode("fan", "fan-agent")
+	fan.OutputSchema = rawSchema(`{"type":"array"}`)
+	fan.Map = &agentsv1beta1.WorkflowMap{Over: `input.items`, As: "item", Parallelism: 2, Do: "worker", Join: "join"}
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{fan, worker, join},
+	}
+}
+
+// TestWorkflowExecutor_Map_FanOutAndJoin: a map over a 3-item list → 3 idempotent child sub-runs (map:0/1/2) →
+// the run suspends on all 3 (WaitAll) → completing all 3 collects their outputs in order → the join step
+// receives the ordered list.
+func TestWorkflowExecutor_Map_FanOutAndJoin(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapWorkflowSpec(), `{"items":["a","b","c"]}`)
+
+	// Advance 1: the map node fans out over the 3 items → 3 child sub-runs with the deterministic map:<i> ids.
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the run parks waiting on the whole fan-out")
+	ids := []string{
+		run.SpawnRunID(wfID, "fan", "map:0"),
+		run.SpawnRunID(wfID, "fan", "map:1"),
+		run.SpawnRunID(wfID, "fan", "map:2"),
+	}
+	kids := childrenOf(t, s, wfID)
+	require.Len(t, kids, 3, "3 items → exactly 3 child sub-runs (idempotent per item)")
+	for i, id := range ids {
+		require.Contains(t, kids, id, "item %d launched its deterministic map:%d sub-run", i, i)
+		assert.Equal(t, "worker-agent", kids[id].Agent, "the do step (worker) runs each item")
+		assert.Equal(t, run.StatusQueued, kids[id].Status)
+	}
+	assert.Equal(t, []string{ids[0], ids[1], ids[2]}, getRun(t, s, wfID).WaitOn, "the run waits on all 3 in order")
+	assert.Equal(t, run.WaitAll, getRun(t, s, wfID).WaitMode, "WaitAll = the join (all-complete collect)")
+
+	// Complete the 3 items OUT OF ORDER to prove the collect is ordered by item index, not completion order.
+	assert.Nil(t, completeChildRun(t, s, ids[1], `{"v":"B"}`), "a non-final map child does not wake the parent")
+	assert.Nil(t, completeChildRun(t, s, ids[0], `{"v":"A"}`), "still not all complete")
+	woke := completeChildRun(t, s, ids[2], `{"v":"C"}`)
+	require.NotNil(t, woke, "the LAST map child wakes the waiting workflow run")
+	assert.Equal(t, run.StatusQueued, woke.Status)
+
+	// Advance 2: collect → the join step launches with the ordered list [A, B, C] as steps.fan.output.
+	drive(t, s, wfID)
+	joinChild := inFlightChild(t, s, wfID)
+	assert.Equal(t, "join-agent", joinChild.Agent, "after the collect the join step runs")
+	var joinInput map[string]any
+	require.NoError(t, json.Unmarshal(joinChild.Input, &joinInput))
+	parts, ok := joinInput["parts"].([]any)
+	require.True(t, ok, "join.input.parts is the collected list")
+	require.Len(t, parts, 3)
+	assert.Equal(t, "A", parts[0].(map[string]any)["v"], "collected[0] is item 0's output (ordered by index)")
+	assert.Equal(t, "B", parts[1].(map[string]any)["v"], "collected[1] is item 1's output")
+	assert.Equal(t, "C", parts[2].(map[string]any)["v"], "collected[2] is item 2's output")
+}
+
+// TestWorkflowExecutor_Map_FailFast: one map item fails → the workflow fails once the fan-out is terminal, the
+// join never runs, and a still-non-terminal sibling is cancelled by the fail-fast cascade.
+//
+// WAKE-SEMANTICS NOTE (documented, not a weakening): the m67.2 store wakes a WaitAll parent only when EVERY
+// child in its wait set is terminal — there is no first-failure wake at the store layer. So a map learns of a
+// failure when its full fan-out resolves, then fail-fasts (a failed item is never collected; the join never
+// runs). The cancel-cascade cancels any workflow child STILL non-terminal at that point — proven here by
+// injecting a running sibling (as a parallel node would be) that the cascade cancels.
+func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapWorkflowSpec(), `{"items":["a","b","c"]}`)
+	drive(t, s, wfID)
+	ids := []string{
+		run.SpawnRunID(wfID, "fan", "map:0"),
+		run.SpawnRunID(wfID, "fan", "map:1"),
+		run.SpawnRunID(wfID, "fan", "map:2"),
+	}
+
+	// Inject a non-terminal sibling (as if a parallel node were in flight) to prove the fail-fast cascade
+	// cancels it.
+	sibling := run.New("sub-sibling", "prod", "agent-x", nil, "conv-wf", time.Now())
+	sibling.ParentRunID = wfID
+	sibling.Status = run.StatusRunning
+	require.NoError(t, s.runStore.Create(sibling))
+
+	// Item 0 succeeds; item 1 FAILS; item 2 succeeds — the fan-out is now all-terminal, so the parent wakes.
+	require.Nil(t, completeChildRun(t, s, ids[0], `{"v":"A"}`))
+	failNode(t, s, ids[1], "worker exploded on item b")
+	completeChildRun(t, s, ids[2], `{"v":"C"}`) // completes the WaitAll → wakes the parent.
+	drive(t, s, wfID)
+
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "a failed map item fails the whole workflow (fail-fast)")
+	assert.Contains(t, fin.Error, "worker exploded on item b")
+	assert.Empty(t, fin.Messages, "the join never runs on a failed map (no collected list)")
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, "sub-sibling").Status, "the non-terminal sibling is cancelled by the cascade")
+}
+
+// TestWorkflowExecutor_Map_IdempotentRelaunch: re-driving a map launch (a reclaimed executor) reuses the
+// existing per-item children — no double fan-out.
+func TestWorkflowExecutor_Map_IdempotentRelaunch(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapWorkflowSpec(), `{"items":["a","b"]}`)
+
+	drive(t, s, wfID)
+	require.Len(t, childrenOf(t, s, wfID), 2, "2 items → 2 children")
+
+	// Re-drive the launch (simulate a mid-advance crash + reclaim): wake waiting→queued, drive again.
+	_, err := s.runStore.Update(wfID, func(r *run.Run) error { return r.Transition(run.StatusQueued, time.Now()) })
+	require.NoError(t, err)
+	drive(t, s, wfID)
+
+	kids := childrenOf(t, s, wfID)
+	require.Len(t, kids, 2, "the reclaimed re-launch reused the 2 existing item sub-runs (no double fan-out)")
+	require.Contains(t, kids, run.SpawnRunID(wfID, "fan", "map:0"))
+	require.Contains(t, kids, run.SpawnRunID(wfID, "fan", "map:1"))
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the run re-suspends on the same fan-out")
+}
+
+// loopWorkflowSpec: a `poll` loop that runs the `tick` do step until the iteration output's done==true, capped
+// at maxIterations. The `until` reads steps.poll.output.done (the loop node's own current-iteration output).
+func loopWorkflowSpec(maxIter int32) agentsv1beta1.WorkflowSpec {
+	tick := stepNode("tick", "tick-agent")
+	tick.OutputSchema = rawSchema(`{"type":"object","properties":{"done":{"type":"boolean"}}}`)
+	poll := stepNode("poll", "poll-agent")
+	poll.OutputSchema = rawSchema(`{"type":"object","properties":{"done":{"type":"boolean"}}}`)
+	poll.Loop = &agentsv1beta1.WorkflowLoop{Until: `steps.poll.output.done == true`, MaxIterations: maxIter, Do: "tick"}
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{poll, tick},
+	}
+}
+
+// TestWorkflowExecutor_Loop_UntilTrue: the loop runs until `until` flips true. We make iteration 0 return
+// done=false and iteration 1 return done=true → exactly 2 iterations, then the workflow succeeds.
+func TestWorkflowExecutor_Loop_UntilTrue(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, loopWorkflowSpec(5), `{}`)
+
+	// Iteration 0 (loop:0).
+	drive(t, s, wfID)
+	c0 := inFlightChild(t, s, wfID)
+	assert.Equal(t, run.SpawnRunID(wfID, "poll", "loop:0"), c0.ID, "iteration 0 uses the deterministic loop:0 id")
+	assert.Equal(t, "tick-agent", c0.Agent, "the loop runs its do step (tick)")
+	completeNode(t, s, c0.ID, `{"done":false}`) // not done → the loop continues.
+
+	// Iteration 1 (loop:1) — the executor launched it because until was false.
+	drive(t, s, wfID)
+	c1 := inFlightChild(t, s, wfID)
+	assert.Equal(t, run.SpawnRunID(wfID, "poll", "loop:1"), c1.ID, "iteration 1 uses loop:1")
+	completeNode(t, s, c1.ID, `{"done":true}`) // done → the loop exits.
+
+	// Advance: until is true → the loop exits → the workflow succeeds with the last iteration's output.
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "until=true exits the loop and completes the workflow")
+	// Exactly 2 iteration sub-runs were launched (loop:0, loop:1) — no third.
+	assert.Len(t, childrenOf(t, s, wfID), 2, "exactly 2 iterations ran (until flipped true at iteration 1)")
+}
+
+// TestWorkflowExecutor_Loop_MaxIterations: a loop whose `until` never satisfies stops at maxIterations (the
+// hard bound), not forever.
+func TestWorkflowExecutor_Loop_MaxIterations(t *testing.T) {
+	s := newWorkflowServer(t)
+	const maxIter = 3
+	wfID := seedWorkflowRun(t, s, loopWorkflowSpec(maxIter), `{}`)
+
+	// Every iteration returns done=false, so `until` never fires; the loop must stop at maxIterations.
+	for i := range maxIter {
+		drive(t, s, wfID)
+		ci := inFlightChild(t, s, wfID)
+		assert.Equal(t, run.SpawnRunID(wfID, "poll", "loop:"+itoa(i)), ci.ID, "iteration %d uses loop:%d", i, i)
+		completeNode(t, s, ci.ID, `{"done":false}`)
+	}
+
+	// After maxIterations iterations, the next advance exits the loop (bound hit) → the workflow succeeds.
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "the loop stops at maxIterations even though until never fired")
+	assert.Len(t, childrenOf(t, s, wfID), maxIter, "exactly maxIterations (%d) iteration sub-runs ran", maxIter)
+}
+
+// retryWorkflowSpec: a single node `flaky` with the given retry count, terminal (no next).
+func retryWorkflowSpec(retries int32) agentsv1beta1.WorkflowSpec {
+	flaky := stepNode("flaky", "flaky-agent")
+	flaky.Retries = retries
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{flaky},
+	}
+}
+
+// TestWorkflowExecutor_Retries_ExhaustThenFail: a node with retries:2 whose sub-run fails on every attempt →
+// exactly 3 attempts (the original "0" + retry:1 + retry:2), then fail-fast.
+func TestWorkflowExecutor_Retries_ExhaustThenFail(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, retryWorkflowSpec(2), `{}`)
+
+	// Attempt 0 (original launch, index "0").
+	drive(t, s, wfID)
+	a0 := run.SpawnRunID(wfID, "flaky", "0")
+	require.Contains(t, childrenOf(t, s, wfID), a0, "attempt 0 is the original launch (index 0)")
+	failNode(t, s, a0, "fail-0")
+
+	// Attempt 1 (retry:1) — the failure had retry budget, so a fresh sub-run launched.
+	drive(t, s, wfID)
+	a1 := run.SpawnRunID(wfID, "flaky", "retry:1")
+	require.Contains(t, childrenOf(t, s, wfID), a1, "attempt 1 is a fresh retry:1 sub-run")
+	assert.NotEqual(t, a0, a1, "a retry is a NEW sub-run, not a re-read of the failed one")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the workflow re-suspends on the retry")
+	failNode(t, s, a1, "fail-1")
+
+	// Attempt 2 (retry:2).
+	drive(t, s, wfID)
+	a2 := run.SpawnRunID(wfID, "flaky", "retry:2")
+	require.Contains(t, childrenOf(t, s, wfID), a2, "attempt 2 is retry:2")
+	failNode(t, s, a2, "fail-2")
+
+	// Retries exhausted (2 retries used) → fail-fast. Exactly 3 attempts total.
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "after retries are exhausted the workflow fails")
+	assert.Contains(t, fin.Error, "fail-2", "the workflow surfaces the LAST attempt's error")
+	assert.Len(t, childrenOf(t, s, wfID), 3, "exactly 3 attempts ran (attempt 0 + 2 retries)")
+}
+
+// TestWorkflowExecutor_Retries_SucceedOnRetry: a node with retries:2 that fails once then succeeds → 2 attempts,
+// then the workflow succeeds (the retry recovered it).
+func TestWorkflowExecutor_Retries_SucceedOnRetry(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, retryWorkflowSpec(2), `{}`)
+
+	drive(t, s, wfID)
+	a0 := run.SpawnRunID(wfID, "flaky", "0")
+	failNode(t, s, a0, "transient")
+
+	drive(t, s, wfID)
+	a1 := run.SpawnRunID(wfID, "flaky", "retry:1")
+	require.Contains(t, childrenOf(t, s, wfID), a1)
+	completeNode(t, s, a1, "recovered")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "a retry that succeeds completes the workflow")
+	assert.Equal(t, "recovered", fin.Messages[0].Content, "the successful attempt's output is the node output")
+	assert.Len(t, childrenOf(t, s, wfID), 2, "exactly 2 attempts ran (fail, then success)")
+}
+
+// TestWorkflowExecutor_Retries_ZeroIsSingleAttempt: retries:0 (the default) → exactly 1 attempt, fail-fast on
+// its failure (the regression that retries default off = today's fail-fast).
+func TestWorkflowExecutor_Retries_ZeroIsSingleAttempt(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, retryWorkflowSpec(0), `{}`)
+
+	drive(t, s, wfID)
+	a0 := run.SpawnRunID(wfID, "flaky", "0")
+	failNode(t, s, a0, "boom")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "retries:0 → the first failure is fail-fast")
+	assert.Contains(t, fin.Error, "boom")
+	assert.Len(t, childrenOf(t, s, wfID), 1, "retries:0 → exactly 1 attempt")
+}
+
+// TestWorkflowExecutor_Map_BudgetBomb: a map whose fan-out exceeds the per-root spawn budget is refused
+// mid-launch → fail-fast (the dynamic map-bomb backstop). Budget maxTotalSpawns=2 over a 5-item list.
+func TestWorkflowExecutor_Map_BudgetBomb(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := mapWorkflowSpec()
+	spec.Budget = &agentsv1beta1.SpawnBudget{MaxTotalSpawns: 2} // only 2 launches allowed for the whole tree.
+	wfID := seedWorkflowRun(t, s, spec, `{"items":["a","b","c","d","e"]}`)
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "a map over 5 items with a budget of 2 is refused → fail-fast")
+	assert.Contains(t, fin.Error, "spawn budget", "the failure names the budget backstop")
+	// At most the budget's worth of item sub-runs were created before the refusal.
+	assert.LessOrEqual(t, len(childrenOf(t, s, wfID)), 2, "no more than the budget's launches were created")
+}
+
+// itoa is a tiny int→string for building loop:<n> ids in tests without importing strconv at call sites.
+func itoa(i int) string { return strconv.Itoa(i) }

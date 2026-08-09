@@ -79,7 +79,43 @@ func ValidateResult(spec agentsv1beta1.WorkflowSpec) Result {
 	// ── 2. CEL compile + 3. the referenced-output⇒outputSchema rule ──────────
 	res.checkExpressions(spec, names)
 
+	// ── 4. Static spawn-budget guard (the map-bomb / runaway-loop lower bound) ──
+	res.checkBudget(spec)
+
 	return res.finish()
+}
+
+// checkBudget rejects a spec whose STATICALLY-KNOWABLE worst-case launch count exceeds the workflow's total
+// spawn budget (ADR 0060 "Validate statically what's knowable"). A map's list size is a RUNTIME value (its
+// dynamic ReserveSpawn is the real backstop), but a loop's `maxIterations` is known at author time: each
+// iteration is one node launch, so the sum of every loop's maxIterations is a conservative lower bound on the
+// total launches. When a budget is set (MaxTotalSpawns > 0) and that lower bound already exceeds it, the
+// workflow can NEVER complete without hitting the budget — reject it at authoring time rather than let it
+// fail-fast at runtime. A workflow with no loops (or no budget) passes this cheaply; the dynamic per-root
+// counter still backstops maps + everything else.
+func (r *Result) checkBudget(spec agentsv1beta1.WorkflowSpec) {
+	if spec.Budget == nil || spec.Budget.MaxTotalSpawns <= 0 {
+		return // no total budget configured → nothing to statically bound (the CRD defaults it for real specs).
+	}
+	// Every non-loop step is at least one launch when reached; every loop contributes up to maxIterations
+	// launches. We do not model reachability (a conservative over-count is the safe direction for a guard —
+	// but we also must not reject a legal linear graph), so we bound only the KNOWABLE amplifier: the loops.
+	// The lower bound = (# non-loop steps that launch) + Σ loop.maxIterations. A loop step's own single "slot"
+	// is subsumed by its iterations, so count it once via maxIterations.
+	var lowerBound int64
+	for i := range spec.Steps {
+		s := &spec.Steps[i]
+		if s.Loop != nil {
+			lowerBound += int64(s.Loop.MaxIterations)
+			continue
+		}
+		lowerBound++ // a plain/conditional/map step is at least one launch (a map's fan-out is runtime).
+	}
+	if lowerBound > int64(spec.Budget.MaxTotalSpawns) {
+		r.add(fmt.Errorf(
+			"workflow's worst-case static launch count (%d, from loop maxIterations + steps) exceeds its spawn budget maxTotalSpawns=%d; raise the budget or lower maxIterations (ADR 0060 map-bomb guard)",
+			lowerBound, spec.Budget.MaxTotalSpawns))
+	}
 }
 
 // checkNames builds the unique, non-empty step-name set (the reference target space), recording a problem per

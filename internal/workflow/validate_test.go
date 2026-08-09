@@ -222,3 +222,35 @@ func TestValidate_NoSteps(t *testing.T) {
 		t.Fatal("a workflow with no steps must be a validation error")
 	}
 }
+
+// TestValidate_StaticSpawnBudget — a loop whose maxIterations (the statically-knowable launch amplifier)
+// already exceeds the workflow's total spawn budget is rejected at authoring time (the m67.5 map-bomb guard);
+// a loop within budget, and a spec with no budget, both pass.
+func TestValidate_StaticSpawnBudget(t *testing.T) {
+	loopSpec := func(maxIter, budget int32) agentsv1beta1.WorkflowSpec {
+		spec := agentsv1beta1.WorkflowSpec{
+			RegistryRef: "support",
+			Steps: []agentsv1beta1.WorkflowStep{
+				{Name: "poll", AgentRef: "poller", Loop: &agentsv1beta1.WorkflowLoop{Until: "true", MaxIterations: maxIter, Do: "tick"}},
+				{Name: "tick", AgentRef: "ticker", Next: ""},
+			},
+		}
+		if budget > 0 {
+			spec.Budget = &agentsv1beta1.SpawnBudget{MaxTotalSpawns: budget}
+		}
+		return spec
+	}
+
+	// maxIterations 50 + 1 non-loop step = 51 worst-case launches > budget 10 → rejected.
+	if err := Validate(loopSpec(50, 10)); err == nil {
+		t.Fatal("a loop whose maxIterations exceeds the spawn budget must be rejected (map-bomb guard)")
+	}
+	// maxIterations 3 + 1 step = 4 <= budget 20 → allowed.
+	if err := Validate(loopSpec(3, 20)); err != nil {
+		t.Fatalf("a loop within the spawn budget must validate; got: %v", err)
+	}
+	// No budget block → no static bound (the dynamic per-root counter is the backstop for real specs).
+	if err := Validate(loopSpec(1000, 0)); err != nil {
+		t.Fatalf("with no budget block the static guard must not fire; got: %v", err)
+	}
+}
