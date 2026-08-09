@@ -188,7 +188,7 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 			// A denied connect is compliance-relevant ("who was refused") — record it, then 403.
 			s.appendAudit(r.Context(), auditlog.Entry{
 				Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
-				ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: "denied",
+				ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: auditOutcomeDenied,
 				Detail: map[string]any{providerNoun: strings.ToLower(strings.TrimSpace(req.Provider))},
 			})
 		}

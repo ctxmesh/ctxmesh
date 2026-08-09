@@ -142,6 +142,12 @@ type gatewayConfig struct {
 	// no guardrail (the m66.2 controller fails a dangling/invalid ref closed, so this env is
 	// only ever set for a VALIDATED policy).
 	GuardrailPolicy string
+	// BFFInternalURL is the BFF's cluster-internal URL (BFF_INTERNAL_URL env), used by the
+	// durable guardrail block audit (m66.9): the launcher POSTs a PII-safe compliance record
+	// to POST /api/internal/guardrail-event best-effort, async. Empty ⇒ the durable POST is
+	// skipped; the span event emitted by emitGuardrailDecision remains the only record.
+	// Same env the delegate client uses (delegate.go, BFFURL field) — one source of truth.
+	BFFInternalURL string
 }
 
 // defaultPodTokenPath is where the controller mounts the launcher's projected
@@ -209,6 +215,7 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		StatelayerProxyURL: strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
 		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
 		GuardrailPolicy:    strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
+		BFFInternalURL:     strings.TrimRight(strings.TrimSpace(lookup("BFF_INTERNAL_URL")), "/"),
 	}, nil
 }
 
@@ -267,7 +274,12 @@ type gatewayProxy struct {
 	// nil ⇒ semanticJudge disabled/absent ⇒ zero judge calls. It NEVER underpins the fail-closed
 	// guarantee: it augments the deterministic engine and fails OPEN on its own error/timeout.
 	judge *semanticJudge
-	logf  func(string, ...any)
+	// bffInternalURL is BFF_INTERNAL_URL (process-level, from gatewayConfig). Used by the durable
+	// guardrail block audit (m66.9, ADR 0059 §9): the launcher POSTs a PII-safe compliance record
+	// to the BFF's ingest endpoint best-effort, async. Empty ⇒ the durable POST is skipped; the
+	// span event (emitted by emitGuardrailDecision) remains the only record.
+	bffInternalURL string
+	logf           func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -312,14 +324,15 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	}
 
 	gp := &gatewayProxy{
-		cfg:       cfg,
-		upstream:  u,
-		enforcer:  budget.NewEnforcer(),
-		estimator: budget.NewEstimator(),
-		client:    &http.Client{Timeout: gatewayRequestTimeout},
-		tracer:    tracer,
-		guardrail: guardrail,
-		logf:      logf,
+		cfg:            cfg,
+		upstream:       u,
+		enforcer:       budget.NewEnforcer(),
+		estimator:      budget.NewEstimator(),
+		client:         &http.Client{Timeout: gatewayRequestTimeout},
+		tracer:         tracer,
+		guardrail:      guardrail,
+		bffInternalURL: cfg.BFFInternalURL,
+		logf:           logf,
 	}
 
 	if cfg.ConvCapUSD != "" {

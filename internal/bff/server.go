@@ -476,6 +476,10 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
 	s.registerSpawnRoute(api)
+	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
+	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
+	// the run capability, not a browser bearer token.
+	s.registerGuardrailEventRoute(api)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
