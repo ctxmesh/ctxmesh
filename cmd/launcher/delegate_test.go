@@ -40,6 +40,12 @@ type fakeSpawnClient struct {
 	spawnErr error
 	awaitRes spawnedRunResult
 	awaitErr error
+
+	// handoff (m67.6)
+	handoffs       int
+	gotHandoffBody bffHandoffBody
+	handoffRes     handoffResult
+	handoffErr     error
 }
 
 func (f *fakeSpawnClient) Spawn(_ context.Context, capToken string, body bffSpawnBody) (string, error) {
@@ -57,6 +63,24 @@ func (f *fakeSpawnClient) Spawn(_ context.Context, capToken string, body bffSpaw
 
 func (f *fakeSpawnClient) Await(_ context.Context, _, _ string) (spawnedRunResult, error) {
 	return f.awaitRes, f.awaitErr
+}
+
+// Handoff records the handoff call + returns a programmed result (m67.6). Delegate tests never call it.
+func (f *fakeSpawnClient) Handoff(_ context.Context, capToken string, body bffHandoffBody) (handoffResult, error) {
+	f.handoffs++
+	f.gotCap = capToken
+	f.gotHandoffBody = body
+	if f.handoffErr != nil {
+		return handoffResult{}, f.handoffErr
+	}
+	res := f.handoffRes
+	if res.RunID == "" {
+		res.RunID = "hand-xyz"
+	}
+	if res.HandedOffTo == "" {
+		res.HandedOffTo = body.TargetAgent
+	}
+	return res, nil
 }
 
 func newDelegate(t *testing.T, client spawnClient, budget SpawnBudget) *delegateServer {

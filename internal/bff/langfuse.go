@@ -1114,7 +1114,7 @@ func projectObservation(o *lfObservation, traceStart time.Time, haveStart bool) 
 // JSON so structured input/output still renders.
 func projectPayload(raw json.RawMessage) (string, bool) {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" || trimmed == `""` {
+	if trimmed == "" || trimmed == jsonNullLiteral || trimmed == `""` {
 		return "", true
 	}
 	// A JSON string unwraps to its text (the common redacted-marker-bearing case);

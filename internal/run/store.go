@@ -18,6 +18,8 @@ package run
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"sync"
 	"time"
 )
@@ -100,6 +102,33 @@ type Store interface {
 	// agent-supplied inputs and is only advisory). Fails CLOSED — a store error returns (false, err) so
 	// the spawn is denied. Monotonic within the tree (each accepted spawn permanently consumes budget).
 	ReserveSpawn(rootRunID string, maxTotal int) (bool, error)
+
+	// Suspend parks a RUNNING run in the `waiting` state (ADR 0060 §3), waiting on the given child run
+	// ids under mode (WaitAll|WaitAny). It clears the run's lease + worker (a waiting run is not
+	// claimable and holds no worker), applies the optional fn under the row lock FIRST (so the executor
+	// can checkpoint its cursor in the SAME transaction that suspends), and returns a copy. The
+	// executor calls this AFTER launching the child(ren). Errors if the run is not `running`, if waitOn
+	// is empty, or on an illegal transition. A status change auto-emits its `state` event.
+	Suspend(id string, waitOn []string, mode WaitMode, fn func(*Run) error) (*Run, error)
+
+	// CompleteAndWake terminates a CHILD run (via apply, which must transition it to a terminal state)
+	// and, in the SAME transaction, wakes a `waiting` PARENT that is waiting on it — flipping the
+	// parent waiting→queued when the wait condition is met — so the existing worker pool re-claims it
+	// (ADR 0060 §3). This is the TRANSACTIONAL cross-run wake: child terminal + parent re-queue commit
+	// together, so the wake is EXACTLY-ONCE by construction with no notification bus. It returns copies
+	// of the child and (if woken) the parent (wokeParent is nil when there is no parent, the parent is
+	// not waiting, the child is not in the parent's wait set, or the wait is not yet met). Idempotent:
+	// re-completing an already-terminal child (a reclaimed completion) is a no-op that does not
+	// re-queue the parent or corrupt the wait set.
+	CompleteAndWake(childID string, apply func(*Run) error) (child *Run, wokeParent *Run, err error)
+
+	// SweepWaiting is the belt-and-braces reconciler for the crash window between a child's terminal
+	// transition and the parent wake (and the sole wake path for the in-mem store across a restart):
+	// it finds `waiting` runs whose wait condition is ALREADY met by their children's persisted
+	// terminal states and flips them waiting→queued. Idempotent (a run woken by CompleteAndWake is no
+	// longer waiting, so the sweep skips it) and bounded in frequency by its caller (~30s). Returns the
+	// ids it re-queued.
+	SweepWaiting() ([]string, error)
 }
 
 // subBuffer bounds a subscriber's live channel; a consumer slower than this is dropped (its
@@ -140,6 +169,130 @@ func (m *memStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 	}
 	m.spawnCnt[rootRunID] = next
 	return true, nil
+}
+
+// Suspend parks a running run in `waiting` on the given children (the mem twin of pgStore.Suspend).
+func (m *memStore) Suspend(id string, waitOn []string, mode WaitMode, fn func(*Run) error) (*Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	oldStatus := e.run.Status
+	working := cloneRun(e.run)
+	if fn != nil {
+		if err := fn(working); err != nil {
+			return nil, err
+		}
+	}
+	if err := working.suspendToWaiting(waitOn, mode, time.Now()); err != nil {
+		return nil, err
+	}
+	e.run = working
+	if working.Status != oldStatus {
+		m.appendLocked(e, EventState, string(working.Status))
+	}
+	return cloneRun(working), nil
+}
+
+// CompleteAndWake terminates a child and wakes a waiting parent in one critical section — the mem
+// twin of the pgStore two-row transaction. The single map lock (m.mu) IS the transaction boundary:
+// child-terminal + parent-requeue are applied together, so the wake is atomic + exactly-once.
+func (m *memStore) CompleteAndWake(childID string, apply func(*Run) error) (*Run, *Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ce, ok := m.entries[childID]
+	if !ok {
+		return nil, nil, ErrNotFound
+	}
+	// Idempotency guard: an already-terminal child is a no-op (a reclaimed completion). Do NOT
+	// re-run apply (it would fail the state machine anyway) and do NOT re-wake the parent.
+	if ce.run.Status.IsTerminal() {
+		return cloneRun(ce.run), nil, nil
+	}
+	childStatus := ce.run.Status
+	child := cloneRun(ce.run)
+	if err := apply(child); err != nil {
+		return nil, nil, err
+	}
+	if !child.Status.IsTerminal() {
+		return nil, nil, fmt.Errorf("run %s: CompleteAndWake apply must reach a terminal state, got %s", childID, child.Status)
+	}
+	ce.run = child
+	if child.Status != childStatus {
+		m.appendLocked(ce, EventState, string(child.Status))
+	}
+	if child.Status.IsTerminal() {
+		for sid, sub := range ce.subs {
+			close(sub.ch)
+			delete(ce.subs, sid)
+		}
+	}
+
+	// Wake the waiting parent, if any, in the SAME critical section.
+	var wokeParent *Run
+	if child.ParentRunID != "" {
+		if pe, ok := m.entries[child.ParentRunID]; ok && pe.run.Status == StatusWaiting {
+			parent := cloneRun(pe.run)
+			met, removed := parent.satisfyChild(childID)
+			if removed {
+				pOld := parent.Status
+				if met {
+					if err := parent.Transition(StatusQueued, time.Now()); err != nil {
+						return nil, nil, err
+					}
+				}
+				pe.run = parent
+				if parent.Status != pOld {
+					m.appendLocked(pe, EventState, string(parent.Status))
+					wokeParent = cloneRun(parent)
+				}
+			}
+		}
+	}
+	return cloneRun(child), wokeParent, nil
+}
+
+// SweepWaiting re-queues waiting runs whose children are all-terminal-enough per the mode (the mem
+// twin of the pgStore sweeper — the crash-window / cross-restart safety net).
+func (m *memStore) SweepWaiting() ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var woke []string
+	for _, e := range m.entries {
+		if e.run.Status != StatusWaiting || len(e.run.WaitOn) == 0 {
+			continue
+		}
+		if !m.waitMetLocked(e.run) {
+			continue
+		}
+		working := cloneRun(e.run)
+		if err := working.Transition(StatusQueued, time.Now()); err != nil {
+			return woke, err
+		}
+		e.run = working
+		m.appendLocked(e, EventState, string(StatusQueued))
+		woke = append(woke, working.ID)
+	}
+	return woke, nil
+}
+
+// waitMetLocked reports whether a waiting run's condition is met by its children's CURRENT statuses.
+// Caller holds m.mu. all → every WaitOn child is terminal (or gone); any → at least one is.
+func (m *memStore) waitMetLocked(r *Run) bool {
+	terminalCount := 0
+	for _, cid := range r.WaitOn {
+		ce, ok := m.entries[cid]
+		// A missing child cannot be waited on further — treat it as satisfied (it will never wake us).
+		if !ok || ce.run.Status.IsTerminal() {
+			terminalCount++
+		}
+	}
+	if r.WaitMode == WaitAny {
+		return terminalCount > 0
+	}
+	return terminalCount == len(r.WaitOn) // WaitAll
 }
 
 func (m *memStore) Create(r *Run) error {
@@ -363,6 +516,13 @@ func cloneRun(r *Run) *Run {
 	if r.LeaseExpiresAt != nil {
 		t := *r.LeaseExpiresAt
 		c.LeaseExpiresAt = &t
+	}
+	if r.WaitOn != nil {
+		c.WaitOn = append([]string(nil), r.WaitOn...)
+	}
+	if r.NodeEndpoints != nil {
+		c.NodeEndpoints = make(map[string]string, len(r.NodeEndpoints))
+		maps.Copy(c.NodeEndpoints, r.NodeEndpoints)
 	}
 	return &c
 }

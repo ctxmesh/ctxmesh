@@ -1,0 +1,517 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+// ── POST /api/workflows/{name}/runs (m67.4, ADR 0060) ─────────────────────────────────────────────────────
+//
+// Creates a workflow instance run. The handler:
+//   1. Resolves the named Workflow CR through the CALLER-SCOPED client (ADR 0011 — caller's RBAC governs).
+//   2. Validates the request body's `input` against the workflow's inputSchema (when declared).
+//   3. Snapshots the resolved WorkflowSpec to JSON and pins it on the new run (SpecSnapshot pattern).
+//   4. Creates the run (IsWorkflowInstance() == true → the run-worker routes it to executeWorkflow).
+//   5. Returns 202 {id, status:"queued"}.
+//
+// ── POST /api/workflows/runs — the INLINE-spec run (planning mode, m67.7, ADR 0060 §6) ─────────────────────
+//
+// A runtime-generated plan runs WITHOUT a Workflow CR (a plan must never create an etcd object, ADR 0042).
+// The body carries an inline WorkflowSpec + input. The handler:
+//   1. VALIDATES the inline spec via the SHARED, k8s-client-free library internal/workflow.Validate (m67.1)
+//      — this is exactly why that validator takes the spec by value and imports no k8s client: the executor
+//      path validates a plan that never becomes a CR. An invalid plan is a 422 with the reason (never run).
+//   2. Resolves registryRef + every step's agentRef to registry MEMBERS through the caller-scoped client —
+//      the same trust-boundary check the m67.1 CR controller runs at admission, done here because a runtime
+//      plan has no controller. A missing registry / missing agent / non-member is a 422.
+//   3. Validates the input against the inline spec's inputSchema (when declared).
+//   4. Snapshots the inline spec + creates the instance run with NO WorkflowRef (workflowRef=""), so the run
+//      is a workflow instance driven off its pinned SpecSnapshot, exactly as the CR path — minus the CR.
+//
+// ── The planner pattern (the bridge this endpoint completes) ────────────────────────────────────────────────
+//
+// "An agent produces a plan then executes it" (ADR 0060 §6) is: a PLANNER agent whose
+// spec.runtime.outputSchema IS the WorkflowSpec JSON schema (M65 structured outputs) emits a WorkflowSpec as
+// its terminal answer; the caller feeds that plan to POST /api/workflows/runs (with requireApproval to gate
+// it behind a human). No new "planner runtime" is needed — the inline-spec endpoint + the plan-approval gate
+// ARE the mechanism; the deterministic executor runs the model-authored graph under the same
+// identity/governance as any workflow. NOTE (m67.7): a served WorkflowSpec JSON-Schema ARTIFACT (a
+// GET .../spec-schema the planner could set verbatim as its outputSchema) is NOT shipped here — the accurate
+// source is the generated CRD openAPIV3Schema (config/crd/bases/...workflows.yaml, which uses
+// x-kubernetes- extensions, not pure JSON Schema) and there is no struct→JSON-Schema dependency in the
+// module, so a faithful runtime artifact is not cheap and a hand-authored one would drift from the type.
+// Deferred as a small follow-on; the pattern works today by pinning the schema at the planner author's side.
+//
+// ── Node-endpoint resolution + pinning at CREATE (m67.13, ADR 0011/0060) ──────────────────────────────────
+//
+// A workflow instance run resolves each node agentRef → the agent's invoke endpoint at CREATE time, through
+// the CALLER-SCOPED client, and PINS them onto the run (run.NodeEndpoints) — exactly as a single run pins its
+// Endpoint at create (m32.2) and as ADR 0060 pins the spec snapshot. The workflow executor runs OFF-REQUEST
+// in the run-worker goroutine (no request context, no caller bearer token), so it reads the PINNED endpoints
+// rather than re-resolving an AgentDeployment. This is load-bearing for ADR 0011: the BFF's own Role holds NO
+// agent-CRD access (config/bff/role.yaml is `rules: []`), so an off-request BFF-SA read of `agentdeployments`
+// would be forbidden on a real cluster — the m67.10 live-tier2 failure this fix closes. Resolving at create,
+// caller-scoped, keeps the create-time RBAC decision the gate (the caller is authorized for these agents —
+// they are the workflow's registry members) and needs the BFF no new RBAC.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agent-engine/internal/workflow"
+)
+
+// resolveWorkflowNodeEndpoints resolves each distinct node agentRef in the (validated) spec to its
+// AgentDeployment's status.URL through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the
+// reads; the caller is authorized for these agents, they are the workflow's registry members) and returns
+// the pinned agentRef→endpoint map. It is FAIL-FAST at create: a node whose agent is missing / not-ready (no
+// endpoint yet) / a job agent, or an RBAC/auth denial, returns ok=false with the right status so the create
+// aborts with a clear 4xx and NO run is stored — exactly as run-create fails on an unresolvable agent. This
+// is what lets the off-request executor launch nodes off the pinned endpoints WITHOUT any BFF-SA agent-CRD
+// RBAC (config/bff/role.yaml is `rules: []`). Returns (endpoints, 0, "", true) on success.
+func (s *Server) resolveWorkflowNodeEndpoints(
+	ctx context.Context, caller client.Client, spec agentsv1beta1.WorkflowSpec, namespace string,
+) (map[string]string, int, string, bool) {
+	// Dedup the agent names (several nodes may be backed by the same agent).
+	want := make([]string, 0, len(spec.Steps))
+	for i := range spec.Steps {
+		want = append(want, spec.Steps[i].AgentRef)
+	}
+	slices.Sort(want)
+	want = slices.Compact(want)
+
+	endpoints := make(map[string]string, len(want))
+	for _, name := range want {
+		var deploy agentsv1alpha1.AgentDeployment
+		if err := caller.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
+			switch {
+			case apierrors.IsForbidden(err):
+				return nil, http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to read node agent %q", name), false
+			case apierrors.IsUnauthorized(err):
+				return nil, http.StatusUnauthorized, msgTokenRejected, false
+			case apierrors.IsNotFound(err):
+				return nil, http.StatusUnprocessableEntity, fmt.Sprintf("node agent %q does not exist in namespace %q", name, namespace), false
+			default:
+				s.log.Error(err, "workflow run: resolving node agent endpoint", "agent", name, "namespace", namespace)
+				return nil, http.StatusInternalServerError, fmt.Sprintf("failed to resolve node agent %q", name), false
+			}
+		}
+		url := strings.TrimSpace(deploy.Status.URL)
+		if url == "" {
+			if deploy.Spec.ExecutionModel == executionModelJob {
+				return nil, http.StatusUnprocessableEntity,
+					fmt.Sprintf("node agent %q is a job agent (executionModel: job) — it has no live endpoint and cannot be a workflow node", name), false
+			}
+			return nil, http.StatusUnprocessableEntity,
+				fmt.Sprintf("node agent %q is not ready (no endpoint assigned yet)", name), false
+		}
+		endpoints[name] = url
+	}
+	return endpoints, 0, "", true
+}
+
+// registerWorkflowRunRoutes mounts the workflow invocation endpoint on the authed mux. It follows
+// the same guard pattern as registerRunRoutes: both the Invoke adapter AND callerClients must be
+// present (the workflow executor re-invokes node agents via the run-worker path, and the creation
+// step resolves the Workflow CRD through the caller-scoped client, ADR 0011).
+func (s *Server) registerWorkflowRunRoutes(authed *http.ServeMux) {
+	if s.adapters.Invoke != nil && s.callerClients != nil {
+		authed.HandleFunc("POST /api/workflows/{name}/runs", s.handleCreateWorkflowRun)
+		// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
+		// WorkflowSpec — NO {name}, NO Workflow CR. Registered on the SAME guard (it also spawns node
+		// sub-runs + reads the registry through the caller-scoped client).
+		authed.HandleFunc("POST /api/workflows/runs", s.handleCreateInlineWorkflowRun)
+		return
+	}
+	authed.Handle("POST /api/workflows/{name}/runs", notImplemented("workflow runs"))
+	authed.Handle("POST /api/workflows/runs", notImplemented("workflow runs"))
+}
+
+// handleCreateWorkflowRun serves POST /api/workflows/{name}/runs (m67.4).
+// Caller-scoped (ADR 0011): the Workflow CRD is resolved through the caller's own client, so the
+// K8s API server enforces the caller's RBAC. Returns 202 Accepted with {id, status:"queued"}.
+func (s *Server) handleCreateWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	wfName := r.PathValue("name")
+	if wfName == "" {
+		writeError(w, http.StatusBadRequest, "workflow name is required")
+		return
+	}
+
+	// Parse the optional namespace + input from the body.
+	req, ok := parseWorkflowRunRequest(w, r)
+	if !ok {
+		return
+	}
+
+	// (1) Resolve the Workflow CR through the caller-scoped client (ADR 0011 — caller's RBAC).
+	wf, ok := s.resolveWorkflowCR(w, r.Context(), caller, wfName, req.Namespace)
+	if !ok {
+		return
+	}
+
+	// (2) Validate the request input against the workflow's inputSchema (when declared).
+	if err := validateWorkflowInput(wf.Spec.InputSchema, req.Input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "input does not conform to the workflow's inputSchema: "+err.Error())
+		return
+	}
+
+	// (3-5) Snapshot the resolved CR spec + create the instance run (the CR was validated by its
+	// controller, so no re-validation here — the trust boundary + graph were enforced at admission).
+	s.createWorkflowInstanceRun(w, r, caller, wfName, wf.Spec, req.Input, req.Namespace, req.ConversationID, req.RequireApproval)
+}
+
+// createWorkflowInstanceRun is the SHARED creation path for BOTH the CR endpoint and the inline-spec
+// endpoint (m67.7). It snapshots the (already-validated) spec, seeds the plan-approval gate into the
+// cursor when requested, records the caller's execution identity, creates the run, and starts it (in
+// dispatch mode it stays `queued` for the pool). workflowRef is the CR name for the CR path and "" for
+// an inline plan (a runtime plan is NOT a CR — ADR 0042). It writes the 202 (or an error) response.
+func (s *Server) createWorkflowInstanceRun(
+	w http.ResponseWriter, r *http.Request, caller client.Client,
+	workflowRef string, spec agentsv1beta1.WorkflowSpec, input json.RawMessage,
+	namespace, conversationID string, requireApproval bool,
+) {
+	// Snapshot the resolved WorkflowSpec to JSON (the executor drives this pinned snapshot, not a live
+	// CR — a live CR edit after instance creation must not change the running graph; an inline plan is
+	// pinned identically so the plan a human approved is exactly the plan that runs).
+	snapshot, err := json.Marshal(spec)
+	if err != nil {
+		s.log.Error(err, "workflow run: could not marshal spec snapshot", "workflow", workflowRef)
+		writeError(w, http.StatusInternalServerError, "failed to snapshot the workflow spec")
+		return
+	}
+
+	runID, err := randToken(16)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to mint a run id")
+		return
+	}
+	ns := namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	// Resolve + PIN each node agent's endpoint at CREATE time through the CALLER-SCOPED client (ADR 0011:
+	// the caller's own RBAC gates the AgentDeployment reads; the caller is authorized for these agents —
+	// they are the workflow's registry members). This mirrors how a single run pins its Endpoint at create
+	// (m32.2) and how ADR 0060 pins the spec snapshot: the executor runs OFF-REQUEST in the run-worker with
+	// no caller token, so it must not re-resolve an AgentDeployment (the BFF SA holds NO agent-CRD RBAC —
+	// config/bff/role.yaml is `rules: []`, ADR 0011). Fail-fast at create (4xx) on any node whose agent is
+	// missing / not-ready — exactly as run-create fails on an unresolvable agent — so a workflow never
+	// queues only to stall unable to launch a node.
+	nodeEndpoints, code, msg, ok := s.resolveWorkflowNodeEndpoints(r.Context(), caller, spec, ns)
+	if !ok {
+		writeError(w, code, msg)
+		return
+	}
+
+	// The run's Agent is the workflow name (CR path) or a synthetic label for an inline plan — it is the
+	// audit/display name; the executor drives the graph off SpecSnapshot, never off Agent.
+	agentLabel := workflowRef
+	if agentLabel == "" {
+		agentLabel = inlineWorkflowAgentLabel
+	}
+	rn := run.New(runID, ns, agentLabel, input, conversationID, time.Now())
+	rn.WorkflowRef = workflowRef       // "" for an inline plan (no CR); the CR name otherwise
+	rn.SpecSnapshot = string(snapshot) // pinned at instance-create time — drives the executor
+	rn.NodeEndpoints = nodeEndpoints   // pinned caller-scoped endpoints — the executor launches nodes off these
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		rn.CallerUsername = username
+		rn.Boundary = agentBoundary(r.Context(), caller, ns, agentLabel)
+	}
+	// The plan-approval gate: seed it into the executor-owned cursor so the FIRST advance pauses in
+	// `requires_action` before launching node 1 (checked in executeWorkflow). Persisted in the existing
+	// Cursor column — no new run field/store migration; the executor owns the cursor's shape.
+	if requireApproval {
+		cursor := newCursor()
+		cursor.PlanApproval = &planApproval{Required: true}
+		cursorJSON, mErr := cursor.marshal()
+		if mErr != nil {
+			s.log.Error(mErr, "workflow run: could not seed plan-approval cursor", "workflow", workflowRef)
+			writeError(w, http.StatusInternalServerError, "failed to seed the plan-approval gate")
+			return
+		}
+		rn.Cursor = cursorJSON
+	}
+
+	if err := s.runStore.Create(rn); err != nil {
+		s.log.Error(err, "create workflow run failed", "workflow", workflowRef)
+		writeError(w, http.StatusInternalServerError, "failed to create the workflow run")
+		return
+	}
+
+	// Worker-dispatch mode: leave `queued` for the pool. Dev/single-pod: execute in-process so the
+	// workflow advances without a running worker pool.
+	if !s.runWorkerDispatch {
+		go s.executeWorkflow(runID)
+	}
+
+	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})
+}
+
+// inlineWorkflowAgentLabel is the synthetic run.Agent for an inline (CR-less) workflow plan — it names
+// the run in listings/audit without implying a single agent (the graph is the SpecSnapshot).
+const inlineWorkflowAgentLabel = "inline-workflow"
+
+// handleCreateInlineWorkflowRun serves POST /api/workflows/runs (planning mode, m67.7, ADR 0060 §6): it
+// runs a runtime-generated inline WorkflowSpec WITHOUT ever creating a Workflow CR (ADR 0042). Caller-
+// scoped (ADR 0011). The inline spec is VALIDATED via the shared m67.1 library (this is exactly why that
+// validator is k8s-client-free) and its registryRef + every step's agentRef are resolved to registry
+// MEMBERS through the caller's own client (the trust-boundary check the CR controller does at admission,
+// done here at run-create because a plan has no controller). An invalid or out-of-boundary plan is a 4xx
+// with the reason — an unvalidated plan is NEVER run.
+func (s *Server) handleCreateInlineWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	req, ok := parseInlineWorkflowRunRequest(w, r)
+	if !ok {
+		return
+	}
+
+	// (1) Validate the inline spec with the SHARED library (structure + CEL + the referenced-output⇒
+	// outputSchema rule). Reject an invalid plan with the validation error — never run an unvalidated plan.
+	if err := workflow.Validate(req.Spec); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid inline workflow spec: "+err.Error())
+		return
+	}
+
+	// (2) Resolve registryRef + every step's agentRef to registry MEMBERS through the caller-scoped
+	// client — the same trust-boundary check the CR controller performs, done here because an inline
+	// plan has no controller. A missing registry / missing agent / non-member is a 4xx (no run created).
+	if code, msg, ok := s.resolveWorkflowMembership(r.Context(), caller, req.Spec, req.Namespace); !ok {
+		writeError(w, code, msg)
+		return
+	}
+
+	// (3) Validate the input against the inline spec's inputSchema (when declared).
+	if err := validateWorkflowInput(req.Spec.InputSchema, req.Input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "input does not conform to the workflow's inputSchema: "+err.Error())
+		return
+	}
+
+	// (4-6) Snapshot the inline spec + create the instance run — with NO WorkflowRef (workflowRef="",
+	// an inline plan is not a CR). The pinned snapshot is what the executor drives.
+	s.createWorkflowInstanceRun(w, r, caller, "" /* no CR */, req.Spec, req.Input, req.Namespace, req.ConversationID, req.RequireApproval)
+}
+
+// parseInlineWorkflowRunRequest reads + JSON-decodes the bounded inline-run body. A spec is required
+// (an empty body / missing spec is a 400 — there is nothing to run).
+func parseInlineWorkflowRunRequest(w http.ResponseWriter, r *http.Request) (InlineWorkflowRunRequest, bool) {
+	if r.Body == nil || r.ContentLength == 0 {
+		writeError(w, http.StatusBadRequest, "an inline workflow run requires a spec in the request body")
+		return InlineWorkflowRunRequest{}, false
+	}
+	var req InlineWorkflowRunRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInvokeRequestBytes))
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err.Error()))
+		return InlineWorkflowRunRequest{}, false
+	}
+	if len(req.Spec.Steps) == 0 {
+		writeError(w, http.StatusBadRequest, "the inline workflow spec has no steps")
+		return InlineWorkflowRunRequest{}, false
+	}
+	return req, true
+}
+
+// resolveWorkflowMembership enforces the workflow's trust boundary at run-create time: registryRef must
+// resolve to an AgentRegistry (same namespace) and EVERY step's agentRef must be an EXISTING
+// AgentDeployment that MATCHES the registry's memberSelector. This is the exact check the CR controller
+// (m67.1) runs at admission; the inline path runs it here because a runtime plan has no controller. Reads
+// go through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the registry/agent reads,
+// so an inline plan cannot escalate past what the user may see). Returns ok=true when the boundary holds;
+// otherwise (code, message, false) — a NotFound/non-member is a 422 (the plan is well-formed but its
+// agents are not authorized here), an RBAC denial is surfaced as 403.
+func (s *Server) resolveWorkflowMembership(
+	ctx context.Context, caller client.Client, spec agentsv1beta1.WorkflowSpec, namespace string,
+) (int, string, bool) {
+	ns := namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	var registry agentsv1alpha1.AgentRegistry
+	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: spec.RegistryRef}, &registry); err != nil {
+		switch {
+		case apierrors.IsForbidden(err):
+			return http.StatusForbidden, "forbidden: not allowed to read the workflow's registryRef", false
+		case apierrors.IsUnauthorized(err):
+			return http.StatusUnauthorized, "unauthorized: token rejected by the API server", false
+		case apierrors.IsNotFound(err):
+			return http.StatusUnprocessableEntity, fmt.Sprintf("registryRef %q not found in namespace %q", spec.RegistryRef, ns), false
+		default:
+			s.log.Error(err, "inline workflow: resolving registryRef", "registry", spec.RegistryRef, "namespace", ns)
+			return http.StatusInternalServerError, "failed to resolve the workflow's registryRef", false
+		}
+	}
+	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
+	if err != nil {
+		return http.StatusUnprocessableEntity, fmt.Sprintf("registry %q has an invalid memberSelector: %v", spec.RegistryRef, err), false
+	}
+
+	// Dedup the agent names (the same agent may back several nodes).
+	want := make([]string, 0, len(spec.Steps))
+	for i := range spec.Steps {
+		want = append(want, spec.Steps[i].AgentRef)
+	}
+	slices.Sort(want)
+	want = slices.Compact(want)
+
+	for _, name := range want {
+		var agent agentsv1alpha1.AgentDeployment
+		if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
+			switch {
+			case apierrors.IsForbidden(err):
+				return http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to read step agent %q", name), false
+			case apierrors.IsUnauthorized(err):
+				return http.StatusUnauthorized, "unauthorized: token rejected by the API server", false
+			case apierrors.IsNotFound(err):
+				return http.StatusUnprocessableEntity, fmt.Sprintf("step agent %q does not exist in namespace %q", name, ns), false
+			default:
+				s.log.Error(err, "inline workflow: resolving step agent", "agent", name, "namespace", ns)
+				return http.StatusInternalServerError, fmt.Sprintf("failed to resolve step agent %q", name), false
+			}
+		}
+		if !selector.Matches(labels.Set(agent.Labels)) {
+			return http.StatusUnprocessableEntity,
+				fmt.Sprintf("agent %q is not a member of registry %q (the workflow's trust boundary)", name, spec.RegistryRef), false
+		}
+	}
+	return 0, "", true
+}
+
+// resolveWorkflowCR reads the named Workflow CR through the CALLER-SCOPED client and returns a copy
+// (the caller's RBAC — not the BFF — gates this read, ADR 0011). It writes the right error
+// response and returns ok=false on any failure: not-found → 404, RBAC → 403, other → 500.
+func (s *Server) resolveWorkflowCR(w http.ResponseWriter, ctx context.Context, caller client.Client, name, namespace string) (*agentsv1beta1.Workflow, bool) {
+	ns := namespace
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	var wf agentsv1beta1.Workflow
+	if err := caller.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, &wf); err != nil {
+		switch {
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, "forbidden: not allowed to read the requested workflow")
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
+		case apierrors.IsNotFound(err):
+			writeError(w, http.StatusNotFound, "workflow not found")
+		default:
+			s.log.Error(err, "resolve workflow failed", "workflow", name, "namespace", ns)
+			writeError(w, http.StatusInternalServerError, "failed to resolve workflow")
+		}
+		return nil, false
+	}
+	return &wf, true
+}
+
+// WorkflowRunRequest is the POST /api/workflows/{name}/runs body.
+type WorkflowRunRequest struct {
+	// Input is the workflow's typed input, validated against inputSchema when declared.
+	// Optional when the workflow declares no inputSchema.
+	Input json.RawMessage `json:"input,omitempty"`
+	// Namespace scopes the Workflow CR lookup; empty → the default namespace.
+	Namespace string `json:"namespace,omitempty"`
+	// ConversationID threads runs together (same as /api/runs). Optional.
+	ConversationID string `json:"conversationId,omitempty"`
+	// RequireApproval, when true, installs the PLAN-APPROVAL GATE (m67.7, ADR 0060 §6): the executor
+	// pauses the run in `requires_action` (a plan_approval action) BEFORE launching node 1, and a human
+	// must POST /api/runs/{id}/resume {decision:approve} to run the graph (or {decision:deny} to reject
+	// it). Default false ⇒ the graph runs immediately (the m67.3 behavior, unchanged). This is the ONE
+	// legitimate use of `requires_action` on a workflow run — it IS human input (ADR 0060 §6).
+	RequireApproval bool `json:"requireApproval,omitempty"`
+}
+
+// InlineWorkflowRunRequest is the POST /api/workflows/runs body (planning mode, m67.7, ADR 0060 §6): a
+// runtime-generated WorkflowSpec run WITHOUT a Workflow CR (a plan must never create an etcd object,
+// ADR 0042). It carries the inline spec + the same run knobs as the CR path.
+type InlineWorkflowRunRequest struct {
+	// Spec is the inline WorkflowSpec — validated by the SHARED library (internal/workflow.Validate,
+	// the m67.1 k8s-client-free validator) then snapshotted onto the run, exactly as the CR path pins a
+	// resolved CR spec. Required.
+	Spec agentsv1beta1.WorkflowSpec `json:"spec"`
+	// Input is the workflow's typed input, validated against the inline spec's inputSchema when declared.
+	Input json.RawMessage `json:"input,omitempty"`
+	// Namespace scopes the registry/agent membership resolution + the node sub-runs; empty → default.
+	Namespace string `json:"namespace,omitempty"`
+	// ConversationID threads runs together (same as /api/runs). Optional.
+	ConversationID string `json:"conversationId,omitempty"`
+	// RequireApproval installs the plan-approval gate (see WorkflowRunRequest.RequireApproval). For a
+	// runtime-generated plan this is the natural "let a human vet the plan before it executes" switch.
+	RequireApproval bool `json:"requireApproval,omitempty"`
+}
+
+// parseWorkflowRunRequest reads the bounded POST body. Returns (req, true) on success, writes an
+// error and returns (_, false) on failure. An empty/absent body is valid (no input required).
+func parseWorkflowRunRequest(w http.ResponseWriter, r *http.Request) (WorkflowRunRequest, bool) {
+	if r.Body == nil || r.ContentLength == 0 {
+		return WorkflowRunRequest{}, true
+	}
+	var req WorkflowRunRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxInvokeRequestBytes))
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err.Error()))
+		return WorkflowRunRequest{}, false
+	}
+	return req, true
+}
+
+// validateWorkflowInput validates the request input against the workflow's declared inputSchema.
+// Returns nil when: the workflow has no inputSchema, OR the input is nil/empty (treats as null), OR
+// the input conforms to the schema. Fail-closed: an uncompilable schema is an error — the operator
+// must fix it; we never silently wave requests through a broken governance contract (ADR 0058 §5).
+func validateWorkflowInput(inputSchema *k8sruntime.RawExtension, input json.RawMessage) error {
+	if inputSchema == nil || len(inputSchema.Raw) == 0 {
+		return nil // no schema declared → no validation (dynamic / untyped workflow input)
+	}
+	sch, err := jsonschema.CompileString("inputSchema.json", string(inputSchema.Raw))
+	if err != nil {
+		return fmt.Errorf("workflow inputSchema is not a valid JSON Schema: %w", err)
+	}
+	// An absent/empty input is treated as JSON null for validation purposes, giving honest feedback
+	// ("null does not match required schema") when the schema requires an object, rather than
+	// silently skipping validation.
+	data := input
+	if len(data) == 0 {
+		data = json.RawMessage(`null`)
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("input is not valid JSON: %w", err)
+	}
+	return sch.Validate(v)
+}

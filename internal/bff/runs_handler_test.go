@@ -421,6 +421,88 @@ func TestCreateRun_NoRuntimeOutputSchemaIsEmpty(t *testing.T) {
 		"a run for an agent with no runtime must have OutputSchema == \"\" (no validation, backward-compat)")
 }
 
+// TestCreateRun_RoutesToActiveAgentAfterHandoff — active-agent routing (m67.6, ADR 0060 §5): when a run
+// is created for a conversation that a prior handoff transferred to agent B AND no explicit agent is
+// given, the run routes to B (the active agent), not a 400.
+func TestCreateRun_RoutesToActiveAgentAfterHandoff(t *testing.T) {
+	// B is a deployed, ready agent the conversation was handed off to.
+	agentB := readyAgent("billing-agent", "prod", "http://billing-agent.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentB).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"how can I help with billing?","consent_required":[]}`)}
+
+	store := run.NewMemStore()
+	conv := run.NewMemConversationStore()
+	require.NoError(t, conv.SetActiveAgent("chat-handed-off", "prod", "billing-agent", "A-1"))
+	s := NewServer(Options{
+		CallerClients:     newFakeFactory(c),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "test",
+		Log:               logr.Discard(),
+		RunStore:          store,
+		ConvStore:         conv,
+		RunWorkerDispatch: true, // keep queued so we can read the routed agent before execution
+	})
+
+	// No explicit agent — only the conversationId. Routing resolves it to the active agent B.
+	created := createRun(t, s, InvokeRequest{ConversationID: "chat-handed-off", Input: json.RawMessage(`{}`)})
+	rn, err := store.Get(created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "billing-agent", rn.Agent, "an agent-less run on a handed-off conversation routes to the active agent B")
+	assert.Equal(t, "chat-handed-off", rn.ConversationID)
+}
+
+// TestCreateRun_ExplicitAgentOverridesActivePointer — an explicit agent always wins over the pointer.
+func TestCreateRun_ExplicitAgentOverridesActivePointer(t *testing.T) {
+	agentEcho := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentEcho).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+
+	store := run.NewMemStore()
+	conv := run.NewMemConversationStore()
+	require.NoError(t, conv.SetActiveAgent("chat-x", "prod", "billing-agent", "A-1"))
+	s := NewServer(Options{
+		CallerClients:     newFakeFactory(c),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "test",
+		Log:               logr.Discard(),
+		RunStore:          store,
+		ConvStore:         conv,
+		RunWorkerDispatch: true,
+	})
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", ConversationID: "chat-x", Input: json.RawMessage(`{}`)})
+	rn, err := store.Get(created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "echo", rn.Agent, "an EXPLICIT agent overrides the active-agent pointer")
+}
+
+// TestHandoffMarkerPresent — the executeRun guard (m67.6) suppresses termination ONLY for a SUCCESSFUL
+// transfer (ok:true, the edge already terminated the run). A refused handoff (ok:false) or an absent
+// marker must return false so executeRun terminates the still-running source run (the stranded-run fix).
+func TestHandoffMarkerPresent(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"successful transfer", `{"output":"","handoff":{"ok":"true","targetAgent":"billing"}}`, true},
+		{"refused handoff", `{"output":"","handoff":{"ok":"false","error":"not a member"}}`, false},
+		{"empty handoff object", `{"output":"x","handoff":{}}`, false},
+		{"null handoff", `{"output":"x","handoff":null}`, false},
+		{"no handoff key", `{"output":"a normal answer"}`, false},
+		{"not json", `not json`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, handoffMarkerPresent([]byte(tc.body)))
+		})
+	}
+}
+
 // m65.4OutputSchema is the schema pinned onto runs in the m65.4 executeRun integration tests: an
 // object with a required string "answer".
 const m65_4OutputSchema = `{

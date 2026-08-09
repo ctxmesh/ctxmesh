@@ -34,6 +34,14 @@ import (
 // (ADR 0034) are unchanged by that swap.
 const runExecTimeout = 90 * time.Second
 
+// jsonNullLiteral is the JSON `null` token, checked when distinguishing an absent/null optional field
+// from a present one in a raw-message body (e.g. the handoff marker detection).
+const jsonNullLiteral = "null"
+
+// handoffOKTrue is the SDK's string-encoded `ok:true` on a SUCCESSFUL handoff marker (ManagedResult's
+// handoff dict is Dict[str,str], so `ok` is the literal "true"/"false").
+const handoffOKTrue = "true"
+
 // CreateRunResponse is returned by POST /api/runs: the run id (the hand-off the client polls or
 // streams) + its initial status. The run executes asynchronously — the response returns before it
 // completes (202 Accepted), which is what unblocks streaming + long-running (ADR 0034).
@@ -78,6 +86,14 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if rn.Status != run.StatusRequiresAction {
 		writeError(w, http.StatusConflict, "run is not awaiting an action (status "+string(rn.Status)+")")
+		return
+	}
+
+	// A WORKFLOW instance paused at the PLAN-APPROVAL GATE (m67.7, ADR 0060 §6) resumes via a DIFFERENT
+	// path than a single-agent run: there is no single agent endpoint to re-invoke (the run drives a
+	// graph off its SpecSnapshot), so approve → re-run the executor; deny → terminate ("plan rejected").
+	if rn.IsWorkflowInstance() && rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionPlanApproval {
+		s.resumePlanApproval(w, r, rn)
 		return
 	}
 
@@ -168,6 +184,24 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	req, ok := parseInvokeRequest(w, r)
 	if !ok {
 		return
+	}
+	// Active-agent routing (m67.6, ADR 0060 §5): when this run is created for a conversation that a
+	// prior handoff transferred to agent B AND the caller gave NO explicit agent override, route to the
+	// active agent B — so the user's next turn continues with whoever the conversation was handed to,
+	// not the original agent. An EXPLICIT agent always wins (the caller can override the pointer). The
+	// pointer is a HINT, not an authorization: the run below still resolves B through the CALLER'S own
+	// client (caller-scoped RBAC) + mints the caller's own capability, exactly as an explicit invoke —
+	// so routing to B grants no access the user did not already have.
+	if strings.TrimSpace(req.Agent) == "" && strings.TrimSpace(req.ConversationID) != "" {
+		if active, aErr := s.convStore.GetActiveAgent(req.ConversationID); aErr == nil {
+			// Adopt the pointer's (namespace, agent) as a PAIR — B's name is only meaningful in B's
+			// namespace (the one resolved at handoff time). Taking the name but keeping a caller-
+			// supplied namespace would resolve "B" in the wrong namespace (a 404, or a different
+			// tenant's same-named agent). The caller's namespace is irrelevant here — they gave no
+			// explicit agent, so they are deferring routing entirely to the pointer.
+			req.Agent = active.Agent
+			req.Namespace = active.Namespace
+		}
 	}
 	if strings.TrimSpace(req.Agent) == "" {
 		writeError(w, http.StatusBadRequest, "agent is required")
@@ -275,7 +309,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		if errors.As(err, &ie) {
 			reason = ie.Error()
 		}
-		_, _ = s.runStore.Update(runID, func(rn *run.Run) error {
+		_ = s.terminalTransition(runID, func(rn *run.Run) error {
 			rn.TraceID = traceID
 			rn.Error = reason
 			return rn.Transition(run.StatusFailed, now)
@@ -312,6 +346,18 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
+	// Handoff (m67.6, ADR 0060 §5): the agent TRANSFERRED the conversation via handoff_to. The BFF
+	// handoff edge (POST /api/internal/handoff) ALREADY terminated this run (succeeded + HandedOffTo)
+	// and created the target's new run WHILE this /invoke was in flight — so there is no answer to
+	// append and no success transition to make here (both would be no-ops or would append an empty
+	// message over the recorded handoff outcome). Detect the marker and return: the run's terminal
+	// state is the handoff edge's, not this executeRun's. (If the edge somehow did not run, the run is
+	// still non-terminal and the normal path below applies — fail-safe, not fail-open.)
+	if handoffMarkerPresent(resp) {
+		s.log.Info("run: agent handed off the conversation (terminal via the handoff edge)", "run", runID)
+		return
+	}
+
 	output := extractRunOutput(resp)
 
 	// Authoritative structured-output gate (m65.4, ADR 0058): when the run pinned an outputSchema
@@ -322,7 +368,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// assistant message. executeRun is shared with the durable worker, so this covers that path too.
 	if verr := validateTerminalOutput(started.OutputSchema, output); verr != nil {
 		s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
-		if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+		if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
 			rn.TraceID = traceID
 			rn.Error = verr.Error()
 			return rn.Transition(run.StatusFailed, now)
@@ -336,7 +382,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// closes live subscribers), then persist it + succeed. m31.4 adds token-level events during
 	// the loop; here the whole answer arrives as one message.
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
-	if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+	if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
 		rn.TraceID = traceID
 		rn.Messages = append(rn.Messages, run.Message{Role: roleAssistant, Content: output})
 		return rn.Transition(run.StatusSucceeded, now)
@@ -357,7 +403,168 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, rn)
+	writeJSON(w, http.StatusOK, runToDTO(rn))
+}
+
+// RunDetailDTO is the API projection of a run for GET /api/runs/{id}. It surfaces the standard run
+// fields plus workflow-instance-specific fields (workflowRef, currentNode, cursor) so the console can
+// render workflow execution progress. Fields with json:"-" on run.Run are exposed here selectively.
+type RunDetailDTO struct {
+	// Standard run fields (mirroring run.Run's exported JSON fields).
+	ID             string          `json:"id"`
+	Namespace      string          `json:"namespace"`
+	Agent          string          `json:"agent"`
+	Input          json.RawMessage `json:"input,omitempty"`
+	ConversationID string          `json:"conversationId,omitempty"`
+	TraceID        string          `json:"traceId,omitempty"`
+	Status         string          `json:"status"`
+	Messages       []run.Message   `json:"messages,omitempty"`
+	RequiresAction *run.Action     `json:"requiresAction,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
+	ParentRunID    string          `json:"parentRunId,omitempty"`
+	RootRunID      string          `json:"rootRunId,omitempty"`
+	SpawnDepth     int             `json:"spawnDepth,omitempty"`
+
+	// Workflow instance fields (m67.4, ADR 0060). Present only for workflow instance runs
+	// (IsWorkflowInstance()), omitted for single-agent runs (zero values / omitempty).
+	// WorkflowRef is the Workflow CR name this run instantiates; CurrentNode is the executor's
+	// cursor "current" — the node currently in flight (empty between nodes or after completion).
+	WorkflowRef string `json:"workflowRef,omitempty"`
+	CurrentNode string `json:"currentNode,omitempty"`
+	// Nodes is the per-node status map for a workflow instance run (m67.9, ADR 0060 §2-3). The server
+	// parses the executor-owned cursor and projects each reached node's status so the console can render
+	// a node-status map without needing to re-parse opaque cursor JSON. Only present for workflow instance
+	// runs; nil/omitted for single-agent runs.
+	//   Status values: "running" (the node's sub-run is in flight), "done" (the node succeeded),
+	//   "pending" (the node has not yet been reached by the executor).
+	// ChildRunID carries the deterministic sub-run id the node launched (non-empty for running/done nodes),
+	// so the console can link to the child run for detail.
+	Nodes []WorkflowNodeStatus `json:"nodes,omitempty"`
+
+	// Handoff fields (m67.6, ADR 0060 §5). HandedOffTo is set on the SOURCE run A (this run terminated
+	// by handing the conversation off to that agent); HandoffSourceRunID is set on the TARGET run B (the
+	// run A whose handoff_to created this run — B has no ParentRunID by design, so this is the A→B
+	// lineage link). Both structured (not parsed from prose) so audit/console can render the transfer.
+	HandedOffTo        string `json:"handedOffTo,omitempty"`
+	HandoffSourceRunID string `json:"handoffSourceRunId,omitempty"`
+}
+
+// WorkflowNodeStatus is the per-node status entry in the RunDetailDTO.Nodes list (m67.9).
+// The server parses the executor cursor and projects it so the console never handles raw cursor JSON.
+type WorkflowNodeStatus struct {
+	// Name is the workflow step name (the node identifier in the SpecSnapshot graph).
+	Name string `json:"name"`
+	// Status is the node's execution status: "pending" (not yet reached), "running" (sub-run in flight),
+	// or "done" (sub-run completed successfully). Failed nodes are "done" at the cursor level — the
+	// workflow run itself moves to "failed" when a node fails.
+	Status string `json:"status"`
+	// ChildRunID is the deterministic sub-run id the node launched (non-empty when status is "running" or
+	// "done"). The console links to GET /api/runs/{childRunID} for the node's detail.
+	ChildRunID string `json:"childRunId,omitempty"`
+}
+
+// runToDTO projects a run.Run onto the RunDetailDTO for the GET /api/runs/{id} response.
+// It selectively exposes the workflow cursor fields (WorkflowRef, CurrentNode, Nodes) that are stored
+// json:"-" on run.Run so the store does not accidentally serialize them in other contexts.
+func runToDTO(rn *run.Run) RunDetailDTO {
+	dto := RunDetailDTO{
+		ID:                 rn.ID,
+		Namespace:          rn.Namespace,
+		Agent:              rn.Agent,
+		Input:              rn.Input,
+		ConversationID:     rn.ConversationID,
+		TraceID:            rn.TraceID,
+		Status:             string(rn.Status),
+		Messages:           rn.Messages,
+		RequiresAction:     rn.RequiresAction,
+		Error:              rn.Error,
+		CreatedAt:          rn.CreatedAt,
+		UpdatedAt:          rn.UpdatedAt,
+		ParentRunID:        rn.ParentRunID,
+		RootRunID:          rn.RootRunID,
+		SpawnDepth:         rn.SpawnDepth,
+		WorkflowRef:        rn.WorkflowRef,
+		HandedOffTo:        rn.HandedOffTo,
+		HandoffSourceRunID: rn.HandoffSourceRunID,
+	}
+	// Surface the executor's cursor fields. We parse the cursor once to populate both CurrentNode
+	// (the in-flight node for backward compatibility) and the Nodes status list (m67.9: the authoritative
+	// per-node status map the console renders as the workflow graph view).
+	if rn.Cursor != "" {
+		if nodes, current := nodesFromCursor(rn.Cursor, rn.SpecSnapshot); len(nodes) > 0 || current != "" {
+			dto.CurrentNode = current
+			dto.Nodes = nodes
+		}
+	}
+	return dto
+}
+
+// nodesFromCursor parses the executor-owned cursor JSON and projects it into the RunDetailDTO.Nodes list
+// (m67.9). It derives the full node list from the SpecSnapshot (so even pending/unreached nodes appear),
+// and overlays each node's progress from the cursor. Returns (nodes, currentNode).
+//
+// The node status values are:
+//   - "pending"  — the executor has not yet reached this node (absent from cursor.Nodes).
+//   - "running"  — the node's sub-run is in flight (cursor state "launched").
+//   - "done"     — the node's sub-run completed (cursor state "done").
+//
+// SpecSnapshot may be empty (a non-workflow run or a corrupt snapshot); in that case we still surface
+// whatever the cursor records, but with no step ordering from the spec.
+func nodesFromCursor(cursorJSON, specSnapshot string) ([]WorkflowNodeStatus, string) {
+	// Decode the executor cursor (minimal: we only need Current + Nodes[].{State,ChildID}).
+	var cursor struct {
+		Current string `json:"current"`
+		Nodes   map[string]struct {
+			State   string `json:"state"`
+			ChildID string `json:"childId"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(cursorJSON), &cursor); err != nil {
+		return nil, ""
+	}
+
+	// Build the step name list from the SpecSnapshot (ordered, authoritative). When unavailable
+	// fall back to the names in the cursor (unordered, but still useful for reached nodes).
+	var stepNames []string
+	if specSnapshot != "" {
+		var spec struct {
+			Steps []struct {
+				Name string `json:"name"`
+			} `json:"steps"`
+		}
+		if err := json.Unmarshal([]byte(specSnapshot), &spec); err == nil {
+			for _, s := range spec.Steps {
+				stepNames = append(stepNames, s.Name)
+			}
+		}
+	}
+	if len(stepNames) == 0 {
+		// Fallback: nodes that have cursor progress (no ordering guarantee).
+		for name := range cursor.Nodes {
+			stepNames = append(stepNames, name)
+		}
+	}
+	if len(stepNames) == 0 {
+		return nil, cursor.Current
+	}
+
+	nodes := make([]WorkflowNodeStatus, 0, len(stepNames))
+	for _, name := range stepNames {
+		ns := WorkflowNodeStatus{Name: name, Status: "pending"}
+		if prog, ok := cursor.Nodes[name]; ok {
+			switch prog.State {
+			case "launched":
+				ns.Status = "running"
+			case "done":
+				ns.Status = "done"
+			}
+			ns.ChildRunID = prog.ChildID
+		}
+		nodes = append(nodes, ns)
+	}
+	return nodes, cursor.Current
 }
 
 // handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR
@@ -435,6 +642,59 @@ func lastEventID(r *http.Request) int {
 	return 0
 }
 
+// resumePlanApproval resolves the workflow PLAN-APPROVAL GATE (m67.7, ADR 0060 §6). {decision:deny} →
+// terminate the run (cancelled, "plan rejected") — NO node ever launched. {decision:approve} (or absent,
+// consistent with the single-agent approval default) → flip the cursor's PlanApproval.Approved, transition
+// `requires_action → running`, and drive the executor: with the gate satisfied it launches node 1 and the
+// graph runs. This reuses the requires_action/resume machinery — the executor, not an agent re-invoke,
+// resolves it (there is no single agent endpoint for a graph). Caller-scoped (the caller already passed
+// callerClient in handleResumeRun). rn is the loaded run (status requires_action, kind plan_approval).
+func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *run.Run) {
+	if parseResumeDecision(r) == "deny" {
+		updated, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
+			x.Error = "plan rejected"
+			return x.Transition(run.StatusCancelled, time.Now())
+		})
+		if err != nil {
+			writeError(w, http.StatusConflict, "cannot resume this run")
+			return
+		}
+		_ = s.runStore.AppendEvent(rn.ID, run.EventStep, "plan-rejected")
+		writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
+		return
+	}
+
+	// APPROVE: mark the plan approved in the executor-owned cursor and re-enter `running` in the SAME
+	// update (so a crash right after cannot lose the approval). Leaving requires_action clears the pending
+	// action (Transition does this). The executor's gate check then sees Approved=true and runs the graph.
+	if _, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
+		cursor, cErr := parseCursor(x.Cursor)
+		if cErr != nil {
+			return cErr
+		}
+		if cursor.PlanApproval == nil {
+			cursor.PlanApproval = &planApproval{Required: true}
+		}
+		cursor.PlanApproval.Approved = true
+		cursorJSON, mErr := cursor.marshal()
+		if mErr != nil {
+			return mErr
+		}
+		x.Cursor = cursorJSON
+		return x.Transition(run.StatusRunning, time.Now())
+	}); err != nil {
+		writeError(w, http.StatusConflict, "cannot resume this run")
+		return
+	}
+	_ = s.runStore.AppendEvent(rn.ID, run.EventStep, "plan-approved")
+
+	// Drive the executor in-process (a low-frequency human action — the single-agent resume path drives
+	// executeRun in-process the same way, independent of dispatch mode) so the approved graph starts now.
+	go s.executeWorkflow(rn.ID)
+
+	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: rn.ID, Status: string(run.StatusRunning)})
+}
+
 // parseResumeDecision reads an optional {"decision":"approve"|"deny"} from the resume body
 // (best-effort; a missing/blank/malformed body ⇒ "" ⇒ treated as approve). Bounded read.
 func parseResumeDecision(r *http.Request) string {
@@ -469,6 +729,27 @@ func withApprovals(input []byte, keys []string) []byte {
 		return input
 	}
 	return out
+}
+
+// handoffMarkerPresent reports whether the managed-agent /invoke envelope carries a SUCCESSFUL handoff
+// marker (m67.6, ADR 0060 §5) — i.e. the agent transferred the conversation and this run was already
+// terminated by the BFF handoff edge, so executeRun must NOT append an answer / re-transition it. It
+// requires the marker's `ok` to be true: a REFUSED handoff (`ok:false` — non-member target, launcher
+// unreachable) did NOT terminate the run, so the normal answer path must run and terminate it (else the
+// run is stranded `running` forever — the m67.6 review bug). Belt-and-braces on top of the SDK, which
+// now emits the marker only on a real transfer. A non-object body / absent marker / `ok:false` ⇒ false.
+func handoffMarkerPresent(resp []byte) bool {
+	var env struct {
+		Handoff *struct {
+			OK string `json:"ok"`
+		} `json:"handoff"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		return false
+	}
+	// The SDK serialises the handoff result with string-valued fields (ManagedResult.handoff is
+	// Dict[str,str]), so `ok` is the literal "true"/"false" — a real transfer is exactly "true".
+	return env.Handoff != nil && env.Handoff.OK == handoffOKTrue
 }
 
 // extractRunOutput unwraps the managed-agent /invoke envelope ({output,...}, m25.9) to the human
