@@ -25,10 +25,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
@@ -345,4 +349,73 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Contains(t, body, "event: message")
 	assert.Contains(t, body, "event: state")
 	assert.Contains(t, body, string(run.StatusSucceeded))
+}
+
+// agentWithSchema builds a ready AgentDeployment whose spec.runtime.outputSchema is set to
+// the given raw JSON Schema, so the create path can pin it onto the run (m65.3).
+func agentWithSchema(name, namespace, url, schema string) *agentsv1alpha1.AgentDeployment {
+	return &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "echo:1",
+			Runtime: &agentsv1alpha1.RuntimeSpec{
+				OutputSchema: &k8sruntime.RawExtension{Raw: []byte(schema)},
+			},
+		},
+		Status: agentsv1alpha1.AgentDeploymentStatus{URL: url},
+	}
+}
+
+// TestCreateRun_PinsOutputSchema proves that a run created for an agent with
+// spec.runtime.outputSchema has its OutputSchema field set to the raw JSON Schema
+// text of the agent at create time (m65.3, ADR 0058).
+func TestCreateRun_PinsOutputSchema(t *testing.T) {
+	schema := `{"type":"object","properties":{"answer":{"type":"string"}}}`
+	agent := agentWithSchema("typed", "prod", "http://typed.prod.svc.cluster.local", schema)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"done","consent_required":[]}`)}
+
+	store := run.NewMemStore()
+	s := NewServer(Options{
+		CallerClients:     newFakeFactory(c),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "test",
+		Log:               logr.Discard(),
+		RunStore:          store,
+		RunWorkerDispatch: true, // keep queued so we can read OutputSchema before execution mutates it
+	})
+
+	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	rn, err := store.Get(created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, schema, rn.OutputSchema,
+		"OutputSchema must be pinned to the agent's spec.runtime.outputSchema at create time")
+}
+
+// TestCreateRun_NoRuntimeOutputSchemaIsEmpty proves that a run created for an agent with
+// no spec.runtime gets OutputSchema == "" (backward-compat: run-create must not fail m65.3).
+func TestCreateRun_NoRuntimeOutputSchemaIsEmpty(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"done","consent_required":[]}`)}
+
+	store := run.NewMemStore()
+	s := NewServer(Options{
+		CallerClients:     newFakeFactory(c),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: inv},
+		Version:           "test",
+		Log:               logr.Discard(),
+		RunStore:          store,
+		RunWorkerDispatch: true,
+	})
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	rn, err := store.Get(created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", rn.OutputSchema,
+		"a run for an agent with no runtime must have OutputSchema == \"\" (no validation, backward-compat)")
 }
