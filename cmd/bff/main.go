@@ -56,6 +56,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
@@ -276,10 +277,19 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// pinned onto the run (run.NodeEndpoints), exactly as a single run pins its Endpoint. The off-request
 	// workflow executor then launches nodes off the PINNED endpoints — so the BFF needs NO agent-CRD RBAC
 	// (config/bff/role.yaml is `rules: []`, ADR 0011) and there is no privileged off-request cluster client.
+
+	// Durable KB object store (M68, ADR 0061 Fork 4): OBJECT_STORE_ADDR unset ⇒ nil ⇒ the upload endpoint
+	// returns an honest 501 (see newDocStore — it is typed-nil-safe).
+	docStore, err := newDocStore()
+	if err != nil {
+		return fmt.Errorf("init durable KB object store: %w", err)
+	}
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
+		DocStore:                    docStore,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
@@ -392,6 +402,21 @@ func envInt(raw string) int {
 		return 0
 	}
 	return n
+}
+
+// newDocStore builds the durable KB object store (M68, ADR 0061 Fork 4) from OBJECT_STORE_ADDR.
+// It is typed-nil-safe: when OBJECT_STORE_ADDR is unset, NewMinioStore returns a nil *minioKBStore,
+// which this returns as a genuine nil ObjectStore interface (never a typed-nil wrapped in the
+// interface) so the upload handler's `docStore == nil` 501-gate works. Unset ⇒ (nil, nil).
+func newDocStore() (objectstore.ObjectStore, error) {
+	ms, err := objectstore.NewMinioStore()
+	if err != nil {
+		return nil, err
+	}
+	if ms == nil {
+		return nil, nil
+	}
+	return ms, nil
 }
 
 // tokenServiceHTTPClient builds the http.Client the BFF uses to delegate grant writes to
