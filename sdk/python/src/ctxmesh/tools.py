@@ -39,6 +39,13 @@ from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
 #: ``DELEGATE_ENABLED=true`` (a supervisor); a plain agent never sees it.
 DELEGATE_TOOL_NAME = "delegate_to"
 
+#: The synthetic knowledge-retrieval tool (M68, ADR 0061 Fork 3). An agent with knowledge bases
+#: bound gets this built-in tool alongside its MCP tools; calling it performs an agentic RAG
+#: retrieval mid-loop and returns results with provenance (documentRef/chunkIndex) so the model
+#: can cite sources. Enabled only when KNOWLEDGE_BASE_ENABLED=true (the launcher injected a KB
+#: binding); a plain agent never sees it.
+KNOWLEDGE_SEARCH_TOOL_NAME = "knowledge_search"
+
 #: The synthetic HANDOFF (transfer-of-control) tool (M67, ADR 0060 §5). A team supervisor/member
 #: with a roster is given this built-in tool alongside delegate_to; calling it TRANSFERS the
 #: conversation to another roster member and ENDS this agent's turn (unlike delegate_to, which
@@ -178,6 +185,62 @@ def _handoff_tool() -> Tool:
     )
 
 
+def _knowledge_search_tool() -> "Tool":
+    """Build the synthetic ``knowledge_search`` tool (M68, ADR 0061 Fork 3).
+
+    The description lists the granted corpora (from the KNOWLEDGE_BASES roster) so the model
+    knows what it can search and must attribute results to a source. The schema is intentionally
+    open on knowledge_base (no enum) so the model can name a KB that happens to be unavailable
+    and get a clear error from the launcher rather than a silent schema rejection.
+    """
+    from ctxmesh.knowledge import _roster_names  # local import to avoid circular deps
+
+    names = _roster_names()
+    if names:
+        corpora_listing = "\n".join(f"- {n}" for n in names)
+        kb_description = (
+            f"The knowledge base to search. Available corpora:\n{corpora_listing}\n"
+            "Omit to use the default when only one corpus is available."
+        )
+    else:
+        kb_description = "The knowledge base to search (configured on the AgentDeployment)."
+    description = (
+        "Search a knowledge base for relevant passages and return them with source provenance "
+        "(documentRef, chunkIndex) for citation. Use this to retrieve grounding context mid-loop "
+        "before answering questions that require factual recall from a corpus. ALWAYS cite the "
+        "documentRef when you use retrieved content in your answer. "
+    )
+    if names:
+        description += f"Available corpora: {', '.join(names)}."
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query — a natural-language question or phrase.",
+            },
+            "knowledge_base": {
+                "type": "string",
+                "description": kb_description,
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default 10).",
+                "default": 10,
+            },
+        },
+        "required": ["query"],
+    }
+    return Tool(
+        name=KNOWLEDGE_SEARCH_TOOL_NAME,
+        mode="knowledge",
+        endpoint="",  # dispatched locally via KnowledgeClient, not over MCP
+        transport="internal",
+        input_schema=schema,
+        description=description,
+    )
+
+
 #: MCP protocol version the SDK negotiates (the version the M4 fixture speaks).
 _MCP_PROTOCOL_VERSION = "2025-03-26"
 
@@ -261,14 +324,24 @@ class ToolsClient:
 
     # ── discovery ────────────────────────────────────────────────────────────
     def list(self) -> List[Tool]:
-        """Return the live tool manifest (sidecar first, tools.json fallback). A team
-        supervisor/member with a roster also gets the synthetic ``delegate_to`` (M64) +
-        ``handoff_to`` (M67) tools alongside its MCP tools."""
+        """Return the live tool manifest (sidecar first, tools.json fallback).
+
+        A team supervisor/member with a roster also gets the synthetic ``delegate_to`` (M64) +
+        ``handoff_to`` (M67) tools alongside its MCP tools.
+
+        An agent with knowledge bases bound (M68, ADR 0061 Fork 3) also gets the synthetic
+        ``knowledge_search`` tool — enabled when KNOWLEDGE_BASE_ENABLED=true and the KNOWLEDGE_BASES
+        roster is non-empty. A plain agent (no KB binding) never sees it.
+        """
+        from ctxmesh.knowledge import _knowledge_enabled, _roster_names  # avoid circular at import
+
         manifest = self._fetch_manifest()
         tools = [Tool.from_dict(t) for t in manifest.get("tools", [])]
         if _delegate_enabled():
             tools.append(_delegate_tool())
             tools.append(_handoff_tool())
+        if _knowledge_enabled() and _roster_names():
+            tools.append(_knowledge_search_tool())
         return tools
 
     def _fetch_manifest(self) -> Dict[str, Any]:
