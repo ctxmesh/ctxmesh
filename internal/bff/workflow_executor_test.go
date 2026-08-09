@@ -17,7 +17,6 @@ limitations under the License.
 package bff
 
 import (
-	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -39,22 +38,32 @@ import (
 // The executor is driven synchronously (executeWorkflow) one advance at a time, so we can assert the run is
 // `waiting` between nodes (it holds no worker) and that the cursor advances deterministically.
 
-// newWorkflowServer builds a Server for executor tests: a mem store, dispatch mode (node sub-runs queue), and
-// a node resolver that maps every agentRef to a stable per-agent endpoint (so we can assert per-node inputs).
+// newWorkflowServer builds a Server for executor tests: a mem store + dispatch mode (node sub-runs queue).
+// Node endpoints are PINNED on the seeded run (resolved caller-scoped at create in production, m67.13); the
+// executor reads them off run.NodeEndpoints — there is no off-request resolver seam anymore.
 func newWorkflowServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{
 		runStore:          run.NewMemStore(),
 		runWorkerDispatch: true, // launched node sub-runs queue; the test completes them via CompleteAndWake.
-		workflowNodeResolver: func(_ context.Context, ns, agentRef string) (string, error) {
-			return "http://" + agentRef + "." + ns + ".svc", nil
-		},
-		log: logr.Discard(),
+		log:               logr.Discard(),
 	}
 }
 
-// seedWorkflowRun creates a running workflow-instance run (a pinned SpecSnapshot) with the given input, as the
-// worker would present it after claiming (status running). Returns the run id.
+// pinnedNodeEndpoints derives the create-time-pinned agentRef→endpoint map for a spec, mapping each step's
+// agentRef to a stable per-agent endpoint (the scheme the create path resolves through the caller client) so
+// the executor can launch nodes off the pins — the deterministic stand-in for the caller-scoped resolution.
+func pinnedNodeEndpoints(ns string, spec agentsv1beta1.WorkflowSpec) map[string]string {
+	m := map[string]string{}
+	for i := range spec.Steps {
+		ref := spec.Steps[i].AgentRef
+		m[ref] = "http://" + ref + "." + ns + ".svc"
+	}
+	return m
+}
+
+// seedWorkflowRun creates a running workflow-instance run (a pinned SpecSnapshot + pinned NodeEndpoints) with
+// the given input, as the worker would present it after claiming (status running). Returns the run id.
 func seedWorkflowRun(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec, input string) string {
 	t.Helper()
 	snap, err := json.Marshal(spec)
@@ -64,6 +73,7 @@ func seedWorkflowRun(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec, i
 	r.CallerUsername = "alice"
 	r.Boundary = "r:prod"
 	r.SpecSnapshot = string(snap)
+	r.NodeEndpoints = pinnedNodeEndpoints(r.Namespace, spec) // pinned at create (caller-scoped) — the executor reads these
 	require.NoError(t, s.runStore.Create(r))
 	return r.ID
 }
@@ -127,7 +137,7 @@ func drive(t *testing.T, s *Server, wfRunID string) {
 		return nil
 	})
 	require.NoError(t, err)
-	s.executeWorkflow(context.Background(), wfRunID)
+	s.executeWorkflow(wfRunID)
 }
 
 // getRun fetches a run (test convenience).
@@ -152,6 +162,64 @@ func inFlightChild(t *testing.T, s *Server, wfRunID string) *run.Run {
 	}
 	require.NotNil(t, found, "the workflow run should have launched a child sub-run")
 	return found
+}
+
+// ── pinned-endpoint launch (m67.13, ADR 0011/0060 — the m67.10 confused-deputy fix) ───────────────────────
+
+// TestWorkflowExecutor_UsesPinnedEndpoints_NoOffRequestRead proves the executor launches a node using the
+// endpoint PINNED on the run at create (caller-scoped) and does NOT perform any off-request AgentDeployment
+// read. The server is built with NO caller-client factory and NO cluster client (callerClients==nil), so any
+// off-request agent-CRD read would be structurally impossible — the launch nonetheless succeeds because the
+// endpoint comes from run.NodeEndpoints. This is the exact real-cluster path that failed in m67.10 when the
+// executor tried a BFF-SA agent read against an empty Role.
+func TestWorkflowExecutor_UsesPinnedEndpoints_NoOffRequestRead(t *testing.T) {
+	s := newWorkflowServer(t) // no callerClients, no cluster client — no way to read an AgentDeployment
+	require.Nil(t, s.callerClients, "the executor path must not depend on any caller/cluster client")
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{stepNode("only", "agent-a")},
+	}
+	// Seed with a DISTINCTIVE pinned endpoint (not the derived default) so the assertion proves the launch
+	// read the PIN, not some re-derivation.
+	snap, err := json.Marshal(spec)
+	require.NoError(t, err)
+	r := run.New("wf-pin", "prod", "the-workflow", json.RawMessage(`{}`), "conv-pin", time.Now())
+	r.Status = run.StatusRunning
+	r.SpecSnapshot = string(snap)
+	r.NodeEndpoints = map[string]string{"agent-a": "http://pinned-agent-a.internal:9000"}
+	require.NoError(t, s.runStore.Create(r))
+
+	// One advance launches node "only" off the pinned endpoint — with no client available to resolve one.
+	drive(t, s, r.ID)
+	child := inFlightChild(t, s, r.ID)
+	assert.Equal(t, "agent-a", child.Agent)
+	assert.Equal(t, "http://pinned-agent-a.internal:9000", child.Endpoint,
+		"the node sub-run must be launched with the PINNED endpoint (no off-request resolution)")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, r.ID).Status, "the run parks waiting on the launched node")
+}
+
+// TestWorkflowExecutor_MissingPin_FailsNode proves an honest failure when a node's endpoint is not pinned
+// (a consistency error that cannot occur for a normally-created run, since create fails fast first): the
+// executor fail-fasts the workflow rather than launching a node with an empty endpoint.
+func TestWorkflowExecutor_MissingPin_FailsNode(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{stepNode("only", "agent-a")},
+	}
+	snap, err := json.Marshal(spec)
+	require.NoError(t, err)
+	r := run.New("wf-nopin", "prod", "the-workflow", json.RawMessage(`{}`), "conv-nopin", time.Now())
+	r.Status = run.StatusRunning
+	r.SpecSnapshot = string(snap)
+	// NodeEndpoints intentionally nil → no pin for agent-a.
+	require.NoError(t, s.runStore.Create(r))
+
+	drive(t, s, r.ID)
+	fin := getRun(t, s, r.ID)
+	assert.Equal(t, run.StatusFailed, fin.Status, "a missing pinned endpoint fail-fasts the workflow")
+	assert.Contains(t, fin.Error, "pinned endpoint", "the failure names the missing pin")
 }
 
 // ── sequential (3 nodes) ──────────────────────────────────────────────────────────────────────────────────
@@ -221,6 +289,7 @@ func seedGatedWorkflowRun(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSp
 	r.CallerUsername = "alice"
 	r.Boundary = "r:prod"
 	r.SpecSnapshot = string(snap)
+	r.NodeEndpoints = pinnedNodeEndpoints(r.Namespace, spec)
 	r.Cursor = cursorJSON
 	require.NoError(t, s.runStore.Create(r))
 	return r.ID
@@ -282,7 +351,7 @@ func TestWorkflowExecutor_PlanApprovalGate_ApprovedRunsGraph(t *testing.T) {
 	require.NoError(t, err)
 
 	// Advance 2: with the gate satisfied the graph runs — node "one" launches + the run parks waiting.
-	s.executeWorkflow(context.Background(), wfID)
+	s.executeWorkflow(wfID)
 	rn := getRun(t, s, wfID)
 	assert.Equal(t, run.StatusWaiting, rn.Status, "the approved plan runs — the run parks on node 1")
 	child := inFlightChild(t, s, wfID)
@@ -504,10 +573,7 @@ func TestWorkflowNode_TerminalWakesParent(t *testing.T) {
 		runStore:          run.NewMemStore(),
 		adapters:          Adapters{Invoke: inv},
 		runWorkerDispatch: false, // execute the node sub-run in-process (drives executeRun's terminal path)
-		workflowNodeResolver: func(_ context.Context, ns, agentRef string) (string, error) {
-			return "http://" + agentRef + "." + ns + ".svc", nil
-		},
-		log: logr.Discard(),
+		log:               logr.Discard(),
 	}
 	spec := agentsv1beta1.WorkflowSpec{
 		RegistryRef: "reg",

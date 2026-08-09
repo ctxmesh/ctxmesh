@@ -115,6 +115,12 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS output_schema text;
 -- non-waiting run, so old rows load unchanged.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS workflow_ref  text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS spec_snapshot text NOT NULL DEFAULT '';
+-- Pinned node endpoints (m67.13, ADR 0011/0060): a workflow instance run resolves each node's agentRef →
+-- endpoint at CREATE time through the CALLER-SCOPED client, then pins them here so the off-request executor
+-- launches nodes WITHOUT any BFF-SA agent-CRD RBAC (the BFF Role is empty, rules: []). JSON object text
+-- ('' ⇒ none), matching the wait_on JSON-in-text convention. Pinned at create + never mutated, so old rows
+-- load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS node_endpoints text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS cursor        text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_on       text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_mode     text NOT NULL DEFAULT '';
@@ -161,13 +167,17 @@ func (p *pgStore) Create(r *Run) error {
 	if err != nil {
 		return err
 	}
+	nodeEndpoints, err := marshalNodeEndpoints(r.NodeEndpoints)
+	if err != nil {
+		return err
+	}
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		 parent_run_id, root_run_id, spawn_depth, output_schema,
 		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		 version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,1,$27,$28)
+		 node_endpoints, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,1,$28,$29)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
@@ -175,7 +185,7 @@ func (p *pgStore) Create(r *Run) error {
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
 		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
 		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo, r.HandoffSourceRunID,
-		r.CreatedAt.UTC(), r.UpdatedAt.UTC())
+		nodeEndpoints, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
 	}
@@ -217,28 +227,29 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		parent_run_id, root_run_id, spawn_depth, output_schema,
 		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		version, created_at, updated_at
+		node_endpoints, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
-		r            Run
-		input        []byte
-		status       string
-		msgs         []byte
-		action       []byte
-		lease        sql.NullTime
-		outputSchema sql.NullString
-		waitOn       string
-		waitMode     string
-		version      int64
-		created      time.Time
-		updated      time.Time
+		r             Run
+		input         []byte
+		status        string
+		msgs          []byte
+		action        []byte
+		lease         sql.NullTime
+		outputSchema  sql.NullString
+		waitOn        string
+		waitMode      string
+		nodeEndpoints string
+		version       int64
+		created       time.Time
+		updated       time.Time
 	)
 	err := q.QueryRowContext(ctx, sel, id).Scan(
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
-		&version, &created, &updated)
+		&nodeEndpoints, &version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, 0, ErrNotFound
@@ -262,6 +273,11 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		return nil, 0, err
 	}
 	r.WaitOn = wo
+	ne, err := unmarshalNodeEndpoints(nodeEndpoints)
+	if err != nil {
+		return nil, 0, err
+	}
+	r.NodeEndpoints = ne
 	if len(input) > 0 {
 		r.Input = append(json.RawMessage(nil), input...)
 	}
@@ -982,6 +998,31 @@ func unmarshalWaitOn(s string) ([]string, error) {
 		return nil, fmt.Errorf("run: unmarshal wait_on: %w", err)
 	}
 	return ids, nil
+}
+
+// marshalNodeEndpoints serialises the pinned node-endpoint map to JSON text (”  for an empty/absent map,
+// so a non-workflow run's column stays the DEFAULT ” — the same JSON-in-text convention as wait_on).
+func marshalNodeEndpoints(m map[string]string) (string, error) {
+	if len(m) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "", fmt.Errorf("run: marshal node_endpoints: %w", err)
+	}
+	return string(b), nil
+}
+
+// unmarshalNodeEndpoints parses the node_endpoints JSON text back to a map (” → nil, the empty map).
+func unmarshalNodeEndpoints(s string) (map[string]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("run: unmarshal node_endpoints: %w", err)
+	}
+	return m, nil
 }
 
 // marshalAction serialises the optional pending action (nil → NULL column).

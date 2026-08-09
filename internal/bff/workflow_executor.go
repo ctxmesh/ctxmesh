@@ -178,7 +178,7 @@ func (c *workflowCursor) marshal() (string, error) {
 // node, and suspend on it — OR finish the graph. The next advance happens after the transactional wake
 // re-queues the run and the worker re-claims it, so this returns quickly (it holds the worker only across one
 // node launch, never across the child's execution — the parked-worker fix).
-func (s *Server) executeWorkflow(ctx context.Context, runID string) {
+func (s *Server) executeWorkflow(runID string) {
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
 		s.log.Error(err, "workflow: could not load the instance run", "run", runID)
@@ -217,7 +217,7 @@ func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 	// It returns the NEXT node to launch (or done=true to finish the graph), OR consumed=true meaning it has
 	// already acted this advance (re-suspended on a retry / next loop iteration / a defensive re-suspend, or
 	// fail-fasted) and executeWorkflow must return without launching anything.
-	next, done, consumed := s.resumeCurrentNode(ctx, runID, rn, spec, cursor)
+	next, done, consumed := s.resumeCurrentNode(runID, rn, spec, cursor)
 	if consumed {
 		return
 	}
@@ -229,7 +229,7 @@ func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 
 	// (2) LAUNCH PHASE. Enter the next node — kind-aware: a plain node launches one sub-run; a map node fans
 	// out over its list; a loop node launches its first iteration — then SUSPEND on the launched child(ren).
-	s.enterNode(ctx, runID, rn, cursor, next)
+	s.enterNode(runID, rn, cursor, next)
 }
 
 // resumeCurrentNode folds the in-flight node's completed sub-run(s) into the cursor and computes what happens
@@ -241,7 +241,7 @@ func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 //
 // When the run is FRESH (no in-flight node) it seeds next = the start step.
 func (s *Server) resumeCurrentNode(
-	ctx context.Context, runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor,
+	runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor,
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	// Fresh run: no node in flight → start at the first step.
 	if cursor.Current == "" {
@@ -266,9 +266,9 @@ func (s *Server) resumeCurrentNode(
 	case cur.Map != nil:
 		return s.resumeMapNode(runID, spec, cursor, cur, prog)
 	case cur.Loop != nil:
-		return s.resumeLoopNode(ctx, runID, rn, spec, cursor, cur, prog)
+		return s.resumeLoopNode(runID, rn, spec, cursor, cur, prog)
 	default:
-		return s.resumePlainNode(ctx, runID, rn, spec, cursor, cur, prog)
+		return s.resumePlainNode(runID, rn, spec, cursor, cur, prog)
 	}
 }
 
@@ -277,7 +277,7 @@ func (s *Server) resumeCurrentNode(
 // attempt (a NEW sub-run at iterationIndex "retry:<attempt>") and re-suspends. A SUCCEEDED sub-run records the
 // node output and computes the next node from its edges.
 func (s *Server) resumePlainNode(
-	ctx context.Context, runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec,
+	runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec,
 	cursor *workflowCursor, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	if prog.ChildID == "" {
@@ -297,7 +297,7 @@ func (s *Server) resumePlainNode(
 			return nil, false, true
 		}
 		if child.Status != run.StatusSucceeded {
-			if s.retryNode(ctx, runID, rn, cursor, cur, prog, child) {
+			if s.retryNode(runID, rn, cursor, cur, prog, child) {
 				return nil, false, true // re-launched a retry attempt + re-suspended.
 			}
 			return nil, false, true // retries exhausted → fail-fasted.
@@ -378,7 +378,7 @@ func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, o
 // are exhausted (having ALREADY fail-fasted the workflow). Retries default off (0) → the first failure is
 // fail-fast (Attempts starts at 0 = the original launch).
 func (s *Server) retryNode(
-	ctx context.Context, runID string, rn *run.Run, cursor *workflowCursor,
+	runID string, rn *run.Run, cursor *workflowCursor,
 	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run,
 ) (retried bool) {
 	if prog.Attempts >= int(cur.Retries) {
@@ -402,7 +402,7 @@ func (s *Server) retryNode(
 	if !s.reserveNodeSpawn(runID, rn) {
 		return false // budget exhausted → fail-fasted.
 	}
-	if err := s.spawnWorkflowNode(ctx, rn, cur, childID, input); err != nil {
+	if err := s.spawnWorkflowNode(rn, cur, childID, input); err != nil {
 		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: launching retry sub-run: %v", cur.Name, err))
 		return false
 	}
@@ -444,16 +444,16 @@ func (s *Server) evalNextNode(step *agentsv1beta1.WorkflowStep, cursor *workflow
 // out over its CEL list; a loop node launches its first iteration. Each launch is idempotent (a deterministic
 // per-item / per-iteration id) and the run SUSPENDS on the launched child(ren).
 func (s *Server) enterNode(
-	ctx context.Context, runID string, rn *run.Run,
+	runID string, rn *run.Run,
 	cursor *workflowCursor, node *agentsv1beta1.WorkflowStep,
 ) {
 	switch {
 	case node.Map != nil:
-		s.enterMapNode(ctx, runID, rn, cursor, node)
+		s.enterMapNode(runID, rn, cursor, node)
 	case node.Loop != nil:
-		s.enterLoopNode(ctx, runID, rn, cursor, node)
+		s.enterLoopNode(runID, rn, cursor, node)
 	default:
-		s.enterPlainNode(ctx, runID, rn, cursor, node)
+		s.enterPlainNode(runID, rn, cursor, node)
 	}
 }
 
@@ -462,7 +462,7 @@ func (s *Server) enterNode(
 // cursor in the same store transaction). The run goes `waiting` (freeing the worker); it resumes via the
 // transactional wake when the child terminates. A node-started event is emitted for the console (m67.4).
 func (s *Server) enterPlainNode(
-	ctx context.Context, runID string, rn *run.Run,
+	runID string, rn *run.Run,
 	cursor *workflowCursor, node *agentsv1beta1.WorkflowStep,
 ) {
 	input, err := s.buildNodeInput(node, cursor)
@@ -476,7 +476,7 @@ func (s *Server) enterPlainNode(
 	if !s.reserveNodeSpawn(runID, rn) {
 		return
 	}
-	if err := s.spawnWorkflowNode(ctx, rn, node, childID, input); err != nil {
+	if err := s.spawnWorkflowNode(rn, node, childID, input); err != nil {
 		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: launching its sub-run: %v", node.Name, err))
 		return
 	}
@@ -561,7 +561,7 @@ func (s *Server) reserveNodeSpawn(runID string, rn *run.Run) bool {
 // records the fan-out set in the cursor, and SUSPENDS on all N (WaitAll = the join). A non-list `over`, or a
 // per-item launch that exhausts the spawn budget, is a hard error → fail-fast.
 func (s *Server) enterMapNode(
-	ctx context.Context, runID string, rn *run.Run,
+	runID string, rn *run.Run,
 	cursor *workflowCursor, node *agentsv1beta1.WorkflowStep,
 ) {
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
@@ -592,7 +592,7 @@ func (s *Server) enterMapNode(
 		if !s.reserveNodeSpawn(runID, rn) {
 			return // budget exhausted mid-fan-out → fail-fasted (the map-bomb backstop).
 		}
-		if err := s.spawnWorkflowNode(ctx, rn, doStep, childID, input); err != nil {
+		if err := s.spawnWorkflowNode(rn, doStep, childID, input); err != nil {
 			s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: launching item[%d] sub-run: %v", node.Name, i, err))
 			return
 		}
@@ -611,7 +611,7 @@ func (s *Server) enterMapNode(
 			s.completeWorkflow(runID, spec, cursor)
 			return
 		}
-		s.enterNode(ctx, runID, rn, cursor, next)
+		s.enterNode(runID, rn, cursor, next)
 		return
 	}
 
@@ -756,20 +756,20 @@ func (s *Server) buildMapItemInput(doStep *agentsv1beta1.WorkflowStep, as string
 // enterLoopNode launches a loop node's FIRST iteration (iterationIndex "loop:0") and suspends on it. Subsequent
 // iterations are launched by resumeLoopNode on each wake, until `until` is true or maxIterations is hit.
 func (s *Server) enterLoopNode(
-	ctx context.Context, runID string, rn *run.Run,
+	runID string, rn *run.Run,
 	cursor *workflowCursor, node *agentsv1beta1.WorkflowStep,
 ) {
 	prog := &nodeProgress{State: cursorLaunched, Loop: &loopProgress{Iteration: 0}}
 	cursor.Nodes[node.Name] = prog
 	cursor.Current = node.Name
-	s.launchLoopIteration(ctx, runID, rn, cursor, node, prog)
+	s.launchLoopIteration(runID, rn, cursor, node, prog)
 }
 
 // resumeLoopNode folds the current iteration's completed sub-run into the loop. A failed iteration → retry (at
 // the node level) or fail-fast. A succeeded iteration → evaluate `until` over its output; exit (until true OR
 // iteration+1 >= maxIterations) with the last output as the node output, else launch the next iteration.
 func (s *Server) resumeLoopNode(
-	ctx context.Context, runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec,
+	runID string, rn *run.Run, spec *agentsv1beta1.WorkflowSpec,
 	cursor *workflowCursor, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
 	if prog.State == cursorDone {
@@ -816,7 +816,7 @@ func (s *Server) resumeLoopNode(
 
 	// Otherwise advance the counter + launch the next iteration.
 	lp.Iteration++
-	s.launchLoopIteration(ctx, runID, rn, cursor, cur, prog)
+	s.launchLoopIteration(runID, rn, cursor, cur, prog)
 	return nil, false, true
 }
 
@@ -825,7 +825,7 @@ func (s *Server) resumeLoopNode(
 // own prior iteration output via steps.<loopNode>.output — set on each iteration's success, though v1 keeps the
 // do step's bindings simple). Budget-bounded: a runaway loop hitting the spawn budget fail-fasts.
 func (s *Server) launchLoopIteration(
-	ctx context.Context, runID string, rn *run.Run,
+	runID string, rn *run.Run,
 	cursor *workflowCursor, node *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) {
 	spec, err := parseWorkflowSnapshot(rn.SpecSnapshot)
@@ -849,7 +849,7 @@ func (s *Server) launchLoopIteration(
 	if !s.reserveNodeSpawn(runID, rn) {
 		return // budget exhausted → fail-fasted (the runaway-loop backstop).
 	}
-	if err := s.spawnWorkflowNode(ctx, rn, doStep, childID, input); err != nil {
+	if err := s.spawnWorkflowNode(rn, doStep, childID, input); err != nil {
 		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q: launching iteration %d: %v", node.Name, prog.Loop.Iteration, err))
 		return
 	}
@@ -918,7 +918,7 @@ func (s *Server) buildNodeInput(node *agentsv1beta1.WorkflowStep, cursor *workfl
 // The sub-run is left `queued` — a worker (this pool) claims + executes it; its terminal transition wakes the
 // suspended workflow run via CompleteAndWake (wired in the executeRun terminal path).
 func (s *Server) spawnWorkflowNode(
-	ctx context.Context, wf *run.Run,
+	wf *run.Run,
 	node *agentsv1beta1.WorkflowStep, childID string, input []byte,
 ) error {
 	// Idempotency: reuse an existing sub-run (a reclaimed executor re-computing the same id).
@@ -943,12 +943,15 @@ func (s *Server) spawnWorkflowNode(
 	if node.OutputSchema != nil && len(node.OutputSchema.Raw) > 0 {
 		sub.OutputSchema = string(node.OutputSchema.Raw)
 	}
-	// Resolve the node agent's endpoint. In dispatch mode a worker re-resolves nothing (Endpoint pinned at
-	// create is what executeRun uses), so we resolve it here. We use the same cluster read the run worker's
-	// re-mint relies on; a resolution failure fails the node (fail-fast).
-	endpoint, err := s.resolveWorkflowNodeEndpoint(ctx, wf, node.AgentRef)
-	if err != nil {
-		return fmt.Errorf("resolving node agent %q: %w", node.AgentRef, err)
+	// Read the node agent's endpoint from the PINNED map (resolved caller-scoped at instance-create, m67.13,
+	// ADR 0011/0060) — NOT an off-request AgentDeployment read. The executor runs in the run-worker with no
+	// caller token, and the BFF SA holds no agent-CRD RBAC, so re-resolving here would be forbidden on a real
+	// cluster (the m67.10 live-tier2 failure). A missing pin is an honest configuration/consistency error →
+	// fail the node (fail-fast); it cannot happen for a normally-created run (create fails fast on an
+	// unresolvable node before the run is stored).
+	endpoint := wf.NodeEndpoints[node.AgentRef]
+	if endpoint == "" {
+		return fmt.Errorf("node agent %q has no pinned endpoint (resolved at create)", node.AgentRef)
 	}
 	sub.Endpoint = endpoint
 
@@ -1072,18 +1075,6 @@ func (s *Server) terminalTransition(runID string, apply func(*run.Run) error) er
 	}
 	_, err = s.runStore.Update(runID, apply)
 	return err
-}
-
-// resolveWorkflowNodeEndpoint resolves a node's agentRef → its invoke endpoint via the injected
-// WorkflowNodeResolver seam (the executor runs off-request, so it cannot use a caller-scoped client). A nil
-// resolver is an honest configuration error (the node fails, the workflow fail-fasts) rather than a silent
-// no-op. The workflow's registry trust boundary was enforced at validation (the node agent is a member), so
-// this is a name→url lookup, not an authz decision.
-func (s *Server) resolveWorkflowNodeEndpoint(ctx context.Context, wf *run.Run, agentRef string) (string, error) {
-	if s.workflowNodeResolver == nil {
-		return "", fmt.Errorf("workflow node resolution not configured")
-	}
-	return s.workflowNodeResolver(ctx, wf.Namespace, agentRef)
 }
 
 // ── cursor + snapshot helpers ─────────────────────────────────────────────────────────────────────────────

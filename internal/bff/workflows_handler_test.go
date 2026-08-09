@@ -55,9 +55,10 @@ func workflowFixture(name, namespace string, inputSchema *k8sruntime.RawExtensio
 }
 
 // newWorkflowHandlerServer builds a Server for workflow handler tests. It wires a fake caller client
-// factory (so the Workflow CRD lookup goes through the fake client) plus a fake invoke adapter (so
-// the route guard is satisfied). RunWorkerDispatch=true leaves runs queued so no background
-// execution spawns child runs — the test controls all state explicitly.
+// factory (so the Workflow CRD lookup + the create-time node-endpoint resolution go through the fake
+// client, caller-scoped) plus a fake invoke adapter (so the route guard is satisfied). RunWorkerDispatch=true
+// leaves runs queued so no background execution spawns child runs — the test controls all state explicitly.
+// There is NO node resolver seam: node endpoints are resolved caller-scoped at create and pinned on the run.
 func newWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 	t.Helper()
 	return NewServer(Options{
@@ -67,12 +68,26 @@ func newWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 		Adapters:          Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
 		RunStore:          run.NewMemStore(),
 		RunWorkerDispatch: true, // leave runs queued; no background goroutines spawn children
-		WorkflowNodeResolver: func(_ context.Context, _ string, agentRef string) (string, error) {
-			return "http://" + agentRef + ".prod.svc", nil
-		},
-		Log:     logr.Discard(),
-		Version: "test",
+		Log:               logr.Discard(),
+		Version:           "test",
 	})
+}
+
+// readyWorkflowAgent builds a ready AgentDeployment (a resolvable status.URL) for a workflow node, so the
+// create-time caller-scoped node-endpoint resolution (m67.13) finds an endpoint to pin. The URL mirrors the
+// in-cluster service form; extraLabels carry the registry's member selector when needed.
+func readyWorkflowAgent(name, namespace string, extraLabels map[string]string) *agentsv1alpha1.AgentDeployment {
+	return &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: extraLabels},
+		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: "http://" + name + "." + namespace + ".svc"},
+	}
+}
+
+// newAgentFakeClient builds a fake client from the objects (the fake client returns an AgentDeployment's
+// populated status.URL on Get — the create path reads it to pin the node endpoint).
+func newAgentFakeClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 }
 
 // postWorkflowRun POSTs to POST /api/workflows/{name}/runs and returns the recorder.
@@ -127,7 +142,8 @@ func wfHasEventPrefix(evs []run.Event, kind run.EventKind, prefix string) (strin
 // with the pinned SpecSnapshot + WorkflowRef; the run store contains the new run.
 func TestCreateWorkflowRun_HappyPath(t *testing.T) {
 	wf := workflowFixture("my-workflow", "prod", nil /* no inputSchema */)
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(wf).Build()
+	// The node agent "agent-a" must resolve at create (caller-scoped) so its endpoint is pinned.
+	cl := newAgentFakeClient(t, wf, readyWorkflowAgent("agent-a", "prod", nil))
 	s := newWorkflowHandlerServer(t, cl)
 
 	rec := postWorkflowRun(t, s, "my-workflow", WorkflowRunRequest{
@@ -147,6 +163,10 @@ func TestCreateWorkflowRun_HappyPath(t *testing.T) {
 	assert.True(t, rn.IsWorkflowInstance(), "the run must be a workflow instance (SpecSnapshot pinned)")
 	assert.Equal(t, "my-workflow", rn.WorkflowRef, "WorkflowRef must name the Workflow CR")
 	assert.NotEmpty(t, rn.SpecSnapshot, "SpecSnapshot must be pinned at create time")
+	// The node endpoints are resolved caller-scoped + PINNED at create (m67.13) so the off-request executor
+	// launches nodes without any agent-CRD read.
+	assert.Equal(t, "http://agent-a.prod.svc", rn.NodeEndpoints["agent-a"],
+		"the node agent's endpoint must be resolved caller-scoped + pinned at create time")
 	// The pinned snapshot must decode back to the spec (round-trip check).
 	var snap agentsv1beta1.WorkflowSpec
 	require.NoError(t, json.Unmarshal([]byte(rn.SpecSnapshot), &snap), "SpecSnapshot must be valid JSON spec")
@@ -157,7 +177,7 @@ func TestCreateWorkflowRun_HappyPath(t *testing.T) {
 func TestCreateWorkflowRun_NoInputSchema(t *testing.T) {
 	// Use "default" namespace so the lookup resolves with no namespace in the body.
 	wf := workflowFixture("open-wf", "default", nil)
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(wf).Build()
+	cl := newAgentFakeClient(t, wf, readyWorkflowAgent("agent-a", "default", nil))
 	s := newWorkflowHandlerServer(t, cl)
 
 	// No body at all (empty namespace → "default") — should succeed.
@@ -177,7 +197,7 @@ func TestCreateWorkflowRun_InputSchemaValidation(t *testing.T) {
 		"required":["q"]
 	}`)}
 	wf := workflowFixture("strict-wf", "prod", sch)
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(wf).Build()
+	cl := newAgentFakeClient(t, wf, readyWorkflowAgent("agent-a", "prod", nil))
 	s := newWorkflowHandlerServer(t, cl)
 
 	// A valid input (has the required "q" field) → 202.
@@ -228,9 +248,9 @@ func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
 		},
 	})
 	for _, name := range agentNames {
-		objs = append(objs, &agentsv1alpha1.AgentDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: label},
-		})
+		// Members are READY (a resolvable status.URL) so create-time node-endpoint resolution (m67.13) pins
+		// each endpoint. Carry the registry's selector label so membership resolution also passes.
+		objs = append(objs, readyWorkflowAgent(name, namespace, label))
 	}
 	return objs
 }
@@ -252,7 +272,7 @@ func postInlineWorkflowRun(t *testing.T, s *Server, body any) *httptest.Response
 // inline spec snapshotted and NO WorkflowRef (no Workflow CR involved).
 func TestCreateInlineWorkflowRun_HappyPath(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a", "agent-b")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -295,7 +315,7 @@ func TestCreateInlineWorkflowRun_HappyPath(t *testing.T) {
 // by the SHARED validator (internal/workflow.Validate) with 422 + the validation error; no run created.
 func TestCreateInlineWorkflowRun_InvalidSpec_DanglingEdge(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -315,7 +335,7 @@ func TestCreateInlineWorkflowRun_InvalidSpec_DanglingEdge(t *testing.T) {
 // expression is rejected by the shared validator (422); no run created.
 func TestCreateInlineWorkflowRun_InvalidSpec_BadCEL(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -335,7 +355,7 @@ func TestCreateInlineWorkflowRun_InvalidSpec_BadCEL(t *testing.T) {
 // referenced by a downstream `when` but pins NO outputSchema violates the load-bearing m67.1 rule → 422.
 func TestCreateInlineWorkflowRun_InvalidSpec_ReferencedWithoutOutputSchema(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a", "agent-b", "agent-c")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -364,7 +384,7 @@ func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
 	objs = append(objs, &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "rogue", Namespace: "prod"}, // no registry label → not a member
 	})
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -402,7 +422,7 @@ func TestCreateInlineWorkflowRun_MissingRegistry(t *testing.T) {
 // TestCreateInlineWorkflowRun_InputSchemaValidation: the inline spec's inputSchema governs the input.
 func TestCreateInlineWorkflowRun_InputSchemaValidation(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -424,7 +444,7 @@ func TestCreateInlineWorkflowRun_InputSchemaValidation(t *testing.T) {
 // TestCreateInlineWorkflowRun_NoSpec: an empty body (no spec) → 400, no run.
 func TestCreateInlineWorkflowRun_NoSpec(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	rec := httptest.NewRecorder()
@@ -439,7 +459,7 @@ func TestCreateInlineWorkflowRun_NoSpec(t *testing.T) {
 // gate into the run's cursor (Required=true) at create time.
 func TestCreateInlineWorkflowRun_RequireApproval_SeedsGate(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -488,7 +508,7 @@ func driveToGate(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec) strin
 	// Claim (queued → running) then advance — the run hits the gate and pauses in requires_action.
 	_, err := s.runStore.Update(resp.ID, func(r *run.Run) error { return r.Transition(run.StatusRunning, time.Now()) })
 	require.NoError(t, err)
-	s.executeWorkflow(context.Background(), resp.ID)
+	s.executeWorkflow(resp.ID)
 	require.Equal(t, run.StatusRequiresAction, mustGetRun(t, s, resp.ID).Status, "the run must reach the plan-approval gate")
 	return resp.ID
 }
@@ -504,7 +524,7 @@ func mustGetRun(t *testing.T, s *Server, id string) *run.Run {
 // and the executor runs the graph (node 1 launches). Full HTTP round-trip through the resume endpoint.
 func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a", "agent-b")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -545,7 +565,7 @@ func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
 // terminates it (cancelled, "plan rejected") and launches NO node.
 func TestPlanApprovalResume_Deny_TerminatesRejected(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	cl := newAgentFakeClient(t, objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -578,49 +598,97 @@ func TestPlanApprovalResume_NoGate_UsesSingleAgentPath(t *testing.T) {
 	// first clause, so handleResumeRun falls through to the single-agent path — verified by construction.)
 }
 
-// ── WorkflowNodeResolver seam (injected resolver) ─────────────────────────────────────────────────────
+// ── Create-time node-endpoint resolution + pinning (m67.13, ADR 0011/0060) ────────────────────────────────
+//
+// The confused-deputy fix the live m67.10 tier-2 caught: the off-request executor CANNOT read an
+// AgentDeployment (the BFF SA holds no agent-CRD RBAC, config/bff/role.yaml is `rules: []`). Endpoints are
+// resolved CALLER-SCOPED at create and PINNED on the run; these tests prove the pin + the fail-fast on an
+// unresolvable / not-ready node at create.
 
-// TestWorkflowNodeResolverFromClient_ResolvesMissingAgent: a resolver backed by a fake client with
-// no AgentDeployment returns a "not found" error (the workflow node fails fast when the agent is gone).
-func TestWorkflowNodeResolverFromClient_ResolvesMissingAgent(t *testing.T) {
-	sc := testScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(sc).Build()
-	resolver := WorkflowNodeResolverFromClient(cl, sc)
+// TestCreateInlineWorkflowRun_PinsNodeEndpoints: a valid inline run resolves EVERY node agent's endpoint
+// (caller-scoped) at create and pins them on the run's NodeEndpoints — one entry per distinct node agent.
+func TestCreateInlineWorkflowRun_PinsNodeEndpoints(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a", "agent-b")
+	cl := newAgentFakeClient(t, objs...)
+	s := newWorkflowHandlerServer(t, cl)
 
-	_, err := resolver(context.Background(), "prod", "missing-agent")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found", "a missing AgentDeployment returns not found")
-}
-
-// TestWorkflowNodeResolverFromClient_ResolvesAgent: a resolver backed by a fake client with a
-// ready agent returns the agent's status.URL.
-func TestWorkflowNodeResolverFromClient_ResolvesAgent(t *testing.T) {
-	agent := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-agent", Namespace: "prod"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: "http://my-agent.prod.svc.cluster.local"},
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "agent-a", Next: "two"},
+			{Name: "two", AgentRef: "agent-b"},
+		},
 	}
-	sc := testScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(sc).WithStatusSubresource(agent).WithObjects(agent).Build()
-	resolver := WorkflowNodeResolverFromClient(cl, sc)
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp CreateRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	endpoint, err := resolver(context.Background(), "prod", "my-agent")
+	rn, err := s.runStore.Get(resp.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "http://my-agent.prod.svc.cluster.local", endpoint)
+	require.NotNil(t, rn.NodeEndpoints, "node endpoints must be pinned at create")
+	assert.Equal(t, "http://agent-a.prod.svc", rn.NodeEndpoints["agent-a"], "agent-a's endpoint is pinned")
+	assert.Equal(t, "http://agent-b.prod.svc", rn.NodeEndpoints["agent-b"], "agent-b's endpoint is pinned")
+	assert.Len(t, rn.NodeEndpoints, 2, "one pinned entry per DISTINCT node agent")
 }
 
-// TestWorkflowNodeResolverFromClient_NotReadyAgent: an agent with an empty status.URL returns an error.
-func TestWorkflowNodeResolverFromClient_NotReadyAgent(t *testing.T) {
-	// An AgentDeployment with no Status.URL set.
-	agent := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: "prod"},
-	}
-	sc := testScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(agent).Build()
-	resolver := WorkflowNodeResolverFromClient(cl, sc)
+// TestCreateInlineWorkflowRun_MissingNodeAgent_FailsAtCreate: an inline spec whose (registry-member) node
+// agent does not resolve at create is rejected with 4xx and NO run is stored — fail-fast at create, so a
+// workflow never queues only to stall unable to launch a node. (Membership resolution passes; the endpoint
+// resolution is what fails — the agent object is gone before the endpoint read.)
+func TestCreateInlineWorkflowRun_MissingNodeAgent_FailsAtCreate(t *testing.T) {
+	// A registry that would MATCH "ghost" by selector, but no AgentDeployment named "ghost" exists — so
+	// membership's selector check never sees it and endpoint resolution 422s on the missing agent. Simplest:
+	// build a registry + one real member, reference a missing member.
+	objs := registryWithMembers(t, "agent-a")
+	cl := newAgentFakeClient(t, objs...)
+	s := newWorkflowHandlerServer(t, cl)
 
-	_, err := resolver(context.Background(), "prod", "pending-agent")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no endpoint", "an agent with no status.URL returns a not-ready error")
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "missing"}},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "an unresolvable node agent must fail create")
+	assert.Zero(t, countStoreRuns(s), "no run is stored when a node agent cannot be resolved at create")
+}
+
+// TestCreateInlineWorkflowRun_NotReadyNodeAgent_FailsAtCreate: a node agent that is a registry member but has
+// NO endpoint yet (status.URL empty ⇒ not Ready) fails create with 4xx and stores no run.
+func TestCreateInlineWorkflowRun_NotReadyNodeAgent_FailsAtCreate(t *testing.T) {
+	label := map[string]string{"registry": "reg"}
+	registry := &agentsv1alpha1.AgentRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "reg", Namespace: "prod"},
+		Spec: agentsv1alpha1.AgentRegistrySpec{
+			RegistryId:     "reg",
+			MemberSelector: metav1.LabelSelector{MatchLabels: label},
+		},
+	}
+	// A member with the selector label but NO status.URL → passes membership, fails endpoint resolution.
+	notReady := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "not-ready-agent", Namespace: "prod", Labels: label}}
+	cl := newAgentFakeClient(t, registry, notReady)
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "not-ready-agent"}},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a not-ready node agent must fail create")
+	assert.Contains(t, rec.Body.String(), "not ready", "the 4xx names the not-ready node")
+	assert.Zero(t, countStoreRuns(s), "no run is stored when a node agent is not ready at create")
+}
+
+// TestCreateWorkflowRun_MissingNodeAgent_FailsAtCreate: the CR path fails-fast identically — the Workflow CR
+// resolves, but its node agent does not, so create 4xxs and stores no run.
+func TestCreateWorkflowRun_MissingNodeAgent_FailsAtCreate(t *testing.T) {
+	wf := workflowFixture("wf", "prod", nil) // its node references agent-a
+	cl := newAgentFakeClient(t, wf)          // NO agent-a in the cluster
+	s := newWorkflowHandlerServer(t, cl)
+
+	rec := postWorkflowRun(t, s, "wf", WorkflowRunRequest{Namespace: "prod"})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a CR whose node agent is unresolvable must fail create")
+	assert.Zero(t, countStoreRuns(s), "no run is stored when a CR-path node agent cannot be resolved")
 }
 
 // ── SweepWaiting goroutine ─────────────────────────────────────────────────────────────────────────────
@@ -777,7 +845,7 @@ func TestRunDetail_SingleAgentRun_NoWorkflowFields(t *testing.T) {
 // exposes workflowRef in the GET /api/runs/{id} response (HTTP round-trip).
 func TestRunDetail_WorkflowRef_RoundTrip(t *testing.T) {
 	wf := workflowFixture("my-wf", "prod", nil)
-	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(wf).Build()
+	cl := newAgentFakeClient(t, wf, readyWorkflowAgent("agent-a", "prod", nil))
 	s := newWorkflowHandlerServer(t, cl)
 
 	// Create the workflow instance run via POST.

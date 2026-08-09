@@ -18,7 +18,6 @@ package bff
 
 import (
 	"bytes"
-	"context"
 	"html"
 	"io/fs"
 	"net/http"
@@ -214,21 +213,7 @@ type Server struct {
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
-
-	// workflowNodeResolver resolves a workflow node's agentRef → its invoke endpoint (AgentDeployment
-	// status.url), OFF the request path (the workflow executor runs in the run-worker, ADR 0060, with no
-	// caller request to scope a client by). nil ⇒ the executor cannot launch nodes and fails a node honestly
-	// ("workflow node resolution not configured"); production wiring (m67.4) injects a resolver backed by the
-	// control-plane read, tests inject a fixture. The resolution is bounded by the workflow's registry trust
-	// boundary at validation time (the m67.1 rule), so this is a name→url lookup, not an authz decision.
-	workflowNodeResolver WorkflowNodeResolver
 }
-
-// WorkflowNodeResolver maps a workflow node's (namespace, agentRef) to its resolved invoke endpoint for the
-// executor's off-request node launch (ADR 0060). It returns an error when the agent is unresolvable (no
-// endpoint yet / not found), which fail-fasts the node. Kept a small function seam (like promptResolver) so
-// the executor has no direct cluster dependency and tests drive it deterministically.
-type WorkflowNodeResolver func(ctx context.Context, namespace, agentRef string) (endpoint string, err error)
 
 // Options configures a Server.
 type Options struct {
@@ -363,11 +348,6 @@ type Options struct {
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
 
-	// WorkflowNodeResolver resolves a workflow node's agentRef → its invoke endpoint for the executor's
-	// off-request node launch (ADR 0060, M67). Optional — nil ⇒ a workflow instance run fails a node honestly
-	// ("workflow node resolution not configured"). m67.4 wires the production resolver; tests inject a fixture.
-	WorkflowNodeResolver WorkflowNodeResolver
-
 	Log logr.Logger
 }
 
@@ -405,7 +385,6 @@ func NewServer(opts Options) *Server {
 		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
-		workflowNodeResolver:     opts.WorkflowNodeResolver,
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
