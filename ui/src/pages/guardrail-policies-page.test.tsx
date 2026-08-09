@@ -71,9 +71,13 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
     expect(screen.getByText("valid")).toBeInTheDocument();
     // The invalid policy shows its reason.
     expect(screen.getByText("InvalidPattern")).toBeInTheDocument();
-    // Fail mode badges.
-    expect(screen.getByText("closed")).toBeInTheDocument();
-    expect(screen.getByText("open")).toBeInTheDocument();
+    // Fail mode badges — closed is salient (success variant), open is warning (riskier posture).
+    const closedBadge = screen.getByText("closed");
+    expect(closedBadge).toBeInTheDocument();
+    expect(closedBadge.className).toMatch(/bg-success/);
+    const openBadge = screen.getByText("open");
+    expect(openBadge).toBeInTheDocument();
+    expect(openBadge.className).toMatch(/bg-warning/);
     // Referencing agents count.
     expect(screen.getByText("2 agents")).toBeInTheDocument();
     // Detectors summary for the PII+judge+rate policy — the column shows
