@@ -229,6 +229,14 @@ type Run struct {
 	WorkflowRef string `json:"-"`
 	// SpecSnapshot is the resolved workflow spec pinned at instance-create time (JSON). Empty ⇒ none.
 	SpecSnapshot string `json:"-"`
+	// NodeEndpoints maps a workflow node's agentRef → its resolved invoke endpoint, pinned at
+	// instance-create time through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the
+	// AgentDeployment reads) and exactly as a single run pins its Endpoint at create (m32.2, ADR 0060
+	// snapshot-pinning). The workflow executor runs OFF-REQUEST in the run-worker and has no caller token,
+	// so it reads these pinned endpoints instead of re-resolving an AgentDeployment — the BFF SA holds NO
+	// agent-CRD RBAC (config/bff/role.yaml is `rules: []`). Keyed by agentRef (a node's agent), so several
+	// nodes backed by the same agent share one entry. Empty ⇒ not a workflow run (or no nodes).
+	NodeEndpoints map[string]string `json:"-"`
 	// Cursor is the executor's per-node progress (JSON, opaque to the store — the executor owns its
 	// shape: pending / launched(childID) / done(outputRef) per node). Resume advances it, never
 	// replays the graph. Empty ⇒ no progress yet.

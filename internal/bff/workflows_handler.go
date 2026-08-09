@@ -53,14 +53,17 @@ package bff
 // module, so a faithful runtime artifact is not cheap and a hand-authored one would drift from the type.
 // Deferred as a small follow-on; the pattern works today by pinning the schema at the planner author's side.
 //
-// ── WorkflowNodeResolverFromClient (m67.4, ADR 0060) ──────────────────────────────────────────────────────
+// ── Node-endpoint resolution + pinning at CREATE (m67.13, ADR 0011/0060) ──────────────────────────────────
 //
-// The production WorkflowNodeResolver uses the BFF's own in-cluster client (a privileged SA, NOT a
-// caller-scoped client) to read an AgentDeployment's status.URL off-request. The workflow executor
-// runs inside the run-worker goroutine, which has no request context and thus no caller bearer token;
-// the resolver fills the seam the executor needs (name→url) without reopening the confused-deputy
-// gap (it reads ONLY AgentDeployment status, never writes, and only in the workflow's registered
-// namespace — the registry trust boundary was enforced at validation time by m67.1).
+// A workflow instance run resolves each node agentRef → the agent's invoke endpoint at CREATE time, through
+// the CALLER-SCOPED client, and PINS them onto the run (run.NodeEndpoints) — exactly as a single run pins its
+// Endpoint at create (m32.2) and as ADR 0060 pins the spec snapshot. The workflow executor runs OFF-REQUEST
+// in the run-worker goroutine (no request context, no caller bearer token), so it reads the PINNED endpoints
+// rather than re-resolving an AgentDeployment. This is load-bearing for ADR 0011: the BFF's own Role holds NO
+// agent-CRD access (config/bff/role.yaml is `rules: []`), so an off-request BFF-SA read of `agentdeployments`
+// would be forbidden on a real cluster — the m67.10 live-tier2 failure this fix closes. Resolving at create,
+// caller-scoped, keeps the create-time RBAC decision the gate (the caller is authorized for these agents —
+// they are the workflow's registry members) and needs the BFF no new RBAC.
 
 import (
 	"context"
@@ -84,26 +87,53 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/workflow"
 )
 
-// WorkflowNodeResolverFromClient returns a WorkflowNodeResolver backed by the given cluster client
-// (the BFF's own SA — the same mechanism credentialClient uses for locked MCP grants). It reads the
-// AgentDeployment's status.URL off-request; the caller MUST supply a client with read access to
-// AgentDeployments in all workflow namespaces (the production BFF's own SA has this via cluster RBAC).
-// The scheme must have agentsv1alpha1 registered.
-func WorkflowNodeResolverFromClient(cl client.Client, _ *k8sruntime.Scheme) WorkflowNodeResolver {
-	return func(ctx context.Context, namespace, agentRef string) (string, error) {
+// resolveWorkflowNodeEndpoints resolves each distinct node agentRef in the (validated) spec to its
+// AgentDeployment's status.URL through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the
+// reads; the caller is authorized for these agents, they are the workflow's registry members) and returns
+// the pinned agentRef→endpoint map. It is FAIL-FAST at create: a node whose agent is missing / not-ready (no
+// endpoint yet) / a job agent, or an RBAC/auth denial, returns ok=false with the right status so the create
+// aborts with a clear 4xx and NO run is stored — exactly as run-create fails on an unresolvable agent. This
+// is what lets the off-request executor launch nodes off the pinned endpoints WITHOUT any BFF-SA agent-CRD
+// RBAC (config/bff/role.yaml is `rules: []`). Returns (endpoints, 0, "", true) on success.
+func (s *Server) resolveWorkflowNodeEndpoints(
+	ctx context.Context, caller client.Client, spec agentsv1beta1.WorkflowSpec, namespace string,
+) (map[string]string, int, string, bool) {
+	// Dedup the agent names (several nodes may be backed by the same agent).
+	want := make([]string, 0, len(spec.Steps))
+	for i := range spec.Steps {
+		want = append(want, spec.Steps[i].AgentRef)
+	}
+	slices.Sort(want)
+	want = slices.Compact(want)
+
+	endpoints := make(map[string]string, len(want))
+	for _, name := range want {
 		var deploy agentsv1alpha1.AgentDeployment
-		if err := cl.Get(ctx, client.ObjectKey{Name: agentRef, Namespace: namespace}, &deploy); err != nil {
-			if apierrors.IsNotFound(err) {
-				return "", fmt.Errorf("workflow node agent %q not found in namespace %q", agentRef, namespace)
+		if err := caller.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
+			switch {
+			case apierrors.IsForbidden(err):
+				return nil, http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to read node agent %q", name), false
+			case apierrors.IsUnauthorized(err):
+				return nil, http.StatusUnauthorized, msgTokenRejected, false
+			case apierrors.IsNotFound(err):
+				return nil, http.StatusUnprocessableEntity, fmt.Sprintf("node agent %q does not exist in namespace %q", name, namespace), false
+			default:
+				s.log.Error(err, "workflow run: resolving node agent endpoint", "agent", name, "namespace", namespace)
+				return nil, http.StatusInternalServerError, fmt.Sprintf("failed to resolve node agent %q", name), false
 			}
-			return "", fmt.Errorf("reading workflow node agent %q: %w", agentRef, err)
 		}
 		url := strings.TrimSpace(deploy.Status.URL)
 		if url == "" {
-			return "", fmt.Errorf("workflow node agent %q has no endpoint yet (not Ready)", agentRef)
+			if deploy.Spec.ExecutionModel == executionModelJob {
+				return nil, http.StatusUnprocessableEntity,
+					fmt.Sprintf("node agent %q is a job agent (executionModel: job) — it has no live endpoint and cannot be a workflow node", name), false
+			}
+			return nil, http.StatusUnprocessableEntity,
+				fmt.Sprintf("node agent %q is not ready (no endpoint assigned yet)", name), false
 		}
-		return url, nil
+		endpoints[name] = url
 	}
+	return endpoints, 0, "", true
 }
 
 // registerWorkflowRunRoutes mounts the workflow invocation endpoint on the authed mux. It follows
@@ -191,6 +221,20 @@ func (s *Server) createWorkflowInstanceRun(
 		ns = defaultCreateNamespace
 	}
 
+	// Resolve + PIN each node agent's endpoint at CREATE time through the CALLER-SCOPED client (ADR 0011:
+	// the caller's own RBAC gates the AgentDeployment reads; the caller is authorized for these agents —
+	// they are the workflow's registry members). This mirrors how a single run pins its Endpoint at create
+	// (m32.2) and how ADR 0060 pins the spec snapshot: the executor runs OFF-REQUEST in the run-worker with
+	// no caller token, so it must not re-resolve an AgentDeployment (the BFF SA holds NO agent-CRD RBAC —
+	// config/bff/role.yaml is `rules: []`, ADR 0011). Fail-fast at create (4xx) on any node whose agent is
+	// missing / not-ready — exactly as run-create fails on an unresolvable agent — so a workflow never
+	// queues only to stall unable to launch a node.
+	nodeEndpoints, code, msg, ok := s.resolveWorkflowNodeEndpoints(r.Context(), caller, spec, ns)
+	if !ok {
+		writeError(w, code, msg)
+		return
+	}
+
 	// The run's Agent is the workflow name (CR path) or a synthetic label for an inline plan — it is the
 	// audit/display name; the executor drives the graph off SpecSnapshot, never off Agent.
 	agentLabel := workflowRef
@@ -200,6 +244,7 @@ func (s *Server) createWorkflowInstanceRun(
 	rn := run.New(runID, ns, agentLabel, input, conversationID, time.Now())
 	rn.WorkflowRef = workflowRef       // "" for an inline plan (no CR); the CR name otherwise
 	rn.SpecSnapshot = string(snapshot) // pinned at instance-create time — drives the executor
+	rn.NodeEndpoints = nodeEndpoints   // pinned caller-scoped endpoints — the executor launches nodes off these
 	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
 		rn.CallerUsername = username
 		rn.Boundary = agentBoundary(r.Context(), caller, ns, agentLabel)
@@ -225,11 +270,10 @@ func (s *Server) createWorkflowInstanceRun(
 		return
 	}
 
-	// Worker-dispatch mode: leave `queued` for the pool. Dev/single-pod: execute in-process. A detached
-	// background context (not r.Context()) so execution survives the request returning 202.
+	// Worker-dispatch mode: leave `queued` for the pool. Dev/single-pod: execute in-process so the
+	// workflow advances without a running worker pool.
 	if !s.runWorkerDispatch {
-		execCtx := contextWithConversationID(context.Background(), conversationID)
-		go s.executeWorkflow(execCtx, runID)
+		go s.executeWorkflow(runID)
 	}
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})

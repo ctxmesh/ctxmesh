@@ -564,12 +564,15 @@ func TestPostgresStore_RoundTripsWorkflowFields(t *testing.T) {
 	r.WorkflowRef = "my-workflow"
 	r.SpecSnapshot = `{"nodes":[{"name":"a"}]}`
 	r.Cursor = `{"a":"pending"}`
+	r.NodeEndpoints = map[string]string{"agent-a": "http://agent-a.ns.svc", "agent-b": "http://agent-b.ns.svc"}
 	require.NoError(t, s.Create(r))
 	got, err := s.Get("wf-run")
 	require.NoError(t, err)
 	assert.Equal(t, "my-workflow", got.WorkflowRef)
 	assert.Equal(t, `{"nodes":[{"name":"a"}]}`, got.SpecSnapshot)
 	assert.Equal(t, `{"a":"pending"}`, got.Cursor)
+	assert.Equal(t, map[string]string{"agent-a": "http://agent-a.ns.svc", "agent-b": "http://agent-b.ns.svc"}, got.NodeEndpoints,
+		"pinned node endpoints round-trip through Postgres")
 }
 
 // recvWithin receives one event or fails the test on timeout.

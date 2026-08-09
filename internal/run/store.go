@@ -19,6 +19,7 @@ package run
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 )
@@ -518,6 +519,10 @@ func cloneRun(r *Run) *Run {
 	}
 	if r.WaitOn != nil {
 		c.WaitOn = append([]string(nil), r.WaitOn...)
+	}
+	if r.NodeEndpoints != nil {
+		c.NodeEndpoints = make(map[string]string, len(r.NodeEndpoints))
+		maps.Copy(c.NodeEndpoints, r.NodeEndpoints)
 	}
 	return &c
 }

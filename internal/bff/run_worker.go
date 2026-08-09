@@ -181,7 +181,7 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 	// "advance" per claim (launch the next node → suspend), NOT the single-agent executeRun. The executor
 	// participates in this same claim/lease/reclaim machinery (it lives in the worker, not a new Deployment).
 	if rn.IsWorkflowInstance() {
-		s.executeWorkflow(execCtx, rn.ID)
+		s.executeWorkflow(rn.ID)
 		return
 	}
 
