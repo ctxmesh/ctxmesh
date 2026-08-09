@@ -109,6 +109,28 @@ type ScoredChunk struct {
 	Score float64
 }
 
+// CorpusStatus is the COARSE, meaningful-transitions-only projection of an ingestion run's outcome (ADR 0061
+// Fork 2). It is the STATUS CHANNEL between the ingestion executor (which UpsertCorpusStatus-es it at a run's
+// terminal phase on the trusted worker's cpDB — governance #8) and the KnowledgeBase controller (which
+// GetCorpusStatus-es it and PROJECTS it onto KnowledgeBase.status, the CRD it alone has RBAC for). One row per
+// corpus, keyed (Namespace, KnowledgeBase); the KB finalizer deletes it with the corpus (DeleteCorpus).
+//
+// Phase is a small closed set the controller maps 1:1 to KnowledgeBase.status.phase:
+// "Ready" | "PartiallyIngested" | "Failed" | "BudgetExceeded" | "Ingesting". LastIngestedAt is nil until a run
+// has SUCCEEDED (Ready/PartiallyIngested); a Failed/BudgetExceeded run leaves the prior success timestamp intact.
+type CorpusStatus struct {
+	Namespace      string
+	KnowledgeBase  string
+	Phase          string
+	DocumentCount  int
+	ChunkCount     int
+	SizeBytes      int64
+	Partial        bool
+	IngestionRunID string
+	LastIngestedAt *time.Time
+	UpdatedAt      time.Time
+}
+
 // Store is the control-plane repository for the managed RAG corpus. Unlike the catalog stores it is a vector
 // store: Upsert writes chunks; Search retrieves by similarity. Corpus lifecycle (EnsureCorpus/DeleteCorpus)
 // creates/drops the per-KB physical partition (ADR 0061 Fork 1).
@@ -130,10 +152,23 @@ type Store interface {
 	// Search returns up to TopK chunks in the query's corpus ordered by descending cosine similarity, dropping
 	// any below Threshold. Only rows whose EmbeddingModel matches the query are considered (the one-way door).
 	Search(ctx context.Context, q SearchQuery) ([]ScoredChunk, error)
-	// DeleteCorpus drops a corpus's partition (and its chunks + indexes) — the DB half of the KB finalizer.
-	// Idempotent: a corpus that never existed is a no-op.
+	// DeleteDocument removes a single document's chunks from a corpus (all rows whose document_ref matches),
+	// regardless of ingestion run — the document-delete cascade (ADR 0061 governance #3: "a document delete
+	// cascades its chunks"). Returns rows deleted. Idempotent: a document with no chunks is a no-op (0, nil).
+	// v1 exposes the store seam; a BFF delete-document endpoint is deferred (m52 Theme M).
+	DeleteDocument(ctx context.Context, namespace, knowledgeBase, documentRef string) (int, error)
+	// DeleteCorpus drops a corpus's partition (and its chunks + indexes) AND deletes its corpus-status row —
+	// the DB half of the KB finalizer. Idempotent: a corpus that never existed is a no-op.
 	DeleteCorpus(ctx context.Context, namespace, knowledgeBase string) error
 	// CountAndSize returns the chunk count + an approximate size (sum of len(content) bytes) of a corpus — for
 	// the KnowledgeBase.status projection (documentCount/chunkCount) and the tenant storage soft-cap.
 	CountAndSize(ctx context.Context, namespace, knowledgeBase string) (chunkCount int, sizeBytes int64, err error)
+
+	// UpsertCorpusStatus writes the coarse corpus-status row (ADR 0061 Fork 2 — the STATUS CHANNEL). The
+	// ingestion executor calls this ONCE at a run's terminal phase (never per-batch); the KB controller reads
+	// it via GetCorpusStatus and projects it onto KnowledgeBase.status. Keyed (Namespace, KnowledgeBase).
+	UpsertCorpusStatus(ctx context.Context, st CorpusStatus) error
+	// GetCorpusStatus returns the corpus-status row for a corpus. found=false (with a zero CorpusStatus, nil
+	// error) when no ingestion has run yet — the controller then leaves KB.status at its validate-only Pending.
+	GetCorpusStatus(ctx context.Context, namespace, knowledgeBase string) (st CorpusStatus, found bool, err error)
 }

@@ -34,8 +34,9 @@ import (
 // corpus must be ensured before it can hold chunks, and DeleteCorpus drops all of its chunks.
 type memStore struct {
 	mu      sync.Mutex
-	rows    map[string]Chunk // keyed by ID
-	corpora map[string]bool  // keyed by "namespace\x00knowledgeBase"
+	rows    map[string]Chunk        // keyed by ID
+	corpora map[string]bool         // keyed by "namespace\x00knowledgeBase"
+	status  map[string]CorpusStatus // keyed by "namespace\x00knowledgeBase" — the corpus-status channel twin
 	now     func() time.Time
 }
 
@@ -44,6 +45,7 @@ func NewMemStore() Store {
 	return &memStore{
 		rows:    map[string]Chunk{},
 		corpora: map[string]bool{},
+		status:  map[string]CorpusStatus{},
 		now:     func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -175,17 +177,62 @@ func (s *memStore) Search(_ context.Context, q SearchQuery) ([]ScoredChunk, erro
 	return scored, nil
 }
 
+func (s *memStore) DeleteDocument(_ context.Context, namespace, knowledgeBase, documentRef string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := 0
+	for id, c := range s.rows {
+		if c.Namespace == namespace && c.KnowledgeBase == knowledgeBase && c.DocumentRef == documentRef {
+			delete(s.rows, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *memStore) DeleteCorpus(_ context.Context, namespace, knowledgeBase string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	delete(s.corpora, corpusKey(namespace, knowledgeBase))
+	delete(s.status, corpusKey(namespace, knowledgeBase)) // the corpus-status row goes with the corpus (pg parity)
 	for id, c := range s.rows {
 		if c.Namespace == namespace && c.KnowledgeBase == knowledgeBase {
 			delete(s.rows, id)
 		}
 	}
 	return nil
+}
+
+func (s *memStore) UpsertCorpusStatus(_ context.Context, st CorpusStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored := st
+	stored.UpdatedAt = s.now()
+	if st.LastIngestedAt != nil {
+		t := st.LastIngestedAt.UTC()
+		stored.LastIngestedAt = &t
+	}
+	s.status[corpusKey(st.Namespace, st.KnowledgeBase)] = stored
+	return nil
+}
+
+func (s *memStore) GetCorpusStatus(_ context.Context, namespace, knowledgeBase string) (CorpusStatus, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	st, ok := s.status[corpusKey(namespace, knowledgeBase)]
+	if !ok {
+		return CorpusStatus{}, false, nil
+	}
+	out := st // copy; deep-copy the pointer so a caller mutation cannot alias the stored row
+	if st.LastIngestedAt != nil {
+		t := *st.LastIngestedAt
+		out.LastIngestedAt = &t
+	}
+	return out, true, nil
 }
 
 func (s *memStore) CountAndSize(_ context.Context, namespace, knowledgeBase string) (int, int64, error) {
