@@ -974,3 +974,345 @@ def test_validate_against_schema_unit():
     # Not JSON.
     err2 = _validate_against_schema("not json at all", _OUTPUT_SCHEMA)
     assert err2 is not None and "not valid JSON" in err2
+
+
+# ── m65.6: tool-use policy in the managed loop (ADR 0058) ───────────────────────
+#
+# A configurable gateway that, on any turn WITHOUT a role:"tool" result present,
+# returns the given tool_calls; once a tool result appears, it returns a final
+# answer. That lets a test drive N tool calls in one turn and then let the loop
+# finish. Every request body is recorded (self.requests) so a test can assert the
+# `tool_choice` the loop sent. Discovery advertises the same tool names so they
+# resolve into tool_names; client.tools.call is monkeypatched to record dispatch.
+
+
+def _tool_call_obj(call_id: str, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+class _PolicyGatewayStub(_BaseStub):
+    """Returns a fixed list of tool_calls on the first turn, then a final answer."""
+
+    def __init__(self, tool_calls: List[Dict[str, Any]]) -> None:
+        self._tool_calls = tool_calls
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def completions(state: _StubState, req: RecordedRequest):
+            body = json.loads(req.body) if req.body else {}
+            messages = body.get("messages") or []
+            if _has_tool_result(messages):
+                resp = _plain_final_body("POLICY_FINAL done")
+            else:
+                resp = {
+                    "id": "chatcmpl-policy",
+                    "object": "chat.completion",
+                    "model": "policy-mock",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": self._tool_calls,
+                            },
+                        }
+                    ],
+                    "usage": USAGE,
+                }
+            return 200, {"Content-Type": "application/json"}, json.dumps(resp).encode()
+
+        self.state.routes.update({"POST /chat/completions": completions})
+
+
+class _MultiToolDiscoveryStub(_BaseStub):
+    """Discovery advertising the named tools (permissive schema) so they resolve."""
+
+    def __init__(self, names: List[str]) -> None:
+        self._names = names
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def tools(state: _StubState, req: RecordedRequest):
+            manifest = {"version": "v0", "tools": [{"name": n} for n in self._names]}
+            return 200, {"Content-Type": "application/json"}, json.dumps(manifest).encode()
+
+        self.state.routes.update({"GET /tools": tools})
+
+
+def _policy_client(gw, disc, monkeypatch):
+    """Build a client on the given gateway/discovery, recording client.tools.call dispatches."""
+    plane = PlaneConfig.for_test(discovery_base_url=disc.base_url, model_gateway_url=gw.base_url)
+    client = agent.from_config(plane)
+    dispatched: List[str] = []
+
+    def fake_call(name, **kwargs):
+        dispatched.append(name)
+        return {"content": [{"type": "text", "text": f"{name} ran"}]}
+
+    monkeypatch.setattr(client.tools, "call", fake_call)
+    return client, dispatched
+
+
+def test_tool_policy_deny_not_dispatched_and_model_told(monkeypatch):
+    """A tool whose rule is deny (via the default) is never dispatched; the model receives an
+    honest denial tool message so it can adapt."""
+    calls = [_tool_call_obj("c1", "search", {"q": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["search"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "deny"},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    # The tool was NOT dispatched, and tools_called does not record it as executed.
+    assert dispatched == []
+    assert result.tools_called == []
+    # The follow-up turn carried the honest denial as the tool result.
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "not permitted by policy" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["tool_call_id"] == "c1"
+
+
+def test_tool_policy_deny_via_override(monkeypatch):
+    """An override naming the tool wins over an allow default: that one tool is denied."""
+    calls = [_tool_call_obj("c1", "danger", {})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["danger"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={
+                "default": "allow",
+                "overrides": [{"name": "danger", "rule": "deny"}],
+            },
+        )
+        result = run_managed_loop(client, config, "go")
+
+    assert dispatched == []
+    assert result.tools_called == []
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
+    assert "not permitted by policy" in tool_msgs[0]["content"]
+
+
+def test_tool_policy_allow_default_unchanged(monkeypatch):
+    """default=allow → the tool dispatches normally (today's behaviour)."""
+    calls = [_tool_call_obj("c1", "search", {"q": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["search"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "allow"},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    assert dispatched == ["search"]
+    assert result.tools_called == ["search"]
+    assert result.output.startswith("POLICY_FINAL")
+
+
+def test_tool_policy_require_approval_top_level_not_granted(monkeypatch):
+    """require-approval, top-level (no spawn depth), not granted → the loop surfaces
+    approval_required with key tool:<name> and the tool never dispatches."""
+    calls = [_tool_call_obj("c1", "send_email", {"to": "a@b.c"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["send_email"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "require-approval"},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    assert result.approval_required is not None
+    assert result.approval_required["key"] == "tool:send_email"
+    assert "send_email" in result.approval_required["summary"]
+    assert dispatched == [], "the gated tool did not execute before approval"
+    assert result.tools_called == []
+
+
+def test_tool_policy_require_approval_top_level_granted(monkeypatch):
+    """require-approval, top-level, approval GRANTED (via approvals=) → the tool dispatches."""
+    calls = [_tool_call_obj("c1", "send_email", {"to": "a@b.c"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["send_email"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "require-approval"},
+        )
+        result = run_managed_loop(client, config, "go", approvals=["tool:send_email"])
+
+    assert result.approval_required is None
+    assert dispatched == ["send_email"]
+    assert result.tools_called == ["send_email"]
+    assert result.output.startswith("POLICY_FINAL")
+
+
+def test_tool_policy_require_approval_in_sub_run_fails_closed(monkeypatch):
+    """require-approval INSIDE a delegated sub-run (X-Ctxmesh-Spawn-Depth: 1) → FAIL-CLOSED:
+    pause_for_approval is NEVER called (proven by a spy), the tool is NOT dispatched, and the
+    model receives the sub-run-denial message. This is the ADR 0058 fifth-issue rule: pausing a
+    sub-run hangs the supervisor's synchronous await, so the loop must deny honestly instead."""
+    import ctxmesh.managed as managed_mod
+
+    # Spy on pause_for_approval AS THE LOOP CALLS IT: the loop resolves the name from the
+    # ctxmesh.managed module namespace, so patch it there and assert it is never invoked.
+    pause_calls: List[tuple] = []
+    real_pause = managed_mod.pause_for_approval
+
+    def spy_pause(key, summary):
+        pause_calls.append((key, summary))
+        return real_pause(key, summary)
+
+    monkeypatch.setattr(managed_mod, "pause_for_approval", spy_pause)
+
+    calls = [_tool_call_obj("c1", "send_email", {"to": "a@b.c"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["send_email"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "require-approval"},
+        )
+        result = run_managed_loop(
+            client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"}
+        )
+
+    # THE load-bearing assertion: pause_for_approval was NOT called at all inside the sub-run.
+    assert pause_calls == [], "a sub-run must NOT pause for approval (fail-closed)"
+    # The run did NOT become an approval_required outcome, and the tool never dispatched.
+    assert result.approval_required is None
+    assert dispatched == []
+    assert result.tools_called == []
+    # The model got the honest sub-run denial as the tool result.
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = [m for m in follow_up["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "cannot be used inside a delegated sub-run" in tool_msgs[0]["content"]
+
+
+@pytest.mark.parametrize(
+    "forced, expected",
+    [
+        ("", None),  # unset → no tool_choice (provider auto)
+        ("auto", "auto"),
+        ("required", "required"),
+        ("search", {"type": "function", "function": {"name": "search"}}),
+    ],
+)
+def test_tool_policy_forced_choice_sets_tool_choice(monkeypatch, forced, expected):
+    """forcedChoice → the right tool_choice on the model call. "" leaves it unset."""
+    # A conforming default (allow) so the single call dispatches and the loop finishes cleanly.
+    calls = [_tool_call_obj("c1", "search", {"q": "x"})]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["search"]) as disc:
+        client, _ = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "allow", "forcedChoice": forced},
+        )
+        run_managed_loop(client, config, "go")
+
+    # Assert on the FIRST model request (turn 1), where the loop applies forcedChoice.
+    first_body = json.loads(gw.requests[0].body)
+    if expected is None:
+        assert "tool_choice" not in first_body
+    else:
+        assert first_body["tool_choice"] == expected
+
+
+def test_tool_policy_parallel_limit_caps_dispatch(monkeypatch):
+    """parallelLimit=1 with 3 tool calls in a turn → exactly the FIRST is dispatched; the other
+    two come back with the honest skip message so the model can re-request them next turn."""
+    calls = [
+        _tool_call_obj("c1", "t1", {}),
+        _tool_call_obj("c2", "t2", {}),
+        _tool_call_obj("c3", "t3", {}),
+    ]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["t1", "t2", "t3"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            tool_policy={"default": "allow", "parallelLimit": 1},
+        )
+        result = run_managed_loop(client, config, "go")
+
+    # Exactly one tool ran; the first in the model's order.
+    assert dispatched == ["t1"]
+    assert result.tools_called == ["t1"]
+    # The follow-up turn carried the two skip messages (honest, re-requestable).
+    follow_up = json.loads(gw.requests[-1].body)
+    tool_msgs = {m["tool_call_id"]: m["content"] for m in follow_up["messages"]
+                 if m.get("role") == "tool"}
+    assert "exceeds the tool parallel-limit of 1" in tool_msgs["c2"]
+    assert "exceeds the tool parallel-limit of 1" in tool_msgs["c3"]
+
+
+def test_tool_policy_none_is_unchanged(monkeypatch):
+    """tool_policy=None (the default) → all tools dispatch, no tool_choice, no limit."""
+    calls = [
+        _tool_call_obj("c1", "t1", {}),
+        _tool_call_obj("c2", "t2", {}),
+    ]
+    with _PolicyGatewayStub(calls) as gw, _MultiToolDiscoveryStub(["t1", "t2"]) as disc:
+        client, dispatched = _policy_client(gw, disc, monkeypatch)
+        config = ManagedConfig(system_prompt="sys", model_route="m")  # no tool_policy
+        result = run_managed_loop(client, config, "go")
+
+    assert dispatched == ["t1", "t2"]
+    assert result.tools_called == ["t1", "t2"]
+    first_body = json.loads(gw.requests[0].body)
+    assert "tool_choice" not in first_body
+
+
+def test_resolve_tool_rule_unit():
+    """Unit coverage for _resolve_tool_rule: override wins, else default, else allow."""
+    from ctxmesh.managed import _resolve_tool_rule
+
+    policy = {
+        "default": "require-approval",
+        "overrides": [{"name": "safe", "rule": "allow"}, {"name": "bad", "rule": "deny"}],
+    }
+    assert _resolve_tool_rule(policy, "safe") == "allow"
+    assert _resolve_tool_rule(policy, "bad") == "deny"
+    # Not named by an override → the default.
+    assert _resolve_tool_rule(policy, "other") == "require-approval"
+    # No default → allow.
+    assert _resolve_tool_rule({}, "x") == "allow"
+    # A malformed/unrecognised override rule falls through to the default (never a silent widen).
+    assert _resolve_tool_rule(
+        {"default": "deny", "overrides": [{"name": "x", "rule": "bogus"}]}, "x"
+    ) == "deny"
+
+
+def test_forced_and_limit_unit():
+    """Unit coverage for _forced_tool_choice and _parallel_limit edge cases."""
+    from ctxmesh.managed import _forced_tool_choice, _parallel_limit
+
+    assert _forced_tool_choice({}) is None
+    assert _forced_tool_choice({"forcedChoice": ""}) is None
+    assert _forced_tool_choice({"forcedChoice": "auto"}) == "auto"
+    assert _forced_tool_choice({"forcedChoice": "required"}) == "required"
+    assert _forced_tool_choice({"forcedChoice": "mytool"}) == {
+        "type": "function",
+        "function": {"name": "mytool"},
+    }
+    # parallel-limit: positive int caps; non-positive / non-int / bool → 0 (unlimited).
+    assert _parallel_limit({"parallelLimit": 3}) == 3
+    assert _parallel_limit({"parallelLimit": 0}) == 0
+    assert _parallel_limit({"parallelLimit": -1}) == 0
+    assert _parallel_limit({}) == 0
+    assert _parallel_limit({"parallelLimit": True}) == 0
