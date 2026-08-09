@@ -710,10 +710,32 @@ def _dispatch_knowledge_search(client: Client, args: Dict[str, Any]) -> str:
 
     if not results:
         return "No results found for this query."
+    # Citation/provenance (ADR 0061 governance #4 — attributable RAG, m68.11).
+    # Each chunk the model sees carries a "citation" string (<documentRef>#<chunkIndex>) alongside
+    # the content and the raw provenance fields, so the model can quote "per doc X §Y" without
+    # hand-assembling the reference. The raw fields (documentRef, chunkIndex, offsets, score) are
+    # kept too so consuming code can parse them. This is a formatting-only step; the underlying
+    # result dicts from client.knowledge.search are immutable — we build new annotated dicts.
+    #
+    # Auto-inject / ephemeral-<retrieved_context> discipline (ADR 0061 governance #5, deferred):
+    # v1 knowledge is TOOL-ONLY. The ephemeral-context mandate (inject into system prompt, never
+    # persist to history) is for a future auto-inject mode — not built here. Carded → m52 Theme M.
+    annotated = []
+    for hit in results:
+        if not isinstance(hit, dict):
+            annotated.append(hit)
+            continue
+        doc_ref = hit.get("documentRef", "")
+        chunk_idx = hit.get("chunkIndex", 0)
+        citation = f"{doc_ref}#{chunk_idx}" if doc_ref else ""
+        entry = dict(hit)
+        if citation:
+            entry["citation"] = citation
+        annotated.append(entry)
     try:
-        return json.dumps(results, separators=(",", ":"), default=str)
+        return json.dumps(annotated, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
-        return str(results)
+        return str(annotated)
 
 
 def _dispatch_delegate_one(
