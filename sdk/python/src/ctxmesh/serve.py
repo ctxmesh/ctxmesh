@@ -130,6 +130,12 @@ def _envelope(agent_name: str, result: HandlerResult) -> Dict[str, Any]:
     }
     if result.approval_required:
         body["approval_required"] = result.approval_required
+    if result.handoff:
+        # The agent TRANSFERRED the conversation (M67, ADR 0060 §5). The BFF handoff edge already
+        # terminated this run + created the target's; surface the marker so the BFF's executeRun
+        # does not append an empty answer over the recorded handoff outcome (and the console can
+        # render the transfer).
+        body["handoff"] = result.handoff
     return body
 
 

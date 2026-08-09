@@ -217,6 +217,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// durable event log). Absent ⇒ the hot in-memory store (dev/single-pod), which the server
 	// defaults to. Aligned with the credential state layer so one Postgres backs both.
 	var runStore runstore.Store
+	var convStore runstore.ConversationStore
 	if runDSN := strings.TrimSpace(os.Getenv("RUN_STORE_DSN")); runDSN != "" {
 		db, dbErr := sql.Open("pgx", runDSN)
 		if dbErr != nil {
@@ -226,6 +227,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		runStore, err = runstore.NewPostgresStore(context.Background(), db)
 		if err != nil {
 			return fmt.Errorf("init durable run store: %w", err)
+		}
+		// The conversation → active-agent pointer for handoff (m67.6, ADR 0060 §5) shares the SAME
+		// Postgres so a transfer survives a restart and the next turn (on any pod) routes to the active
+		// agent. Absent RUN_STORE_DSN ⇒ a hot mem twin (the server defaults to it), matching the run store.
+		convStore, err = runstore.NewPostgresConversationStore(context.Background(), db)
+		if err != nil {
+			return fmt.Errorf("init durable conversation store: %w", err)
 		}
 		log.Info("durable run store enabled (ADR 0034): runs persist to Postgres")
 	}
@@ -279,6 +287,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
+		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),

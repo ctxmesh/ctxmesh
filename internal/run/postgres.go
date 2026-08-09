@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS runs (
     cursor           text NOT NULL DEFAULT '',
     wait_on          text NOT NULL DEFAULT '',
     wait_mode        text NOT NULL DEFAULT '',
+    handed_off_to    text NOT NULL DEFAULT '',
+    handoff_source_run_id text NOT NULL DEFAULT '',
     version          bigint NOT NULL DEFAULT 1,
     created_at       timestamptz NOT NULL,
     updated_at       timestamptz NOT NULL
@@ -116,6 +118,12 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS spec_snapshot text NOT NULL DEFAULT ''
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS cursor        text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_on       text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS wait_mode     text NOT NULL DEFAULT '';
+-- Handoff outcome (M67, ADR 0060 §5): the roster member the conversation was handed off to when this
+-- run terminated via handoff_to. Default '' ⇒ this run did not hand off, so old rows load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS handed_off_to text NOT NULL DEFAULT '';
+-- Handoff backlink (M67, ADR 0060 §5): B's run records the run (A) whose handoff_to created it, since
+-- a transferred run is a NEW ROOT with no parent_run_id. Default '' ⇒ not created by a handoff.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS handoff_source_run_id text NOT NULL DEFAULT '';
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
@@ -157,15 +165,16 @@ func (p *pgStore) Create(r *Run) error {
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		 parent_run_id, root_run_id, spawn_depth, output_schema,
-		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,1,$25,$26)
+		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
+		 version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,1,$27,$28)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
 		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
-		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode),
+		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo, r.HandoffSourceRunID,
 		r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
@@ -207,7 +216,8 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		parent_run_id, root_run_id, spawn_depth, output_schema,
-		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, version, created_at, updated_at
+		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
+		version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
 		r            Run
@@ -227,7 +237,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
-		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode,
+		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
 		&version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -324,13 +334,13 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 	}
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
-			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11,
-			version=version+1, updated_at=$12
-		WHERE id=$1 AND version=$13`
+			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
+			version=version+1, updated_at=$13
+		WHERE id=$1 AND version=$14`
 	res, err := tx.ExecContext(ctx, upd,
 		id, working.TraceID, string(working.Status), msgs, action, working.Error,
 		working.WorkerID, nullableTime(working.LeaseExpiresAt),
-		working.Cursor, waitOn, string(working.WaitMode),
+		working.Cursor, waitOn, string(working.WaitMode), working.HandedOffTo,
 		working.UpdatedAt.UTC(), version)
 	if err != nil {
 		return nil, fmt.Errorf("run: update: %w", err)
@@ -355,8 +365,10 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 // writeRunTx persists a run row inside a transaction, guarded by its OCC version (version=$N),
 // bumping the version. It returns errRunConflict if the row moved under us (the standard OCC loser
 // signal, retried by the caller's retry loop). The caller MUST already hold the row lock. It writes
-// the same mutable column set as tryUpdate's UPDATE, so the child/parent writes in CompleteAndWake
-// persist cursor + wait record + lease exactly like an ordinary Update.
+// the same mutable column set as tryUpdate's UPDATE (incl. handed_off_to, m67.6), so the child/parent
+// writes in CompleteAndWake persist cursor + wait record + lease + handoff outcome exactly like an
+// ordinary Update — the two mutable-column sets must never diverge. handoff_source_run_id is NOT here:
+// it is create-only (set once when a handoff mints B, never mutated), like parent_run_id.
 func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version int64) error {
 	msgs, err := json.Marshal(r.Messages)
 	if err != nil {
@@ -372,12 +384,12 @@ func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version in
 	}
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
-			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11,
-			version=version+1, updated_at=$12
-		WHERE id=$1 AND version=$13`
+			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
+			version=version+1, updated_at=$13
+		WHERE id=$1 AND version=$14`
 	res, err := tx.ExecContext(ctx, upd,
 		r.ID, r.TraceID, string(r.Status), msgs, action, r.Error,
-		r.WorkerID, nullableTime(r.LeaseExpiresAt), r.Cursor, waitOn, string(r.WaitMode),
+		r.WorkerID, nullableTime(r.LeaseExpiresAt), r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo,
 		r.UpdatedAt.UTC(), version)
 	if err != nil {
 		return fmt.Errorf("run: update: %w", err)

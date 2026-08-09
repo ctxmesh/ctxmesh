@@ -70,6 +70,12 @@ type Server struct {
 	// store; M32 swaps a durable backend behind the same seam. Always non-nil (defaulted).
 	runStore run.Store
 
+	// convStore holds the conversation → active-agent pointer (M67, ADR 0060 §5). Handoff (handoff_to)
+	// terminates A's run and sets this pointer to B, so the conversation's NEXT turn routes to B. Always
+	// non-nil (defaulted to a mem twin) — durable Postgres when a run-store DSN is set, so a handoff
+	// survives a restart and the next turn (on any pod) routes to the active agent.
+	convStore run.ConversationStore
+
 	// promptStore, when set, is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4).
 	// During the migration window the BFF DUAL-WRITES: the PromptVersion CRD stays the source of truth
 	// (RBAC-gated by the caller-scoped write) and the store is mirrored best-effort after each write, so
@@ -331,6 +337,10 @@ type Options struct {
 	// RunStore backs the run-oriented execution contract (ADR 0034). Optional — a hot in-memory
 	// store is used when nil (phase 1); M32 injects a durable store.
 	RunStore run.Store
+	// ConvStore backs the conversation → active-agent pointer for handoff (M67, ADR 0060 §5). Optional —
+	// a hot in-memory twin is used when nil (dev/single-pod); a durable store is injected alongside the
+	// durable RunStore (same Postgres) in cmd/bff/main.go so handoff routing survives a restart.
+	ConvStore run.ConversationStore
 	// PromptStore is the control-plane Postgres store for PromptVersions (ADR 0042, m40.4). Optional —
 	// nil ⇒ CRD-only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
 	PromptStore promptversion.Store
@@ -387,6 +397,7 @@ func NewServer(opts Options) *Server {
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
+		convStore:                opts.ConvStore,
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
@@ -399,6 +410,9 @@ func NewServer(opts Options) *Server {
 	}
 	if s.runStore == nil {
 		s.runStore = run.NewMemStore()
+	}
+	if s.convStore == nil {
+		s.convStore = run.NewMemConversationStore()
 	}
 	if s.version == "" {
 		s.version = defaultVersion
@@ -497,6 +511,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
 	s.registerSpawnRoute(api)
+	s.registerHandoffRoute(api)
 	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.
