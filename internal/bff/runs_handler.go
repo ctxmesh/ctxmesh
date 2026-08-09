@@ -312,10 +312,29 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
+	output := extractRunOutput(resp)
+
+	// Authoritative structured-output gate (m65.4, ADR 0058): when the run pinned an outputSchema
+	// (m65.3), the terminal answer MUST conform before we call the run a success. Fail closed — an
+	// answer that is not valid JSON, violates the schema, or was governed by an uncompilable schema
+	// becomes an honest `failed`, never a swallowed success. This runs BEFORE the success message
+	// event + succeeded transition below, so a rejected answer is never surfaced as a successful
+	// assistant message. executeRun is shared with the durable worker, so this covers that path too.
+	if verr := validateTerminalOutput(started.OutputSchema, output); verr != nil {
+		s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
+		if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
+			rn.TraceID = traceID
+			rn.Error = verr.Error()
+			return rn.Transition(run.StatusFailed, now)
+		}); uErr != nil {
+			s.log.Error(uErr, "run: could not persist schema-validation failure", "run", runID)
+		}
+		return
+	}
+
 	// Success: emit the assistant message as a stream event BEFORE the terminal transition (which
 	// closes live subscribers), then persist it + succeed. m31.4 adds token-level events during
 	// the loop; here the whole answer arrives as one message.
-	output := extractRunOutput(resp)
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
 	if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
 		rn.TraceID = traceID

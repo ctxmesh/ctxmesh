@@ -351,18 +351,19 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Contains(t, body, string(run.StatusSucceeded))
 }
 
-// agentWithSchema builds a ready AgentDeployment whose spec.runtime.outputSchema is set to
-// the given raw JSON Schema, so the create path can pin it onto the run (m65.3).
-func agentWithSchema(name, namespace, url, schema string) *agentsv1alpha1.AgentDeployment {
+// agentWithSchema builds a ready "typed" AgentDeployment whose spec.runtime.outputSchema is set to
+// the given raw JSON Schema, so the create path can pin it onto the run (m65.3). Only the schema
+// varies across tests; the identity is fixed.
+func agentWithSchema(schema string) *agentsv1alpha1.AgentDeployment {
 	return &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "typed", Namespace: "prod"},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
 			Image: "echo:1",
 			Runtime: &agentsv1alpha1.RuntimeSpec{
 				OutputSchema: &k8sruntime.RawExtension{Raw: []byte(schema)},
 			},
 		},
-		Status: agentsv1alpha1.AgentDeploymentStatus{URL: url},
+		Status: agentsv1alpha1.AgentDeploymentStatus{URL: "http://typed.prod.svc.cluster.local"},
 	}
 }
 
@@ -371,7 +372,7 @@ func agentWithSchema(name, namespace, url, schema string) *agentsv1alpha1.AgentD
 // text of the agent at create time (m65.3, ADR 0058).
 func TestCreateRun_PinsOutputSchema(t *testing.T) {
 	schema := `{"type":"object","properties":{"answer":{"type":"string"}}}`
-	agent := agentWithSchema("typed", "prod", "http://typed.prod.svc.cluster.local", schema)
+	agent := agentWithSchema(schema)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"done","consent_required":[]}`)}
 
@@ -418,4 +419,122 @@ func TestCreateRun_NoRuntimeOutputSchemaIsEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", rn.OutputSchema,
 		"a run for an agent with no runtime must have OutputSchema == \"\" (no validation, backward-compat)")
+}
+
+// m65.4OutputSchema is the schema pinned onto runs in the m65.4 executeRun integration tests: an
+// object with a required string "answer".
+const m65_4OutputSchema = `{
+	"type": "object",
+	"properties": {"answer": {"type": "string"}},
+	"required": ["answer"],
+	"additionalProperties": false
+}`
+
+// runEventsBody returns the run's full SSE event backlog (the run must already be terminal so the
+// stream closes cleanly). Used to assert which stream events did — and did NOT — surface.
+func runEventsBody(t *testing.T, s *Server, id string) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+id+"/events", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+// TestExecuteRun_SchemaConformingSucceeds proves the authoritative gate (m65.4, ADR 0058) passes a
+// terminal answer that is valid JSON conforming to the pinned outputSchema: the run succeeds, the
+// answer is preserved, and the assistant message is emitted — byte-for-byte the pre-m65.4 success.
+func TestExecuteRun_SchemaConformingSucceeds(t *testing.T) {
+	agent := agentWithSchema(m65_4OutputSchema)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"{\"answer\":\"shipped\"}","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	assert.Equal(t, run.StatusSucceeded, got.Status, "conforming JSON must succeed unchanged")
+	assert.Empty(t, got.Error)
+	require.Len(t, got.Messages, 1)
+	assert.Equal(t, `{"answer":"shipped"}`, got.Messages[0].Content, "the conforming answer is preserved verbatim")
+
+	body := runEventsBody(t, s, created.ID)
+	assert.Contains(t, body, "event: message", "a successful run emits its assistant message")
+	assert.Contains(t, body, string(run.StatusSucceeded))
+}
+
+// TestExecuteRun_NonConformingFailsClosed proves fail-closed on a valid-JSON answer that VIOLATES
+// the schema (missing the required "answer"): the run is an honest `failed` with a schema/validation
+// error, no assistant message is surfaced, and there is NO `event: message` on the stream.
+func TestExecuteRun_NonConformingFailsClosed(t *testing.T) {
+	agent := agentWithSchema(m65_4OutputSchema)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// Valid JSON, but missing the required "answer" property → violates the schema.
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"{\"note\":\"nope\"}","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	assert.Equal(t, run.StatusFailed, got.Status,
+		"a schema-violating answer is an honest failed run, never a swallowed success")
+	assert.NotEmpty(t, got.Error)
+	assert.Contains(t, got.Error, "schema", "the failure explains the validation problem")
+	assert.Empty(t, got.Messages, "a rejected answer must NOT be persisted as an assistant message")
+
+	body := runEventsBody(t, s, created.ID)
+	assert.NotContains(t, body, "event: message",
+		"a rejected answer must NOT be surfaced as a successful assistant message on the stream")
+	assert.Contains(t, body, string(run.StatusFailed))
+}
+
+// TestExecuteRun_NonJSONFailsClosed proves fail-closed when a schema is set but the terminal answer
+// is not JSON at all (plain prose): honest `failed`, no message surfaced.
+func TestExecuteRun_NonJSONFailsClosed(t *testing.T) {
+	agent := agentWithSchema(m65_4OutputSchema)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"shipped, as prose","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	assert.Equal(t, run.StatusFailed, got.Status, "non-JSON against a schema is a failed run")
+	assert.NotEmpty(t, got.Error)
+	assert.Empty(t, got.Messages)
+	assert.NotContains(t, runEventsBody(t, s, created.ID), "event: message")
+}
+
+// TestExecuteRun_NoSchemaUnchanged proves the regression guard: a run with NO pinned schema is the
+// exact pre-m65.4 path — any answer (here, plain prose) succeeds and is surfaced unchanged.
+func TestExecuteRun_NoSchemaUnchanged(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"just prose, no schema","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	assert.Equal(t, run.StatusSucceeded, got.Status, "no schema => no validation, unchanged success")
+	require.Len(t, got.Messages, 1)
+	assert.Equal(t, "just prose, no schema", got.Messages[0].Content)
+}
+
+// TestExecuteRun_MalformedSchemaFailsClosed proves that a pinned schema that does not compile as a
+// JSON Schema (possible because the CRD stores it preserve-unknown / unvalidated) DENIES: an
+// unenforceable governance control fails the run closed rather than silently passing the answer.
+func TestExecuteRun_MalformedSchemaFailsClosed(t *testing.T) {
+	// A structurally invalid schema ("type" must be a string/array of strings, not a number).
+	agent := agentWithSchema(`{"type": 123}`)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"{\"answer\":\"shipped\"}","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "typed", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+
+	assert.Equal(t, run.StatusFailed, got.Status, "an uncompilable schema must fail closed, not pass the answer")
+	assert.Contains(t, got.Error, "not a valid JSON Schema")
+	assert.Empty(t, got.Messages)
 }
