@@ -503,6 +503,18 @@ def _tool_result_content(result: Any) -> str:
         return str(result)
 
 
+def _is_guarded() -> bool:
+    """Return True when the agent container is running under a guardrail policy.
+
+    The controller (m66.2) injects ``GUARDRAIL_POLICY`` into the agent pod env
+    when ``guardrailPolicyRef`` is set on the AgentDeployment.  A non-empty value
+    means this process is behind the guardrail proxy, which rejects ``stream:true``
+    with 422 ``guardrail_streaming_unsupported`` (m66.6, ADR 0059 §4) — output
+    blocking is incompatible with streaming because tokens cannot be un-sent.
+    """
+    return bool(os.environ.get("GUARDRAIL_POLICY"))
+
+
 def _stream_turn(
     client: Client,
     route: str,
@@ -981,7 +993,14 @@ def _chat_with_resilience(
     attempt = 0
     while True:
         try:
-            if on_token is not None:
+            if on_token is not None and not _is_guarded():
+                # Streaming is only safe when not guarded: the guardrail proxy
+                # rejects stream:true with 422 guardrail_streaming_unsupported
+                # (m66.6, ADR 0059 §4) because output-blocking requires the full
+                # response before any token reaches the caller.  When guarded,
+                # fall through to the buffered path regardless of on_token — the
+                # run still receives the completed message event; it just arrives
+                # as one block instead of deltas.
                 return _stream_turn(client, route, messages, chat_opts, on_token)
             return client.model.chat(route, messages, **chat_opts)
         except GuardrailBlockedError:
