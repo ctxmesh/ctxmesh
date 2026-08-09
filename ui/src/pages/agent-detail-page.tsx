@@ -927,12 +927,16 @@ function SpecKV({ k, v }: { k: string; v: React.ReactNode }) {
 }
 
 // ── Runtime section (m65.9, ADR 0058) ────────────────────────────────────────
-// Read-only card rendered in the Overview tab when spec.runtime is present.
-// Shows structured-output indicator, tool policy summary, and resilience summary.
-// When runtime is absent nothing is rendered — no clutter for agents that don't
-// use it.
+// Read-only card rendered in the Overview tab when spec.runtime is present AND
+// at least one sub-section has content (outputSchemaSet, toolPolicy, resilience).
+// When runtime is absent or every sub-section is empty, nothing is rendered —
+// no clutter for agents that don't use it.
 function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
   const [schemaOpen, setSchemaOpen] = React.useState(false);
+
+  const hasContent =
+    runtime.outputSchemaSet || runtime.toolPolicy != null || runtime.resilience != null;
+  if (!hasContent) return null;
 
   return (
     <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="runtime-section">
@@ -995,7 +999,16 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
               {runtime.toolPolicy.forcedChoice && (
                 <>
                   <dt className="text-muted-foreground">Forced choice</dt>
-                  <dd className="font-mono text-xs">{runtime.toolPolicy.forcedChoice}</dd>
+                  <dd className="font-mono text-xs">
+                    {runtime.toolPolicy.forcedChoice}
+                    <span className="ml-1 font-sans text-[10px] text-muted-foreground">
+                      {runtime.toolPolicy.forcedChoice === "auto"
+                        ? "(model chooses)"
+                        : runtime.toolPolicy.forcedChoice === "required"
+                          ? "(must call a tool)"
+                          : `(must call ${runtime.toolPolicy.forcedChoice})`}
+                    </span>
+                  </dd>
                 </>
               )}
             </dl>
@@ -1042,7 +1055,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                         ? `${runtime.resilience.modelCall.timeoutSeconds}s timeout`
                         : null,
                       runtime.resilience.modelCall.maxRetries
-                        ? `${runtime.resilience.modelCall.maxRetries} retries`
+                        ? `${runtime.resilience.modelCall.maxRetries} ${runtime.resilience.modelCall.maxRetries === 1 ? "retry" : "retries"}`
                         : null,
                     ]
                       .filter(Boolean)
@@ -1059,7 +1072,7 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
                         ? `${runtime.resilience.toolCall.timeoutSeconds}s timeout`
                         : null,
                       runtime.resilience.toolCall.maxRetries
-                        ? `${runtime.resilience.toolCall.maxRetries} retries`
+                        ? `${runtime.resilience.toolCall.maxRetries} ${runtime.resilience.toolCall.maxRetries === 1 ? "retry" : "retries"}`
                         : null,
                     ]
                       .filter(Boolean)
