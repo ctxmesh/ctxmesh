@@ -25,12 +25,94 @@ manifest is a phase-2 M4 item; the SDK resolves it at call time for now.)
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from ctxmesh import _http
 from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
+
+#: The synthetic sub-agent-delegation tool (M64, ADR 0057). A team SUPERVISOR is given this built-in
+#: tool alongside its MCP tools; calling it starts a roster member as a durable SUB-RUN (via the
+#: launcher-local endpoint) and returns its result. Enabled only when the controller injects
+#: ``DELEGATE_ENABLED=true`` (a supervisor); a plain agent never sees it.
+DELEGATE_TOOL_NAME = "delegate_to"
+
+#: The launcher-local delegate endpoint (:2994). Platform-owned — the agent's user code POSTs here;
+#: the launcher stamps the spawn envelope + guard, so the agent can't forge a spawn.
+_DELEGATE_ENDPOINT = "http://127.0.0.1:2994/delegate"
+
+#: A delegated sub-run executes synchronously (the launcher blocks until it is terminal), so this is
+#: generous — a sub-agent may itself do several tool round-trips.
+_DELEGATE_TIMEOUT = 600.0
+
+
+def _delegate_enabled() -> bool:
+    """True when this agent is a team supervisor (the controller injected DELEGATE_ENABLED)."""
+    return os.environ.get("DELEGATE_ENABLED", "").strip() == "true"
+
+
+def _delegate_roster() -> List[Dict[str, str]]:
+    """Parse the DELEGATE_ROSTER env (a JSON list of ``{"name","description"}``) the controller
+    injects from the AgentTeam roster — teaches the model which sub-agents it can summon."""
+    raw = os.environ.get("DELEGATE_ROSTER", "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    out: List[Dict[str, str]] = []
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict) and entry.get("name"):
+                out.append(
+                    {"name": str(entry["name"]), "description": str(entry.get("description", ""))}
+                )
+    return out
+
+
+def _delegate_tool() -> Tool:
+    """Build the synthetic ``delegate_to`` tool: its description lists the roster so the model picks
+    a sub-agent by capability, and its schema constrains ``sub_agent`` to the roster when known."""
+    roster = _delegate_roster()
+    names = [r["name"] for r in roster]
+    listing = (
+        "\n".join(f"- {r['name']}: {r['description']}" for r in roster)
+        or "(configured on the AgentTeam)"
+    )
+    description = (
+        "Delegate a subtask to a sub-agent on your team and wait for its result. Use it to break a "
+        "complex task into pieces handled by the right specialist, then combine their answers. "
+        f"Available sub-agents:\n{listing}"
+    )
+    sub_agent_schema: Dict[str, Any] = {
+        "type": "string",
+        "description": "The roster member to delegate to.",
+    }
+    if names:
+        sub_agent_schema["enum"] = names
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "sub_agent": sub_agent_schema,
+            "task": {
+                "type": "string",
+                "description": "The subtask to hand to the sub-agent, in plain language.",
+            },
+        },
+        "required": ["sub_agent", "task"],
+    }
+    return Tool(
+        name=DELEGATE_TOOL_NAME,
+        mode="delegate",
+        endpoint=_DELEGATE_ENDPOINT,
+        transport="http",
+        input_schema=schema,
+        description=description,
+    )
+
 
 #: MCP protocol version the SDK negotiates (the version the M4 fixture speaks).
 _MCP_PROTOCOL_VERSION = "2025-03-26"
@@ -115,9 +197,13 @@ class ToolsClient:
 
     # ── discovery ────────────────────────────────────────────────────────────
     def list(self) -> List[Tool]:
-        """Return the live tool manifest (sidecar first, tools.json fallback)."""
+        """Return the live tool manifest (sidecar first, tools.json fallback). A team supervisor
+        also gets the synthetic ``delegate_to`` tool (M64) alongside its MCP tools."""
         manifest = self._fetch_manifest()
-        return [Tool.from_dict(t) for t in manifest.get("tools", [])]
+        tools = [Tool.from_dict(t) for t in manifest.get("tools", [])]
+        if _delegate_enabled():
+            tools.append(_delegate_tool())
+        return tools
 
     def _fetch_manifest(self) -> Dict[str, Any]:
         url = f"{self._config.discovery_base_url}/tools"
@@ -183,6 +269,36 @@ class ToolsClient:
             return json.loads(raw_text)
         except (json.JSONDecodeError, TypeError):
             return raw_text
+
+    def delegate(self, sub_agent: str, task: str, step: str, call_id: str) -> Dict[str, Any]:
+        """Delegate a subtask to a roster sub-agent via the launcher-local endpoint (M64, ADR 0057).
+
+        The launcher applies the spawn guard, starts the sub-agent as a durable SUB-RUN, waits for
+        it to finish, and returns ``{"ok": bool, "answer": str, "error": str}``. The invoking user's
+        run capability is relayed so the sub-run acts on-behalf-of the SAME user (no re-consent).
+        ``step`` + ``call_id`` are the idempotency key — a reclaimed supervisor re-issuing the same
+        call resolves the SAME sub-run. A denial or a failure comes back as ``ok=false`` (an outcome
+        the model reads), never an exception — the loop threads it as the tool result.
+        """
+        body = json.dumps(
+            {"subAgent": sub_agent, "input": task, "step": step, "callId": call_id}
+        ).encode()
+        headers = {"Content-Type": "application/json"}
+        capability = current_capability()
+        if capability:
+            headers[CAPABILITY_HEADER] = capability
+        resp = _http.request(
+            "POST",
+            _DELEGATE_ENDPOINT,
+            body=body,
+            headers=headers,
+            timeout=_DELEGATE_TIMEOUT,
+            expect=(200,),
+        )
+        data = resp.json()
+        if isinstance(data, dict):
+            return data
+        return {"ok": False, "error": "malformed delegate response"}
 
 
 # ── minimal MCP streamable-http client (stdlib only) ───────────────────────────
@@ -280,7 +396,7 @@ def _parse_jsonrpc(resp: _http.Response) -> Dict[str, Any]:
         data_line = None
         for line in text.splitlines():
             if line.startswith("data:"):
-                data_line = line[len("data:"):].strip()
+                data_line = line[len("data:") :].strip()
         if data_line is None:
             raise EndpointError("MCP SSE response contained no data frame")
         text = data_line

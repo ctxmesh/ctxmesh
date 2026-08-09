@@ -42,6 +42,7 @@ from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
+from ctxmesh.tools import DELEGATE_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
 #: here so it surfaces in the pod's stderr instead of being silently wrong (OTH-3). With no
@@ -429,9 +430,11 @@ def run_managed_loop(
     # (m32.4) — on a resume the re-invoke carries the approved key so pause_for_approval
     # proceeds. Both are request-scoped ContextVars — no cross-user bleed between runs.
     step = 0
-    with capability_scope(headers), approval_scope(approvals), client.trace.loop(
-        "managed-agent", headers=headers
-    ) as root:
+    with (
+        capability_scope(headers),
+        approval_scope(approvals),
+        client.trace.loop("managed-agent", headers=headers) as root,
+    ):
         root.set_input(user_input)
 
         # Opt-in long-term auto-retrieval (ADR 0045): prepend relevant agent memories to THIS
@@ -442,8 +445,18 @@ def run_managed_loop(
 
         try:
             return _drive_loop(
-                client, config, root, messages, tool_schemas, tool_names,
-                tools_called, consent_required, on_token, conversation_id, threaded, user_input,
+                client,
+                config,
+                root,
+                messages,
+                tool_schemas,
+                tool_names,
+                tools_called,
+                consent_required,
+                on_token,
+                conversation_id,
+                threaded,
+                user_input,
                 message_id,
             )
         except ApprovalRequiredError as exc:
@@ -458,6 +471,31 @@ def run_managed_loop(
                 consent_required=consent_required,
                 approval_required={"key": exc.key, "summary": exc.summary},
             )
+
+
+def _dispatch_delegate(
+    client: Client,
+    args: Dict[str, Any],
+    step: str,
+    call_id: str,
+    tools_called: List[str],
+) -> str:
+    """Dispatch a delegate_to call (M64, ADR 0057): summon a roster sub-agent as a durable sub-run
+    and return its result as the tool content. A denial/failure returns as text the model can act on
+    (try another sub-agent, or answer directly) — never an exception that crashes the supervisor."""
+    sub_agent = str(args.get("sub_agent", "")).strip()
+    task = str(args.get("task", ""))
+    if not sub_agent:
+        return "error: delegate_to requires a 'sub_agent'"
+    with client.trace.tool(
+        DELEGATE_TOOL_NAME, input={"sub_agent": sub_agent, "task": task}
+    ) as span:
+        resp = client.tools.delegate(sub_agent=sub_agent, task=task, step=step, call_id=call_id)
+        span.set_output(resp)
+    tools_called.append(DELEGATE_TOOL_NAME)
+    if resp.get("ok"):
+        return str(resp.get("answer", ""))
+    return f"delegation to {sub_agent!r} did not succeed: {resp.get('error', 'unknown error')}"
 
 
 def _drive_loop(
@@ -523,6 +561,11 @@ def _drive_loop(
                     # tool result so the model can recover, rather than
                     # crashing the run on a hallucinated tool name.
                     content = f"error: tool {name!r} is not bound to this agent"
+                elif name == DELEGATE_TOOL_NAME:
+                    # Sub-agent delegation (M64, ADR 0057): a durable sub-run, not an MCP call. The
+                    # launcher guards + spawns + awaits it; the result (answer or honest failure) is
+                    # the tool result the model reads. step + call_id are the idempotency key.
+                    content = _dispatch_delegate(client, args, str(step), call_id, tools_called)
                 else:
                     try:
                         with client.trace.tool(name, input=args) as tool_span:
