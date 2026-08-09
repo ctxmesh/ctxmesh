@@ -94,7 +94,7 @@ export function GuardrailPoliciesPage() {
       header: "Fail mode",
       hideOnMobile: true,
       cell: (p) => (
-        <Badge variant={p.failMode === "closed" ? "secondary" : "outline"} className="text-xs">
+        <Badge variant={p.failMode === "closed" ? "success" : "warning"} className="text-xs">
           {p.failMode}
         </Badge>
       ),
