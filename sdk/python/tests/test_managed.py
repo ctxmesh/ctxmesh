@@ -771,3 +771,206 @@ def test_delegate_batch_single_call_no_pool():
     client = _DelClient({"ok": True, "answer": "solo"})
     out = _dispatch_delegate_batch(client, [("c1", "researcher", "t")], "1")
     assert out == {"c1": "solo"}
+
+
+# ── m65.5: structured outputs — response_format + in-loop schema repair ─────────
+
+
+# A simple JSON Schema the tests drive against.
+_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+# A response text that conforms to _OUTPUT_SCHEMA.
+_CONFORMING_ANSWER = '{"answer": "hello"}'
+# A response text that is valid JSON but violates _OUTPUT_SCHEMA (missing required key).
+_NONCONFORMING_ANSWER = '{"wrong_key": 42}'
+# A response text that is not JSON at all.
+_NOT_JSON = "this is plain text, not JSON"
+
+
+def _plain_final_body(text: str) -> Dict[str, Any]:
+    """A one-turn final-answer gateway response body for the given text."""
+    return {
+        "id": "chatcmpl-so",
+        "object": "chat.completion",
+        "model": "test",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": text},
+            }
+        ],
+        "usage": USAGE,
+    }
+
+
+class _SequentialGatewayStub(_BaseStub):
+    """A model gateway stub that returns a fixed sequence of responses, one per POST."""
+
+    def __init__(self, responses: List[str]) -> None:
+        self._responses = list(responses)
+        self._idx = 0
+        super().__init__()
+
+    def _install_routes(self) -> None:
+        def completions(state: _StubState, req: RecordedRequest):
+            text = self._responses[min(self._idx, len(self._responses) - 1)]
+            self._idx += 1
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json.dumps(_plain_final_body(text)).encode(),
+            )
+
+        self.state.routes.update({"POST /chat/completions": completions})
+
+
+class _EmptyDiscoveryStub(_BaseStub):
+    """Discovery stub advertising NO tools — the loop is a plain chat agent."""
+
+    def _install_routes(self) -> None:
+        def tools(state: _StubState, req: RecordedRequest):
+            body = json.dumps({"version": "v0", "tools": []}).encode()
+            return 200, {"Content-Type": "application/json"}, body
+
+        self.state.routes.update({"GET /tools": tools})
+
+
+def _schema_plane(gw_stub) -> PlaneConfig:
+    with _EmptyDiscoveryStub() as disc:
+        return PlaneConfig.for_test(
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gw_stub.base_url,
+        )
+
+
+def test_structured_output_conforming_no_repair():
+    """output_schema set, the model returns schema-conforming JSON on the first final turn →
+    run_managed_loop returns that output with NO repair turn (model called exactly once)."""
+    with _SequentialGatewayStub([_CONFORMING_ANSWER]) as gw, _EmptyDiscoveryStub() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url=gw.base_url
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            output_schema=_OUTPUT_SCHEMA,
+        )
+
+        result = run_managed_loop(client, config, "go")
+
+    assert result.output == _CONFORMING_ANSWER
+    # The model was called exactly ONCE — no repair turn.
+    assert len(gw.requests) == 1, f"expected 1 model call, got {len(gw.requests)}"
+    # response_format was injected into the chat opts on that call.
+    body = json.loads(gw.requests[0].body)
+    assert "response_format" in body
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["schema"] == _OUTPUT_SCHEMA
+    assert body["response_format"]["json_schema"]["strict"] is False
+
+
+def test_structured_output_repair_then_success():
+    """output_schema set; model returns non-conforming JSON first, then conforming →
+    exactly ONE repair turn happens; the final output is the conforming answer."""
+    with _SequentialGatewayStub([_NONCONFORMING_ANSWER, _CONFORMING_ANSWER]) as gw, \
+            _EmptyDiscoveryStub() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url=gw.base_url
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            output_schema=_OUTPUT_SCHEMA,
+            # Give plenty of steps so the repair doesn't hit the max_steps guard.
+            max_steps=10,
+        )
+
+        result = run_managed_loop(client, config, "go")
+
+    assert result.output == _CONFORMING_ANSWER
+    # Two model calls: the original final answer + ONE repair turn.
+    assert len(gw.requests) == 2, f"expected 2 model calls, got {len(gw.requests)}"
+    # The second call carried a corrective user message.
+    second_body = json.loads(gw.requests[1].body)
+    messages = second_body["messages"]
+    user_msgs = [m for m in messages if m["role"] == "user"]
+    # The last user message is the corrective repair prompt.
+    last_user = user_msgs[-1]["content"]
+    assert "not valid per the required JSON schema" in last_user
+
+
+def test_structured_output_give_up_after_max_repairs():
+    """output_schema set; model ALWAYS returns non-conforming JSON →
+    the loop stops after exactly _MAX_SCHEMA_REPAIR repair attempts and returns the last
+    (non-conforming) answer without raising."""
+    from ctxmesh.managed import _MAX_SCHEMA_REPAIR
+
+    # Always bad — more entries than _MAX_SCHEMA_REPAIR + 1 so the stub never runs out.
+    bad_responses = [_NONCONFORMING_ANSWER] * (_MAX_SCHEMA_REPAIR + 5)
+    with _SequentialGatewayStub(bad_responses) as gw, _EmptyDiscoveryStub() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url=gw.base_url
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            output_schema=_OUTPUT_SCHEMA,
+            # Give plenty of steps so we're testing the schema-repair bound, not max_steps.
+            max_steps=20,
+        )
+
+        result = run_managed_loop(client, config, "go")
+
+    # Must return the last (non-conforming) answer — must NOT raise.
+    assert result.output == _NONCONFORMING_ANSWER
+    # Exactly 1 (original) + _MAX_SCHEMA_REPAIR (repair turns) calls — no more.
+    expected_calls = 1 + _MAX_SCHEMA_REPAIR
+    assert len(gw.requests) == expected_calls, (
+        f"expected {expected_calls} model calls (1 original + {_MAX_SCHEMA_REPAIR} repairs), "
+        f"got {len(gw.requests)}"
+    )
+
+
+def test_structured_output_no_schema_unchanged_behavior():
+    """output_schema=None (the default) → no response_format in the chat opts,
+    no validation, the loop behaves byte-for-byte as before (regression guard)."""
+    with _SequentialGatewayStub([_NOT_JSON]) as gw, _EmptyDiscoveryStub() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url=gw.base_url
+        )
+        client = agent.from_config(plane)
+        # No output_schema — the default.
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+
+        result = run_managed_loop(client, config, "go")
+
+    # The plain-text answer is returned unchanged with exactly one model call.
+    assert result.output == _NOT_JSON
+    assert len(gw.requests) == 1
+    # No response_format was injected.
+    body = json.loads(gw.requests[0].body)
+    assert "response_format" not in body
+
+
+def test_validate_against_schema_unit():
+    """Unit coverage for _validate_against_schema: conforming → None,
+    schema violation → error string, not-JSON → error string."""
+    from ctxmesh.managed import _validate_against_schema
+
+    # Conforming.
+    assert _validate_against_schema('{"answer": "hi"}', _OUTPUT_SCHEMA) is None
+    # Schema violation (missing required key).
+    err = _validate_against_schema('{"wrong": 1}', _OUTPUT_SCHEMA)
+    assert err is not None and isinstance(err, str)
+    # Not JSON.
+    err2 = _validate_against_schema("not json at all", _OUTPUT_SCHEMA)
+    assert err2 is not None and "not valid JSON" in err2
