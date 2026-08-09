@@ -262,7 +262,12 @@ type gatewayProxy struct {
 	// OBO egress path uses. nil ⇒ no key provisioned: per-user enforcement fails OPEN (skipped)
 	// even when a userRateLimit is set — a missing verifier is treated like a missing capability.
 	capVerifier *runcap.Verifier
-	logf        func(string, ...any)
+	// judge is the OPTIONAL fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) — a cascaded, cached,
+	// loop-safe semantic-classification layer built from the guardrail policy's semanticJudge section.
+	// nil ⇒ semanticJudge disabled/absent ⇒ zero judge calls. It NEVER underpins the fail-closed
+	// guarantee: it augments the deterministic engine and fails OPEN on its own error/timeout.
+	judge *semanticJudge
+	logf  func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -365,6 +370,15 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	}
 	gp.user = uq
 	gp.capVerifier = verifier
+
+	// Fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5): OPTIONAL semantic augmentation, off by default.
+	// A parse error is fail-closed (defence-in-depth, mirroring the engine load); an enabled-but-
+	// unroutable judge is left OFF (fail-open) inside newSemanticJudge. nil ⇒ no judge, zero overhead.
+	judge, err := newSemanticJudge(cfg.GuardrailPolicy, logf)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+	gp.judge = judge
 
 	return gp, nil
 }
@@ -531,7 +545,7 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	relayBody := body
 	outputBlocked := false
 	if gp.guardrail != nil {
-		relayBody, outputBlocked = gp.applyOutputGuardrail(span, body)
+		relayBody, outputBlocked = gp.applyOutputGuardrail(ctx, span, r, body)
 	}
 
 	// Relay the (possibly substituted/redacted) response. An output block overrides the
@@ -740,13 +754,15 @@ func (gp *gatewayProxy) annotateSpan(
 		attribute.String("gateway.cost_usd", actual.String()),
 	}
 	if gp.convCap != nil && caps.ConversationID != "" {
-		attrs = append(attrs,
+		attrs = append(
+			attrs,
 			attribute.String("budget.conversation.spent_usd", convSpent.String()),
 			attribute.String("budget.conversation.cap_usd", gp.convCap.String()),
 		)
 	}
 	if gp.agentCap != nil && caps.AgentName != "" {
-		attrs = append(attrs,
+		attrs = append(
+			attrs,
 			attribute.String("budget.agent.spent_usd", agentSpent.String()),
 			attribute.String("budget.agent.cap_usd", gp.agentCap.String()),
 		)

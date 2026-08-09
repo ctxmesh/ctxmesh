@@ -64,6 +64,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -121,6 +122,14 @@ const (
 	scanOutput     guardrailScanPoint = "output"
 	scanToolOutput guardrailScanPoint = "toolOutput"
 	scanAll        guardrailScanPoint = "all"
+)
+
+// Chat message roles the guardrail scans map to scan points: a user-role message is the untrusted
+// input, a tool-role message is a re-entering tool result (toolOutput). system/assistant are the
+// agent's own config and are never scanned. Shared by scanRequest and the LLM-judge cascade.
+const (
+	roleUser = "user"
+	roleTool = "tool"
 )
 
 // ── the injected policy shape (mirror of GuardrailPolicySpec) ─────────────────
@@ -507,9 +516,9 @@ func (e *guardrailEngine) scanRequest(body []byte) (scanResult, []byte) {
 		var rules []guardrailRule
 		var point guardrailScanPoint
 		switch m.role {
-		case "user":
+		case roleUser:
 			rules, point = e.input, scanInput
-		case "tool":
+		case roleTool:
 			rules, point = e.toolOutput, scanToolOutput
 		default:
 			continue // system/assistant content is the agent's own config, not scanned.
@@ -754,6 +763,22 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 	if res.redacted {
 		gp.logf("launcher: gateway: guardrail REDACT applied to request (scrubbed body forwarded)")
 	}
+
+	// ── Cascaded LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) ──────────────────────
+	// The judge is the RESIDUAL step: it runs only now that the deterministic detectors did NOT block
+	// this request (a deterministic block short-circuited above and never reached here). It classifies
+	// the SAME user/tool content over the body being forwarded, issues its call to the REAL upstream
+	// (loop-safe), and fails OPEN on its own error — so a flaky judge never blocks. A FLAGGED+block
+	// verdict refuses the call with the typed guardrail_blocked (detector "semantic-judge") BEFORE
+	// forwarding; auditOnly/SAFE/judge-error proceed. nil judge ⇒ this is a no-op.
+	if gp.judge != nil {
+		if dec, blocked := gp.judgeRequest(r.Context(), span, r, forwardBody); blocked {
+			gp.writeGuardrailBlocked(w, span, dec)
+			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=%s (semantic-judge FLAGGED; call refused)",
+				dec.detector, dec.scanPoint)
+			return true
+		}
+	}
 	return false
 }
 
@@ -772,30 +797,56 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 // output on the way OUT — failing every non-JSON stream closed would be wrong; the request
 // path, which inspects untrusted input BEFORE it runs, is the one that fails closed).
 // Called ONLY when gp.guardrail != nil and there are output rules; never for a nil engine.
-func (gp *gatewayProxy) applyOutputGuardrail(span trace.Span, body []byte) (out []byte, blocked bool) {
-	if len(gp.guardrail.output) == 0 {
-		return body, false
+func (gp *gatewayProxy) applyOutputGuardrail(
+	ctx context.Context, span trace.Span, r *http.Request, body []byte,
+) (out []byte, blocked bool) {
+	// The deterministic output scan runs first (block > redact > auditOnly). Skip it only when there
+	// are no output rules — but STILL fall through to the judge, which may apply to output even with no
+	// deterministic output rules configured.
+	relayBody := body
+	if len(gp.guardrail.output) > 0 {
+		res, scrubbed := gp.guardrail.scanOutput(body)
+		relayBody = scrubbed
+		for _, dec := range res.decisions {
+			emitGuardrailDecision(span, dec)
+		}
+		if res.block {
+			cause := blockCause(res.decisions)
+			gp.markOutputBlockSpan(span, cause)
+			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output (policy match; completion withheld)",
+				cause.detector)
+			return guardrailBlockedBody(cause), true
+		}
+		if res.redacted {
+			gp.logf("launcher: gateway: guardrail REDACT applied to completion (scrubbed response relayed)")
+		}
 	}
-	res, relayBody := gp.guardrail.scanOutput(body)
-	for _, dec := range res.decisions {
-		emitGuardrailDecision(span, dec)
-	}
-	if res.block {
-		cause := blockCause(res.decisions)
-		span.SetAttributes(
-			attribute.String("guardrail.decision", string(actionBlock)),
-			attribute.String("guardrail.detector", cause.detector),
-			attribute.String("guardrail.scan_point", string(cause.scanPoint)),
-		)
-		span.SetStatus(codes.Error, guardrailBlockedType)
-		gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output (policy match; completion withheld)",
-			cause.detector)
-		return guardrailBlockedBody(cause), true
-	}
-	if res.redacted {
-		gp.logf("launcher: gateway: guardrail REDACT applied to completion (scrubbed response relayed)")
+
+	// ── Cascaded LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) ──────────────────────
+	// Residual step on the completion the deterministic output scan did NOT block. It classifies the
+	// (possibly scrubbed) completion, calls the REAL upstream (loop-safe), and fails OPEN on its own
+	// error. A FLAGGED+block verdict SUBSTITUTES the guardrail_blocked body for the completion — the
+	// client never sees the flagged output — exactly as a deterministic output block does.
+	if gp.judge != nil {
+		if dec, blk := gp.judgeOutput(ctx, span, r, relayBody); blk {
+			gp.markOutputBlockSpan(span, dec)
+			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output "+
+				"(semantic-judge FLAGGED; completion withheld)", dec.detector)
+			return guardrailBlockedBody(dec), true
+		}
 	}
 	return relayBody, false
+}
+
+// markOutputBlockSpan stamps the output-block attributes + error status on the span. Shared by the
+// deterministic output block and the judge output block so both surface identically.
+func (gp *gatewayProxy) markOutputBlockSpan(span trace.Span, cause guardrailDecision) {
+	span.SetAttributes(
+		attribute.String("guardrail.decision", string(actionBlock)),
+		attribute.String("guardrail.detector", cause.detector),
+		attribute.String("guardrail.scan_point", string(cause.scanPoint)),
+	)
+	span.SetStatus(codes.Error, guardrailBlockedType)
 }
 
 // scanOutput scans a buffered chat/completions RESPONSE body's completion content
