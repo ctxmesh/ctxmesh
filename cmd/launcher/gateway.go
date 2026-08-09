@@ -243,7 +243,11 @@ type gatewayProxy struct {
 	// tenant enforces the M47 tenant model quota (rate + aggregate budget) against
 	// the shared Valkey. nil ⇒ untenanted or no tenant model caps.
 	tenant *tenantQuota
-	logf   func(string, ...any)
+	// guardrail is the in-path content-governance engine (M66, ADR 0059 §8), built
+	// from GUARDRAIL_POLICY. nil ⇒ no policy: the request path is byte-for-byte
+	// unchanged (no request-body buffering, forward() streams r.Body as pre-M66).
+	guardrail *guardrailEngine
+	logf      func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -277,6 +281,16 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		return nil, fmt.Errorf("gateway: invalid GATEWAY_UPSTREAM_URL %q", cfg.UpstreamURL)
 	}
 
+	// Build the in-path guardrail engine from the injected policy (M66, ADR 0059 §8).
+	// FAIL-CLOSED: a policy that does not parse or whose patterns don't compile is a
+	// hard construction error, not a silent bypass — the controller already validated
+	// it (m66.2), so this is defence-in-depth. Empty GUARDRAIL_POLICY ⇒ nil engine ⇒
+	// the request path stays byte-for-byte unchanged.
+	guardrail, err := newGuardrailEngine(cfg.GuardrailPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+
 	gp := &gatewayProxy{
 		cfg:       cfg,
 		upstream:  u,
@@ -284,6 +298,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		estimator: budget.NewEstimator(),
 		client:    &http.Client{Timeout: gatewayRequestTimeout},
 		tracer:    tracer,
+		guardrail: guardrail,
 		logf:      logf,
 	}
 
@@ -394,6 +409,17 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseSlot()
+
+	// ── Guardrail input scan (M66, ADR 0059 §8) ────────────────────────────
+	// Only when a policy is active. Buffers the request body (fail-closed on oversize
+	// or unparseable), scans the user-role input against block/auditOnly rules, and
+	// refuses a block hit with a typed guardrail_blocked BEFORE forwarding. With no
+	// policy (guardrail nil) this is skipped entirely and the body streams unchanged.
+	if gp.guardrail != nil {
+		if refused := gp.applyInputGuardrail(w, span, r); refused {
+			return
+		}
+	}
 
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
 	resp, body, err := gp.forward(ctx, r)
