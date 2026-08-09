@@ -3,6 +3,7 @@ import {
   Coins,
   FlaskConical,
   GitBranch,
+  GitFork,
   KeyRound,
   LayoutDashboard,
   MessagesSquare,
@@ -46,7 +47,8 @@ export type Milestone =
   | "M47"
   | "M63"
   | "M64"
-  | "M66";
+  | "M66"
+  | "M67";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -285,6 +287,17 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Shield,
         milestone: "M66",
         route: "/guardrails",
+      },
+      {
+        // Workflows (m67.9, ADR 0060) — declarative graphs of agent invocations:
+        // conditional branching, map/loop control flow, deterministic execution.
+        // Read-open (RBAC gate at the API server, ADR 0011); authored via YAML/kubectl.
+        // Invoke affordance starts a workflow instance run from the console.
+        id: "workflows",
+        label: "Workflows",
+        icon: GitFork,
+        milestone: "M67",
+        route: "/workflows",
       },
     ],
   },

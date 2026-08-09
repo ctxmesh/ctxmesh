@@ -659,6 +659,8 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/teams", s.handleListTeams)
 		// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
 		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
+		// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
+		authed.HandleFunc("GET /api/workflows", s.handleListWorkflows)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
@@ -847,6 +849,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
+		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).

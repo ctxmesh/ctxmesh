@@ -159,5 +159,17 @@
         "ready": true
       }
     ]
+  },
+  "WorkflowListResponse": {
+    "items": [
+      {
+        "name": "my-pipeline",
+        "namespace": "default",
+        "stepCount": 3,
+        "registryRef": "prod-registry",
+        "validated": true,
+        "specHash": "sha256-def456"
+      }
+    ]
   }
 }
