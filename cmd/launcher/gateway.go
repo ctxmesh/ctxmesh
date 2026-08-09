@@ -410,13 +410,14 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseSlot()
 
-	// ── Guardrail input scan (M66, ADR 0059 §8) ────────────────────────────
+	// ── Guardrail request scan (M66, ADR 0059 §8) ──────────────────────────
 	// Only when a policy is active. Buffers the request body (fail-closed on oversize
-	// or unparseable), scans the user-role input against block/auditOnly rules, and
-	// refuses a block hit with a typed guardrail_blocked BEFORE forwarding. With no
-	// policy (guardrail nil) this is skipped entirely and the body streams unchanged.
+	// or unparseable), scans the user-role input AND tool-role tool-output against
+	// block/redact/auditOnly rules, refuses a block hit with a typed guardrail_blocked
+	// BEFORE forwarding, and forwards the SCRUBBED body on a redact hit. With no policy
+	// (guardrail nil) this is skipped entirely and the body streams unchanged.
 	if gp.guardrail != nil {
-		if refused := gp.applyInputGuardrail(w, span, r); refused {
+		if refused := gp.applyRequestGuardrail(w, span, r); refused {
 			return
 		}
 	}
@@ -430,19 +431,39 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Relay the upstream response verbatim (status, headers, body). Budget
-	// enforcement is transparent to a successful call — the agent sees exactly
-	// what LiteLLM returned.
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	if _, werr := w.Write(body); werr != nil {
+	// ── Guardrail output scan (M66, ADR 0059 §8) ────────────────────────────
+	// Scan the completion (choices[].message.content) against the output rules. A block
+	// SUBSTITUTES a guardrail_blocked body for the completion (the client never sees it);
+	// a redact relays the completion with [REDACTED:<name>]. relayBody is what the client
+	// receives; spend is still booked below on a block, since the model already generated
+	// (ADR 0059 §7). Only runs under an active policy with output rules — otherwise
+	// relayBody == body (the response is relayed verbatim).
+	relayBody := body
+	outputBlocked := false
+	if gp.guardrail != nil {
+		relayBody, outputBlocked = gp.applyOutputGuardrail(span, body)
+	}
+
+	// Relay the (possibly substituted/redacted) response. An output block overrides the
+	// upstream status with 403 guardrail_blocked so the client sees a typed refusal, not a
+	// 200 with a withheld body; otherwise the upstream status/headers are relayed as-is.
+	if outputBlocked {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(guardrailBlockedStatus) // 403
+	} else {
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+	}
+	if _, werr := w.Write(relayBody); werr != nil {
 		gp.logf("launcher: gateway: write response: %v", werr)
 	}
 
 	// ── POST-CALL accounting ───────────────────────────────────────────────
 	// Only book cost for a successful completion (a 4xx/5xx from LiteLLM cost the
-	// tenant nothing and must not accrue spend). Price prefers LiteLLM's own cost
-	// header; falls back to the deterministic token table.
+	// tenant nothing and must not accrue spend). An OUTPUT BLOCK still books spend: the
+	// model already generated, so accounting runs on the ORIGINAL upstream body/usage
+	// (ADR 0059 §7) even though the completion was withheld from the client. Price prefers
+	// LiteLLM's own cost header; falls back to the deterministic token table.
 	if resp.StatusCode != http.StatusOK {
 		return
 	}
