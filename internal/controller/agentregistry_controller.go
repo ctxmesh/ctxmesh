@@ -132,6 +132,11 @@ const (
 	objectStorePort            = 9000
 	statelayerProxyPort        = 8080
 	tokenServicePort           = 8443
+	// bffPort is the BFF's API port. A team SUPERVISOR's launcher calls the BFF's capability-authorized
+	// spawn edge (POST /api/internal/spawn) here (M64, ADR 0057); a registry member's default-deny egress
+	// must allow it or the spawn silently fails closed. Every member gets it (cheap, single port) — a
+	// non-supervisor member simply never dials it.
+	bffPort = 9090
 
 	// registryDefaultMaxDepth / registryDefaultHopBudget mirror the CRD kubebuilder
 	// defaults for AgentRegistry.spec.guards (maxDepth=8, hopBudget=32). They are
@@ -466,6 +471,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(bffPort)},
 					},
 				},
 				{

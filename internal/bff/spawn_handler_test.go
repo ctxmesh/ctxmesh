@@ -221,3 +221,55 @@ func TestReadSpawnedRun_MissingCapIs401(t *testing.T) {
 	rec := getSpawnedRun(t, s, "", "sub-1")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+// budgetedBody adds the team spawn budget the launcher relays (trusted env) to a spawn request.
+func budgetedBody(maxDepth, maxTotal int) SpawnRunRequest {
+	b := validSpawnBody()
+	b.MaxSpawnDepth = maxDepth
+	b.MaxTotalSpawns = maxTotal
+	return b
+}
+
+// TestSpawn_DepthExceeded_Authoritative — the BFF enforces maxSpawnDepth against the VERIFIED parent's
+// depth (not an agent-supplied header), fail-closed with 429 (the security-review P1-A fix).
+func TestSpawn_DepthExceeded_Authoritative(t *testing.T) {
+	parent := mkParentRun("parent-deep")
+	parent.SpawnDepth = 3 // a sub-run 3 levels down
+	s, signer, store := newSpawnServer(t, parent)
+
+	rec := postSpawn(t, s, mintCap(t, signer, "parent-deep"), budgetedBody(3, 20)) // child depth 4 > 3
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Len(t, store.List(), 1, "no sub-run created past the depth bound")
+}
+
+// TestSpawn_TotalBudgetExhausted — the authoritative per-root counter denies past maxTotalSpawns.
+func TestSpawn_TotalBudgetExhausted(t *testing.T) {
+	s, signer, store := newSpawnServer(t, mkParentRun("parent-1"))
+	cap := mintCap(t, signer, "parent-1")
+
+	first := postSpawn(t, s, cap, budgetedBody(9, 1)) // maxTotal=1
+	require.Equal(t, http.StatusAccepted, first.Code)
+
+	// A DIFFERENT delegation (distinct callId → distinct sub-run) exceeds the tree's total budget.
+	body2 := budgetedBody(9, 1)
+	body2.CallID = "call-b"
+	second := postSpawn(t, s, cap, body2)
+	assert.Equal(t, http.StatusTooManyRequests, second.Code, "the tree's total spawn budget is exhausted")
+	assert.Len(t, store.List(), 2, "still only parent + the one admitted sub-run")
+}
+
+// TestSpawn_IdempotentDoesNotConsumeBudget — a re-issued identical spawn returns the existing sub-run
+// WITHOUT consuming a second unit of the total budget (idempotency precedes the reservation).
+func TestSpawn_IdempotentDoesNotConsumeBudget(t *testing.T) {
+	s, signer, _ := newSpawnServer(t, mkParentRun("parent-1"))
+	cap := mintCap(t, signer, "parent-1")
+
+	require.Equal(t, http.StatusAccepted, postSpawn(t, s, cap, budgetedBody(9, 2)).Code)
+	// The SAME delegation again (same callId) → idempotent 200, no budget consumed.
+	require.Equal(t, http.StatusOK, postSpawn(t, s, cap, budgetedBody(9, 2)).Code)
+
+	// A THIRD DISTINCT delegation still fits (budget 2, only 1 consumed so far).
+	body3 := budgetedBody(9, 2)
+	body3.CallID = "call-c"
+	assert.Equal(t, http.StatusAccepted, postSpawn(t, s, cap, body3).Code, "the idempotent retry did not consume budget")
+}

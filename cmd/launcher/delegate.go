@@ -78,13 +78,18 @@ type spawnedRunResult struct {
 	Error  string
 }
 
-// bffSpawnBody is the launcher→BFF POST /api/internal/spawn body (mirrors bff.SpawnRunRequest).
+// bffSpawnBody is the launcher→BFF POST /api/internal/spawn body (mirrors bff.SpawnRunRequest). The
+// budget is relayed from the launcher's controller-injected env (trusted) so the BFF enforces it
+// AUTHORITATIVELY against the verified parent — the launcher's own guard reads agent-supplied inputs and
+// is only an advisory fast-path (the M64 security-review P1-A fix).
 type bffSpawnBody struct {
-	SubAgent string          `json:"subAgent"`
-	Endpoint string          `json:"endpoint"`
-	Input    json.RawMessage `json:"input"`
-	Step     string          `json:"step"`
-	CallID   string          `json:"callId"`
+	SubAgent       string          `json:"subAgent"`
+	Endpoint       string          `json:"endpoint"`
+	Input          json.RawMessage `json:"input"`
+	Step           string          `json:"step"`
+	CallID         string          `json:"callId"`
+	MaxSpawnDepth  int             `json:"maxSpawnDepth,omitempty"`
+	MaxTotalSpawns int             `json:"maxTotalSpawns,omitempty"`
 }
 
 // spawnClient creates a sub-run via the BFF + awaits its terminal status. An interface so the delegate
@@ -317,7 +322,10 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 	_ = err // Admit returns (SpawnAdmitted, nil) here
 
 	subRunID, err := s.client.Spawn(r.Context(), capToken, bffSpawnBody{
-		SubAgent: req.SubAgent, Endpoint: s.targetURL(req.SubAgent), Input: req.Input, Step: req.Step, CallID: req.CallID,
+		SubAgent: req.SubAgent, Endpoint: s.targetURL(req.SubAgent), Input: req.Input,
+		Step: req.Step, CallID: req.CallID,
+		// Relay the TRUSTED budget (env, controller-injected) so the BFF enforces it authoritatively.
+		MaxSpawnDepth: s.cfg.Budget.MaxSpawnDepth, MaxTotalSpawns: s.cfg.Budget.MaxTotalSpawns,
 	})
 	if err != nil {
 		writeDelegate(w, delegateResponse{OK: false, Error: "spawn failed: " + err.Error()})

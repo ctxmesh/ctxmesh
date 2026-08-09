@@ -99,7 +99,14 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS spawn_depth   integer NOT NULL DEFAULT
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
-CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';`
+CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
+-- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
+-- root run id), incremented atomically as the BFF admits each sub-run. The BFF keys it on the root it
+-- derived from the VERIFIED parent, so it cannot be re-keyed by an agent for a fresh budget.
+CREATE TABLE IF NOT EXISTS spawn_counters (
+    root_run_id text PRIMARY KEY,
+    spawns      bigint NOT NULL DEFAULT 0
+);`
 
 // NewPostgresStore opens a durable Postgres-backed run store over an open *sql.DB, applying the
 // schema idempotently. The caller owns the DB's lifecycle (open/close), matching credstore.
@@ -144,6 +151,26 @@ func (p *pgStore) Create(r *Run) error {
 func (p *pgStore) Get(id string) (*Run, error) {
 	r, _, err := p.getWithVersion(context.Background(), p.db, id)
 	return r, err
+}
+
+// ReserveSpawn atomically increments the tree's total-spawn counter and admits when within maxTotal.
+// The INSERT ... ON CONFLICT ... WHERE is one atomic statement: a first spawn inserts 1; a subsequent
+// spawn increments ONLY while under budget (the WHERE gates the DO UPDATE), so an over-budget attempt
+// updates nothing and returns no row → denied WITHOUT recording the rejected spawn. Fails CLOSED.
+func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
+	const q = `INSERT INTO spawn_counters (root_run_id, spawns) VALUES ($1, 1)
+		ON CONFLICT (root_run_id) DO UPDATE SET spawns = spawn_counters.spawns + 1
+		WHERE spawn_counters.spawns < $2
+		RETURNING spawns`
+	var spawns int64
+	err := p.db.QueryRowContext(context.Background(), q, rootRunID, maxTotal).Scan(&spawns)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil // the DO UPDATE's WHERE was false → over budget
+	case err != nil:
+		return false, fmt.Errorf("run: reserve spawn: %w", err) // fail closed
+	}
+	return true, nil
 }
 
 // getWithVersion loads a run + its OCC version from the given querier (the pool or a tx). A
