@@ -703,17 +703,17 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 		_ = r.Body.Close()
 	}
 	if err != nil {
-		gp.writeGuardrailBlocked(w, span, guardrailDecision{
-			blocked: true, detector: "unreadable-request", action: actionBlock, scanPoint: scanInput,
-		})
+		failDec := guardrailDecision{blocked: true, detector: "unreadable-request", action: actionBlock, scanPoint: scanInput}
+		gp.writeGuardrailBlocked(w, span, failDec)
 		gp.logf("launcher: gateway: guardrail fail-closed BLOCK (request body read error: %v)", err)
+		gp.fireGuardrailBlockAudit(r, failDec) // m66.9: durable record even for fail-closed blocks
 		return true
 	}
 	if oversize {
-		gp.writeGuardrailBlocked(w, span, guardrailDecision{
-			blocked: true, detector: "oversize-request", action: actionBlock, scanPoint: scanInput,
-		})
+		failDec := guardrailDecision{blocked: true, detector: "oversize-request", action: actionBlock, scanPoint: scanInput}
+		gp.writeGuardrailBlocked(w, span, failDec)
 		gp.logf("launcher: gateway: guardrail fail-closed BLOCK (request body exceeds %d bytes)", maxGatewayReqBody)
+		gp.fireGuardrailBlockAudit(r, failDec) // m66.9: durable record even for fail-closed blocks
 		return true
 	}
 
@@ -757,6 +757,9 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 		}
 		gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=%s (%s; call refused)",
 			cause.detector, cause.scanPoint, reason)
+		// m66.9: fire the durable compliance record AFTER the refusal is written — the block is
+		// never delayed by the audit write (fire-and-forget goroutine, independent timeout).
+		gp.fireGuardrailBlockAudit(r, cause)
 		return true
 	}
 
@@ -776,6 +779,8 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 			gp.writeGuardrailBlocked(w, span, dec)
 			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=%s (semantic-judge FLAGGED; call refused)",
 				dec.detector, dec.scanPoint)
+			// m66.9: durable compliance record for a semantic-judge block (same contract).
+			gp.fireGuardrailBlockAudit(r, dec)
 			return true
 		}
 	}
@@ -815,6 +820,9 @@ func (gp *gatewayProxy) applyOutputGuardrail(
 			gp.markOutputBlockSpan(span, cause)
 			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output (policy match; completion withheld)",
 				cause.detector)
+			// m66.9: durable compliance record — fire AFTER the decision is recorded; the body
+			// substitution happens in serve() after this returns. Fire-and-forget, never delays.
+			gp.fireGuardrailBlockAudit(r, cause)
 			return guardrailBlockedBody(cause), true
 		}
 		if res.redacted {
@@ -832,6 +840,8 @@ func (gp *gatewayProxy) applyOutputGuardrail(
 			gp.markOutputBlockSpan(span, dec)
 			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output "+
 				"(semantic-judge FLAGGED; completion withheld)", dec.detector)
+			// m66.9: durable compliance record for a semantic-judge output block.
+			gp.fireGuardrailBlockAudit(r, dec)
 			return guardrailBlockedBody(dec), true
 		}
 	}
