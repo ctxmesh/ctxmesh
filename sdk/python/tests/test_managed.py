@@ -725,3 +725,49 @@ def test_dispatch_delegate_requires_sub_agent():
     out = _dispatch_delegate(client, {"task": "x"}, "1", "c1", [])
     assert "requires a 'sub_agent'" in out
     assert client.tools.calls == [], "no delegation is attempted without a sub_agent"
+
+
+# ── v1b bounded-parallel fan-out (M64, ADR 0057) ───────────────────────────────
+
+
+def test_delegate_batch_runs_concurrently_and_propagates_capability():
+    """A turn's delegate_to calls run CONCURRENTLY, all results return keyed by call_id, and each
+    worker thread sees the invoking user's run capability (OBO propagated via the copied ctx)."""
+    import threading
+
+    from ctxmesh._capability import capability_scope, current_capability
+    from ctxmesh.managed import _dispatch_delegate_batch
+
+    seen_caps = []
+    seen_threads = set()
+
+    class _BatchTools:
+        def delegate(self, sub_agent, task, step, call_id):
+            seen_caps.append(current_capability())
+            seen_threads.add(threading.get_ident())
+            return {"ok": True, "answer": f"{sub_agent}:done"}
+
+    class _BatchClient:
+        trace = _DelTrace()
+        tools = _BatchTools()
+
+    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
+    with capability_scope({"X-Ctxmesh-Run-Capability": "cap-token"}):
+        results = _dispatch_delegate_batch(_BatchClient(), calls, "1")
+
+    assert results == {"c1": "researcher:done", "c2": "coder:done", "c3": "writer:done"}
+    assert (
+        seen_caps == ["cap-token"] * 3
+    ), "every sub-run acts on-behalf-of the same user (OBO to threads)"
+    assert (
+        len(seen_threads) >= 2
+    ), "the delegations ran on multiple worker threads (concurrent, not serial)"
+
+
+def test_delegate_batch_single_call_no_pool():
+    """A single delegate call takes the direct path (no thread pool) and returns its result."""
+    from ctxmesh.managed import _dispatch_delegate_batch
+
+    client = _DelClient({"ok": True, "answer": "solo"})
+    out = _dispatch_delegate_batch(client, [("c1", "researcher", "t")], "1")
+    assert out == {"c1": "solo"}

@@ -31,6 +31,8 @@ system prompt, the model route) and hands it to :func:`run_managed_loop`.
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextvars
 import json
 import logging
 import os
@@ -473,18 +475,19 @@ def run_managed_loop(
             )
 
 
-def _dispatch_delegate(
-    client: Client,
-    args: Dict[str, Any],
-    step: str,
-    call_id: str,
-    tools_called: List[str],
+#: Cap on the delegate thread pool so a runaway turn can't spawn unbounded threads. The spawn GUARD
+#: (the Valkey width counter) is the real ceiling — this just bounds local concurrency.
+_MAX_DELEGATE_WORKERS = 8
+
+
+def _dispatch_delegate_one(
+    client: Client, sub_agent: str, task: str, step: str, call_id: str
 ) -> str:
-    """Dispatch a delegate_to call (M64, ADR 0057): summon a roster sub-agent as a durable sub-run
-    and return its result as the tool content. A denial/failure returns as text the model can act on
-    (try another sub-agent, or answer directly) — never an exception that crashes the supervisor."""
-    sub_agent = str(args.get("sub_agent", "")).strip()
-    task = str(args.get("task", ""))
+    """Summon ONE roster sub-agent as a durable sub-run and return its result as the tool content. A
+    denial/failure returns as text the model can act on (try another sub-agent, or answer) — not an
+    exception. Traced under the current span, so a concurrent call nests when the caller propagates
+    the context (v1b)."""
+    sub_agent = sub_agent.strip()
     if not sub_agent:
         return "error: delegate_to requires a 'sub_agent'"
     with client.trace.tool(
@@ -492,10 +495,49 @@ def _dispatch_delegate(
     ) as span:
         resp = client.tools.delegate(sub_agent=sub_agent, task=task, step=step, call_id=call_id)
         span.set_output(resp)
-    tools_called.append(DELEGATE_TOOL_NAME)
     if resp.get("ok"):
         return str(resp.get("answer", ""))
     return f"delegation to {sub_agent!r} did not succeed: {resp.get('error', 'unknown error')}"
+
+
+def _dispatch_delegate(
+    client: Client,
+    args: Dict[str, Any],
+    step: str,
+    call_id: str,
+    tools_called: List[str],
+) -> str:
+    """Dispatch a single delegate_to call (the sequential path + the unit-test seam)."""
+    content = _dispatch_delegate_one(
+        client, str(args.get("sub_agent", "")), str(args.get("task", "")), step, call_id
+    )
+    tools_called.append(DELEGATE_TOOL_NAME)
+    return content
+
+
+def _dispatch_delegate_batch(client: Client, calls: List[tuple], step: str) -> Dict[str, str]:
+    """v1b fan-out (ADR 0057): run a turn's delegate_to calls CONCURRENTLY and return
+    ``{call_id: content}``. The spawn GUARD's shared Valkey width counter admits up to maxFanOut and
+    DENIES the rest fail-closed (each gets honest tool text) — so over-fan-out is safe. Each worker
+    runs in a COPIED context (contextvars), carrying BOTH the invoking user's run capability (OBO —
+    the sub-run acts as the same user) AND the OTel active span (trace nesting) into the thread.
+    ``calls`` is a list of ``(call_id, sub_agent, task)``."""
+    if len(calls) == 1:
+        cid, sub_agent, task = calls[0]
+        return {cid: _dispatch_delegate_one(client, sub_agent, task, step, cid)}
+
+    results: Dict[str, str] = {}
+    workers = min(len(calls), _MAX_DELEGATE_WORKERS)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for cid, sub_agent, task in calls:
+            ctx = contextvars.copy_context()  # snapshot: run capability + OTel span
+            futures[
+                pool.submit(ctx.run, _dispatch_delegate_one, client, sub_agent, task, step, cid)
+            ] = cid
+        for fut in concurrent.futures.as_completed(futures):
+            results[futures[fut]] = fut.result()
+    return results
 
 
 def _drive_loop(
@@ -551,6 +593,24 @@ def _drive_loop(
             messages.append(_assistant_message_for_history(resp))
             turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
 
+            # v1b fan-out (M64, ADR 0057): run THIS turn's delegate_to calls CONCURRENTLY (the spawn
+            # guard bounds the width; the rest come back denied fail-closed). Pre-compute results,
+            # then thread them into the append loop below in the model's original tool-call order.
+            delegate_calls = [
+                (
+                    c.get("id", ""),
+                    str(_parse_arguments(_call_arguments(c)).get("sub_agent", "")),
+                    str(_parse_arguments(_call_arguments(c)).get("task", "")),
+                )
+                for c in resp.tool_calls
+                if _call_name(c) == DELEGATE_TOOL_NAME
+            ]
+            delegate_results = (
+                _dispatch_delegate_batch(client, delegate_calls, str(step))
+                if delegate_calls
+                else {}
+            )
+
             for call in resp.tool_calls:
                 name = _call_name(call)
                 args = _parse_arguments(_call_arguments(call))
@@ -562,10 +622,10 @@ def _drive_loop(
                     # crashing the run on a hallucinated tool name.
                     content = f"error: tool {name!r} is not bound to this agent"
                 elif name == DELEGATE_TOOL_NAME:
-                    # Sub-agent delegation (M64, ADR 0057): a durable sub-run, not an MCP call. The
-                    # launcher guards + spawns + awaits it; the result (answer or honest failure) is
-                    # the tool result the model reads. step + call_id are the idempotency key.
-                    content = _dispatch_delegate(client, args, str(step), call_id, tools_called)
+                    # Sub-agent delegation (M64): dispatched concurrently above; thread the
+                    # precomputed result here (in order). step + call_id are the idempotency key.
+                    content = delegate_results.get(call_id, "error: delegation was not dispatched")
+                    tools_called.append(DELEGATE_TOOL_NAME)
                 else:
                     try:
                         with client.trace.tool(name, input=args) as tool_span:
