@@ -357,7 +357,72 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, rn)
+	writeJSON(w, http.StatusOK, runToDTO(rn))
+}
+
+// RunDetailDTO is the API projection of a run for GET /api/runs/{id}. It surfaces the standard run
+// fields plus workflow-instance-specific fields (workflowRef, currentNode, cursor) so the console can
+// render workflow execution progress. Fields with json:"-" on run.Run are exposed here selectively.
+type RunDetailDTO struct {
+	// Standard run fields (mirroring run.Run's exported JSON fields).
+	ID             string          `json:"id"`
+	Namespace      string          `json:"namespace"`
+	Agent          string          `json:"agent"`
+	Input          json.RawMessage `json:"input,omitempty"`
+	ConversationID string          `json:"conversationId,omitempty"`
+	TraceID        string          `json:"traceId,omitempty"`
+	Status         string          `json:"status"`
+	Messages       []run.Message   `json:"messages,omitempty"`
+	RequiresAction *run.Action     `json:"requiresAction,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
+	ParentRunID    string          `json:"parentRunId,omitempty"`
+	RootRunID      string          `json:"rootRunId,omitempty"`
+	SpawnDepth     int             `json:"spawnDepth,omitempty"`
+
+	// Workflow instance fields (m67.4, ADR 0060). Present only for workflow instance runs
+	// (IsWorkflowInstance()), omitted for single-agent runs (zero values / omitempty).
+	// WorkflowRef is the Workflow CR name this run instantiates; CurrentNode is the executor's
+	// cursor "current" — the node currently in flight (empty between nodes or after completion).
+	WorkflowRef string `json:"workflowRef,omitempty"`
+	CurrentNode string `json:"currentNode,omitempty"`
+}
+
+// runToDTO projects a run.Run onto the RunDetailDTO for the GET /api/runs/{id} response.
+// It selectively exposes the workflow cursor fields (WorkflowRef, CurrentNode) that are stored
+// json:"-" on run.Run so the store does not accidentally serialize them in other contexts.
+func runToDTO(rn *run.Run) RunDetailDTO {
+	dto := RunDetailDTO{
+		ID:             rn.ID,
+		Namespace:      rn.Namespace,
+		Agent:          rn.Agent,
+		Input:          rn.Input,
+		ConversationID: rn.ConversationID,
+		TraceID:        rn.TraceID,
+		Status:         string(rn.Status),
+		Messages:       rn.Messages,
+		RequiresAction: rn.RequiresAction,
+		Error:          rn.Error,
+		CreatedAt:      rn.CreatedAt,
+		UpdatedAt:      rn.UpdatedAt,
+		ParentRunID:    rn.ParentRunID,
+		RootRunID:      rn.RootRunID,
+		SpawnDepth:     rn.SpawnDepth,
+		WorkflowRef:    rn.WorkflowRef,
+	}
+	// Surface the executor's current node from the cursor. The cursor JSON includes "current"
+	// as the node name currently in flight; rather than re-parsing the full cursor opaque JSON
+	// (the executor owns its shape), we extract just the "current" field with a minimal decode.
+	if rn.Cursor != "" {
+		var c struct {
+			Current string `json:"current"`
+		}
+		if err := json.Unmarshal([]byte(rn.Cursor), &c); err == nil {
+			dto.CurrentNode = c.Current
+		}
+	}
+	return dto
 }
 
 // handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR

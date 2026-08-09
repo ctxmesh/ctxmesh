@@ -208,6 +208,9 @@ func (s *Server) recordCompletedNode(
 		// CEL selects fields of an object (the outputSchema rule guarantees a referenced node pins a schema).
 		prog.Output = decodeNodeOutput(child)
 		prog.State = cursorDone
+		// Emit node-completed with the child run id so the SSE stream surfaces per-node completion
+		// (m67.4 structured node events — complementing the node-started emitted at launch).
+		_ = s.runStore.AppendEvent(runID, run.EventStep, "node-completed:"+cursor.Current+":"+prog.ChildID)
 	}
 
 	// Compute the next node from this node's edges over the outputs so far.
@@ -304,8 +307,9 @@ func (s *Server) launchAndSuspend(
 		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: suspending on its sub-run: %v", node.Name, err))
 		return
 	}
-	// node-started (at least the state; m67.4 adds the structured node-started/completed events).
-	_ = s.runStore.AppendEvent(runID, run.EventStep, "node-started:"+node.Name)
+	// node-started event: the node name + child run id so the SSE stream surfaces the in-flight node
+	// (m67.4 structured node events). Format: "node-started:<nodeName>:<childID>".
+	_ = s.runStore.AppendEvent(runID, run.EventStep, "node-started:"+node.Name+":"+childID)
 }
 
 // buildNodeInput evaluates a node's `input` CEL bindings into the sub-run's input JSON object. Each binding

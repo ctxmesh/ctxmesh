@@ -895,6 +895,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerExtAuthRoutes(authed)
 
 	s.registerRunRoutes(authed)
+	s.registerWorkflowRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
 	// honest 501 otherwise.
