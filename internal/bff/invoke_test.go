@@ -251,6 +251,30 @@ func TestInvokeAdapterAttachesConversationHeader(t *testing.T) {
 	assert.Empty(t, gotConv, "no conversation id on the context ⇒ no header (single-shot run)")
 }
 
+// TestInvokeAdapterAttachesSpawnHeaders proves the adapter forwards a run's spawn-tree position
+// (M64) as X-Ctxmesh-Spawn-Root/Depth when present, and attaches none for a plain (non-spawn) run.
+func TestInvokeAdapterAttachesSpawnHeaders(t *testing.T) {
+	var gotRoot, gotDepth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoot = r.Header.Get(hdrSpawnRoot)
+		gotDepth = r.Header.Get(hdrSpawnDepth)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithSpawnContext(context.Background(), "root-1", 2), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "root-1", gotRoot, "the adapter stamps the spawn-tree root")
+	assert.Equal(t, "2", gotDepth, "the adapter stamps this run's spawn depth")
+
+	gotRoot, gotDepth = "", ""
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, gotRoot, "no spawn context ⇒ no headers (a plain run)")
+	assert.Empty(t, gotDepth)
+}
+
 // TestInvokeThreadsConversationID proves the caller-scoped handler carries a body-supplied
 // conversationId onto the adapter's context (→ X-Conversation-Id), and rejects a malformed
 // id with a 400 at the console boundary rather than forwarding a memory-key-breaking value.
