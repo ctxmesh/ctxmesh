@@ -47,6 +47,7 @@ rules:
   - agentteams
   - agentversions
   - guardrailpolicies
+  - knowledgebases
   - mcptoolbindings
   - memorybindings
   - modelroutes
@@ -67,6 +68,7 @@ rules:
   - agentscalingpolicies/finalizers
   - agentteams/finalizers
   - guardrailpolicies/finalizers
+  - knowledgebases/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   - tenants/finalizers
@@ -81,6 +83,7 @@ rules:
   - agentscalingpolicies/status
   - agentteams/status
   - guardrailpolicies/status
+  - knowledgebases/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status

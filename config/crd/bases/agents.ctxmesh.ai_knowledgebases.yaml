@@ -1,0 +1,301 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: knowledgebases.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    kind: KnowledgeBase
+    listKind: KnowledgeBaseList
+    plural: knowledgebases
+    shortNames:
+    - kb
+    singular: knowledgebase
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.chunkCount
+      name: Chunks
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Validated')].status
+      name: Validated
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          KnowledgeBase is a namespaced managed RAG corpus: a user uploads documents; the platform
+          chunks, embeds, indexes, and serves them for retrieval-augmented generation (M68, ADR 0061).
+          It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook.
+
+          Key design properties:
+            - embeddingRoute and chunking parameters are IMMUTABLE after creation (the two one-way doors,
+              enforced by CEL transition rules). Changing either requires delete + recreate.
+            - A finalizer (knowledgebase.agents.ctxmesh.ai/finalizer) guards deletion so the two-store GC
+              (knowledge_chunks partition + durable bucket prefix) runs before the object is removed
+              (ADR 0061 governance #3). The real two-store GC lands in m68.10; m68.1 registers the
+              finalizer and removes it as a documented no-op placeholder.
+            - The spec carries refs only, never inline document content (an etcd anti-pattern, ADR 0042).
+            - v1 scope: org-wide corpora only (perUser ingestion gated off); text/MD/HTML/born-digital PDF
+              ingestion; objectStorePrefix + upload sources.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              KnowledgeBaseSpec defines the desired state of a KnowledgeBase (ADR 0061).
+
+              Two fields are pinned at create time and are immutable thereafter — the "one-way doors":
+               1. embeddingRoute (the corpus's embedding model): mixing embedding models in one HNSW index
+                  yields plausible-looking garbage (the ADR 0045 silent-wrong-result trap); changing it
+                  requires a full background re-ingest.
+               2. chunking (size/overlap/splitter): re-chunking requires re-ingest and drives retrieval quality.
+
+              Both are enforced by CEL transition rules (the XValidation pattern used by AgentVersion and
+              AgentRegistry in this codebase, preferred over a validating webhook).
+            properties:
+              chunking:
+                description: |-
+                  chunking pins the corpus's chunking parameters (size/overlap/splitter). IMMUTABLE after
+                  creation (one-way door #2, ADR 0061). Sensible defaults (~512 tokens, ~64 overlap,
+                  recursive splitter) produce a good out-of-the-box RAG corpus.
+                properties:
+                  overlap:
+                    default: 64
+                    description: |-
+                      overlap is the number of tokens to overlap between adjacent chunks. Defaults to 64.
+                      Must be less than size (validated by the controller, not at admission time, so a partial
+                      update that sets size and overlap separately does not produce a transient invalid state).
+                    minimum: 0
+                    type: integer
+                  size:
+                    default: 512
+                    description: size is the target chunk size in tokens. Defaults
+                      to 512. Must be greater than 0.
+                    minimum: 1
+                    type: integer
+                  splitter:
+                    default: recursive
+                    description: |-
+                      splitter selects the text-splitting strategy. "recursive" (default) splits on a priority
+                      sequence of delimiters ("\n\n", "\n", " ") — the best general-purpose strategy. "markdown"
+                      splits on Markdown structural boundaries first (##, *, ` ``` `) and is preferred when the
+                      corpus is predominantly Markdown documentation.
+                    enum:
+                    - recursive
+                    - markdown
+                    type: string
+                type: object
+              displayName:
+                description: |-
+                  displayName is an optional human-readable label for the KnowledgeBase, surfaced in
+                  the console and audit log. It does not affect routing or retrieval.
+                maxLength: 256
+                type: string
+              embeddingRoute:
+                description: |-
+                  embeddingRoute is the name of the gateway ModelRoute used to embed document chunks.
+                  It MUST be set; it is IMMUTABLE after creation (one-way door #1, ADR 0061): the entire
+                  knowledge_chunks HNSW index is keyed to this model's vector space — mixing models yields
+                  silent wrong results. Changing it requires a full re-ingest (delete + recreate the KB).
+                minLength: 1
+                type: string
+              perUser:
+                description: |-
+                  perUser enables per-user corpus scoping (isolates chunk retrieval to the invoking user's
+                  hash, the ADR 0045 subject mandate). v1 gates per-user INGESTION off (org-wide corpora
+                  only); the field + the knowledge_chunks.subject column exist from day one so per-user
+                  ingestion can be enabled without a schema migration. Defaults to false.
+                type: boolean
+              source:
+                description: |-
+                  source describes where the KnowledgeBase's documents come from. The ingestion job
+                  (m68.6) reads documents from this source; the source is a ref, never inline content.
+                properties:
+                  objectStorePrefix:
+                    description: |-
+                      objectStorePrefix is the durable object-store prefix from which documents are fetched when
+                      type="objectStorePrefix". The ObjectStore SPI resolves this against the configured store
+                      (MinIO in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
+                    type: string
+                  type:
+                    description: |-
+                      type identifies the source mechanism. "objectStorePrefix" reads documents from a durable
+                      object-store prefix (objectStorePrefix field must be set). "upload" reads documents from
+                      the durable KB bucket populated via the BFF upload endpoint (no additional field required
+                      in v1 — the bucket prefix is derived from the KB name).
+                    enum:
+                    - objectStorePrefix
+                    - upload
+                    type: string
+                required:
+                - type
+                type: object
+            required:
+            - embeddingRoute
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: 'embeddingRoute is immutable after creation (one-way door #1,
+                ADR 0061): changing the embedding model requires a full re-ingest
+                — delete and recreate the KnowledgeBase'
+              rule: self.embeddingRoute == oldSelf.embeddingRoute
+            - message: 'chunking parameters (size/overlap/splitter) are immutable
+                after creation (one-way door #2, ADR 0061): re-chunking requires a
+                full re-ingest — delete and recreate the KnowledgeBase'
+              rule: self.chunking.size == oldSelf.chunking.size && self.chunking.overlap
+                == oldSelf.chunking.overlap && self.chunking.splitter == oldSelf.chunking.splitter
+          status:
+            description: |-
+              KnowledgeBaseStatus defines the observed state of a KnowledgeBase. Populated by the m68.1
+              validate-only controller (phase/conditions) and updated by the m68.6 ingestion executor
+              (documentCount/chunkCount/sizeBytes/lastIngestedAt/ingestionRunRef).
+            properties:
+              chunkCount:
+                description: |-
+                  chunkCount is the number of stored chunks in knowledge_chunks as of the last successful
+                  ingestion run. Populated by the m68.6 ingestion executor.
+                format: int32
+                type: integer
+              conditions:
+                description: |-
+                  conditions reflect the KnowledgeBase's reconciliation state.
+                    Validated=True  → the spec is valid (embeddingRoute non-empty, chunking sane, source valid).
+                    Validated=False → the spec is invalid; reason + message carry the details.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              documentCount:
+                description: |-
+                  documentCount is the number of source documents in the corpus as of the last successful
+                  ingestion run. Populated by the m68.6 ingestion executor.
+                format: int32
+                type: integer
+              ingestionRunRef:
+                description: |-
+                  ingestionRunRef is the name of the current or last ingestion Run in the run store.
+                  Populated by the m68.6 ingestion executor; useful for debugging and status correlation.
+                type: string
+              lastIngestedAt:
+                description: lastIngestedAt is the timestamp of the last successfully
+                  completed ingestion run.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation that was
+                  last fully reconciled.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  phase is the coarse corpus lifecycle phase. Transitions:
+                    Pending         → validated but no ingestion run has started yet (initial state).
+                    Ingesting       → an ingestion run is in progress.
+                    Ready           → the last ingestion run completed successfully; corpus is queryable.
+                    PartiallyIngested → some documents extracted < N chars and were flagged (ADR 0061 §5);
+                                        the corpus is queryable but incomplete.
+                    Failed          → the last ingestion run failed for a non-budget reason.
+                    BudgetExceeded  → the last ingestion run was halted by a tenant budget 402 (fail-soft,
+                                      resumable — the ingestion cursor is preserved, ADR 0061 Fork 2).
+                enum:
+                - Pending
+                - Ingesting
+                - Ready
+                - PartiallyIngested
+                - Failed
+                - BudgetExceeded
+                type: string
+              sizeBytes:
+                description: |-
+                  sizeBytes is the total bytes of raw source documents in the durable KB bucket as of the
+                  last successful ingestion run. Reported for tenant storage soft-cap accounting (ADR 0061
+                  governance #7); hard storage-quota enforcement is deferred (m52 Theme M).
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
