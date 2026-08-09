@@ -44,6 +44,7 @@ rules:
   - agentdeployments
   - agentregistries
   - agentscalingpolicies
+  - agentteams
   - agentversions
   - mcptoolbindings
   - memorybindings
@@ -62,6 +63,7 @@ rules:
   - agentdeployments/finalizers
   - agentregistries/finalizers
   - agentscalingpolicies/finalizers
+  - agentteams/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   - tenants/finalizers
@@ -73,6 +75,7 @@ rules:
   - agentdeployments/status
   - agentregistries/status
   - agentscalingpolicies/status
+  - agentteams/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status

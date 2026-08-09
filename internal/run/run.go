@@ -22,10 +22,22 @@ limitations under the License.
 package run
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 )
+
+// SpawnRunID derives a DETERMINISTIC sub-run id from the spawn key (parentRunID, step, callID) —
+// ADR 0057's idempotency mechanism. A reclaimed supervisor (at-least-once, m32.3) that re-issues the
+// SAME delegate_to call computes the SAME id, so the store's `ON CONFLICT (id) DO NOTHING` collapses the
+// duplicate to one sub-run instead of double-spawning. `step` + `callID` disambiguate multiple
+// delegations within one supervisor step (a fan-out). The `sub-` prefix makes a spawned run recognizable.
+func SpawnRunID(parentRunID, step, callID string) string {
+	sum := sha256.Sum256([]byte(parentRunID + "\x00" + step + "\x00" + callID))
+	return "sub-" + hex.EncodeToString(sum[:16])
+}
 
 // Status is the run's lifecycle state. The set + transitions mirror the A2A task states and the
 // OpenAI Assistants run statuses (ADR 0034), so external clients and the mesh interoperate.
@@ -121,6 +133,19 @@ type Run struct {
 	// CreatedAt / UpdatedAt bound the run's timeline.
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+
+	// --- Spawn lineage (M64, ADR 0057): set when this run is a SUB-RUN a supervisor spawned via
+	// delegate_to. Non-secret correlation, so exposed on the API (the console renders the spawn tree,
+	// the trace nests). A ROOT run leaves ParentRunID empty and RootRunID == ID; SpawnDepth 0.
+
+	// ParentRunID is the supervisor run that spawned this sub-run (empty ⇒ a root run).
+	ParentRunID string `json:"parentRunId,omitempty"`
+	// RootRunID is the tree root — the aggregate spawn-budget key (spawn:{tenant}:{rootRunId}). For a
+	// root run it equals ID; a sub-run inherits the parent's RootRunID.
+	RootRunID string `json:"rootRunId,omitempty"`
+	// SpawnDepth is this run's depth in the spawn tree (0 = root; parent+1 for a sub-run). Bounded by
+	// the team's maxSpawnDepth (the per-path guard, carried in the spawn envelope).
+	SpawnDepth int `json:"spawnDepth,omitempty"`
 
 	// --- Execution record (m32.2): the non-secret material a WORKER needs to (re)execute this run
 	// off the request path — durably, on any pod. Not part of the public API object (json:"-"); the

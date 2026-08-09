@@ -519,13 +519,17 @@ def test_tool_schema_advertises_real_description():
     """FUNC-10: a Tool carrying a description advertises it as the model function
     `description`; absent, the loop synthesises a generic name-derived one (never empty)."""
     described = Tool(
-        name="word_count", mode="remote", endpoint="http://x/mcp", transport="streamable-http",
+        name="word_count",
+        mode="remote",
+        endpoint="http://x/mcp",
+        transport="streamable-http",
         description="Count whitespace-separated words.",
     )
     assert _tool_schema(described)["function"]["description"] == "Count whitespace-separated words."
 
-    plain = Tool(name="word_count", mode="remote", endpoint="http://x/mcp",
-                 transport="streamable-http")
+    plain = Tool(
+        name="word_count", mode="remote", endpoint="http://x/mcp", transport="streamable-http"
+    )
     desc = _tool_schema(plain)["function"]["description"]
     assert desc == "The word_count tool bound to this agent."  # generic fallback, not empty
 
@@ -623,7 +627,9 @@ def test_managed_loop_streams_the_answer(monkeypatch):
     """With on_token wired, the loop streams the final answer's content deltas AND returns the
     assembled result — the streaming /invoke's token source (m32.7)."""
     with _EmptyDiscovery() as disc:
-        plane = PlaneConfig.for_test(discovery_base_url=disc.base_url, model_gateway_url="http://gw")
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url="http://gw"
+        )
         client = agent.from_config(plane)
 
         def fake_stream(route, messages, **opts):
@@ -646,3 +652,122 @@ def test_managed_loop_streams_the_answer(monkeypatch):
         assert result.output == "Hello there"
         assert result.steps == 1
         assert result.tools_called == []
+
+
+# ── delegate_to dispatch in the managed loop (M64, ADR 0057) ───────────────────
+
+
+class _DelSpan:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def set_output(self, v):
+        self.out = v
+
+
+class _DelTrace:
+    def tool(self, name, input=None):
+        return _DelSpan()
+
+
+class _DelTools:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def delegate(self, sub_agent, task, step, call_id):
+        self.calls.append({"sub_agent": sub_agent, "task": task, "step": step, "call_id": call_id})
+        return self._result
+
+
+class _DelClient:
+    def __init__(self, result):
+        self.trace = _DelTrace()
+        self.tools = _DelTools(result)
+
+
+def test_dispatch_delegate_threads_the_answer():
+    """A successful delegation returns the sub-run's answer as the tool result, records the call,
+    and forwards the idempotency key (step + call_id)."""
+    from ctxmesh.managed import _dispatch_delegate
+
+    client = _DelClient({"ok": True, "answer": "the sub-run answer"})
+    tools_called = []
+    out = _dispatch_delegate(
+        client, {"sub_agent": "researcher", "task": "find it"}, "3", "call-9", tools_called
+    )
+    assert out == "the sub-run answer"
+    assert tools_called == ["delegate_to"]
+    assert client.tools.calls == [
+        {"sub_agent": "researcher", "task": "find it", "step": "3", "call_id": "call-9"}
+    ]
+
+
+def test_dispatch_delegate_failure_is_tool_text():
+    """A guard denial / sub-run failure comes back as text the model can act on, not an error."""
+    from ctxmesh.managed import _dispatch_delegate
+
+    client = _DelClient({"ok": False, "error": "spawn_budget_exceeded"})
+    tools_called = []
+    out = _dispatch_delegate(client, {"sub_agent": "coder", "task": "x"}, "1", "c1", tools_called)
+    assert "did not succeed" in out and "spawn_budget_exceeded" in out
+    assert tools_called == ["delegate_to"], "even a refused delegation is recorded as attempted"
+
+
+def test_dispatch_delegate_requires_sub_agent():
+    """A delegate_to call missing sub_agent is refused before any spawn."""
+    from ctxmesh.managed import _dispatch_delegate
+
+    client = _DelClient({"ok": True, "answer": "unused"})
+    out = _dispatch_delegate(client, {"task": "x"}, "1", "c1", [])
+    assert "requires a 'sub_agent'" in out
+    assert client.tools.calls == [], "no delegation is attempted without a sub_agent"
+
+
+# ── v1b bounded-parallel fan-out (M64, ADR 0057) ───────────────────────────────
+
+
+def test_delegate_batch_runs_concurrently_and_propagates_capability():
+    """A turn's delegate_to calls run CONCURRENTLY, all results return keyed by call_id, and each
+    worker thread sees the invoking user's run capability (OBO propagated via the copied ctx)."""
+    import threading
+
+    from ctxmesh._capability import capability_scope, current_capability
+    from ctxmesh.managed import _dispatch_delegate_batch
+
+    seen_caps = []
+    seen_threads = set()
+
+    class _BatchTools:
+        def delegate(self, sub_agent, task, step, call_id):
+            seen_caps.append(current_capability())
+            seen_threads.add(threading.get_ident())
+            return {"ok": True, "answer": f"{sub_agent}:done"}
+
+    class _BatchClient:
+        trace = _DelTrace()
+        tools = _BatchTools()
+
+    calls = [("c1", "researcher", "t1"), ("c2", "coder", "t2"), ("c3", "writer", "t3")]
+    with capability_scope({"X-Ctxmesh-Run-Capability": "cap-token"}):
+        results = _dispatch_delegate_batch(_BatchClient(), calls, "1")
+
+    assert results == {"c1": "researcher:done", "c2": "coder:done", "c3": "writer:done"}
+    assert (
+        seen_caps == ["cap-token"] * 3
+    ), "every sub-run acts on-behalf-of the same user (OBO to threads)"
+    assert (
+        len(seen_threads) >= 2
+    ), "the delegations ran on multiple worker threads (concurrent, not serial)"
+
+
+def test_delegate_batch_single_call_no_pool():
+    """A single delegate call takes the direct path (no thread pool) and returns its result."""
+    from ctxmesh.managed import _dispatch_delegate_batch
+
+    client = _DelClient({"ok": True, "answer": "solo"})
+    out = _dispatch_delegate_batch(client, [("c1", "researcher", "t")], "1")
+    assert out == {"c1": "solo"}

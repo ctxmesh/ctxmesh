@@ -231,11 +231,22 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	ctx, cancel := context.WithTimeout(ctx, runExecTimeout)
 	defer cancel()
 
-	if _, err := s.runStore.Update(runID, func(rn *run.Run) error {
+	started, err := s.runStore.Update(runID, func(rn *run.Run) error {
 		return rn.Transition(run.StatusRunning, time.Now())
-	}); err != nil {
+	})
+	if err != nil {
 		s.log.Error(err, "run: could not start", "run", runID)
 		return
+	}
+	// Stamp the run's spawn-tree position onto ctx so the invoke adapter forwards it (M64): a
+	// SUPERVISOR's launcher reads it to bound its delegations. A root run (no RootRunID) roots the tree
+	// at itself. A non-supervisor agent ignores the headers — harmless.
+	{
+		root := started.RootRunID
+		if root == "" {
+			root = started.ID
+		}
+		ctx = contextWithSpawnContext(ctx, root, started.SpawnDepth)
 	}
 
 	// Stream tokens when the adapter supports it (m32.7): each content delta becomes a `token`
@@ -244,7 +255,6 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// fake) falls back to request/response.
 	var resp []byte
 	var traceID string
-	var err error
 	if sa, ok := s.adapters.Invoke.(StreamingInvokeAdapter); ok {
 		resp, traceID, err = sa.InvokeStream(ctx, endpoint, input, func(text string) {
 			_ = s.runStore.AppendEvent(runID, run.EventToken, text)
@@ -303,7 +313,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
 	if _, uErr := s.runStore.Update(runID, func(rn *run.Run) error {
 		rn.TraceID = traceID
-		rn.Messages = append(rn.Messages, run.Message{Role: "assistant", Content: output})
+		rn.Messages = append(rn.Messages, run.Message{Role: roleAssistant, Content: output})
 		return rn.Transition(run.StatusSucceeded, now)
 	}); uErr != nil {
 		s.log.Error(uErr, "run: could not persist terminal state", "run", runID)

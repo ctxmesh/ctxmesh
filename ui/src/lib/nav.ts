@@ -12,6 +12,7 @@ import {
   SlidersHorizontal,
   TestTube2,
   Users,
+  Waypoints,
   Wrench,
   BookOpen,
   Building2,
@@ -42,7 +43,8 @@ export type Milestone =
   | "M17"
   | "M18"
   | "M47"
-  | "M63";
+  | "M63"
+  | "M64";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -136,6 +138,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Boxes,
         milestone: "M13",
         route: "/agents",
+      },
+      {
+        // Agent Teams (M64, ADR 0057) — the orchestration rosters: a supervisor + summonable
+        // sub-agents + a spawn budget. Read-open (the API is the RBAC gate); a team is authored via
+        // YAML/kubectl for now (the conversational "describe → team" builder is M71).
+        id: "teams",
+        label: "Agent Teams",
+        icon: Waypoints,
+        milestone: "M64",
+        route: "/teams",
       },
       // "New agent" is NOT a nav item (m25 S8) — it lives as the primary action
       // (top-right button) ON the Agents page, next to the list it creates into,

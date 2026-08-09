@@ -37,6 +37,7 @@ rules:
   - promptversions
   - memorybindings
   - agentregistries
+  - agentteams
   - agentscalingpolicies
   - evalsuites
   - tenants
@@ -54,6 +55,7 @@ rules:
   - mcptoolbindings/status
   - memorybindings/status
   - agentregistries/status
+  - agentteams/status
   - agentscalingpolicies/status
   - evalsuites/status
   verbs:

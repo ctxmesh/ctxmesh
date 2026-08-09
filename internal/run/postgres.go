@@ -91,8 +91,22 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS boundary         text NOT NULL DEFAULT
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS endpoint         text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS worker_id        text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+-- Spawn lineage (M64, ADR 0057): a sub-run records its parent + tree-root + depth. Defaults ('' / 0)
+-- describe a ROOT run (no parent), so old rows load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS root_run_id   text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS spawn_depth   integer NOT NULL DEFAULT 0;
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
-CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';`
+CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
+-- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
+CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
+-- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
+-- root run id), incremented atomically as the BFF admits each sub-run. The BFF keys it on the root it
+-- derived from the VERIFIED parent, so it cannot be re-keyed by an agent for a fresh budget.
+CREATE TABLE IF NOT EXISTS spawn_counters (
+    root_run_id text PRIMARY KEY,
+    spawns      bigint NOT NULL DEFAULT 0
+);`
 
 // NewPostgresStore opens a durable Postgres-backed run store over an open *sql.DB, applying the
 // schema idempotently. The caller owns the DB's lifecycle (open/close), matching credstore.
@@ -115,13 +129,15 @@ func (p *pgStore) Create(r *Run) error {
 	}
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
-		 caller_username, boundary, endpoint, worker_id, lease_expires_at, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,1,$16,$17)
+		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
+		 parent_run_id, root_run_id, spawn_depth, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,1,$19,$20)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
+		r.ParentRunID, r.RootRunID, r.SpawnDepth,
 		r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
@@ -137,11 +153,32 @@ func (p *pgStore) Get(id string) (*Run, error) {
 	return r, err
 }
 
+// ReserveSpawn atomically increments the tree's total-spawn counter and admits when within maxTotal.
+// The INSERT ... ON CONFLICT ... WHERE is one atomic statement: a first spawn inserts 1; a subsequent
+// spawn increments ONLY while under budget (the WHERE gates the DO UPDATE), so an over-budget attempt
+// updates nothing and returns no row → denied WITHOUT recording the rejected spawn. Fails CLOSED.
+func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
+	const q = `INSERT INTO spawn_counters (root_run_id, spawns) VALUES ($1, 1)
+		ON CONFLICT (root_run_id) DO UPDATE SET spawns = spawn_counters.spawns + 1
+		WHERE spawn_counters.spawns < $2
+		RETURNING spawns`
+	var spawns int64
+	err := p.db.QueryRowContext(context.Background(), q, rootRunID, maxTotal).Scan(&spawns)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil // the DO UPDATE's WHERE was false → over budget
+	case err != nil:
+		return false, fmt.Errorf("run: reserve spawn: %w", err) // fail closed
+	}
+	return true, nil
+}
+
 // getWithVersion loads a run + its OCC version from the given querier (the pool or a tx). A
 // missing row is ErrNotFound.
 func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
 	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
-		caller_username, boundary, endpoint, worker_id, lease_expires_at, version, created_at, updated_at
+		caller_username, boundary, endpoint, worker_id, lease_expires_at,
+		parent_run_id, root_run_id, spawn_depth, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
 		r       Run
@@ -157,6 +194,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 	err := q.QueryRowContext(ctx, sel, id).Scan(
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
+		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth,
 		&version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

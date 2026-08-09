@@ -586,6 +586,38 @@ export interface AuditListParams {
   cursor?: string;
 }
 
+// --- AgentTeams (GET /api/teams) --------------------------------------------
+// The orchestration rosters (M64, ADR 0057): a supervisor + a governed set of
+// summonable sub-agents + a spawn budget. Read-only surface (caller-scoped).
+
+export interface AgentTeamRoster {
+  name: string;
+  agentRef: string;
+  description?: string;
+}
+
+export interface AgentTeamSpawnBudget {
+  maxFanOut: number;
+  maxSpawnDepth: number;
+  maxTotalSpawns: number;
+}
+
+export interface AgentTeamSummary {
+  name: string;
+  namespace: string;
+  registry: string;
+  supervisor: string;
+  roster: AgentTeamRoster[];
+  members: string[];
+  ready: boolean;
+  reason?: string;
+  budget: AgentTeamSpawnBudget;
+}
+
+export interface AgentTeamListResponse {
+  items: AgentTeamSummary[];
+}
+
 // --- Config builder (POST /api/expand, POST /api/agents) --------------------
 // The config-builder submits the SAME simplified agent.yaml the CLI consumes:
 // the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
@@ -2914,6 +2946,11 @@ export const api = {
   // Tenants (M47, ADR 0046) — read-only, cluster-scoped.
   listTenants: (signal?: AbortSignal) =>
     getJSON<TenantListResponse>("/api/tenants", signal),
+
+  // listTeams reads the AgentTeams (M64) — orchestration rosters (caller-scoped). A 403 surfaces
+  // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
+  listTeams: (signal?: AbortSignal) =>
+    getJSON<AgentTeamListResponse>("/api/teams", signal),
 
   tenantDetail: (name: string, signal?: AbortSignal) =>
     getJSON<TenantDetail>(`/api/tenants/${encodeURIComponent(name)}`, signal),

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +92,34 @@ func contextWithConversationID(ctx context.Context, id string) context.Context {
 func conversationIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(conversationIDCtxKey{}).(string)
 	return id
+}
+
+// Spawn-context headers (M64, ADR 0057): the run-worker stamps a run's spawn-tree position onto its
+// /invoke so a SUPERVISOR's launcher can bound its delegations — the tree ROOT (the shared spawn-counter
+// key) and this run's DEPTH (the child's depth = this+1 vs maxSpawnDepth). The launcher reads them in the
+// delegate handler; absent ⇒ a root supervisor (depth 0, its own run id as root).
+const (
+	hdrSpawnRoot  = "X-Ctxmesh-Spawn-Root"
+	hdrSpawnDepth = "X-Ctxmesh-Spawn-Depth"
+)
+
+type spawnContextCtxKey struct{}
+
+type spawnContext struct {
+	root  string
+	depth int
+}
+
+// contextWithSpawnContext returns ctx carrying this run's spawn-tree position for the adapter to stamp
+// onto the outbound /invoke.
+func contextWithSpawnContext(ctx context.Context, root string, depth int) context.Context {
+	return context.WithValue(ctx, spawnContextCtxKey{}, spawnContext{root: root, depth: depth})
+}
+
+// spawnContextFromContext returns the run's spawn-tree position on ctx (root, depth, present).
+func spawnContextFromContext(ctx context.Context) (string, int, bool) {
+	sc, ok := ctx.Value(spawnContextCtxKey{}).(spawnContext)
+	return sc.root, sc.depth, ok
 }
 
 // httpInvokeAdapter is the concrete InvokeAdapter (m12.7). It is a PURE HTTP
@@ -185,6 +214,13 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	if convID := conversationIDFromContext(ctx); convID != "" {
 		req.Header.Set(hdrConversationID, convID)
 	}
+	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
+	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root
+	// run the run-worker tagged); a plain invoke carries none and nothing changes.
+	if root, depth, ok := spawnContextFromContext(ctx); ok && root != "" {
+		req.Header.Set(hdrSpawnRoot, root)
+		req.Header.Set(hdrSpawnDepth, strconv.Itoa(depth))
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -245,6 +281,13 @@ func (a *httpInvokeAdapter) InvokeStream(
 	}
 	if convID := conversationIDFromContext(ctx); convID != "" {
 		req.Header.Set(hdrConversationID, convID)
+	}
+	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
+	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root
+	// run the run-worker tagged); a plain invoke carries none and nothing changes.
+	if root, depth, ok := spawnContextFromContext(ctx); ok && root != "" {
+		req.Header.Set(hdrSpawnRoot, root)
+		req.Header.Set(hdrSpawnDepth, strconv.Itoa(depth))
 	}
 
 	resp, err := a.client.Do(req)
