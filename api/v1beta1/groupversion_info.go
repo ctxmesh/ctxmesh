@@ -32,7 +32,7 @@ import (
 
 var (
 	// SchemeGroupVersion is the group version used to register these objects.
-	SchemeGroupVersion = schema.GroupVersion{Group: "agents.ctxmesh.ai", Version: "v1beta1"}
+	SchemeGroupVersion = schema.GroupVersion{Group: "agents.ctxmesh.ai", Version: "v1beta1"} //nolint:goconst // "v1beta1" is an API version string; extracting to a const adds no clarity
 
 	// GroupVersion is an alias for SchemeGroupVersion.
 	GroupVersion = SchemeGroupVersion
