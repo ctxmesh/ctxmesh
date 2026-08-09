@@ -355,6 +355,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)
 	}
+	if err := (&controller.KnowledgeBaseReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "knowledgebase")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	// Control-plane audit (M11.4, PRD §20): a controller-emitted audit trail of
