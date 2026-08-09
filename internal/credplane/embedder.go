@@ -49,8 +49,17 @@ type embeddingsRequest struct {
 	Input string `json:"input"`
 }
 
+// embeddingsBatchRequest is a separate struct for the batch call so that the Input field is encoded as a JSON
+// array of strings, matching the OpenAI/LiteLLM /v1/embeddings batch form. The single-string struct above is
+// left untouched so the existing single-embed path is unchanged.
+type embeddingsBatchRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
 type embeddingsResponse struct {
 	Data []struct {
+		Index     int       `json:"index"`
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
 }
@@ -86,4 +95,68 @@ func (e *gatewayEmbedder) Embed(ctx context.Context, model, text string) ([]floa
 	}
 	vec := out.Data[0].Embedding
 	return vec, len(vec), nil
+}
+
+// EmbedBatch embeds a slice of texts in a single HTTP call to the gateway's /v1/embeddings endpoint using the
+// OpenAI/LiteLLM batch form (input is a JSON array of strings). Results are returned in the same order as the
+// input slice, aligned 1:1 — the API may return items out-of-order by index, so this method reorders them.
+//
+// Policy: EmbedBatch issues ONE HTTP call for the slice it is given. The caller is responsible for sub-batching
+// (recommended: 96–256 texts per call) because providers have per-request input-array size limits. Do NOT pass
+// an unbounded slice.
+//
+// Empty input: returns (nil, 0, nil) immediately without an HTTP call. The caller may treat a nil result as
+// an empty batch — no vectors to store.
+func (e *gatewayEmbedder) EmbedBatch(ctx context.Context, model string, texts []string) ([][]float32, int, error) {
+	if len(texts) == 0 {
+		return nil, 0, nil
+	}
+	body, err := json.Marshal(embeddingsBatchRequest{Model: model, Input: texts})
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal batch embeddings request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/v1/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, fmt.Errorf("build batch embeddings request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if e.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+e.apiKey)
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("call gateway batch embeddings: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, 0, fmt.Errorf("gateway batch embeddings status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	var out embeddingsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+		return nil, 0, fmt.Errorf("decode batch embeddings response: %w", err)
+	}
+	if len(out.Data) != len(texts) {
+		return nil, 0, fmt.Errorf("gateway batch embeddings returned %d vectors for %d inputs", len(out.Data), len(texts))
+	}
+
+	// Re-order by the index field so result[i] aligns with texts[i] regardless of response order.
+	vecs := make([][]float32, len(texts))
+	var dim int
+	for _, item := range out.Data {
+		if item.Index < 0 || item.Index >= len(texts) {
+			return nil, 0, fmt.Errorf("gateway batch embeddings returned out-of-range index %d for %d inputs", item.Index, len(texts))
+		}
+		if len(item.Embedding) == 0 {
+			return nil, 0, fmt.Errorf("gateway batch embeddings returned empty vector at index %d", item.Index)
+		}
+		// Assert dimension consistency across all vectors: a mismatch would corrupt the HNSW index.
+		if dim == 0 {
+			dim = len(item.Embedding)
+		} else if len(item.Embedding) != dim {
+			return nil, 0, fmt.Errorf("gateway batch embeddings: dimension mismatch at index %d: got %d, expected %d", item.Index, len(item.Embedding), dim)
+		}
+		vecs[item.Index] = item.Embedding
+	}
+	return vecs, dim, nil
 }

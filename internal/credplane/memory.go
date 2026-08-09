@@ -35,8 +35,12 @@ const (
 
 // Embedder turns text into a vector via the model gateway's embeddings endpoint (ADR 0045). Mockable so the
 // handlers unit-test without a live gateway. Returns the vector + its dimension (stored as provenance).
+//
+// EmbedBatch is the batch form used by corpus ingestion (m68.6): one HTTP call for a slice of texts, results
+// aligned 1:1 with input order. See gatewayEmbedder.EmbedBatch for caller batch-size policy.
 type Embedder interface {
 	Embed(ctx context.Context, model, text string) (vec []float32, dim int, err error)
+	EmbedBatch(ctx context.Context, model string, texts []string) (vecs [][]float32, dim int, err error)
 }
 
 // WithMemory enables the long-term-memory endpoints over the given pgvector store + embedder. When either is
