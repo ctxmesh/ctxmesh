@@ -35,6 +35,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
@@ -86,6 +87,12 @@ type Server struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
 	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
+
+	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
+	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
+	// OBJECT_STORE_ADDR is unset — the upload endpoint returns 501 honestly rather
+	// than panicking. Constructed once in cmd/bff/main.go.
+	docStore objectstore.ObjectStore
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -348,6 +355,11 @@ type Options struct {
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
 
+	// DocStore is the durable KB object store (M68, ADR 0061 Fork 4). Optional — nil when
+	// OBJECT_STORE_ADDR is unset; the BFF upload endpoint returns honest 501 rather than panicking.
+	// Constructed in cmd/bff/main.go via objectstore.NewMinioStore().
+	DocStore objectstore.ObjectStore
+
 	Log logr.Logger
 }
 
@@ -385,6 +397,7 @@ func NewServer(opts Options) *Server {
 		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
+		docStore:                 opts.DocStore,
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
@@ -625,6 +638,13 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
 		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
 
+		// KnowledgeBase document upload (M68, ADR 0061 Fork 4): stream a raw document body
+		// into the durable KB bucket at KnowledgeKey(ns, kbName, filename). Caller-scoped:
+		// the BFF verifies the KB exists in the caller's namespace before writing (honest 404
+		// when absent; 403 when RBAC denies the GET; 501 when OBJECT_STORE_ADDR is unset;
+		// 413 when the body exceeds maxDocumentUploadBytes). Returns 201 + {documentRef, key, size}.
+		authed.HandleFunc("POST /api/knowledgebases/{name}/documents", s.handleUploadKBDocument)
+
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
 		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
@@ -829,6 +849,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
