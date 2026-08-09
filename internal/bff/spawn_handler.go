@@ -60,7 +60,62 @@ type SpawnRunResponse struct {
 func (s *Server) registerSpawnRoute(api *http.ServeMux) {
 	if s.capabilitySigner != nil {
 		api.HandleFunc("POST /api/internal/spawn", s.handleSpawnRun)
+		api.HandleFunc("GET /api/internal/runs/{id}", s.handleReadSpawnedRun)
 	}
+}
+
+// SpawnedRunStatus is a supervisor launcher's await projection of a sub-run (M64): just enough to decide
+// "terminal yet?" and return the answer into the tool loop. No secrets (the run store holds none).
+type SpawnedRunStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Answer string `json:"answer,omitempty"` // the final assistant message on success
+	Error  string `json:"error,omitempty"`  // the honest failure reason on failure
+}
+
+// handleReadSpawnedRun serves GET /api/internal/runs/{id} — the capability-authorized AWAIT companion to
+// the spawn edge (ADR 0057 Door 2). A supervisor's launcher polls it until the sub-run is terminal.
+// Authz: the capability holder may read ONLY a sub-run it DIRECTLY spawned (the run's ParentRunID == the
+// capability's RunID) — the synchronous-delegate model (you await what you started); it never leaks a
+// sibling, an ancestor, or an unrelated run.
+func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
+	if s.capabilitySigner == nil || s.runStore == nil {
+		writeError(w, http.StatusNotImplemented, "sub-run await requires the run capability signer + run store")
+		return
+	}
+	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing run capability")
+		return
+	}
+	capab, err := s.capabilitySigner.Verifier().Verify(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid run capability")
+		return
+	}
+	sub, err := s.runStore.Get(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if sub.ParentRunID != capab.RunID {
+		// A capability may only await its OWN direct children (never a sibling or unrelated run).
+		writeError(w, http.StatusForbidden, "the run capability may only read a run it spawned")
+		return
+	}
+	writeJSON(w, http.StatusOK, SpawnedRunStatus{
+		ID: sub.ID, Status: string(sub.Status), Answer: lastAssistantMessage(sub), Error: sub.Error,
+	})
+}
+
+// lastAssistantMessage returns the final assistant turn's content (the sub-run's answer), or "".
+func lastAssistantMessage(rn *run.Run) string {
+	for i := len(rn.Messages) - 1; i >= 0; i-- {
+		if rn.Messages[i].Role == "assistant" {
+			return rn.Messages[i].Content
+		}
+	}
+	return ""
 }
 
 // handleSpawnRun serves POST /api/internal/spawn — the CAPABILITY-AUTHORIZED sub-run create edge (ADR

@@ -175,3 +175,49 @@ func TestSpawn_NilSignerIs501(t *testing.T) {
 	s.handleSpawnRun(rec, req)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 }
+
+func getSpawnedRun(t *testing.T, s *Server, capToken, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/internal/runs/"+id, nil)
+	if capToken != "" {
+		req.Header.Set(runcap.HeaderName, capToken)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestReadSpawnedRun_DirectChildOK — a supervisor reads a sub-run it directly spawned + gets the answer.
+func TestReadSpawnedRun_DirectChildOK(t *testing.T) {
+	s, signer, store := newSpawnServer(t, mkParentRun("parent-1"))
+	sub := run.New("sub-1", "team-ns", "worker", nil, "conv-42", time.Now())
+	sub.ParentRunID = "parent-1"
+	sub.Status = run.StatusSucceeded
+	sub.Messages = []run.Message{{Role: "user", Content: "go"}, {Role: "assistant", Content: "done: 42"}}
+	require.NoError(t, store.Create(sub))
+
+	rec := getSpawnedRun(t, s, mintCap(t, signer, "parent-1"), "sub-1")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got SpawnedRunStatus
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "succeeded", got.Status)
+	assert.Equal(t, "done: 42", got.Answer, "the final assistant message is the answer")
+}
+
+// TestReadSpawnedRun_NotMyChildIs403 — a capability cannot read a run it did not spawn (no sibling leak).
+func TestReadSpawnedRun_NotMyChildIs403(t *testing.T) {
+	s, signer, store := newSpawnServer(t, mkParentRun("parent-1"))
+	other := run.New("sub-other", "team-ns", "worker", nil, "", time.Now())
+	other.ParentRunID = "someone-else" // spawned by a different supervisor
+	require.NoError(t, store.Create(other))
+
+	rec := getSpawnedRun(t, s, mintCap(t, signer, "parent-1"), "sub-other")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestReadSpawnedRun_MissingCapIs401 — the await endpoint authenticates only on the capability.
+func TestReadSpawnedRun_MissingCapIs401(t *testing.T) {
+	s, _, _ := newSpawnServer(t, mkParentRun("parent-1"))
+	rec := getSpawnedRun(t, s, "", "sub-1")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
