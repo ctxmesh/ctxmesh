@@ -343,6 +343,12 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "guardrailpolicy")
 		os.Exit(1)
 	}
+	if err := (&controller.WorkflowReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "workflow")
+		os.Exit(1)
+	}
 	if err := (&controller.TenantReconciler{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
