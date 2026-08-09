@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import jsonschema
 
-from ctxmesh._approval import approval_scope
+from ctxmesh._approval import approval_scope, pause_for_approval
 from ctxmesh._capability import capability_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import ApprovalRequiredError, ConfigError, ConsentRequiredError
@@ -68,6 +68,14 @@ CONVERSATION_HEADER = "X-Conversation-Id"
 #: /invoke from the envelope; the loop relays it to memory writes so entries attribute to THIS hop.
 MESSAGE_HEADER = "X-Message-Id"
 
+#: X-Ctxmesh-Spawn-Depth (m65.6, ADR 0058) — the delegation depth stamped by the BFF on a
+#: delegated sub-run's inbound /invoke (internal/bff/invoke.go sets it via strconv.Itoa; the
+#: spawn-context propagates it). An integer > 0 means THIS run is a delegated sub-run of a
+#: supervisor; absent or "0" means a top-level run. The tool-use policy reads it to decide the
+#: require-approval branch: a top-level run can pause for human approval, a sub-run CANNOT
+#: (pausing a sub-run hangs the supervisor's synchronous await — fail-closed deny instead).
+SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth"
+
 #: The most recent conversation messages the loop replays as context on each turn.
 #: Bounds the prompt so a long chat can't grow the context without limit — older turns
 #: fall out of the window (the memory plane still retains the full history).
@@ -91,6 +99,23 @@ def _conversation_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
 def _message_id_from_headers(headers: Optional[Dict[str, str]]) -> str:
     """Pull the per-hop message id (X-Message-Id, m33.4) out of inbound headers, "" when absent."""
     return _header_value(headers, MESSAGE_HEADER)
+
+
+def _spawn_depth_from_headers(headers: Optional[Dict[str, str]]) -> int:
+    """Read the delegation depth (X-Ctxmesh-Spawn-Depth, m65.6) from inbound *headers*.
+
+    Returns the parsed integer when the header is present and numeric (the BFF stamps it via
+    ``strconv.Itoa``), else ``0`` — a top-level run has the header absent, blank, "0", or (a
+    corrupt value) unparseable, and ``0`` is the safe top-level reading in every one of those
+    cases. ``> 0`` marks this run as a delegated sub-run.
+    """
+    raw = _header_value(headers, SPAWN_DEPTH_HEADER)
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
 
 
 def mint_conversation_id() -> str:
@@ -247,6 +272,25 @@ class ManagedConfig:
     #: (m65.4) is the authoritative backstop. ``None`` (the default) leaves the loop unchanged.
     output_schema: Optional[Dict[str, Any]] = None
 
+    #: Tool-use policy (m65.6, ADR 0058) — the ``AGENT_RUNTIME.toolPolicy`` object, shape:
+    #: ``{"default": "allow"|"deny"|"require-approval",
+    #:    "overrides": [{"name": str, "rule": <same choices>, "retryable": bool}],
+    #:    "forcedChoice": ""|"auto"|"required"|"<toolName>", "parallelLimit": int}``.
+    #: (``retryable`` is read by m65.7, not here.)
+    #: When set, :func:`run_managed_loop` enforces it in the managed loop: per-call rule
+    #: resolution (deny → honest denial to the model; require-approval → HITL pause when
+    #: top-level, fail-closed deny inside a delegated sub-run), a ``tool_choice`` from
+    #: ``forcedChoice`` on the model call, and a per-turn ``parallelLimit`` cap. ``None`` (the
+    #: default) leaves the loop byte-for-byte unchanged (all tools allowed, no forced choice,
+    #: no limit).
+    #:
+    #: **Honesty (not an unbypassable boundary).** These are managed-loop *authoring* controls:
+    #: they shape how the STOCK loop selects and dispatches tools. A custom agent that ignores
+    #: the SDK is not bound by them — the hard, unbypassable boundary stays the MCPToolBinding
+    #: set + the egress sidecar + on-behalf-of auth. This policy is defence-in-depth for the
+    #: managed image, not a security perimeter; do not treat it as one.
+    tool_policy: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_env(cls) -> "ManagedConfig":
         """Build a ManagedConfig from the launcher-injected environment (config → behaviour).
@@ -276,7 +320,7 @@ class ManagedConfig:
             _log.warning("MAX_STEPS=%d is < 1; using the default %d", max_steps, DEFAULT_MAX_STEPS)
             max_steps = DEFAULT_MAX_STEPS
         # Parse the controller-injected AGENT_RUNTIME once; pull keys by spec below.
-        # m65.6 will read runtime.get("toolPolicy"); m65.7 runtime.get("resilience").
+        # m65.7 will read runtime.get("resilience").
         runtime = _parse_runtime_env()
         output_schema: Optional[Dict[str, Any]] = runtime.get("outputSchema")
         # Guard: only accept a dict (a non-dict value in the JSON is a misconfig).
@@ -286,11 +330,21 @@ class ManagedConfig:
                 type(output_schema).__name__,
             )
             output_schema = None
+        # Tool-use policy (m65.6). Same type-guard: a non-dict value is a misconfig → None,
+        # which leaves the loop unchanged.
+        tool_policy: Optional[Dict[str, Any]] = runtime.get("toolPolicy")
+        if tool_policy is not None and not isinstance(tool_policy, dict):
+            _log.warning(
+                "AGENT_RUNTIME.toolPolicy is not a JSON object (%r); ignoring",
+                type(tool_policy).__name__,
+            )
+            tool_policy = None
         return cls(
             system_prompt=_load_system_prompt_from_env(),
             model_route=os.environ.get("MODEL_ROUTE", ""),
             max_steps=max_steps,
             output_schema=output_schema,
+            tool_policy=tool_policy,
         )
 
 
@@ -473,6 +527,11 @@ def run_managed_loop(
     # Per-hop message id (m33.4): when this turn was reached via A2A, the launcher stamped the hop's
     # messageId onto the inbound headers; relay it so persisted turns attribute to this hop.
     message_id = _message_id_from_headers(headers)
+    # Delegation depth (m65.6): computed ONCE per run from the inbound headers and threaded into
+    # the loop so the tool-use policy's require-approval branch can tell a top-level run (may pause
+    # for human approval) from a delegated sub-run (must fail-closed deny — a pause hangs the
+    # supervisor's synchronous await).
+    spawn_depth = _spawn_depth_from_headers(headers)
     threaded = bool(conversation_id) and client.config.memory_wired
     history = (
         _load_history(client, conversation_id, config.max_history_messages) if threaded else []
@@ -520,6 +579,7 @@ def run_managed_loop(
                 threaded,
                 user_input,
                 message_id,
+                spawn_depth,
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -620,6 +680,56 @@ def _validate_against_schema(text: str, schema: Dict[str, Any]) -> Optional[str]
     return None
 
 
+def _resolve_tool_rule(tool_policy: Dict[str, Any], name: str) -> str:
+    """Resolve the effective policy rule for tool *name* (m65.6, ADR 0058).
+
+    An override that names this tool wins; otherwise the policy ``default`` applies (itself
+    defaulting to ``"allow"`` when absent). An override with a non-string / unrecognised
+    ``rule`` is ignored in favour of the default — a corrupt override must never silently
+    widen access. ``overrides`` that isn't a list, or entries that aren't dicts, are skipped.
+    """
+    valid = ("allow", "deny", "require-approval")
+    overrides = tool_policy.get("overrides")
+    if isinstance(overrides, list):
+        for entry in overrides:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                rule = entry.get("rule")
+                if isinstance(rule, str) and rule in valid:
+                    return rule
+                # A named-but-malformed override falls through to the default (fail to the
+                # policy's baseline, not to a silent allow).
+                break
+    default = tool_policy.get("default", "allow")
+    return default if isinstance(default, str) and default in valid else "allow"
+
+
+def _forced_tool_choice(tool_policy: Dict[str, Any]) -> Optional[Any]:
+    """Translate ``toolPolicy.forcedChoice`` into an OpenAI ``tool_choice`` value (m65.6).
+
+    ``""`` (or absent / a non-string) → ``None`` (leave ``tool_choice`` unset = provider auto).
+    ``"auto"`` → ``"auto"``; ``"required"`` → ``"required"``; any other string is treated as a
+    TOOL NAME → ``{"type": "function", "function": {"name": <value>}}`` (force that one tool).
+    """
+    forced = tool_policy.get("forcedChoice")
+    if not isinstance(forced, str) or forced == "":
+        return None
+    if forced in ("auto", "required"):
+        return forced
+    return {"type": "function", "function": {"name": forced}}
+
+
+def _parallel_limit(tool_policy: Dict[str, Any]) -> int:
+    """Return ``toolPolicy.parallelLimit`` as a positive int cap, or ``0`` for unlimited (m65.6).
+
+    A non-int, or a value ``<= 0``, means "no cap" (today's behaviour): the loop executes every
+    tool call the model returns in a turn.
+    """
+    limit = tool_policy.get("parallelLimit")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return 0
+    return limit
+
+
 def _drive_loop(
     client: Client,
     config: ManagedConfig,
@@ -634,6 +744,7 @@ def _drive_loop(
     threaded: bool,
     user_input: str,
     message_id: str = "",
+    spawn_depth: int = 0,
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
@@ -661,6 +772,14 @@ def _drive_loop(
                         "strict": False,
                     },
                 }
+            # Tool-use policy (m65.6, ADR 0058): steer which tool the model may pick via
+            # forcedChoice → OpenAI tool_choice. Only when a policy is set AND it resolves to
+            # a value (""/absent leaves it unset = provider auto, today's behaviour). This is
+            # an authoring control on the STOCK loop, not an unbypassable boundary.
+            if config.tool_policy is not None:
+                tool_choice = _forced_tool_choice(config.tool_policy)
+                if tool_choice is not None:
+                    chat_opts["tool_choice"] = tool_choice
             # When a token sink is wired (the streaming /invoke, m32.7), stream this turn:
             # push content deltas to on_token as they arrive, then take the assembled response
             # (with any tool_calls) to drive the loop exactly as the non-streaming path does.
@@ -727,9 +846,58 @@ def _drive_loop(
             messages.append(_assistant_message_for_history(resp))
             turn.set_output({"tool_calls": [_call_name(c) for c in resp.tool_calls]})
 
+            # Tool-use policy pre-pass (m65.6, ADR 0058): resolve, PER CALL and BEFORE any
+            # dispatch, whether each tool call is executed or short-circuited with honest tool
+            # text the model sees. blocked[call_id] holds that text for a short-circuited call;
+            # a call absent from blocked is dispatched normally. When tool_policy is None this
+            # pass makes NO decisions (blocked stays empty) → behaviour is byte-for-byte unchanged.
+            #
+            #   * deny            → honest "not permitted by policy" (never dispatched)
+            #   * require-approval, sub-run (spawn_depth > 0) → FAIL-CLOSED deny with honest
+            #     text (pausing a sub-run hangs the supervisor's synchronous await — ADR 0058)
+            #   * require-approval, top-level → pause_for_approval; if unapproved it RAISES here,
+            #     before any dispatch, and the outer handler surfaces approval_required
+            #   * parallelLimit L → the first L calls execute; each excess call is skipped with
+            #     honest text so the model can re-request it next turn
+            blocked: Dict[str, str] = {}
+            if config.tool_policy is not None:
+                limit = _parallel_limit(config.tool_policy)
+                dispatched_count = 0
+                for call in resp.tool_calls:
+                    name = _call_name(call)
+                    call_id = call.get("id", "")
+                    # Unknown tools are handled by the existing not-bound branch below; leave the
+                    # policy pass to bound tools so an unbound name still gets its own honest error.
+                    rule = _resolve_tool_rule(config.tool_policy, name)
+                    if rule == "deny":
+                        blocked[call_id] = f"tool {name!r} is not permitted by policy"
+                        continue
+                    if rule == "require-approval":
+                        if spawn_depth > 0:
+                            # ADR 0058 fifth-issue fail-closed rule: a delegated sub-run cannot
+                            # pause for human approval (the pause is invisible to the human and
+                            # hangs the awaiting supervisor). Deny honestly instead of pausing.
+                            blocked[call_id] = (
+                                f"tool {name!r} requires human approval and cannot be used "
+                                "inside a delegated sub-run"
+                            )
+                            continue
+                        # Top-level run: gate on human approval. An unapproved key raises
+                        # ApprovalRequiredError here (before any dispatch) — do NOT swallow it;
+                        # the outer run_managed_loop handler turns it into approval_required.
+                        args = _parse_arguments(_call_arguments(call))
+                        pause_for_approval(f"tool:{name}", f"Run tool {name!r} with args {args!r}?")
+                    # allow (or an approved require-approval) counts toward the parallel limit.
+                    if limit and dispatched_count >= limit:
+                        blocked[call_id] = f"skipped: exceeds the tool parallel-limit of {limit}"
+                        continue
+                    dispatched_count += 1
+
             # v1b fan-out (M64, ADR 0057): run THIS turn's delegate_to calls CONCURRENTLY (the spawn
             # guard bounds the width; the rest come back denied fail-closed). Pre-compute results,
             # then thread them into the append loop below in the model's original tool-call order.
+            # A delegate call the policy pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED
+            # here so it is never dispatched — its honest text is threaded from `blocked` below.
             delegate_calls = [
                 (
                     c.get("id", ""),
@@ -737,7 +905,7 @@ def _drive_loop(
                     str(_parse_arguments(_call_arguments(c)).get("task", "")),
                 )
                 for c in resp.tool_calls
-                if _call_name(c) == DELEGATE_TOOL_NAME
+                if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
             ]
             delegate_results = (
                 _dispatch_delegate_batch(client, delegate_calls, str(step))
@@ -750,7 +918,12 @@ def _drive_loop(
                 args = _parse_arguments(_call_arguments(call))
                 call_id = call.get("id", "")
 
-                if name not in tool_names:
+                if call_id in blocked:
+                    # Tool-use policy short-circuited this call (deny / sub-run-deny / skipped).
+                    # Return the honest policy text as the tool result so the model can adapt;
+                    # the tool was NOT dispatched, so tools_called does not record it as executed.
+                    content = blocked[call_id]
+                elif name not in tool_names:
                     # A tool the agent is not bound to — surface it as the
                     # tool result so the model can recover, rather than
                     # crashing the run on a hallucinated tool name.
