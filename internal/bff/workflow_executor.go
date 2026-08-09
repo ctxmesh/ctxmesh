@@ -178,7 +178,21 @@ func (c *workflowCursor) marshal() (string, error) {
 // node, and suspend on it — OR finish the graph. The next advance happens after the transactional wake
 // re-queues the run and the worker re-claims it, so this returns quickly (it holds the worker only across one
 // node launch, never across the child's execution — the parked-worker fix).
+//
+// OPENING TRANSITION (m67.14, ADR 0034): mirror executeRun's idempotent queued→running flip. In the worker
+// path the claim already flips the run to running before executeWorkflow is called; in the in-process path
+// (dev / spawnWorkflowNode non-dispatch) the run is still queued when we enter. Without this transition a
+// node-launch failure would attempt queued→failed, which is illegal (the state machine only allows
+// running→failed). The Update is idempotent: Transition is a no-op when from==to, so a run already running
+// (the worker path) is unaffected.
 func (s *Server) executeWorkflow(runID string) {
+	if _, err := s.runStore.Update(runID, func(r *run.Run) error {
+		return r.Transition(run.StatusRunning, time.Now())
+	}); err != nil {
+		s.log.Error(err, "workflow: could not start (opening running transition)", "run", runID)
+		return
+	}
+
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
 		s.log.Error(err, "workflow: could not load the instance run", "run", runID)
