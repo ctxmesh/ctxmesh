@@ -36,6 +36,14 @@ const (
 	// error — audit is observability, never a gate). actorKindUser marks a caller-authenticated row.
 	actorUnknown  = "unknown"
 	actorKindUser = "user"
+
+	// auditOutcomeDenied is the outcome value for an access that was refused (grant revoked, provider
+	// denied, guardrail blocked, etc.). Shared across all BFF audit rows that record a denial.
+	auditOutcomeDenied = "denied"
+	// auditPolicyActionBlock is the policy_action value for a guardrail block decision (m66.9).
+	// Defined here (alongside the other audit constants) so the ingest handler and its callers share
+	// the same string without triggering goconst.
+	auditPolicyActionBlock = "block"
 )
 
 // auditActor resolves the PRECISE authenticated username for an audit row (ADR 0056 §1: store the real

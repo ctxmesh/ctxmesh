@@ -41,6 +41,7 @@ rules:
   - agentteams
   - agentscalingpolicies
   - evalsuites
+  - guardrailpolicies
   verbs:
   - create
   - delete
@@ -72,6 +73,7 @@ rules:
   - agentteams/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - guardrailpolicies/status
   verbs:
   - get
   - list

@@ -53,6 +53,21 @@ func buildContractFixtures() map[string]any {
 		SecretName: "acme-key",
 	}
 	return map[string]any{
+		"GuardrailPolicyListResponse": GuardrailPolicyListResponse{
+			Items: []GuardrailPolicySummary{{
+				Name:              "pii-and-jailbreak",
+				Namespace:         "default",
+				PIIEnabled:        true,
+				DenylistCount:     2,
+				JudgeEnabled:      true,
+				FailMode:          "closed",
+				UserRateLimited:   true,
+				Validated:         true,
+				Reason:            "",
+				PolicyHash:        "sha256-abc123",
+				ReferencingAgents: []string{"echo"},
+			}},
+		},
 		"ConnectProviderResponse": ConnectProviderResponse{
 			Provider: provider,
 			Created:  []createdObject{{Kind: "Secret", Name: "anthropic", Namespace: "default"}},
@@ -106,6 +121,9 @@ func buildContractFixtures() map[string]any {
 					},
 				},
 			},
+			// m66.10: guardrailPolicyRef is included in the fixture so the UI
+			// mock-drift guard covers agents that reference a GuardrailPolicy.
+			GuardrailPolicyRef: "pii-and-jailbreak",
 		},
 	}
 }

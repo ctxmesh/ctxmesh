@@ -56,6 +56,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ctxmesh/agent-engine/internal/gateway/budget"
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 const (
@@ -90,6 +91,11 @@ const (
 	// defaultSoftPct mirrors the CRD default (BudgetSpec.softThresholdPct=80) so a
 	// missing/blank X-Budget-Soft-Pct still enforces a sane soft threshold.
 	defaultSoftPct = 80
+
+	// dimensionUser is the budgetErrorBody "dimension" for a per-END-USER (OBO) quota
+	// denial (m66.7), distinguishing it from the "tenant"/cost denials a client parses
+	// the same way.
+	dimensionUser = "user"
 )
 
 // gatewayConfig is the outbound-gateway-proxy configuration parsed from env.
@@ -128,6 +134,20 @@ type gatewayConfig struct {
 	// PodTokenPath is the mounted projected SA-token the proxy authenticates (audience
 	// statelayer-proxy). Defaults to defaultPodTokenPath when the proxy URL is set.
 	PodTokenPath string
+
+	// GuardrailPolicy (M66, ADR 0059 §8): the resolved GuardrailPolicy spec serialized to
+	// JSON (GUARDRAIL_POLICY env), injected by the controller when spec.guardrailPolicyRef
+	// resolves. Its presence FORCES the proxy on so the in-path guardrail engine (m66.3)
+	// can inspect model input/output — even for a guardrailed-but-unbudgeted agent. Empty ⇒
+	// no guardrail (the m66.2 controller fails a dangling/invalid ref closed, so this env is
+	// only ever set for a VALIDATED policy).
+	GuardrailPolicy string
+	// BFFInternalURL is the BFF's cluster-internal URL (BFF_INTERNAL_URL env), used by the
+	// durable guardrail block audit (m66.9): the launcher POSTs a PII-safe compliance record
+	// to POST /api/internal/guardrail-event best-effort, async. Empty ⇒ the durable POST is
+	// skipped; the span event emitted by emitGuardrailDecision remains the only record.
+	// Same env the delegate client uses (delegate.go, BFFURL field) — one source of truth.
+	BFFInternalURL string
 }
 
 // defaultPodTokenPath is where the controller mounts the launcher's projected
@@ -135,13 +155,16 @@ type gatewayConfig struct {
 const defaultPodTokenPath = "/var/run/secrets/statelayer-proxy/token"
 
 // GatewayProxyEnabled reports whether the outbound gateway proxy should start.
-// True iff an upstream gateway URL was injected AND at least one budget cap is
-// set — the ONLY reason to interpose the proxy is to enforce a cap. With neither
-// cap set the controller does not inject GATEWAY_UPSTREAM_URL, so the agent's
-// MODEL_GATEWAY_URL keeps pointing straight at LiteLLM.
+// True iff an upstream gateway URL was injected AND there is a reason to interpose
+// the proxy: at least one budget cap, a tenant quota, OR a guardrail policy (M66,
+// ADR 0059 §8 — a guarded agent must route its LLM calls THROUGH the proxy so the
+// in-path guardrail engine can inspect them). With none of these the controller does
+// not inject GATEWAY_UPSTREAM_URL, so the agent's MODEL_GATEWAY_URL keeps pointing
+// straight at LiteLLM.
 func (c Config) GatewayProxyEnabled() bool {
 	g := c.Gateway
-	return g.UpstreamURL != "" && (g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "")
+	return g.UpstreamURL != "" &&
+		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" || g.GuardrailPolicy != "")
 }
 
 // loadGatewayConfig parses the outbound-gateway-proxy configuration from env.
@@ -191,6 +214,8 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		QuotaAddr:          strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
 		StatelayerProxyURL: strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
 		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
+		GuardrailPolicy:    strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
+		BFFInternalURL:     strings.TrimRight(strings.TrimSpace(lookup("BFF_INTERNAL_URL")), "/"),
 	}, nil
 }
 
@@ -231,7 +256,30 @@ type gatewayProxy struct {
 	// tenant enforces the M47 tenant model quota (rate + aggregate budget) against
 	// the shared Valkey. nil ⇒ untenanted or no tenant model caps.
 	tenant *tenantQuota
-	logf   func(string, ...any)
+	// guardrail is the in-path content-governance engine (M66, ADR 0059 §8), built
+	// from GUARDRAIL_POLICY. nil ⇒ no policy: the request path is byte-for-byte
+	// unchanged (no request-body buffering, forward() streams r.Body as pre-M66).
+	guardrail *guardrailEngine
+	// user enforces the per-END-USER (OBO) model quota (M66, ADR 0059 §8), built from the
+	// guardrail policy's userRateLimit. nil ⇒ no userRateLimit ⇒ per-user enforcement is
+	// off. The invoking user's hashed id is resolved PER CALL from the verified capability.
+	user *userQuota
+	// capVerifier verifies the inbound run capability to resolve the invoking user's hashed
+	// id (m66.7). Built from the same MCP_CAPABILITY_PUBLIC_KEY / MCP_CAPABILITY_AUDIENCE the
+	// OBO egress path uses. nil ⇒ no key provisioned: per-user enforcement fails OPEN (skipped)
+	// even when a userRateLimit is set — a missing verifier is treated like a missing capability.
+	capVerifier *runcap.Verifier
+	// judge is the OPTIONAL fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) — a cascaded, cached,
+	// loop-safe semantic-classification layer built from the guardrail policy's semanticJudge section.
+	// nil ⇒ semanticJudge disabled/absent ⇒ zero judge calls. It NEVER underpins the fail-closed
+	// guarantee: it augments the deterministic engine and fails OPEN on its own error/timeout.
+	judge *semanticJudge
+	// bffInternalURL is BFF_INTERNAL_URL (process-level, from gatewayConfig). Used by the durable
+	// guardrail block audit (m66.9, ADR 0059 §9): the launcher POSTs a PII-safe compliance record
+	// to the BFF's ingest endpoint best-effort, async. Empty ⇒ the durable POST is skipped; the
+	// span event (emitted by emitGuardrailDecision) remains the only record.
+	bffInternalURL string
+	logf           func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -265,14 +313,26 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		return nil, fmt.Errorf("gateway: invalid GATEWAY_UPSTREAM_URL %q", cfg.UpstreamURL)
 	}
 
+	// Build the in-path guardrail engine from the injected policy (M66, ADR 0059 §8).
+	// FAIL-CLOSED: a policy that does not parse or whose patterns don't compile is a
+	// hard construction error, not a silent bypass — the controller already validated
+	// it (m66.2), so this is defence-in-depth. Empty GUARDRAIL_POLICY ⇒ nil engine ⇒
+	// the request path stays byte-for-byte unchanged.
+	guardrail, err := newGuardrailEngine(cfg.GuardrailPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+
 	gp := &gatewayProxy{
-		cfg:       cfg,
-		upstream:  u,
-		enforcer:  budget.NewEnforcer(),
-		estimator: budget.NewEstimator(),
-		client:    &http.Client{Timeout: gatewayRequestTimeout},
-		tracer:    tracer,
-		logf:      logf,
+		cfg:            cfg,
+		upstream:       u,
+		enforcer:       budget.NewEnforcer(),
+		estimator:      budget.NewEstimator(),
+		client:         &http.Client{Timeout: gatewayRequestTimeout},
+		tracer:         tracer,
+		guardrail:      guardrail,
+		bffInternalURL: cfg.BFFInternalURL,
+		logf:           logf,
 	}
 
 	if cfg.ConvCapUSD != "" {
@@ -314,7 +374,75 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		}
 	}
 
+	// Per-END-USER (OBO) model quota (M66, ADR 0059 §8): built from the guardrail policy's
+	// userRateLimit + a run-capability verifier. A parse error is fail-closed (defence-in-depth,
+	// mirroring the engine load). buildUserQuota returns nil when there is no userRateLimit.
+	uq, verifier, err := buildUserQuota(cfg, logf)
+	if err != nil {
+		return nil, err
+	}
+	gp.user = uq
+	gp.capVerifier = verifier
+
+	// Fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5): OPTIONAL semantic augmentation, off by default.
+	// A parse error is fail-closed (defence-in-depth, mirroring the engine load); an enabled-but-
+	// unroutable judge is left OFF (fail-open) inside newSemanticJudge. nil ⇒ no judge, zero overhead.
+	judge, err := newSemanticJudge(cfg.GuardrailPolicy, logf)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+	gp.judge = judge
+
 	return gp, nil
+}
+
+// buildUserQuota constructs the per-user (OBO) quota enforcer and the run-capability verifier from
+// the guardrail policy's userRateLimit (M66, ADR 0059 §8). It returns (nil, nil, nil) when there is
+// no userRateLimit — per-user enforcement is simply off. A malformed policy is a hard error (the load
+// path is fail-closed, matching newGuardrailEngine). The per-user quota shares the tenant quota's
+// Valkey (TENANT_QUOTA_ADDR); with no direct Valkey addr (or the state-layer-proxy-only path) the
+// per-user store cannot be built, so enforcement stays OFF (fail-open) with a loud log — a missing
+// accumulator must never block model calls.
+func buildUserQuota(cfg gatewayConfig, logf func(string, ...any)) (*userQuota, *runcap.Verifier, error) {
+	limit, err := parseUserRateLimit(cfg.GuardrailPolicy)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gateway: %w", err)
+	}
+	if limit == nil {
+		return nil, nil, nil
+	}
+
+	uq := &userQuota{rpm: limit.RequestsPerMinute, maxConcurrent: limit.MaxInFlight, logf: logf}
+	if limit.SpendUSD != "" {
+		uq.budgetUSD = moneyToFloat(limit.SpendUSD)
+		uq.hasBudget = uq.budgetUSD > 0
+	}
+
+	// The per-user accumulator lives in the SAME shared Valkey the tenant quota uses. Without a direct
+	// address we cannot coordinate a per-user bucket across replicas — leave enforcement OFF (a visible
+	// misconfig), never silently block. (The state-layer-proxy path derives the TENANT from the pod
+	// token and has no per-user notion, so it is not usable here.)
+	if cfg.QuotaAddr == "" {
+		logf("launcher: gateway: userRateLimit configured but no TENANT_QUOTA_ADDR — per-user limits NOT enforced")
+		return nil, nil, nil
+	}
+	uq.store = newRedisUserStore(cfg.QuotaAddr)
+
+	// The verifier resolves the invoking user's hashed id from the run capability. Reuse the OBO
+	// capability public key + audience the controller already provisions for the egress path. Without a
+	// key we cannot TRUST any user id: per-user enforcement fails OPEN (skipped) — never fail-closed,
+	// which would break every guarded call whose capability didn't propagate (ADR 0059 §8).
+	var verifier *runcap.Verifier
+	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
+		if pub, derr := runcap.DecodePublicKey(pubB64); derr == nil {
+			verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
+		} else {
+			logf("launcher: gateway: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user limits fail OPEN (skipped)", derr)
+		}
+	} else {
+		logf("launcher: gateway: userRateLimit set but MCP_CAPABILITY_PUBLIC_KEY unset — per-user limits fail OPEN (skipped)")
+	}
+	return uq, verifier, nil
 }
 
 // handler returns the HTTP handler for the proxy listener.
@@ -383,6 +511,34 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseSlot()
 
+	// M66 per-END-USER (OBO) model quota (rate + monthly budget + concurrency), independent of the tenant
+	// caps. The invoking user's hashed id is resolved from the VERIFIED run capability (userHashFromRequest);
+	// a missing/forged/unverifiable capability yields "" ⇒ per-user enforcement is SKIPPED (fail-open, ADR
+	// 0059 §8) — the call is still bounded by gateway auth + the guardrail content pipeline + the tenant
+	// quota. releaseUser frees the per-user concurrency slot on finish (noop when none was taken / userHash "").
+	userHash := gp.userHashFromRequest(r)
+	if userHash != "" {
+		span.SetAttributes(attribute.String("user.quota.subject", userHash))
+	}
+	userDeny, releaseUser := gp.user.preCall(ctx, userHash, moneyToFloat(est.String()))
+	if userDeny != nil {
+		gp.writeUserDeny(w, span, userDeny)
+		return
+	}
+	defer releaseUser()
+
+	// ── Guardrail request scan (M66, ADR 0059 §8) ──────────────────────────
+	// Only when a policy is active. Buffers the request body (fail-closed on oversize
+	// or unparseable), scans the user-role input AND tool-role tool-output against
+	// block/redact/auditOnly rules, refuses a block hit with a typed guardrail_blocked
+	// BEFORE forwarding, and forwards the SCRUBBED body on a redact hit. With no policy
+	// (guardrail nil) this is skipped entirely and the body streams unchanged.
+	if gp.guardrail != nil {
+		if refused := gp.applyRequestGuardrail(w, span, r); refused {
+			return
+		}
+	}
+
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
 	resp, body, err := gp.forward(ctx, r)
 	if err != nil {
@@ -392,19 +548,39 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Relay the upstream response verbatim (status, headers, body). Budget
-	// enforcement is transparent to a successful call — the agent sees exactly
-	// what LiteLLM returned.
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	if _, werr := w.Write(body); werr != nil {
+	// ── Guardrail output scan (M66, ADR 0059 §8) ────────────────────────────
+	// Scan the completion (choices[].message.content) against the output rules. A block
+	// SUBSTITUTES a guardrail_blocked body for the completion (the client never sees it);
+	// a redact relays the completion with [REDACTED:<name>]. relayBody is what the client
+	// receives; spend is still booked below on a block, since the model already generated
+	// (ADR 0059 §7). Only runs under an active policy with output rules — otherwise
+	// relayBody == body (the response is relayed verbatim).
+	relayBody := body
+	outputBlocked := false
+	if gp.guardrail != nil {
+		relayBody, outputBlocked = gp.applyOutputGuardrail(ctx, span, r, body)
+	}
+
+	// Relay the (possibly substituted/redacted) response. An output block overrides the
+	// upstream status with 403 guardrail_blocked so the client sees a typed refusal, not a
+	// 200 with a withheld body; otherwise the upstream status/headers are relayed as-is.
+	if outputBlocked {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(guardrailBlockedStatus) // 403
+	} else {
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+	}
+	if _, werr := w.Write(relayBody); werr != nil {
 		gp.logf("launcher: gateway: write response: %v", werr)
 	}
 
 	// ── POST-CALL accounting ───────────────────────────────────────────────
 	// Only book cost for a successful completion (a 4xx/5xx from LiteLLM cost the
-	// tenant nothing and must not accrue spend). Price prefers LiteLLM's own cost
-	// header; falls back to the deterministic token table.
+	// tenant nothing and must not accrue spend). An OUTPUT BLOCK still books spend: the
+	// model already generated, so accounting runs on the ORIGINAL upstream body/usage
+	// (ADR 0059 §7) even though the completion was withheld from the client. Price prefers
+	// LiteLLM's own cost header; falls back to the deterministic token table.
 	if resp.StatusCode != http.StatusOK {
 		return
 	}
@@ -413,6 +589,9 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// M47: accrue the tenant's aggregate spend to the shared Valkey (nil-safe; only when a tenant budget
 	// is set). Runs even when the M8 per-agent budget is not enforced for this agent.
 	gp.tenant.postCall(ctx, moneyToFloat(actual.String()))
+	// M66: accrue the invoking user's monthly spend (nil-safe; only when a per-user budget is set AND the
+	// capability resolved a userHash — a missing/forged capability booked no user, so nothing accrues).
+	gp.user.postCall(ctx, userHash, moneyToFloat(actual.String()))
 
 	if !caps.Enforced() {
 		return
@@ -492,6 +671,61 @@ func (gp *gatewayProxy) writeTenantDeny(w http.ResponseWriter, span trace.Span, 
 	gp.logf("launcher: gateway: %s (tenant=%s status=%d, call refused)", deny.code, gp.tenant.id, deny.status)
 }
 
+// userHashFromRequest resolves the invoking user's ALREADY-HASHED id from the inbound run capability
+// (the X-Ctxmesh-Run-Capability header the SDK relays on the model call, m66.7). It returns "" — meaning
+// "no trusted user, skip per-user enforcement" (FAIL-OPEN, ADR 0059 §8) — whenever there is nothing to
+// enforce or nothing to trust:
+//   - no per-user quota configured, or no verifier provisioned;
+//   - the header is absent (an unattended/offline run, or the capability did not propagate);
+//   - the capability does not VERIFY (bad signature / expired / wrong audience — a FORGED token is treated
+//     exactly like an absent one, so it can NEVER inject a spoofed userHash);
+//   - the capability verifies but carries no user id.
+//
+// Rate-limiting is availability plumbing: a missing/unverifiable identity must NOT fail the model call
+// (that would break every guarded call whose capability didn't propagate). The call stays bounded by the
+// gateway auth + the guardrail content pipeline + the tenant quota.
+func (gp *gatewayProxy) userHashFromRequest(r *http.Request) string {
+	if gp.user == nil || gp.capVerifier == nil {
+		return ""
+	}
+	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
+	if token == "" {
+		return ""
+	}
+	capability, err := gp.capVerifier.Verify(token)
+	if err != nil {
+		// A forged/expired/wrong-audience capability is NOT trusted — treat it as absent (fail-open per-user)
+		// and never as a user. It cannot grant a spoofed userHash.
+		gp.logf("launcher: gateway: run capability failed verification (per-user limits skipped, fail-open): %v", err)
+		return ""
+	}
+	return capability.User
+}
+
+// writeUserDeny emits the typed per-user quota rejection (402 user_budget_exceeded / 429
+// user_rate_limited | user_concurrency_exceeded, dimension "user") and marks the span. The provider is NOT
+// called (M66 circuit-break). Reuses budgetErrorBody so a caller parses user, tenant, and per-agent denials
+// the same way.
+func (gp *gatewayProxy) writeUserDeny(w http.ResponseWriter, span trace.Span, deny *userDeny) {
+	span.SetAttributes(
+		attribute.String("user.quota.code", deny.code),
+		attribute.Int("user.quota.status", deny.status),
+	)
+	span.SetStatus(codes.Error, deny.code)
+
+	body := budgetErrorBody{Error: deny.code, Dimension: dimensionUser}
+	if deny.status == http.StatusPaymentRequired {
+		body.Spent = strconv.FormatFloat(deny.spent, 'f', -1, 64)
+		body.Cap = strconv.FormatFloat(deny.capUSD, 'f', -1, 64)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(deny.status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		gp.logf("launcher: gateway: encode user deny: %v", err)
+	}
+	gp.logf("launcher: gateway: %s (status=%d, call refused)", deny.code, deny.status)
+}
+
 // writeBudgetExceeded emits the typed 402 budget_exceeded response and marks the
 // span. The provider is NOT called (this is the circuit-break).
 func (gp *gatewayProxy) writeBudgetExceeded(w http.ResponseWriter, span trace.Span, dec budget.PreCallDecision) {
@@ -533,13 +767,15 @@ func (gp *gatewayProxy) annotateSpan(
 		attribute.String("gateway.cost_usd", actual.String()),
 	}
 	if gp.convCap != nil && caps.ConversationID != "" {
-		attrs = append(attrs,
+		attrs = append(
+			attrs,
 			attribute.String("budget.conversation.spent_usd", convSpent.String()),
 			attribute.String("budget.conversation.cap_usd", gp.convCap.String()),
 		)
 	}
 	if gp.agentCap != nil && caps.AgentName != "" {
-		attrs = append(attrs,
+		attrs = append(
+			attrs,
 			attribute.String("budget.agent.spent_usd", agentSpent.String()),
 			attribute.String("budget.agent.cap_usd", gp.agentCap.String()),
 		)
@@ -567,6 +803,10 @@ var budgetHeaderSet = map[string]struct{}{
 	strings.ToLower(hdrBudgetConvUSD):  {},
 	strings.ToLower(hdrBudgetAgentUSD): {},
 	strings.ToLower(hdrBudgetSoftPct):  {},
+	// The run capability is a launcher-internal identity header (m66.7) consumed HERE to
+	// enforce per-user limits — it is proof of WHO is invoking, not a LiteLLM credential,
+	// and must never leak upstream to the model provider.
+	strings.ToLower(runcap.HeaderName): {},
 }
 
 // copyForwardHeaders copies request headers to the upstream request, dropping the

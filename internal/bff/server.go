@@ -476,6 +476,10 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
 
 	s.registerSpawnRoute(api)
+	// Guardrail block ingest (m66.9, ADR 0059 §9): capability-authorized durable compliance record.
+	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
+	// the run capability, not a browser bearer token.
+	s.registerGuardrailEventRoute(api)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
@@ -617,6 +621,8 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
 		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
 		authed.HandleFunc("GET /api/teams", s.handleListTeams)
+		// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
+		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
 			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
@@ -804,6 +810,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
+		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).

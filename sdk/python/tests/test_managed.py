@@ -654,6 +654,133 @@ def test_managed_loop_streams_the_answer(monkeypatch):
         assert result.tools_called == []
 
 
+# ── m66.14: guarded agents downgrade to buffered chat (ADR 0059 §4) ────────────
+
+
+def test_guarded_agent_uses_buffered_even_with_on_token(monkeypatch):
+    """When GUARDRAIL_POLICY is set AND on_token is provided, the loop must call
+    client.model.chat (buffered) and must NOT call stream_completion.
+
+    This prevents the 422 guardrail_streaming_unsupported that the proxy returns
+    for stream:true requests when guardrails are active (m66.6, ADR 0059 §4).
+    """
+    monkeypatch.setenv("GUARDRAIL_POLICY", "default")
+    with _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url="http://gw"
+        )
+        client = agent.from_config(plane)
+
+        chat_called = []
+
+        def fake_chat(route, messages, **opts):
+            chat_called.append(True)
+            return ChatResponse(
+                text="buffered answer",
+                usage={},
+                model=route,
+                raw={"choices": [{"message": {"role": "assistant", "content": "buffered answer"}}]},
+            )
+
+        stream_called = []
+
+        def fake_stream(route, messages, **opts):
+            stream_called.append(True)
+            # should never be reached when guarded
+            raise AssertionError("stream_completion must not be called when guarded")
+            yield  # makes this a generator so the type matches stream_completion's signature
+
+        monkeypatch.setattr(client.model, "chat", fake_chat)
+        monkeypatch.setattr(client.model, "stream_completion", fake_stream)
+
+        got: list = []
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        result = run_managed_loop(client, config, "hi", on_token=got.append)
+
+        assert stream_called == [], "stream_completion must not be called when guarded"
+        assert chat_called == [True], "buffered chat must be called when guarded"
+        assert result.output == "buffered answer"
+        assert got == [], "no token deltas when guarded — message arrives as one block"
+
+
+def test_unguarded_agent_streams_when_on_token_provided(monkeypatch):
+    """Without GUARDRAIL_POLICY, the loop streams as before (m32.7 regression guard).
+
+    This confirms the unguarded path is unchanged: stream_completion IS called
+    and on_token receives the deltas.
+    """
+    monkeypatch.delenv("GUARDRAIL_POLICY", raising=False)
+    with _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url="http://gw"
+        )
+        client = agent.from_config(plane)
+
+        def fake_stream(route, messages, **opts):
+            for tok in ["un", "guard", "ed"]:
+                yield tok
+            return ChatResponse(
+                text="unguarded",
+                usage={},
+                model=route,
+                raw={"choices": [{"message": {"role": "assistant", "content": "unguarded"}}]},
+            )
+
+        stream_spy = []
+        original_fake = fake_stream
+
+        def spied_stream(route, messages, **opts):
+            stream_spy.append(True)
+            return original_fake(route, messages, **opts)
+
+        monkeypatch.setattr(client.model, "stream_completion", spied_stream)
+
+        got: list = []
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        result = run_managed_loop(client, config, "hi", on_token=got.append)
+
+        assert stream_spy == [True], "stream_completion must be called when NOT guarded"
+        assert got == ["un", "guard", "ed"], "token deltas must flow to on_token when unguarded"
+        assert result.output == "unguarded"
+
+
+def test_guarded_agent_no_on_token_uses_buffered(monkeypatch):
+    """When GUARDRAIL_POLICY is set and no on_token is provided, the loop stays
+    buffered (unchanged behavior — this is a sanity guard)."""
+    monkeypatch.setenv("GUARDRAIL_POLICY", "strict")
+    with _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            discovery_base_url=disc.base_url, model_gateway_url="http://gw"
+        )
+        client = agent.from_config(plane)
+
+        def fake_chat(route, messages, **opts):
+            return ChatResponse(
+                text="still buffered",
+                usage={},
+                model=route,
+                raw={
+                    "choices": [{"message": {"role": "assistant", "content": "still buffered"}}]
+                },
+            )
+
+        stream_called = []
+
+        def fake_stream(route, messages, **opts):
+            stream_called.append(True)
+            raise AssertionError("stream_completion must not be called when guarded")
+            yield  # makes this a generator so the type matches stream_completion's signature
+
+        monkeypatch.setattr(client.model, "chat", fake_chat)
+        monkeypatch.setattr(client.model, "stream_completion", fake_stream)
+
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+        result = run_managed_loop(client, config, "hi")  # no on_token
+
+        assert stream_called == [], "stream_completion must not be called when guarded"
+        assert result.output == "still buffered"
+
+
 # ── delegate_to dispatch in the managed loop (M64, ADR 0057) ───────────────────
 
 

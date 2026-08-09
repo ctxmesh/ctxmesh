@@ -251,6 +251,14 @@ type AgentDeploymentSpec struct {
 	// subsequent task.
 	// +optional
 	Runtime *RuntimeSpec `json:"runtime,omitempty"`
+
+	// guardrailPolicyRef optionally names a GuardrailPolicy (same namespace) that governs this
+	// agent's content at inference time. The guardrail engine enforces the policy via a sidecar
+	// (m66.3); a missing or invalid ref fails the agent closed — the request is denied rather than
+	// passed through unguarded (m66.2 controller validates the ref and sets a condition).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 }
 
 // RuntimeSpec configures runtime authoring primitives applied by the managed

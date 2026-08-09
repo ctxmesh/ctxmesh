@@ -336,6 +336,15 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if pe, ok := asPromptResolveError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, pe.reason, pe.msg)
 	}
+	// Guardrails control-plane FAIL-CLOSED (M66, ADR 0059 §8): a dangling / invalid
+	// guardrailPolicyRef is surfaced from buildPodTemplate as a *guardrailResolveError
+	// BEFORE any workload write (the ksvc CreateOrUpdate is never reached, so the OLD
+	// revision — guarded, or nonexistent — keeps serving; the controller NEVER injects a
+	// "no-guardrail" MODEL_GATEWAY_URL). Report Ready=False and STOP cleanly (no requeue
+	// on user input). A GuardrailPolicy create/fix re-reconciles via the watch below.
+	if ge, ok := asGuardrailResolveError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, ge.reason, ge.msg)
+	}
 	return result, err
 }
 
@@ -703,14 +712,28 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 	tenantQuota := hasTenant && tenantCtx.hasModelCaps()
 
-	// Cost budget (M8, specs/cost-governance.md) + tenant model quota (M47): when EITHER is set, the
-	// agent's LLM calls must flow through the launcher's in-pod gateway proxy so it can enforce the cap
-	// BEFORE the provider is hit. So MODEL_GATEWAY_URL points at the proxy (localhost:2996), the real
-	// LiteLLM address travels as GATEWAY_UPSTREAM_URL, and the knobs are injected as STATIC env (values
-	// known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine / tier1 no-valueFrom guard).
-	// An agent with neither gets the plain LiteLLM URL and no proxy env — byte-for-byte M2 behavior.
+	// Guardrails (M66, ADR 0059 §8): resolve + validate spec.guardrailPolicyRef EARLY — like the
+	// tenant, it decides whether the launcher :2996 model proxy is forced on (a guarded agent must
+	// route its LLM calls THROUGH the proxy so the in-path guardrail engine can inspect them, even if
+	// it has no budget/quota). CONTROL-PLANE FAIL-CLOSED: a dangling ref (policy not found) or an
+	// invalid ref (an RE2 pattern doesn't compile) returns a *guardrailResolveError, which propagates
+	// out of buildPodTemplate BEFORE any ksvc write — Reconcile sets Ready=False and the agent is NEVER
+	// served unguarded (no "no-guardrail" MODEL_GATEWAY_URL, no serving revision that bypasses the
+	// guardrail). Absent ref → gr.referenced is false and this path is byte-compatible pre-M66.
+	gr, err := resolveGuardrail(ctx, r.Client, deploy)
+	if err != nil {
+		return podTemplate{}, err
+	}
+
+	// Cost budget (M8, specs/cost-governance.md) + tenant model quota (M47) + guardrails (M66): when
+	// ANY is set, the agent's LLM calls must flow through the launcher's in-pod gateway proxy so it can
+	// enforce the cap / inspect content BEFORE the provider is hit. So MODEL_GATEWAY_URL points at the
+	// proxy (localhost:2996), the real LiteLLM address travels as GATEWAY_UPSTREAM_URL, and the knobs
+	// are injected as STATIC env (values known at reconcile time — NEVER valueFrom, the m5.7 Knative
+	// landmine / tier1 no-valueFrom guard). An agent with none gets the plain LiteLLM URL and no proxy
+	// env — byte-for-byte M2 behavior.
 	gatewayURL := litellmGatewayURL
-	if deploy.Spec.Budget != nil || tenantQuota {
+	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced {
 		gatewayURL = budgetProxyURL
 		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
 	}
@@ -726,6 +749,27 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		)
 	}
 	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
+
+	// Guardrails (M66, ADR 0059 §8): inject the resolved+validated GuardrailPolicy spec as GUARDRAIL_POLICY
+	// (STATIC JSON env — NEVER valueFrom, the m5.7 Knative landmine). Its presence flips the launcher's
+	// GatewayProxyEnabled() true (gateway.go), so the :2996 proxy starts and runs the in-path guardrail
+	// engine (m66.3) even for a guardrailed-but-unbudgeted agent. Injected ONLY when the ref resolved and
+	// validated — a broken ref already failed closed above (buildPodTemplate returned a
+	// *guardrailResolveError), so we never reach here with a policy the engine can't enforce.
+	//
+	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
+	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
+	// but a PLAIN guarded agent (guardrailPolicyRef set, not a delegate supervisor) never enters that
+	// branch — its block audit is span-only and the durable row is silently skipped. Fix: inject
+	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
+	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
+	// unchanged (no BFF_INTERNAL_URL injected).
+	if gr.referenced {
+		env = append(env, corev1.EnvVar{Name: envGuardrailPolicy, Value: gr.policyJSON})
+		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
+			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
+		}
+	}
 
 	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher
 	// starts the :2995 endpoint when LANGFUSE_HOST is present. The host, dev
@@ -1050,7 +1094,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
 		}
 		if team != nil {
-			env = append(env, delegateEnv(team)...)
+			for _, e := range delegateEnv(team) {
+				// Guard against duplicates: a guarded supervisor already has BFF_INTERNAL_URL
+				// injected by the guardrail block (m66.15). All other delegateEnv vars are
+				// delegate-only so the check is symmetric with the rest of the platform env
+				// injection pattern (envVarPresent before append).
+				if !envVarPresent(env, e.Name) && !envVarPresent(deploy.Spec.Env, e.Name) {
+					env = append(env, e)
+				}
+			}
 			if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
 				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 			}
@@ -1259,7 +1311,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
 	// folds into the combined digest like the other components.
 	runtimeDig := runtimeDigest(deploy.Spec.Runtime)
-	combinedDigest := combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig)
+	// Guardrails (M66, ADR 0059 §8): a guardrailPolicyRef add/remove/change repoints MODEL_GATEWAY_URL at
+	// the proxy and injects/removes/changes the GUARDRAIL_POLICY env — a STRUCTURAL change that must roll
+	// the revision, so it folds into the combined digest like the other components. gr.digest is the hash
+	// of the RESOLVED policy spec, so editing the referenced GuardrailPolicy (via the watch below) rolls a
+	// new revision — compliance tightening propagates. "" when unreferenced (symmetric with the others).
+	guardrailDig := gr.digest
+	combinedDigest := combinedBindingDigest(
+		toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig, guardrailDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1716,15 +1775,15 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
 func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest,
-	proxyDigest, runtimeDigest string,
+	proxyDigest, runtimeDigest, guardrailDigest string,
 ) string {
 	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
-		tenantDigest == "" && proxyDigest == "" && runtimeDigest == "" {
+		tenantDigest == "" && proxyDigest == "" && runtimeDigest == "" && guardrailDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
 		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest +
-		";rt=" + runtimeDigest))
+		";rt=" + runtimeDigest + ";gr=" + guardrailDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
@@ -1965,6 +2024,36 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// GuardrailPolicy → requeue every AgentDeployment in the policy's namespace that
+	// references it via spec.guardrailPolicyRef (M66, ADR 0059 §8). A policy edit changes
+	// the resolved-policy hash → the referencing agent's combined digest → the Knative
+	// revision rolls (compliance tightening propagates). A policy CREATE also re-reconciles
+	// a previously-dangling referencer (Ready=False → resolves → serves guarded). Delete
+	// events carry the last-known name, so a dropped policy re-reconciles its referencers
+	// and they fail closed. Scoped to referencers only (not the whole namespace) — the
+	// name is a stable field on each AgentDeployment, so the exact set is cheap to compute.
+	mapGuardrailPolicyToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			gp, ok := obj.(*agentsv1beta1.GuardrailPolicy)
+			if !ok {
+				return nil
+			}
+			var list agentsv1alpha1.AgentDeploymentList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(gp.Namespace)); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				if list.Items[i].Spec.GuardrailPolicyRef == gp.Name {
+					reqs = append(reqs, reconcile.Request{
+						NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+					})
+				}
+			}
+			return reqs
+		},
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.AgentDeployment{}).
 		Owns(&agentsv1alpha1.AgentVersion{}).
@@ -1980,6 +2069,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
 		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).
+		Watches(&agentsv1beta1.GuardrailPolicy{}, mapGuardrailPolicyToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }

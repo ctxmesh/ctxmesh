@@ -40,6 +40,7 @@ from ctxmesh.errors import (
     ConfigError,
     CtxmeshError,
     EndpointError,
+    GuardrailBlockedError,
     NotInPodError,
 )
 from ctxmesh.managed import (
@@ -62,6 +63,7 @@ __all__ = [
     "ConfigError",
     "NotInPodError",
     "EndpointError",
+    "GuardrailBlockedError",
     "ModelClient",
     "ChatResponse",
     "TraceClient",

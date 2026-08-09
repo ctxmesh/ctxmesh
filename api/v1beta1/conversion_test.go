@@ -135,6 +135,36 @@ func TestAgentDeploymentNilRuntimeRoundTrip(t *testing.T) {
 	assert.Nil(t, back.Spec.Runtime, "round-trip must preserve nil Runtime")
 }
 
+// TestAgentDeploymentGuardrailPolicyRefRoundTrip proves that spec.guardrailPolicyRef (m66.1)
+// survives a v1beta1 → v1alpha1 → v1beta1 round trip losslessly. The field lives on the shared
+// v1alpha1.AgentDeploymentSpec (the hub spec), so dst.Spec=src.Spec covers it automatically —
+// this test is a regression guard that makes the wire-through explicit and catches any future
+// accidental field exclusion.
+func TestAgentDeploymentGuardrailPolicyRefRoundTrip(t *testing.T) {
+	hub := &v1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "guarded-agent", Namespace: "default"},
+		Spec: v1alpha1.AgentDeploymentSpec{
+			Image:              "ghcr.io/ctxmesh/guarded-agent:v1",
+			GuardrailPolicyRef: "strict-policy",
+		},
+	}
+
+	// hub → spoke (v1alpha1 → v1beta1).
+	spoke := &AgentDeployment{}
+	require.NoError(t, spoke.ConvertFrom(hub))
+	assert.Equal(t, hub.Name, spoke.Name)
+	assert.Equal(t, "strict-policy", spoke.Spec.GuardrailPolicyRef,
+		"GuardrailPolicyRef must be non-empty after ConvertFrom")
+
+	// spoke → hub (round trip): must reproduce the original spec exactly.
+	back := &v1alpha1.AgentDeployment{}
+	require.NoError(t, spoke.ConvertTo(back))
+	assert.Equal(t, hub.ObjectMeta, back.ObjectMeta)
+	assert.Equal(t, hub.Spec, back.Spec)
+	assert.Equal(t, "strict-policy", back.Spec.GuardrailPolicyRef,
+		"GuardrailPolicyRef must survive the full v1beta1↔v1alpha1 round trip")
+}
+
 // TestSecretBindingConversionRoundTrip proves the v1alpha1(hub) ↔ v1beta1(spoke) conversion is
 // lossless (ADR 0037, M34) — the graduation is field-identical, so a round trip is the identity.
 func TestSecretBindingConversionRoundTrip(t *testing.T) {
