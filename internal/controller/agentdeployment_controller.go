@@ -746,8 +746,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
 	// RuntimeSpec as JSON and inject it as AGENT_RUNTIME — a STATIC platform env var
 	// (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses it at startup.
-	// Injected BEFORE spec.env so user env cannot shadow this platform var. When nil,
-	// inject nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
+	// Injected before spec.env, which is appended last; by the platform convention a
+	// user's spec.env may override a platform default (K8s uses the last value for a
+	// duplicate name). That's harmless here — the authoritative output-schema validator
+	// reads spec.runtime from the CRD (m65.4), not this env var. When nil, inject
+	// nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
 	if deploy.Spec.Runtime != nil {
 		rtBytes, err := json.Marshal(deploy.Spec.Runtime)
 		if err != nil {
