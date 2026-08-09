@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -29,6 +30,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 )
 
 // kbFinalizer guards KnowledgeBase deletion so both stores (knowledge_chunks Postgres partition
@@ -49,21 +52,49 @@ const (
 	reasonKBInvalidSource    = "InvalidSource"
 )
 
-// KnowledgeBaseReconciler is a VALIDATE-ONLY controller (the GuardrailPolicy/Workflow pattern,
-// ADR 0061, m68.1). It validates the KnowledgeBase spec — embeddingRoute non-empty, chunking sane
-// (size > 0, overlap < size), source.type valid + required companion field present — then sets
-// Validated=True + phase=Pending (ingestion hasn't run) or Validated=False + an Invalid condition.
-// It also manages the kbFinalizer lifecycle.
+// corpusStore is the narrow slice of the knowledge store the reconciler needs: the finalizer's DB-half GC
+// (DeleteCorpus — drops the knowledge_chunks partition + the corpus-status row) and the status projection
+// (GetCorpusStatus — the coarse ingestion outcome the executor wrote on cpDB). A narrow interface lets the
+// envtest inject a fake without a real Postgres and keeps the reconciler decoupled from the write path.
+type corpusStore interface {
+	DeleteCorpus(ctx context.Context, namespace, knowledgeBase string) error
+	GetCorpusStatus(ctx context.Context, namespace, knowledgeBase string) (knowledge.CorpusStatus, bool, error)
+}
+
+// prefixDeleter is the narrow slice of the durable object store the finalizer's bucket-half GC needs
+// (DeletePrefix — purge every document under the KB's prefix). objectstore.ObjectStore satisfies it.
+type prefixDeleter interface {
+	DeletePrefix(ctx context.Context, prefix string) error
+}
+
+// ingestingRequeue is how long the reconciler waits before re-projecting KB.status while a corpus is Ingesting
+// (there is no CRD watch on the off-request corpus-status row, so the controller polls the status channel while
+// a run is in flight). A steady-state (Ready/Failed/…) corpus does not requeue — the next spec change or the
+// BFF's Ingesting flip re-triggers it.
+const ingestingRequeue = 10 * time.Second
+
+// KnowledgeBaseReconciler validates the KnowledgeBase spec (m68.1), runs the finalizer's two-store GC (m68.10,
+// ADR 0061 governance #3), and projects the ingestion outcome from the corpus-status channel onto KB.status
+// (m68.10, ADR 0061 Fork 2). On a live object it: ensures the finalizer, validates the spec (embeddingRoute
+// non-empty, chunking sane, source valid), then reconciles KB.status from the corpus-status row the ingestion
+// executor wrote on cpDB. On deletion it GCs BOTH stores before releasing the finalizer.
 //
-// What this controller does NOT do (clean seams for later tasks):
-//   - It does NOT ingest, embed, or write to knowledge_chunks (m68.6: the ingestion executor).
-//   - It does NOT touch any object store (m68.6).
-//   - The finalizer's two-store GC (knowledge_chunks partition + durable bucket prefix) is a
-//     documented no-op placeholder here — the real GC lands in m68.10 (ADR 0061 governance #3).
-//   - It does NOT bind a KnowledgeBase to an AgentDeployment (m68.8: AgentDeployment
-//     spec.knowledgeBases[] + launcher roster gate injection).
+// Store wiring (injected in cmd/main.go from the manager's existing cpDB + OBJECT_STORE_ADDR):
+//   - Knowledge (cpDB): DeleteCorpus (finalizer DB half) + GetCorpusStatus (status projection). nil in a
+//     deployment without cpDB → the finalizer skips the DB half with a WARN; status stays validate-only.
+//   - ObjectStore (OBJECT_STORE_ADDR): DeletePrefix (finalizer bucket half). nil when unset (dev) → the
+//     finalizer skips the bucket half with a WARN. A store that does not exist must not block deletion forever.
+//
+// What this controller still does NOT do (clean seams): it does not ingest/embed/write knowledge_chunks (m68.6,
+// the ingestion executor), and the console reads the projected KB.status (m68.13) — it never reads cpDB directly.
 type KnowledgeBaseReconciler struct {
 	client.Client
+	// Knowledge is the control-plane knowledge store (from cpDB). nil ⇒ the finalizer skips the DB-half GC and
+	// the status projection is disabled (a deployment without CONTROLPLANE_DSN).
+	Knowledge corpusStore
+	// ObjectStore is the durable KB object store (from OBJECT_STORE_ADDR). nil ⇒ the finalizer skips the
+	// bucket-half GC (a dev deployment without an object store).
+	ObjectStore prefixDeleter
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=knowledgebases,verbs=get;list;watch;create;update;patch;delete
@@ -82,15 +113,14 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("fetching KnowledgeBase: %w", err)
 	}
 
-	// ── Deletion path: the finalizer is set; perform GC before releasing it ─────────────────────
+	// ── Deletion path: run the two-store GC before releasing the finalizer (governance #3) ──────
 	if !kb.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&kb, kbFinalizer) {
-			// GC of knowledge_chunks partition + the durable bucket prefix lands in m68.10
-			// (ADR 0061 governance #3). Here we remove the finalizer immediately so deletion
-			// is not blocked, but the seam is established from day one. The real two-store
-			// cleanup (DROP PARTITION + object-store prefix purge) will be wired here in m68.10.
-			log.V(1).Info("KnowledgeBase deletion: releasing finalizer (two-store GC is m68.10)",
-				"knowledgebase", kb.Name)
+			// GC BOTH stores. On any error the finalizer is NOT removed — the reconcile returns the
+			// error and requeues, so a partial failure is retried and never orphans a store.
+			if err := r.gcCorpus(ctx, &kb); err != nil {
+				return ctrl.Result{}, err
+			}
 			controllerutil.RemoveFinalizer(&kb, kbFinalizer)
 			if err := r.Update(ctx, &kb); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing KnowledgeBase finalizer: %w", err)
@@ -153,12 +183,106 @@ func (r *KnowledgeBaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				kb.Spec.Source.Type))
 	}
 
-	// ── Valid spec → Pending (ingestion not yet run, that is m68.6) ───────────────────────────
+	// ── Valid spec → Validated=True (phase → Pending only on the very first reconcile) ─────────
 	log.V(1).Info("KnowledgeBase validated", "knowledgebase", kb.Name,
 		"embeddingRoute", kb.Spec.EmbeddingRoute, "sourceType", kb.Spec.Source.Type)
-	return ctrl.Result{}, r.setStatus(ctx, &kb, metav1.ConditionTrue, reasonKBValidated,
+	if err := r.setStatus(ctx, &kb, metav1.ConditionTrue, reasonKBValidated,
 		fmt.Sprintf("spec is valid: embeddingRoute=%q, source.type=%q, chunking size=%d/overlap=%d/splitter=%q",
-			kb.Spec.EmbeddingRoute, kb.Spec.Source.Type, size, overlap, kb.Spec.Chunking.Splitter))
+			kb.Spec.EmbeddingRoute, kb.Spec.Source.Type, size, overlap, kb.Spec.Chunking.Splitter)); err != nil {
+		return ctrl.Result{}, err
+	}
+	// ── Project the ingestion outcome from the corpus-status channel onto KB.status (Fork 2) ────
+	return r.reconcileCorpusStatus(ctx, &kb)
+}
+
+// gcCorpus runs the finalizer's two-store GC (ADR 0061 governance #3): drop the knowledge_chunks partition
+// (+ the corpus-status row, both inside DeleteCorpus) and purge the durable bucket prefix. It is idempotent
+// and survives partial failure — the caller removes the finalizer ONLY when this returns nil, so a failed half
+// requeues and retries, never orphaning a store. An unconfigured store (nil, e.g. a dev deployment without
+// cpDB / OBJECT_STORE_ADDR) is skipped with a WARN — a store that does not exist here must not block deletion.
+func (r *KnowledgeBaseReconciler) gcCorpus(
+	ctx context.Context, kb *agentsv1beta1.KnowledgeBase,
+) error {
+	log := logf.FromContext(ctx)
+	ns := kb.Namespace
+	if r.Knowledge != nil {
+		if err := r.Knowledge.DeleteCorpus(ctx, ns, kb.Name); err != nil {
+			return fmt.Errorf("finalizer GC: dropping knowledge_chunks partition for %s/%s: %w", ns, kb.Name, err)
+		}
+	} else {
+		log.Info("finalizer GC: knowledge store not configured — skipping the DB-half (partition) GC",
+			"knowledgebase", kb.Name)
+	}
+	if r.ObjectStore != nil {
+		if err := r.ObjectStore.DeletePrefix(ctx, objectstore.KnowledgePrefix(ns, kb.Name)); err != nil {
+			return fmt.Errorf("finalizer GC: purging object-store prefix for %s/%s: %w", ns, kb.Name, err)
+		}
+	} else {
+		log.Info("finalizer GC: object store not configured — skipping the bucket-half GC",
+			"knowledgebase", kb.Name)
+	}
+	return nil
+}
+
+// reconcileCorpusStatus projects the coarse ingestion outcome (the corpus-status row the ingestion executor
+// wrote on cpDB) onto KB.status (ADR 0061 Fork 2 — a coarse projection, change-guarded, no write-storm). The
+// terminal phase (Ready/PartiallyIngested/Failed/BudgetExceeded) + counts live in the row; the transient
+// `Ingesting` phase is set by the BFF ingest endpoint (caller-scoped) and polled here until the terminal row
+// appears. A deployment without a knowledge store (nil) leaves status validate-only.
+func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
+	ctx context.Context, kb *agentsv1beta1.KnowledgeBase,
+) (ctrl.Result, error) {
+	if r.Knowledge == nil {
+		return ctrl.Result{}, nil
+	}
+	log := logf.FromContext(ctx)
+	cs, found, err := r.Knowledge.GetCorpusStatus(ctx, kb.Namespace, kb.Name)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reading corpus status for %s/%s: %w", kb.Namespace, kb.Name, err)
+	}
+	if !found {
+		// No terminal ingestion outcome yet. If the BFF flipped us to Ingesting, poll for the row.
+		if kb.Status.Phase == "Ingesting" {
+			return ctrl.Result{RequeueAfter: ingestingRequeue}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+	changed := false
+	if cs.Phase != "" && kb.Status.Phase != cs.Phase {
+		kb.Status.Phase = cs.Phase
+		changed = true
+	}
+	if kb.Status.DocumentCount != int32(cs.DocumentCount) {
+		kb.Status.DocumentCount = int32(cs.DocumentCount)
+		changed = true
+	}
+	if kb.Status.ChunkCount != int32(cs.ChunkCount) {
+		kb.Status.ChunkCount = int32(cs.ChunkCount)
+		changed = true
+	}
+	if kb.Status.SizeBytes != cs.SizeBytes {
+		kb.Status.SizeBytes = cs.SizeBytes
+		changed = true
+	}
+	if kb.Status.IngestionRunRef != cs.IngestionRunID {
+		kb.Status.IngestionRunRef = cs.IngestionRunID
+		changed = true
+	}
+	if cs.LastIngestedAt != nil {
+		t := metav1.NewTime(*cs.LastIngestedAt)
+		if kb.Status.LastIngestedAt == nil || !kb.Status.LastIngestedAt.Equal(&t) {
+			kb.Status.LastIngestedAt = &t
+			changed = true
+		}
+	}
+	if changed {
+		if err := r.Status().Update(ctx, kb); err != nil {
+			return ctrl.Result{}, fmt.Errorf("projecting corpus status onto %s/%s: %w", kb.Namespace, kb.Name, err)
+		}
+		log.V(1).Info("KnowledgeBase status projected from corpus-status channel",
+			"knowledgebase", kb.Name, "phase", cs.Phase, "chunks", cs.ChunkCount)
+	}
+	return ctrl.Result{}, nil
 }
 
 // setStatus writes the Validated condition + phase + observedGeneration, only when something
@@ -172,8 +296,11 @@ func (r *KnowledgeBaseReconciler) setStatus(
 	reason, message string,
 ) error {
 	phase := ""
-	if status == metav1.ConditionTrue {
-		phase = "Pending" // ingestion hasn't run yet; the executor (m68.6) will advance this
+	if status == metav1.ConditionTrue && kb.Status.Phase == "" {
+		// Only stamp Pending on the FIRST validate (empty phase). Once ingestion has advanced the phase
+		// (Ingesting via the BFF, or a terminal phase via the corpus-status projection), a re-validate must
+		// NOT reset it to Pending — reconcileCorpusStatus owns the phase from then on.
+		phase = "Pending"
 	}
 	condChanged := apimeta.SetStatusCondition(&kb.Status.Conditions, metav1.Condition{
 		Type:               conditionKBValidated,

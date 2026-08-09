@@ -164,8 +164,26 @@ func (s *pgStore) Search(ctx context.Context, q SearchQuery) ([]ScoredChunk, err
 	return out, rows.Err()
 }
 
-// DeleteCorpus drops the corpus's partition (its chunks + indexes go with it). Idempotent via DROP TABLE IF
-// EXISTS — a corpus that never had a partition is a no-op. The DB half of the KB finalizer (m68.10).
+// DeleteDocument removes a single document's chunks (all rows whose document_ref matches, any ingestion run) —
+// the document-delete cascade (ADR 0061 governance #3). Returns rows deleted; idempotent (0 rows is not an error).
+func (s *pgStore) DeleteDocument(ctx context.Context, namespace, knowledgeBase, documentRef string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM knowledge_chunks
+		WHERE namespace = $1 AND knowledge_base = $2 AND document_ref = $3`,
+		namespace, knowledgeBase, documentRef)
+	if err != nil {
+		return 0, fmt.Errorf("knowledge: delete document %q: %w", documentRef, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("knowledge: delete document rows: %w", err)
+	}
+	return int(n), nil
+}
+
+// DeleteCorpus drops the corpus's partition (its chunks + indexes go with it) AND deletes the corpus-status row,
+// so a dropped corpus leaves no orphan status. Idempotent via DROP TABLE IF EXISTS + a DELETE that matches
+// nothing — a corpus that never had a partition is a no-op. The DB half of the KB finalizer (m68.10).
 func (s *pgStore) DeleteCorpus(ctx context.Context, namespace, knowledgeBase string) error {
 	if strings.TrimSpace(knowledgeBase) == "" {
 		return fmt.Errorf("knowledge: DeleteCorpus: knowledgeBase is required")
@@ -174,7 +192,62 @@ func (s *pgStore) DeleteCorpus(ctx context.Context, namespace, knowledgeBase str
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s`, part)); err != nil {
 		return fmt.Errorf("knowledge: delete corpus %q: %w", knowledgeBase, err)
 	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM knowledge_corpus_status WHERE namespace = $1 AND knowledge_base = $2`,
+		namespace, knowledgeBase); err != nil {
+		return fmt.Errorf("knowledge: delete corpus status %q: %w", knowledgeBase, err)
+	}
 	return nil
+}
+
+// UpsertCorpusStatus writes the coarse corpus-status row (ADR 0061 Fork 2 — the status channel). One row per
+// corpus, keyed (namespace, knowledge_base); the executor calls it once at a run's terminal phase.
+func (s *pgStore) UpsertCorpusStatus(ctx context.Context, st CorpusStatus) error {
+	if strings.TrimSpace(st.KnowledgeBase) == "" {
+		return fmt.Errorf("knowledge: UpsertCorpusStatus: knowledgeBase is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO knowledge_corpus_status
+			(namespace, knowledge_base, phase, document_count, chunk_count, size_bytes, partial,
+			 ingestion_run_id, last_ingested_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+		ON CONFLICT (namespace, knowledge_base) DO UPDATE SET
+			phase = EXCLUDED.phase, document_count = EXCLUDED.document_count, chunk_count = EXCLUDED.chunk_count,
+			size_bytes = EXCLUDED.size_bytes, partial = EXCLUDED.partial,
+			ingestion_run_id = EXCLUDED.ingestion_run_id, last_ingested_at = EXCLUDED.last_ingested_at,
+			updated_at = now()`,
+		st.Namespace, st.KnowledgeBase, st.Phase, st.DocumentCount, st.ChunkCount, st.SizeBytes, st.Partial,
+		st.IngestionRunID, st.LastIngestedAt)
+	if err != nil {
+		return fmt.Errorf("knowledge: upsert corpus status %q: %w", st.KnowledgeBase, err)
+	}
+	return nil
+}
+
+// GetCorpusStatus reads the corpus-status row. found=false (zero status, nil error) when no ingestion has run.
+func (s *pgStore) GetCorpusStatus(ctx context.Context, namespace, knowledgeBase string) (CorpusStatus, bool, error) {
+	var (
+		st      CorpusStatus
+		lastIng sql.NullTime
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT namespace, knowledge_base, phase, document_count, chunk_count, size_bytes, partial,
+			ingestion_run_id, last_ingested_at, updated_at
+		FROM knowledge_corpus_status WHERE namespace = $1 AND knowledge_base = $2`,
+		namespace, knowledgeBase).Scan(&st.Namespace, &st.KnowledgeBase, &st.Phase, &st.DocumentCount,
+		&st.ChunkCount, &st.SizeBytes, &st.Partial, &st.IngestionRunID, &lastIng, &st.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return CorpusStatus{}, false, nil
+	}
+	if err != nil {
+		return CorpusStatus{}, false, fmt.Errorf("knowledge: get corpus status %q: %w", knowledgeBase, err)
+	}
+	if lastIng.Valid {
+		t := lastIng.Time.UTC()
+		st.LastIngestedAt = &t
+	}
+	st.UpdatedAt = st.UpdatedAt.UTC()
+	return st, true, nil
 }
 
 // CountAndSize returns a corpus's chunk count + approximate size (sum of content bytes) for the status

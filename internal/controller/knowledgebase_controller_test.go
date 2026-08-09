@@ -19,7 +19,10 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,6 +36,8 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────────────────────────
@@ -350,4 +355,288 @@ func TestKnowledgeBinding_NoKnowledgeBases_NoByteDrift(t *testing.T) {
 	assert.False(t, hasEnabled, "no knowledgeBases → KNOWLEDGE_BASE_ENABLED must not be injected")
 	_, hasRoster := envMap["KNOWLEDGE_BASES"]
 	assert.False(t, hasRoster, "no knowledgeBases → KNOWLEDGE_BASES must not be injected")
+}
+
+// ── Fake stores for finalizer / status tests ──────────────────────────────────────────────────────
+//
+// These fakes implement corpusStore and prefixDeleter (the narrow interfaces the KnowledgeBaseReconciler
+// depends on) so the envtest can exercise the GC and status-projection paths without a real Postgres or
+// object-store connection.
+
+// fakeCorpusStore records DeleteCorpus calls and serves a canned GetCorpusStatus response. It is safe
+// for concurrent use (the reconciler may be called from goroutines in future, and tests reuse it across
+// reconcile invocations).
+type fakeCorpusStore struct {
+	mu sync.Mutex
+
+	// DeleteCorpusArgs holds (namespace, knowledgeBase) pairs for each DeleteCorpus call.
+	DeleteCorpusArgs [][2]string
+	// DeleteCorpusErr, if non-nil, is returned by DeleteCorpus.
+	DeleteCorpusErr error
+
+	// GetStatusResult is the canned CorpusStatus returned by GetCorpusStatus.
+	GetStatusResult knowledge.CorpusStatus
+	// GetStatusFound controls the found return value of GetCorpusStatus.
+	GetStatusFound bool
+	// GetStatusErr, if non-nil, is returned by GetCorpusStatus.
+	GetStatusErr error
+}
+
+func (f *fakeCorpusStore) DeleteCorpus(_ context.Context, namespace, kb string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.DeleteCorpusArgs = append(f.DeleteCorpusArgs, [2]string{namespace, kb})
+	return f.DeleteCorpusErr
+}
+
+func (f *fakeCorpusStore) GetCorpusStatus(_ context.Context, _, _ string) (knowledge.CorpusStatus, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.GetStatusResult, f.GetStatusFound, f.GetStatusErr
+}
+
+// fakePrefixDeleter records DeletePrefix calls and can be configured to fail.
+type fakePrefixDeleter struct {
+	mu sync.Mutex
+
+	// DeletePrefixArgs holds each prefix passed to DeletePrefix.
+	DeletePrefixArgs []string
+	// DeletePrefixErr, if non-nil, is returned by DeletePrefix.
+	DeletePrefixErr error
+}
+
+func (f *fakePrefixDeleter) DeletePrefix(_ context.Context, prefix string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.DeletePrefixArgs = append(f.DeletePrefixArgs, prefix)
+	return f.DeletePrefixErr
+}
+
+// newKBReconcilerWith builds a KnowledgeBaseReconciler with the given fake stores wired in.
+func newKBReconcilerWith(cs corpusStore, pd prefixDeleter) *KnowledgeBaseReconciler {
+	return &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: cs, ObjectStore: pd}
+}
+
+// reconcileKBExpectErr calls Reconcile and asserts it returns an error. Used for partial-failure tests.
+func reconcileKBExpectErr(t *testing.T, r *KnowledgeBaseReconciler, name, namespace string) {
+	t.Helper()
+	_, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
+	})
+	require.Error(t, err, "reconcile must return an error when a store GC fails")
+}
+
+// ── m68.10 finalizer + status tests ──────────────────────────────────────────────────────────────
+
+// TestKnowledgeBase_FinalizerGCsBothStores: on deletion the finalizer calls DeleteCorpus on the
+// corpus store AND DeletePrefix on the object store with the right key, then removes the finalizer.
+func TestKnowledgeBase_FinalizerGCsBothStores(t *testing.T) {
+	const ns = "default"
+	const name = "kb-gc-both"
+
+	fakeKnowledge := &fakeCorpusStore{}
+	fakeOS := &fakePrefixDeleter{}
+	r := newKBReconcilerWith(fakeKnowledge, fakeOS)
+
+	// Create the KB and reconcile once to add the finalizer.
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	require.True(t, controllerutil.ContainsFinalizer(&live, kbFinalizer),
+		"finalizer must be present after first reconcile")
+
+	// Delete the KB — it enters Terminating, blocked by the finalizer.
+	require.NoError(t, k8sClient.Delete(testCtx, &live))
+
+	// Reconcile on the terminating object: GC must fire + finalizer must be released.
+	reconcileKB(t, r, name, ns)
+
+	// Both stores must have been called.
+	fakeKnowledge.mu.Lock()
+	defer fakeKnowledge.mu.Unlock()
+	require.Len(t, fakeKnowledge.DeleteCorpusArgs, 1,
+		"DeleteCorpus must be called exactly once during the finalizer GC")
+	assert.Equal(t, [2]string{ns, name}, fakeKnowledge.DeleteCorpusArgs[0],
+		"DeleteCorpus must receive the correct (namespace, kb) pair")
+
+	fakeOS.mu.Lock()
+	defer fakeOS.mu.Unlock()
+	require.Len(t, fakeOS.DeletePrefixArgs, 1,
+		"DeletePrefix must be called exactly once during the finalizer GC")
+	wantPrefix := objectstore.KnowledgePrefix(ns, name)
+	assert.Equal(t, wantPrefix, fakeOS.DeletePrefixArgs[0],
+		"DeletePrefix must receive the KnowledgePrefix for the deleted KB")
+
+	// The object must be gone once the finalizer is released.
+	var gone agentsv1beta1.KnowledgeBase
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &gone)
+	assert.True(t, apierrors.IsNotFound(err),
+		"KnowledgeBase must be garbage-collected once the finalizer is released")
+}
+
+// TestKnowledgeBase_FinalizerPartialFailureRequeues: when the object-store DeletePrefix fails the
+// reconcile must return an error (so it requeues), and the finalizer must still be present. Once the
+// store succeeds the finalizer is removed.
+func TestKnowledgeBase_FinalizerPartialFailureRequeues(t *testing.T) {
+	const ns = "default"
+	const name = "kb-gc-partial"
+
+	fakeKnowledge := &fakeCorpusStore{}
+	fakeOS := &fakePrefixDeleter{DeletePrefixErr: fmt.Errorf("object store unavailable")}
+	r := newKBReconcilerWith(fakeKnowledge, fakeOS)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	require.NoError(t, k8sClient.Delete(testCtx, &live))
+
+	// First reconcile: object store fails → error returned, finalizer stays.
+	reconcileKBExpectErr(t, r, name, ns)
+
+	var terminating agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &terminating))
+	assert.True(t, controllerutil.ContainsFinalizer(&terminating, kbFinalizer),
+		"finalizer must remain when a store GC fails (so the delete is retried on next reconcile)")
+
+	// Fix the store error; second reconcile must succeed and release the finalizer.
+	fakeOS.mu.Lock()
+	fakeOS.DeletePrefixErr = nil
+	fakeOS.mu.Unlock()
+	reconcileKB(t, r, name, ns)
+
+	var gone agentsv1beta1.KnowledgeBase
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &gone)
+	assert.True(t, apierrors.IsNotFound(err),
+		"KnowledgeBase must be deleted once the store GC succeeds on retry")
+}
+
+// TestKnowledgeBase_StatusProjection: a live valid KB with a canned GetCorpusStatus response (Phase,
+// ChunkCount, DocumentCount, SizeBytes) must have those values projected onto KB.status by reconcile.
+func TestKnowledgeBase_StatusProjection(t *testing.T) {
+	const ns = "default"
+	const name = "kb-status-proj"
+
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: name,
+			Phase: "Ready", DocumentCount: 2, ChunkCount: 7, SizeBytes: 1234,
+			IngestionRunID: "run-proj",
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	assert.Equal(t, "Ready", live.Status.Phase,
+		"reconcile must project the corpus-status Phase onto KB.status.phase")
+	assert.Equal(t, int32(7), live.Status.ChunkCount,
+		"reconcile must project ChunkCount onto KB.status.chunkCount")
+	assert.Equal(t, int32(2), live.Status.DocumentCount,
+		"reconcile must project DocumentCount onto KB.status.documentCount")
+	assert.Equal(t, int64(1234), live.Status.SizeBytes,
+		"reconcile must project SizeBytes onto KB.status.sizeBytes")
+	assert.Equal(t, "run-proj", live.Status.IngestionRunRef,
+		"reconcile must project IngestionRunID onto KB.status.ingestionRunRef")
+}
+
+// TestKnowledgeBase_StatusProjection_IngestingRequeue: when GetCorpusStatus returns found=false AND
+// the KB.status.Phase is already "Ingesting" (set by the BFF endpoint), the reconcile must return a
+// RequeueAfter > 0 (so the controller polls for the terminal row to appear).
+func TestKnowledgeBase_StatusProjection_IngestingRequeue(t *testing.T) {
+	const ns = "default"
+	const name = "kb-ingesting-requeue"
+
+	// GetCorpusStatus returns found=false — the executor has not written a terminal row yet.
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	// First reconcile: adds finalizer + validates spec + sets status.phase="Pending".
+	reconcileKB(t, r, name, ns)
+
+	// Simulate the BFF setting phase=Ingesting on the status sub-resource.
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.Phase = "Ingesting"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+
+	// Second reconcile: GetCorpusStatus returns found=false + phase is "Ingesting" → must requeue.
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err, "reconcile must not error during an Ingesting poll")
+	assert.Positive(t, result.RequeueAfter,
+		"reconcile must return RequeueAfter > 0 while status is Ingesting and no terminal row is found")
+}
+
+// TestKnowledgeBase_FinalizerLifecycle_NilStores: the existing test (nil stores → skip GC → finalizer
+// removed). Confirms that both new and old code paths coexist: nil stores skip GC, non-nil stores GC.
+// (This test mirrors the pre-existing TestKnowledgeBase_FinalizerLifecycle exactly; it is reproduced
+// here so the reader sees the nil-store / non-nil-store pair side by side.)
+func TestKnowledgeBase_FinalizerLifecycle_NilStores(t *testing.T) {
+	const ns = "default"
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb-nil-stores", Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+
+	r := newKBReconciler() // nil Knowledge + nil ObjectStore
+	reconcileKB(t, r, "kb-nil-stores", ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-nil-stores", Namespace: ns}, &live))
+	assert.True(t, controllerutil.ContainsFinalizer(&live, kbFinalizer),
+		"finalizer must be added even when stores are nil")
+
+	require.NoError(t, k8sClient.Delete(testCtx, &live))
+	reconcileKB(t, r, "kb-nil-stores", ns)
+
+	var gone agentsv1beta1.KnowledgeBase
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-nil-stores", Namespace: ns}, &gone)
+	assert.True(t, apierrors.IsNotFound(err),
+		"nil stores must not block deletion — the finalizer must be released")
 }

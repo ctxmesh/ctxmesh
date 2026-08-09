@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -293,5 +294,131 @@ func TestStore_ValidateRejections(t *testing.T) {
 		dimMismatch := chunk("", "d", 0, "x", 1, 0, 0)
 		dimMismatch.EmbeddingDim = 5
 		assert.ErrorIs(t, s.Upsert(ctx, []Chunk{dimMismatch}), controlplane.ErrInvalid, "embedding length != dim")
+	})
+}
+
+// ── CorpusStatus (ADR 0061 Fork 2) ───────────────────────────────────────────────────────────────
+//
+// UpsertCorpusStatus/GetCorpusStatus are the status channel between the ingestion executor and the
+// KnowledgeBase controller. The tests below form the conformance contract; both the mem twin and
+// the Postgres store must pass them identically.
+
+// TestStore_CorpusStatus_RoundTrip verifies that a UpsertCorpusStatus→GetCorpusStatus round-trip
+// preserves all fields and that a second Upsert overwrites (one row per corpus, not two).
+func TestStore_CorpusStatus_RoundTrip(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		now := time.Now().UTC().Truncate(time.Second)
+
+		st := CorpusStatus{
+			Namespace:      "prod",
+			KnowledgeBase:  testKB,
+			Phase:          "Ready",
+			DocumentCount:  3,
+			ChunkCount:     42,
+			SizeBytes:      99_000,
+			Partial:        false,
+			IngestionRunID: "run-abc",
+			LastIngestedAt: &now,
+		}
+		require.NoError(t, s.UpsertCorpusStatus(ctx, st))
+
+		got, found, err := s.GetCorpusStatus(ctx, "prod", testKB)
+		require.NoError(t, err)
+		require.True(t, found, "GetCorpusStatus must find the row after UpsertCorpusStatus")
+		assert.Equal(t, "prod", got.Namespace)
+		assert.Equal(t, testKB, got.KnowledgeBase)
+		assert.Equal(t, "Ready", got.Phase)
+		assert.Equal(t, 3, got.DocumentCount)
+		assert.Equal(t, 42, got.ChunkCount)
+		assert.Equal(t, int64(99_000), got.SizeBytes)
+		assert.Equal(t, "run-abc", got.IngestionRunID)
+		require.NotNil(t, got.LastIngestedAt, "LastIngestedAt must survive the round-trip")
+		assert.Equal(t, now.Unix(), got.LastIngestedAt.Unix(), "LastIngestedAt must be preserved to the second")
+
+		// A second Upsert (new phase) must overwrite — not append a second row.
+		st2 := CorpusStatus{
+			Namespace: "prod", KnowledgeBase: testKB,
+			Phase: "Failed", DocumentCount: 3, ChunkCount: 42, SizeBytes: 99_000,
+			IngestionRunID: "run-xyz",
+		}
+		require.NoError(t, s.UpsertCorpusStatus(ctx, st2))
+
+		got2, found2, err := s.GetCorpusStatus(ctx, "prod", testKB)
+		require.NoError(t, err)
+		require.True(t, found2)
+		assert.Equal(t, "Failed", got2.Phase, "second Upsert must overwrite the phase (one row per corpus)")
+		assert.Equal(t, "run-xyz", got2.IngestionRunID, "second Upsert must overwrite the ingestion run ID")
+	})
+}
+
+// TestStore_GetCorpusStatus_NotFound verifies that GetCorpusStatus on an absent corpus returns
+// found=false (not an error) — this is what the controller uses to gate its Ingesting requeue.
+func TestStore_GetCorpusStatus_NotFound(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		_, found, err := s.GetCorpusStatus(ctx, "prod", "no-such-kb")
+		require.NoError(t, err, "GetCorpusStatus on absent corpus must return nil error")
+		assert.False(t, found, "GetCorpusStatus on absent corpus must return found=false")
+	})
+}
+
+// TestStore_DeleteDocument_RemovesExactDocument verifies that DeleteDocument removes exactly one
+// document's chunks (all its rows, any run) while leaving a sibling document intact; and that the
+// returned count equals the number of rows deleted.
+func TestStore_DeleteDocument_RemovesExactDocument(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ensure(t, s)
+
+		// Seed two documents (2 chunks in docA, 1 chunk in docB).
+		require.NoError(t, s.Upsert(ctx, []Chunk{
+			chunk("", "docA.md", 0, "A chunk 0", 1, 0, 0),
+			chunk("", "docA.md", 1, "A chunk 1", 0, 1, 0),
+		}))
+		require.NoError(t, s.Upsert(ctx, []Chunk{
+			chunk("", "docB.md", 0, "B chunk 0", 0, 0, 1),
+		}))
+
+		// Delete only docA.
+		n, err := s.DeleteDocument(ctx, "prod", testKB, "docA.md")
+		require.NoError(t, err)
+		assert.Equal(t, 2, n, "DeleteDocument must return the count of deleted rows")
+
+		// docB must survive; only docA should be gone.
+		count, _, err := s.CountAndSize(ctx, "prod", testKB)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count, "docB must survive the deletion of docA")
+
+		// A second delete of docA is idempotent (0 rows).
+		n2, err := s.DeleteDocument(ctx, "prod", testKB, "docA.md")
+		require.NoError(t, err)
+		assert.Equal(t, 0, n2, "deleting an already-deleted document must return 0 (idempotent)")
+	})
+}
+
+// TestStore_DeleteCorpus_RemovesStatusRow verifies that DeleteCorpus also removes the corpus-status
+// row (ADR 0061 governance #3) — GetCorpusStatus after DeleteCorpus must return found=false.
+func TestStore_DeleteCorpus_RemovesStatusRow(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ensure(t, s)
+
+		// Write a status row.
+		require.NoError(t, s.UpsertCorpusStatus(ctx, CorpusStatus{
+			Namespace: "prod", KnowledgeBase: testKB, Phase: "Ready",
+			DocumentCount: 1, ChunkCount: 5, SizeBytes: 1024, IngestionRunID: "run-del",
+		}))
+		// Verify it's there.
+		_, found, err := s.GetCorpusStatus(ctx, "prod", testKB)
+		require.NoError(t, err)
+		require.True(t, found, "status row must exist before DeleteCorpus")
+
+		// DeleteCorpus must drop the status row along with the partition.
+		require.NoError(t, s.DeleteCorpus(ctx, "prod", testKB))
+
+		_, found, err = s.GetCorpusStatus(ctx, "prod", testKB)
+		require.NoError(t, err)
+		assert.False(t, found, "DeleteCorpus must also remove the corpus-status row (governance #3)")
 	})
 }

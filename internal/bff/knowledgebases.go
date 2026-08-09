@@ -41,6 +41,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
@@ -467,6 +468,14 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mark the corpus Ingesting on KB.status via the CALLER'S client (ADR 0061 Fork 2: the ingest endpoint is
+	// caller-scoped and holds KB RBAC — unlike the off-request executor, which has no KB-status RBAC and instead
+	// records the terminal outcome on the corpus-status row). Set phase=Ingesting + ingestionRunRef so the console
+	// shows an in-flight ingestion immediately; the controller's periodic reconcile then projects the terminal
+	// phase from the corpus-status row. Best-effort: a status-write failure does not fail the (already-created)
+	// run — the terminal phase still lands via the controller.
+	setKBIngesting(r.Context(), caller, &kb, runID)
+
 	// Dispatch mode: leave `queued` for the worker pool. Dev/single-pod: run in-process so ingestion progresses
 	// without a running worker pool (the workflows_handler precedent).
 	if !s.runWorkerDispatch {
@@ -478,4 +487,20 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 		Status:        string(run.StatusQueued),
 		DocumentCount: len(docs),
 	})
+}
+
+// setKBIngesting sets phase=Ingesting + ingestionRunRef on a KnowledgeBase's status via the caller's client
+// (the caller holds KB-status RBAC; ADR 0061 Fork 2). Change-guarded (never a no-op write-storm) and
+// best-effort: a conflict/failure is logged, not returned — the controller's reconcile is the authoritative
+// projector of the terminal phase, so a missed Ingesting flip only delays the console's in-flight indicator.
+func setKBIngesting(ctx context.Context, caller client.Client, kb *agentsv1beta1.KnowledgeBase, runID string) {
+	if kb.Status.Phase == "Ingesting" && kb.Status.IngestionRunRef == runID {
+		return // already reflecting this run — no write.
+	}
+	kb.Status.Phase = "Ingesting"
+	kb.Status.IngestionRunRef = runID
+	if err := caller.Status().Update(ctx, kb); err != nil {
+		logf.FromContext(ctx).Info("ingest: could not mark KB Ingesting (non-fatal; the controller projects the terminal phase)",
+			"kb", kb.Name, "ns", kb.Namespace, "err", err.Error())
+	}
 }

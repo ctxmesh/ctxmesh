@@ -113,6 +113,29 @@ func (c *ingestionCursor) marshal() (string, error) {
 // reconcile maps to a KnowledgeBase phase. NEVER string-parsed by the reconcile: the code is the contract.
 type ingestionReason string
 
+// KnowledgeBase.status.phase values the executor projects onto the corpus-status row (ADR 0061 Fork 2). These
+// match the CRD's status.phase enum; the KB controller copies them verbatim onto KnowledgeBase.status.phase.
+const (
+	kbPhaseReady             = "Ready"
+	kbPhasePartiallyIngested = "PartiallyIngested"
+	kbPhaseFailed            = "Failed"
+	kbPhaseBudgetExceeded    = "BudgetExceeded"
+)
+
+// ingestionReasonToPhase maps a coded terminal reason to the KnowledgeBase.status.phase the controller reflects.
+// Succeeded is resolved to Ready/PartiallyIngested by the caller (it holds the Partial flag); the other reasons
+// map 1:1. A run left reclaimable (429) records no terminal status — the corpus keeps its prior phase.
+func ingestionReasonToPhase(reason ingestionReason) string {
+	switch reason {
+	case ingestionBudgetExceeded:
+		return kbPhaseBudgetExceeded
+	case ingestionFailed:
+		return kbPhaseFailed
+	default:
+		return kbPhaseFailed
+	}
+}
+
 const (
 	// ingestionSucceeded — every document was ingested (the run is `succeeded`, phase Ready — unless Partial).
 	ingestionSucceeded ingestionReason = "Succeeded"
@@ -486,6 +509,20 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 		outcome.Message = fmt.Sprintf("ingested %d document(s), %d chunk(s)", len(spec.Documents), chunkCount)
 	}
 
+	// STATUS CHANNEL (ADR 0061 Fork 2): project the terminal outcome onto the corpus-status row on cpDB — the
+	// coarse, meaningful-transitions-only channel the KB controller reads + reflects into KnowledgeBase.status.
+	// A successful run stamps last_ingested_at=now; Partial → phase PartiallyIngested, else Ready.
+	phase := kbPhaseReady
+	if cursor.Partial {
+		phase = kbPhasePartiallyIngested
+	}
+	now := time.Now().UTC()
+	s.recordCorpusStatus(ctx, runID, knowledge.CorpusStatus{
+		Namespace: spec.Namespace, KnowledgeBase: spec.KnowledgeBase, Phase: phase,
+		DocumentCount: len(spec.Documents), ChunkCount: chunkCount, SizeBytes: sizeBytes,
+		Partial: cursor.Partial, IngestionRunID: runID, LastIngestedAt: &now,
+	})
+
 	outcomeJSON, err := json.Marshal(outcome)
 	if err != nil {
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("encoding ingestion outcome: %v", err))
@@ -512,6 +549,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 // intact by this call (it was persisted per-document), so a resumable failure (429/402) keeps its progress.
 func (s *Server) failIngestion(runID string, reason ingestionReason, message string) {
 	outcome := IngestionOutcome{Reason: reason, Message: message}
+	var ns, kb string // captured for the corpus-status channel projection below (empty ⇒ spec unreadable, skip)
 	// Enrich the outcome with the counts we can cheaply read from the run's spec + cursor (best-effort — a fail
 	// path must not itself fail). The store CountAndSize is skipped here (the corpus may be mid-write).
 	if rn, err := s.runStore.Get(runID); err == nil {
@@ -519,6 +557,7 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 		if json.Unmarshal([]byte(rn.IngestionSpec), &spec) == nil {
 			outcome.Documents = len(spec.Documents)
 			outcome.EmbeddingModel = spec.EmbeddingRoute
+			ns, kb = spec.Namespace, spec.KnowledgeBase
 		}
 		if cur, cErr := parseIngestionCursor(rn.Cursor); cErr == nil {
 			outcome.Chunks = cur.Chunks
@@ -531,6 +570,18 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 		outcomeJSON = fmt.Appendf(nil, `{"reason":%q,"message":%q}`, reason, message)
 	}
 
+	// STATUS CHANNEL (ADR 0061 Fork 2): project the terminal FAILURE onto the corpus-status row so the KB
+	// controller reflects phase Failed / BudgetExceeded. LastIngestedAt is left nil — this run did not succeed, so
+	// recordCorpusStatus preserves the corpus's prior lastIngestedAt rather than clobbering it. A best-effort
+	// background context so a draining ctx does not skip the status write.
+	if ns != "" && kb != "" {
+		s.recordCorpusStatus(context.Background(), runID, knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: kb,
+			Phase: ingestionReasonToPhase(reason), DocumentCount: outcome.Documents, ChunkCount: outcome.Chunks,
+			Partial: outcome.Partial, IngestionRunID: runID,
+		})
+	}
+
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "ingestion-failed:"+string(reason))
 	if err := s.terminalTransition(runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
@@ -541,5 +592,25 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 		return r.Transition(run.StatusFailed, time.Now())
 	}); err != nil {
 		s.log.Info("ingestion: fail transition skipped", "run", runID, "reason", string(reason), "err", err.Error())
+	}
+}
+
+// recordCorpusStatus writes the coarse corpus-status row (the STATUS CHANNEL, ADR 0061 Fork 2) at a run's
+// terminal phase — the seam the KB controller reads + reflects into KnowledgeBase.status. Best-effort: a status
+// write failure is logged, NEVER fatal to the ingestion (the chunks are already durable in knowledge_chunks; the
+// controller re-reconciles). When st.LastIngestedAt is nil (a Failed/BudgetExceeded run), the corpus's PRIOR
+// lastIngestedAt is carried forward so a failed re-ingest does not erase the last-good timestamp.
+func (s *Server) recordCorpusStatus(ctx context.Context, runID string, st knowledge.CorpusStatus) {
+	if s.knowledgeStore == nil {
+		return // unconfigured store (dev without cpDB) — nothing to write; degrade quietly.
+	}
+	if st.LastIngestedAt == nil {
+		if prior, found, err := s.knowledgeStore.GetCorpusStatus(ctx, st.Namespace, st.KnowledgeBase); err == nil && found {
+			st.LastIngestedAt = prior.LastIngestedAt // preserve the last-good timestamp across a failed run.
+		}
+	}
+	if err := s.knowledgeStore.UpsertCorpusStatus(ctx, st); err != nil {
+		s.log.Error(err, "ingestion: recording corpus status failed (non-fatal; the controller re-reconciles)",
+			"run", runID, "kb", st.KnowledgeBase, "phase", st.Phase)
 	}
 }
