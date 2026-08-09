@@ -396,6 +396,39 @@ function AgentHeader({
             }
           />
         )}
+        {detail.guardrailPolicyRef && (
+          <HeaderKV
+            k="Guardrail policy"
+            v={
+              <>
+                <Link
+                  to="/guardrails"
+                  className="truncate text-primary hover:underline"
+                  data-testid="agent-guardrail-policy-link"
+                >
+                  {detail.guardrailPolicyRef}
+                </Link>
+                {/* When the agent is not ready due to a guardrail policy problem, surface the reason inline
+                    so the operator sees it next to the ref rather than having to scroll to the status timeline. */}
+                {(() => {
+                  const guardrailReasons = ["GuardrailPolicyNotFound", "GuardrailPolicyInvalid"];
+                  const reason = detail.conditions.find(
+                    (c) => c.type === "Ready" && c.status !== "True" && guardrailReasons.includes(c.reason),
+                  )?.reason;
+                  return reason ? (
+                    <Badge
+                      variant="destructive"
+                      className="ml-2 text-[10px]"
+                      data-testid="agent-guardrail-notready-reason"
+                    >
+                      {reason}
+                    </Badge>
+                  ) : null;
+                })()}
+              </>
+            }
+          />
+        )}
         <HeaderKV k="Scaling" v={`${detail.scaling.min} – ${detail.scaling.max}`} />
         {detail.latestVersion && (
           <HeaderKV k="Latest version" v={<span className="font-mono text-xs">{detail.latestVersion}</span>} />

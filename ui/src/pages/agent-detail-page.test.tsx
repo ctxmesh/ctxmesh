@@ -1268,3 +1268,83 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
     expect(screen.queryByTestId("runtime-section")).toBeNull();
   });
 });
+
+// ── m66.10: GuardrailPolicyRef on the agent detail header ────────────────────
+// Tests that spec.guardrailPolicyRef is surfaced as a ResourceLink in the header,
+// and that when the agent is NotReady due to a guardrail reason, the reason is
+// surfaced inline next to the link.
+describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
+  it("renders a guardrail policy link when guardrailPolicyRef is set", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, guardrailPolicyRef: "pii-and-jailbreak" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const link = screen.getByTestId("agent-guardrail-policy-link");
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveTextContent("pii-and-jailbreak");
+    // The link leads to /guardrails.
+    expect(link).toHaveAttribute("href", "/guardrails");
+    // No NotReady badge when the agent is Ready.
+    expect(screen.queryByTestId("agent-guardrail-notready-reason")).toBeNull();
+  });
+
+  it("surfaces GuardrailPolicyNotFound inline when the agent is NotReady for that reason", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        ready: false,
+        phase: "NotReady",
+        guardrailPolicyRef: "missing-policy",
+        conditions: [
+          {
+            type: "Ready",
+            status: "False",
+            reason: "GuardrailPolicyNotFound",
+            message: "guardrail policy 'missing-policy' not found in namespace 'prod'",
+            lastTransitionTime: "2026-07-11T00:00:00Z",
+          },
+        ],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    // The link to the policy is still rendered.
+    expect(screen.getByTestId("agent-guardrail-policy-link")).toHaveTextContent("missing-policy");
+    // The NotReady reason is surfaced inline next to the link.
+    const badge = screen.getByTestId("agent-guardrail-notready-reason");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent("GuardrailPolicyNotFound");
+  });
+
+  it("surfaces GuardrailPolicyInvalid inline when the agent is NotReady for that reason", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        ready: false,
+        phase: "NotReady",
+        guardrailPolicyRef: "bad-regex-policy",
+        conditions: [
+          {
+            type: "Ready",
+            status: "False",
+            reason: "GuardrailPolicyInvalid",
+            message: "guardrail policy 'bad-regex-policy' has invalid RE2 patterns",
+            lastTransitionTime: "2026-07-11T00:00:00Z",
+          },
+        ],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("agent-guardrail-policy-link")).toHaveTextContent("bad-regex-policy");
+    const badge = screen.getByTestId("agent-guardrail-notready-reason");
+    expect(badge).toHaveTextContent("GuardrailPolicyInvalid");
+  });
+
+  it("no guardrail link rendered when guardrailPolicyRef is absent", async () => {
+    installFetch({ detail: DEFAULT_DETAIL }); // DEFAULT_DETAIL has no guardrailPolicyRef
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("agent-guardrail-policy-link")).toBeNull();
+    expect(screen.queryByTestId("agent-guardrail-notready-reason")).toBeNull();
+  });
+});

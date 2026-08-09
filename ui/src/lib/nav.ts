@@ -9,6 +9,7 @@ import {
   Network,
   PlugZap,
   ScrollText,
+  Shield,
   SlidersHorizontal,
   TestTube2,
   Users,
@@ -44,7 +45,8 @@ export type Milestone =
   | "M18"
   | "M47"
   | "M63"
-  | "M64";
+  | "M64"
+  | "M66";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -62,6 +64,8 @@ export const RES_TENANTS = "tenants";
 // resource: only the operator persona's ClusterRole grants `list auditlogs`, so the
 // nav item hides for developer/viewer chrome (display-only; the API still enforces).
 export const RES_AUDITLOGS = "auditlogs";
+// RES_GUARDRAIL is the plural resource name for GuardrailPolicies (m66.10, ADR 0059).
+export const RES_GUARDRAIL = "guardrailpolicies";
 
 export interface NavItem {
   id: string;
@@ -271,6 +275,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Building2,
         milestone: "M47",
         route: "/tenants",
+      },
+      {
+        // GuardrailPolicies (m66.10, ADR 0059) — namespace-scoped content-governance
+        // policies: PII scanning, pattern deny-lists, optional LLM-judge, per-user
+        // rate limits. Read-open (the API is the RBAC gate); authored via YAML/kubectl.
+        id: "guardrails",
+        label: "Guardrail Policies",
+        icon: Shield,
+        milestone: "M66",
+        route: "/guardrails",
       },
     ],
   },

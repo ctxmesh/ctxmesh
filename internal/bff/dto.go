@@ -189,6 +189,9 @@ type AgentDetailResponse struct {
 	// structured-output schema, tool policy, and per-turn resilience settings. Nil
 	// when spec.runtime is absent — the UI renders nothing new in that case.
 	Runtime *AgentRuntimeDetail `json:"runtime,omitempty"`
+	// GuardrailPolicyRef is the name of the GuardrailPolicy (same namespace) that
+	// governs this agent's content (m66.10, ADR 0059). Empty when not set.
+	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
 }
 
 // AgentRuntimeDetail is the read-only projection of spec.runtime for the agent
@@ -1228,24 +1231,25 @@ func newAgentDetail(
 	}
 
 	return AgentDetailResponse{
-		Name:             ad.Name,
-		Namespace:        ad.Namespace,
-		Image:            ad.Spec.Image,
-		ExecutionModel:   ad.Spec.ExecutionModel,
-		Role:             ad.Spec.Role,
-		PromptRef:        ad.Spec.PromptRef,
-		ModelRoute:       modelRoute,
-		Scaling:          scaling,
-		Phase:            phase,
-		Ready:            ready,
-		URL:              ad.Status.URL,
-		LatestVersion:    ad.Status.LatestVersion,
-		Conditions:       conditions,
-		Bindings:         bindings,
-		Versions:         versionNames,
-		ManagedOutsideUI: managedOutsideUI,
-		Drift:            drift,
-		Runtime:          newAgentRuntimeDetail(ad.Spec.Runtime),
+		Name:               ad.Name,
+		Namespace:          ad.Namespace,
+		Image:              ad.Spec.Image,
+		ExecutionModel:     ad.Spec.ExecutionModel,
+		Role:               ad.Spec.Role,
+		PromptRef:          ad.Spec.PromptRef,
+		ModelRoute:         modelRoute,
+		Scaling:            scaling,
+		Phase:              phase,
+		Ready:              ready,
+		URL:                ad.Status.URL,
+		LatestVersion:      ad.Status.LatestVersion,
+		Conditions:         conditions,
+		Bindings:           bindings,
+		Versions:           versionNames,
+		ManagedOutsideUI:   managedOutsideUI,
+		Drift:              drift,
+		Runtime:            newAgentRuntimeDetail(ad.Spec.Runtime),
+		GuardrailPolicyRef: ad.Spec.GuardrailPolicyRef,
 	}
 }
 
