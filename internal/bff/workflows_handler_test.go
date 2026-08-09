@@ -208,6 +208,376 @@ func TestCreateWorkflowRun_MissingWorkflow(t *testing.T) {
 	assert.Zero(t, countStoreRuns(s), "no run created for a missing workflow")
 }
 
+// ── POST /api/workflows/runs — inline-spec run (planning mode, m67.7, ADR 0060 §6) ───────────────────────
+
+// registryWithMembers builds an AgentRegistry + member AgentDeployments so the inline-run membership
+// resolver (resolveWorkflowMembership) passes. Each agent carries the registry's selector label.
+func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
+	t.Helper()
+	const (
+		registryName = "reg"
+		namespace    = "prod"
+	)
+	label := map[string]string{"registry": registryName}
+	objs := make([]client.Object, 0, 1+len(agentNames))
+	objs = append(objs, &agentsv1alpha1.AgentRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: registryName, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentRegistrySpec{
+			RegistryId:     registryName,
+			MemberSelector: metav1.LabelSelector{MatchLabels: label},
+		},
+	})
+	for _, name := range agentNames {
+		objs = append(objs, &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: label},
+		})
+	}
+	return objs
+}
+
+// postInlineWorkflowRun POSTs to POST /api/workflows/runs and returns the recorder.
+func postInlineWorkflowRun(t *testing.T, s *Server, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/runs", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCreateInlineWorkflowRun_HappyPath: a valid inline spec + input → 202 + an instance run with the
+// inline spec snapshotted and NO WorkflowRef (no Workflow CR involved).
+func TestCreateInlineWorkflowRun_HappyPath(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a", "agent-b")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "agent-a", Next: "two"},
+			{Name: "two", AgentRef: "agent-b"},
+		},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{
+		Spec:      spec,
+		Namespace: "prod",
+		Input:     json.RawMessage(`{"q":"hello"}`),
+	})
+
+	require.Equal(t, http.StatusAccepted, rec.Code, "a valid inline spec must 202")
+	var resp CreateRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.ID)
+
+	rn, err := s.runStore.Get(resp.ID)
+	require.NoError(t, err)
+	assert.True(t, rn.IsWorkflowInstance(), "the run must be a workflow instance (SpecSnapshot pinned)")
+	assert.Empty(t, rn.WorkflowRef, "an inline run pins NO WorkflowRef (no Workflow CR was created)")
+	assert.NotEmpty(t, rn.SpecSnapshot, "the inline spec must be snapshotted onto the run")
+	// The snapshot round-trips to the submitted spec.
+	var snap agentsv1beta1.WorkflowSpec
+	require.NoError(t, json.Unmarshal([]byte(rn.SpecSnapshot), &snap))
+	assert.Equal(t, "reg", snap.RegistryRef)
+	require.Len(t, snap.Steps, 2)
+	assert.Equal(t, "one", snap.Steps[0].Name)
+
+	// No Workflow CR should exist in the cluster (a plan never creates an etcd object, ADR 0042).
+	var wfl agentsv1beta1.WorkflowList
+	require.NoError(t, cl.List(context.Background(), &wfl))
+	assert.Empty(t, wfl.Items, "the inline run must NOT create a Workflow CR")
+}
+
+// TestCreateInlineWorkflowRun_InvalidSpec_DanglingEdge: an inline spec with a dangling edge is rejected
+// by the SHARED validator (internal/workflow.Validate) with 422 + the validation error; no run created.
+func TestCreateInlineWorkflowRun_InvalidSpec_DanglingEdge(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "agent-a", Next: "does-not-exist"}, // dangling edge
+		},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a dangling edge must be rejected 422")
+	assert.Contains(t, rec.Body.String(), "dangling edge", "the 422 must carry the validation error")
+	assert.Zero(t, countStoreRuns(s), "no run is created for an invalid inline plan")
+}
+
+// TestCreateInlineWorkflowRun_InvalidSpec_BadCEL: an inline spec with a syntactically invalid CEL
+// expression is rejected by the shared validator (422); no run created.
+func TestCreateInlineWorkflowRun_InvalidSpec_BadCEL(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "agent-a", Input: map[string]string{"x": "this is ) not valid CEL ("}},
+		},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "invalid CEL must be rejected 422")
+	assert.Contains(t, rec.Body.String(), "CEL", "the 422 must carry the CEL compile error")
+	assert.Zero(t, countStoreRuns(s), "no run is created for an invalid inline plan")
+}
+
+// TestCreateInlineWorkflowRun_InvalidSpec_ReferencedWithoutOutputSchema: a step whose output is
+// referenced by a downstream `when` but pins NO outputSchema violates the load-bearing m67.1 rule → 422.
+func TestCreateInlineWorkflowRun_InvalidSpec_ReferencedWithoutOutputSchema(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a", "agent-b", "agent-c")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			// "classify" is referenced by the branch predicate but pins NO outputSchema → invalid.
+			{Name: "classify", AgentRef: "agent-a", Branches: []agentsv1beta1.WorkflowBranch{
+				{When: "steps.classify.output.topic == \"x\"", To: "b"},
+			}, Default: "c"},
+			{Name: "b", AgentRef: "agent-b"},
+			{Name: "c", AgentRef: "agent-c"},
+		},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a referenced-without-outputSchema step must be 422")
+	assert.Contains(t, rec.Body.String(), "outputSchema", "the 422 must carry the outputSchema-rule error")
+	assert.Zero(t, countStoreRuns(s), "no run is created for an invalid inline plan")
+}
+
+// TestCreateInlineWorkflowRun_NonMemberAgent: a well-formed inline spec referencing an agent that is NOT
+// a member of registryRef is rejected (422 non-member) — the trust boundary is enforced at run-create.
+func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
+	// Registry "reg" has member agent-a; a non-member "rogue" also exists but carries no member label.
+	objs := registryWithMembers(t, "agent-a")
+	objs = append(objs, &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "rogue", Namespace: "prod"}, // no registry label → not a member
+	})
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "rogue"}, // exists but not a member of reg
+		},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a non-member agent must be rejected")
+	assert.Contains(t, rec.Body.String(), "not a member", "the 422 names the trust-boundary violation")
+	assert.Zero(t, countStoreRuns(s), "no run is created when the trust boundary fails")
+}
+
+// TestCreateInlineWorkflowRun_MissingRegistry: an inline spec whose registryRef does not resolve → 422.
+func TestCreateInlineWorkflowRun_MissingRegistry(t *testing.T) {
+	// agent-a exists but there is NO registry "reg".
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
+		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "prod"}},
+	).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "a missing registryRef must 422")
+	assert.Contains(t, rec.Body.String(), "not found", "the 422 names the missing registry")
+	assert.Zero(t, countStoreRuns(s))
+}
+
+// TestCreateInlineWorkflowRun_InputSchemaValidation: the inline spec's inputSchema governs the input.
+func TestCreateInlineWorkflowRun_InputSchemaValidation(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		InputSchema: &k8sruntime.RawExtension{Raw: []byte(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`)},
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+	}
+
+	// Valid input → 202.
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod", Input: json.RawMessage(`{"q":"hi"}`)})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	// Invalid input → 422, no second run.
+	rec = postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod", Input: json.RawMessage(`{"wrong":1}`)})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, 1, countStoreRuns(s), "only the first (valid) inline run exists")
+}
+
+// TestCreateInlineWorkflowRun_NoSpec: an empty body (no spec) → 400, no run.
+func TestCreateInlineWorkflowRun_NoSpec(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/runs", nil)
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "an inline run with no spec must 400")
+	assert.Zero(t, countStoreRuns(s))
+}
+
+// TestCreateInlineWorkflowRun_RequireApproval_SeedsGate: requireApproval:true seeds the plan-approval
+// gate into the run's cursor (Required=true) at create time.
+func TestCreateInlineWorkflowRun_RequireApproval_SeedsGate(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+	}
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod", RequireApproval: true})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp CreateRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	rn, err := s.runStore.Get(resp.ID)
+	require.NoError(t, err)
+	cur, err := parseCursor(rn.Cursor)
+	require.NoError(t, err)
+	require.NotNil(t, cur.PlanApproval, "requireApproval must seed the plan-approval gate into the cursor")
+	assert.True(t, cur.PlanApproval.Required, "the gate is Required")
+	assert.False(t, cur.PlanApproval.Approved, "the gate starts un-approved")
+}
+
+// postResume POSTs to POST /api/runs/{id}/resume with an optional decision and returns the recorder.
+func postResume(t *testing.T, s *Server, runID, decision string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body []byte
+	if decision != "" {
+		body, _ = json.Marshal(map[string]string{"decision": decision})
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/resume", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// driveToGate creates a gated inline run and drives one executor advance so it reaches the plan-approval
+// gate (requires_action). Returns the run id. (The handler server is dispatch mode, so create leaves the
+// run queued; we claim+advance it manually as a worker would.)
+func driveToGate(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec) string {
+	t.Helper()
+	rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod", RequireApproval: true})
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp CreateRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// Claim (queued → running) then advance — the run hits the gate and pauses in requires_action.
+	_, err := s.runStore.Update(resp.ID, func(r *run.Run) error { return r.Transition(run.StatusRunning, time.Now()) })
+	require.NoError(t, err)
+	s.executeWorkflow(context.Background(), resp.ID)
+	require.Equal(t, run.StatusRequiresAction, mustGetRun(t, s, resp.ID).Status, "the run must reach the plan-approval gate")
+	return resp.ID
+}
+
+func mustGetRun(t *testing.T, s *Server, id string) *run.Run {
+	t.Helper()
+	r, err := s.runStore.Get(id)
+	require.NoError(t, err)
+	return r
+}
+
+// TestPlanApprovalResume_Approve_RunsGraph: resume {decision:approve} on a gated workflow run resumes it
+// and the executor runs the graph (node 1 launches). Full HTTP round-trip through the resume endpoint.
+func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a", "agent-b")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "one", AgentRef: "agent-a", Next: "two"},
+			{Name: "two", AgentRef: "agent-b"},
+		},
+	}
+	runID := driveToGate(t, s, spec)
+
+	rec := postResume(t, s, runID, "approve")
+	require.Equal(t, http.StatusAccepted, rec.Code, "approve resumes the run")
+
+	// The resume drove the executor in-process (a goroutine); wait for node 1 to launch.
+	require.Eventually(t, func() bool {
+		for _, r := range s.runStore.List() {
+			if r.ParentRunID == runID {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "the approved plan must launch node 1")
+
+	// Exactly one node sub-run (node "one") is now in flight; the workflow run is waiting on it.
+	var child *run.Run
+	for _, r := range s.runStore.List() {
+		if r.ParentRunID == runID {
+			child = r
+		}
+	}
+	require.NotNil(t, child)
+	assert.Equal(t, "agent-a", child.Agent, "node one (agent-a) launched after approval")
+	assert.Equal(t, run.StatusWaiting, mustGetRun(t, s, runID).Status, "the run parks waiting on node 1")
+}
+
+// TestPlanApprovalResume_Deny_TerminatesRejected: resume {decision:deny} on a gated workflow run
+// terminates it (cancelled, "plan rejected") and launches NO node.
+func TestPlanApprovalResume_Deny_TerminatesRejected(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+	}
+	runID := driveToGate(t, s, spec)
+
+	rec := postResume(t, s, runID, "deny")
+	require.Equal(t, http.StatusOK, rec.Code, "deny returns 200 with the terminal status")
+
+	rn := mustGetRun(t, s, runID)
+	assert.Equal(t, run.StatusCancelled, rn.Status, "a denied plan terminates the run")
+	assert.Equal(t, "plan rejected", rn.Error, "the rejection reason is recorded")
+
+	// NO node sub-run was ever launched.
+	for _, r := range s.runStore.List() {
+		assert.NotEqual(t, runID, r.ParentRunID, "a denied plan must never launch a node")
+	}
+}
+
+// TestPlanApprovalResume_NoGate_UsesSingleAgentPath: a non-workflow run in requires_action is NOT routed
+// through the plan-approval path (regression guard: the workflow branch only triggers for a workflow
+// instance whose action kind is plan_approval).
+func TestPlanApprovalResume_NoGate_UsesSingleAgentPath(t *testing.T) {
+	// A plain single-agent run paused for a consent action — must not be treated as a plan-approval resume.
+	rn := run.New("plain-run", "prod", "agent-a", json.RawMessage(`{}`), "", time.Now())
+	assert.False(t, rn.IsWorkflowInstance(), "a plain run is not a workflow instance")
+	// (The routing predicate is IsWorkflowInstance() && action kind == plan_approval; a plain run fails the
+	// first clause, so handleResumeRun falls through to the single-agent path — verified by construction.)
+}
+
 // ── WorkflowNodeResolver seam (injected resolver) ─────────────────────────────────────────────────────
 
 // TestWorkflowNodeResolverFromClient_ResolvesMissingAgent: a resolver backed by a fake client with

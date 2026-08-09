@@ -89,6 +89,14 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A WORKFLOW instance paused at the PLAN-APPROVAL GATE (m67.7, ADR 0060 §6) resumes via a DIFFERENT
+	// path than a single-agent run: there is no single agent endpoint to re-invoke (the run drives a
+	// graph off its SpecSnapshot), so approve → re-run the executor; deny → terminate ("plan rejected").
+	if rn.IsWorkflowInstance() && rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionPlanApproval {
+		s.resumePlanApproval(w, r, rn)
+		return
+	}
+
 	// The resume decision (human-in-the-loop, m32.4). Absent ⇒ approve — the consent path has
 	// nothing to deny (the user connected their account); a deny is meaningful only for an approval.
 	isApproval := rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionApproval
@@ -545,6 +553,60 @@ func lastEventID(r *http.Request) int {
 		}
 	}
 	return 0
+}
+
+// resumePlanApproval resolves the workflow PLAN-APPROVAL GATE (m67.7, ADR 0060 §6). {decision:deny} →
+// terminate the run (cancelled, "plan rejected") — NO node ever launched. {decision:approve} (or absent,
+// consistent with the single-agent approval default) → flip the cursor's PlanApproval.Approved, transition
+// `requires_action → running`, and drive the executor: with the gate satisfied it launches node 1 and the
+// graph runs. This reuses the requires_action/resume machinery — the executor, not an agent re-invoke,
+// resolves it (there is no single agent endpoint for a graph). Caller-scoped (the caller already passed
+// callerClient in handleResumeRun). rn is the loaded run (status requires_action, kind plan_approval).
+func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *run.Run) {
+	if parseResumeDecision(r) == "deny" {
+		updated, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
+			x.Error = "plan rejected"
+			return x.Transition(run.StatusCancelled, time.Now())
+		})
+		if err != nil {
+			writeError(w, http.StatusConflict, "cannot resume this run")
+			return
+		}
+		_ = s.runStore.AppendEvent(rn.ID, run.EventStep, "plan-rejected")
+		writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
+		return
+	}
+
+	// APPROVE: mark the plan approved in the executor-owned cursor and re-enter `running` in the SAME
+	// update (so a crash right after cannot lose the approval). Leaving requires_action clears the pending
+	// action (Transition does this). The executor's gate check then sees Approved=true and runs the graph.
+	if _, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
+		cursor, cErr := parseCursor(x.Cursor)
+		if cErr != nil {
+			return cErr
+		}
+		if cursor.PlanApproval == nil {
+			cursor.PlanApproval = &planApproval{Required: true}
+		}
+		cursor.PlanApproval.Approved = true
+		cursorJSON, mErr := cursor.marshal()
+		if mErr != nil {
+			return mErr
+		}
+		x.Cursor = cursorJSON
+		return x.Transition(run.StatusRunning, time.Now())
+	}); err != nil {
+		writeError(w, http.StatusConflict, "cannot resume this run")
+		return
+	}
+	_ = s.runStore.AppendEvent(rn.ID, run.EventStep, "plan-approved")
+
+	// Drive the executor in-process (a low-frequency human action — the single-agent resume path drives
+	// executeRun in-process the same way, independent of dispatch mode) so the approved graph starts now.
+	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
+	go s.executeWorkflow(execCtx, rn.ID)
+
+	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: rn.ID, Status: string(run.StatusRunning)})
 }
 
 // parseResumeDecision reads an optional {"decision":"approve"|"deny"} from the resume body

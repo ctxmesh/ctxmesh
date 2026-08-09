@@ -110,6 +110,18 @@ type loopProgress struct {
 	ChildID string `json:"childId,omitempty"`
 }
 
+// planApproval is the plan-approval gate's state in the cursor (m67.7, ADR 0060 §6). When Required is true
+// and Approved is false, the executor's FIRST advance pauses the run in `requires_action` (a plan_approval
+// action) BEFORE launching node 1. A human's resume-approve flips Approved=true (the resume handler), after
+// which the executor runs the graph normally; a resume-deny terminates the run (no node ever launched).
+type planApproval struct {
+	// Required marks that this run carries a plan-approval gate (set at instance-create when requireApproval).
+	Required bool `json:"required,omitempty"`
+	// Approved records that a human approved the plan (set by the resume-approve path). Once true the gate is
+	// satisfied and the executor proceeds; it is never re-checked.
+	Approved bool `json:"approved,omitempty"`
+}
+
 // workflowCursor is the executor's opaque per-node progress JSON (Run.Cursor). The store never inspects it —
 // the executor owns its shape. `Current` names the node whose sub-run is in flight (the one the run is parked
 // on); it is how a resumed executor knows WHICH node just completed without scanning.
@@ -119,11 +131,20 @@ type workflowCursor struct {
 	// Current is the node currently launched + awaited (empty when none is in flight — fresh, or right after
 	// recording a completion and before the next launch).
 	Current string `json:"current,omitempty"`
+	// PlanApproval, when non-nil, carries the plan-approval gate's state (m67.7). Seeded at instance-create
+	// when requireApproval; nil ⇒ no gate (the graph runs immediately, the m67.3 behavior).
+	PlanApproval *planApproval `json:"planApproval,omitempty"`
 
 	// workflowInput is the workflow run's Input, carried for the CEL activation. It is NOT serialized into the
 	// cursor JSON (the run already persists its Input) — the executor sets it from the loaded run before
 	// evaluating. Kept unexported (no JSON tag) so the persisted cursor shape stays stable across advances.
 	workflowInput json.RawMessage `json:"-"`
+}
+
+// gatePending reports whether the plan-approval gate is set and NOT yet approved — the executor must pause
+// in requires_action instead of advancing the graph.
+func (c *workflowCursor) gatePending() bool {
+	return c.PlanApproval != nil && c.PlanApproval.Required && !c.PlanApproval.Approved
 }
 
 func newCursor() *workflowCursor { return &workflowCursor{Nodes: map[string]*nodeProgress{}} }
@@ -176,6 +197,17 @@ func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 	}
 	// The workflow input feeds the CEL `input` variable for every edge + input binding this pass.
 	cursor.workflowInput = rn.Input
+
+	// (0) PLAN-APPROVAL GATE (m67.7, ADR 0060 §6). On the FIRST advance of a run created with
+	// requireApproval, pause in `requires_action` (a plan_approval action) BEFORE launching node 1 — a
+	// human must resume-approve to run the graph (or resume-deny to reject it). The gate fires ONLY while
+	// the graph has not started (no node in flight, none recorded): a reclaim after approval finds
+	// PlanApproval.Approved=true (set by the resume-approve path) and skips straight through. This reuses
+	// the existing requires_action machinery — no new mechanism (ADR 0060 §6).
+	if cursor.gatePending() && cursor.Current == "" && len(cursor.Nodes) == 0 {
+		s.gatePlanApproval(runID, cursor)
+		return
+	}
 
 	// (1) RESUME PHASE. If a node's sub-run(s) are in flight (cursor.Current), fold their terminal result(s)
 	// into the cursor — a resumed executor lands here after the wake. The resume is KIND-AWARE (m67.5):
@@ -953,6 +985,39 @@ func (s *Server) completeWorkflow(runID string, spec *agentsv1beta1.WorkflowSpec
 	}); err != nil {
 		s.log.Error(err, "workflow: could not persist terminal success", "run", runID)
 	}
+}
+
+// gatePlanApproval pauses a workflow run at the PLAN-APPROVAL GATE (m67.7, ADR 0060 §6): it transitions the
+// run `running → requires_action` with a `plan_approval` action and re-checkpoints the cursor (carrying the
+// PlanApproval state) in the SAME store update — so NO node is launched until a human resumes. It reuses the
+// existing requires_action machinery (StatusRequiresAction + the /resume path), inventing no new mechanism.
+// The run holds no worker while paused (requires_action is a human-input pause, like an OBO consent). An
+// already-terminal run (a raced cancel) is left alone. A plan-ready event is emitted for the console banner.
+func (s *Server) gatePlanApproval(runID string, cursor *workflowCursor) {
+	cursorJSON, err := cursor.marshal()
+	if err != nil {
+		s.failWorkflow(runID, fmt.Sprintf("workflow plan-approval gate: encoding cursor: %v", err))
+		return
+	}
+	if _, err := s.runStore.Update(runID, func(r *run.Run) error {
+		if r.Status.IsTerminal() {
+			return fmt.Errorf("already %s", r.Status) // a raced cancel — do not resurrect
+		}
+		if r.Status == run.StatusRequiresAction {
+			return nil // idempotent: a reclaim re-gating an already-paused run
+		}
+		r.Cursor = cursorJSON
+		r.RequiresAction = &run.Action{
+			Kind:    run.ActionPlanApproval,
+			Message: "approve the workflow plan before it executes",
+		}
+		return r.Transition(run.StatusRequiresAction, time.Now())
+	}); err != nil {
+		// A run already terminal/paused (a concurrent cancel or a benign re-gate) is fine; log anything else.
+		s.log.Info("workflow: plan-approval gate transition skipped", "run", runID, "err", err.Error())
+		return
+	}
+	_ = s.runStore.AppendEvent(runID, run.EventStep, "plan-approval-required")
 }
 
 // failWorkflow transitions the workflow run to `failed` with reason via the normal terminal path (waking a
