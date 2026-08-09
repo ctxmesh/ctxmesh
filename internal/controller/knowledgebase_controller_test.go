@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 )
 
@@ -227,4 +229,125 @@ func TestKnowledgeBase_FinalizerLifecycle(t *testing.T) {
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-finalizer", Namespace: ns}, &gone)
 	assert.True(t, apierrors.IsNotFound(err),
 		"KnowledgeBase must be deleted once the finalizer is released (m68.10 GC seam is in place)")
+}
+
+// ── AgentDeployment knowledge-base binding tests (m68.8) ──────────────────────────────────────────
+//
+// These tests verify that spec.knowledgeBases[] is resolved by the AgentDeployment controller and
+// injected into the ksvc env as KNOWLEDGE_BASE_ENABLED + KNOWLEDGE_BASES (ADR 0061 Fork 3).
+
+// TestKnowledgeBinding_ResolvesEnvVars: an AgentDeployment with spec.knowledgeBases pointing to an
+// existing KnowledgeBase → KNOWLEDGE_BASE_ENABLED=true + KNOWLEDGE_BASES roster with the resolved
+// embeddingRoute injected into the ksvc.
+func TestKnowledgeBinding_ResolvesEnvVars(t *testing.T) {
+	const ns = "default"
+	const kbName = "docs-kb"
+	const agentName = "kb-bound-agent"
+
+	// 1. Create the KnowledgeBase and reconcile it (adds finalizer + Validated condition).
+	kb := mkKnowledgeBase(t, kbName, ns, agentsv1beta1.KnowledgeBaseSpec{
+		EmbeddingRoute: "text-embedding-3-small",
+		Source:         agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+		Chunking:       agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+	})
+	reconcileKB(t, newKBReconciler(), kbName, ns)
+	_ = kb // validated in the reconcile; we just need the CR to exist
+
+	// 2. Create an AgentDeployment that references the KB.
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+				{Name: kbName}, // namespace defaults to the agent's ns
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, ns)
+
+	envMap := envByName(getKsvc(t, agentName, ns).Spec.Template.Spec.Containers[0].Env)
+
+	assert.Equal(t, "true", envMap["KNOWLEDGE_BASE_ENABLED"],
+		"KNOWLEDGE_BASE_ENABLED must be true when spec.knowledgeBases is non-empty")
+
+	rosterJSON, hasRoster := envMap["KNOWLEDGE_BASES"]
+	require.True(t, hasRoster, "KNOWLEDGE_BASES env must be set")
+
+	var roster []kbRosterEntry
+	require.NoError(t, json.Unmarshal([]byte(rosterJSON), &roster),
+		"KNOWLEDGE_BASES must be valid JSON")
+	require.Len(t, roster, 1, "roster must contain exactly one entry")
+	assert.Equal(t, kbName, roster[0].Name)
+	assert.Equal(t, ns, roster[0].Namespace)
+	assert.Equal(t, "text-embedding-3-small", roster[0].EmbeddingRoute,
+		"embeddingRoute must be resolved from the KnowledgeBase CR")
+}
+
+// TestKnowledgeBinding_DanglingRef_SetsCondition: when a spec.knowledgeBases[] ref points to a
+// non-existent KnowledgeBase, the controller sets a KnowledgeBasesResolved=False condition and
+// does NOT inject KNOWLEDGE_BASE_ENABLED (all refs dangling → proxy stays off).
+func TestKnowledgeBinding_DanglingRef_SetsCondition(t *testing.T) {
+	const ns = "default"
+	const agentName = "kb-dangling-agent"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+				{Name: "does-not-exist"},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, ns)
+
+	// Condition check: KnowledgeBasesResolved must be False/DanglingRef.
+	var liveAgent agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: ns}, &liveAgent))
+	cond := apimeta.FindStatusCondition(liveAgent.Status.Conditions, "KnowledgeBasesResolved")
+	require.NotNil(t, cond, "KnowledgeBasesResolved condition must be set for a dangling ref")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status,
+		"KnowledgeBasesResolved must be False for a dangling ref")
+	assert.Equal(t, "DanglingRef", cond.Reason)
+	assert.Contains(t, cond.Message, "does-not-exist",
+		"condition message must identify the missing KB")
+
+	// Env check: no KNOWLEDGE_BASE_ENABLED (all refs dangling → proxy stays off).
+	envMap := envByName(getKsvc(t, agentName, ns).Spec.Template.Spec.Containers[0].Env)
+	_, hasEnabled := envMap["KNOWLEDGE_BASE_ENABLED"]
+	assert.False(t, hasEnabled, "KNOWLEDGE_BASE_ENABLED must NOT be set when all KB refs are dangling")
+	_, hasRoster := envMap["KNOWLEDGE_BASES"]
+	assert.False(t, hasRoster, "KNOWLEDGE_BASES must NOT be set when all KB refs are dangling")
+}
+
+// TestKnowledgeBinding_NoKnowledgeBases_NoByteDrift: an AgentDeployment with no knowledgeBases
+// must NOT inject KNOWLEDGE_BASE_ENABLED or KNOWLEDGE_BASES — byte-compatible with pre-M68.
+func TestKnowledgeBinding_NoKnowledgeBases_NoByteDrift(t *testing.T) {
+	const ns = "default"
+	const agentName = "kb-none-agent"
+
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			// KnowledgeBases intentionally absent
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, ns)
+
+	envMap := envByName(getKsvc(t, agentName, ns).Spec.Template.Spec.Containers[0].Env)
+	_, hasEnabled := envMap["KNOWLEDGE_BASE_ENABLED"]
+	assert.False(t, hasEnabled, "no knowledgeBases → KNOWLEDGE_BASE_ENABLED must not be injected")
+	_, hasRoster := envMap["KNOWLEDGE_BASES"]
+	assert.False(t, hasRoster, "no knowledgeBases → KNOWLEDGE_BASES must not be injected")
 }

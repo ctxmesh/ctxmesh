@@ -106,6 +106,24 @@ type SessionMemorySpec struct {
 	Backend *MemoryBackend `json:"backend,omitempty"`
 }
 
+// KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
+// (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+// The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
+// un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
+// refers to a KnowledgeBase in the same namespace as the AgentDeployment.
+type KnowledgeBaseRef struct {
+	// name is the KnowledgeBase CR name. Required.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// namespace is the namespace of the KnowledgeBase CR. When omitted, the AgentDeployment's
+	// own namespace is used (the most common case — same-namespace KBs need no namespace field).
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
 // LongTermMemorySpec is the folded long-term-memory config (ADR 0045): `agent`-scope memory that persists
 // ACROSS conversations and is retrieved by MEANING (pgvector), orthogonal to sessionMemory's conversation
 // scope — an agent can have both. Like sessionMemory it folds into the AgentDeployment (a per-agent 1:1
@@ -184,6 +202,20 @@ type AgentDeploymentSpec struct {
 	// conversations, retrieved by meaning — orthogonal to sessionMemory.
 	// +optional
 	LongTermMemory *LongTermMemorySpec `json:"longTermMemory,omitempty"`
+
+	// knowledgeBases lists the managed RAG corpora this agent is granted access to (ADR 0061, M68).
+	// This is a CAPABILITY field — the same pattern as longTermMemory — enforced un-forgeably at the
+	// launcher roster gate (KNOWLEDGE_BASES env, mirroring DELEGATE_ROSTER), NOT by a binding CRD.
+	// The controller resolves each ref to a KnowledgeBase CR (reading spec.embeddingRoute) and injects
+	// KNOWLEDGE_BASE_ENABLED=true + KNOWLEDGE_BASES as a JSON roster; the launcher's knowledgeProxy
+	// gates every /knowledge/search against the roster — a model cannot forge KB membership.
+	// Dangling (unresolvable) refs surface a condition and are skipped; the remaining resolvable KBs
+	// are still injected (KB is an ADDITIVE capability, not a fail-closed safety gate like guardrails).
+	// An agent with no knowledgeBases gets no KNOWLEDGE_BASE_ENABLED env (the proxy stays off).
+	// +listType=atomic
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	KnowledgeBases []KnowledgeBaseRef `json:"knowledgeBases,omitempty"`
 
 	// role is the agent's role within its AgentRegistry (PRD §12.4 role-based
 	// access control). The three built-in roles always exist: "orchestrator",
