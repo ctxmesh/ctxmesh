@@ -52,6 +52,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
@@ -285,11 +286,23 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return fmt.Errorf("init durable KB object store: %w", err)
 	}
 
+	// KB ingestion direct-write path (M68, ADR 0061 governance #8): the run-worker is a TRUSTED control-plane
+	// workload that already holds the controlplane DSN, so the ingestion executor (m68.6) EMBEDS + WRITES
+	// knowledge_chunks DIRECTLY — no token-service proxy hop (agent pods never do this; they read via proxy).
+	//   - the knowledge store rides the already-open cpDB (the same pgvector Postgres as memory).
+	//   - the gateway embedder is built from MODEL_GATEWAY_URL, exactly as the token-service builds its memory
+	//     embedder (the same seam). Absent ⇒ nil ⇒ the ingest endpoint + executor degrade honestly (501 / a
+	//     clear failed-run reason), never a panic.
+	knowledgeStore := knowledge.NewPostgresStore(cpDB)
+	ingestEmbedder := newIngestEmbedder(log)
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
 		DocStore:                    docStore,
+		KnowledgeStore:              knowledgeStore,
+		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
@@ -417,6 +430,22 @@ func newDocStore() (objectstore.ObjectStore, error) {
 		return nil, nil
 	}
 	return ms, nil
+}
+
+// newIngestEmbedder builds the gateway embedder the KB ingestion executor uses to embed chunk texts directly
+// (M68, ADR 0061 Fork 2 / governance #8 — the trusted worker embeds + writes, agent pods do not). It reads the
+// gateway base URL from MODEL_GATEWAY_URL (the same seam the token-service memory embedder uses) + the optional
+// MODEL_GATEWAY_KEY. Unset ⇒ nil, so the ingest endpoint + executor degrade honestly (501 / a failed-run reason).
+func newIngestEmbedder(log logr.Logger) credplane.Embedder {
+	gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL"))
+	if gwURL == "" {
+		log.Info("KB ingestion embedder DISABLED: MODEL_GATEWAY_URL unset — the ingest endpoint returns 501")
+		return nil
+	}
+	log.Info("KB ingestion embedder enabled (ADR 0061 Fork 2): gateway embeddings, direct-write from worker",
+		"gateway", gwURL)
+	return credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
+		&http.Client{Timeout: 60 * time.Second})
 }
 
 // tokenServiceHTTPClient builds the http.Client the BFF uses to delegate grant writes to

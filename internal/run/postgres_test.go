@@ -575,6 +575,34 @@ func TestPostgresStore_RoundTripsWorkflowFields(t *testing.T) {
 		"pinned node endpoints round-trip through Postgres")
 }
 
+// TestPostgresStore_RoundTripsIngestionFields proves the M68 ingestion marker + pinned spec round-trip through
+// real Postgres (create-only columns), and Outcome persists through the mutable-column Update path.
+func TestPostgresStore_RoundTripsIngestionFields(t *testing.T) {
+	s := openPGStore(t)
+	r := New("ing-run", "ns", "my-kb", nil, "", t0)
+	r.IngestionRef = "my-kb"
+	r.IngestionSpec = `{"knowledgeBase":"my-kb","documents":[{"key":"knowledge/ns/my-kb/a.md"}]}`
+	r.Cursor = `{"done":{"knowledge/ns/my-kb/a.md":true}}`
+	require.NoError(t, s.Create(r))
+
+	got, err := s.Get("ing-run")
+	require.NoError(t, err)
+	assert.Equal(t, "my-kb", got.IngestionRef)
+	assert.Equal(t, `{"knowledgeBase":"my-kb","documents":[{"key":"knowledge/ns/my-kb/a.md"}]}`, got.IngestionSpec)
+	assert.Equal(t, `{"done":{"knowledge/ns/my-kb/a.md":true}}`, got.Cursor)
+	assert.True(t, got.IsIngestionJob())
+
+	// Outcome is a MUTABLE column — the executor persists it via Update.
+	_, err = s.Update("ing-run", func(x *Run) error {
+		x.Outcome = `{"reason":"Succeeded","documents":1,"chunks":3}`
+		return nil
+	})
+	require.NoError(t, err)
+	got, err = s.Get("ing-run")
+	require.NoError(t, err)
+	assert.Equal(t, `{"reason":"Succeeded","documents":1,"chunks":3}`, got.Outcome)
+}
+
 // recvWithin receives one event or fails the test on timeout.
 func recvWithin(t *testing.T, ch <-chan Event) Event {
 	t.Helper()

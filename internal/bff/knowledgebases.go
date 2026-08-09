@@ -33,15 +33,18 @@ package bff
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
 const (
@@ -337,4 +340,142 @@ func ResolveKBSources(
 	default:
 		return nil, fmt.Errorf("KnowledgeBase %q has unsupported source.type %q (supported: upload, objectStorePrefix)", kb.Name, kb.Spec.Source.Type)
 	}
+}
+
+// -------------------------------------------------------------------------
+// Ingest trigger endpoint (m68.6)
+// -------------------------------------------------------------------------
+
+// IngestResponse is returned (202) when an ingestion run is created.
+type IngestResponse struct {
+	// RunID is the durable ingestion Run's id — pollable via GET /api/runs/{id} (and the SSE stream).
+	RunID string `json:"runId"`
+	// Status is the run's initial status ("queued").
+	Status string `json:"status"`
+	// DocumentCount is the number of documents resolved + pinned for this ingestion.
+	DocumentCount int `json:"documentCount"`
+}
+
+// handleIngestKB serves POST /api/knowledgebases/{name}/ingest (m68.6, ADR 0061 Fork 2). It is what the console
+// (m68.13) and a user call to (re-)ingest a corpus. Caller-scoped (ADR 0011): it resolves the KB through the
+// caller's own client (K8s RBAC gates who can trigger ingestion), resolves the document list from the source,
+// PINS an IngestionSpec (source/embeddingRoute/chunking/doc-keys — the snapshot the off-request executor drives),
+// and creates a durable ingestion Run (queued for the worker pool in dispatch mode, or executed in-process in
+// dev — the workflows_handler create-path precedent). Returns 202 + the run id.
+//
+// Honest errors (ADR 0027):
+//   - 400 — missing KB name
+//   - 404 — KB not found in the caller's namespace
+//   - 403/401 — RBAC denial / token rejected
+//   - 501 — knowledge store / embedder / object store not configured (ingestion is unwired)
+//   - 422 — the source cannot be resolved (bad source.type / empty prefix / no documents)
+func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	// Ingestion is only meaningful when the direct-write path is wired (governance #8: the worker embeds +
+	// writes knowledge_chunks directly). Degrade honestly (the DocStore-nil→501 pattern) rather than create a
+	// run that would immediately fail in the executor.
+	if s.knowledgeStore == nil || s.embedder == nil {
+		writeError(w, http.StatusNotImplemented,
+			"ingestion not configured: set CONTROLPLANE_DSN (knowledge store) and MODEL_GATEWAY_URL (embedder)")
+		return
+	}
+	if s.docStore == nil {
+		writeError(w, http.StatusNotImplemented,
+			"document store not configured: set OBJECT_STORE_ADDR to enable KB ingestion")
+		return
+	}
+
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	kbName := r.PathValue("name")
+	if kbName == "" {
+		writeError(w, http.StatusBadRequest, "KB name is required in the URL path")
+		return
+	}
+
+	// Resolve the KB (caller-scoped, 404 if absent) — the same RBAC gate as the upload endpoint.
+	var kb agentsv1beta1.KnowledgeBase
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: kbName}, &kb); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			writeError(w, http.StatusNotFound, fmt.Sprintf("KnowledgeBase %q not found in namespace %q", kbName, ns))
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to access KnowledgeBase %q", kbName))
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+		default:
+			s.log.Error(err, "get KnowledgeBase failed", "ns", ns, "name", kbName)
+			writeError(w, http.StatusInternalServerError, "failed to look up KnowledgeBase")
+		}
+		return
+	}
+
+	// Resolve the document list from the source (upload prefix / objectStorePrefix) — snapshotted at create.
+	infos, err := ResolveKBSources(r.Context(), s.docStore, ns, &kb)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "failed to resolve KB sources: "+err.Error())
+		return
+	}
+
+	// Pin the ingestion spec: the resolved doc keys + content types + the corpus's embedding route + chunking.
+	docs := make([]IngestionDoc, 0, len(infos))
+	for _, info := range infos {
+		docs = append(docs, IngestionDoc{
+			Key:         info.Key,
+			Filename:    info.Key, // the key's basename drives extraction dispatch when ContentType is generic
+			ContentType: info.ContentType,
+		})
+	}
+	spec := IngestionSpec{
+		Namespace:      ns,
+		KnowledgeBase:  kbName,
+		EmbeddingRoute: kb.Spec.EmbeddingRoute,
+		Chunking:       kb.Spec.Chunking,
+		Documents:      docs,
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		s.log.Error(err, "marshal ingestion spec", "ns", ns, "kb", kbName)
+		writeError(w, http.StatusInternalServerError, "failed to pin the ingestion spec")
+		return
+	}
+
+	runID, err := randToken(16)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to mint a run id")
+		return
+	}
+
+	// Create the ingestion Run. Its Agent is the KB name (the audit/display label — an ingestion run has no
+	// agent; the executor drives it off IngestionSpec, never off Agent). No conversation, no OBO-to-a-model.
+	rn := run.New(runID, ns, kbName, nil, "", time.Now())
+	rn.IngestionRef = kbName
+	rn.IngestionSpec = string(specJSON)
+	if err := s.runStore.Create(rn); err != nil {
+		s.log.Error(err, "create ingestion run failed", "ns", ns, "kb", kbName)
+		writeError(w, http.StatusInternalServerError, "failed to create the ingestion run")
+		return
+	}
+
+	// Dispatch mode: leave `queued` for the worker pool. Dev/single-pod: run in-process so ingestion progresses
+	// without a running worker pool (the workflows_handler precedent).
+	if !s.runWorkerDispatch {
+		go s.executeIngestion(contextWithConversationID(context.Background(), ""), runID)
+	}
+
+	writeJSON(w, http.StatusAccepted, IngestResponse{
+		RunID:         runID,
+		Status:        string(run.StatusQueued),
+		DocumentCount: len(docs),
+	})
 }

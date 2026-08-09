@@ -177,6 +177,15 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease)
 	defer stopHeartbeat()
 
+	// An INGESTION JOB (a pinned IngestionRef, ADR 0061 Fork 2) is driven by the ingestion executor — it
+	// runs straight through (no suspend; the resume story is worker reclaim, driven off the cursor). Like the
+	// workflow branch it participates in this same claim/lease/reclaim machinery. It has no agent/OBO, so it
+	// runs off the pool's exec context (execCtx) rather than a run capability.
+	if rn.IsIngestionJob() {
+		s.executeIngestion(execCtx, rn.ID)
+		return
+	}
+
 	// A WORKFLOW INSTANCE (a pinned SpecSnapshot, ADR 0060) is driven by the workflow executor — one
 	// "advance" per claim (launch the next node → suspend), NOT the single-agent executeRun. The executor
 	// participates in this same claim/lease/reclaim machinery (it lives in the worker, not a new Deployment).

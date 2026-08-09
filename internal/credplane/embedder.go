@@ -20,11 +20,37 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 )
+
+// EmbedError is a typed, coded error returned by Embed/EmbedBatch when the gateway responds with a non-200
+// status. It carries the HTTP Status so a caller can branch on the transport outcome WITHOUT parsing error
+// strings (ADR 0061 Fork 2 — the ingestion executor branches 429=rate-limit / 402=budget-exceeded). The
+// message preserves the gateway's response snippet for diagnostics. Non-HTTP failures (a dial error, a decode
+// failure) are returned as plain errors with Status 0 — they are not gateway-status conditions.
+type EmbedError struct {
+	Status  int    // the gateway HTTP status (e.g. 402, 429); 0 ⇒ not a status error
+	Snippet string // the trimmed gateway response body (bounded)
+}
+
+func (e *EmbedError) Error() string {
+	return fmt.Sprintf("gateway embeddings status %d: %s", e.Status, e.Snippet)
+}
+
+// EmbedStatus extracts the gateway HTTP status from an error if it is (or wraps) an *EmbedError, else 0. The
+// ingestion executor uses it to branch cleanly on 429 (back off + resume) vs 402 (fail-soft, budget-exceeded)
+// without string matching.
+func EmbedStatus(err error) int {
+	var ee *EmbedError
+	if errors.As(err, &ee) {
+		return ee.Status
+	}
+	return 0
+}
 
 // gatewayEmbedder embeds text via the model gateway's OpenAI-compatible /v1/embeddings endpoint (ADR 0045).
 // The gateway (LiteLLM) resolves the model's provider credential server-side, so the token-service holds no
@@ -84,7 +110,7 @@ func (e *gatewayEmbedder) Embed(ctx context.Context, model, text string) ([]floa
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, 0, fmt.Errorf("gateway embeddings status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, 0, &EmbedError{Status: resp.StatusCode, Snippet: strings.TrimSpace(string(snippet))}
 	}
 	var out embeddingsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
@@ -130,7 +156,7 @@ func (e *gatewayEmbedder) EmbedBatch(ctx context.Context, model string, texts []
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, 0, fmt.Errorf("gateway batch embeddings status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, 0, &EmbedError{Status: resp.StatusCode, Snippet: strings.TrimSpace(string(snippet))}
 	}
 	var out embeddingsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {

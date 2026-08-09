@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS runs (
     wait_mode        text NOT NULL DEFAULT '',
     handed_off_to    text NOT NULL DEFAULT '',
     handoff_source_run_id text NOT NULL DEFAULT '',
+    ingestion_ref    text NOT NULL DEFAULT '',
+    ingestion_spec   text NOT NULL DEFAULT '',
+    outcome          text NOT NULL DEFAULT '',
     version          bigint NOT NULL DEFAULT 1,
     created_at       timestamptz NOT NULL,
     updated_at       timestamptz NOT NULL
@@ -130,6 +133,13 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS handed_off_to text NOT NULL DEFAULT ''
 -- Handoff backlink (M67, ADR 0060 §5): B's run records the run (A) whose handoff_to created it, since
 -- a transferred run is a NEW ROOT with no parent_run_id. Default '' ⇒ not created by a handoff.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS handoff_source_run_id text NOT NULL DEFAULT '';
+-- Ingestion job (M68, ADR 0061 Fork 2): an ingestion run pins its IngestionRef (the KB name) + resolved
+-- IngestionSpec (source/embeddingRoute/chunking/doc-keys), routed to executeIngestion by IsIngestionJob().
+-- outcome carries the executor-written terminal outcome (counts + partial flag + coded reason) — the m68.10
+-- seam the KB-status reconcile reads. Defaults ('') describe a non-ingestion run, so old rows load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS ingestion_ref  text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS ingestion_spec text NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome        text NOT NULL DEFAULT '';
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
@@ -176,8 +186,8 @@ func (p *pgStore) Create(r *Run) error {
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		 parent_run_id, root_run_id, spawn_depth, output_schema,
 		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		 node_endpoints, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,1,$28,$29)
+		 node_endpoints, ingestion_ref, ingestion_spec, outcome, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,1,$31,$32)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
@@ -185,7 +195,7 @@ func (p *pgStore) Create(r *Run) error {
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
 		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
 		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo, r.HandoffSourceRunID,
-		nodeEndpoints, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
+		nodeEndpoints, r.IngestionRef, r.IngestionSpec, r.Outcome, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
 	}
@@ -227,7 +237,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		parent_run_id, root_run_id, spawn_depth, output_schema,
 		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		node_endpoints, version, created_at, updated_at
+		node_endpoints, ingestion_ref, ingestion_spec, outcome, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
 		r             Run
@@ -249,7 +259,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
-		&nodeEndpoints, &version, &created, &updated)
+		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, 0, ErrNotFound
@@ -351,13 +361,13 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
 			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
-			version=version+1, updated_at=$13
-		WHERE id=$1 AND version=$14`
+			outcome=$13, version=version+1, updated_at=$14
+		WHERE id=$1 AND version=$15`
 	res, err := tx.ExecContext(ctx, upd,
 		id, working.TraceID, string(working.Status), msgs, action, working.Error,
 		working.WorkerID, nullableTime(working.LeaseExpiresAt),
 		working.Cursor, waitOn, string(working.WaitMode), working.HandedOffTo,
-		working.UpdatedAt.UTC(), version)
+		working.Outcome, working.UpdatedAt.UTC(), version)
 	if err != nil {
 		return nil, fmt.Errorf("run: update: %w", err)
 	}
@@ -381,10 +391,11 @@ func (p *pgStore) tryUpdate(ctx context.Context, id string, fn func(*Run) error)
 // writeRunTx persists a run row inside a transaction, guarded by its OCC version (version=$N),
 // bumping the version. It returns errRunConflict if the row moved under us (the standard OCC loser
 // signal, retried by the caller's retry loop). The caller MUST already hold the row lock. It writes
-// the same mutable column set as tryUpdate's UPDATE (incl. handed_off_to, m67.6), so the child/parent
-// writes in CompleteAndWake persist cursor + wait record + lease + handoff outcome exactly like an
-// ordinary Update — the two mutable-column sets must never diverge. handoff_source_run_id is NOT here:
-// it is create-only (set once when a handoff mints B, never mutated), like parent_run_id.
+// the same mutable column set as tryUpdate's UPDATE (incl. handed_off_to, m67.6, and outcome, m68.6), so the
+// child/parent writes in CompleteAndWake persist cursor + wait record + lease + handoff outcome + ingestion
+// outcome exactly like an ordinary Update — the two mutable-column sets must never diverge. handoff_source_run_id,
+// ingestion_ref and ingestion_spec are NOT here: they are create-only (set once at create, never mutated), like
+// parent_run_id.
 func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version int64) error {
 	msgs, err := json.Marshal(r.Messages)
 	if err != nil {
@@ -401,12 +412,12 @@ func (p *pgStore) writeRunTx(ctx context.Context, tx *sql.Tx, r *Run, version in
 	const upd = `UPDATE runs SET
 			trace_id=$2, status=$3, messages=$4, requires_action=$5, error=$6,
 			worker_id=$7, lease_expires_at=$8, cursor=$9, wait_on=$10, wait_mode=$11, handed_off_to=$12,
-			version=version+1, updated_at=$13
-		WHERE id=$1 AND version=$14`
+			outcome=$13, version=version+1, updated_at=$14
+		WHERE id=$1 AND version=$15`
 	res, err := tx.ExecContext(ctx, upd,
 		r.ID, r.TraceID, string(r.Status), msgs, action, r.Error,
 		r.WorkerID, nullableTime(r.LeaseExpiresAt), r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo,
-		r.UpdatedAt.UTC(), version)
+		r.Outcome, r.UpdatedAt.UTC(), version)
 	if err != nil {
 		return fmt.Errorf("run: update: %w", err)
 	}

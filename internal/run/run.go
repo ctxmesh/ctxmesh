@@ -90,6 +90,16 @@ func (r *Run) IsWorkflowInstance() bool {
 	return r.SpecSnapshot != ""
 }
 
+// IsIngestionJob reports whether this run is a KNOWLEDGE-BASE INGESTION job (M68, ADR 0061 Fork 2) — i.e. it
+// carries an IngestionRef (the KnowledgeBase name it ingests). The run-worker routes such a run to the ingestion
+// executor (executeIngestion) instead of the single-agent executeRun or the workflow executor. This mirrors the
+// M67 typed-marker precedent (IsWorkflowInstance = SpecSnapshot != ""): there is NO generic run `kind` column, so
+// the presence of the marker field IS the dispatch gate. A run is EITHER a workflow OR an ingestion, never both —
+// each reuses the shared Cursor for its own resume progress (ADR 0061: verification #5's correction).
+func (r *Run) IsIngestionJob() bool {
+	return r.IngestionRef != ""
+}
+
 // IsSpawned reports whether this run is a SUB-RUN of another (a workflow node or a supervisor delegation) —
 // it has a parent. A spawned run's terminal transition goes through CompleteAndWake so a `waiting` parent
 // (a suspended workflow run) is woken in the same transaction (ADR 0060 §3).
@@ -264,6 +274,29 @@ type Run struct {
 	// the only forward/backward link between A and B, closing the handoff lineage loop (Fable, 2026-08-09).
 	// Empty ⇒ this run was not created by a handoff (a normal invoke/create). Non-secret (a run id).
 	HandoffSourceRunID string `json:"-"`
+
+	// --- Ingestion job (M68, ADR 0061 Fork 2): set when this run INGESTS a KnowledgeBase corpus. An ingestion
+	// run is a Run with an IngestionRef (the KB name) + a pinned IngestionSpec (the resolved source + embedding
+	// route + chunking + the snapshotted document object-keys), routed to executeIngestion by the typed marker
+	// IsIngestionJob() = IngestionRef != "" (mirroring IsWorkflowInstance). It has NO agent, NO OBO-to-a-model,
+	// NO conversation — the run store is a generic durable-job runner (as M67 proved). It reuses the shared
+	// Cursor field for per-document progress (a run is either a workflow OR an ingestion, never both), so a
+	// worker reclaim resumes at the next un-done document without re-embedding. None is a secret (a KB name, a
+	// resolved spec) — kept json:"-" (the store persists them as their own columns; API exposure is m68.10's call).
+
+	// IngestionRef names the KnowledgeBase this run ingests (empty ⇒ not an ingestion run). The dispatch marker.
+	IngestionRef string `json:"-"`
+	// IngestionSpec is the resolved ingestion parameters pinned at ingest-create time (JSON: namespace, KB,
+	// embeddingRoute, chunking, and the document object-keys resolved from the source). Pinned so a live-edited
+	// KB or a changed bucket does not retroactively alter an in-flight ingestion (the ADR 0060 snapshot-pinning
+	// discipline). Empty ⇒ not an ingestion run.
+	IngestionSpec string `json:"-"`
+	// Outcome is the executor-written terminal outcome record (JSON, opaque to the store). For an ingestion run
+	// it carries the document/chunk/size counts + a partial flag + a coded terminal reason — the m68.10 SEAM the
+	// KnowledgeBase-status reconcile reads (the off-request run-worker has no KB-status RBAC, so it records the
+	// outcome ON THE RUN instead of writing KB.status). It is a MUTABLE column (unlike IngestionRef/IngestionSpec,
+	// which are create-only) so the executor persists it on completion. Empty ⇒ no outcome recorded yet.
+	Outcome string `json:"-"`
 }
 
 // WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3).
