@@ -98,8 +98,9 @@ export function TeamsPage() {
       header: "Spawn budget",
       hideOnMobile: true,
       cell: (t) => (
-        <span className="font-mono text-xs text-muted-foreground" title="fan-out / depth / total">
-          {t.budget.maxFanOut} / {t.budget.maxSpawnDepth} / {t.budget.maxTotalSpawns}
+        <span className="text-xs text-muted-foreground">
+          fan-out {t.budget.maxFanOut} · depth {t.budget.maxSpawnDepth} · total{" "}
+          {t.budget.maxTotalSpawns}
         </span>
       ),
     },
@@ -141,7 +142,7 @@ export function TeamsPage() {
           icon: Waypoints,
           title: "No agent teams",
           description:
-            "No AgentTeams defined yet. Create one (a supervisor + a roster of sub-agents) to enable dynamic delegation.",
+            "No AgentTeams defined yet. Apply an AgentTeam manifest (a supervisor + a roster of sub-agents) with kubectl to enable dynamic delegation; a describe-to-team builder arrives in a later milestone.",
         }}
       />
     </div>
