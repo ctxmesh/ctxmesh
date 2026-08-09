@@ -263,6 +263,18 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		tenantUsage = bff.NewRedisTenantUsageReader(addr)
 	}
 
+	// Production WorkflowNodeResolver (m67.4, ADR 0060): the workflow executor runs off-request (in the
+	// run-worker goroutine), so it cannot use a caller-scoped client for node resolution. We build a
+	// privileged, read-only cluster client from the BFF's own in-cluster config to read AgentDeployment
+	// status.URL — the SAME mechanism the credentialClient uses for locked MCP grants. This client is
+	// used ONLY for the name→url lookup (not for any user-data write), bounded by the workflow's registry
+	// trust boundary (enforced at validation time by m67.1); the authz decision happened at create-time.
+	clusterClient, clusterClientErr := client.New(cfg, client.Options{Scheme: scheme})
+	if clusterClientErr != nil {
+		return fmt.Errorf("build cluster client for workflow node resolver: %w", clusterClientErr)
+	}
+	workflowNodeResolver := bff.WorkflowNodeResolverFromClient(clusterClient, scheme)
+
 	srv := bff.NewServer(bff.Options{
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
@@ -291,6 +303,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OIDCIssuer:                  oidcIssuer,
 		OIDCClientID:                oidcClientID,
 		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
+		WorkflowNodeResolver:        workflowNodeResolver,
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 

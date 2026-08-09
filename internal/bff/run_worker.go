@@ -55,11 +55,22 @@ func (c RunWorkerConfig) withDefaults() RunWorkerConfig {
 	return c
 }
 
+// sweepWaitingInterval is how often the SweepWaiting goroutine runs. It is the belt-and-braces
+// reconciler for the crash window between a child's terminal transition and the transactional parent
+// wake (and the sole wake path for the in-mem store across a restart). 30s is well within any
+// reasonable lease interval and does not add meaningful latency to workflow execution.
+const sweepWaitingInterval = 30 * time.Second
+
 // StartRunWorkers launches a pool of claim loops that drain queued runs from the durable store and
 // execute them (ADR 0034 worker path, m32.2), until ctx is cancelled. Each loop leases runs under a
 // distinct worker id (pod hostname + index) so FOR UPDATE SKIP LOCKED never hands the same run to
 // two workers. It returns immediately; the pool runs in the background. Pair with a KEDA
 // ScaledObject that scales this Deployment on the queued-run count (see BuildRunWorkerScaledObject).
+//
+// It also starts the SweepWaiting goroutine (m67.4, ADR 0060 §3): a ~30s periodic reconciler that
+// re-queues `waiting` runs whose children have all gone terminal — the belt-and-braces safety net
+// for the crash window between CompleteAndWake and the actual wake (and the sole wake path for the
+// in-mem store across a restart). The goroutine is ctx-cancellable and terminates with the worker pool.
 func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) {
 	cfg = cfg.withDefaults()
 	host, err := os.Hostname()
@@ -70,6 +81,32 @@ func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) {
 	for i := range cfg.Concurrency {
 		workerID := fmt.Sprintf("%s-%d", host, i)
 		go s.runWorkerLoop(ctx, workerID, cfg)
+	}
+	// SweepWaiting goroutine (m67.4, ADR 0060 §3): periodically re-queues waiting runs whose children
+	// are all-terminal — the belt-and-braces for the crash window + in-mem-store across restart.
+	go s.sweepWaitingLoop(ctx)
+}
+
+// sweepWaitingLoop runs SweepWaiting on a ~30s tick until ctx is cancelled. It logs swept run ids at
+// Debug level so an operator can see which runs were re-queued by the reconciler (not the fast path).
+func (s *Server) sweepWaitingLoop(ctx context.Context) {
+	ticker := time.NewTicker(sweepWaitingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			woke, err := s.runStore.SweepWaiting()
+			if err != nil {
+				s.log.Error(err, "run-worker: SweepWaiting failed")
+				continue
+			}
+			if len(woke) > 0 {
+				s.log.Info("run-worker: SweepWaiting re-queued waiting runs (crash-window reconciler)",
+					"count", len(woke), "runIDs", woke)
+			}
+		}
 	}
 }
 
