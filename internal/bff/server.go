@@ -161,6 +161,11 @@ type Server struct {
 	// the tenant usage endpoint returns 501 (no state-layer configured).
 	tenantUsage TenantUsageReader
 
+	// runControl publishes the run-scoped CONTROL marker to the shared state-layer Valkey on cancel
+	// (m70.8, the real-kill cancel channel). nil ⇒ no STATELAYER_ADDR: cancel degrades to the durable
+	// status flip alone (soft cancel), never an error — the marker is only the accelerator.
+	runControl RunControlPublisher
+
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
 	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
 	// caller-scoped SSAR (exact RBAC parity with the CRD path). Always non-nil (defaulted to
@@ -421,6 +426,11 @@ type Options struct {
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
 
+	// RunControl publishes the run-scoped CONTROL marker to the shared state-layer Valkey on cancel (m70.8,
+	// the real-kill cancel channel). Optional — nil ⇒ cancel degrades to the durable status flip alone
+	// (soft cancel). Constructed in cmd/bff/main.go from STATELAYER_ADDR (the same addr the usage reader uses).
+	RunControl RunControlPublisher
+
 	// AgentMemoryStore is the control-plane pgvector store for long-term memory (ADR 0045). Optional —
 	// nil ⇒ the console memory endpoint returns 501.
 	AgentMemoryStore agentmemory.Store
@@ -504,6 +514,7 @@ func NewServer(opts Options) *Server {
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
 		tenantUsage:              opts.TenantUsage,
+		runControl:               opts.RunControl,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,

@@ -275,8 +275,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Live tenant-usage reader (M49): read-only connection to the shared state-layer Valkey so the console
 	// can show a tenant's current spend/rpm/inflight vs the cap. Optional — absent ⇒ the usage endpoint 501s.
 	var tenantUsage bff.TenantUsageReader
+	// Run-control publisher (m70.8, real-kill cancel channel): the trusted BFF SETs `run:{id}:control=cancel`
+	// to the SAME shared state-layer Valkey on cancel, so the launcher gateway can abort the in-flight model
+	// call. Absent STATELAYER_ADDR ⇒ nil ⇒ cancel degrades to the durable soft-cancel status flip alone.
+	var runControl bff.RunControlPublisher
 	if addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR")); addr != "" {
 		tenantUsage = bff.NewRedisTenantUsageReader(addr)
+		runControl = bff.NewRedisRunControlPublisher(addr)
 	}
 
 	// Workflow node endpoints are resolved + pinned at CREATE time, caller-scoped (m67.13, ADR 0011/0060):
@@ -336,6 +341,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		TokenServiceHTTPClient:      tsHTTPClient,
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
+		RunControl:                  runControl,
 		RunStore:                    runStore,
 		DocStore:                    docStore,
 		KnowledgeStore:              knowledgeStore,
