@@ -44,6 +44,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -194,11 +195,16 @@ func run(log logr.Logger) error {
 	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
 	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
 	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
-		tsServer.WithMemory(
-			agentmemory.NewPostgresStore(cpDB),
-			credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second}),
-		)
+		embedder := credplane.NewGatewayEmbedder(
+			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
+		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
 		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
+		// Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the token-service is the sole holder of the
+		// pgvector knowledge store; agent launchers proxy the READ path here (no DB creds in agent pods). The
+		// ingestion WRITE path is the run-worker holding its own store (m68.6). Reuses the same control-plane DB
+		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
+		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
+		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
 	}
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)

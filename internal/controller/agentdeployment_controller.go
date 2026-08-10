@@ -982,6 +982,35 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// Knowledge bases (M68, ADR 0061 Fork 3): when spec.knowledgeBases is non-empty, resolve each
+	// referenced KnowledgeBase CR (reading spec.embeddingRoute) and inject:
+	//   KNOWLEDGE_BASE_ENABLED=true  — the launcher knowledgeProxy gate reads this.
+	//   KNOWLEDGE_BASES=<JSON roster> — [{name,namespace,embeddingRoute}] — the un-forgeable roster
+	//     (mirroring DELEGATE_ROSTER) that the launcher gates every /knowledge/search against.
+	// Dangling (unresolvable) refs: KB is an ADDITIVE capability, NOT a fail-closed safety gate like
+	// guardrails, so a missing KB surfaces a condition + skips that entry (the resolvable KBs are still
+	// injected). The controller sets a "KnowledgeBasesResolved" condition (False/PartiallyResolved) when
+	// any ref is unresolvable. An empty/nil slice ⇒ no KNOWLEDGE_BASE_ENABLED env (proxy stays off).
+	kbRes, kbErr := resolveKnowledgeBases(ctx, r.Client, deploy)
+	if kbErr != nil {
+		return podTemplate{}, fmt.Errorf("resolving knowledge bases: %w", kbErr)
+	}
+	if len(kbRes.danglingNames) > 0 {
+		// Surface a clear condition so the operator sees exactly which refs are broken.
+		// We do NOT return an error — the resolvable entries are still injected.
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+			Type:               "KnowledgeBasesResolved",
+			Status:             metav1.ConditionFalse,
+			Reason:             "DanglingRef",
+			Message:            fmt.Sprintf("KnowledgeBase refs not found (skipped): %s", strings.Join(kbRes.danglingNames, ", ")),
+			ObservedGeneration: deploy.Generation,
+		})
+		if err := r.Status().Update(ctx, deploy); err != nil {
+			return podTemplate{}, fmt.Errorf("updating status for dangling KB refs: %w", err)
+		}
+	}
+	env = append(env, kbRes.env...)
+
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
@@ -1317,8 +1346,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// of the RESOLVED policy spec, so editing the referenced GuardrailPolicy (via the watch below) rolls a
 	// new revision — compliance tightening propagates. "" when unreferenced (symmetric with the others).
 	guardrailDig := gr.digest
+	// Knowledge bases (M68, ADR 0061): a spec.knowledgeBases add/remove/change (or a change to a bound
+	// KnowledgeBase's embeddingRoute — picked up via the watch wired in SetupWithManager) injects/removes
+	// KNOWLEDGE_BASE_ENABLED + KNOWLEDGE_BASES — a STRUCTURAL change that must roll the revision.
+	// "" when no KBs are bound (symmetric with the other components; byte-compatible pre-M68).
+	kbDig := knowledgeBasesDigest(kbRes.roster)
 	combinedDigest := combinedBindingDigest(
-		toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig, guardrailDig)
+		toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig, guardrailDig, kbDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1775,15 +1809,16 @@ func memoryBindingDigest(hasBinding bool, addr string) string {
 // a new combined suffix → a new revision, while spec.Image (the user container's
 // image) is untouched → the image digest is unchanged.
 func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promptDigest, tenantDigest,
-	proxyDigest, runtimeDigest, guardrailDigest string,
+	proxyDigest, runtimeDigest, guardrailDigest, kbDigest string,
 ) string {
 	if toolDigest == "" && memDigest == "" && regDigest == "" && budgetDigest == "" && promptDigest == "" &&
-		tenantDigest == "" && proxyDigest == "" && runtimeDigest == "" && guardrailDigest == "" {
+		tenantDigest == "" && proxyDigest == "" && runtimeDigest == "" && guardrailDigest == "" &&
+		kbDigest == "" {
 		return ""
 	}
 	h := sha256.Sum256([]byte("b=" + toolDigest + ";m=" + memDigest + ";r=" + regDigest +
 		";g=" + budgetDigest + ";p=" + promptDigest + ";t=" + tenantDigest + ";x=" + proxyDigest +
-		";rt=" + runtimeDigest + ";gr=" + guardrailDigest))
+		";rt=" + runtimeDigest + ";gr=" + guardrailDigest + ";kb=" + kbDigest))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 )
 
@@ -44,6 +45,9 @@ type Server struct {
 	// answer errCodeUnsupported (started without CONTROLPLANE_DSN / a gateway).
 	memStore agentmemory.Store
 	embedder Embedder
+	// Managed-RAG retrieval (ADR 0061 Fork 3), optional — enabled via WithKnowledge. nil ⇒ the
+	// /v1/knowledge endpoint answers errCodeUnsupported. Shares the embedder with the memory endpoints.
+	knowledgeStore knowledge.Store
 }
 
 // NewServer builds a Server over the given (single, shared) resolver.
@@ -59,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathStore, s.handleStore)
 	mux.HandleFunc(pathMemoryRemember, s.handleMemoryRemember)
 	mux.HandleFunc(pathMemorySearch, s.handleMemorySearch)
+	mux.HandleFunc(pathKnowledgeSearch, s.handleKnowledgeSearch)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	return mux

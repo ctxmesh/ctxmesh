@@ -32,9 +32,12 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
@@ -86,6 +89,24 @@ type Server struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
 	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
+
+	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
+	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
+	// OBJECT_STORE_ADDR is unset — the upload endpoint returns 501 honestly rather
+	// than panicking. Constructed once in cmd/bff/main.go.
+	docStore objectstore.ObjectStore
+
+	// knowledgeStore is the control-plane pgvector store for the managed RAG corpus (M68, ADR 0061 Fork 1),
+	// built from cpDB. The ingestion executor (m68.6) WRITES it DIRECTLY — EnsureCorpus/Upsert/SweepOrphans —
+	// because the run-worker is a trusted control-plane workload that holds the controlplane DSN (governance
+	// #8: write-direct-from-worker). nil ⇒ the ingest endpoint + executor degrade honestly (501 / a clear
+	// failed-run reason), never a panic. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN.
+	knowledgeStore knowledge.Store
+	// embedder embeds chunk texts via the model gateway (M68, ADR 0061 Fork 2) for the ingestion executor's
+	// direct write path (governance #8 — the trusted worker embeds + writes, agent pods do not). nil when
+	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
+	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
+	embedder credplane.Embedder
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -185,6 +206,16 @@ type Server struct {
 	// no capability and a downstream tool call resolves as unattended (org/public only),
 	// never another user's grant. Built in NewServer from MCP_CAPABILITY_PRIVATE_KEY.
 	capabilitySigner *runcap.Signer
+
+	// tokenServiceURL is the base URL of the central token-service (e.g.
+	// "http://token-service:8443"), used by the KB test-query endpoint (m68.13) to
+	// proxy POST /v1/knowledge/search. Empty ⇒ the search endpoint returns 501 honestly
+	// rather than panicking. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
+	tokenServiceURL string
+	// tokenServiceClient is the mTLS http.Client the KB test-query endpoint uses to reach the
+	// token-service (the same client the grant-delegation path uses). nil ⇒ http.DefaultClient
+	// (dev, plain HTTP). The token-service serves mTLS in prod, so this must not be the default client.
+	tokenServiceClient *http.Client
 
 	// grantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service (credplane.Client) so the grant lands in the CONFIG-SELECTED backend
@@ -298,6 +329,16 @@ type Options struct {
 	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
 	// why this bounded SA use does not reopen the confused-deputy gap.
 	CredentialClient client.Client
+	// TokenServiceURL is the base URL of the central token-service (e.g.
+	// "http://token-service:8443"). When set, the KB test-query endpoint proxies
+	// POST /v1/knowledge/search to this URL (m68.13). Empty ⇒ the search endpoint
+	// returns 501 honestly. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
+	TokenServiceURL string
+
+	// TokenServiceHTTPClient is the mTLS client for the token-service (the KB test-query endpoint,
+	// m68.13). nil ⇒ http.DefaultClient (dev). Wired from tokenServiceHTTPClient in cmd/bff/main.go.
+	TokenServiceHTTPClient *http.Client
+
 	// GrantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service so grants land in the config-selected backend (ADR 0032). nil ⇒ the BFF
 	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
@@ -348,6 +389,20 @@ type Options struct {
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
 
+	// DocStore is the durable KB object store (M68, ADR 0061 Fork 4). Optional — nil when
+	// OBJECT_STORE_ADDR is unset; the BFF upload endpoint returns honest 501 rather than panicking.
+	// Constructed in cmd/bff/main.go via objectstore.NewMinioStore().
+	DocStore objectstore.ObjectStore
+
+	// KnowledgeStore is the control-plane pgvector store for the managed RAG corpus (M68, ADR 0061 Fork 1),
+	// which the ingestion executor writes directly (governance #8). Optional — nil ⇒ the ingest endpoint +
+	// executor degrade honestly. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN (cpDB).
+	KnowledgeStore knowledge.Store
+	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
+	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
+	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
+	Embedder credplane.Embedder
+
 	Log logr.Logger
 }
 
@@ -373,6 +428,8 @@ func NewServer(opts Options) *Server {
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
+		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
+		tokenServiceClient:       opts.TokenServiceHTTPClient,
 		grantStore:               opts.GrantStore,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
@@ -385,6 +442,9 @@ func NewServer(opts Options) *Server {
 		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
+		docStore:                 opts.DocStore,
+		knowledgeStore:           opts.KnowledgeStore,
+		embedder:                 opts.Embedder,
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
@@ -625,6 +685,31 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
 		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
 
+		// KnowledgeBase list + detail (m68.13): read the caller's KB CRs — name, phase, counts.
+		// Caller-scoped (ADR 0011): the BFF lists/gets through the caller's own client so K8s RBAC
+		// governs who can read KBs. 403 when denied; 404 on a missing KB (detail only).
+		authed.HandleFunc("GET /api/knowledgebases", s.handleListKBs)
+		authed.HandleFunc("GET /api/knowledgebases/{name}", s.handleGetKB)
+
+		// KnowledgeBase test-query (m68.13): the console test-query panel — verify the KB exists
+		// (caller-scoped, 404 if absent) then forward to the token-service /v1/knowledge/search
+		// with the KB's embeddingRoute. Returns ranked chunks + citations. 501 when the token-service
+		// is unconfigured (TOKEN_SERVICE_URL unset).
+		authed.HandleFunc("POST /api/knowledgebases/{name}/search", s.handleSearchKB)
+
+		// KnowledgeBase document upload (M68, ADR 0061 Fork 4): stream a raw document body
+		// into the durable KB bucket at KnowledgeKey(ns, kbName, filename). Caller-scoped:
+		// the BFF verifies the KB exists in the caller's namespace before writing (honest 404
+		// when absent; 403 when RBAC denies the GET; 501 when OBJECT_STORE_ADDR is unset;
+		// 413 when the body exceeds maxDocumentUploadBytes). Returns 201 + {documentRef, key, size}.
+		authed.HandleFunc("POST /api/knowledgebases/{name}/documents", s.handleUploadKBDocument)
+
+		// KnowledgeBase ingestion trigger (M68, ADR 0061 Fork 2): resolve the KB's source documents,
+		// pin an IngestionSpec, and create a durable ingestion Run the worker drives (extract → chunk →
+		// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
+		// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
+		authed.HandleFunc("POST /api/knowledgebases/{name}/ingest", s.handleIngestKB)
+
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
 		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
@@ -829,6 +914,10 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
+		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
+		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
+		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).

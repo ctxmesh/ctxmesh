@@ -440,6 +440,36 @@ func TestMemStore_RoundTripsWorkflowFields(t *testing.T) {
 		"pinned node endpoints round-trip through the store")
 }
 
+// TestMemStore_RoundTripsIngestionFields proves the M68 ingestion marker + pinned spec round-trip through the
+// hot store, IsIngestionJob() reflects the marker, and Outcome (a MUTABLE column) persists via Update.
+func TestMemStore_RoundTripsIngestionFields(t *testing.T) {
+	s := NewMemStore()
+	r := New("ing-run", "ns", "my-kb", nil, "", t0)
+	r.IngestionRef = "my-kb"
+	r.IngestionSpec = `{"knowledgeBase":"my-kb","documents":[{"key":"knowledge/ns/my-kb/a.md"}]}`
+	r.Cursor = `{"done":{"knowledge/ns/my-kb/a.md":true}}`
+	require.True(t, r.IsIngestionJob())
+	require.False(t, r.IsWorkflowInstance(), "an ingestion run is not a workflow instance")
+	require.NoError(t, s.Create(r))
+
+	got, err := s.Get("ing-run")
+	require.NoError(t, err)
+	assert.Equal(t, "my-kb", got.IngestionRef)
+	assert.Equal(t, `{"knowledgeBase":"my-kb","documents":[{"key":"knowledge/ns/my-kb/a.md"}]}`, got.IngestionSpec)
+	assert.Equal(t, `{"done":{"knowledge/ns/my-kb/a.md":true}}`, got.Cursor)
+	assert.True(t, got.IsIngestionJob())
+
+	// Outcome is written by the executor via Update (a mutable column).
+	_, err = s.Update("ing-run", func(x *Run) error {
+		x.Outcome = `{"reason":"Succeeded","documents":1,"chunks":3}`
+		return nil
+	})
+	require.NoError(t, err)
+	got, err = s.Get("ing-run")
+	require.NoError(t, err)
+	assert.Equal(t, `{"reason":"Succeeded","documents":1,"chunks":3}`, got.Outcome)
+}
+
 // TestMemStore_ReserveSpawn proves the authoritative aggregate spawn counter: admit up to maxTotal,
 // deny beyond (without recording the rejected spawn), and isolate per root tree.
 func TestMemStore_ReserveSpawn(t *testing.T) {

@@ -160,10 +160,13 @@ spec:
           resources:
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               cpu: 500m
-              memory: 128Mi
+              # M68 (ADR 0061): the BFF now runs the ingestion executor (chunk buffering +
+              # batch embedding), which OOMed the prior 128Mi limit during ingestion (m52.M5,
+              # caught by the m68.14 live tier). Bumped to a sane control-plane BFF ceiling.
+              memory: 512Mi
           volumeMounts: []
       volumes: []
       serviceAccountName: bff

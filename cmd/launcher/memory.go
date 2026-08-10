@@ -264,21 +264,24 @@ const memoryScopeShared = "shared"
 // prefix, and the tracer. It is safe for concurrent use — every field is
 // read-only after construction and the store is concurrency-safe.
 type memoryServer struct {
-	store    MemoryStore
-	prefix   string // "mem:{namespace}/{agent}:"
-	agent    string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
-	tracer   trace.Tracer
-	longTerm *longTermProxy // optional (ADR 0045); nil ⇒ no long-term endpoints
+	store     MemoryStore
+	prefix    string // "mem:{namespace}/{agent}:"
+	agent     string // this agent's name — the AUTHORITATIVE writer attribution (m33.1)
+	tracer    trace.Tracer
+	longTerm  *longTermProxy  // optional (ADR 0045); nil ⇒ no long-term endpoints
+	knowledge *knowledgeProxy // optional (ADR 0061 Fork 3); nil ⇒ no managed-RAG retrieval endpoint
 	// forward, when non-nil (STATELAYER_PROXY_URL set), reverse-proxies the session/shared routes to
 	// the control-plane state-layer proxy — the launcher holds no Valkey path (ADR 0050 §8 phase 1).
 	forward *httputil.ReverseProxy
 }
 
-// buildMemoryHTTPServer builds the :2998 listener, or nil when neither session nor long-term memory is
-// enabled. It serves the session/shared (Valkey) routes when a backend is wired + the long-term
-// (token-service proxy) routes when ltProxy is set — an agent may have either or both (ADR 0045).
-func buildMemoryHTTPServer(cfg Config, tracer trace.Tracer, ltProxy *longTermProxy) *http.Server {
-	if !cfg.MemoryEnabled() && ltProxy == nil {
+// buildMemoryHTTPServer builds the :2998 listener, or nil when no memory surface is enabled. It serves the
+// session/shared (Valkey) routes when a backend is wired, the long-term (token-service proxy) routes when ltProxy
+// is set, and the managed-RAG retrieval route when kbProxy is set — an agent may have any subset (ADR 0045, 0061).
+func buildMemoryHTTPServer(
+	cfg Config, tracer trace.Tracer, ltProxy *longTermProxy, kbProxy *knowledgeProxy,
+) *http.Server {
+	if !cfg.MemoryEnabled() && ltProxy == nil && kbProxy == nil {
 		return nil
 	}
 	// Build the direct-Valkey store only when a backend addr is wired. When ONLY the state-layer proxy
@@ -289,11 +292,13 @@ func buildMemoryHTTPServer(cfg Config, tracer trace.Tracer, ltProxy *longTermPro
 	}
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Memory.Port),
-		Handler: newMemoryServer(store, cfg.Memory, tracer, ltProxy).handler(),
+		Handler: newMemoryServer(store, cfg.Memory, tracer, ltProxy, kbProxy).handler(),
 	}
 }
 
-func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer, longTerm *longTermProxy) *memoryServer {
+func newMemoryServer(
+	store MemoryStore, cfg memoryConfig, tracer trace.Tracer, longTerm *longTermProxy, knowledge *knowledgeProxy,
+) *memoryServer {
 	// Shared scope (m33.3): key under the registry trust boundary so every agent in the
 	// conversation reads/writes ONE scratchpad. It requires a registry — without one there is no
 	// boundary to share within, so fall back to the private per-agent layout (the controller gates
@@ -303,11 +308,12 @@ func newMemoryServer(store MemoryStore, cfg memoryConfig, tracer trace.Tracer, l
 		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
 	}
 	m := &memoryServer{
-		store:    store,
-		prefix:   prefix,
-		agent:    cfg.Agent,
-		tracer:   tracer,
-		longTerm: longTerm,
+		store:     store,
+		prefix:    prefix,
+		agent:     cfg.Agent,
+		tracer:    tracer,
+		longTerm:  longTerm,
+		knowledge: knowledge,
 	}
 	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath)
 	return m
@@ -447,6 +453,10 @@ func (m *memoryServer) handler() http.Handler {
 	// Long-term (agent-scope) memory (ADR 0045) — proxied to the token-service.
 	if m.longTerm != nil {
 		m.longTerm.register(mux)
+	}
+	// Managed-RAG retrieval (ADR 0061 Fork 3) — proxied to the token-service on the same listener.
+	if m.knowledge != nil {
+		m.knowledge.register(mux)
 	}
 	return mux
 }
