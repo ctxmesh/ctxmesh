@@ -988,6 +988,38 @@ export interface AgentTeamListResponse {
   items: AgentTeamSummary[];
 }
 
+// --- Team generate + create (POST /api/teams/generate, POST /api/teams, ADR 0065 D4) ---
+//
+// generateTeam composes an AgentTeam YAML from existing registry members via an
+// LLM call SERVER-SIDE (never auto-applies — returns for review). createTeam
+// applies the reviewed YAML via the caller-scoped K8s create. Both are caller-scoped.
+
+export interface GenerateTeamRequest {
+  description: string;
+  registryRef: string;
+  provider?: string;
+  model?: string;
+  namespace?: string;
+}
+
+// GenerateTeamResponse is the 200 success shape: the validated YAML + metadata.
+export interface GenerateTeamResponse {
+  teamYAML: string;
+  model: string;
+  provider: string;
+  warnings: string[];
+  eligibleMembers: string[];
+  // regenerate is present on 422 invalid outcomes (keyed like generateAgent).
+  regenerate?: boolean;
+  error?: string;
+  reason?: string;
+}
+
+export interface CreateTeamRequest {
+  teamYAML: string;
+  namespace?: string;
+}
+
 // --- Config builder (POST /api/expand, POST /api/agents) --------------------
 // The config-builder submits the SAME simplified agent.yaml the CLI consumes:
 // the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
@@ -3486,6 +3518,57 @@ export const api = {
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
   listTeams: (signal?: AbortSignal) =>
     getJSON<AgentTeamListResponse>("/api/teams", signal),
+
+  // generateTeam composes an AgentTeam YAML from existing registry members via a
+  // server-side LLM call (ADR 0065 D4). Like generateAgent, a 422 with
+  // `regenerate: true` is the INVALID outcome (not thrown) — the caller branches
+  // on the flag. A 403 / other non-2xx still surfaces as a typed ApiError.
+  generateTeam: async (
+    req: GenerateTeamRequest,
+    signal?: AbortSignal,
+  ): Promise<GenerateTeamResponse> => {
+    const res = await apiFetch("/api/teams/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as GenerateTeamResponse;
+    }
+    // Mirror generateAgent: a 422 with `regenerate: true` is the regenerate outcome.
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => ({}))) as GenerateTeamResponse;
+      if (body.regenerate) return body;
+      throw new ApiError(body.error || body.reason || "team generation failed", 422);
+    }
+    throw new ApiError(
+      await errorMessage(res, `generateTeam failed (${res.status})`),
+      res.status,
+    );
+  },
+
+  // createTeam applies a reviewed AgentTeam YAML via the caller-scoped K8s create
+  // (ADR 0065 D4). Returns the AgentTeamSummary on 201; throws ApiError on failure.
+  // A 403 → isForbidden (viewer); a 409 → isConflict (name collision).
+  createTeam: async (
+    req: CreateTeamRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentTeamSummary> => {
+    const res = await apiFetch("/api/teams", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as AgentTeamSummary;
+    }
+    throw new ApiError(
+      await errorMessage(res, `createTeam failed (${res.status})`),
+      res.status,
+    );
+  },
 
   // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
   // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).

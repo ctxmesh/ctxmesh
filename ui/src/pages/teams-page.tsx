@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Waypoints } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Plus, Waypoints } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
 
 // TeamsPage — the AgentTeam orchestration rosters (m64.11, ADR 0057).
@@ -23,6 +25,7 @@ type LoadState =
   | { kind: "error"; message: string; forbidden: boolean };
 
 export function TeamsPage() {
+  const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const abortRef = useRef<AbortController | null>(null);
@@ -120,12 +123,18 @@ export function TeamsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6" data-testid="teams-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Agent Teams</h2>
-        <p className="text-sm text-muted-foreground">
-          Orchestration rosters — a supervisor summons the roster's sub-agents on demand (delegate_to),
-          bounded by the spawn budget. Authored via YAML for now.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Agent Teams</h2>
+          <p className="text-sm text-muted-foreground">
+            Orchestration rosters — a supervisor summons the roster's sub-agents on demand (delegate_to),
+            bounded by the spawn budget.
+          </p>
+        </div>
+        <Button onClick={() => navigate("/teams/new")}>
+          <Plus className="h-4 w-4" />
+          New team
+        </Button>
       </div>
 
       <DataTable<AgentTeamSummary>
@@ -142,7 +151,7 @@ export function TeamsPage() {
           icon: Waypoints,
           title: "No agent teams",
           description:
-            "No AgentTeams defined yet. Apply an AgentTeam manifest (a supervisor + a roster of sub-agents) with kubectl to enable dynamic delegation; a describe-to-team builder arrives in a later milestone.",
+            "No AgentTeams defined yet. Use the New team button to describe a team in a sentence — we compose a supervisor and roster from your registry's published agents.",
         }}
       />
     </div>
