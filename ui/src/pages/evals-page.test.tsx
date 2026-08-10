@@ -73,6 +73,13 @@ const RESULTS_NO_SCORES = {
   scoresUnavailableReason: "Langfuse not configured",
 };
 
+// Default eval-gated metric fixture: 3 of 5 deployments are gated → 60%.
+const METRIC_DEFAULT = { total: 5, gated: 3, percent: 60 };
+// Fixture that meets the >50% PRD §5 target.
+const METRIC_ABOVE_TARGET = { total: 4, gated: 3, percent: 75 };
+// Fixture that is below the target.
+const METRIC_BELOW_TARGET = { total: 4, gated: 1, percent: 25 };
+
 type FetchSetup = {
   caps?: Record<string, Record<string, boolean>>;
   suites?: unknown[];
@@ -83,6 +90,9 @@ type FetchSetup = {
   resultsBody?: unknown;
   resultsStatus?: number;
   deleteOk?: boolean;
+  // eval-gated metric setup
+  metricBody?: unknown;
+  metricStatus?: number;
 };
 
 function installFetch(opts: FetchSetup = {}) {
@@ -155,6 +165,18 @@ function installFetch(opts: FetchSetup = {}) {
           ok,
           status: ok ? 204 : 403,
           json: async () => (ok ? {} : { error: "forbidden" }),
+        } as Response);
+      }
+
+      // Eval-gated metric
+      if (url.startsWith("/api/metrics/eval-gated") && method === "GET") {
+        const status = opts.metricStatus ?? 200;
+        const ok = status < 400;
+        return Promise.resolve({
+          ok,
+          status,
+          json: async () =>
+            ok ? (opts.metricBody ?? METRIC_DEFAULT) : { error: "failed" },
         } as Response);
       }
 
@@ -329,5 +351,51 @@ describe("EvalsPage", () => {
 
     expect(screen.queryByTestId("evals-new-btn")).not.toBeInTheDocument();
     expect(screen.queryByTestId("eval-delete-my-eval")).not.toBeInTheDocument();
+  });
+
+  // ---- eval-gated metric stat card (M69, ADR 0062 governance #2) -----------
+
+  it("stat: renders percent and gated/total from the BFF metric", async () => {
+    renderPage(EDITOR_CAPS, { metricBody: METRIC_ABOVE_TARGET });
+    // Wait for the metric card to appear (it loads independently of the suite list).
+    await waitFor(() => {
+      expect(screen.getByTestId("eval-gated-stat")).toBeInTheDocument();
+    });
+    // Percent value is rendered.
+    expect(screen.getByTestId("eval-gated-percent")).toHaveTextContent("75.0%");
+    // Sub-label shows gated/total.
+    expect(screen.getByTestId("eval-gated-sub")).toHaveTextContent("3/4 deployments");
+  });
+
+  it("stat: >50% target indicator appears when metric meets the target", async () => {
+    renderPage(EDITOR_CAPS, { metricBody: METRIC_ABOVE_TARGET });
+    await waitFor(() => {
+      expect(screen.getByTestId("eval-gated-target")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("eval-gated-target")).toHaveTextContent(/Above 50% target/);
+  });
+
+  it("stat: target indicator shows goal when below 50%", async () => {
+    renderPage(EDITOR_CAPS, { metricBody: METRIC_BELOW_TARGET });
+    await waitFor(() => {
+      expect(screen.getByTestId("eval-gated-target")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("eval-gated-target")).toHaveTextContent(/Target:.*50%/);
+  });
+
+  it("stat: shows 0.0% honestly when no deployments are gated", async () => {
+    renderPage(EDITOR_CAPS, { metricBody: { total: 3, gated: 0, percent: 0 } });
+    await waitFor(() => {
+      expect(screen.getByTestId("eval-gated-percent")).toHaveTextContent("0.0%");
+    });
+    expect(screen.getByTestId("eval-gated-sub")).toHaveTextContent("0/3 deployments");
+  });
+
+  it("stat: hides the card entirely when the endpoint returns 501 (dev substrate)", async () => {
+    renderPage(EDITOR_CAPS, { metricStatus: 501 });
+    // Suite list still loads.
+    await screen.findByTestId("eval-suite-my-eval");
+    // Stat card absent — no fabricated 0/0.
+    expect(screen.queryByTestId("eval-gated-stat")).not.toBeInTheDocument();
   });
 });

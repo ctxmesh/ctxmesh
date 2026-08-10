@@ -612,6 +612,11 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		// Eval-gated deploys metric (M69, ADR 0062 governance #2): the PRD §5
+		// ">50% of production deploys gated by an EvalSuite" counter. Caller-scoped
+		// (ADR 0011): reads AgentDeployments through the caller's own token — the K8s
+		// API server's RBAC decides visibility, not the BFF SA. No new RBAC grant.
+		authed.HandleFunc("GET /api/metrics/eval-gated", s.handleEvalGatedMetric)
 		// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
 		// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
 		// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22

@@ -1323,6 +1323,22 @@ func newAgentRuntimeDetail(rt *agentsv1alpha1.RuntimeSpec) *AgentRuntimeDetail {
 	return detail
 }
 
+// EvalGatedMetricResponse is returned by GET /api/metrics/eval-gated — the
+// PRD §5 ">50% of production deploys gated by an EvalSuite" quality-discipline
+// metric (ADR 0062 governance #2). It is a LIVE SNAPSHOT over the caller's
+// AgentDeployments (caller-scoped, ADR 0011): the historical per-promotion
+// count is a deferred follow-up.
+//
+//   - Total   — AgentDeployments visible to the caller.
+//   - Gated   — those with a non-empty spec.evalSuiteRef.
+//   - Percent — gated/total*100 rounded to one decimal; 0 when total==0 (no
+//     divide-by-zero; an honest empty-state).
+type EvalGatedMetricResponse struct {
+	Total   int     `json:"total"`
+	Gated   int     `json:"gated"`
+	Percent float64 `json:"percent"`
+}
+
 // healthFromConditions maps a resource's standard "Ready" condition onto the
 // topology health vocabulary. Absent condition → "unknown" (not yet reconciled),
 // True → "ready", False → "notReady", anything else → "pending". This is the one
