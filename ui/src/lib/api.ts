@@ -58,6 +58,7 @@ export interface AgentSummary {
   // drive the SRE fleet drift badges (m18.12). Optional for backward-compat.
   drift?: boolean;
   managedOutsideUI?: boolean;
+  isDraft?: boolean;
 }
 
 // CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):
@@ -93,6 +94,7 @@ export interface AgentListParams {
   cursor?: string;
   q?: string;
   namespace?: string;
+  includeDrafts?: boolean;
 }
 
 // --- Agent detail (GET /api/agents/{ns}/{name}, m14.7) ----------------------
@@ -210,6 +212,8 @@ export interface AgentDetailResponse {
     phase?: string;
     scoredRevision?: string;
   };
+  resourceVersion?: string;
+  isDraft?: boolean;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -1637,6 +1641,37 @@ export interface GenerateAgentResponse {
   regenerate?: boolean;
 }
 
+// RefineAgentRequest / RefineAgentResponse (POST /api/agents/refine, m71.1)
+export interface RefineTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface RefineAgentRequest {
+  currentSpec: string;
+  instruction: string;
+  transcript?: RefineTurn[];
+}
+
+export interface RefineAgentResponse {
+  agentYAML: string;
+  expanded?: string;
+  diff?: string[];
+  model?: string;
+  provider?: string;
+  warnings?: string[];
+  // The failure path (422): reason + the flag the UI keys off.
+  error?: string;
+  reason?: string;
+  regenerate?: boolean;
+}
+
+// PublishAgentResponse (POST /api/agents/{ns}/{name}/publish, m71.2)
+export interface PublishAgentResponse {
+  name: string;
+  namespace: string;
+}
+
 // EvalGatedMetricResponse mirrors the BFF's EvalGatedMetricResponse DTO (GET
 // /api/metrics/eval-gated, M69, ADR 0062 governance #2): a LIVE SNAPSHOT of the
 // PRD §5 ">50% of production deploys gated by an EvalSuite" quality metric.
@@ -2386,6 +2421,7 @@ function agentsQuery(params: AgentListParams = {}): string {
   if (params.cursor) qs.set("cursor", params.cursor);
   if (params.q) qs.set("q", params.q);
   if (params.namespace) qs.set("namespace", params.namespace);
+  if (params.includeDrafts) qs.set("includeDrafts", "true");
   const s = qs.toString();
   return s ? `?${s}` : "";
 }
@@ -2602,6 +2638,7 @@ export const api = {
     // and points the agent at it — the user picks a MODEL, the platform manages the
     // ROUTE. Absent → the YAML's own model.route is used.
     model?: { connection?: string; provider: string; model: string },
+    stage?: "draft",
     signal?: AbortSignal,
   ): Promise<CreateAgentResponse> => {
     const res = await apiFetch("/api/agents", {
@@ -2611,6 +2648,7 @@ export const api = {
         agentYAML,
         namespace,
         ...(model ? { model } : {}),
+        ...(stage ? { stage } : {}),
       }),
       signal,
     });
@@ -3021,6 +3059,89 @@ export const api = {
       await errorMessage(res, `generate failed (${res.status})`),
       res.status,
     );
+  },
+
+  // refineAgent calls the conversational refine endpoint (POST /api/agents/refine, m71.1).
+  // Mirrors generateAgent's 200/422/regenerate handling. `diff` lists changed top-level fields.
+  // `transcript` is the prior turns capped to ~8 client-side.
+  refineAgent: async (
+    req: RefineAgentRequest,
+    signal?: AbortSignal,
+  ): Promise<RefineAgentResponse> => {
+    const res = await apiFetch("/api/agents/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as RefineAgentResponse;
+    }
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => ({}))) as RefineAgentResponse;
+      if (body.regenerate) return body;
+      throw new ApiError(body.error || body.reason || "refinement failed", 422);
+    }
+    throw new ApiError(
+      await errorMessage(res, `refine failed (${res.status})`),
+      res.status,
+    );
+  },
+
+  // publishAgent flips the draft label off (POST /api/agents/{ns}/{name}/publish, m71.2).
+  // Idempotent — calling on an already-published agent is safe.
+  publishAgent: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<PublishAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `publish failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PublishAgentResponse;
+  },
+
+  // updateAgentSpec applies a full agentYAML update to a live draft
+  // (PUT /api/agents/{ns}/{name}, m71.3). Pass resourceVersion for the concurrent-edit guard
+  // → 409 "changed since you loaded it" on a stale value.
+  updateAgentSpec: async (
+    ns: string,
+    name: string,
+    agentYAML: string,
+    resourceVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<UpdateAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentYAML,
+          ...(resourceVersion ? { resourceVersion } : {}),
+        }),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as UpdateAgentResponse;
   },
 
   // updateAgent edits an existing agent via PUT /api/agents/{ns}/{name}
