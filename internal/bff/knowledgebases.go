@@ -32,6 +32,7 @@ package bff
 //     - "objectStorePrefix" → store.List(spec.source.objectStorePrefix)
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -503,4 +504,331 @@ func setKBIngesting(ctx context.Context, caller client.Client, kb *agentsv1beta1
 		logf.FromContext(ctx).Info("ingest: could not mark KB Ingesting (non-fatal; the controller projects the terminal phase)",
 			"kb", kb.Name, "ns", kb.Namespace, "err", err.Error())
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Read + test-query endpoints (m68.13)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// KBSummary is the BFF's flat projection of one KnowledgeBase for the console list (m68.13).
+// It is a DISPLAY-ONLY DTO — no inline document content (the CRD stores none), no etcd anti-pattern.
+type KBSummary struct {
+	Name           string  `json:"name"`
+	Namespace      string  `json:"namespace"`
+	Phase          string  `json:"phase"`
+	ChunkCount     int32   `json:"chunkCount"`
+	DocumentCount  int32   `json:"documentCount"`
+	SizeBytes      int64   `json:"sizeBytes"`
+	LastIngestedAt *string `json:"lastIngestedAt,omitempty"` // RFC3339 or absent
+	EmbeddingRoute string  `json:"embeddingRoute"`
+}
+
+// KBCondition is one status condition projected from metav1.Condition.
+type KBCondition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+}
+
+// KBDetail extends KBSummary with full spec + conditions for the detail page (m68.13).
+type KBDetail struct {
+	KBSummary
+	DisplayName     string        `json:"displayName,omitempty"`
+	SourceType      string        `json:"sourceType"`
+	ChunkSize       int           `json:"chunkSize"`
+	ChunkOverlap    int           `json:"chunkOverlap"`
+	ChunkSplitter   string        `json:"chunkSplitter"`
+	IngestionRunRef string        `json:"ingestionRunRef,omitempty"`
+	Conditions      []KBCondition `json:"conditions"`
+}
+
+// KBListResponse is the list-contract DTO for GET /api/knowledgebases.
+type KBListResponse struct {
+	Items []KBSummary `json:"items"`
+}
+
+// kbSummaryFrom projects a KnowledgeBase CRD into a KBSummary.
+func kbSummaryFrom(kb agentsv1beta1.KnowledgeBase) KBSummary {
+	s := KBSummary{
+		Name:           kb.Name,
+		Namespace:      kb.Namespace,
+		Phase:          kb.Status.Phase,
+		ChunkCount:     kb.Status.ChunkCount,
+		DocumentCount:  kb.Status.DocumentCount,
+		SizeBytes:      kb.Status.SizeBytes,
+		EmbeddingRoute: kb.Spec.EmbeddingRoute,
+	}
+	if kb.Status.LastIngestedAt != nil {
+		ts := kb.Status.LastIngestedAt.UTC().Format(time.RFC3339)
+		s.LastIngestedAt = &ts
+	}
+	return s
+}
+
+// kbDetailFrom projects a KnowledgeBase CRD into a KBDetail.
+func kbDetailFrom(kb agentsv1beta1.KnowledgeBase) KBDetail {
+	d := KBDetail{
+		KBSummary:       kbSummaryFrom(kb),
+		DisplayName:     kb.Spec.DisplayName,
+		SourceType:      kb.Spec.Source.Type,
+		ChunkSize:       kb.Spec.Chunking.Size,
+		ChunkOverlap:    kb.Spec.Chunking.Overlap,
+		ChunkSplitter:   kb.Spec.Chunking.Splitter,
+		IngestionRunRef: kb.Status.IngestionRunRef,
+	}
+	d.Conditions = make([]KBCondition, 0, len(kb.Status.Conditions))
+	for _, c := range kb.Status.Conditions {
+		d.Conditions = append(d.Conditions, KBCondition{
+			Type:               c.Type,
+			Status:             string(c.Status),
+			Reason:             c.Reason,
+			Message:            c.Message,
+			LastTransitionTime: c.LastTransitionTime.UTC().Format(time.RFC3339),
+		})
+	}
+	return d
+}
+
+// handleListKBs serves GET /api/knowledgebases (m68.13).
+//
+// Lists KnowledgeBases in the caller's namespace(s) (caller-scoped, ADR 0011).
+// Returns a KBListResponse. Supports ?namespace= to scope to one namespace.
+func (s *Server) handleListKBs(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	ns := r.URL.Query().Get("namespace")
+
+	var kbList agentsv1beta1.KnowledgeBaseList
+	listOpts := []client.ListOption{}
+	if ns != "" {
+		listOpts = append(listOpts, client.InNamespace(ns))
+	}
+	if err := caller.List(r.Context(), &kbList, listOpts...); err != nil {
+		if apierrors.IsForbidden(err) {
+			writeError(w, http.StatusForbidden, "forbidden: not allowed to list KnowledgeBases")
+			return
+		}
+		if apierrors.IsUnauthorized(err) {
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+			return
+		}
+		s.log.Error(err, "list KnowledgeBases failed")
+		writeError(w, http.StatusInternalServerError, "failed to list KnowledgeBases")
+		return
+	}
+
+	items := make([]KBSummary, 0, len(kbList.Items))
+	for _, kb := range kbList.Items {
+		items = append(items, kbSummaryFrom(kb))
+	}
+	writeJSON(w, http.StatusOK, KBListResponse{Items: items})
+}
+
+// handleGetKB serves GET /api/knowledgebases/{name} (m68.13).
+//
+// Returns a KBDetail for the named KnowledgeBase in the caller's namespace.
+// 404 when absent or RBAC-hidden; 403 when explicitly denied (ADR 0011).
+func (s *Server) handleGetKB(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	kbName := r.PathValue("name")
+	if kbName == "" {
+		writeError(w, http.StatusBadRequest, "KB name is required in the URL path")
+		return
+	}
+
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	var kb agentsv1beta1.KnowledgeBase
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: kbName}, &kb); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			writeError(w, http.StatusNotFound, fmt.Sprintf("KnowledgeBase %q not found in namespace %q", kbName, ns))
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to access KnowledgeBase %q", kbName))
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+		default:
+			s.log.Error(err, "get KnowledgeBase failed", "ns", ns, "name", kbName)
+			writeError(w, http.StatusInternalServerError, "failed to look up KnowledgeBase")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, kbDetailFrom(kb))
+}
+
+// kbSearchRequest is the console TEST-QUERY body (m68.13, POST /api/knowledgebases/{name}/search).
+type kbSearchRequest struct {
+	Query     string  `json:"query"`
+	TopK      int     `json:"topK,omitempty"`
+	Threshold float64 `json:"threshold,omitempty"`
+}
+
+// kbSearchHit is one result chunk as projected by the BFF (the m68.11 citation surface).
+type kbSearchHit struct {
+	Content     string  `json:"content"`
+	DocumentRef string  `json:"documentRef"`
+	ChunkIndex  int     `json:"chunkIndex"`
+	Score       float64 `json:"score"`
+	Truncated   bool    `json:"truncated,omitempty"`
+}
+
+// kbSearchResponse is the BFF response for POST /api/knowledgebases/{name}/search.
+type kbSearchResponse struct {
+	Results []kbSearchHit `json:"results"`
+}
+
+// handleSearchKB serves POST /api/knowledgebases/{name}/search (m68.13).
+//
+// The console TEST-QUERY panel: verify the KB exists (caller-scoped, 404 if absent), then forward
+// to the token-service POST /v1/knowledge/search with the KB's embeddingRoute as embeddingModel.
+// Returns ranked chunks with citation fields (documentRef, chunkIndex, score, content snippet).
+//
+// Token-service unconfigured → honest 501 (never a panic).
+// KB not found → 404. Caller denied → 403.
+func (s *Server) handleSearchKB(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	// Degrade honestly when the token-service is not configured.
+	if s.tokenServiceURL == "" {
+		writeError(w, http.StatusNotImplemented,
+			"knowledge search not configured: set TOKEN_SERVICE_URL to enable KB test-query")
+		return
+	}
+
+	kbName := r.PathValue("name")
+	if kbName == "" {
+		writeError(w, http.StatusBadRequest, "KB name is required in the URL path")
+		return
+	}
+
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	// KB existence + embeddingRoute resolution (caller-scoped, ADR 0011).
+	var kb agentsv1beta1.KnowledgeBase
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: kbName}, &kb); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			writeError(w, http.StatusNotFound, fmt.Sprintf("KnowledgeBase %q not found in namespace %q", kbName, ns))
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, fmt.Sprintf("forbidden: not allowed to access KnowledgeBase %q", kbName))
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+		default:
+			s.log.Error(err, "get KnowledgeBase failed", "ns", ns, "name", kbName)
+			writeError(w, http.StatusInternalServerError, "failed to look up KnowledgeBase")
+		}
+		return
+	}
+
+	// Decode the test-query request body.
+	var req kbSearchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Query == "" {
+		writeError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+
+	// Build the token-service search request, using the KB's embeddingRoute as the embedding model.
+	// This mirrors the knowledgeSearchRequest shape in internal/credplane/knowledge.go.
+	tsReq := struct {
+		Namespace      string  `json:"namespace"`
+		KnowledgeBase  string  `json:"knowledgeBase"`
+		Query          string  `json:"query"`
+		TopK           int     `json:"topK,omitempty"`
+		Threshold      float64 `json:"threshold,omitempty"`
+		EmbeddingModel string  `json:"embeddingModel"`
+	}{
+		Namespace:      ns,
+		KnowledgeBase:  kbName,
+		Query:          req.Query,
+		TopK:           req.TopK,
+		Threshold:      req.Threshold,
+		EmbeddingModel: kb.Spec.EmbeddingRoute,
+	}
+	tsReqJSON, err := json.Marshal(tsReq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to marshal search request")
+		return
+	}
+
+	// Forward to the token-service /v1/knowledge/search (the same path the launcher uses).
+	tsURL := s.tokenServiceURL + "/v1/knowledge/search"
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tsURL, bytes.NewReader(tsReqJSON))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build token-service request")
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		s.log.Error(err, "knowledge search: token-service request failed", "ns", ns, "kb", kbName)
+		writeError(w, http.StatusBadGateway, "knowledge search failed: "+err.Error())
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// The token-service returns knowledgeSearchResponse{Results, Error}. We project it
+	// to the BFF's kbSearchResponse (same shape, subset of fields for the console).
+	var tsResp struct {
+		Results []struct {
+			Content     string  `json:"content"`
+			DocumentRef string  `json:"documentRef"`
+			ChunkIndex  int     `json:"chunkIndex"`
+			Score       float64 `json:"score"`
+			Truncated   bool    `json:"truncated,omitempty"`
+		} `json:"results"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tsResp); err != nil {
+		s.log.Error(err, "knowledge search: failed to decode token-service response", "ns", ns, "kb", kbName)
+		writeError(w, http.StatusBadGateway, "knowledge search: bad response from token-service")
+		return
+	}
+
+	if tsResp.Error != "" {
+		// The token-service returned an application-level error (e.g. "unsupported").
+		writeError(w, http.StatusBadGateway, "knowledge search: "+tsResp.Error)
+		return
+	}
+
+	hits := make([]kbSearchHit, 0, len(tsResp.Results))
+	for _, r := range tsResp.Results {
+		hits = append(hits, kbSearchHit{
+			Content:     r.Content,
+			DocumentRef: r.DocumentRef,
+			ChunkIndex:  r.ChunkIndex,
+			Score:       r.Score,
+			Truncated:   r.Truncated,
+		})
+	}
+	writeJSON(w, http.StatusOK, kbSearchResponse{Results: hits})
 }

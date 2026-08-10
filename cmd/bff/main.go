@@ -297,6 +297,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	ingestEmbedder := newIngestEmbedder(log)
 
 	srv := bff.NewServer(bff.Options{
+		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
