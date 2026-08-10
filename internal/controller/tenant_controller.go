@@ -31,10 +31,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 )
 
 const (
@@ -60,6 +62,11 @@ const (
 // separate tasks (m47.2b / m47.3).
 type TenantReconciler struct {
 	client.Client
+	// NamespaceTenant mirrors the tenant's owned member namespaces into a small (namespace, tenant)
+	// Postgres index (ADR 0067 §6, m73.3) so the m73.4 catalog can resolve tenant membership WITHOUT
+	// the BFF reading namespaces (forbidden by ADR 0011). Optional/typed-nil-safe: nil ⇒ the mirror is
+	// skipped (envtests without a control-plane DB), mirroring how the other optional stores are treated.
+	NamespaceTenant namespacetenant.Store
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=tenants,verbs=get;list;watch;update;patch
@@ -83,6 +90,14 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if controllerutil.ContainsFinalizer(&tenant, tenantFinalizer) {
 			if err := r.pruneNamespaces(ctx, tenant.Name, nil); err != nil {
 				return ctrl.Result{}, fmt.Errorf("pruning on delete: %w", err)
+			}
+			// Clear the tenant's rows from the membership mirror before dropping the finalizer — the
+			// finalizer is the one guaranteed chance to clean up, so a mirror error REQUEUES (returns)
+			// rather than leaking stale (namespace, tenant) rows into the m73.4 catalog.
+			if r.NamespaceTenant != nil {
+				if err := r.NamespaceTenant.DeleteTenant(ctx, tenant.Name); err != nil {
+					return ctrl.Result{}, fmt.Errorf("clearing membership mirror on delete: %w", err)
+				}
 			}
 			controllerutil.RemoveFinalizer(&tenant, tenantFinalizer)
 			if err := r.Update(ctx, &tenant); err != nil {
@@ -115,6 +130,14 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := r.pruneNamespaces(ctx, tenant.Name, owned); err != nil {
 		return ctrl.Result{}, fmt.Errorf("pruning dropped namespaces: %w", err)
 	}
+
+	// Mirror the converged member set into the (namespace, tenant) index (ADR 0067 §6, m73.3) so the
+	// m73.4 catalog resolves membership without the BFF reading namespaces (ADR 0011). Best-effort on
+	// the converge path: a Postgres blip is LOGGED (not swallowed) but does NOT wedge the K8s
+	// convergence (quota/NP/label) that already succeeded — the mirror self-heals on the next reconcile
+	// (the namespace/KB watches re-drive it). The tenant-DELETE path (above) requeues instead, since the
+	// finalizer is the one chance to clean up.
+	r.syncMembershipMirror(ctx, tenant.Name, owned)
 
 	// Aggregate corpus bytes across member namespaces for the storage soft-cap check
 	// (ADR 0061 governance #7, M68 m68.12). Pure K8s list+sum — never re-queries Postgres.
@@ -370,6 +393,22 @@ func (r *TenantReconciler) pruneNamespaces(ctx context.Context, tenantName strin
 		}
 	}
 	return nil
+}
+
+// syncMembershipMirror upserts+prunes the (namespace, tenant) mirror to exactly the tenant's owned
+// member set (ADR 0067 §6, m73.3). It is a no-op when the store is unconfigured (nil — envtest without
+// a control-plane DB). Best-effort on the reconcile converge path: a store error is LOGGED (not
+// swallowed, not returned) so a Postgres blip never rolls back the K8s convergence that already
+// succeeded; the next reconcile re-drives the mirror. The tenant-delete path handles its own error
+// (it requeues) because the finalizer is the sole cleanup opportunity.
+func (r *TenantReconciler) syncMembershipMirror(ctx context.Context, tenantName string, owned []string) {
+	if r.NamespaceTenant == nil {
+		return
+	}
+	if err := r.NamespaceTenant.SetMembers(ctx, tenantName, owned); err != nil {
+		logf.FromContext(ctx).Error(err, "membership mirror sync failed; will re-converge next reconcile",
+			"tenant", tenantName)
+	}
 }
 
 // aggregateCorpusBytes sums KnowledgeBase.status.sizeBytes across all member namespaces.
