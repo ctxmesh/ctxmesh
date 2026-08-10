@@ -58,6 +58,7 @@ export interface AgentSummary {
   // drive the SRE fleet drift badges (m18.12). Optional for backward-compat.
   drift?: boolean;
   managedOutsideUI?: boolean;
+  isDraft?: boolean;
 }
 
 // CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):
@@ -93,6 +94,7 @@ export interface AgentListParams {
   cursor?: string;
   q?: string;
   namespace?: string;
+  includeDrafts?: boolean;
 }
 
 // --- Agent detail (GET /api/agents/{ns}/{name}, m14.7) ----------------------
@@ -210,6 +212,8 @@ export interface AgentDetailResponse {
     phase?: string;
     scoredRevision?: string;
   };
+  resourceVersion?: string;
+  isDraft?: boolean;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -984,6 +988,38 @@ export interface AgentTeamListResponse {
   items: AgentTeamSummary[];
 }
 
+// --- Team generate + create (POST /api/teams/generate, POST /api/teams, ADR 0065 D4) ---
+//
+// generateTeam composes an AgentTeam YAML from existing registry members via an
+// LLM call SERVER-SIDE (never auto-applies — returns for review). createTeam
+// applies the reviewed YAML via the caller-scoped K8s create. Both are caller-scoped.
+
+export interface GenerateTeamRequest {
+  description: string;
+  registryRef: string;
+  provider?: string;
+  model?: string;
+  namespace?: string;
+}
+
+// GenerateTeamResponse is the 200 success shape: the validated YAML + metadata.
+export interface GenerateTeamResponse {
+  teamYAML: string;
+  model: string;
+  provider: string;
+  warnings: string[];
+  eligibleMembers: string[];
+  // regenerate is present on 422 invalid outcomes (keyed like generateAgent).
+  regenerate?: boolean;
+  error?: string;
+  reason?: string;
+}
+
+export interface CreateTeamRequest {
+  teamYAML: string;
+  namespace?: string;
+}
+
 // --- Config builder (POST /api/expand, POST /api/agents) --------------------
 // The config-builder submits the SAME simplified agent.yaml the CLI consumes:
 // the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
@@ -1635,6 +1671,37 @@ export interface GenerateAgentResponse {
   error?: string;
   reason?: string;
   regenerate?: boolean;
+}
+
+// RefineAgentRequest / RefineAgentResponse (POST /api/agents/refine, m71.1)
+export interface RefineTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface RefineAgentRequest {
+  currentSpec: string;
+  instruction: string;
+  transcript?: RefineTurn[];
+}
+
+export interface RefineAgentResponse {
+  agentYAML: string;
+  expanded?: string;
+  diff?: string[];
+  model?: string;
+  provider?: string;
+  warnings?: string[];
+  // The failure path (422): reason + the flag the UI keys off.
+  error?: string;
+  reason?: string;
+  regenerate?: boolean;
+}
+
+// PublishAgentResponse (POST /api/agents/{ns}/{name}/publish, m71.2)
+export interface PublishAgentResponse {
+  name: string;
+  namespace: string;
 }
 
 // EvalGatedMetricResponse mirrors the BFF's EvalGatedMetricResponse DTO (GET
@@ -2386,6 +2453,7 @@ function agentsQuery(params: AgentListParams = {}): string {
   if (params.cursor) qs.set("cursor", params.cursor);
   if (params.q) qs.set("q", params.q);
   if (params.namespace) qs.set("namespace", params.namespace);
+  if (params.includeDrafts) qs.set("includeDrafts", "true");
   const s = qs.toString();
   return s ? `?${s}` : "";
 }
@@ -2602,6 +2670,7 @@ export const api = {
     // and points the agent at it — the user picks a MODEL, the platform manages the
     // ROUTE. Absent → the YAML's own model.route is used.
     model?: { connection?: string; provider: string; model: string },
+    stage?: "draft",
     signal?: AbortSignal,
   ): Promise<CreateAgentResponse> => {
     const res = await apiFetch("/api/agents", {
@@ -2611,6 +2680,7 @@ export const api = {
         agentYAML,
         namespace,
         ...(model ? { model } : {}),
+        ...(stage ? { stage } : {}),
       }),
       signal,
     });
@@ -3023,6 +3093,89 @@ export const api = {
     );
   },
 
+  // refineAgent calls the conversational refine endpoint (POST /api/agents/refine, m71.1).
+  // Mirrors generateAgent's 200/422/regenerate handling. `diff` lists changed top-level fields.
+  // `transcript` is the prior turns capped to ~8 client-side.
+  refineAgent: async (
+    req: RefineAgentRequest,
+    signal?: AbortSignal,
+  ): Promise<RefineAgentResponse> => {
+    const res = await apiFetch("/api/agents/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as RefineAgentResponse;
+    }
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => ({}))) as RefineAgentResponse;
+      if (body.regenerate) return body;
+      throw new ApiError(body.error || body.reason || "refinement failed", 422);
+    }
+    throw new ApiError(
+      await errorMessage(res, `refine failed (${res.status})`),
+      res.status,
+    );
+  },
+
+  // publishAgent flips the draft label off (POST /api/agents/{ns}/{name}/publish, m71.2).
+  // Idempotent — calling on an already-published agent is safe.
+  publishAgent: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<PublishAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `publish failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as PublishAgentResponse;
+  },
+
+  // updateAgentSpec applies a full agentYAML update to a live draft
+  // (PUT /api/agents/{ns}/{name}, m71.3). Pass resourceVersion for the concurrent-edit guard
+  // → 409 "changed since you loaded it" on a stale value.
+  updateAgentSpec: async (
+    ns: string,
+    name: string,
+    agentYAML: string,
+    resourceVersion?: string,
+    signal?: AbortSignal,
+  ): Promise<UpdateAgentResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agentYAML,
+          ...(resourceVersion ? { resourceVersion } : {}),
+        }),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `update failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as UpdateAgentResponse;
+  },
+
   // updateAgent edits an existing agent via PUT /api/agents/{ns}/{name}
   // (m15.11, ADR 0017 round-trip + degraded safe-field patch). A 403 (RBAC
   // viewer), 409 (conflict), or 400 (invalid spec) surfaces via ApiError. The
@@ -3365,6 +3518,57 @@ export const api = {
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
   listTeams: (signal?: AbortSignal) =>
     getJSON<AgentTeamListResponse>("/api/teams", signal),
+
+  // generateTeam composes an AgentTeam YAML from existing registry members via a
+  // server-side LLM call (ADR 0065 D4). Like generateAgent, a 422 with
+  // `regenerate: true` is the INVALID outcome (not thrown) — the caller branches
+  // on the flag. A 403 / other non-2xx still surfaces as a typed ApiError.
+  generateTeam: async (
+    req: GenerateTeamRequest,
+    signal?: AbortSignal,
+  ): Promise<GenerateTeamResponse> => {
+    const res = await apiFetch("/api/teams/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as GenerateTeamResponse;
+    }
+    // Mirror generateAgent: a 422 with `regenerate: true` is the regenerate outcome.
+    if (res.status === 422) {
+      const body = (await res.json().catch(() => ({}))) as GenerateTeamResponse;
+      if (body.regenerate) return body;
+      throw new ApiError(body.error || body.reason || "team generation failed", 422);
+    }
+    throw new ApiError(
+      await errorMessage(res, `generateTeam failed (${res.status})`),
+      res.status,
+    );
+  },
+
+  // createTeam applies a reviewed AgentTeam YAML via the caller-scoped K8s create
+  // (ADR 0065 D4). Returns the AgentTeamSummary on 201; throws ApiError on failure.
+  // A 403 → isForbidden (viewer); a 409 → isConflict (name collision).
+  createTeam: async (
+    req: CreateTeamRequest,
+    signal?: AbortSignal,
+  ): Promise<AgentTeamSummary> => {
+    const res = await apiFetch("/api/teams", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as AgentTeamSummary;
+    }
+    throw new ApiError(
+      await errorMessage(res, `createTeam failed (${res.status})`),
+      res.status,
+    );
+  },
 
   // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
   // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).

@@ -138,6 +138,14 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
+	// Draft filter (ADR 0065 D1): by default, draft agents (those carrying the
+	// agents.ctxmesh.ai/stage=draft label) are excluded from the list — they are
+	// only included when the caller passes ?includeDrafts=true. This is a BFF-side
+	// post-fetch filter (same approach as q): Kubernetes has no label-exclusion
+	// filter on List, so we fetch the raw page and filter client-side. Callers
+	// that explicitly include drafts can still use ?q to narrow the window.
+	includeDrafts := r.URL.Query().Get("includeDrafts") == handoffOKTrue
+
 	opts := []client.ListOption{client.Limit(int64(limit))}
 	if cursor != "" {
 		opts = append(opts, client.Continue(cursor))
@@ -162,13 +170,21 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	// match on the name.
 	summaries := make([]AgentSummary, 0, len(list.Items))
 	for i := range list.Items {
-		summary := newAgentSummary(&list.Items[i])
+		ad := &list.Items[i]
+		// Draft filter: skip draft agents unless the caller opted in.
+		if isDraftAgent(ad) && !includeDrafts {
+			continue
+		}
+		summary := newAgentSummary(ad)
 		if q != "" && !strings.Contains(strings.ToLower(summary.Name), q) {
 			continue
 		}
 		// Fleet-health flags (m18.11) — computed only for agents that pass the
 		// filter so a filtered page never pays for skipped agents.
-		summary.ManagedOutsideUI, summary.Drift = s.editModeFlags(&list.Items[i])
+		summary.ManagedOutsideUI, summary.Drift = s.editModeFlags(ad)
+		// Draft badge (ADR 0065 D1): set on the summary so the UI can render a
+		// "draft" badge on each draft agent when includeDrafts is true.
+		summary.IsDraft = isDraftAgent(ad)
 		summaries = append(summaries, summary)
 	}
 

@@ -36,6 +36,7 @@ import { RunsPage } from "@/pages/runs-page";
 import { AuditPage } from "@/pages/audit-page";
 import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
+import { CreateTeamPage } from "@/pages/create-team-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
 import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
@@ -184,6 +185,8 @@ export function App() {
             <Route path="agents" element={<AgentsPage />} />
             {/* m64.11: AgentTeams — the orchestration rosters (read-only). */}
             <Route path="teams" element={<TeamsPage />} />
+            {/* m71.7: CreateTeamPage — describe → generate → review → create. */}
+            <Route path="teams/new" element={<CreateTeamPage />} />
             {/* m66.10: GuardrailPolicies — the content-governance policies (read-only). */}
             <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* m67.9: Workflows — the declarative agent graph CRs (read-only list + invoke). */}

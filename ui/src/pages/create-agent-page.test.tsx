@@ -317,6 +317,10 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
     await pickDescribe();
     fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    // After generation, the refine-and-draft surface is shown. Click "Create agent (classic)"
+    // to reach the SharedReview (the one-shot path).
+    await screen.findByTestId("refine-and-draft-surface");
+    fireEvent.click(screen.getByTestId("create-agent-direct"));
     await screen.findByTestId("shared-review");
     return calls;
   }
@@ -432,6 +436,9 @@ describe("CreateAgentPage — create → landing navigation (m14.11)", () => {
     await screen.findByTestId("describe-flow");
     fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    // After generation, the refine-and-draft surface is shown; use the one-shot classic path.
+    await screen.findByTestId("refine-and-draft-surface");
+    fireEvent.click(screen.getByTestId("create-agent-direct"));
     await screen.findByTestId("shared-review");
     fireEvent.click(screen.getByTestId("create-button"));
     await screen.findByTestId("create-success");
@@ -442,5 +449,221 @@ describe("CreateAgentPage — create → landing navigation (m14.11)", () => {
       () => expect(screen.getByTestId("location")).toHaveTextContent("/agents/default/rev-agent"),
       { timeout: 3000 },
     );
+  });
+});
+
+describe("CreateAgentPage — refine chat + draft lifecycle (m71.4/m71.5)", () => {
+  // Extended recordingFetch that also handles /api/agents/refine and /api/agents/{ns}/{name}/publish
+  function recordingFetchWithDraft(opts: {
+    refine?: Handler;
+    create?: Handler;
+    publish?: Handler;
+    agentDetail?: (url: string) => { ok: boolean; status?: number; json: unknown };
+    invoke?: Handler;
+    updateAgent?: Handler;
+  } = {}) {
+    const calls: Captured[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const body = typeof init?.body === "string" ? init.body : "";
+        calls.push({ url, method, body });
+
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok,
+            status,
+            json: async () => json,
+            text: async () => (typeof json === "string" ? json : JSON.stringify(json)),
+          } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
+        if (url === "/api/tools")
+          return j({ tools: [] });
+        if (url === "/api/agents/generate" && method === "POST")
+          return j({ agentYAML: "name: test-agent\nruntime: managed\n", expanded: "kind: AgentDeployment\n", model: "claude-sonnet-4" });
+        if (url === "/api/agents/refine" && method === "POST") {
+          const r = opts.refine
+            ? opts.refine(body)
+            : { ok: true, json: { agentYAML: "name: test-agent\nruntime: managed\nsystemPrompt: refined\n", diff: ["systemPrompt"], model: "claude-sonnet-4" } };
+          return j(r.json, r.ok, r.status ?? (r.ok ? 200 : 422));
+        }
+        if (url === "/api/agents" && method === "POST") {
+          const r = opts.create
+            ? opts.create(body)
+            : { ok: true, json: { created: [{ kind: "AgentDeployment", name: "test-agent", namespace: "default" }] } };
+          return j(r.json, r.ok, r.status ?? (r.ok ? 201 : 400));
+        }
+        if (url.includes("/api/agents/") && url.includes("/publish") && method === "POST") {
+          if (opts.publish) {
+            const r = opts.publish(body);
+            return j(r.json, r.ok, r.status ?? (r.ok ? 200 : 400));
+          }
+          return j({ name: "test-agent", namespace: "default" });
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/) && method === "GET") {
+          if (opts.agentDetail) {
+            const r = opts.agentDetail(url);
+            return j(r.json, r.ok, r.status ?? 200);
+          }
+          return j({ name: "test-agent", namespace: "default", resourceVersion: "123", isDraft: true, image: "", executionModel: "serving", role: "", promptRef: "", modelRoute: "", scaling: { min: 0, max: 3 }, phase: "Ready", ready: true, url: "", latestVersion: "", conditions: [], bindings: [], versions: [] });
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/) && method === "PUT") {
+          if (opts.updateAgent) {
+            const r = opts.updateAgent(body);
+            return j(r.json, r.ok, r.status ?? 200);
+          }
+          return j({ name: "test-agent", namespace: "default" });
+        }
+        if (url === "/api/invoke" && method === "POST") {
+          if (opts.invoke) {
+            const r = opts.invoke(body);
+            return j(r.json, r.ok, r.status ?? 200);
+          }
+          return j({ traceId: "t1", response: "Hello from draft agent" });
+        }
+        return j({}, false, 404);
+      }),
+    );
+    return calls;
+  }
+
+  async function reachRefinePanel() {
+    recordingFetchWithDraft();
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    // Should land on the refine-and-draft surface
+    await screen.findByTestId("refine-and-draft-surface");
+  }
+
+  it("after generation, lands on the refine-and-draft surface with the refine chat panel", async () => {
+    await reachRefinePanel();
+    expect(screen.getByTestId("refine-chat-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("draft-lifecycle")).toBeInTheDocument();
+    expect(screen.getByTestId("refine-input")).toBeInTheDocument();
+  });
+
+  it("sending a refine instruction calls api.refineAgent and renders the diff chip", async () => {
+    const calls = recordingFetchWithDraft();
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+
+    fireEvent.change(screen.getByTestId("refine-input"), { target: { value: "add web search" } });
+    fireEvent.click(screen.getByTestId("refine-send"));
+
+    // Wait for the diff chip to appear
+    await screen.findByTestId("refine-diff-chip");
+    expect(screen.getByTestId("refine-diff-chip")).toHaveTextContent(/systemPrompt/);
+
+    // Verify refine was called
+    expect(calls.find((c) => c.url === "/api/agents/refine" && c.method === "POST")).toBeDefined();
+    const refineCall = calls.find((c) => c.url === "/api/agents/refine" && c.method === "POST")!;
+    expect(JSON.parse(refineCall.body).instruction).toBe("add web search");
+  });
+
+  it("a 422+regenerate from refineAgent shows the reason inline — no crash", async () => {
+    recordingFetchWithDraft({
+      refine: () => ({
+        ok: false,
+        status: 422,
+        json: { regenerate: true, reason: "Cannot add web search to this spec type", agentYAML: "name: test-agent\nruntime: managed\n" },
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+
+    fireEvent.change(screen.getByTestId("refine-input"), { target: { value: "add web search" } });
+    fireEvent.click(screen.getByTestId("refine-send"));
+
+    await screen.findByTestId("refine-error");
+    expect(screen.getByTestId("refine-error")).toHaveTextContent(/Cannot add web search/);
+    // No crash — the surface is still there
+    expect(screen.getByTestId("refine-and-draft-surface")).toBeInTheDocument();
+  });
+
+  it("Create draft & test creates with stage:draft and shows the inline test panel", async () => {
+    const calls = recordingFetchWithDraft();
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+
+    fireEvent.click(screen.getByTestId("create-draft-button"));
+    await screen.findByTestId("draft-test-panel");
+
+    // Verify the POST to /api/agents included stage:draft
+    const createCall = calls.find((c) => c.url === "/api/agents" && c.method === "POST")!;
+    expect(createCall).toBeDefined();
+    expect(JSON.parse(createCall.body).stage).toBe("draft");
+  });
+
+  it("Publish calls publishAgent and shows published state", async () => {
+    const calls = recordingFetchWithDraft();
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+
+    // Create draft first
+    fireEvent.click(screen.getByTestId("create-draft-button"));
+    await screen.findByTestId("draft-test-panel");
+
+    // Publish
+    fireEvent.click(screen.getByTestId("publish-button"));
+    await screen.findByTestId("draft-published");
+
+    // Verify publish was called
+    expect(calls.find((c) => c.url.includes("/publish") && c.method === "POST")).toBeDefined();
+  });
+
+  it("a 409 on apply shows the conflict message", async () => {
+    recordingFetchWithDraft({
+      updateAgent: () => ({
+        ok: false,
+        status: 409,
+        json: { error: "the agent changed since you loaded it" },
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-describe"));
+    await screen.findByTestId("describe-flow");
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "a test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await screen.findByTestId("refine-and-draft-surface");
+
+    // First refine to get a transcript
+    fireEvent.change(screen.getByTestId("refine-input"), { target: { value: "add web search" } });
+    fireEvent.click(screen.getByTestId("refine-send"));
+    await screen.findByTestId("refine-diff-chip");
+
+    // Create draft
+    fireEvent.click(screen.getByTestId("create-draft-button"));
+    await screen.findByTestId("draft-test-panel");
+
+    // Apply refinement → 409
+    fireEvent.click(screen.getByTestId("apply-refinement-button"));
+    await screen.findByTestId("draft-conflict");
+    expect(screen.getByTestId("draft-conflict")).toHaveTextContent(/changed since you loaded it/);
   });
 });

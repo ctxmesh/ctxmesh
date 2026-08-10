@@ -92,7 +92,7 @@ func mcpServerReferences(ctx context.Context, cl client.Client, ns, server strin
 	for i := range list.Items {
 		b := &list.Items[i]
 		if b.Spec.RegistryRef == server {
-			out = append(out, MCPServerReference{Kind: "MCPToolBinding", Name: b.Name, AgentRef: b.Spec.AgentRef})
+			out = append(out, MCPServerReference{Kind: mcpToolBindingKind, Name: b.Name, AgentRef: b.Spec.AgentRef})
 		}
 	}
 	return out, nil

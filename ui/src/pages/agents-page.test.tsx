@@ -317,3 +317,43 @@ describe("AgentsPage — RBAC-aware row actions (m15.11)", () => {
     expect(screen.queryByTestId("external-clean")).toBeNull();
   });
 });
+
+describe("AgentsPage — Drafts toggle (m71.5)", () => {
+  it("shows a Drafts toggle that passes includeDrafts to the API", async () => {
+    const calls = installFetch({
+      agents: (qs) => {
+        const includeDrafts = qs.get("includeDrafts");
+        const items = includeDrafts
+          ? [agent("live"), { ...agent("my-draft"), isDraft: true }]
+          : [agent("live")];
+        return { ok: true, body: { agents: [], items, nextCursor: "" } };
+      },
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("live");
+    // Draft not shown yet
+    expect(screen.queryByText("my-draft")).toBeNull();
+
+    // Toggle drafts on
+    fireEvent.click(screen.getByTestId("drafts-toggle"));
+    await screen.findByText("my-draft");
+    expect(calls.some((c) => c.url.includes("includeDrafts=true"))).toBe(true);
+  });
+
+  it("shows a draft badge on draft agents", async () => {
+    installFetch({
+      agents: () => ({
+        ok: true,
+        body: {
+          agents: [],
+          items: [{ ...agent("my-draft"), isDraft: true }, agent("live")],
+          nextCursor: "",
+        },
+      }),
+    });
+    renderWithCaps(<AgentsPage />);
+    await screen.findByText("my-draft");
+    expect(screen.getByTestId("draft-my-draft")).toBeInTheDocument();
+    expect(screen.queryByTestId("draft-live")).toBeNull();
+  });
+});
