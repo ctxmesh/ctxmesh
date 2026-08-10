@@ -167,9 +167,11 @@ func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Personal-owner guard (ADR 0029): a personal server may be deleted ONLY by its
-	// owner. org/public rely on caller-scoped RBAC (a viewer's delete → the API 403).
-	if tr.Labels[labelMCPScope] == scopePersonal {
+	// Personal/private-owner guard (ADR 0029 / ADR 0067): a private (was: personal) server
+	// may be deleted ONLY by its owner. team/org/public rely on caller-scoped RBAC.
+	// mcpVisibility does dual-read: uses labelMCPVisibility when present, else derives
+	// from the legacy labelMCPScope so pre-m73 rows remain correctly owner-gated.
+	if deleteVis, _ := mcpVisibility(tr); deleteVis == visibilityPrivate {
 		username, uErr := callerUsername(r.Context(), caller)
 		if uErr != nil {
 			if status, msg, isRBAC := classifyReadError(uErr); isRBAC {

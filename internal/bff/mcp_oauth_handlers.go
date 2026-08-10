@@ -350,8 +350,12 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		oauthConfig: flow.oauth,
 		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
 		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
-		scope: scopePersonal,
-		owner: flow.grantUserHash,
+		// ADR 0067 §2: also stamp the two new axes (private, byo-oauth) alongside the legacy
+		// scope=personal for rollback aid — consistent with the bearer-key register path.
+		scope:            scopePersonal,
+		owner:            flow.grantUserHash,
+		visibility:       visibilityPrivate,
+		credentialSource: credSourceByoOAuth,
 	}); crErr != nil {
 		oauthCallbackError(w, r, crErr.msg)
 		return
