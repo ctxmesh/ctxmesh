@@ -138,4 +138,12 @@ type Store interface {
 	// ListCases returns the dataset's DRAFT HEAD cases (for the labeling UI, m69.3), ordered oldest-first.
 	// datasetID must exist (controlplane.ErrNotFound otherwise).
 	ListCases(ctx context.Context, datasetID string) ([]Case, error)
+
+	// ListDatasets returns all datasets in a namespace, ordered oldest-first. An empty namespace is
+	// controlplane.ErrInvalid. When no datasets exist the result is an empty (non-nil) slice.
+	ListDatasets(ctx context.Context, namespace string) ([]Dataset, error)
+
+	// LatestLabel returns the most-recently-appended label for caseID, or (nil, nil) when the case has no label
+	// yet. controlplane.ErrNotFound when caseID does not name a known case.
+	LatestLabel(ctx context.Context, caseID string) (*Label, error)
 }

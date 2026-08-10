@@ -735,6 +735,65 @@ export interface KBSearchResponse {
   results: KBSearchHit[];
 }
 
+// --- Datasets (GET /api/datasets, GET /api/datasets/{name}/cases, POST labels + from-run) ---
+// The labeling console (m69.3, ADR 0062 Fork 5): list datasets, browse draft-head cases
+// with their latest label, append labels, and add a single run as a dataset case (the on-ramp).
+
+// DatasetSummary mirrors BFF's DatasetListItem — one dataset in the list.
+export interface DatasetSummary {
+  id: string;
+  name: string;
+  namespace: string;
+  caseCount: number;
+  createdAt: string;
+}
+
+// DatasetListResponse mirrors BFF's DatasetListResponse.
+export interface DatasetListResponse {
+  items: DatasetSummary[];
+}
+
+// CaseLabelSummary mirrors BFF's CaseLabelSummary — the latest label on a case.
+export interface CaseLabelSummary {
+  value: string;
+  correction?: string;
+  note?: string;
+  author: string;
+  createdAt: string;
+}
+
+// DatasetCase mirrors BFF's DatasetCaseItem — one case in the draft head.
+export interface DatasetCase {
+  id: string;
+  input: string;
+  expected?: string;
+  sourceTraceId?: string;
+  tags?: Record<string, string>;
+  createdAt: string;
+  // latestLabel is absent when the case has not been labeled yet.
+  latestLabel?: CaseLabelSummary;
+}
+
+// DatasetCasesResponse mirrors BFF's DatasetCasesResponse.
+export interface DatasetCasesResponse {
+  datasetId: string;
+  name: string;
+  cases: DatasetCase[];
+}
+
+// AppendLabelRequest is the POST /api/datasets/{name}/cases/{caseId}/labels body.
+// The author is always derived from the authenticated caller on the server — never sent by the client.
+export interface AppendLabelRequest {
+  value: string;
+  correction?: string;
+  note?: string;
+}
+
+// FromRunRequest is the POST /api/datasets/{name}/cases/from-run body — the single-run on-ramp.
+export interface FromRunRequest {
+  traceId: string;
+}
+
 // --- Workflows (GET /api/workflows, POST /api/workflows/{name}/runs) ---------
 // The Workflow CR list surface (m67.9, ADR 0060): declarative graphs of agent invocations.
 // Read-only list (caller-scoped); invoke via POST to create a workflow instance run.
@@ -3883,5 +3942,100 @@ export const api = {
       );
     }
     return (await res.json()) as PromptDiffResponse;
+  },
+
+  // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
+  // listDatasets reads all datasets in the caller's namespace. 501-calm when the store is
+  // unconfigured (dataset store needs CONTROLPLANE_DSN); 502-error on a fetch failure.
+  listDatasets: async (signal?: AbortSignal, namespace?: string): Promise<DatasetListResponse> => {
+    const path = namespace
+      ? `/api/datasets?namespace=${encodeURIComponent(namespace)}`
+      : "/api/datasets";
+    const res = await apiFetch(path, { signal });
+    if (res.status === 501) return { items: [] }; // calm unconfigured degrade
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `list datasets failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DatasetListResponse;
+  },
+
+  // listDatasetCases reads the draft-head cases + latest label for one dataset.
+  // 501-calm (unconfigured); 404 when the dataset does not exist → throws.
+  listDatasetCases: async (
+    name: string,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<DatasetCasesResponse> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(name)}/cases?namespace=${encodeURIComponent(ns)}`,
+      { signal },
+    );
+    if (res.status === 501) return { datasetId: "", name, cases: [] }; // calm degrade
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `list dataset cases failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DatasetCasesResponse;
+  },
+
+  // appendLabel appends a label to a case. The author is always the authenticated caller.
+  // 201 on success; throws on any error (404 case not found, 400 missing value, 501 unconfigured).
+  appendLabel: async (
+    datasetName: string,
+    caseId: string,
+    req: AppendLabelRequest,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<void> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?namespace=${encodeURIComponent(ns)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `append label failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // addRunToDataset posts the single-run on-ramp — one trace → one redacted case in the dataset.
+  // 201 on success with {caseId}; 501-calm when unconfigured (store or Langfuse adapter absent).
+  // Throws on 400 (missing traceId), 422 (trace has no input), or 502 (Langfuse fetch failed).
+  addRunToDataset: async (
+    datasetName: string,
+    req: FromRunRequest,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<{ caseId: string }> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?namespace=${encodeURIComponent(ns)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `add run to dataset failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as { caseId: string };
   },
 };

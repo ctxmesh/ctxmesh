@@ -29,11 +29,16 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/run"
+	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
 // ExportRequest is the POST /api/datasets/{name}/export body. The dataset name comes from the URL path; the body
@@ -160,4 +165,349 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 		RunID:  runID,
 		Status: string(run.StatusQueued),
 	})
+}
+
+// ── Labeling API (m69.3, ADR 0062 Fork 5) ───────────────────────────────────────────────────────────────────
+//
+// Four endpoints that close the improvement loop's human-labeling path (ADR 0062 Fork 5):
+//
+//   GET  /api/datasets                              — list the caller's datasets (name, case count)
+//   GET  /api/datasets/{name}/cases                 — draft-head cases + each case's latest label
+//   POST /api/datasets/{name}/cases/{caseId}/labels — append a label (author = the authenticated caller)
+//   POST /api/datasets/{name}/cases/from-run        — single-run on-ramp: add one redacted trace as a case
+//
+// Auth pattern: caller-scoped (ADR 0011) for the identity check (callerUsername), dataset store for the data.
+// No CRD ops — datasets are a Postgres store (ADR 0044 precedent). The dataset store nil-guard (501) follows
+// the DocStore-nil pattern established by the export handler.
+
+// DatasetListItem is one dataset summary in GET /api/datasets. CaseCount is the DRAFT HEAD size
+// (ListCases count) — the labeling-UI's primary navigation datum.
+type DatasetListItem struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Namespace string    `json:"namespace"`
+	CaseCount int       `json:"caseCount"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// DatasetListResponse is the GET /api/datasets body.
+type DatasetListResponse struct {
+	Items []DatasetListItem `json:"items"`
+}
+
+// handleListDatasets serves GET /api/datasets — lists datasets in the caller's namespace(s).
+// Caller-scoped (ADR 0011): the caller must present a valid token (for identity); the dataset store
+// is then queried per-namespace. Namespace resolved via X-Namespace header / ?namespace / "default".
+// 501 when the dataset store is not configured; 401 on a missing/rejected token.
+func (s *Server) handleListDatasets(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	if s.datasetStore == nil {
+		writeError(w, http.StatusNotImplemented, "dataset store not configured: set CONTROLPLANE_DSN to enable datasets")
+		return
+	}
+
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	datasets, err := s.datasetStore.ListDatasets(r.Context(), ns)
+	if err != nil {
+		s.log.Error(err, "list datasets failed", "ns", ns)
+		writeError(w, http.StatusInternalServerError, "failed to list datasets")
+		return
+	}
+
+	items := make([]DatasetListItem, 0, len(datasets))
+	for _, ds := range datasets {
+		cases, cErr := s.datasetStore.ListCases(r.Context(), ds.ID)
+		if cErr != nil {
+			s.log.Error(cErr, "list cases for dataset failed", "dataset", ds.ID)
+			// Best-effort: report count as 0 rather than failing the whole list.
+			cases = nil
+		}
+		items = append(items, DatasetListItem{
+			ID:        ds.ID,
+			Name:      ds.Name,
+			Namespace: ds.Namespace,
+			CaseCount: len(cases),
+			CreatedAt: ds.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, DatasetListResponse{Items: items})
+}
+
+// CaseLabelSummary is the latest label state for a case (may be absent).
+type CaseLabelSummary struct {
+	Value      string    `json:"value"`
+	Correction string    `json:"correction,omitempty"`
+	Note       string    `json:"note,omitempty"`
+	Author     string    `json:"author"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// DatasetCaseItem is one case row in GET /api/datasets/{name}/cases.
+type DatasetCaseItem struct {
+	ID            string            `json:"id"`
+	Input         string            `json:"input"`
+	Expected      string            `json:"expected,omitempty"`
+	SourceTraceID string            `json:"sourceTraceId,omitempty"`
+	Tags          map[string]string `json:"tags,omitempty"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	// LatestLabel is nil when the case has no label yet.
+	LatestLabel *CaseLabelSummary `json:"latestLabel,omitempty"`
+}
+
+// DatasetCasesResponse is the GET /api/datasets/{name}/cases body.
+type DatasetCasesResponse struct {
+	DatasetID string            `json:"datasetId"`
+	Name      string            `json:"name"`
+	Cases     []DatasetCaseItem `json:"cases"`
+}
+
+// handleListDatasetCases serves GET /api/datasets/{name}/cases — the draft-head cases + each case's latest label
+// (for the labeling console, m69.3). Namespace via X-Namespace / ?namespace / "default".
+// 404 when the dataset does not exist; 501 when the store is unconfigured.
+func (s *Server) handleListDatasetCases(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	if s.datasetStore == nil {
+		writeError(w, http.StatusNotImplemented, "dataset store not configured: set CONTROLPLANE_DSN to enable datasets")
+		return
+	}
+
+	datasetName := r.PathValue("name")
+	if datasetName == "" {
+		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
+		return
+	}
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	ds, err := s.datasetStore.EnsureDataset(r.Context(), ns, datasetName)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("dataset %q not found in namespace %q", datasetName, ns))
+			return
+		}
+		s.log.Error(err, "ensure dataset for case list", "name", datasetName, "ns", ns)
+		writeError(w, http.StatusInternalServerError, "failed to look up dataset")
+		return
+	}
+
+	cases, err := s.datasetStore.ListCases(r.Context(), ds.ID)
+	if err != nil {
+		s.log.Error(err, "list cases failed", "dataset", ds.ID)
+		writeError(w, http.StatusInternalServerError, "failed to list cases")
+		return
+	}
+
+	items := make([]DatasetCaseItem, 0, len(cases))
+	for _, c := range cases {
+		item := DatasetCaseItem{
+			ID:            c.ID,
+			Input:         c.Input,
+			Expected:      c.Expected,
+			SourceTraceID: c.SourceTraceID,
+			Tags:          c.Tags,
+			CreatedAt:     c.CreatedAt,
+		}
+		if label, lErr := s.datasetStore.LatestLabel(r.Context(), c.ID); lErr == nil && label != nil {
+			item.LatestLabel = &CaseLabelSummary{
+				Value:      label.Value,
+				Correction: label.Correction,
+				Note:       label.Note,
+				Author:     label.Author,
+				CreatedAt:  label.CreatedAt,
+			}
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, DatasetCasesResponse{
+		DatasetID: ds.ID,
+		Name:      ds.Name,
+		Cases:     items,
+	})
+}
+
+// AppendLabelRequest is the POST /api/datasets/{name}/cases/{caseId}/labels body.
+// The author is ALWAYS the authenticated caller — a client-supplied author field would be a security hazard.
+type AppendLabelRequest struct {
+	Value      string `json:"value"`
+	Correction string `json:"correction,omitempty"`
+	Note       string `json:"note,omitempty"`
+}
+
+// AppendLabelResponse is the 201 body returned after a successful label append.
+type AppendLabelResponse struct {
+	Status string `json:"status"`
+}
+
+// handleAppendLabel serves POST /api/datasets/{name}/cases/{caseId}/labels (m69.3, ADR 0062 Fork 5).
+// APPENDS one label row to the case — append-only (no update/delete). The author is the AUTHENTICATED
+// caller (resolved via SelfSubjectReview — never a client-supplied field). 404 when the case does not exist;
+// 400 on missing value; 401 on a missing/rejected token; 501 when the store is unconfigured.
+func (s *Server) handleAppendLabel(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	if s.datasetStore == nil {
+		writeError(w, http.StatusNotImplemented, "dataset store not configured: set CONTROLPLANE_DSN to enable labeling")
+		return
+	}
+
+	caseID := r.PathValue("caseId")
+	if caseID == "" {
+		writeError(w, http.StatusBadRequest, "caseId is required in the URL path")
+		return
+	}
+
+	var req AppendLabelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Value) == "" {
+		writeError(w, http.StatusBadRequest, "label value is required")
+		return
+	}
+
+	// Author = the authenticated caller (SelfSubjectReview — the single authoritative source, ADR 0011).
+	// A rejected/empty identity means we refuse to record an anonymous label.
+	author, err := callerUsername(r.Context(), caller)
+	if err != nil {
+		s.log.Error(err, "resolve caller username for label", "case", caseID)
+		writeError(w, http.StatusUnauthorized, "could not resolve caller identity for the label author: "+err.Error())
+		return
+	}
+
+	if err := s.datasetStore.AppendLabel(r.Context(), caseID, dataset.Label{
+		Value:      strings.TrimSpace(req.Value),
+		Correction: strings.TrimSpace(req.Correction),
+		Note:       strings.TrimSpace(req.Note),
+		Author:     author,
+	}); err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("case %q not found", caseID))
+			return
+		}
+		s.log.Error(err, "append label failed", "case", caseID, "author", author)
+		writeError(w, http.StatusInternalServerError, "failed to append label")
+		return
+	}
+	writeJSON(w, http.StatusCreated, AppendLabelResponse{Status: "appended"})
+}
+
+// FromRunRequest is the POST /api/datasets/{name}/cases/from-run body (the single-run on-ramp, m69.3).
+// TraceID is the Langfuse trace id of the run the operator wants to add to the dataset.
+type FromRunRequest struct {
+	TraceID string `json:"traceId"`
+}
+
+// FromRunResponse is the 201 body after a successful from-run append.
+type FromRunResponse struct {
+	CaseID string `json:"caseId"`
+}
+
+// handleFromRun serves POST /api/datasets/{name}/cases/from-run (m69.3, ADR 0062 Fork 5) — the single-run
+// on-ramp. The operator sees a bad trace and files it in one click: the BFF fetches the trace, runs REDACTION
+// (the same M66 RE2 engine the export executor uses — parity of the redacted case shape), EnsureDataset +
+// AppendCase, and returns the new case id.
+//
+// Honest degrade (501) when the dataset store or the Langfuse adapter is unconfigured. 400 on a missing
+// traceId. Caller-scoped (ADR 0011): the caller must authenticate; the identity is used as the label author
+// for the initial case (not the label row — that comes from a subsequent label append).
+func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	if s.datasetStore == nil || s.adapters.Langfuse == nil {
+		writeError(w, http.StatusNotImplemented,
+			"from-run not available: set CONTROLPLANE_DSN (dataset store) and LANGFUSE_HOST/keys (trace source)")
+		return
+	}
+
+	datasetName := r.PathValue("name")
+	if datasetName == "" {
+		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
+		return
+	}
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+
+	var req FromRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.TraceID) == "" {
+		writeError(w, http.StatusBadRequest, "traceId is required")
+		return
+	}
+	traceID := strings.TrimSpace(req.TraceID)
+
+	// Fetch the trace's detail from Langfuse.
+	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), traceID)
+	if err != nil {
+		s.log.Error(err, "from-run: fetch trace detail", "trace", traceID)
+		writeError(w, http.StatusBadGateway, "failed to fetch trace from Langfuse: "+err.Error())
+		return
+	}
+
+	// REDACT (the same helper the export executor uses — parity of the case shape, ADR 0062 Fork 1 PII P1).
+	rawInput, rawOutput := traceInputOutput(detail)
+	if strings.TrimSpace(rawInput) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "trace has no input payload to seed a dataset case")
+		return
+	}
+	detectors := telemetry.DefaultDetectors()
+	redactedInput := telemetry.RedactString(rawInput, detectors)
+	redactedExpected := telemetry.RedactString(rawOutput, detectors)
+
+	tags := map[string]string{caseSourceTag: "from-run"}
+	if st := traceStatus(detail); st != "" {
+		tags[caseStatusTag] = st
+	}
+	if strings.TrimSpace(redactedExpected) != "" {
+		tags[caseDraftTag] = caseExpectedDraft
+	}
+
+	// EnsureDataset (idempotent — safe even when the dataset already exists from a bulk export).
+	ds, err := s.datasetStore.EnsureDataset(r.Context(), ns, datasetName)
+	if err != nil {
+		s.log.Error(err, "from-run: ensure dataset", "name", datasetName, "ns", ns)
+		writeError(w, http.StatusInternalServerError, "failed to ensure dataset: "+err.Error())
+		return
+	}
+
+	caseID, err := s.datasetStore.AppendCase(r.Context(), ds.ID, dataset.Case{
+		Input:         redactedInput,
+		Expected:      redactedExpected,
+		SourceTraceID: traceID,
+		MimeType:      caseMIMETextPlain,
+		Tags:          tags,
+	})
+	if err != nil {
+		s.log.Error(err, "from-run: append case", "dataset", ds.ID, "trace", traceID)
+		writeError(w, http.StatusInternalServerError, "failed to append case: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, FromRunResponse{CaseID: caseID})
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,6 +248,49 @@ func (m *memStore) ListCases(_ context.Context, datasetID string) ([]Case, error
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func (m *memStore) ListDatasets(_ context.Context, namespace string) ([]Dataset, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("dataset: %w: namespace is required", controlplane.ErrInvalid)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]Dataset, 0)
+	for _, d := range m.datasets {
+		if d.dataset.Namespace == namespace {
+			ds := d.dataset
+			out = append(out, ds)
+		}
+	}
+	// Stable oldest-first order.
+	slices.SortFunc(out, func(a, b Dataset) int {
+		if a.CreatedAt.Before(b.CreatedAt) {
+			return -1
+		}
+		if a.CreatedAt.After(b.CreatedAt) {
+			return 1
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out, nil
+}
+
+func (m *memStore) LatestLabel(_ context.Context, caseID string) (*Label, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mc, ok := m.caseIndex[caseID]
+	if !ok {
+		return nil, fmt.Errorf("dataset: %w: case %q", controlplane.ErrNotFound, caseID)
+	}
+	if len(mc.labels) == 0 {
+		return nil, nil
+	}
+	l := mc.labels[len(mc.labels)-1]
+	return &l, nil
 }
 
 // cloneTags copies a tag map, normalizing empty to nil (parity with the pg store's jsonb round-trip).

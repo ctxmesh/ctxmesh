@@ -150,6 +150,11 @@ const (
 
 	caseSourceExport  = "langfuse-export"
 	caseExpectedDraft = "draft"
+
+	// caseMIMETextPlain is the MIME type stamped on every exported/from-run case (the case payload is always plain
+	// text; a separate MIME-detection pass is deferred). Named here so the 4+ occurrences across this file,
+	// datasets.go, and the test helpers share one definition (goconst requires it).
+	caseMIMETextPlain = "text/plain"
 )
 
 // exportPageCap bounds how many trace pages the executor walks in one claim, so a pathological window cannot loop
@@ -298,7 +303,7 @@ func (s *Server) exportOneTrace(ctx context.Context, datasetID, traceID string, 
 		Input:         redactedInput,
 		Expected:      redactedExpected,
 		SourceTraceID: traceID,
-		MimeType:      "text/plain",
+		MimeType:      caseMIMETextPlain,
 		Tags:          tags,
 	})
 	if err != nil {
