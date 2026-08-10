@@ -603,6 +603,35 @@ func TestPostgresStore_RoundTripsIngestionFields(t *testing.T) {
 	assert.Equal(t, `{"reason":"Succeeded","documents":1,"chunks":3}`, got.Outcome)
 }
 
+// TestPostgresStore_RoundTripsExportFields proves the M69 dataset-export marker + pinned spec round-trip through
+// real Postgres (create-only columns), and the shared Outcome persists through the mutable-column Update path.
+func TestPostgresStore_RoundTripsExportFields(t *testing.T) {
+	s := openPGStore(t)
+	r := New("exp-run", "ns", "goldens", nil, "", t0)
+	r.ExportRef = "goldens"
+	r.ExportSpec = `{"datasetNamespace":"ns","datasetName":"goldens","agentTag":"ns/chatbot","from":"2026-01-01T00:00:00Z"}`
+	r.Cursor = `{"page":2,"documents":10,"cases":10}`
+	require.NoError(t, s.Create(r))
+
+	got, err := s.Get("exp-run")
+	require.NoError(t, err)
+	assert.Equal(t, "goldens", got.ExportRef)
+	assert.Equal(t, `{"datasetNamespace":"ns","datasetName":"goldens","agentTag":"ns/chatbot","from":"2026-01-01T00:00:00Z"}`, got.ExportSpec)
+	assert.Equal(t, `{"page":2,"documents":10,"cases":10}`, got.Cursor)
+	assert.True(t, got.IsDatasetExportJob())
+	assert.False(t, got.IsIngestionJob())
+
+	// Outcome is a MUTABLE column — the executor persists it via Update.
+	_, err = s.Update("exp-run", func(x *Run) error {
+		x.Outcome = `{"reason":"Succeeded","documents":10,"cases":10}`
+		return nil
+	})
+	require.NoError(t, err)
+	got, err = s.Get("exp-run")
+	require.NoError(t, err)
+	assert.Equal(t, `{"reason":"Succeeded","documents":10,"cases":10}`, got.Outcome)
+}
+
 // recvWithin receives one event or fails the test on timeout.
 func recvWithin(t *testing.T, ch <-chan Event) Event {
 	t.Helper()

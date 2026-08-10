@@ -186,6 +186,15 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 		return
 	}
 
+	// A DATASET EXPORT JOB (a pinned ExportRef, ADR 0062 Fork 1) is driven by the dataset-export executor — it
+	// runs straight through (no suspend; the resume story is worker reclaim, driven off the per-page cursor). Like
+	// the ingestion branch it participates in this same claim/lease/reclaim machinery and has no agent/OBO, so it
+	// runs off the pool's exec context (execCtx) rather than a run capability.
+	if rn.IsDatasetExportJob() {
+		s.executeDatasetExport(execCtx, rn.ID)
+		return
+	}
+
 	// A WORKFLOW INSTANCE (a pinned SpecSnapshot, ADR 0060) is driven by the workflow executor — one
 	// "advance" per claim (launch the next node → suspend), NOT the single-agent executeRun. The executor
 	// participates in this same claim/lease/reclaim machinery (it lives in the worker, not a new Deployment).

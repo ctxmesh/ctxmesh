@@ -32,6 +32,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -107,6 +108,14 @@ type Server struct {
 	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
 	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
 	embedder credplane.Embedder
+
+	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
+	// cpDB. The dataset-export executor (m69.2) WRITES it DIRECTLY — EnsureDataset/AppendCase — copying
+	// M66-redacted, traceId-lineaged cases out of Langfuse (governance #8: the run-worker is a trusted
+	// control-plane workload holding cpDB + Langfuse creds; agent pods never touch this). nil ⇒ the export
+	// endpoint + executor degrade honestly (501 / a clear failed-run reason), never a panic. Constructed in
+	// cmd/bff/main.go from CONTROLPLANE_DSN.
+	datasetStore dataset.Store
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -398,6 +407,10 @@ type Options struct {
 	// which the ingestion executor writes directly (governance #8). Optional — nil ⇒ the ingest endpoint +
 	// executor degrade honestly. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN (cpDB).
 	KnowledgeStore knowledge.Store
+	// DatasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), which the
+	// dataset-export executor writes directly (governance #8). Optional — nil ⇒ the export endpoint +
+	// executor degrade honestly (501 / a clear failed-run reason). Constructed in cmd/bff/main.go from cpDB.
+	DatasetStore dataset.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -444,6 +457,7 @@ func NewServer(opts Options) *Server {
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,
 		knowledgeStore:           opts.KnowledgeStore,
+		datasetStore:             opts.DatasetStore,
 		embedder:                 opts.Embedder,
 		log:                      opts.Log,
 	}
@@ -709,6 +723,13 @@ func (s *Server) Handler() http.Handler {
 		// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
 		// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
 		authed.HandleFunc("POST /api/knowledgebases/{name}/ingest", s.handleIngestKB)
+
+		// Dataset export trigger (M69, ADR 0062 Fork 1): pin an ExportSpec (target dataset + agent tag +
+		// timerange) and create a durable export Run the worker drives — it copies production traces OUT of
+		// Langfuse into the control-plane dataset store, M66-REDACTED (the PII P1), with source-trace lineage.
+		// Caller-scoped (ADR 0011): the caller's own token gates who can trigger an export. 501 when the dataset
+		// store / Langfuse adapter is unwired; 400 on a bad body. Returns 202 + {runId, status}.
+		authed.HandleFunc("POST /api/datasets/{name}/export", s.handleExportDataset)
 
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)

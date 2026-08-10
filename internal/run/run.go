@@ -100,6 +100,17 @@ func (r *Run) IsIngestionJob() bool {
 	return r.IngestionRef != ""
 }
 
+// IsDatasetExportJob reports whether this run is a DATASET EXPORT job (M69, ADR 0062 Fork 1) — i.e. it carries
+// an ExportRef (the dataset name it exports into). The run-worker routes such a run to the dataset-export
+// executor (executeDatasetExport) instead of the single-agent executeRun, the workflow executor, or the
+// ingestion executor. This mirrors the M67/M68 typed-marker precedent (IsWorkflowInstance = SpecSnapshot != "",
+// IsIngestionJob = IngestionRef != ""): there is NO generic run `kind` column, so the presence of the marker
+// field IS the dispatch gate. A run is EXACTLY ONE of workflow / ingestion / export — never two — and each
+// reuses the shared Cursor for its own resume progress (ADR 0062 Fork 1: export paginates Langfuse, cursor per page).
+func (r *Run) IsDatasetExportJob() bool {
+	return r.ExportRef != ""
+}
+
 // IsSpawned reports whether this run is a SUB-RUN of another (a workflow node or a supervisor delegation) —
 // it has a parent. A spawned run's terminal transition goes through CompleteAndWake so a `waiting` parent
 // (a suspended workflow run) is woken in the same transaction (ADR 0060 §3).
@@ -291,6 +302,23 @@ type Run struct {
 	// KB or a changed bucket does not retroactively alter an in-flight ingestion (the ADR 0060 snapshot-pinning
 	// discipline). Empty ⇒ not an ingestion run.
 	IngestionSpec string `json:"-"`
+
+	// --- Dataset export job (M69, ADR 0062 Fork 1): set when this run EXPORTS production traces into the
+	// control-plane dataset store, REDACTED (governance #1 / the PII P1). An export run is a Run with an ExportRef
+	// (the dataset name) + a pinned ExportSpec (the resolved dataset namespace+name, the agent tag, and the
+	// from/to timerange), routed to executeDatasetExport by the typed marker IsDatasetExportJob() = ExportRef != ""
+	// (mirroring IsIngestionJob). Like an ingestion run it has NO agent, NO OBO-to-a-model, NO conversation — it is
+	// a trusted control-plane job that holds cpDB + Langfuse creds (governance #8). It reuses the shared Cursor for
+	// per-page resume progress (a run is either a workflow OR an ingestion OR an export, never two), so a worker
+	// reclaim resumes at the next un-exported page. None is a secret (a dataset name, an agent tag, a timerange) —
+	// kept json:"-" (the store persists them as their own columns).
+
+	// ExportRef names the dataset this run exports into (empty ⇒ not an export run). The dispatch marker.
+	ExportRef string `json:"-"`
+	// ExportSpec is the resolved export parameters pinned at export-create time (JSON: dataset namespace+name, the
+	// agent tag "<ns>/<name>", from/to timerange). Pinned so a later config change does not retroactively alter an
+	// in-flight export (the ADR 0060 snapshot-pinning discipline). Empty ⇒ not an export run.
+	ExportSpec string `json:"-"`
 	// Outcome is the executor-written terminal outcome record (JSON, opaque to the store). For an ingestion run
 	// it carries the document/chunk/size counts + a partial flag + a coded terminal reason — the m68.10 SEAM the
 	// KnowledgeBase-status reconcile reads (the off-request run-worker has no KB-status RBAC, so it records the

@@ -52,6 +52,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -298,6 +299,12 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	knowledgeStore := knowledge.NewPostgresStore(cpDB)
 	ingestEmbedder := newIngestEmbedder(log)
 
+	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
+	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
+	// Langfuse creds), copying M66-redacted, traceId-lineaged cases out of Langfuse. Paired with the Langfuse
+	// adapter in `adapters` (built below) as the export read source.
+	datasetStore := dataset.NewPostgresStore(cpDB)
+
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		TokenServiceHTTPClient:      tsHTTPClient,
@@ -306,6 +313,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RunStore:                    runStore,
 		DocStore:                    docStore,
 		KnowledgeStore:              knowledgeStore,
+		DatasetStore:                datasetStore,
 		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
