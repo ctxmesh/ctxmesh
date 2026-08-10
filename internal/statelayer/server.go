@@ -72,6 +72,11 @@ type Server struct {
 	// dedup is the async seen-set (M53). nil in memory-only deployments; the dedup
 	// endpoint then reports unavailable (the launcher fails CLOSED).
 	dedup DedupStore
+	// control reads a run's CONTROL marker (m70.8, the real-kill cancel channel) for the
+	// pod-authed /control endpoint the launcher gateway polls. nil in memory-only
+	// deployments; the endpoint then reports unavailable (the launcher fails OPEN — no
+	// verb ⇒ no cancel, so a missing control store never spuriously kills a run).
+	control ControlStore
 	// devScope, when non-nil, is used for requests that carry no token — the
 	// STATELAYER_DEV_MODE bypass (never enabled in production). It scopes by a
 	// static dev identity without verification.
@@ -99,6 +104,10 @@ type Options struct {
 	// DedupStore is the async seen-set (M53). Optional: nil ⇒ the dedup endpoint
 	// reports unavailable.
 	DedupStore DedupStore
+	// ControlStore reads a run's CONTROL marker for the /control endpoint (m70.8, the
+	// real-kill cancel channel). Optional: nil ⇒ the /control endpoint reports unavailable
+	// (the launcher fails OPEN — no verb ⇒ no cancel).
+	ControlStore ControlStore
 	// DevAgent, when set, enables the dev bypass: unauthenticated requests are
 	// scoped to this "<namespace>/<agent>" identity. NEVER set in production.
 	DevAgent string
@@ -121,6 +130,7 @@ func NewServer(opts Options) (*Server, error) {
 		registries: opts.RegistryResolver,
 		quota:      opts.QuotaStore,
 		dedup:      opts.DedupStore,
+		control:    opts.ControlStore,
 		now:        now,
 	}
 	if strings.TrimSpace(opts.DevAgent) != "" {
@@ -154,6 +164,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
 	// Async dedup (M53) — pod-identity authenticated, namespace-scoped SERVER-SIDE.
 	mux.HandleFunc("POST /dedup", s.handleDedup)
+	// Run control (m70.8) — pod-identity authenticated; the run-scoped CONTROL verb the
+	// launcher gateway polls to real-kill a cancelled run's in-flight model call.
+	mux.HandleFunc("GET /control/{runID}", s.handleControlGet)
 	return mux
 }
 
