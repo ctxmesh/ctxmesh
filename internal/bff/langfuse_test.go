@@ -153,7 +153,7 @@ func TestLangfuseRecentRuns(t *testing.T) {
 		{"id":"t2","name":"agent.invoke","timestamp":"2026-07-01T00:01:00Z","totalCost":0.25,"latency":80.0,"totalTokens":400,"tags":["agent:prod/summarizer"]},
 		{"id":"mnoise","name":"memory.append","timestamp":"2026-07-01T00:00:45Z","totalCost":0.0,"latency":1.0,"tags":[]},
 		{"id":"noise","name":"Received Proxy Server Request","timestamp":"2026-07-01T00:00:30Z","totalCost":0.01,"latency":5.0,"tags":["agent:prod/chatbot"]},
-		{"id":"t1","name":"prod/chatbot","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":1.2,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot"]}
+		{"id":"t1","name":"prod/chatbot","timestamp":"2026-07-01T00:00:00Z","totalCost":0.5,"latency":1.2,"usage":{"totalTokens":900},"tags":["agent:prod/chatbot","version:v1"]}
 	]}`
 	srv, rec := fakeLangfuse(t, body)
 	a := newTestLangfuse(t, srv.URL)
@@ -185,6 +185,10 @@ func TestLangfuseRecentRuns(t *testing.T) {
 	assert.Equal(t, "scalekit-agent", runs[0].AgentName)
 	assert.Equal(t, "prod", runs[2].AgentNs)
 	assert.Equal(t, "chatbot", runs[2].AgentName)
+	// m69.5: the version tag projects onto RunSummary.Version (t1 carries version:v1;
+	// t3/scalekit-agent has no version tag → empty).
+	assert.Equal(t, "v1", runs[2].Version, "version:v1 tag projects onto RunSummary.Version")
+	assert.Equal(t, "", runs[0].Version, "no version tag → empty Version")
 
 	// Creds are sent server-side as HTTP Basic; they must NEVER appear in a DTO.
 	assert.True(t, rec.hadAuth, "public-API creds must be sent as Basic auth")
@@ -192,6 +196,33 @@ func TestLangfuseRecentRuns(t *testing.T) {
 	assert.Equal(t, "sk-secret", rec.pass)
 	assert.Equal(t, "/api/public/traces", rec.path)
 	assert.Contains(t, rec.query, "orderBy=timestamp.desc")
+}
+
+// TestTraceVersion: the `version:<agentVersion>` trace tag (m69.5, ADR 0062 Fork 2)
+// projects onto RunSummary.Version — symmetric with traceAgent's AgentNs/AgentName.
+// Empty when no version tag is present (older launcher / unversioned agent).
+func TestTraceVersion(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tags []string
+		want string
+	}{
+		{"agent-then-version", []string{"agent:prod/chatbot", "version:v2"}, "v2"},
+		{"version-only", []string{"version:v9"}, "v9"},
+		{"no-version-tag", []string{"agent:prod/chatbot"}, ""},
+		{"empty-version-value", []string{"version:"}, ""},
+		{"no-tags", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := traceVersion(lfTrace{Tags: tc.tags}); got != tc.want {
+				t.Errorf("traceVersion(%v) = %q, want %q", tc.tags, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestLangfuseCostUsage(t *testing.T) {

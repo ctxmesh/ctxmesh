@@ -53,6 +53,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
@@ -290,6 +291,12 @@ func main() {
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.
 		Registry: registryReader,
+		// Online-score store (m69.8, ADR 0062 Fork 4): the SAME cpDB store the regression
+		// detector reads (below). The human rollback actuator's healthy-target damping guard
+		// reads it to refuse a rollback to a version that itself regressed. nil-safe (dev
+		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
+		// deferred, so this is guard-side only).
+		OnlineScore: onlinescore.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
@@ -374,6 +381,19 @@ func main() {
 		ObjectStore: kbObjStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "knowledgebase")
+		os.Exit(1)
+	}
+	// Regression detector (M69, ADR 0062 Fork 4): maintains the RegressionDetected condition on
+	// each AgentDeployment by comparing the serving AgentVersion's online-score aggregates against
+	// the prior version's baseline (delta-vs-baseline + min-n + persistence). DETECTION ONLY — the
+	// auto-rollback trigger is DEFERRED (PRD §17.4); the console pairs the condition with a
+	// one-click HUMAN rollback (m69.8). The store is the manager's existing cpDB (mirrors the
+	// KnowledgeBase wiring above); nil-safe if cpDB were absent (the detector abstains → Unknown).
+	if err := (&controller.RegressionDetectorReconciler{
+		Client:      mgr.GetClient(),
+		OnlineScore: onlinescore.NewPostgresStore(cpDB),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

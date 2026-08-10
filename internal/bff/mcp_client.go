@@ -168,7 +168,7 @@ func probeMCPServer(ctx context.Context, httpClient *http.Client, url, apiKey st
 		Params: map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "agent-engine-bff", "version": "0.1.0"},
+			"clientInfo":      map[string]any{"name": "agent-engine-bff", "version": "0.1.0"}, //nolint:goconst
 		},
 	})
 	if err != nil {

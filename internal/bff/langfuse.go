@@ -224,6 +224,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
 			AgentName: name,
+			Version:   traceVersion(t),
 		})
 		if len(runs) >= limit {
 			break
@@ -235,6 +236,14 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 // agentInvokeTraceName is the launcher's per-invocation boundary span name — the one
 // trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
 const agentInvokeTraceName = "agent.invoke"
+
+// traceStatusOK / traceStatusError are the coarse per-span/trace health projection of a Langfuse
+// observation Level ("ERROR" → error, else ok) — the SpanSummary.Status vocabulary the run inspector's
+// health dot and the dataset-export status tag (m69.2) share, so the two never drift.
+const (
+	traceStatusOK    = "ok"
+	traceStatusError = "error"
+)
 
 // runDisplayName names a run by its agent identity (from the agent:<ns>/<name> tag),
 // e.g. "prod/chatbot" or "chatbot", falling back to the trace name when untagged.
@@ -261,6 +270,24 @@ func traceAgent(t lfTrace) (ns, name string) {
 		}
 	}
 	return "", ""
+}
+
+// versionRunTagPrefix prefixes the per-version trace tag the launcher stamps
+// (`version:<agentVersion>`, cmd/launcher/proxy.go versionTagPrefix). Kept in sync
+// with the launcher so parseVersionTag is the exact inverse of what is produced.
+const versionRunTagPrefix = "version:"
+
+// traceVersion extracts the agent version from a trace's `version:<agentVersion>`
+// identity tag (m69.5, ADR 0062 Fork 2). Empty when the trace carries no version tag
+// (an older launcher, or an unversioned agent). Symmetric with traceAgent — a single
+// source the RunSummary construction sites share so each run projects its version.
+func traceVersion(t lfTrace) string {
+	for _, tag := range t.Tags {
+		if v, ok := strings.CutPrefix(tag, versionRunTagPrefix); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
@@ -562,6 +589,7 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
 			AgentName: name,
+			Version:   traceVersion(t),
 		})
 	}
 	return dst
@@ -1079,9 +1107,9 @@ func projectObservation(o *lfObservation, traceStart time.Time, haveStart bool) 
 	input, inputRedacted := projectPayload(o.Input)
 	output, outputRedacted := projectPayload(o.Output)
 
-	status := "ok"
+	status := traceStatusOK
 	if strings.EqualFold(o.Level, "ERROR") {
-		status = "error"
+		status = traceStatusError
 	}
 
 	return SpanSummary{

@@ -47,6 +47,19 @@ const (
 	// PhaseWarned means the candidate scored below threshold under gate:warn: it is
 	// promoted anyway but annotated (eval.warn) so the risk is recorded.
 	PhaseWarned = "warned"
+	// PhaseCanary means the candidate PASSED the offline gate AND the deployment
+	// requested a canary rollout (spec.rollout.strategy == "canary"): instead of
+	// holding the candidate at awaiting-promotion (0%), the Knative Service serves a
+	// NAMED-revision traffic split {old: 100-N, candidate: N} so both arms accumulate
+	// online scores (ADR 0062 Fork 3, M69). It is a HOLD state like awaiting-promotion
+	// — the human completes it with `promote=<candidate>` (→ promoted, 100% candidate)
+	// or aborts (→ aborted, 100% old). Serving-only; auto-progression is deferred.
+	PhaseCanary = "canary"
+	// PhaseAborted means a canary rollout was ABORTED by the human (the
+	// agents.ctxmesh.ai/rollout-abort signal): traffic returns to 100% the OLD
+	// serving revision and the candidate is withdrawn from the split. Terminal for
+	// that candidate; a later spec change re-gates a fresh candidate.
+	PhaseAborted = "aborted"
 )
 
 // Gate modes (mirror EvalSuite.spec.gate).

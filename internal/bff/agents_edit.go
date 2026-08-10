@@ -182,7 +182,7 @@ func mergeEditOntoSourceSpec(stored string, req UpdateAgentRequest) (string, *cr
 // carrying the agent's name, for the degraded safe-field patch (which compares the
 // submitted spec to the live object and ignores unmodeled fields).
 func (req UpdateAgentRequest) fieldEditYAML(name string) string {
-	spec := map[string]any{"name": name}
+	spec := map[string]any{"name": name} //nolint:goconst
 	applyFieldEdits(spec, req)
 	out, _ := json.Marshal(spec)
 	return string(out)

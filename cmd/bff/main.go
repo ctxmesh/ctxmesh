@@ -52,7 +52,9 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
@@ -298,6 +300,29 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	knowledgeStore := knowledge.NewPostgresStore(cpDB)
 	ingestEmbedder := newIngestEmbedder(log)
 
+	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
+	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
+	// Langfuse creds), copying M66-redacted, traceId-lineaged cases out of Langfuse. Paired with the Langfuse
+	// adapter in `adapters` (built below) as the export read source.
+	datasetStore := dataset.NewPostgresStore(cpDB)
+
+	// Online-score store (M69, ADR 0062 Fork 2): rides the same cpDB (migration 0008 applied by
+	// controlplane.Migrate). The online-scoring worker (m69.5) writes it directly (governance #8: the
+	// trusted off-request worker holds cpDB + Langfuse creds), folding production traces into the
+	// per-(namespace, agent, version, window) online-score vector.
+	onlineStore := onlinescore.NewPostgresStore(cpDB)
+
+	// Per-agent online-config resolver (M69, ADR 0062 Fork 2, m69.6): a READ-ONLY client over
+	// AgentDeployment + EvalSuite that the online-scoring worker consults for each agent's EvalSuite.online
+	// The online-scoring worker uses PROCESS-WIDE DEFAULTS for every agent (judge OFF — no per-agent
+	// SampleRate/MaxScoredPerDay, hence zero ungoverned judge spend; the operational + feedback components
+	// need no agent reads). The BFF deliberately does NOT read AgentDeployment/EvalSuite via its own SA:
+	// ADR 0011 keeps the BFF's SA at `rules: []` (the confused-deputy blast-radius stance; the m67.13
+	// precedent pins caller-scoped instead of granting the BFF agent-CRD RBAC). Per-agent online config
+	// (which enables the judge per agent) belongs on the CONTROLLER (it HAS agent-CRD RBAC): the eval-gate
+	// controller resolves EvalSuite.online → cpDB → the worker reads it — a follow-up carded to m52 Theme N.
+	var onlineResolver bff.OnlineConfigResolver // nil ⇒ defaults (ADR 0011 — see above)
+
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		TokenServiceHTTPClient:      tsHTTPClient,
@@ -306,6 +331,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		RunStore:                    runStore,
 		DocStore:                    docStore,
 		KnowledgeStore:              knowledgeStore,
+		DatasetStore:                datasetStore,
+		OnlineStore:                 onlineStore,
+		OnlineResolver:              onlineResolver,
 		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
@@ -356,6 +384,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("run-worker pool started (ADR 0034)", "concurrency", n)
 	}
 
+	maybeStartOnlineScorer(ctx, srv, adapters)
+
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("BFF listening", "addr", addr, "staticDir", staticDir)
@@ -373,6 +403,26 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+// maybeStartOnlineScorer starts the online-scoring worker (ADR 0062 Fork 2, m69.5) when
+// ONLINE_SCORER_ENABLED=1 AND a Langfuse adapter is wired. The periodic reconciler folds production
+// traces into the per-(namespace, agent, version, window) online-score aggregates; without Langfuse
+// (post-hoc scoring reads traces) it could only no-op, so we gate on it to avoid starting a goroutine
+// that can never do work — logging the honest reason. The worker stops on ctx cancellation (the shutdown
+// signal). Extracted from run() to keep its cyclomatic complexity down; the logger is derived here
+// (ctrl.Log) rather than passed, so the signature stays context-first without mixing ctx + logger.
+func maybeStartOnlineScorer(ctx context.Context, srv *bff.Server, adapters bff.Adapters) {
+	log := ctrl.Log.WithName("bff.online-scorer")
+	if os.Getenv("ONLINE_SCORER_ENABLED") != "1" {
+		return
+	}
+	if adapters.Langfuse == nil {
+		log.Info("ONLINE_SCORER_ENABLED set but Langfuse not configured; online-scoring worker NOT started")
+		return
+	}
+	srv.StartOnlineScorer(ctx, bff.OnlineScorerConfig{})
+	log.Info("online-scoring worker started (ADR 0062 Fork 2)")
 }
 
 // providerConnectEnabled resolves the connect-a-provider kill-switch from its

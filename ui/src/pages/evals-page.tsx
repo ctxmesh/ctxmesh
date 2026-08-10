@@ -4,12 +4,14 @@ import {
   ChevronRight,
   Loader2,
   RefreshCw,
+  ShieldCheck,
   TestTube2,
   XCircle,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -28,6 +30,7 @@ import {
   api,
   ApiError,
   type EvalCondition,
+  type EvalGatedMetricResponse,
   type EvalScore,
   type EvalSuiteDetail,
   type EvalSuiteResults,
@@ -82,6 +85,75 @@ type BuilderState =
 
 // ---- main page ----------------------------------------------------------------
 
+// MetricState holds the eval-gated metric load state (PRD §5, ADR 0062
+// governance #2). "unavailable" (501) is a calm degrade — the endpoint requires
+// a wired cluster; "error" is a real failure. Neither is fabricated.
+type MetricState =
+  | { kind: "loading" }
+  | { kind: "ready"; data: EvalGatedMetricResponse }
+  | { kind: "unavailable" }
+  | { kind: "error" };
+
+// TARGET_PERCENT is the PRD §5 quality-discipline target: > 50% of production
+// deploys must be gated by an EvalSuite. Shown as a visual indicator on the card.
+const TARGET_PERCENT = 50;
+
+// EvalGatedStatCard renders the PRD §5 ">50% of production deploys gated by an
+// EvalSuite" quality metric as a compact stat card (M69, ADR 0062 governance #2).
+// Shows gated/total (percent%) with a clear label and a >50% target indicator.
+// Degrades to "…" while loading; shows "—" on error (no fabricated numbers).
+function EvalGatedStatCard({ metric }: { metric: MetricState }) {
+  const isLoading = metric.kind === "loading";
+  const isError = metric.kind === "error";
+  const data = metric.kind === "ready" ? metric.data : undefined;
+
+  const meetsTarget = data !== undefined && data.percent > TARGET_PERCENT;
+  const percentStr = data !== undefined ? `${data.percent.toFixed(1)}%` : "—";
+  const subStr =
+    data !== undefined ? `${data.gated}/${data.total} deployments` : "";
+
+  return (
+    <Card data-testid="eval-gated-stat">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Eval-gated deploys
+          </p>
+          <ShieldCheck
+            className={`h-4 w-4 shrink-0 ${
+              meetsTarget ? "text-success" : "text-muted-foreground"
+            }`}
+          />
+        </div>
+        <p
+          className={`mt-2 text-2xl font-semibold tracking-tight tabular-nums ${
+            isLoading || isError ? "text-muted-foreground" : ""
+          }`}
+          data-testid="eval-gated-percent"
+        >
+          {isLoading ? "…" : percentStr}
+        </p>
+        <p className="mt-0.5 h-4 text-xs text-muted-foreground" data-testid="eval-gated-sub">
+          {isLoading ? "" : (isError ? "Couldn't load metric" : subStr)}
+        </p>
+        {/* PRD §5 target indicator: >50% threshold */}
+        {data !== undefined && (
+          <p
+            className={`mt-1 text-xs font-medium ${
+              meetsTarget ? "text-success" : "text-muted-foreground"
+            }`}
+            data-testid="eval-gated-target"
+          >
+            {meetsTarget
+              ? `✓ Above ${TARGET_PERCENT}% target`
+              : `Target: >${TARGET_PERCENT}% (PRD §5)`}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function EvalsPage() {
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [showBuilder, setShowBuilder] = React.useState(false);
@@ -93,6 +165,8 @@ export function EvalsPage() {
     null,
   );
   const [deleteState, setDeleteState] = React.useState<DeleteState>({ kind: "idle" });
+  // PRD §5 eval-gated metric — live snapshot of how many deploys are eval-gated.
+  const [metric, setMetric] = React.useState<MetricState>({ kind: "loading" });
 
   const { can } = useCapabilities();
   const { namespace: shellNs } = useNamespace();
@@ -104,6 +178,9 @@ export function EvalsPage() {
   const load = React.useCallback(
     (signal?: AbortSignal) => {
       setPage({ kind: "loading" });
+      setMetric({ kind: "loading" });
+
+      // Load EvalSuite list.
       api
         .listEvalSuites({ namespace: shellNs || undefined }, signal)
         .then((res) => {
@@ -128,6 +205,23 @@ export function EvalsPage() {
             kind: "error",
             message: err instanceof Error ? err.message : "request failed",
           });
+        });
+
+      // Load eval-gated metric (PRD §5, ADR 0062 governance #2).
+      api
+        .evalGatedMetric({ namespace: shellNs || undefined, signal })
+        .then((data) => {
+          if (signal?.aborted) return;
+          setMetric({ kind: "ready", data });
+        })
+        .catch((err: unknown) => {
+          if (signal?.aborted) return;
+          // 501 = endpoint not yet wired (dev substrate) — calm degrade.
+          if (err instanceof ApiError && err.status === 501) {
+            setMetric({ kind: "unavailable" });
+            return;
+          }
+          setMetric({ kind: "error" });
         });
     },
     [shellNs],
@@ -236,6 +330,12 @@ export function EvalsPage() {
           )}
         </div>
       </div>
+
+      {/* PRD §5 eval-gated metric — live snapshot (ADR 0062 governance #2).
+          Hides when the endpoint is unavailable (dev substrate, 501). */}
+      {metric.kind !== "unavailable" && (
+        <EvalGatedStatCard metric={metric} />
+      )}
 
       {page.kind === "loading" && <SkeletonTable rows={4} />}
 

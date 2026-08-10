@@ -19,6 +19,7 @@ package bff
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -578,6 +579,63 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		scores = []FeedbackScore{}
 	}
 	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
+}
+
+// handleEvalGatedMetric serves GET /api/metrics/eval-gated — the PRD §5
+// ">50% of production deploys gated by an EvalSuite" quality-discipline metric
+// (ADR 0062 governance #2). It counts AgentDeployments through the CALLER-SCOPED
+// client (ADR 0011): the caller's own RBAC governs which namespaces are visible,
+// so the snapshot is scoped to what the caller can see.
+//
+//   - An optional ?namespace=<ns> query param narrows the count to one namespace.
+//   - gated = those with a non-empty spec.evalSuiteRef.
+//   - percent = gated/total*100 (0 when total==0 — no divide-by-zero).
+//
+// This is a LIVE SNAPSHOT (v1). The historical per-promotion audit-log count is
+// a deferred follow-up (ADR 0062). No new RBAC or ClusterRole is added: the BFF
+// reads through the caller's token exactly like GET /api/agents (ADR 0011).
+func (s *Server) handleEvalGatedMetric(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	var opts []client.ListOption
+	if ns := strings.TrimSpace(r.URL.Query().Get("namespace")); ns != "" {
+		opts = append(opts, client.InNamespace(ns))
+	}
+
+	list, err := listAgentDeployments(r.Context(), caller, opts...)
+	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(err, "list AgentDeployments for eval-gated metric failed")
+		writeError(w, http.StatusInternalServerError, "failed to count agent deployments")
+		return
+	}
+
+	total := len(list.Items)
+	gated := 0
+	for i := range list.Items {
+		if list.Items[i].Spec.EvalSuiteRef != "" {
+			gated++
+		}
+	}
+
+	var percent float64
+	if total > 0 {
+		percent = float64(gated) / float64(total) * 100
+		// Round to one decimal place.
+		percent = math.Round(percent*10) / 10
+	}
+
+	writeJSON(w, http.StatusOK, EvalGatedMetricResponse{
+		Total:   total,
+		Gated:   gated,
+		Percent: percent,
+	})
 }
 
 // notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/
