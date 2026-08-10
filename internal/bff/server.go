@@ -34,6 +34,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
@@ -116,6 +117,19 @@ type Server struct {
 	// endpoint + executor degrade honestly (501 / a clear failed-run reason), never a panic. Constructed in
 	// cmd/bff/main.go from CONTROLPLANE_DSN.
 	datasetStore dataset.Store
+
+	// onlineStore is the control-plane Postgres store for per-agent-version online score aggregates
+	// (M69, ADR 0062 Fork 2), built from cpDB. The online-scoring worker (m69.5) WRITES it DIRECTLY —
+	// UpsertAggregate — folding production traces (operational + feedback + judge) into the
+	// per-(namespace, agent, version, window) vector (governance #8: the trusted off-request worker holds
+	// cpDB + Langfuse creds; agent pods never touch this). nil ⇒ the online-scoring worker does not start
+	// (cmd/bff/main.go gates on it), so a missing store is an honest no-op, never a panic.
+	onlineStore onlinescore.Store
+
+	// judgeCounters bounds the online-scoring worker's SAMPLED judge to a per-(agent, day) cost cap
+	// (m69.5, ADR 0062 Fork 2): an in-memory best-effort counter that resets lazily when the date rolls.
+	// Always non-nil (constructed in NewServer) so the worker never nil-derefs it.
+	judgeCounters *judgeCounter
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -411,6 +425,10 @@ type Options struct {
 	// dataset-export executor writes directly (governance #8). Optional — nil ⇒ the export endpoint +
 	// executor degrade honestly (501 / a clear failed-run reason). Constructed in cmd/bff/main.go from cpDB.
 	DatasetStore dataset.Store
+	// OnlineStore is the control-plane Postgres store for online score aggregates (M69, ADR 0062 Fork 2),
+	// which the online-scoring worker (m69.5) writes directly (governance #8). Optional — nil ⇒ the
+	// online-scoring worker does not start (an honest no-op). Constructed in cmd/bff/main.go from cpDB.
+	OnlineStore onlinescore.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -458,7 +476,9 @@ func NewServer(opts Options) *Server {
 		docStore:                 opts.DocStore,
 		knowledgeStore:           opts.KnowledgeStore,
 		datasetStore:             opts.DatasetStore,
+		onlineStore:              opts.OnlineStore,
 		embedder:                 opts.Embedder,
+		judgeCounters:            &judgeCounter{},
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {

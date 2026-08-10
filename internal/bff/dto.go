@@ -495,6 +495,13 @@ type RunSummary struct {
 	// trace→agent hop. Empty when the trace carries no agent tag (an ambient trace).
 	AgentNs   string `json:"agentNs,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
+	// Version is the agent version that served the run, parsed from the trace's
+	// `version:<agentVersion>` tag (m69.5, ADR 0062 Fork 2) — the launcher stamps it
+	// alongside the agent tag (cmd/launcher/proxy.go). Empty when the trace carries no
+	// version tag (an older launcher, or an unversioned agent). Symmetric with
+	// AgentNs/AgentName: a clean projected field, so the online-scoring worker can
+	// separate a window's runs by version without re-parsing raw tags.
+	Version string `json:"version,omitempty"`
 }
 
 // RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).

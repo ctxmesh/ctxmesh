@@ -224,6 +224,7 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
 			AgentName: name,
+			Version:   traceVersion(t),
 		})
 		if len(runs) >= limit {
 			break
@@ -269,6 +270,24 @@ func traceAgent(t lfTrace) (ns, name string) {
 		}
 	}
 	return "", ""
+}
+
+// versionRunTagPrefix prefixes the per-version trace tag the launcher stamps
+// (`version:<agentVersion>`, cmd/launcher/proxy.go versionTagPrefix). Kept in sync
+// with the launcher so parseVersionTag is the exact inverse of what is produced.
+const versionRunTagPrefix = "version:"
+
+// traceVersion extracts the agent version from a trace's `version:<agentVersion>`
+// identity tag (m69.5, ADR 0062 Fork 2). Empty when the trace carries no version tag
+// (an older launcher, or an unversioned agent). Symmetric with traceAgent — a single
+// source the RunSummary construction sites share so each run projects its version.
+func traceVersion(t lfTrace) string {
+	for _, tag := range t.Tags {
+		if v, ok := strings.CutPrefix(tag, versionRunTagPrefix); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // agentRunTag builds the trace-level identity tag `agent:<namespace>/<name>` the
@@ -570,6 +589,7 @@ func appendRunTraces(dst []RunSummary, data []lfTrace, agentTag, q2 string) []Ru
 			LatencyMs: latencyMsOf(t),
 			AgentNs:   ns,
 			AgentName: name,
+			Version:   traceVersion(t),
 		})
 	}
 	return dst
