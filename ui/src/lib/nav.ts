@@ -48,7 +48,8 @@ export type Milestone =
   | "M63"
   | "M64"
   | "M66"
-  | "M67";
+  | "M67"
+  | "M68";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -298,6 +299,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: GitFork,
         milestone: "M67",
         route: "/workflows",
+      },
+      {
+        // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora: upload docs → ingest →
+        // watch phase → test-query with citations. Read-open (RBAC gate at the API server,
+        // ADR 0011); authored via YAML/kubectl.
+        id: "knowledgebases",
+        label: "Knowledge Bases",
+        icon: BookOpen,
+        milestone: "M68",
+        route: "/knowledgebases",
       },
     ],
   },

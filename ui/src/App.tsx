@@ -37,6 +37,7 @@ import { AuditPage } from "@/pages/audit-page";
 import { TeamsPage } from "@/pages/teams-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
+import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
 import {
   SecretBindingDetailPage,
   NewSecretBindingPage,
@@ -185,6 +186,9 @@ export function App() {
             <Route path="guardrails" element={<GuardrailPoliciesPage />} />
             {/* m67.9: Workflows — the declarative agent graph CRs (read-only list + invoke). */}
             <Route path="workflows" element={<WorkflowsPage />} />
+            {/* m68.13: KnowledgeBases — managed RAG corpora (list + detail, upload, ingest, test-query). */}
+            <Route path="knowledgebases" element={<KnowledgeBasesPage />} />
+            <Route path="knowledgebases/:ns/:name" element={<KBDetailPage />} />
             {/* The agent LANDING page (m14.11) — closes the aha loop: status
                 timeline + live log tail + Run panel + the native run inspector.
                 Reached from the agents list row-click and the create→landing

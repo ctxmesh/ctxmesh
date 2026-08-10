@@ -207,6 +207,12 @@ type Server struct {
 	// never another user's grant. Built in NewServer from MCP_CAPABILITY_PRIVATE_KEY.
 	capabilitySigner *runcap.Signer
 
+	// tokenServiceURL is the base URL of the central token-service (e.g.
+	// "http://token-service:8443"), used by the KB test-query endpoint (m68.13) to
+	// proxy POST /v1/knowledge/search. Empty ⇒ the search endpoint returns 501 honestly
+	// rather than panicking. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
+	tokenServiceURL string
+
 	// grantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service (credplane.Client) so the grant lands in the CONFIG-SELECTED backend
 	// (ADR 0032) — Postgres / remote-vault creds stay in the token-service, not this
@@ -319,6 +325,12 @@ type Options struct {
 	// nil ⇒ the legacy caller-scoped path. See the credentialNamespace field note for
 	// why this bounded SA use does not reopen the confused-deputy gap.
 	CredentialClient client.Client
+	// TokenServiceURL is the base URL of the central token-service (e.g.
+	// "http://token-service:8443"). When set, the KB test-query endpoint proxies
+	// POST /v1/knowledge/search to this URL (m68.13). Empty ⇒ the search endpoint
+	// returns 501 honestly. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
+	TokenServiceURL string
+
 	// GrantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service so grants land in the config-selected backend (ADR 0032). nil ⇒ the BFF
 	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
@@ -408,6 +420,7 @@ func NewServer(opts Options) *Server {
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
+		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
 		grantStore:               opts.GrantStore,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
@@ -663,6 +676,18 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
 		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
 
+		// KnowledgeBase list + detail (m68.13): read the caller's KB CRs — name, phase, counts.
+		// Caller-scoped (ADR 0011): the BFF lists/gets through the caller's own client so K8s RBAC
+		// governs who can read KBs. 403 when denied; 404 on a missing KB (detail only).
+		authed.HandleFunc("GET /api/knowledgebases", s.handleListKBs)
+		authed.HandleFunc("GET /api/knowledgebases/{name}", s.handleGetKB)
+
+		// KnowledgeBase test-query (m68.13): the console test-query panel — verify the KB exists
+		// (caller-scoped, 404 if absent) then forward to the token-service /v1/knowledge/search
+		// with the KB's embeddingRoute. Returns ranked chunks + citations. 501 when the token-service
+		// is unconfigured (TOKEN_SERVICE_URL unset).
+		authed.HandleFunc("POST /api/knowledgebases/{name}/search", s.handleSearchKB)
+
 		// KnowledgeBase document upload (M68, ADR 0061 Fork 4): stream a raw document body
 		// into the durable KB bucket at KnowledgeKey(ns, kbName, filename). Caller-scoped:
 		// the BFF verifies the KB exists in the caller's namespace before writing (honest 404
@@ -880,6 +905,9 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
+		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
+		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
 		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
 	}
 

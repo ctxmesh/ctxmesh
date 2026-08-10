@@ -16,16 +16,25 @@ limitations under the License.
 
 package bff
 
-// Tests for POST /api/knowledgebases/{name}/documents (handleUploadKBDocument)
-// and ResolveKBSources.
+// Tests for the KnowledgeBases BFF endpoints (m68.13):
+//   POST /api/knowledgebases/{name}/documents (handleUploadKBDocument)
+//   POST /api/knowledgebases/{name}/ingest (handleIngestKB)
+//   GET  /api/knowledgebases             (handleListKBs)
+//   GET  /api/knowledgebases/{name}      (handleGetKB)
+//   POST /api/knowledgebases/{name}/search (handleSearchKB)
+//   ResolveKBSources
 //
 // Coverage:
-//   - Happy path: 201 + correct JSON, object stored under the right key.
-//   - Unknown KB: 404 (KB does not exist in the caller's namespace).
-//   - Over-limit body: 413 (body exceeds maxDocumentUploadBytes).
-//   - Unconfigured store: 501 (docStore nil — no OBJECT_STORE_ADDR).
-//   - Missing filename: 400.
+//   - Upload happy path: 201 + correct JSON, object stored under the right key.
+//   - Upload unknown KB: 404 (KB does not exist in the caller's namespace).
+//   - Upload over-limit body: 413 (body exceeds maxDocumentUploadBytes).
+//   - Upload unconfigured store: 501 (docStore nil — no OBJECT_STORE_ADDR).
+//   - Upload missing filename: 400.
 //   - ResolveKBSources: "upload" and "objectStorePrefix" paths.
+//   - List KBs: returns KBs in the caller's namespace.
+//   - Get KB: 404 on absent KB; returns KBDetail on success.
+//   - Search KB: forwards to a fake token-service + returns citations.
+//   - Search KB unconfigured: 501 when TOKEN_SERVICE_URL is unset.
 
 import (
 	"bytes"
@@ -443,4 +452,230 @@ func TestIngestKB_Unwired_Returns501(t *testing.T) {
 	})
 	code, body := postIngest(t, s, "my-kb", kbNS)
 	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when ingestion is unwired; body: %s", string(body))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for read + test-query endpoints (m68.13)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// listKBs sends GET /api/knowledgebases and returns (status, body).
+func listKBs(t *testing.T, s *Server, ns string) (int, []byte) {
+	t.Helper()
+	rawURL := "/api/knowledgebases"
+	if ns != "" {
+		rawURL += "?namespace=" + ns
+	}
+	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// getKB sends GET /api/knowledgebases/{name} and returns (status, body).
+func getKB(t *testing.T, s *Server, name, ns string) (int, []byte) {
+	t.Helper()
+	rawURL := "/api/knowledgebases/" + name
+	if ns != "" {
+		rawURL += "?namespace=" + ns
+	}
+	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// searchKB sends POST /api/knowledgebases/{name}/search and returns (status, body).
+func searchKB(t *testing.T, s *Server, name, ns string, reqBody []byte) (int, []byte) {
+	t.Helper()
+	rawURL := "/api/knowledgebases/" + name + "/search"
+	if ns != "" {
+		rawURL += "?namespace=" + ns
+	}
+	req := httptest.NewRequest(http.MethodPost, rawURL, bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+func TestListKBs_ReturnsSummaries(t *testing.T) {
+	kb1 := mockKnowledgeBase("kb-alpha", kbNS)
+	kb1.Status.Phase = "Ready"
+	kb1.Status.ChunkCount = 42
+	kb2 := mockKnowledgeBase("kb-beta", kbNS)
+	kb2.Status.Phase = "Pending"
+
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).
+		WithStatusSubresource(&agentsv1beta1.KnowledgeBase{}).
+		WithObjects(kb1, kb2).Build()
+
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(fc),
+		Scheme:        sc,
+		Auth:          AllowAll{},
+		Log:           logr.Discard(),
+	})
+
+	code, body := listKBs(t, s, kbNS)
+	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
+
+	var resp KBListResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Len(t, resp.Items, 2, "expected 2 KBs")
+
+	names := map[string]bool{}
+	for _, item := range resp.Items {
+		names[item.Name] = true
+	}
+	assert.True(t, names["kb-alpha"])
+	assert.True(t, names["kb-beta"])
+}
+
+func TestGetKB_ReturnsDetail(t *testing.T) {
+	kb := mockKnowledgeBase("detail-kb", kbNS)
+	kb.Spec.DisplayName = "My Detail KB"
+	kb.Spec.Chunking = agentsv1beta1.ChunkingConfig{Size: 256, Overlap: 32, Splitter: "markdown"}
+	kb.Status.Phase = "Ready"
+	kb.Status.ChunkCount = 10
+	kb.Status.DocumentCount = 2
+
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).
+		WithStatusSubresource(&agentsv1beta1.KnowledgeBase{}).
+		WithObjects(kb).Build()
+
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(fc),
+		Scheme:        sc,
+		Auth:          AllowAll{},
+		Log:           logr.Discard(),
+	})
+
+	code, body := getKB(t, s, "detail-kb", kbNS)
+	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
+
+	var resp KBDetail
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Equal(t, "detail-kb", resp.Name)
+	assert.Equal(t, "My Detail KB", resp.DisplayName)
+	assert.Equal(t, "Ready", resp.Phase)
+	assert.EqualValues(t, 10, resp.ChunkCount)
+	assert.EqualValues(t, 2, resp.DocumentCount)
+	assert.Equal(t, "markdown", resp.ChunkSplitter)
+	assert.Equal(t, 256, resp.ChunkSize)
+	assert.Equal(t, 32, resp.ChunkOverlap)
+}
+
+func TestGetKB_AbsentKB_Returns404(t *testing.T) {
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).Build() // no KBs
+
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(fc),
+		Scheme:        sc,
+		Auth:          AllowAll{},
+		Log:           logr.Discard(),
+	})
+
+	code, body := getKB(t, s, "ghost-kb", kbNS)
+	assert.Equal(t, http.StatusNotFound, code, "expected 404 for absent KB; body: %s", string(body))
+}
+
+func TestSearchKB_ForwardsToTokenServiceAndReturnsResults(t *testing.T) {
+	// Start a fake token-service that returns one search hit.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/knowledge/search" || r.Method != http.MethodPost {
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
+		}
+		// Verify the forwarded body includes the embeddingModel from the KB spec.
+		var fwdReq struct {
+			EmbeddingModel string `json:"embeddingModel"`
+			Query          string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&fwdReq); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if fwdReq.EmbeddingModel != "text-embedding-route" {
+			http.Error(w, "wrong embeddingModel: "+fwdReq.EmbeddingModel, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"results": []map[string]any{
+				{
+					"content":     "chunk content",
+					"documentRef": "guide.pdf",
+					"chunkIndex":  3,
+					"score":       0.87,
+				},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	kb := mockKnowledgeBase("search-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "text-embedding-route"
+
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).Build()
+
+	s := NewServer(Options{
+		CallerClients:   newFakeFactory(fc),
+		Scheme:          sc,
+		Auth:            AllowAll{},
+		Log:             logr.Discard(),
+		TokenServiceURL: ts.URL,
+	})
+
+	reqBody, _ := json.Marshal(map[string]any{"query": "how to configure", "topK": 5})
+	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
+	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
+
+	var resp kbSearchResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	require.Len(t, resp.Results, 1, "expected 1 search result")
+	assert.Equal(t, "chunk content", resp.Results[0].Content)
+	assert.Equal(t, "guide.pdf", resp.Results[0].DocumentRef)
+	assert.Equal(t, 3, resp.Results[0].ChunkIndex)
+	assert.InDelta(t, 0.87, resp.Results[0].Score, 0.001)
+}
+
+func TestSearchKB_Unconfigured_Returns501(t *testing.T) {
+	kb := mockKnowledgeBase("search-kb", kbNS)
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).Build()
+
+	// TokenServiceURL deliberately empty — not configured.
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(fc),
+		Scheme:        sc,
+		Auth:          AllowAll{},
+		Log:           logr.Discard(),
+	})
+
+	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
+	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
+	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when token-service is unconfigured; body: %s", string(body))
+}
+
+func TestSearchKB_AbsentKB_Returns404(t *testing.T) {
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).Build() // no KBs
+
+	s := NewServer(Options{
+		CallerClients:   newFakeFactory(fc),
+		Scheme:          sc,
+		Auth:            AllowAll{},
+		Log:             logr.Discard(),
+		TokenServiceURL: "http://token-service:8443",
+	})
+
+	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
+	code, body := searchKB(t, s, "ghost-kb", kbNS, reqBody)
+	assert.Equal(t, http.StatusNotFound, code, "expected 404 for absent KB; body: %s", string(body))
 }
