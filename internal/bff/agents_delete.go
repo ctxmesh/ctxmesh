@@ -188,7 +188,7 @@ func collectAgentReferences(ctx context.Context, cl client.Client, ns, name stri
 		}
 		owned := hasOwnerRef(obj.OwnerReferences, agentDeploymentOwnerKind, name)
 		out.References = append(out.References, AgentReferenceEntry{
-			Kind:         "MCPToolBinding",
+			Kind:         mcpToolBindingKind,
 			Name:         obj.Name,
 			OwnedByAgent: owned,
 		})

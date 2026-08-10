@@ -105,6 +105,7 @@ func createAgentFromYAML(
 	agentYAML []byte,
 	namespace string,
 	callerOwner string,
+	opts ...createAgentOptions,
 ) ([]createdObject, error) {
 	if scheme == nil {
 		return nil, &createError{status: 500, msg: "server misconfigured: no scheme"}
@@ -178,6 +179,13 @@ func createAgentFromYAML(
 	// Stamp the source-spec annotation on the primary AgentDeployment only, before
 	// it is created, so the edit source of truth rides the object from birth.
 	stampSourceSpec(objs, sourceSpec)
+
+	// Draft stage (ADR 0065 D1): when the caller requested a draft create, stamp the
+	// agents.ctxmesh.ai/stage=draft label on the AgentDeployment before creation so
+	// the object is born as a draft. Default (no opts) → normal create, no label.
+	if len(opts) > 0 && opts[0].draft {
+		stampDraftLabel(objs)
+	}
 
 	// Compose-and-denormalize the prompt (ADR 0042, m40.3): resolve the agent's promptRef to its git
 	// pointer (from the Postgres store — including a PromptVersion just created above) and stamp it as an
