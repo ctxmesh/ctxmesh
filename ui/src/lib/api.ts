@@ -1522,6 +1522,20 @@ export interface GenerateAgentResponse {
   regenerate?: boolean;
 }
 
+// EvalGatedMetricResponse mirrors the BFF's EvalGatedMetricResponse DTO (GET
+// /api/metrics/eval-gated, M69, ADR 0062 governance #2): a LIVE SNAPSHOT of the
+// PRD §5 ">50% of production deploys gated by an EvalSuite" quality metric.
+// Caller-scoped (ADR 0011): the BFF reads AgentDeployments via the caller's own
+// token; RBAC governs visibility. Historical per-promotion count is deferred.
+export interface EvalGatedMetricResponse {
+  /** Total AgentDeployments visible to the caller. */
+  total: number;
+  /** AgentDeployments with a non-empty spec.evalSuiteRef. */
+  gated: number;
+  /** gated/total*100 rounded to one decimal; 0 when total==0. */
+  percent: number;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -4037,5 +4051,27 @@ export const api = {
       );
     }
     return (await res.json()) as { caseId: string };
+  },
+
+  // evalGatedMetric fetches the PRD §5 ">50% of production deploys gated by an
+  // EvalSuite" live-snapshot metric (GET /api/metrics/eval-gated, M69, ADR 0062
+  // governance #2). Caller-scoped (ADR 0011): the BFF reads AgentDeployments via
+  // the caller's own token; RBAC governs visibility. ?namespace narrows to one ns.
+  evalGatedMetric: async (
+    opts?: { namespace?: string; signal?: AbortSignal },
+  ): Promise<EvalGatedMetricResponse> => {
+    const params = new URLSearchParams();
+    if (opts?.namespace) params.set("namespace", opts.namespace);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const res = await apiFetch(`/api/metrics/eval-gated${qs}`, {
+      signal: opts?.signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `eval-gated metric failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalGatedMetricResponse;
   },
 };
