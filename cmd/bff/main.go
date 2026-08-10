@@ -52,6 +52,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -312,6 +313,12 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// per-(namespace, agent, version, window) online-score vector.
 	onlineStore := onlinescore.NewPostgresStore(cpDB)
 
+	// Cost-rollup store (M70, ADR 0063 D1): rides the same cpDB (migration 0009 applied by
+	// controlplane.Migrate). The cost-rollup worker (m70.2) writes it directly (governance #8: the
+	// trusted off-request worker holds cpDB + Valkey reach), snapshotting the ephemeral per-tenant
+	// Valkey monthly-spend keys into the durable cost_rollups ledger.
+	rollupStore := costrollup.NewPostgresStore(cpDB)
+
 	// Per-agent online-config resolver (M69, ADR 0062 Fork 2, m69.6): a READ-ONLY client over
 	// AgentDeployment + EvalSuite that the online-scoring worker consults for each agent's EvalSuite.online
 	// The online-scoring worker uses PROCESS-WIDE DEFAULTS for every agent (judge OFF — no per-agent
@@ -334,6 +341,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		DatasetStore:                datasetStore,
 		OnlineStore:                 onlineStore,
 		OnlineResolver:              onlineResolver,
+		RollupStore:                 rollupStore,
 		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
@@ -385,6 +393,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	}
 
 	maybeStartOnlineScorer(ctx, srv, adapters)
+	maybeStartCostRollupWorker(ctx, srv)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -423,6 +432,23 @@ func maybeStartOnlineScorer(ctx context.Context, srv *bff.Server, adapters bff.A
 	}
 	srv.StartOnlineScorer(ctx, bff.OnlineScorerConfig{})
 	log.Info("online-scoring worker started (ADR 0062 Fork 2)")
+}
+
+// maybeStartCostRollupWorker starts the cost-rollup worker (ADR 0063 D1, m70.2) when
+// COST_ROLLUP_ENABLED=1. The periodic reconciler snapshots the ephemeral per-tenant Valkey monthly-spend
+// keys into the durable cost_rollups ledger once per tick (~1h). It degrades gracefully: it is a no-op
+// when STATELAYER_ADDR (the Valkey addr) is unset. The worker stops on ctx cancellation (the shutdown
+// signal). Extracted from run() to keep its cyclomatic complexity down; the logger is derived (ctrl.Log).
+func maybeStartCostRollupWorker(ctx context.Context, srv *bff.Server) {
+	log := ctrl.Log.WithName("bff.cost-rollup")
+	if os.Getenv("COST_ROLLUP_ENABLED") != "1" {
+		return
+	}
+	cfg := bff.CostRollupConfig{
+		ValKeyAddr: strings.TrimSpace(os.Getenv("STATELAYER_ADDR")),
+	}
+	srv.StartCostRollupWorker(ctx, cfg)
+	log.Info("cost-rollup worker started (ADR 0063 D1)", "valKeyAddr", cfg.ValKeyAddr)
 }
 
 // providerConnectEnabled resolves the connect-a-provider kill-switch from its

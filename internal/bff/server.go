@@ -32,6 +32,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -125,6 +126,13 @@ type Server struct {
 	// cpDB + Langfuse creds; agent pods never touch this). nil ⇒ the online-scoring worker does not start
 	// (cmd/bff/main.go gates on it), so a missing store is an honest no-op, never a panic.
 	onlineStore onlinescore.Store
+
+	// rollupStore is the control-plane Postgres store for the durable cost-rollup ledger
+	// (M70, ADR 0063 D1). The cost-rollup worker (m70.2) WRITES it DIRECTLY — Upsert — snapshotting
+	// the ephemeral Valkey monthly-spend keys and the Langfuse per-agent cost breakdown into a
+	// date-keyed series (governance #8: the trusted off-request worker holds cpDB + Langfuse + Valkey
+	// creds; agent pods never touch this). nil ⇒ the worker is a safe no-op, never a panic.
+	rollupStore costrollup.Store
 
 	// judgeCounters bounds the online-scoring worker's SAMPLED judge to a per-(agent, day) cost cap
 	// (m69.5, ADR 0062 Fork 2): an in-memory best-effort counter that resets lazily when the date rolls.
@@ -441,6 +449,10 @@ type Options struct {
 	// Constructed in cmd/bff/main.go (a read-only client over AgentDeployment + EvalSuite) only when the
 	// online-scoring worker is enabled.
 	OnlineResolver OnlineConfigResolver
+	// RollupStore is the control-plane Postgres store for the durable cost-rollup ledger (M70, ADR 0063 D1),
+	// which the cost-rollup worker (m70.2) writes directly (governance #8). Optional — nil ⇒ the worker is
+	// a safe no-op. Constructed in cmd/bff/main.go from cpDB.
+	RollupStore costrollup.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -490,6 +502,7 @@ func NewServer(opts Options) *Server {
 		datasetStore:             opts.DatasetStore,
 		onlineStore:              opts.OnlineStore,
 		onlineResolver:           opts.OnlineResolver,
+		rollupStore:              opts.RollupStore,
 		embedder:                 opts.Embedder,
 		judgeCounters:            &judgeCounter{},
 		log:                      opts.Log,
