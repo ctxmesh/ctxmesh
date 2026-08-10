@@ -1,4 +1,5 @@
 import {
+  Bell,
   Boxes,
   Coins,
   Database,
@@ -51,7 +52,8 @@ export type Milestone =
   | "M66"
   | "M67"
   | "M68"
-  | "M69";
+  | "M69"
+  | "M70";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -71,6 +73,9 @@ export const RES_TENANTS = "tenants";
 export const RES_AUDITLOGS = "auditlogs";
 // RES_GUARDRAIL is the plural resource name for GuardrailPolicies (m66.10, ADR 0059).
 export const RES_GUARDRAIL = "guardrailpolicies";
+// RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2). The caller-scoped SSAR
+// authorizes against `list alertpolicies` — the same resource the CRD path enforced.
+export const RES_ALERTPOLICIES = "alertpolicies";
 
 export interface NavItem {
   id: string;
@@ -276,6 +281,18 @@ export const NAV_SECTIONS: NavSection[] = [
         milestone: "M63",
         route: "/audit",
         requiresWrite: { resource: RES_AUDITLOGS, verb: "list" },
+      },
+      {
+        // Alerts (M70, ADR 0063 D2) — the fired-alert console feed: AlertPolicy
+        // conditions that crossed their threshold. Read-only; the controller
+        // auto-resolves on true→false transitions. Gated on `list alertpolicies`
+        // so a caller without that RBAC sees an honest 403 rather than an empty list.
+        id: "alerts",
+        label: "Alerts",
+        icon: Bell,
+        milestone: "M70",
+        route: "/alerts",
+        requiresWrite: { resource: RES_ALERTPOLICIES, verb: "list" },
       },
     ],
   },

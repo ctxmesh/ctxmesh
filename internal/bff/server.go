@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
@@ -151,6 +152,10 @@ type Server struct {
 	agentMemoryStore agentmemory.Store
 	// auditStore appends the BFF's security events to the audit_log (ADR 0056, M63). nil ⇒ no-op.
 	auditStore auditlog.Store
+	// alertStore is the control-plane store for fired alerts (M70, ADR 0063 D2). The AlertPolicy
+	// reconciler appends one Alert per false→true condition transition and resolves it on true→false.
+	// The console reads it via GET /api/alerts. nil ⇒ the endpoint returns 501 (CONTROLPLANE_DSN absent).
+	alertStore alertstore.Store
 
 	// tenantUsage reads a tenant's LIVE quota consumption from the shared state-layer Valkey (M49). nil ⇒
 	// the tenant usage endpoint returns 501 (no state-layer configured).
@@ -423,6 +428,9 @@ type Options struct {
 	// grant.revoke + denials) with the PRECISE authenticated actor (ADR 0056, M63). Optional — nil ⇒ the
 	// BFF audit writes no-op (the controller still persists CRD mutations) and GET /api/audit returns 501.
 	AuditStore auditlog.Store
+	// AlertStore is the control-plane store for fired alerts (M70, ADR 0063 D2). Optional — nil ⇒
+	// GET /api/alerts returns 501 (CONTROLPLANE_DSN absent). Constructed in cmd/bff/main.go from cpDB.
+	AlertStore alertstore.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -494,6 +502,7 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
+		alertStore:               opts.AlertStore,
 		tenantUsage:              opts.TenantUsage,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
@@ -641,6 +650,10 @@ func (s *Server) Handler() http.Handler {
 		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
 		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
 		authed.HandleFunc("GET /api/audit", s.handleListAudit)
+		// Alerts feed (M70, ADR 0063 D2): the fired-alert console feed — newest-first,
+		// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
+		// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
+		authed.HandleFunc("GET /api/alerts", s.handleListAlerts)
 		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
 		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
 		// API server (a viewer without update is denied → 403).
@@ -1009,6 +1022,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("GET /api/alerts", notImplemented("caller-scoped alerts feed"))
 		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
 		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
 		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
