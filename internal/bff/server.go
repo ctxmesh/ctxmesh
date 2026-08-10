@@ -131,6 +131,13 @@ type Server struct {
 	// Always non-nil (constructed in NewServer) so the worker never nil-derefs it.
 	judgeCounters *judgeCounter
 
+	// onlineResolver resolves the PER-AGENT online-scoring policy from the agent's EvalSuite.online block
+	// (ADR 0062 Fork 2, m69.6). nil ⇒ the online-scoring worker uses its process-wide config for every
+	// agent (m69.5 back-compat); a real k8sOnlineConfigResolver (a read-only client over AgentDeployment +
+	// EvalSuite) is wired in cmd/bff/main.go when the worker is enabled. A resolve error falls back to the
+	// process defaults for that agent — never a fabricated verdict.
+	onlineResolver OnlineConfigResolver
+
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
 	agentMemoryStore agentmemory.Store
@@ -429,6 +436,11 @@ type Options struct {
 	// which the online-scoring worker (m69.5) writes directly (governance #8). Optional — nil ⇒ the
 	// online-scoring worker does not start (an honest no-op). Constructed in cmd/bff/main.go from cpDB.
 	OnlineStore onlinescore.Store
+	// OnlineResolver resolves the per-agent online-scoring policy from the EvalSuite.online block (ADR 0062
+	// Fork 2, m69.6). Optional — nil ⇒ the worker uses its process-wide config for every agent (m69.5).
+	// Constructed in cmd/bff/main.go (a read-only client over AgentDeployment + EvalSuite) only when the
+	// online-scoring worker is enabled.
+	OnlineResolver OnlineConfigResolver
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -477,6 +489,7 @@ func NewServer(opts Options) *Server {
 		knowledgeStore:           opts.KnowledgeStore,
 		datasetStore:             opts.DatasetStore,
 		onlineStore:              opts.OnlineStore,
+		onlineResolver:           opts.OnlineResolver,
 		embedder:                 opts.Embedder,
 		judgeCounters:            &judgeCounter{},
 		log:                      opts.Log,

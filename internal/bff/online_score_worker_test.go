@@ -316,6 +316,122 @@ func TestJudgeCounter_ResetsOnDayRoll(t *testing.T) {
 	assert.False(t, jc.reserve("default/foo", "any", 0), "a zero cap always denies (judge OFF)")
 }
 
+// fakeOnlineResolver is a canned OnlineConfigResolver for the per-agent override tests: it returns a fixed
+// config (and/or error) regardless of (namespace, agent), enough to prove the worker merges a per-agent
+// policy over its process-wide defaults.
+type fakeOnlineResolver struct {
+	cfg *ResolvedOnlineConfig
+	err error
+}
+
+func (f fakeOnlineResolver) ResolveOnline(context.Context, string, string) (*ResolvedOnlineConfig, error) {
+	return f.cfg, f.err
+}
+
+// Test: a per-agent resolver with judge ON overrides a process-wide cfg with judge OFF (m69.6). The
+// process default is SampleRate=0 (judge OFF); the resolver returns SampleRate=1 + a cap, so the worker
+// MUST judge this agent — proving the per-agent policy is authoritative over the process default.
+func TestOnlineScorer_PerAgentOverrideEnablesJudge(t *testing.T) {
+	t.Parallel()
+
+	runs := runsFor("v1", 5, 100)
+	lf := onlineScorerFake{
+		recent:   runs,
+		filtered: map[string][]RunSummary{"default/foo": runs},
+	}
+	store := onlinescore.NewMemStore()
+	s := NewServer(Options{
+		Auth:        AllowAll{},
+		Adapters:    Adapters{Langfuse: lf},
+		OnlineStore: store,
+		// Per-agent policy: judge ON (SampleRate=1, cap=5) even though the process cfg below is judge OFF.
+		OnlineResolver: fakeOnlineResolver{cfg: &ResolvedOnlineConfig{SampleRate: 1.0, MaxScoredPerDay: 5}},
+		Version:        "test",
+		Log:            logr.Discard(),
+	})
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	// Process-wide cfg is judge OFF (SampleRate 0) — the per-agent resolver must flip it ON for this agent.
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{}, now))
+
+	windowStart := now.Add(-defaultOnlineScorerWindow)
+	agg, err := store.GetAggregate(context.Background(), "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	assert.Positive(t, agg.Judge.Count, "per-agent policy (judge ON) overrides the process default (judge OFF)")
+	assert.LessOrEqual(t, agg.Judge.Count, 5, "the per-agent daily cap still bounds the judge writes")
+}
+
+// Test: a nil resolver ⇒ the worker uses the process-wide cfg for every agent (m69.5 back-compat). With
+// process cfg judge OFF, no agent is judged even though runs exist.
+func TestOnlineScorer_NilResolverUsesProcessDefaults(t *testing.T) {
+	t.Parallel()
+
+	runs := runsFor("v1", 5, 100)
+	lf := onlineScorerFake{recent: runs, filtered: map[string][]RunSummary{"default/foo": runs}}
+	s, store := newOnlineScorerServer(t, lf) // newOnlineScorerServer wires NO resolver (nil)
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{}, now))
+
+	windowStart := now.Add(-defaultOnlineScorerWindow)
+	agg, err := store.GetAggregate(context.Background(), "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	assert.Equal(t, 5, agg.Operational.Total, "runs still folded (operational always scores)")
+	assert.Zero(t, agg.Judge.Count, "nil resolver ⇒ process default (judge OFF) for every agent")
+}
+
+// Test: a resolver ERROR falls back to the process-wide cfg for that agent (never abandons the agent,
+// never fabricates a verdict). Process cfg is judge OFF, so the agent is still scored (operational) with
+// judge OFF — the tick does not fail.
+func TestOnlineScorer_ResolverErrorFallsBackToDefaults(t *testing.T) {
+	t.Parallel()
+
+	runs := runsFor("v1", 4, 100)
+	lf := onlineScorerFake{recent: runs, filtered: map[string][]RunSummary{"default/foo": runs}}
+	store := onlinescore.NewMemStore()
+	s := NewServer(Options{
+		Auth:           AllowAll{},
+		Adapters:       Adapters{Langfuse: lf},
+		OnlineStore:    store,
+		OnlineResolver: fakeOnlineResolver{err: errors.New("k8s api down")},
+		Version:        "test",
+		Log:            logr.Discard(),
+	})
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{}, now), "a resolve error does not fail the tick")
+
+	windowStart := now.Add(-defaultOnlineScorerWindow)
+	agg, err := store.GetAggregate(context.Background(), "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	assert.Equal(t, 4, agg.Operational.Total, "the agent is still scored under process defaults despite the resolve error")
+	assert.Zero(t, agg.Judge.Count, "fell back to the process default (judge OFF)")
+}
+
+// Test: a per-agent Window override re-scopes the window (mergeOnto + resolveWindow). A 24h per-agent
+// window scores over the last 24h, so runs stamped 2h ago (outside the process-default 1h window's server
+// filter) are still discovered by the version filter — here we assert the merged config carries the
+// per-agent window through withDefaults.
+func TestResolvedOnlineConfig_MergeOnto(t *testing.T) {
+	t.Parallel()
+
+	base := OnlineScorerConfig{} // withDefaults ⇒ Window 1h, judge OFF
+
+	// nil ⇒ base unchanged.
+	assert.Equal(t, base, (*ResolvedOnlineConfig)(nil).mergeOnto(base))
+
+	// Per-agent policy: judge ON + a 24h window overrides the 1h default.
+	merged := (&ResolvedOnlineConfig{SampleRate: 0.5, MaxScoredPerDay: 3, Window: 24 * time.Hour}).mergeOnto(base)
+	assert.InDelta(t, 0.5, merged.SampleRate, 1e-9)
+	assert.Equal(t, 3, merged.MaxScoredPerDay)
+	assert.Equal(t, 24*time.Hour, merged.Window, "per-agent window overrides the process default")
+	assert.True(t, merged.judgeEnabled(), "per-agent SampleRate + cap ⇒ judge ON")
+
+	// A per-agent policy that OMITS the window (0) keeps the process default (1h) after withDefaults.
+	noWin := (&ResolvedOnlineConfig{SampleRate: 0.2, MaxScoredPerDay: 1}).mergeOnto(base)
+	assert.Equal(t, defaultOnlineScorerWindow, noWin.Window, "omitted per-agent window ⇒ process default")
+}
+
 // Sanity: the MemStore rejects an empty namespace/agent (defensive — the worker never upserts one, since
 // discovery skips runs with no agentName; this pins that contract).
 func TestOnlineScorer_UpsertGuard(t *testing.T) {

@@ -82,6 +82,46 @@ type OnlineScorerConfig struct {
 	MaxScoredPerDay int           // hard judge cost cap per (agent) per day (default 0 = judge OFF)
 }
 
+// OnlineConfigResolver resolves the per-agent online-scoring policy from the agent's EvalSuite.online
+// block (ADR 0062 Fork 2, m69.6). It is the worker's ONLY view of the k8s eval policy — the worker holds
+// no caller token, so a small read-only client (the manager's cached client) backs this in production.
+// Absent policy (no evalSuiteRef, or no online block) ⇒ (nil, nil): the worker falls back to its
+// process-wide config defaults (judge OFF).
+type OnlineConfigResolver interface {
+	// ResolveOnline returns the online policy for (namespace, agentName), or (nil, nil) when the agent
+	// has no evalSuiteRef or the referenced EvalSuite has no online block. An error is a genuine lookup
+	// failure (the worker logs it and falls back to defaults for that agent — never a fabricated verdict).
+	ResolveOnline(ctx context.Context, namespace, agentName string) (*ResolvedOnlineConfig, error)
+}
+
+// ResolvedOnlineConfig is the per-agent online policy the worker applies, already parsed from the CRD
+// strings into worker types (SampleRate float, Window duration).
+type ResolvedOnlineConfig struct {
+	SampleRate      float64
+	MaxScoredPerDay int
+	Window          time.Duration
+	MinSamples      int
+}
+
+// mergeOnto layers a per-agent ResolvedOnlineConfig over the process-wide defaults, returning the merged
+// config the worker applies for THIS agent (ADR 0062 Fork 2, m69.6). Per-agent SampleRate/MaxScoredPerDay
+// override the process defaults unconditionally (a per-agent 0 turns the judge OFF for that agent — the
+// policy is authoritative, not "only override if non-zero"). Window overrides only when set (>0), so a
+// per-agent policy that omits window keeps the process default rather than collapsing to 0. withDefaults
+// then re-applies the platform floors (a 0 Window ⇒ 1h). MinSamples has no worker effect until m69.7
+// (regression detection); it rides through so the resolved policy is complete.
+func (r *ResolvedOnlineConfig) mergeOnto(cfg OnlineScorerConfig) OnlineScorerConfig {
+	if r == nil {
+		return cfg
+	}
+	cfg.SampleRate = r.SampleRate
+	cfg.MaxScoredPerDay = r.MaxScoredPerDay
+	if r.Window > 0 {
+		cfg.Window = r.Window
+	}
+	return cfg.withDefaults()
+}
+
 func (c OnlineScorerConfig) withDefaults() OnlineScorerConfig {
 	if c.Interval <= 0 {
 		c.Interval = defaultOnlineScorerInterval
@@ -209,6 +249,13 @@ func (s *Server) scoreOnce(ctx context.Context, cfg OnlineScorerConfig, now time
 
 // scoreTarget computes + upserts the aggregate for ONE (namespace, agent, version) over the window.
 func (s *Server) scoreTarget(ctx context.Context, cfg OnlineScorerConfig, tgt scoreTarget, windowStart, now time.Time, dayKey string) error {
+	// Resolve the PER-AGENT online policy from the agent's EvalSuite.online block (ADR 0062 Fork 2, m69.6)
+	// and merge it over the process-wide defaults. A nil resolver (m69.5 back-compat) or a (nil, nil)
+	// resolution (no evalSuiteRef / no online block) leaves cfg untouched — the process defaults apply. A
+	// lookup error is logged and falls back to the process defaults for THIS agent (never a fabricated
+	// verdict, never abandons the agent).
+	cfg, windowStart = s.resolveWindow(ctx, cfg, tgt, windowStart, now)
+
 	// Fetch the window's runs for this agent (server-side tag filter on agent + time window), then keep
 	// only the runs whose version tag matches THIS version — so two versions of the same agent in the
 	// same window fold into two DISTINCT aggregates (version separation).
@@ -238,6 +285,32 @@ func (s *Server) scoreTarget(ctx context.Context, cfg OnlineScorerConfig, tgt sc
 		return err
 	}
 	return nil
+}
+
+// resolveWindow resolves the per-agent online policy for tgt and returns the merged config plus the
+// window-start to score over (ADR 0062 Fork 2, m69.6). When the resolver is absent, returns (nil, nil),
+// or errors, it returns the process-wide cfg + the caller's windowStart unchanged (m69.5 behaviour). When
+// a per-agent policy sets a different Window, windowStart is RECOMPUTED from `now` so the agent's window
+// is honoured (a per-agent 24h window scores over the last 24h, not the process-default 1h). A resolver
+// error is logged and falls back to defaults for this agent — the tick never abandons the agent and never
+// fabricates a verdict.
+func (s *Server) resolveWindow(ctx context.Context, cfg OnlineScorerConfig, tgt scoreTarget, windowStart, now time.Time) (OnlineScorerConfig, time.Time) {
+	if s.onlineResolver == nil {
+		return cfg, windowStart
+	}
+	resolved, err := s.onlineResolver.ResolveOnline(ctx, tgt.namespace, tgt.agentName)
+	if err != nil {
+		s.log.Error(err, "online-scoring worker: per-agent config resolve failed; using process defaults",
+			"namespace", tgt.namespace, "agent", tgt.agentName)
+		return cfg, windowStart
+	}
+	if resolved == nil {
+		return cfg, windowStart // no evalSuiteRef / no online block — process defaults
+	}
+	merged := resolved.mergeOnto(cfg)
+	// Re-derive the window start from the merged (possibly per-agent) Window so an overridden window is
+	// scored over its own span, not the process default's.
+	return merged, now.Add(-merged.Window)
 }
 
 // scoreTarget identity: a distinct (namespace, agentName, version) triple to score.

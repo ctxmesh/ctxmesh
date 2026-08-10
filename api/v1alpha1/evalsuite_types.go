@@ -75,6 +75,43 @@ type EvalSuiteSpec struct {
 	// +kubebuilder:default=block
 	// +kubebuilder:validation:Enum=block;warn
 	Gate string `json:"gate,omitempty"`
+
+	// online is the OPTIONAL online-scoring policy (ADR 0062 Fork 2). Absent ⇒ the platform defaults
+	// (operational + feedback score every run; the LLM judge is OFF). The offline gate above (dataset +
+	// scorers + threshold) is UNAFFECTED — online scoring is the separate production-side signal.
+	// +optional
+	Online *OnlineScoringSpec `json:"online,omitempty"`
+}
+
+// OnlineScoringSpec is the online-scoring policy for an EvalSuite (ADR 0062 Fork 2, M69). It configures
+// the online-scoring worker that scores PRODUCTION runs of a serving revision post-hoc (distinct from the
+// offline pre-promotion gate above). Absent ⇒ online scoring uses the platform defaults (judge OFF).
+type OnlineScoringSpec struct {
+	// sampleRate is the fraction of production traces sent to the (expensive) LLM judge, in [0,1].
+	// Deterministic hash-of-traceId sampling (reproducible, evenly spread). 0 ⇒ judge OFF (the default);
+	// the free operational + feedback components still score every run. Expressed as a decimal string
+	// 0..1 (same convention as threshold), e.g. "0.05".
+	// +optional
+	// +kubebuilder:validation:Pattern=`^0(\.[0-9]{1,4})?$|^1(\.0{1,4})?$`
+	SampleRate string `json:"sampleRate,omitempty"`
+
+	// maxScoredPerDay is a hard per-agent-per-day cap on judge invocations — the judge is control-plane
+	// spend the tenant budget proxy does not see (governance #4), so it needs its own cap. 0 ⇒ judge OFF.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxScoredPerDay int32 `json:"maxScoredPerDay,omitempty"`
+
+	// window is the aggregation window per scoring pass (a Go duration string, e.g. "1h", "24h").
+	// Empty ⇒ the platform default (1h). Validated by the worker (a bad duration ⇒ the default, logged).
+	// +optional
+	Window string `json:"window,omitempty"`
+
+	// minSamples is the minimum number of scored runs in a window before a component yields a verdict —
+	// below it, regression detection (m69.7) treats the window as "no verdict" (sparse data → garbage
+	// verdicts otherwise). 0 ⇒ the platform default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MinSamples int32 `json:"minSamples,omitempty"`
 }
 
 // EvalSuiteStatus defines the observed state of an EvalSuite.
