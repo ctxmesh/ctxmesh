@@ -188,25 +188,21 @@ export function ConfigBuilderPage() {
               </FormField>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <FormField id="scalingMin" label="Min replicas" error={errors.scalingMin}>
-                <Input
-                  id="scalingMin"
-                  inputMode="numeric"
-                  value={form.scalingMin}
-                  onChange={(e) => set("scalingMin", e.target.value)}
-                  placeholder="0"
-                />
-              </FormField>
-              <FormField id="scalingMax" label="Max replicas" error={errors.scalingMax}>
-                <Input
-                  id="scalingMax"
-                  inputMode="numeric"
-                  value={form.scalingMax}
-                  onChange={(e) => set("scalingMax", e.target.value)}
-                  placeholder="3"
-                />
-              </FormField>
+            <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-4">
+              <input
+                id="keepWarm"
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border"
+                checked={form.keepWarm}
+                onChange={(e) => set("keepWarm", e.target.checked)}
+              />
+              <label htmlFor="keepWarm" className="cursor-pointer space-y-0.5">
+                <span className="text-sm font-medium">Keep warm</span>
+                <p className="text-xs text-muted-foreground">
+                  Keeps at least one replica running so requests never cold-start.
+                  Advanced min/max scaling is available in the raw-YAML editor.
+                </p>
+              </label>
             </div>
 
             {/* ── Budget (opt-in) ──────────────────────────────────────── */}

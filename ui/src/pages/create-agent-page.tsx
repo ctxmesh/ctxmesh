@@ -36,7 +36,9 @@ import {
   api,
   ApiError,
   type CatalogTool,
+  type CheckRequirementsResponse,
   type ProviderSummary,
+  type RecipeSummary,
   type CreatedObject,
   type GenerateAgentResponse,
   type RefineAgentResponse,
@@ -77,7 +79,7 @@ import { groupToolsByServer } from "@/lib/tool-groups";
 
 // The mode is the top-level flow selection: the entrance fork, then one of the
 // two entrances. `configure` and `describe` both end at the shared review.
-type Mode = "entrance" | "describe" | "configure";
+type Mode = "entrance" | "describe" | "configure" | "recipe";
 
 // The Describe-it sub-state. `prompt` is the hero; `review` is the generation
 // review (valid generation); `regenerate` is the 422 outcome (reason + raw YAML
@@ -118,6 +120,14 @@ export function CreateAgentPage() {
   const [mode, setMode] = React.useState<Mode>(
     initialProvider ? "configure" : "entrance",
   );
+  // recipeSpec: the spec from a recipe the user clicked (m72.5). When set, mode="recipe"
+  // and SharedReview renders with this spec pre-filled.
+  const [recipeSpec, setRecipeSpec] = React.useState<string | null>(null);
+
+  function onPickRecipe(spec: string) {
+    setRecipeSpec(spec);
+    setMode("recipe");
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -130,7 +140,9 @@ export function CreateAgentPage() {
         </p>
       </div>
       <ProviderGate>
-        {mode === "entrance" && <Entrance onPick={setMode} />}
+        {mode === "entrance" && (
+          <Entrance onPick={setMode} onPickRecipe={onPickRecipe} />
+        )}
         {mode === "describe" && (
           <DescribeFlow onBack={() => setMode("entrance")} />
         )}
@@ -138,6 +150,12 @@ export function CreateAgentPage() {
           <ConfigureFlow
             onBack={() => setMode("entrance")}
             initialProvider={initialProvider}
+          />
+        )}
+        {mode === "recipe" && recipeSpec && (
+          <RecipeReview
+            spec={recipeSpec}
+            onBack={() => setMode("entrance")}
           />
         )}
       </ProviderGate>
@@ -203,41 +221,114 @@ function ProviderGate({ children }: { children: React.ReactNode }) {
 }
 
 // Entrance — the fork. "Describe it" is visually the primary (recommended) path;
-// "Configure it" is the full-control form. Matches the approved wireframe.
-function Entrance({ onPick }: { onPick: (m: Mode) => void }) {
+// "Configure it" is the full-control form; "Start from a recipe" shows a card grid
+// of pre-built recipes (m72.5). Matches the approved wireframe.
+function Entrance({
+  onPick,
+  onPickRecipe,
+}: {
+  onPick: (m: Mode) => void;
+  onPickRecipe: (spec: string) => void;
+}) {
+  const [showRecipes, setShowRecipes] = React.useState(false);
+  const [recipes, setRecipes] = React.useState<RecipeSummary[]>([]);
+  const [recipesLoading, setRecipesLoading] = React.useState(false);
+
+  function handleShowRecipes() {
+    setShowRecipes(true);
+    if (recipes.length === 0) {
+      setRecipesLoading(true);
+      api
+        .listRecipes()
+        .then((r) => {
+          setRecipes(r.recipes ?? []);
+          setRecipesLoading(false);
+        })
+        .catch(() => {
+          setRecipesLoading(false);
+        });
+    }
+  }
+
   return (
-    <div className="grid gap-4 md:grid-cols-2" data-testid="create-entrance">
-      <button
-        type="button"
-        onClick={() => onPick("describe")}
-        className="rounded-xl border-2 border-primary bg-accent/40 p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
-        data-testid="entrance-describe"
-      >
-        <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-brand-2 text-primary-foreground">
-          <Boxes className="h-6 w-6" />
+    <div className="space-y-4" data-testid="create-entrance">
+      <div className="grid gap-4 md:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onPick("describe")}
+          className="rounded-xl border-2 border-primary bg-accent/40 p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
+          data-testid="entrance-describe"
+        >
+          <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-brand-2 text-primary-foreground">
+            <Boxes className="h-6 w-6" />
+          </div>
+          <p className="text-base font-semibold">Describe it</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Say what it should do in a sentence. We generate a validated config
+            you review before creating.{" "}
+            <span className="font-medium text-primary">Recommended</span>.
+          </p>
+        </button>
+        <button
+          type="button"
+          onClick={() => onPick("configure")}
+          className="rounded-xl border p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
+          data-testid="entrance-configure"
+        >
+          <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
+            <Terminal className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <p className="text-base font-semibold">Configure it</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            A guided multi-step form — full control over runtime, model, prompt,
+            and tools.
+          </p>
+        </button>
+      </div>
+
+      {/* Recipe gallery (m72.5) — "Start from a recipe" expands below the main cards. */}
+      {!showRecipes ? (
+        <button
+          type="button"
+          onClick={handleShowRecipes}
+          className="flex w-full items-center gap-2 rounded-xl border border-dashed p-4 text-sm text-muted-foreground transition-colors hover:border-primary/60 hover:text-foreground"
+          data-testid="entrance-recipes-toggle"
+        >
+          <Sparkles className="h-4 w-4 shrink-0" />
+          Start from a recipe
+        </button>
+      ) : (
+        <div data-testid="recipe-gallery">
+          <p className="mb-3 text-sm font-medium">Recipes</p>
+          {recipesLoading ? (
+            <p className="text-sm text-muted-foreground">Loading recipes…</p>
+          ) : recipes.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No recipes available.</p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {recipes.map((r) => (
+                <button
+                  key={r.name}
+                  type="button"
+                  onClick={() => onPickRecipe(r.spec)}
+                  className="rounded-xl border bg-card p-4 text-left shadow-card transition-shadow hover:shadow-elevated"
+                  data-testid={`recipe-card-${r.name}`}
+                >
+                  {r.icon && (
+                    <span className="mb-2 block text-2xl" role="img" aria-label={r.title}>
+                      {r.icon}
+                    </span>
+                  )}
+                  <p className="text-sm font-semibold">{r.title}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">
+                    {r.description}
+                  </p>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <p className="text-base font-semibold">Describe it</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Say what it should do in a sentence. We generate a validated config
-          you review before creating.{" "}
-          <span className="font-medium text-primary">Recommended</span>.
-        </p>
-      </button>
-      <button
-        type="button"
-        onClick={() => onPick("configure")}
-        className="rounded-xl border p-6 text-left shadow-card transition-shadow hover:shadow-elevated"
-        data-testid="entrance-configure"
-      >
-        <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-surface-2">
-          <Terminal className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <p className="text-base font-semibold">Configure it</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          A guided multi-step form — full control over runtime, model, prompt,
-          and tools.
-        </p>
-      </button>
+      )}
     </div>
   );
 }
@@ -1121,6 +1212,16 @@ function ConfigureFlow({
           })),
         );
         setConnectedModels(flat);
+        // Auto-default: pick the primary (flagship) model from the connected set.
+        // "Primary" mirrors Go's primaryModel(): prefer flagship tiers
+        // (opus/sonnet/gpt-5/gpt-4/large/ultra/pro/max) over small tiers
+        // (haiku/fable/mini/nano/small/lite/flash/embed).
+        const smallTierRe = /haiku|fable|mini|nano|\bsmall\b|lite|flash|embed/i;
+        const flagship = flat.find((x) => !smallTierRe.test(x.model));
+        const autoDefault = flagship ?? flat[0];
+        if (autoDefault) {
+          setPickedModel((prev) => prev || `${autoDefault.connection}|${autoDefault.model}`);
+        }
         // m21/m22 (provider-as-model-home): arriving from Providers "Use" pre-picks
         // the first model of that connection so the user lands ready to create.
         if (initialProvider) {
@@ -1441,33 +1542,22 @@ function ConfigureFlow({
               />
             </FormField>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <FormField
-              id="cfg-min"
-              label="Min replicas"
-              error={errors.scalingMin}
-            >
-              <Input
-                id="cfg-min"
-                inputMode="numeric"
-                value={form.scalingMin}
-                onChange={(e) => set("scalingMin", e.target.value)}
-                placeholder="0"
-              />
-            </FormField>
-            <FormField
-              id="cfg-max"
-              label="Max replicas"
-              error={errors.scalingMax}
-            >
-              <Input
-                id="cfg-max"
-                inputMode="numeric"
-                value={form.scalingMax}
-                onChange={(e) => set("scalingMax", e.target.value)}
-                placeholder="3"
-              />
-            </FormField>
+          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-4">
+            <input
+              id="cfg-keep-warm"
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border"
+              checked={form.keepWarm}
+              onChange={(e) => set("keepWarm", e.target.checked)}
+              data-testid="cfg-keep-warm"
+            />
+            <label htmlFor="cfg-keep-warm" className="cursor-pointer space-y-0.5">
+              <span className="text-sm font-medium">Keep warm</span>
+              <p className="text-xs text-muted-foreground">
+                Always keeps at least one replica running so requests never cold-start.
+                Advanced min/max scaling is available in the raw-YAML editor.
+              </p>
+            </label>
           </div>
         </div>
       ),
@@ -1710,6 +1800,31 @@ function ToggleSection({
   );
 }
 
+// ─── Recipe review (m72.5) ──────────────────────────────────────────────────
+
+// RecipeReview pre-fills the SharedReview surface with a recipe's simplified
+// agent.yaml spec. The recipe spec is the same format as the generate/refine
+// output — SharedReview handles tool injection, Preview, and Create identically.
+function RecipeReview({ spec, onBack }: { spec: string; onBack: () => void }) {
+  const summary = summarizeYAML(spec);
+  const toolNames = summary.tools ?? [];
+  return (
+    <SharedReview
+      baseYAML={spec}
+      initialTools={toolNames}
+      summary={summary}
+      advancedYAML={spec}
+      onBack={onBack}
+      header={
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-primary" />
+          <p className="text-sm font-medium">Recipe — review before creating</p>
+        </div>
+      }
+    />
+  );
+}
+
 // ─── The shared review + tool picker + Create ───────────────────────────────
 
 function SharedReview({
@@ -1796,6 +1911,23 @@ function SharedReview({
     () => withTools(baseYAML, selected),
     [baseYAML, selected],
   );
+
+  // Check-requirements checklist (m72.3, ADR 0066 D3): advisory pre-flight against
+  // the finalYAML. Runs once after finalYAML+namespace are stable. A failure (e.g.
+  // 501 from older server) degrades silently — no checklist shown.
+  const [reqCheck, setReqCheck] = React.useState<CheckRequirementsResponse | null>(null);
+  React.useEffect(() => {
+    const c = new AbortController();
+    api
+      .checkRequirements(finalYAML, targetNs, c.signal)
+      .then((r) => {
+        if (!c.signal.aborted) setReqCheck(r);
+      })
+      .catch(() => {
+        /* soft miss — advisory only, don't surface errors */
+      });
+    return () => c.abort();
+  }, [finalYAML, targetNs]);
 
   async function onPreview() {
     setState({ kind: "previewing" });
@@ -1928,6 +2060,74 @@ function SharedReview({
           />
         )}
       </div>
+
+      {/* Check-requirements checklist (m72.3) — advisory only, never blocks create. */}
+      {reqCheck && (reqCheck.model.required || reqCheck.tools.length > 0) && (
+        <div
+          className="rounded-lg border bg-card p-5 shadow-card"
+          data-testid="requirements-checklist"
+        >
+          <p className="mb-3 text-sm font-medium">Connect what this needs</p>
+          <ul className="space-y-2">
+            {reqCheck.model.required && (
+              <li className="flex items-start gap-2 text-sm">
+                {reqCheck.model.connected ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                ) : (
+                  <PlugZap className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                )}
+                <span>
+                  Model route{reqCheck.model.route ? ` (${reqCheck.model.route})` : ""}
+                  {!reqCheck.model.connected && (
+                    <>
+                      {" — "}
+                      <a
+                        href="/providers/connect"
+                        className="text-primary underline underline-offset-2"
+                      >
+                        connect a provider
+                      </a>
+                    </>
+                  )}
+                </span>
+              </li>
+            )}
+            {reqCheck.tools.map((t) => (
+              <li key={t.name} className="flex items-start gap-2 text-sm">
+                {t.status === "ready" ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                ) : (
+                  <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                )}
+                <span>
+                  Tool: {t.name}
+                  {t.status === "needs-approval" && (
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      — pending operator approval
+                    </span>
+                  )}
+                  {t.status === "needs-consent" && (
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      — OAuth consent required at runtime
+                    </span>
+                  )}
+                  {t.status === "not-found" && (
+                    <>
+                      {" — "}
+                      <a
+                        href="/tools/connect"
+                        className="text-primary underline underline-offset-2"
+                      >
+                        register MCP server
+                      </a>
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Tool picker — managed agents only (a custom image brings its own). */}
       {isManaged && (

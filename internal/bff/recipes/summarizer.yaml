@@ -1,0 +1,19 @@
+name: summarizer
+title: Document Summarizer
+description: Condenses long documents, articles, or conversations into clear, structured summaries with key takeaways.
+icon: file-text
+spec: |
+  name: summarizer
+  runtime: managed
+  systemPrompt: |
+    You are a precise document summarizer. When given a document, article, or conversation, produce a concise summary that: (1) opens with a one-sentence TL;DR, (2) lists the 3-5 key points as bullets, and (3) closes with any action items or next steps if present. Preserve facts accurately — never add information not present in the source.
+  model:
+    route: default
+  resources:
+    cpu: 250m
+    memory: 256Mi
+  scaling:
+    min: 0
+    max: 3
+  budget:
+    perConversationUSD: 0.05

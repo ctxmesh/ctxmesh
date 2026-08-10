@@ -63,26 +63,36 @@ describe("config-form toAgentYAML", () => {
     expect(yaml).toBe("name: echo-agent\nimage: ghcr.io/x/echo:v1\n");
   });
 
-  it("emits resources, scaling and model.route", () => {
+  it("emits resources and model.route", () => {
     const yaml = toAgentYAML(
       form({
         name: "full-agent",
         image: "ghcr.io/x/full:v1",
         resourcesCpu: "500m",
         resourcesMemory: "256Mi",
-        scalingMin: "1",
-        scalingMax: "5",
         modelRoute: "default-model",
       }),
     );
     expect(yaml).toContain("resources:");
     expect(yaml).toContain("cpu: 500m");
     expect(yaml).toContain("memory: 256Mi");
-    expect(yaml).toContain("scaling:");
-    expect(yaml).toContain("min: 1");
-    expect(yaml).toContain("max: 5");
     expect(yaml).toContain("model:");
     expect(yaml).toContain("route: default-model");
+  });
+
+  it("emits scaling.min:1 when keepWarm=true, omits scaling block when false", () => {
+    const withWarm = toAgentYAML(
+      form({ name: "warm-agent", image: "ghcr.io/x/a:v1", keepWarm: true }),
+    );
+    expect(withWarm).toContain("scaling:");
+    expect(withWarm).toContain("min: 1");
+    // max must NOT appear (keepWarm only sets min)
+    expect(withWarm).not.toContain("max:");
+
+    const noWarm = toAgentYAML(
+      form({ name: "cold-agent", image: "ghcr.io/x/a:v1", keepWarm: false }),
+    );
+    expect(noWarm).not.toContain("scaling:");
   });
 
   it("omits the serving default execution model but emits others", () => {
