@@ -210,20 +210,40 @@ func (s *minioKBStore) Put(ctx context.Context, key string, r io.Reader, size in
 }
 
 func (s *minioKBStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	// MinIO GetObject returns a LAZY reader: the HTTP body is fetched on the caller's first Read,
+	// which happens AFTER this function returns. So the op-timeout context must stay alive until the
+	// returned reader is CLOSED — a `defer cancel()` here would cancel that context on return and the
+	// caller's io.ReadAll would fail with "context canceled" (the bug the m68.14 live tier caught;
+	// the mem-store twin never exercises this lazy-reader path). Cancel on Close instead.
 	opCtx, cancel := context.WithTimeout(ctx, opTimeout)
-	defer cancel()
 
 	obj, err := s.client.GetObject(opCtx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("get KB object %q: %w", key, err)
 	}
 	// Trigger a stat to surface a missing key eagerly (MinIO GetObject is lazy
 	// — a missing key errors only on first Read).
 	if _, statErr := obj.Stat(); statErr != nil {
 		_ = obj.Close()
+		cancel()
 		return nil, fmt.Errorf("get KB object %q: %w", key, statErr)
 	}
-	return obj, nil
+	return &cancelOnCloseReader{ReadCloser: obj, cancel: cancel}, nil
+}
+
+// cancelOnCloseReader ties a context's cancel func to a reader's Close, so a lazily-read MinIO
+// object's op-timeout context outlives the Get call that created it (until the caller finishes
+// reading + closes). Without this, a `defer cancel()` in Get cancels the read (see Get above).
+type cancelOnCloseReader struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCloseReader) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 func (s *minioKBStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
