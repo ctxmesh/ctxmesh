@@ -95,6 +95,10 @@ func (s *Server) handleSetOrgCredential(w http.ResponseWriter, r *http.Request) 
 	}
 	tr.Labels[labelMCPScope] = scopeOrg
 	delete(tr.Labels, labelMCPOwner) // org has no single owner
+	// ADR 0067 §2: stamp the two new axes alongside the legacy label (rollback aid).
+	// org → (team, shared) per the forward mapping in mcpVisibility.
+	tr.Labels[labelMCPVisibility] = visibilityTeam
+	tr.Labels[labelMCPCredentialSource] = credSourceShared
 
 	// Retired (RETIRE_TR, ADR 0044): the org-promote authz — the SSAR VerbUpdate IS
 	// the admin gate (exact RBAC parity with the CRD update this replaces). It runs
