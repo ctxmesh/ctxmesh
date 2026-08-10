@@ -301,3 +301,69 @@ func TestAlertPolicy_BudgetSoftFires(t *testing.T) {
 	assert.False(t, csLow.Firing, "budgetSoft must NOT fire below the threshold")
 	assert.Equal(t, 0, alertsLow.count(ns), "no alert below threshold")
 }
+
+// TestAlertPolicy_ForecastExceededFires exercises the forecastExceeded condition (m70.9): the tenant's
+// month-to-date cost-rollup, linearly projected to month-end, vs an absolute USD threshold. Uses a wide
+// margin (MTD already above the threshold ⇒ the projection ≥ MTD always exceeds it) so the assertion is
+// deterministic on any day of the month regardless of the run-rate extrapolation.
+func TestAlertPolicy_ForecastExceededFires(t *testing.T) {
+	const (
+		ns       = "ap-eval-forecast-ns"
+		tenant   = "ap-eval-forecast-tenant"
+		condName = "forecast-cap"
+	)
+
+	nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   ns,
+		Labels: map[string]string{agentsv1alpha1.TenantLabel: tenant},
+	}}
+	require.NoError(t, k8sClient.Create(testCtx, nsObj))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, nsObj) })
+
+	// forecastExceeded needs the tenant to exist (for its id) but NOT a budget — the cap is on the
+	// condition (a plain USD float), not the tenant.
+	tnt := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: tenant},
+		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{ns}},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tnt))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tnt) })
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+
+	// Fire: MTD = $500 already exceeds the $300 cap; the projection (≥ MTD) exceeds it on any day.
+	rollups := &fakeRollupStore{rows: []costrollup.Rollup{
+		{ScopeType: "tenant", ScopeID: tenant, Day: today, SpendUSD: 500.0},
+	}}
+	const policyHi = "ap-eval-forecast-policy-hi"
+	specHi := agentsv1beta1.AlertPolicySpec{
+		Conditions: []agentsv1beta1.AlertCondition{{Name: condName, Type: "forecastExceeded", Threshold: "300.00"}},
+		Route:      agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policyHi, ns, specHi)
+	alertsHi := newFakeAlertStore()
+	rHi := apEvalReconciler(alertsHi, rollups)
+	reconcileAPEval(t, rHi, policyHi, ns)
+	csHi := apConditionStatus(t, policyHi, ns, condName)
+	require.NotNil(t, csHi, "forecastExceeded condition status must be recorded")
+	assert.True(t, csHi.Firing, "forecastExceeded must fire when the projection >= the USD cap")
+	assert.Equal(t, 1, alertsHi.count(ns), "forecastExceeded firing must append exactly one alert")
+
+	// No fire: MTD = $10, cap = $100000 — the projection (≤ MTD * daysInMonth ≤ ~$310) stays below.
+	rollupsLow := &fakeRollupStore{rows: []costrollup.Rollup{
+		{ScopeType: "tenant", ScopeID: tenant, Day: today, SpendUSD: 10.0},
+	}}
+	const policyLo = "ap-eval-forecast-policy-lo"
+	specLo := agentsv1beta1.AlertPolicySpec{
+		Conditions: []agentsv1beta1.AlertCondition{{Name: condName, Type: "forecastExceeded", Threshold: "100000.00"}},
+		Route:      agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policyLo, ns, specLo)
+	alertsLo := newFakeAlertStore()
+	rLo := apEvalReconciler(alertsLo, rollupsLow)
+	reconcileAPEval(t, rLo, policyLo, ns)
+	csLo := apConditionStatus(t, policyLo, ns, condName)
+	require.NotNil(t, csLo)
+	assert.False(t, csLo.Firing, "forecastExceeded must NOT fire when the projection is below the cap")
+	assert.Equal(t, 0, alertsLo.count(ns), "no alert below the cap")
+}

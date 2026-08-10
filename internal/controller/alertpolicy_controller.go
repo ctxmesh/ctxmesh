@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -221,7 +222,10 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 	case condTypeBudgetSoft:
 		return r.evalBudgetSoft(ctx, ap, cond)
 
-	case condTypeErrorRate, condTypeP95Latency, condTypeForecastExceeded, condTypeRunFailureRate:
+	case condTypeForecastExceeded:
+		return r.evalForecastExceeded(ctx, ap, cond)
+
+	case condTypeErrorRate, condTypeP95Latency, condTypeRunFailureRate:
 		// Recognized-but-abstain: these have no wired data source yet (m52 Theme Q). Log once at V(1)
 		// and treat as not firing — NEVER error, so the rest of the policy still evaluates.
 		log.V(1).Info("alert condition type not yet evaluated — no data source (m52 Theme Q)",
@@ -347,6 +351,77 @@ func parseFractionPercent(s string) (int, bool) {
 	r.Add(r, big.NewRat(1, 2)) // +0.5 for round-half-up before truncation
 	num := new(big.Int).Quo(r.Num(), r.Denom())
 	return int(num.Int64()), true
+}
+
+// evalForecastExceeded fires when the linear run-rate projection of the tenant's
+// month-to-date spend (from the durable cost-rollup ledger) meets or exceeds the
+// condition's Threshold, parsed as a plain USD amount (NOT a 0..1 fraction —
+// forecastExceeded uses absolute USD thresholds while budgetSoft uses a fraction
+// of the tenant budget; document this difference clearly so policy authors are not
+// confused).
+//
+// ABSTAIN (not fire) when:
+//   - the cost-rollup store is not wired (no control-plane DB)
+//   - the policy's namespace has no tenant
+//   - there are no rollup rows for the current month
+//   - LinearForecast returns ok=false (e.g. now is at or before month start)
+//   - Threshold is empty or not parseable as a float
+//
+// value is "projected/threshold" on fire, "" on abstain.
+// BOTH the BFF forecast endpoint and this evaluator call costrollup.LinearForecast
+// so the two planes cannot drift apart.
+func (r *AlertPolicyReconciler) evalForecastExceeded(
+	ctx context.Context,
+	ap *agentsv1beta1.AlertPolicy,
+	cond agentsv1beta1.AlertCondition,
+) (bool, string) {
+	log := logf.FromContext(ctx)
+
+	if r.Rollups == nil {
+		log.V(1).Info("forecastExceeded abstains: cost-rollup store not wired (no control-plane DB)",
+			"alertpolicy", ap.Name, "condition", cond.Name)
+		return false, ""
+	}
+
+	tc, found, err := resolveTenantForNamespace(ctx, r.Client, ap.Namespace)
+	if err != nil {
+		log.V(1).Info("forecastExceeded abstains: tenant resolution failed",
+			"alertpolicy", ap.Name, "condition", cond.Name, "err", err.Error())
+		return false, ""
+	}
+	if !found {
+		log.V(1).Info("forecastExceeded abstains: no tenant for namespace",
+			"alertpolicy", ap.Name, "condition", cond.Name, "namespace", ap.Namespace)
+		return false, ""
+	}
+
+	// Threshold is a plain USD float (e.g. "500.00"), NOT a 0..1 fraction.
+	// budgetSoft uses a fraction of budgetUSD; forecastExceeded is an absolute USD cap.
+	thresholdUSD, parseErr := strconv.ParseFloat(strings.TrimSpace(cond.Threshold), 64)
+	if parseErr != nil || thresholdUSD < 0 {
+		log.V(1).Info("forecastExceeded abstains: unparseable or negative threshold (want a plain USD float, e.g. \"500.00\")",
+			"alertpolicy", ap.Name, "condition", cond.Name, "threshold", cond.Threshold)
+		return false, ""
+	}
+
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	rollups, err := r.Rollups.Range(ctx, "tenant", tc.id, monthStart, now)
+	if err != nil {
+		log.V(1).Info("forecastExceeded abstains: cost-rollup range read failed",
+			"alertpolicy", ap.Name, "condition", cond.Name, "tenant", tc.id, "err", err.Error())
+		return false, ""
+	}
+
+	projected, ok := costrollup.LinearForecast(rollups, now)
+	if !ok {
+		log.V(1).Info("forecastExceeded abstains: LinearForecast returned no signal (empty rollups or zero elapsed days)",
+			"alertpolicy", ap.Name, "condition", cond.Name, "tenant", tc.id)
+		return false, ""
+	}
+
+	value := fmt.Sprintf("%.2f/%.2f", projected, thresholdUSD)
+	return projected >= thresholdUSD, value
 }
 
 // applyConditionResult updates the per-condition status entry (keyed by AlertCondition.name) with

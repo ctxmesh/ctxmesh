@@ -665,6 +665,14 @@ func (s *Server) Handler() http.Handler {
 		// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
 		// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
 		authed.HandleFunc("GET /api/alerts", s.handleListAlerts)
+		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
+		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
+		// gate â no per-row leak). nil store â 501. ?tenant= required.
+		authed.HandleFunc("GET /api/cost/forecast", s.handleCostForecast)
+		// Cost chargeback (M70, ADR 0063 D3): per-day rollup export for a calendar month.
+		// CSV when Accept: text/csv or ?format=csv, else JSON. Caller-scoped SSAR on
+		// `costrollups`. nil store â 501. ?tenant= and ?period=YYYY-MM required.
+		authed.HandleFunc("GET /api/cost/chargeback", s.handleCostChargeback)
 		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
 		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
 		// API server (a viewer without update is denied → 403).
