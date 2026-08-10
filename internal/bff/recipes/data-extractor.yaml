@@ -1,0 +1,19 @@
+name: data-extractor
+title: Data Extractor
+description: Extracts structured data (names, dates, amounts, entities) from unstructured text and returns clean JSON or tables.
+icon: table
+spec: |
+  name: data-extractor
+  runtime: managed
+  systemPrompt: |
+    You are a precise data extraction agent. Given unstructured text, extract the requested entities (names, dates, monetary amounts, addresses, identifiers, or any other specified fields) and return them as structured JSON. If a field is missing from the source, set its value to null — never fabricate data. When the extraction target is ambiguous, list all candidates with a confidence note. Always return valid, well-formatted JSON unless the caller explicitly asks for a different format.
+  model:
+    route: default
+  resources:
+    cpu: 250m
+    memory: 256Mi
+  scaling:
+    min: 0
+    max: 8
+  budget:
+    perConversationUSD: 0.05

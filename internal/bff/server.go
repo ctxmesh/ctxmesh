@@ -1158,6 +1158,13 @@ func (s *Server) Handler() http.Handler {
 	// Pure spec-editing (m71.1, extracted to keep Handler under gocyclo).
 	s.registerRefineRoute(authed)
 
+	// Recipe gallery (ADR 0066 D4): the curated set of Go-embedded simplified
+	// agent.yaml starters a user one-clicks to pre-fill the create form. Recipes
+	// carry no secrets and no caller-specific data — every authenticated caller
+	// gets the same list. Wired on the authed mux (consistent with all other
+	// console reads) but performs no cluster lookup.
+	authed.HandleFunc("GET /api/recipes", s.handleListRecipes)
+
 	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
 	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by
 	// TWO factors, in order:
