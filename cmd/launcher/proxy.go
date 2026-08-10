@@ -64,6 +64,15 @@ const agentInvokeSpanName = "agent.invoke"
 // another namespace. Exported-shape kept in sync with the BFF's agentRunTag().
 const agentTagPrefix = "agent:"
 
+// versionTagPrefix prefixes the per-version trace tag value. The full tag is
+// `version:<agentVersion>` — an ADDITIVE second trace tag alongside the agent tag
+// (m69.5, ADR 0062 Fork 2) so the online-scoring worker can filter/group a trace by
+// the exact agent version that served it. `agent.version` is stamped as a span
+// ATTRIBUTE (below), which Langfuse buries as an observation field — NOT a
+// trace-level tag — so it cannot back a trace filter; a tag can. Stamped only when
+// the version is known (empty AgentVersion emits no version tag — nothing to group on).
+const versionTagPrefix = "version:"
+
 // agentIdentityTag builds the trace-level identity tag `agent:<ns>/<name>` from the
 // launcher config. When the namespace is absent (a misconfiguration — the
 // controller injects POD_NAMESPACE) it degrades to the bare `agent:<name>` rather
@@ -103,8 +112,21 @@ func agentTraceName(cfg Config) string {
 // attributed to its agent.
 func setAgentIdentityTag(span trace.Span, cfg Config) {
 	span.SetAttributes(attribute.String(langfuseTraceNameAttr, agentTraceName(cfg)))
+	// Build the trace-level tag slice: the per-agent identity tag `agent:<ns>/<name>`,
+	// plus an ADDITIVE `version:<agentVersion>` tag when the version is known (m69.5,
+	// ADR 0062 Fork 2) so the online-scoring worker can group a trace by the exact
+	// version that served it. Order is agent-first, then version. An unnamed agent
+	// yields no agent tag; an empty version yields no version tag — so the slice is
+	// only stamped when it has at least one entry (never an empty tags array).
+	tags := make([]string, 0, 2)
 	if tag := agentIdentityTag(cfg); tag != "" {
-		span.SetAttributes(attribute.StringSlice(langfuseTraceTagsAttr, []string{tag}))
+		tags = append(tags, tag)
+	}
+	if cfg.AgentVersion != "" {
+		tags = append(tags, versionTagPrefix+cfg.AgentVersion)
+	}
+	if len(tags) > 0 {
+		span.SetAttributes(attribute.StringSlice(langfuseTraceTagsAttr, tags))
 	}
 	// Tenant attribution (M47, ADR 0046): stamp the owning tenant on the run so cost + usage
 	// are attributable per tenant (PRD §13). Empty for an untenanted agent — omitted, not noise.
@@ -226,7 +248,8 @@ func buildHandler(
 		// existing trace for A2A calls; starts a new root if absent).
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 
-		ctx, span := tracer.Start(ctx, agentInvokeSpanName,
+		ctx, span := tracer.Start(
+			ctx, agentInvokeSpanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		// Deferred so the span is always ended (and exported) even if the
