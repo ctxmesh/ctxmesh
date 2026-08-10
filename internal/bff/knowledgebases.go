@@ -788,7 +788,14 @@ func (s *Server) handleSearchKB(w http.ResponseWriter, r *http.Request) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	// Use the BFF's mTLS token-service client (the same platform material the grant-delegation path
+	// uses) — the token-service serves on an mTLS port in prod, so http.DefaultClient would fail the
+	// TLS handshake. Fall back to the default client only in dev (no BFF_TOKEN_SERVICE_TLS_* ⇒ plain HTTP).
+	tsClient := s.tokenServiceClient
+	if tsClient == nil {
+		tsClient = http.DefaultClient
+	}
+	resp, err := tsClient.Do(httpReq)
 	if err != nil {
 		s.log.Error(err, "knowledge search: token-service request failed", "ns", ns, "kb", kbName)
 		writeError(w, http.StatusBadGateway, "knowledge search failed: "+err.Error())
