@@ -56,6 +56,10 @@ const maxGenerateRequestBytes = 64 << 10 // 64 KiB
 // explicit about the allowed fields and the managed-runtime default so the output
 // expand-validates; a field expand does not understand fails validation →
 // regenerate.
+//
+// The tools field directive is intentionally open-ended here; at runtime
+// buildGenerationPrompt appends the caller-visible tool catalog so the model
+// selects only real, approved tool names (ADR 0066 D2).
 const generationSystemPrompt = `You are a configuration generator for the agent-engine platform.
 Turn the user's description of an agent into a single simplified agent.yaml document.
 
@@ -65,7 +69,7 @@ The agent.yaml schema (emit ONLY these fields; omit any you do not need):
   name: <dns-1123 name, required>
   runtime: managed        # ALWAYS use "managed" (no Docker build required)
   systemPrompt: <the agent's system prompt, required for a useful agent>
-  tools: [<tool catalog name>, ...]   # optional; only tools the user asked for
+  tools: [<tool catalog name>, ...]   # optional; pick ONLY from the tools listed below
   model:
     route: <model route alias>        # optional
   resources: { cpu: <e.g. 250m>, memory: <e.g. 256Mi> }   # optional
@@ -76,6 +80,94 @@ Rules:
   - ALWAYS set "runtime: managed" and DO NOT set "image".
   - Do NOT invent fields outside this schema; unknown fields are rejected.
   - Prefer a concise, well-scoped systemPrompt derived from the description.`
+
+// maxCatalogTools is the maximum number of catalog tools injected into the
+// generation prompt. Bounding the list keeps the system prompt size predictable
+// across large catalogs.
+const maxCatalogTools = 50
+
+// maxToolDescriptionLen is the maximum characters of a tool description included
+// in the generation prompt. Longer descriptions are truncated with "…" so the
+// prompt stays bounded.
+const maxToolDescriptionLen = 120
+
+// buildGenerationPrompt returns the system prompt for the generation call,
+// appending the caller-visible approved tool catalog (ADR 0066 D2) so the model
+// selects only real names. When the catalog is empty a note instructs the model
+// to omit the tools field. When catalog is nil (lookup failed, degrade path) the
+// base prompt is returned unchanged.
+func buildGenerationPrompt(catalog []ToolCatalogEntry) string {
+	if catalog == nil {
+		// Catalog lookup failed — degrade gracefully, use the base prompt as-is.
+		return generationSystemPrompt
+	}
+	if len(catalog) == 0 {
+		return generationSystemPrompt + "\n\nNo tools are available in this workspace — omit the tools field entirely."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(generationSystemPrompt)
+	sb.WriteString("\n\nAvailable tools (pick ONLY from these names; DO NOT invent tool names):\n")
+	limit := min(len(catalog), maxCatalogTools)
+	for i := range limit {
+		t := catalog[i]
+		desc := t.Description
+		if len(desc) > maxToolDescriptionLen {
+			desc = desc[:maxToolDescriptionLen] + "…"
+		}
+		if desc != "" {
+			sb.WriteString("- ")
+			sb.WriteString(t.Name)
+			sb.WriteString(": ")
+			sb.WriteString(desc)
+			sb.WriteByte('\n')
+		} else {
+			sb.WriteString("- ")
+			sb.WriteString(t.Name)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// buildCallerToolPrompt fetches the caller-visible approved tool catalog from the
+// store (same SSAR + mcpScopeVisibleTo filter as handleListTools) and returns the
+// system prompt with the catalog injected. On any error it logs and returns the
+// base prompt — generation degrades gracefully to operate without auto-wiring.
+func (s *Server) buildCallerToolPrompt(ctx context.Context, caller client.Client, ns string) string {
+	// Short-circuit when the store is not wired (e.g. minimal test servers or a
+	// deployment without the control-plane DB). Avoids a spurious SSAR create.
+	if s.toolRegistryStore == nil {
+		return buildGenerationPrompt(nil)
+	}
+
+	registries, err := s.mcpListToolRegistries(ctx, caller, ns, nil)
+	if err != nil {
+		s.log.V(1).Info("tool catalog lookup failed for generation prompt; degrading gracefully", "err", err)
+		return buildGenerationPrompt(nil) // degrade: nil signals lookup failed
+	}
+
+	// Determine caller identity for personal-server scope filter (fail-closed: empty
+	// owner hides personal servers — identical to handleListTools).
+	callerOwner := ""
+	if username, uErr := callerUsername(ctx, caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
+
+	catalog := make([]ToolCatalogEntry, 0)
+	for ri := range registries.Items {
+		tr := &registries.Items[ri]
+		if !mcpScopeVisibleTo(tr, callerOwner) {
+			continue
+		}
+		for _, e := range toolCatalogEntriesFromRegistry(tr) {
+			if e.ApprovalStatus == agentsv1alpha1.ApprovalApproved {
+				catalog = append(catalog, e)
+			}
+		}
+	}
+	return buildGenerationPrompt(catalog)
+}
 
 // handleGenerate serves POST /api/agents/generate (ADR 0014). It resolves the
 // generation model (the caller's connected provider by default; a platform-pinned
@@ -120,12 +212,18 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch the caller-visible approved tool catalog and inject it into the system
+	// prompt so the model picks only real names (ADR 0066 D2). The catalog is read
+	// caller-scoped (same SSAR + visibility filter as GET /api/tools). A listing
+	// failure degrades gracefully — generation still runs, just without auto-wiring.
+	sysPrompt := s.buildCallerToolPrompt(r.Context(), caller, ns)
+
 	// Server-side chat/completions. The key rides on the request headers only; it
 	// is never returned or logged. A rejected key → 422 (an upstream key rejection,
 	// NOT the caller's session — FUNC-9/ADR 0027), an unreachable provider → 502
 	// (honest, never a 500).
 	output, err := chatComplete(r.Context(), s.providerHTTP,
-		gen.provider, gen.apiKey, gen.baseURL, gen.model, generationSystemPrompt, req.Description, generationCostTag)
+		gen.provider, gen.apiKey, gen.baseURL, gen.model, sysPrompt, req.Description, generationCostTag)
 	if err != nil {
 		if pe, isPE := isProviderError(err); isPE {
 			writeError(w, pe.status, pe.msg)
