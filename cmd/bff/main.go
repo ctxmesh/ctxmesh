@@ -205,11 +205,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
 	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
 	var grantStore credresolve.GrantWriter
+	var tsHTTPClient *http.Client // reused by the KB test-query endpoint (m68.13)
 	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
 		httpClient, tlsErr := tokenServiceHTTPClient(tsURL)
 		if tlsErr != nil {
 			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
 		}
+		tsHTTPClient = httpClient
 		grantStore = credplane.NewClient(tsURL, httpClient)
 		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
 	}
@@ -298,6 +300,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
+		TokenServiceHTTPClient:      tsHTTPClient,
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,

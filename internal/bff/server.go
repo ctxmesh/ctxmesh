@@ -212,6 +212,10 @@ type Server struct {
 	// proxy POST /v1/knowledge/search. Empty ⇒ the search endpoint returns 501 honestly
 	// rather than panicking. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
 	tokenServiceURL string
+	// tokenServiceClient is the mTLS http.Client the KB test-query endpoint uses to reach the
+	// token-service (the same client the grant-delegation path uses). nil ⇒ http.DefaultClient
+	// (dev, plain HTTP). The token-service serves mTLS in prod, so this must not be the default client.
+	tokenServiceClient *http.Client
 
 	// grantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service (credplane.Client) so the grant lands in the CONFIG-SELECTED backend
@@ -331,6 +335,10 @@ type Options struct {
 	// returns 501 honestly. Wired from TOKEN_SERVICE_URL in cmd/bff/main.go.
 	TokenServiceURL string
 
+	// TokenServiceHTTPClient is the mTLS client for the token-service (the KB test-query endpoint,
+	// m68.13). nil ⇒ http.DefaultClient (dev). Wired from tokenServiceHTTPClient in cmd/bff/main.go.
+	TokenServiceHTTPClient *http.Client
+
 	// GrantStore, when set, DELEGATES the OAuth-callback grant persist to the central
 	// token-service so grants land in the config-selected backend (ADR 0032). nil ⇒ the BFF
 	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
@@ -421,6 +429,7 @@ func NewServer(opts Options) *Server {
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
 		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
+		tokenServiceClient:       opts.TokenServiceHTTPClient,
 		grantStore:               opts.GrantStore,
 		oauthFlows:               newPendingOAuthStore(),
 		promptResolver:           opts.PromptResolver,
