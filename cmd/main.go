@@ -51,7 +51,9 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/audit"
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -394,6 +396,21 @@ func main() {
 		OnlineScore: onlinescore.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
+		os.Exit(1)
+	}
+	// AlertPolicy reconciler (M70, ADR 0063 D2): evaluates each policy condition, fires once per
+	// false→true transition (dedup in .status), and PERSISTS fired alerts to the durable alerts ledger
+	// + audit_log (m70.4). Stores are the manager's existing cpDB (mirrors the regression detector +
+	// KnowledgeBase wiring); all nil-safe if cpDB were absent. NOTIFICATION dispatch (webhook/console
+	// feed) is a separate task (m70.5). The reconciler reads Tenants for the budgetSoft condition.
+	if err := (&controller.AlertPolicyReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Alerts:  alertstore.NewPostgresStore(cpDB),
+		Rollups: costrollup.NewPostgresStore(cpDB),
+		Audit:   auditlog.NewPostgresStore(cpDB),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

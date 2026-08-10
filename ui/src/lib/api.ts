@@ -593,6 +593,34 @@ export interface CostBreakdownParams {
   cursor?: string;
 }
 
+// --- Cost forecast (GET /api/cost/forecast, M70 ADR 0063 D3) ----------------
+// Linear run-rate month-end projection from the durable cost-rollup ledger.
+// Returns null on 501 (CONTROLPLANE_DSN not set — control-plane store absent).
+// Throws ApiError on other non-2xx (real error). ?tenant= required.
+
+export interface CostForecastResponse {
+  tenant: string;
+  monthToDateUSD: number;
+  projectedMonthEndUSD: number;
+  asOf: string; // RFC3339
+}
+
+// --- Cost chargeback (GET /api/cost/chargeback, M70 ADR 0063 D3) ------------
+// Per-day rollup export for a calendar month. JSON or CSV (Accept: text/csv /
+// ?format=csv). Returns null on 501. ?tenant= and ?period=YYYY-MM required.
+
+export interface ChargebackRow {
+  scope_type: string;
+  scope_id: string;
+  day: string; // RFC3339
+  spend_usd: number;
+  tokens: number;
+}
+
+export interface ChargebackResponse {
+  items: ChargebackRow[];
+}
+
 // --- Recent runs (GET /api/runs) --------------------------------------------
 
 export interface RunSummary {
@@ -690,6 +718,36 @@ export interface AuditListParams {
   kind?: string;
   limit?: number;
   cursor?: string;
+}
+
+// --- Alerts feed (GET /api/alerts) ------------------------------------------
+// The fired-alert console feed (M70, ADR 0063 D2): a newest-first list of alerts
+// fired by AlertPolicy conditions. Read-only — the controller auto-resolves on
+// condition true→false transitions; a manual ack path is a follow-up task.
+
+export interface AlertSummary {
+  id: number;
+  namespace: string;
+  policy: string;
+  condition: string;
+  agent?: string; // "namespace/agent" or absent for policy-level alerts
+  type: string;   // "regressionDetected" | "budgetSoft" | …
+  value?: string;
+  message?: string;
+  firedAt: string;    // RFC3339
+  resolvedAt: string | null; // RFC3339 or null (still firing)
+  firing: boolean;    // true when resolvedAt is null
+}
+
+// AlertListResponse mirrors the BFF's AlertListResponse: items is non-null on the wire.
+export interface AlertListResponse {
+  items: AlertSummary[];
+}
+
+// AlertListParams are the query params for GET /api/alerts.
+export interface AlertListParams {
+  namespace?: string;
+  limit?: number;
 }
 
 // --- GuardrailPolicies (GET /api/guardrailpolicies) -------------------------
@@ -2460,6 +2518,35 @@ export const api = {
     }
     return (await res.json()) as AuditListResponse;
   },
+
+  // listAlerts reads the fired-alert feed (GET /api/alerts, M70, ADR 0063 D2).
+  // Returns null on 501 (the alert store is not configured — control-plane DSN
+  // absent) as the calm sentinel: callers render "not enabled", NOT an error.
+  // A 403 (the caller lacks `list alertpolicies`) throws a typed ApiError
+  // (isForbidden) so the page shows an honest forbidden state — never a fake empty
+  // list. Any other non-2xx throws too (retryable).
+  listAlerts: async (
+    params: AlertListParams = {},
+    signal?: AbortSignal,
+  ): Promise<AlertListResponse | null> => {
+    const qs = new URLSearchParams();
+    if (params.namespace) qs.set("namespace", params.namespace);
+    if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    const res = await apiFetch(`/api/alerts${suffix}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (res.status === 501) return null; // alert store not configured — calm sentinel
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `alerts failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AlertListResponse;
+  },
+
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(
       `/api/traces/${encodeURIComponent(traceId)}`,
@@ -4183,5 +4270,58 @@ export const api = {
       );
     }
     return (await res.json()) as EvalGatedMetricResponse;
+  },
+
+  // costForecast reads the linear run-rate month-end projection (M70, ADR 0063 D3)
+  // from GET /api/cost/forecast?tenant=. Returns null on 501 (CONTROLPLANE_DSN not
+  // set — control-plane store absent). Throws ApiError on other non-2xx errors.
+  // NOTE: Both the BFF and the forecastExceeded AlertPolicy condition use the same
+  // LinearForecast function — the two planes cannot drift apart.
+  costForecast: async (
+    tenant: string,
+    signal?: AbortSignal,
+  ): Promise<CostForecastResponse | null> => {
+    const res = await apiFetch(
+      `/api/cost/forecast?tenant=${encodeURIComponent(tenant)}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `cost forecast failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as CostForecastResponse;
+  },
+
+  // costChargebackJSON reads the per-day rollup for a calendar month as JSON
+  // (M70, ADR 0063 D3) from GET /api/cost/chargeback?tenant=&period=YYYY-MM.
+  // Returns null on 501 (control-plane store absent).
+  costChargebackJSON: async (
+    tenant: string,
+    period: string,
+    signal?: AbortSignal,
+  ): Promise<ChargebackResponse | null> => {
+    const qs = new URLSearchParams({ tenant, period });
+    const res = await apiFetch(`/api/cost/chargeback?${qs.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `cost chargeback failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as ChargebackResponse;
+  },
+
+  // costChargebackCSVUrl returns the URL for a chargeback CSV download (no fetch;
+  // the browser navigates to it directly so the file saves natively).
+  costChargebackCSVUrl: (tenant: string, period: string): string => {
+    const qs = new URLSearchParams({ tenant, period, format: "csv" });
+    return `/api/cost/chargeback?${qs.toString()}`;
   },
 };

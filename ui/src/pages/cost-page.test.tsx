@@ -3,9 +3,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { CostPage } from "@/pages/cost-page";
-import type { AgentCostItem, CostSummary } from "@/lib/api";
+import type { AgentCostItem, CostForecastResponse, CostSummary } from "@/lib/api";
 
-// CostPage (m16.10) — cost drill-down, per-agent breakdown.
+// CostPage (m16.10 + M70 ADR 0063 D3) — cost drill-down, per-agent breakdown,
+// forecast card, and chargeback download.
 //
 // Coverage:
 //   • summary card renders total cost / tokens from the window summary
@@ -415,5 +416,112 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     await screen.findByTestId("cost-page");
 
     expect(captured.some((u) => u.includes("by=agent"))).toBe(true);
+  });
+});
+
+// ── Forecast card (M70 ADR 0063 D3) ──────────────────────────────────────────
+
+function forecastResponse(over: Partial<CostForecastResponse> = {}): CostForecastResponse {
+  return {
+    tenant: "acme",
+    monthToDateUSD: 42.5,
+    projectedMonthEndUSD: 155.0,
+    asOf: "2026-08-10T12:00:00Z",
+    ...over,
+  };
+}
+
+// installMultiFetch stubs fetch to route /api/cost/forecast and
+// /api/cost/breakdown to different handlers.
+function installMultiFetch(opts: {
+  forecast?: { ok: boolean; status?: number; body?: unknown };
+  breakdown?: { ok: boolean; status?: number; body?: unknown };
+}) {
+  const breakdownDefault: { ok: boolean; status?: number; body?: unknown } = {
+    ok: true,
+    body: { agents: [], total: summary(), nextCursor: "" },
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: string | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const isForecast = url.includes("/api/cost/forecast");
+      const r: { ok: boolean; status?: number; body?: unknown } = isForecast
+        ? (opts.forecast ?? { ok: true, body: forecastResponse() })
+        : (opts.breakdown ?? breakdownDefault);
+      return Promise.resolve({
+        ok: r.ok,
+        status: r.status ?? (r.ok ? 200 : 500),
+        json: async () => r.body,
+        text: async () => JSON.stringify(r.body ?? { error: "err" }),
+      } as Response);
+    }),
+  );
+}
+
+// renderPageWithTenant renders CostPage with ?tenant=<tenant> in the URL.
+function renderPageWithTenant(tenant: string) {
+  return render(
+    <MemoryRouter initialEntries={[`/cost?tenant=${encodeURIComponent(tenant)}`]}>
+      <Routes>
+        <Route path="/cost" element={<CostPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
+  it("renders the forecast card when ?tenant= is given and the store responds 200", async () => {
+    installMultiFetch({
+      forecast: { ok: true, body: forecastResponse({ monthToDateUSD: 42.5, projectedMonthEndUSD: 155.0 }) },
+    });
+
+    renderPageWithTenant("acme");
+
+    const card = await screen.findByTestId("cost-forecast-card");
+    expect(card).toBeInTheDocument();
+    // Month-to-date amount is displayed.
+    expect(card.textContent).toContain("$42.500");
+    // Projected month-end amount is displayed.
+    expect(card.textContent).toContain("$155.000");
+    // Card header says "Month forecast"
+    expect(card.textContent).toContain("Month forecast");
+  });
+
+  it("does NOT render the forecast card when ?tenant= is absent", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { agents: [], total: summary(), nextCursor: "" },
+    }));
+
+    renderPage(); // no ?tenant=
+
+    await screen.findByTestId("cost-page");
+    expect(screen.queryByTestId("cost-forecast-card")).toBeNull();
+  });
+
+  it("does NOT render the forecast card when the store returns 501", async () => {
+    installMultiFetch({
+      forecast: { ok: false, status: 501, body: { error: "no store" } },
+    });
+
+    renderPageWithTenant("acme");
+
+    await screen.findByTestId("cost-page");
+    expect(screen.queryByTestId("cost-forecast-card")).toBeNull();
+  });
+
+  it("renders the chargeback download link when the forecast card is shown", async () => {
+    installMultiFetch({
+      forecast: { ok: true, body: forecastResponse() },
+    });
+
+    renderPageWithTenant("acme");
+
+    const link = await screen.findByTestId("cost-chargeback-download");
+    expect(link).toBeInTheDocument();
+    expect(link.getAttribute("href")).toContain("/api/cost/chargeback");
+    expect(link.getAttribute("href")).toContain("tenant=acme");
+    expect(link.getAttribute("href")).toContain("format=csv");
   });
 });

@@ -553,6 +553,9 @@ rules:
   - evalsuites
   - tenants
   - auditlogs
+  # costrollups: the M70 cost-forecast/chargeback virtual resource (ADR 0063 D1); operator-only,
+  # mirrors auditlogs. This grant IS the cost-read policy for the durable per-tenant spend ledger.
+  - costrollups
   verbs:
   - '*'
 - apiGroups:

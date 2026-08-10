@@ -169,6 +169,12 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "cannot cancel this run: "+err.Error())
 		return
 	}
+	// Real-kill accelerator (m70.8): the durable status flip above is the AUTHORITATIVE cancel; now publish
+	// the `run:{id}:control = cancel` marker to the shared state-layer Valkey so the agent's launcher gateway
+	// — polling the pod-authed proxy — aborts the in-flight model call at call-boundary granularity instead
+	// of waiting for the worker to observe the terminal status. Best-effort: a nil publisher (no
+	// STATELAYER_ADDR) or a Valkey blip degrades to today's soft cancel, never an error on the cancel path.
+	s.publishCancelMarker(r.Context(), id)
 	writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
 }
 

@@ -80,6 +80,9 @@ func run(log logr.Logger) error {
 		Store:      store,
 		QuotaStore: statelayer.NewRedisQuotaStore(addr, username, password),
 		DedupStore: statelayer.NewRedisDedupStore(addr, username, password),
+		// Run-control marker read (m70.8, real-kill cancel channel): the /control endpoint reads the
+		// `run:{id}:control` verb the trusted BFF writes on cancel, over the SAME credentialed Valkey.
+		ControlStore: statelayer.NewRedisControlStore(addr, username, password),
 	}
 
 	// The dev bypass (STATELAYER_DEV_AGENT="<ns>/<agent>") scopes unauthenticated

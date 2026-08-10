@@ -30,8 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
@@ -126,6 +128,13 @@ type Server struct {
 	// (cmd/bff/main.go gates on it), so a missing store is an honest no-op, never a panic.
 	onlineStore onlinescore.Store
 
+	// rollupStore is the control-plane Postgres store for the durable cost-rollup ledger
+	// (M70, ADR 0063 D1). The cost-rollup worker (m70.2) WRITES it DIRECTLY — Upsert — snapshotting
+	// the ephemeral Valkey monthly-spend keys and the Langfuse per-agent cost breakdown into a
+	// date-keyed series (governance #8: the trusted off-request worker holds cpDB + Langfuse + Valkey
+	// creds; agent pods never touch this). nil ⇒ the worker is a safe no-op, never a panic.
+	rollupStore costrollup.Store
+
 	// judgeCounters bounds the online-scoring worker's SAMPLED judge to a per-(agent, day) cost cap
 	// (m69.5, ADR 0062 Fork 2): an in-memory best-effort counter that resets lazily when the date rolls.
 	// Always non-nil (constructed in NewServer) so the worker never nil-derefs it.
@@ -143,10 +152,19 @@ type Server struct {
 	agentMemoryStore agentmemory.Store
 	// auditStore appends the BFF's security events to the audit_log (ADR 0056, M63). nil ⇒ no-op.
 	auditStore auditlog.Store
+	// alertStore is the control-plane store for fired alerts (M70, ADR 0063 D2). The AlertPolicy
+	// reconciler appends one Alert per false→true condition transition and resolves it on true→false.
+	// The console reads it via GET /api/alerts. nil ⇒ the endpoint returns 501 (CONTROLPLANE_DSN absent).
+	alertStore alertstore.Store
 
 	// tenantUsage reads a tenant's LIVE quota consumption from the shared state-layer Valkey (M49). nil ⇒
 	// the tenant usage endpoint returns 501 (no state-layer configured).
 	tenantUsage TenantUsageReader
+
+	// runControl publishes the run-scoped CONTROL marker to the shared state-layer Valkey on cancel
+	// (m70.8, the real-kill cancel channel). nil ⇒ no STATELAYER_ADDR: cancel degrades to the durable
+	// status flip alone (soft cancel), never an error — the marker is only the accelerator.
+	runControl RunControlPublisher
 
 	// authorizer gates a store-backed access (ADR 0042 Amendment 4, m43.4 reads / m44.2 writes): once the
 	// API server is no longer in the path for a Postgres-backed entity, the BFF authorizes with a
@@ -408,6 +426,11 @@ type Options struct {
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
 
+	// RunControl publishes the run-scoped CONTROL marker to the shared state-layer Valkey on cancel (m70.8,
+	// the real-kill cancel channel). Optional — nil ⇒ cancel degrades to the durable status flip alone
+	// (soft cancel). Constructed in cmd/bff/main.go from STATELAYER_ADDR (the same addr the usage reader uses).
+	RunControl RunControlPublisher
+
 	// AgentMemoryStore is the control-plane pgvector store for long-term memory (ADR 0045). Optional —
 	// nil ⇒ the console memory endpoint returns 501.
 	AgentMemoryStore agentmemory.Store
@@ -415,6 +438,9 @@ type Options struct {
 	// grant.revoke + denials) with the PRECISE authenticated actor (ADR 0056, M63). Optional — nil ⇒ the
 	// BFF audit writes no-op (the controller still persists CRD mutations) and GET /api/audit returns 501.
 	AuditStore auditlog.Store
+	// AlertStore is the control-plane store for fired alerts (M70, ADR 0063 D2). Optional — nil ⇒
+	// GET /api/alerts returns 501 (CONTROLPLANE_DSN absent). Constructed in cmd/bff/main.go from cpDB.
+	AlertStore alertstore.Store
 	// RunWorkerDispatch routes POST /runs execution to a KEDA-scaled worker pool (m32.2) instead of
 	// running it in-process. Only meaningful with a durable RunStore; ignored otherwise.
 	RunWorkerDispatch bool
@@ -441,6 +467,10 @@ type Options struct {
 	// Constructed in cmd/bff/main.go (a read-only client over AgentDeployment + EvalSuite) only when the
 	// online-scoring worker is enabled.
 	OnlineResolver OnlineConfigResolver
+	// RollupStore is the control-plane Postgres store for the durable cost-rollup ledger (M70, ADR 0063 D1),
+	// which the cost-rollup worker (m70.2) writes directly (governance #8). Optional — nil ⇒ the worker is
+	// a safe no-op. Constructed in cmd/bff/main.go from cpDB.
+	RollupStore costrollup.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -482,7 +512,9 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
+		alertStore:               opts.AlertStore,
 		tenantUsage:              opts.TenantUsage,
+		runControl:               opts.RunControl,
 		authorizer:               authz.SSARAuthorizer{},
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,
@@ -490,6 +522,7 @@ func NewServer(opts Options) *Server {
 		datasetStore:             opts.DatasetStore,
 		onlineStore:              opts.OnlineStore,
 		onlineResolver:           opts.OnlineResolver,
+		rollupStore:              opts.RollupStore,
 		embedder:                 opts.Embedder,
 		judgeCounters:            &judgeCounter{},
 		log:                      opts.Log,
@@ -628,6 +661,18 @@ func (s *Server) Handler() http.Handler {
 		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
 		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
 		authed.HandleFunc("GET /api/audit", s.handleListAudit)
+		// Alerts feed (M70, ADR 0063 D2): the fired-alert console feed — newest-first,
+		// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
+		// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
+		authed.HandleFunc("GET /api/alerts", s.handleListAlerts)
+		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
+		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
+		// gate â no per-row leak). nil store â 501. ?tenant= required.
+		authed.HandleFunc("GET /api/cost/forecast", s.handleCostForecast)
+		// Cost chargeback (M70, ADR 0063 D3): per-day rollup export for a calendar month.
+		// CSV when Accept: text/csv or ?format=csv, else JSON. Caller-scoped SSAR on
+		// `costrollups`. nil store â 501. ?tenant= and ?period=YYYY-MM required.
+		authed.HandleFunc("GET /api/cost/chargeback", s.handleCostChargeback)
 		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
 		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
 		// API server (a viewer without update is denied → 403).
@@ -996,6 +1041,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
+		authed.Handle("GET /api/alerts", notImplemented("caller-scoped alerts feed"))
 		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
 		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
 		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
