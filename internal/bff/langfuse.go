@@ -236,6 +236,14 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 // trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
 const agentInvokeTraceName = "agent.invoke"
 
+// traceStatusOK / traceStatusError are the coarse per-span/trace health projection of a Langfuse
+// observation Level ("ERROR" → error, else ok) — the SpanSummary.Status vocabulary the run inspector's
+// health dot and the dataset-export status tag (m69.2) share, so the two never drift.
+const (
+	traceStatusOK    = "ok"
+	traceStatusError = "error"
+)
+
 // runDisplayName names a run by its agent identity (from the agent:<ns>/<name> tag),
 // e.g. "prod/chatbot" or "chatbot", falling back to the trace name when untagged.
 func runDisplayName(t lfTrace) string {
@@ -1079,9 +1087,9 @@ func projectObservation(o *lfObservation, traceStart time.Time, haveStart bool) 
 	input, inputRedacted := projectPayload(o.Input)
 	output, outputRedacted := projectPayload(o.Output)
 
-	status := "ok"
+	status := traceStatusOK
 	if strings.EqualFold(o.Level, "ERROR") {
-		status = "error"
+		status = traceStatusError
 	}
 
 	return SpanSummary{
