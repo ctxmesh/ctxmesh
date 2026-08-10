@@ -17,8 +17,9 @@ limitations under the License.
 package alertstore
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -65,12 +66,11 @@ func (m *memStore) List(_ context.Context, namespace string, limit int) ([]Alert
 	}
 
 	// Sort newest-first (by FiredAt DESC, ID DESC — mirrors the SQL ORDER BY).
-	sort.Slice(matching, func(i, j int) bool {
-		ti, tj := matching[i].FiredAt, matching[j].FiredAt
-		if !ti.Equal(tj) {
-			return ti.After(tj)
+	slices.SortFunc(matching, func(a, b Alert) int {
+		if c := b.FiredAt.Compare(a.FiredAt); c != 0 {
+			return c // FiredAt DESC
 		}
-		return matching[i].ID > matching[j].ID
+		return cmp.Compare(b.ID, a.ID) // ID DESC tiebreak
 	})
 
 	if len(matching) > limit {
