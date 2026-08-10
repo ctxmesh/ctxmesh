@@ -444,3 +444,29 @@ func TestHandleFromRun_EnsuresDatasetIdempotently(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, cases, 2, "each from-run call appends one case (dataset create is idempotent)")
 }
+
+// TestHandlePinDataset_PinsDraftHead (m69.12): POST /api/datasets/{name}/pin freezes the draft head into
+// an immutable version (the loop's export→label→PIN→gate on-ramp — no API pin surface was the live gap).
+func TestHandlePinDataset_PinsDraftHead(t *testing.T) {
+	s, ds := newLabelingServer(t, "alice", nil)
+	seedCase(t, ds, "default", "goldens", "What is 2+2?")
+
+	code, body := labelingRequest(t, s, http.MethodPost, "/api/datasets/goldens/pin", nil)
+	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
+
+	var resp PinDatasetResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Equal(t, 1, resp.Version, "the first pin is version 1")
+	assert.Equal(t, "goldens", resp.Dataset)
+}
+
+// TestHandlePinDataset_EmptyDatasetIs422 — pinning a dataset with no cases is a clear 422, not a silent
+// empty version (a pinned eval must have cases).
+func TestHandlePinDataset_EmptyDatasetIs422(t *testing.T) {
+	s, ds := newLabelingServer(t, "alice", nil)
+	_, err := ds.EnsureDataset(context.Background(), "default", "empty-ds")
+	require.NoError(t, err)
+
+	code, _ := labelingRequest(t, s, http.MethodPost, "/api/datasets/empty-ds/pin", nil)
+	assert.Equal(t, http.StatusUnprocessableEntity, code, "an empty dataset pin is 422")
+}
