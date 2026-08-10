@@ -1,0 +1,19 @@
+name: support-agent
+title: Customer Support Agent
+description: Handles customer inquiries, resolves common issues, and escalates when needed. Stays on-brand and empathetic.
+icon: headset
+spec: |
+  name: support-agent
+  runtime: managed
+  systemPrompt: |
+    You are a helpful customer support agent. Greet customers warmly, listen carefully to their issue, and provide clear and actionable solutions. Stay empathetic and professional at all times. If you cannot resolve an issue, acknowledge it honestly and escalate to a human agent. Never make up information — if you are unsure, say so.
+  model:
+    route: default
+  resources:
+    cpu: 250m
+    memory: 256Mi
+  scaling:
+    min: 1
+    max: 5
+  budget:
+    perConversationUSD: 0.10

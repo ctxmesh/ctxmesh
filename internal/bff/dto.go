@@ -1508,6 +1508,36 @@ type EvalGatedMetricResponse struct {
 	Percent float64 `json:"percent"`
 }
 
+// --- Recipe gallery (GET /api/recipes, ADR 0066 D4) --------------------------
+
+// RecipeSummary is one entry in the recipe gallery — a curated, named
+// source-spec (simplified agent.yaml) a user one-clicks to start from.
+// Spec is the raw simplified agent.yaml string; it is intended for the create
+// form to pre-fill and for the caller to expand (POST /api/expand) before
+// applying. No secret material ever appears in a Spec — the embedded recipes
+// are expand-validated at test time to enforce this.
+type RecipeSummary struct {
+	// Name is the unique, kebab-case identifier for the recipe (matches the
+	// `name` field inside its Spec).
+	Name string `json:"name"`
+	// Title is the human-readable display name shown in the gallery card.
+	Title string `json:"title"`
+	// Description is a one-sentence explanation of what the recipe does.
+	Description string `json:"description"`
+	// Icon is a UI icon hint (icon-set name / emoji) the console renders on
+	// the gallery card. Empty means no icon.
+	Icon string `json:"icon,omitempty"`
+	// Spec is the complete simplified agent.yaml content for this recipe.
+	// The caller may pass it verbatim to POST /api/expand or POST /api/agents.
+	Spec string `json:"spec"`
+}
+
+// RecipeListResponse is returned by GET /api/recipes.
+// Recipes is non-nil on the wire ([] not null) so the SPA never sees null.
+type RecipeListResponse struct {
+	Recipes []RecipeSummary `json:"recipes"`
+}
+
 // healthFromConditions maps a resource's standard "Ready" condition onto the
 // topology health vocabulary. Absent condition → "unknown" (not yet reconciled),
 // True → "ready", False → "notReady", anything else → "pending". This is the one

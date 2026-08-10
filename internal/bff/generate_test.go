@@ -448,6 +448,194 @@ func TestGenerateNilExpandIs501(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 }
 
+// --- tool auto-wiring tests (ADR 0066 D2) ------------------------------------
+
+// newGenerateServerWithCatalog builds a generate server with a tool registry store
+// seeded with the given ToolRegistry objects (for the tool auto-wiring tests). It
+// extends newGenerateServer by wiring wireTRStore so the catalog is reachable
+// from buildCallerToolPrompt.
+func newGenerateServerWithCatalog(t *testing.T, c client.Client, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
+	t.Helper()
+	s, factory, _ := newGenerateServer(t, c, nil)
+	wireTRStore(t, s, nil, regs...)
+	return s, factory
+}
+
+// TestGeneratePromptContainsCatalogTools proves that when the caller's namespace
+// has approved tools in the store the system prompt sent to the model contains
+// those tool names (ADR 0066 D2).
+func TestGeneratePromptContainsCatalogTools(t *testing.T) {
+	prov, lastBody := fakeChatProvider(t, validGeneratedYAML)
+	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+
+	reg := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-tools", Namespace: "prod"},
+		Spec: agentsv1alpha1.ToolRegistrySpec{
+			Tools: []agentsv1alpha1.ToolEntry{
+				{
+					Name:           "search_docs",
+					Description:    "Search the documentation",
+					Source:         agentsv1alpha1.SourceCurated,
+					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+				},
+				{
+					Name:           "run_query",
+					Description:    "Execute a SQL query",
+					Source:         agentsv1alpha1.SourceCurated,
+					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+				},
+			},
+		},
+	}
+	s, _ := newGenerateServerWithCatalog(t, c, reg)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/generate",
+		bytes.NewReader(generateBody(t, GenerateAgentRequest{
+			Description: "a support bot",
+			Namespace:   "prod",
+		})))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	// The system prompt sent to the model must contain the real catalog tool names.
+	body := string(*lastBody)
+	assert.Contains(t, body, "search_docs", "the catalog tool name must appear in the prompt")
+	assert.Contains(t, body, "run_query", "the catalog tool name must appear in the prompt")
+	assert.Contains(t, body, "Available tools", "the catalog block header must appear in the prompt")
+}
+
+// TestGeneratePromptNoToolsWhenCatalogEmpty proves that a caller whose namespace
+// has NO visible tools gets a prompt with the "no tools" note and generation
+// still succeeds (200 OK).
+func TestGeneratePromptNoToolsWhenCatalogEmpty(t *testing.T) {
+	prov, lastBody := fakeChatProvider(t, validGeneratedYAML)
+	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	// No tool registries seeded — empty catalog.
+	s, _ := newGenerateServerWithCatalog(t, c)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/generate",
+		bytes.NewReader(generateBody(t, GenerateAgentRequest{
+			Description: "a support bot",
+			Namespace:   "prod",
+		})))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	body := string(*lastBody)
+	assert.Contains(t, body, "No tools are available", "the prompt must instruct the model to omit tools")
+	assert.NotContains(t, body, "Available tools", "no catalog list when empty")
+}
+
+// TestGeneratePromptExcludesPendingTools proves that pending-approval tools are
+// NOT surfaced to the model — only approved tools appear in the catalog block.
+func TestGeneratePromptExcludesPendingTools(t *testing.T) {
+	prov, lastBody := fakeChatProvider(t, validGeneratedYAML)
+	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+
+	reg := &agentsv1alpha1.ToolRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed-tools", Namespace: "prod"},
+		Spec: agentsv1alpha1.ToolRegistrySpec{
+			Tools: []agentsv1alpha1.ToolEntry{
+				{
+					Name:           "approved_tool",
+					Description:    "An approved tool",
+					Source:         agentsv1alpha1.SourceCurated,
+					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+				},
+				{
+					Name:           "pending_tool",
+					Description:    "A tool awaiting approval",
+					Source:         agentsv1alpha1.SourceUserAdded,
+					ApprovalStatus: agentsv1alpha1.ApprovalPending,
+				},
+			},
+		},
+	}
+	s, _ := newGenerateServerWithCatalog(t, c, reg)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/generate",
+		bytes.NewReader(generateBody(t, GenerateAgentRequest{
+			Description: "a support bot",
+			Namespace:   "prod",
+		})))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	body := string(*lastBody)
+	assert.Contains(t, body, "approved_tool", "approved tool must appear in catalog")
+	assert.NotContains(t, body, "pending_tool", "pending tool must NOT appear in catalog")
+}
+
+// TestGenerateCatalogErrorDegradeGracefully proves that when the tool catalog
+// store is not wired (nil store, authorization fails) the generation still runs
+// successfully — the catalog lookup error degrades gracefully (never fails the
+// generate request).
+func TestGenerateCatalogErrorDegradeGracefully(t *testing.T) {
+	prov, _ := fakeChatProvider(t, validGeneratedYAML)
+	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	// Use the standard generate server WITHOUT a TR store — the store is nil,
+	// so mcpListToolRegistries will error, triggering graceful degrade.
+	s, _, _ := newGenerateServer(t, c, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/generate",
+		bytes.NewReader(generateBody(t, GenerateAgentRequest{
+			Description: "a support bot",
+			Namespace:   "prod",
+		})))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	// Generation must still succeed 200 — the catalog error is a degrade, not a failure.
+	require.Equal(t, http.StatusOK, rec.Code, "catalog lookup error must not fail the generate endpoint")
+}
+
+// TestBuildGenerationPromptUnit unit-tests buildGenerationPrompt directly for
+// the three cases: nil (degrade), empty catalog, non-empty catalog.
+func TestBuildGenerationPromptUnit(t *testing.T) {
+	// nil catalog → base prompt unchanged (degrade path)
+	got := buildGenerationPrompt(nil)
+	assert.Equal(t, generationSystemPrompt, got, "nil catalog must return the base prompt verbatim")
+
+	// empty catalog → base + "no tools" note
+	got = buildGenerationPrompt([]ToolCatalogEntry{})
+	assert.Contains(t, got, "No tools are available", "empty catalog must add a no-tools note")
+	assert.NotContains(t, got, "Available tools", "empty catalog must not include a catalog list")
+
+	// non-empty catalog → base + catalog block with the tool name + description
+	tools := []ToolCatalogEntry{
+		{Name: "alpha", Description: "does alpha things", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+		{Name: "beta", Description: "", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+	}
+	got = buildGenerationPrompt(tools)
+	assert.Contains(t, got, "Available tools", "non-empty catalog must include the catalog block header")
+	assert.Contains(t, got, "- alpha: does alpha things", "catalog entry with description")
+	assert.Contains(t, got, "- beta\n", "catalog entry without description has no trailing colon")
+	assert.Contains(t, got, generationSystemPrompt, "the base prompt is always present")
+}
+
+// TestBuildGenerationPromptTruncatesLongDescriptions proves descriptions longer
+// than maxToolDescriptionLen are truncated (the prompt stays bounded).
+func TestBuildGenerationPromptTruncatesLongDescriptions(t *testing.T) {
+	longDesc := strings.Repeat("x", maxToolDescriptionLen+50)
+	tools := []ToolCatalogEntry{
+		{Name: "big-tool", Description: longDesc, ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+	}
+	got := buildGenerationPrompt(tools)
+	assert.NotContains(t, got, longDesc, "the full long description must not appear verbatim")
+	assert.Contains(t, got, "big-tool", "the tool name must still appear")
+}
+
 // TestGenerateNilFactoryIs501 proves that without the caller-client factory (no
 // caller-scoping), the route serves 501 — never a BFF-SA fallback (ADR 0011).
 func TestGenerateNilFactoryIs501(t *testing.T) {

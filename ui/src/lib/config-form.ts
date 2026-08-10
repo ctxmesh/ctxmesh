@@ -48,8 +48,9 @@ export interface ConfigForm {
   modelRoute: string;
   resourcesCpu: string;
   resourcesMemory: string;
-  scalingMin: string;
-  scalingMax: string;
+  // keepWarm: when true emits scaling.min=1 so at least one replica stays warm.
+  // Advanced min/max control is available only via the raw-YAML editor.
+  keepWarm: boolean;
 
   budgetEnabled: boolean;
   budgetPerConversationUSD: string;
@@ -90,8 +91,7 @@ export function emptyForm(): ConfigForm {
     modelRoute: "",
     resourcesCpu: "",
     resourcesMemory: "",
-    scalingMin: "",
-    scalingMax: "",
+    keepWarm: false,
     budgetEnabled: false,
     budgetPerConversationUSD: "",
     budgetPerAgentUSD: "",
@@ -144,13 +144,6 @@ export function validate(form: ConfigForm): FieldErrors {
     errors.image = "Image is required.";
   }
 
-  if (form.scalingMin.trim() && !isNonNegInt(form.scalingMin)) {
-    errors.scalingMin = "Min replicas must be a non-negative integer.";
-  }
-  if (form.scalingMax.trim() && !isPosInt(form.scalingMax)) {
-    errors.scalingMax = "Max replicas must be a positive integer.";
-  }
-
   if (form.budgetEnabled) {
     if (form.budgetPerConversationUSD.trim() && !decimalUSD.test(form.budgetPerConversationUSD.trim())) {
       errors.budgetPerConversationUSD = "Use a decimal amount, e.g. 0.50.";
@@ -200,13 +193,6 @@ export function validate(form: ConfigForm): FieldErrors {
   }
 
   return errors;
-}
-
-function isNonNegInt(s: string): boolean {
-  return /^[0-9]+$/.test(s.trim());
-}
-function isPosInt(s: string): boolean {
-  return /^[0-9]+$/.test(s.trim()) && Number(s) >= 1;
 }
 
 // yamlString quotes a scalar when YAML would otherwise misread it (empty, or a
@@ -267,12 +253,11 @@ export function toAgentYAML(form: ConfigForm): string {
     if (mem) lines.push(`  memory: ${yamlString(mem)}`);
   }
 
-  const min = form.scalingMin.trim();
-  const max = form.scalingMax.trim();
-  if (min || max) {
+  // keepWarm=true → emit scaling.min=1 so a replica stays warm.
+  // Advanced min/max is only available via the raw-YAML editor.
+  if (form.keepWarm) {
     lines.push("scaling:");
-    if (min) lines.push(`  min: ${Number(min)}`);
-    if (max) lines.push(`  max: ${Number(max)}`);
+    lines.push("  min: 1");
   }
 
   const route = form.modelRoute.trim();
