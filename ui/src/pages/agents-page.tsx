@@ -110,6 +110,7 @@ export function AgentsPage() {
   const canDelete = can(RES_AGENTS, "delete");
 
   const [query, setQuery] = useState("");
+  const [includeDrafts, setIncludeDrafts] = useState(false);
   // The page stack: the cursor used to fetch each page. [""] = we're on page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
   const [state, setState] = useState<Load>({ kind: "loading" });
@@ -127,7 +128,7 @@ export function AgentsPage() {
     setState({ kind: "loading" });
     api
       .listAgents(
-        { limit: PAGE_LIMIT, cursor: cursor || undefined, q: query || undefined, namespace: namespace || undefined },
+        { limit: PAGE_LIMIT, cursor: cursor || undefined, q: query || undefined, namespace: namespace || undefined, includeDrafts: includeDrafts || undefined },
         controller.signal,
       )
       .then((res) => {
@@ -143,7 +144,7 @@ export function AgentsPage() {
           forbidden,
         });
       });
-  }, [cursor, query, namespace]);
+  }, [cursor, query, namespace, includeDrafts]);
 
   useEffect(() => {
     load();
@@ -256,6 +257,11 @@ export function AgentsPage() {
               external
             </Badge>
           )}
+          {a.isDraft && (
+            <Badge variant="secondary" data-testid={`draft-${a.name}`}>
+              draft
+            </Badge>
+          )}
         </div>
       ),
     },
@@ -312,6 +318,14 @@ export function AgentsPage() {
             New agent
           </Button>
         )}
+        <Button
+          variant={includeDrafts ? "secondary" : "outline"}
+          onClick={() => { setIncludeDrafts((v) => !v); resetPaging(); }}
+          data-testid="drafts-toggle"
+          size="sm"
+        >
+          {includeDrafts ? "Hide drafts" : "Show drafts"}
+        </Button>
       </div>
 
       <DataTable<AgentSummary>
