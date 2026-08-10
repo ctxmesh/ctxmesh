@@ -229,3 +229,29 @@ func (s *httpTenantStore) ReleaseSlot(ctx context.Context, _ string) error {
 		return statusErr("release", resp.StatusCode)
 	}
 }
+
+// Control reads a run's CONTROL verb from the pod-authed /control endpoint (m70.8, the real-kill cancel
+// channel). It GETs /control/{runID} with the launcher's projected pod token and parses {"control":"…"}.
+// The gateway's caller FAILS OPEN: a transport/proxy error → ("", err) so the model call proceeds (a
+// control-plane blip must never spuriously kill a live run). A 200 with an empty verb (the common case:
+// no cancel marker) returns ("", nil). "cancel" is the only verb the gateway acts on in v1.
+func (s *httpTenantStore) Control(ctx context.Context, runID string) (string, error) {
+	resp, err := s.call(ctx, http.MethodGet, "/control/"+runID, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var r struct {
+			Control string `json:"control"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+			return "", err
+		}
+		return r.Control, nil
+	default:
+		// Any non-200 (401 / 404 / 502 / 503) → no trusted verb; the caller fails open (no cancel).
+		return "", statusErr("control", resp.StatusCode)
+	}
+}

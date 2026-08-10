@@ -34,6 +34,7 @@ import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
 import { AuditPage } from "@/pages/audit-page";
+import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
@@ -249,6 +250,8 @@ export function App() {
             <Route path="cost" element={<CostPage />} />
             {/* m63.5: the compliance audit trail viewer (operator-only; ADR 0056). */}
             <Route path="audit" element={<AuditPage />} />
+            {/* m70.6: the fired-alert console feed (M70, ADR 0063 D2). */}
+            <Route path="alerts" element={<AlertsPage />} />
 
             {/* m17.12: EvalSuite builder + results browser */}
             <Route path="evals" element={<EvalsPage />} />

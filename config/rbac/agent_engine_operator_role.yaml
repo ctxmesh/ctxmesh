@@ -49,6 +49,12 @@ rules:
   # Operator ONLY — the audit trail spans users/namespaces (who connected/consented/invoked what),
   # so developer/viewer personas deliberately do NOT get it. Omitting it fail-closes /api/audit.
   - auditlogs
+  # costrollups is a store-backed VIRTUAL resource (M70, ADR 0063 D1): GET /api/cost/forecast +
+  # /api/cost/chargeback gate on a caller-scoped SSAR on this name — this grant IS the cost-read
+  # policy for the durable per-tenant spend ledger. Operator ONLY (per-tenant spend/billing spans
+  # tenants). NB: the older Langfuse-backed /api/cost + /api/cost/breakdown are currently ungated —
+  # gating them on this same resource is a tracked consistency follow-up.
+  - costrollups
   verbs:
   - '*'
 - apiGroups:

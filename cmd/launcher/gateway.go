@@ -96,6 +96,13 @@ const (
 	// denial (m66.7), distinguishing it from the "tenant"/cost denials a client parses
 	// the same way.
 	dimensionUser = "user"
+
+	// errRunCancelled is the typed error code for the m70.8 real-kill refusal: the run was
+	// cancelled, so the launcher refuses the model call (409) instead of forwarding it.
+	errRunCancelled = "run_cancelled"
+	// dimensionRun is the budgetErrorBody "dimension" for the run-cancelled refusal, so a
+	// client parses it like the other typed gateway refusals (tenant / user / cost).
+	dimensionRun = "run"
 )
 
 // gatewayConfig is the outbound-gateway-proxy configuration parsed from env.
@@ -238,6 +245,25 @@ type budgetErrorBody struct {
 	Cap       string `json:"cap"`
 }
 
+// controlStore reads a run's CONTROL verb from the pod-authed state-layer proxy (m70.8, the real-kill
+// cancel channel). The httpTenantStore (the proxy client) satisfies it. An interface so the gateway
+// unit-tests the cancel enforcement against a fake without a live proxy.
+type controlStore interface {
+	// Control returns the run's control verb ("cancel" or ""), or an error on a transport/proxy failure
+	// (the gateway then fails OPEN — no verb ⇒ no cancel).
+	Control(ctx context.Context, runID string) (string, error)
+}
+
+// controlVerbCancel is the ONLY control verb the gateway acts on in v1 (real-kill). An unknown verb
+// (a future nudge / take-over) is ignored — the marker is a verb channel, so a newer BFF verb never
+// breaks an older launcher.
+const controlVerbCancel = "cancel"
+
+// controlPollInterval is how often the mid-call abort goroutine re-checks the control marker while a
+// model call is in flight (m70.8). ~1s is responsive enough to abort a long streaming call promptly
+// without hammering the proxy; the goroutine exits the moment the request finishes (ctx.Done()).
+const controlPollInterval = time.Second
+
 // gatewayProxy is the outbound gateway proxy handler. It holds the shared,
 // process-wide enforcer/estimator (spend accumulates across every request) and
 // forwards to the upstream LiteLLM gateway.
@@ -269,6 +295,12 @@ type gatewayProxy struct {
 	// OBO egress path uses. nil ⇒ no key provisioned: per-user enforcement fails OPEN (skipped)
 	// even when a userRateLimit is set — a missing verifier is treated like a missing capability.
 	capVerifier *runcap.Verifier
+	// control reads a run's CONTROL verb from the pod-authed state-layer proxy (m70.8, the real-kill
+	// cancel channel). Set ONLY when the launcher runs the state-layer-proxy path (STATELAYER_PROXY_URL):
+	// the httpTenantStore is the proxy client that already holds the pod token. nil in the direct-Valkey
+	// legacy mode or when unconfigured ⇒ the cancel-check is a NO-OP (the model-call path is unchanged) —
+	// the real kill is an ACCELERATOR layered onto the durable status-flip cancel, never a hard dependency.
+	control controlStore
 	// judge is the OPTIONAL fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) — a cascaded, cached,
 	// loop-safe semantic-classification layer built from the guardrail policy's semanticJudge section.
 	// nil ⇒ semanticJudge disabled/absent ⇒ zero judge calls. It NEVER underpins the fail-closed
@@ -372,6 +404,16 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 			logf("launcher: gateway: tenant %s has model caps but no STATELAYER_PROXY_URL or "+
 				"TENANT_QUOTA_ADDR — quota NOT enforced", cfg.TenantID)
 		}
+	}
+
+	// Real-kill control channel (m70.8): the launcher polls the pod-authed /control endpoint to abort a
+	// cancelled run's in-flight model call. It is available ONLY on the state-layer-proxy path (which gives
+	// the launcher a pod-token reach to the proxy) — and it is INDEPENDENT of the tenant quota, so a
+	// proxied-but-untenanted agent (guardrail-only, or no caps) is still real-killable. With no proxy URL
+	// (direct-Valkey legacy mode or unconfigured) gp.control stays nil ⇒ the cancel-check is a no-op and the
+	// model-call path is byte-for-byte unchanged (the durable status-flip cancel still applies).
+	if cfg.StatelayerProxyURL != "" {
+		gp.control = newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
 	}
 
 	// Per-END-USER (OBO) model quota (M66, ADR 0059 §8): built from the guardrail policy's
@@ -539,8 +581,35 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ── Real-kill cancel channel (m70.8) ───────────────────────────────────
+	// Resolve the TRUSTED run id from the verified capability (fail-open to "" — no trusted run id ⇒ no
+	// cancel enforcement, the model-call path is unchanged). PRE-CALL check: if the run's control marker
+	// says "cancel", REFUSE the call BEFORE forwarding so the agent's model call errors and its loop
+	// unwinds — the real kill at call-boundary granularity. gp.control is nil off the state-layer-proxy
+	// path, so this whole block is a no-op there.
+	runID := gp.extractRunID(r)
+	if runID != "" {
+		span.SetAttributes(attribute.String("run.id", runID))
+		if gp.controlIsCancel(ctx, runID) {
+			gp.writeRunCancelled(w, span, runID)
+			return
+		}
+	}
+
+	// Mid-call abort (m70.8, the richer kill): while a (possibly long/streaming) model call is in flight,
+	// poll the control marker and abort the forward the moment it flips to "cancel". Wrap the forward ctx
+	// in a cancel func and spawn a poller that exits when the request finishes (fwdCtx.Done()) — so the
+	// goroutine can never outlive the call. A no-op when there is no trusted run id / no control store.
+	fwdCtx := ctx
+	if runID != "" {
+		var cancelFwd context.CancelFunc
+		fwdCtx, cancelFwd = context.WithCancel(ctx)
+		defer cancelFwd()
+		go gp.pollControlAbort(fwdCtx, runID, cancelFwd)
+	}
+
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
-	resp, body, err := gp.forward(ctx, r)
+	resp, body, err := gp.forward(fwdCtx, r)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "gateway upstream error")
@@ -700,6 +769,95 @@ func (gp *gatewayProxy) userHashFromRequest(r *http.Request) string {
 		return ""
 	}
 	return capability.User
+}
+
+// extractRunID resolves the TRUSTED run id from the inbound run capability (the X-Ctxmesh-Run-Capability
+// header the SDK relays on the model call), parallel to userHashFromRequest (m70.8, the real-kill cancel
+// channel). It returns "" — meaning "no trusted run id, skip cancel enforcement" (FAIL-OPEN) — whenever
+// there is nothing to trust:
+//   - no control store (not the state-layer-proxy path), or no capability verifier provisioned;
+//   - the capability header is absent (an unattended run, or it did not propagate);
+//   - the capability does not VERIFY (bad signature / expired / wrong audience — a FORGED token is treated
+//     exactly like an absent one, so it can NEVER inject a spoofed run id to cancel someone else's run);
+//   - the capability verifies but carries no run id.
+//
+// The run id is taken from the VERIFIED capability (not a raw header), so an agent cannot forge a run id to
+// probe/cancel another run's marker: it can only ever read its OWN run's control verb.
+func (gp *gatewayProxy) extractRunID(r *http.Request) string {
+	if gp.control == nil || gp.capVerifier == nil {
+		return ""
+	}
+	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
+	if token == "" {
+		return ""
+	}
+	capability, err := gp.capVerifier.Verify(token)
+	if err != nil {
+		// A forged/expired capability is NOT trusted — treat it as absent (no cancel enforcement). It
+		// cannot grant a spoofed run id.
+		gp.logf("launcher: gateway: run capability failed verification (cancel-check skipped, fail-open): %v", err)
+		return ""
+	}
+	return capability.RunID
+}
+
+// controlIsCancel reports whether the run's CONTROL marker says "cancel" (m70.8). It FAILS OPEN: an empty
+// run id (no trusted capability), a nil control store, or ANY proxy/transport error → false (do NOT cancel)
+// — a control-plane blip must never spuriously kill a live model call. Only the exact verb "cancel" trips
+// it; an unknown/future verb is ignored.
+func (gp *gatewayProxy) controlIsCancel(ctx context.Context, runID string) bool {
+	if gp.control == nil || runID == "" {
+		return false
+	}
+	verb, err := gp.control.Control(ctx, runID)
+	if err != nil {
+		gp.logf("launcher: gateway: control check failed (fail-open, call proceeds): %v", err)
+		return false
+	}
+	return verb == controlVerbCancel
+}
+
+// pollControlAbort polls the run's control marker every controlPollInterval while a model call is in
+// flight and calls cancelFwd on the FIRST "cancel" — aborting a long/streaming in-flight call at the
+// transport (m70.8, the richer real-kill). It MUST exit when the request finishes: it selects on
+// ctx.Done() (the DERIVED forward ctx, cancelled by serve's defer), so the goroutine can never leak past
+// the call. Fails OPEN on any Control error (controlIsCancel logs at the call site) — never aborts on a
+// blip. The Control read is bounded by its own client timeout, so a hung proxy cannot wedge the poller.
+func (gp *gatewayProxy) pollControlAbort(ctx context.Context, runID string, cancelFwd context.CancelFunc) {
+	ticker := time.NewTicker(controlPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return // the request finished (or was already aborted) — stop polling
+		case <-ticker.C:
+			if gp.controlIsCancel(ctx, runID) {
+				gp.logf("launcher: gateway: run %s cancelled mid-call — aborting the in-flight model call", runID)
+				cancelFwd()
+				return
+			}
+		}
+	}
+}
+
+// writeRunCancelled emits the pre-call real-kill refusal (m70.8): the run was cancelled, so the model
+// call is REFUSED before forwarding. It returns a typed 409 run_cancelled so the agent's model call
+// errors and its loop unwinds — reusing budgetErrorBody's shape so a client parses it like the other
+// typed gateway refusals (dimension "run"). The provider is NOT called.
+func (gp *gatewayProxy) writeRunCancelled(w http.ResponseWriter, span trace.Span, runID string) {
+	span.SetAttributes(
+		attribute.String("run.control", controlVerbCancel),
+		attribute.String("run.id", runID),
+	)
+	span.SetStatus(codes.Error, errRunCancelled)
+
+	body := budgetErrorBody{Error: errRunCancelled, Dimension: dimensionRun}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict) // 409 — the run is cancelled; the call must not proceed
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		gp.logf("launcher: gateway: encode run_cancelled: %v", err)
+	}
+	gp.logf("launcher: gateway: run_cancelled (run=%s, call refused — real kill)", runID)
 }
 
 // writeUserDeny emits the typed per-user quota rejection (402 user_budget_exceeded / 429

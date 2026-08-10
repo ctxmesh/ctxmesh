@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Coins } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Coins, Download } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
-import { api, ApiError, type AgentCostItem, type CostSummary } from "@/lib/api";
+import {
+  api,
+  ApiError,
+  type AgentCostItem,
+  type CostForecastResponse,
+  type CostSummary,
+} from "@/lib/api";
 
 // CostPage — the cost drill-down surface (m16.10).
 //
@@ -88,6 +94,68 @@ function CostSummaryCard({ total }: { total: CostSummary }) {
   );
 }
 
+// ForecastCard renders the month-to-date spend + linear run-rate projected month-end
+// from the durable cost-rollup ledger (M70, ADR 0063 D3).
+// 501-calm discipline: null forecast ⇒ card is not rendered (store not enabled).
+function ForecastCard({
+  forecast,
+  tenant,
+}: {
+  forecast: CostForecastResponse | null;
+  tenant: string;
+}) {
+  if (!forecast) return null;
+
+  // Build the chargeback download URL for the current calendar month (YYYY-MM).
+  const now = new Date();
+  const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const csvUrl = api.costChargebackCSVUrl(tenant, period);
+
+  return (
+    <Card data-testid="cost-forecast-card">
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-base">Month forecast</CardTitle>
+          <a
+            href={csvUrl}
+            download={`chargeback-${period}.csv`}
+            data-testid="cost-chargeback-download"
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            <Download className="h-3 w-3" />
+            Download chargeback CSV
+          </a>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Month to date
+            </p>
+            <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
+              {formatUSD(forecast.monthToDateUSD)}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Projected month end
+            </p>
+            <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
+              {forecast.projectedMonthEndUSD > 0
+                ? formatUSD(forecast.projectedMonthEndUSD)
+                : "—"}
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Linear run-rate estimate
+            </p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; agents: AgentCostItem[]; total: CostSummary; nextCursor: string }
@@ -105,6 +173,15 @@ const emptyCostSummary: CostSummary = {
 
 export function CostPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  // ?tenant= drives the forecast card (cost-rollup store); absent = no forecast shown.
+  const tenant = searchParams.get("tenant") ?? "";
+
+  // Forecast state: null = 501 (store not enabled) or no tenant given; undefined = not yet loaded.
+  const [forecast, setForecast] = useState<CostForecastResponse | null | undefined>(
+    undefined,
+  );
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
@@ -160,6 +237,26 @@ export function CostPage() {
     load();
     return () => abortRef.current?.abort();
   }, [load]);
+
+  // Forecast: fetch when ?tenant= is present. 501 → null (calm). Errors are swallowed
+  // (the breakdown table is the primary surface; forecast is secondary and optional).
+  useEffect(() => {
+    if (!tenant) {
+      setForecast(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    api
+      .costForecast(tenant, ctrl.signal)
+      .then((res) => {
+        if (!ctrl.signal.aborted) setForecast(res);
+      })
+      .catch(() => {
+        // Forecast errors are non-fatal: the page still works without the card.
+        if (!ctrl.signal.aborted) setForecast(null);
+      });
+    return () => ctrl.abort();
+  }, [tenant]);
 
   const agents = loadState.kind === "ready" ? loadState.agents : [];
   const total = loadState.kind === "ready" ? loadState.total : emptyCostSummary;
@@ -293,6 +390,12 @@ export function CostPage() {
 
       {loadState.kind === "ready" && (
         <CostSummaryCard total={total} />
+      )}
+
+      {/* Forecast card: shown when ?tenant= is present and the store is enabled.
+          null = 501 or no tenant → card hidden (calm). undefined = still loading → hidden. */}
+      {forecast != null && tenant && (
+        <ForecastCard forecast={forecast} tenant={tenant} />
       )}
 
       <div data-testid="cost-breakdown-table">

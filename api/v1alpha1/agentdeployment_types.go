@@ -329,6 +329,32 @@ type RolloutSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=99
 	CanaryPercent int32 `json:"canaryPercent,omitempty"`
+
+	// autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
+	// (prior) version when the online-score regression detector flags the serving
+	// version (RegressionDetected=True) — ADR 0062 Fork 4, PRD §17.4. Absent (the
+	// default) ⇒ detection-only, byte-for-byte the pre-auto behavior: the controller
+	// NEVER rolls back on its own; a human drives the one-click rollback. When
+	// enabled, the auto-path runs the SAME damping guards as the human rollback
+	// (cooldown, two-version flap, healthy-target, freeze-after-auto-action) — it can
+	// only roll back to a HEALTHY prior version and, on success, sets
+	// status.rollback.frozenUntilAck to freeze further AUTO-actions until a human acks
+	// (the anti-runaway guard). A subsequent auto-attempt while frozen is refused.
+	// +optional
+	AutoRollback *AutoRollbackConfig `json:"autoRollback,omitempty"`
+}
+
+// AutoRollbackConfig configures OPT-IN automatic rollback for a gated serving agent
+// (ADR 0062 Fork 4, PRD §17.4). It is the ONLY switch that arms the auto-path; every
+// deployment without it is unaffected (detection stays advisory, human-driven rollback).
+type AutoRollbackConfig struct {
+	// enabled, when true, arms automatic rollback to the last-healthy (prior) version on
+	// RegressionDetected=True. Default false ⇒ detection-only (no auto-action). The
+	// auto-path reuses the human rollback's damping guards verbatim and freezes further
+	// auto-actions (status.rollback.frozenUntilAck) until a human acknowledges.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // RuntimeSpec configures runtime authoring primitives applied by the managed

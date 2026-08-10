@@ -434,6 +434,28 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoRollback:
+                        description: |-
+                          autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
+                          (prior) version when the online-score regression detector flags the serving
+                          version (RegressionDetected=True) — ADR 0062 Fork 4, PRD §17.4. Absent (the
+                          default) ⇒ detection-only, byte-for-byte the pre-auto behavior: the controller
+                          NEVER rolls back on its own; a human drives the one-click rollback. When
+                          enabled, the auto-path runs the SAME damping guards as the human rollback
+                          (cooldown, two-version flap, healthy-target, freeze-after-auto-action) — it can
+                          only roll back to a HEALTHY prior version and, on success, sets
+                          status.rollback.frozenUntilAck to freeze further AUTO-actions until a human acks
+                          (the anti-runaway guard). A subsequent auto-attempt while frozen is refused.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              enabled, when true, arms automatic rollback to the last-healthy (prior) version on
+                              RegressionDetected=True. Default false ⇒ detection-only (no auto-action). The
+                              auto-path reuses the human rollback's damping guards verbatim and freezes further
+                              auto-actions (status.rollback.frozenUntilAck) until a human acknowledges.
+                            type: boolean
+                        type: object
                       canaryPercent:
                         default: 10
                         description: |-
@@ -1123,6 +1145,28 @@ spec:
                       deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
                       (double side-effects) and auto-progression is deferred.
                     properties:
+                      autoRollback:
+                        description: |-
+                          autoRollback optionally enables OPT-IN automatic rollback to the last-healthy
+                          (prior) version when the online-score regression detector flags the serving
+                          version (RegressionDetected=True) — ADR 0062 Fork 4, PRD §17.4. Absent (the
+                          default) ⇒ detection-only, byte-for-byte the pre-auto behavior: the controller
+                          NEVER rolls back on its own; a human drives the one-click rollback. When
+                          enabled, the auto-path runs the SAME damping guards as the human rollback
+                          (cooldown, two-version flap, healthy-target, freeze-after-auto-action) — it can
+                          only roll back to a HEALTHY prior version and, on success, sets
+                          status.rollback.frozenUntilAck to freeze further AUTO-actions until a human acks
+                          (the anti-runaway guard). A subsequent auto-attempt while frozen is refused.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              enabled, when true, arms automatic rollback to the last-healthy (prior) version on
+                              RegressionDetected=True. Default false ⇒ detection-only (no auto-action). The
+                              auto-path reuses the human rollback's damping guards verbatim and freezes further
+                              auto-actions (status.rollback.frozenUntilAck) until a human acknowledges.
+                            type: boolean
+                        type: object
                       canaryPercent:
                         default: 10
                         description: |-
