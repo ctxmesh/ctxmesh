@@ -9,6 +9,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Server,
   SlidersHorizontal,
   Terminal,
@@ -51,6 +52,8 @@ import {
   type AgentSimplifiedSpec,
   type LogEventType,
   type MemoryBindingSummary,
+  type OnlineScoreResponse,
+  type OnlineScoreWindow,
   type RunSummary,
 } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
@@ -930,6 +933,14 @@ function OverviewTab({
         </div>
 
         {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
+
+        <ImprovementLoopSection
+          ns={detail.namespace}
+          name={detail.name}
+          conditions={detail.conditions}
+          gatePhase={detail.gate?.phase}
+          versions={detail.versions}
+        />
       </div>
 
       <UseAgentPanel
@@ -2724,3 +2735,350 @@ function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
     </div>
   );
 }
+
+// ── Improvement-Loop Section (m69.11, ADR 0062) ───────────────────────────────
+// Surfaces on the Overview tab. Shows:
+//   1. The serving version's 3-component online score (operational/feedback/judge)
+//      + a RegressionDetected badge (from status.conditions).
+//   2. When gate.phase == "canary": two arms side-by-side (old vs candidate) each
+//      with their per-version online-score components.
+//   3. A rollback button (confirm-guarded): picks a version from history, POSTs
+//      the rollback annotation via the caller's token. Degrades calmly when the
+//      online-score store is unconfigured (501 = calm "not available").
+
+type OnlineScoreLoad =
+  | { kind: "loading" }
+  | { kind: "ready"; data: OnlineScoreResponse }
+  | { kind: "unavailable" }  // 501 — store not configured
+  | { kind: "error"; message: string };
+
+function ImprovementLoopSection({
+  ns,
+  name,
+  conditions,
+  gatePhase,
+  versions,
+}: {
+  ns: string;
+  name: string;
+  conditions: AgentCondition[];
+  gatePhase?: string;
+  versions: string[];
+}) {
+  const { toast } = useToast();
+  const [scoreLoad, setScoreLoad] = React.useState<OnlineScoreLoad>({ kind: "loading" });
+  const [rollbackTarget, setRollbackTarget] = React.useState<string>("");
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [rolling, setRolling] = React.useState(false);
+
+  React.useEffect(() => {
+    const controller = new AbortController();
+    setScoreLoad({ kind: "loading" });
+    api
+      .agentOnlineScore(ns, name, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        if (res === null) {
+          setScoreLoad({ kind: "unavailable" });
+          return;
+        }
+        setScoreLoad({ kind: "ready", data: res });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setScoreLoad({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load online score",
+        });
+      });
+    return () => controller.abort();
+  }, [ns, name]);
+
+  // RegressionDetected condition from status.conditions.
+  const regressionCond = conditions.find((c) => c.type === "RegressionDetected");
+  const regressionDetected = regressionCond?.status === "True";
+
+  const isCanary = gatePhase === "canary";
+
+  // Per-version windows for canary arms (group the most recent window per version).
+  const latestByVersion = React.useMemo((): Map<string, OnlineScoreWindow> => {
+    if (scoreLoad.kind !== "ready") return new Map();
+    const map = new Map<string, OnlineScoreWindow>();
+    for (const w of scoreLoad.data.windows) {
+      if (!map.has(w.agentVersion)) map.set(w.agentVersion, w);
+    }
+    return map;
+  }, [scoreLoad]);
+
+  async function doRollback() {
+    if (!rollbackTarget) return;
+    setRolling(true);
+    try {
+      await api.agentRollback(ns, name, rollbackTarget);
+      toast({
+        variant: "success",
+        title: "Rollback requested",
+        description: `Annotation set: rollback to "${rollbackTarget}" requested. The controller will actuate it.`,
+      });
+      setConfirmOpen(false);
+      setRollbackTarget("");
+    } catch (err) {
+      toast({
+        variant: "error",
+        title: "Rollback failed",
+        description: err instanceof Error ? err.message : "rollback failed",
+      });
+    } finally {
+      setRolling(false);
+    }
+  }
+
+  // If the store is unavailable AND no RegressionDetected AND no canary AND no versions,
+  // render nothing (no noise for simple agents with no eval suite).
+  if (
+    scoreLoad.kind === "unavailable" &&
+    !regressionDetected &&
+    !isCanary &&
+    versions.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <div
+      className="rounded-lg border bg-card p-5 shadow-card space-y-4"
+      data-testid="improvement-loop-section"
+    >
+      <div className="flex items-center gap-2">
+        <Activity className="h-4 w-4 text-muted-foreground" />
+        <p className="text-sm font-medium">Online score</p>
+        {regressionDetected && (
+          <Badge variant="destructive" className="text-[10px]" data-testid="regression-detected-badge">
+            <AlertTriangle className="mr-1 h-3 w-3" />
+            Regression detected
+          </Badge>
+        )}
+        {regressionCond && !regressionDetected && regressionCond.status === "False" && (
+          <Badge variant="success" className="text-[10px]" data-testid="regression-ok-badge">
+            Healthy
+          </Badge>
+        )}
+      </div>
+
+      {/* Online score content */}
+      {scoreLoad.kind === "loading" && (
+        <p className="text-sm text-muted-foreground" data-testid="online-score-loading">
+          Loading online score…
+        </p>
+      )}
+      {scoreLoad.kind === "unavailable" && (
+        <p className="text-sm text-muted-foreground" data-testid="online-score-unavailable">
+          Online score not available — control-plane store not configured.
+        </p>
+      )}
+      {scoreLoad.kind === "error" && (
+        <p className="text-sm text-destructive" data-testid="online-score-error">
+          {scoreLoad.message}
+        </p>
+      )}
+
+      {scoreLoad.kind === "ready" && (
+        <>
+          {scoreLoad.data.windows.length === 0 ? (
+            <p className="text-sm text-muted-foreground" data-testid="online-score-empty">
+              No score data yet — no production runs recorded for this agent.
+            </p>
+          ) : isCanary ? (
+            /* Canary arms: two versions side-by-side */
+            <CanaryArms latestByVersion={latestByVersion} />
+          ) : (
+            /* Serving version: most-recent window */
+            <OnlineScoreCard window={scoreLoad.data.windows[0]} />
+          )}
+        </>
+      )}
+
+      {/* Rollback button — shown when versions available (RBAC-permissive: server enforces) */}
+      {versions.length > 1 && (
+        <div className="flex items-center gap-3 pt-2 border-t" data-testid="rollback-section">
+          <RotateCcw className="h-4 w-4 text-muted-foreground shrink-0" />
+          <p className="text-sm text-muted-foreground shrink-0">Rollback to</p>
+          <select
+            value={rollbackTarget}
+            onChange={(e) => setRollbackTarget(e.target.value)}
+            className="flex-1 rounded-md border bg-background px-3 py-1.5 text-sm"
+            data-testid="rollback-version-select"
+          >
+            <option value="">— choose a version —</option>
+            {versions.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!rollbackTarget}
+            onClick={() => setConfirmOpen(true)}
+            data-testid="rollback-button"
+          >
+            Rollback
+          </Button>
+        </div>
+      )}
+
+      {/* Confirm dialog — guards the destructive annotation write */}
+      <ConfirmDialog
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => void doRollback()}
+        title={`Rollback ${name} to ${rollbackTarget}?`}
+        description={`This will set the rollback annotation on ${name}. The controller will revert the serving spec to version "${rollbackTarget}", subject to cooldown and flap guards. The annotation is one-shot (cleared after evaluation).`}
+        confirmLabel="Rollback"
+        busy={rolling}
+        destructive
+      />
+    </div>
+  );
+}
+
+// OnlineScoreCard renders the most-recent window for the serving version —
+// all 3 components with clear labels so the operator sees the full picture.
+function OnlineScoreCard({ window: w }: { window: OnlineScoreWindow }) {
+  const errorRate = w.operational.total > 0
+    ? ((w.operational.errorCount / w.operational.total) * 100).toFixed(1)
+    : "—";
+  const toolFailRate = w.operational.total > 0
+    ? ((w.operational.toolFailCount / w.operational.total) * 100).toFixed(1)
+    : "—";
+  const feedbackAvg = w.feedback.count > 0
+    ? (w.feedback.sumVal / w.feedback.count).toFixed(2)
+    : "—";
+  const judgeAvg = w.judge.count > 0
+    ? (w.judge.sumVal / w.judge.count).toFixed(2)
+    : "—";
+
+  return (
+    <div
+      className="grid grid-cols-3 gap-3 text-sm"
+      data-testid="online-score-card"
+    >
+      {/* Operational */}
+      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="operational-component">
+        <p className="text-xs font-medium text-muted-foreground mb-2">Operational</p>
+        <dl className="space-y-1">
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Requests</dt>
+            <dd className="tabular-nums">{w.operational.total.toLocaleString()}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Error rate</dt>
+            <dd className="tabular-nums">{errorRate}%</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Tool fail</dt>
+            <dd className="tabular-nums">{toolFailRate}%</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">p95 latency</dt>
+            <dd className="tabular-nums">{w.operational.latencyP95Ms.toFixed(0)}ms</dd>
+          </div>
+        </dl>
+      </div>
+
+      {/* Feedback */}
+      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="feedback-component">
+        <p className="text-xs font-medium text-muted-foreground mb-2">Feedback</p>
+        <dl className="space-y-1">
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Count</dt>
+            <dd className="tabular-nums">{w.feedback.count}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Avg score</dt>
+            <dd className="tabular-nums">{feedbackAvg}</dd>
+          </div>
+        </dl>
+      </div>
+
+      {/* Judge */}
+      <div className="rounded-md border bg-surface-2/40 p-3" data-testid="judge-component">
+        <p className="text-xs font-medium text-muted-foreground mb-2">Judge</p>
+        <dl className="space-y-1">
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Count</dt>
+            <dd className="tabular-nums">{w.judge.count}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-xs text-muted-foreground">Avg score</dt>
+            <dd className="tabular-nums">{judgeAvg}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+// CanaryArms renders the two canary arms side-by-side when gate.phase == "canary":
+// OLD (baseline serving revision) vs CANDIDATE (new revision being canary-tested).
+// Each arm shows its own online-score components so regressions are visible before
+// the promotion decision is made.
+function CanaryArms({
+  latestByVersion,
+}: {
+  latestByVersion: Map<string, OnlineScoreWindow>;
+}) {
+  // Derive the two arms: we have ≤N versions; we show all distinct versions.
+  // When exactly 2 versions: label the newest as Candidate, the other as Baseline.
+  const versions = [...latestByVersion.keys()];
+  if (versions.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="canary-arms-empty">
+        No per-version score data yet — still accumulating.
+      </p>
+    );
+  }
+
+  // Sort by the window start of the version's latest window, newest last = candidate.
+  const sorted = versions.sort((a, b) => {
+    const wa = latestByVersion.get(a)?.windowStart ?? "";
+    const wb = latestByVersion.get(b)?.windowStart ?? "";
+    return wa.localeCompare(wb);
+  });
+
+  return (
+    <div className="space-y-3" data-testid="canary-arms">
+      <p className="text-xs text-muted-foreground">
+        Canary in progress — comparing serving arms:
+      </p>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {sorted.map((v, i) => {
+          const w = latestByVersion.get(v)!;
+          const label = sorted.length === 2
+            ? i === 0 ? "Baseline (old)" : "Candidate (new)"
+            : v;
+          return (
+            <div
+              key={v}
+              className="rounded-md border bg-surface-2/40 p-3 space-y-2"
+              data-testid={`canary-arm-${i === 0 ? "old" : "candidate"}`}
+            >
+              <div className="flex items-center gap-2">
+                <Badge
+                  variant={sorted.length === 2 && i === 1 ? "secondary" : "outline"}
+                  className="text-[10px]"
+                >
+                  {label}
+                </Badge>
+                <span className="font-mono text-[10px] text-muted-foreground truncate">{v}</span>
+              </div>
+              <OnlineScoreCard window={w} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+

@@ -204,6 +204,12 @@ export interface AgentDetailResponse {
   // m66.10 — optional guardrail policy reference (ADR 0059). Present when
   // spec.guardrailPolicyRef is set. The detail page links to /guardrails.
   guardrailPolicyRef?: string;
+  // m69.11 — optional gate projection (ADR 0062 Fork 3). Phase drives the
+  // canary/promote state machine; absent when no EvalSuite is wired.
+  gate?: {
+    phase?: string;
+    scoredRevision?: string;
+  };
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -295,6 +301,57 @@ export interface LongTermMemoryConfig {
   enabled: boolean;
   perUser: boolean;
   embeddingRoute?: string;
+}
+
+// --- Online-score (m69.11, ADR 0062 Fork 2) -----------------------------------
+// The 3-component per-version online-score aggregates served by
+// GET /api/agents/{ns}/{name}/online-score. Un-collapsed (operational / feedback
+// / judge) so the UI can show each component independently.
+
+export interface OnlineScoreOperational {
+  total: number;
+  errorCount: number;
+  toolFailCount: number;
+  latencyP95Ms: number;
+}
+
+export interface OnlineScoreFeedback {
+  count: number;
+  sumVal: number;
+}
+
+export interface OnlineScoreJudge {
+  count: number;
+  sumVal: number;
+}
+
+export interface OnlineScoreWindow {
+  agentVersion: string;
+  windowStart: string; // RFC3339 UTC, truncated to hour
+  operational: OnlineScoreOperational;
+  feedback: OnlineScoreFeedback;
+  judge: OnlineScoreJudge;
+}
+
+export interface OnlineScoreResponse {
+  namespace: string;
+  name: string;
+  windows: OnlineScoreWindow[];
+}
+
+// --- Rollback (m69.11, ADR 0062 Fork 4) --------------------------------------
+// POST /api/agents/{ns}/{name}/rollback — sets the rollback annotation via the
+// caller's PATCH. The rollback controller (m69.8) actuates the guarded revert.
+
+export interface RollbackRequest {
+  version: string;
+}
+
+export interface RollbackResponse {
+  namespace: string;
+  name: string;
+  targetVersion: string;
+  annotationSet: boolean;
 }
 
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
@@ -3514,6 +3571,59 @@ export const api = {
       );
     }
     return (await res.json()) as AgentMemoryListResponse;
+  },
+
+  // agentOnlineScore reads the improvement-loop online score aggregates for an agent
+  // (m69.11, ADR 0062 Fork 2). Returns null on 501 (control-plane store not configured)
+  // so the caller degrades to "not available" rather than an error — same discipline as
+  // agentMemory. The response carries the 3-component (operational/feedback/judge)
+  // un-collapsed per-version vector.
+  agentOnlineScore: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<OnlineScoreResponse | null> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/online-score`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `online score failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as OnlineScoreResponse;
+  },
+
+  // agentRollback posts a rollback request — sets the rollback annotation on the
+  // AgentDeployment via the caller's PATCH (m69.11, ADR 0062 Fork 4). The
+  // rollback controller (m69.8) actuates the guarded revert; this is fire-and-signal
+  // (the annotation is set; controller acts asynchronously). A 404 means the agent
+  // is not found, a 403 means RBAC denied the patch.
+  agentRollback: async (
+    ns: string,
+    name: string,
+    version: string,
+    signal?: AbortSignal,
+  ): Promise<RollbackResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/rollback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ version } satisfies RollbackRequest),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `rollback failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RollbackResponse;
   },
 
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------

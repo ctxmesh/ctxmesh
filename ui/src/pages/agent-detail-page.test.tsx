@@ -48,6 +48,9 @@ interface DetailOpts {
   scalingUpdateResult?: { ok: boolean; status?: number; body?: unknown };
   scalingDeleteResult?: { ok: boolean; status?: number; body?: unknown };
   detectors?: { name: string; pattern: string }[];
+  // m69.11 additions: online-score + rollback
+  onlineScore?: unknown | null; // null → 501 (store not configured)
+  rollbackResult?: { ok: boolean; status?: number; body?: unknown };
 }
 
 const DEFAULT_DETAIL = {
@@ -218,6 +221,19 @@ function installFetch(opts: DetailOpts = {}) {
       }
       if (url.match(/\/tracepolicy$/) && method === "PUT") {
         return j({ customDetectors: opts.detectors ?? [] });
+      }
+
+      // m69.11: online-score (GET .../online-score)
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) {
+        if (opts.onlineScore === null) {
+          return j({ error: "not implemented" }, false, 501);
+        }
+        return j(opts.onlineScore ?? { namespace: "prod", name: "billing", windows: [] }, true, 200);
+      }
+      // m69.11: rollback (POST .../rollback)
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/rollback/) && method === "POST") {
+        const r = opts.rollbackResult ?? { ok: true, body: { namespace: "prod", name: "billing", targetVersion: "billing-v1", annotationSet: true } };
+        return j(r.body ?? {}, r.ok, r.status ?? (r.ok ? 200 : 400));
       }
 
       return j({}, false, 404);
@@ -1346,5 +1362,159 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("agent-guardrail-policy-link")).toBeNull();
     expect(screen.queryByTestId("agent-guardrail-notready-reason")).toBeNull();
+  });
+});
+
+// ── m69.11: improvement-loop surfaces (online-score + canary arms + rollback) ──
+describe("ImprovementLoopSection (m69.11)", () => {
+  const SCORE_WINDOW = {
+    agentVersion: "billing-v2",
+    windowStart: "2026-08-10T12:00:00Z",
+    operational: { total: 200, errorCount: 4, toolFailCount: 1, latencyP95Ms: 280.5 },
+    feedback: { count: 15, sumVal: 12.0 },
+    judge: { count: 5, sumVal: 4.2 },
+  };
+
+  it("renders the 3-component online score for the serving version", async () => {
+    installFetch({
+      onlineScore: { namespace: "prod", name: "billing", windows: [SCORE_WINDOW] },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    // The improvement-loop section renders in the Overview tab.
+    const section = await screen.findByTestId("improvement-loop-section");
+    expect(section).toBeInTheDocument();
+    // All 3 component cards are present.
+    expect(within(section).getByTestId("operational-component")).toBeInTheDocument();
+    expect(within(section).getByTestId("feedback-component")).toBeInTheDocument();
+    expect(within(section).getByTestId("judge-component")).toBeInTheDocument();
+    // Values rendered inside operational card.
+    const op = within(section).getByTestId("operational-component");
+    expect(op).toHaveTextContent("200"); // total requests
+  });
+
+  it("renders RegressionDetected badge when condition is True", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        conditions: [
+          ...DEFAULT_DETAIL.conditions,
+          {
+            type: "RegressionDetected",
+            status: "True",
+            reason: "RegressionDetected",
+            message: "operational error rate breached baseline",
+            lastTransitionTime: "2026-08-10T13:00:00Z",
+          },
+        ],
+      },
+      onlineScore: { namespace: "prod", name: "billing", windows: [SCORE_WINDOW] },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const badge = await screen.findByTestId("regression-detected-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent("Regression detected");
+  });
+
+  it("does not render the regression badge when RegressionDetected is False", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        conditions: [
+          ...DEFAULT_DETAIL.conditions,
+          {
+            type: "RegressionDetected",
+            status: "False",
+            reason: "Healthy",
+            message: "",
+            lastTransitionTime: "2026-08-10T13:00:00Z",
+          },
+        ],
+      },
+      onlineScore: { namespace: "prod", name: "billing", windows: [SCORE_WINDOW] },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    await screen.findByTestId("improvement-loop-section");
+    expect(screen.queryByTestId("regression-detected-badge")).toBeNull();
+    // Healthy badge shown when False
+    expect(screen.getByTestId("regression-ok-badge")).toBeInTheDocument();
+  });
+
+  it("renders canary arms side-by-side when gate phase is canary", async () => {
+    const oldWindow = {
+      ...SCORE_WINDOW,
+      agentVersion: "billing-v1",
+      windowStart: "2026-08-10T11:00:00Z",
+    };
+    const candidateWindow = {
+      ...SCORE_WINDOW,
+      agentVersion: "billing-v2",
+      windowStart: "2026-08-10T12:00:00Z",
+    };
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        gate: { phase: "canary", scoredRevision: "billing-v2-h1234" },
+      },
+      onlineScore: {
+        namespace: "prod",
+        name: "billing",
+        windows: [candidateWindow, oldWindow],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const arms = await screen.findByTestId("canary-arms");
+    expect(arms).toBeInTheDocument();
+    // Two arms rendered.
+    expect(within(arms).getByTestId("canary-arm-old")).toBeInTheDocument();
+    expect(within(arms).getByTestId("canary-arm-candidate")).toBeInTheDocument();
+  });
+
+  it("renders rollback button and posts when confirmed", async () => {
+    const calls = installFetch({
+      onlineScore: { namespace: "prod", name: "billing", windows: [SCORE_WINDOW] },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // The rollback section appears (there are 2 versions: billing-v1, billing-v2).
+    const section = await screen.findByTestId("rollback-section");
+    expect(section).toBeInTheDocument();
+
+    // Select a version and click Rollback.
+    const select = within(section).getByTestId("rollback-version-select");
+    fireEvent.change(select, { target: { value: "billing-v1" } });
+
+    const btn = within(section).getByTestId("rollback-button");
+    expect(btn).not.toBeDisabled();
+    fireEvent.click(btn);
+
+    // Confirm dialog appears (ConfirmDialog uses role="alertdialog").
+    const dialog = await screen.findByRole("alertdialog");
+    const confirmBtn = within(dialog).getByRole("button", { name: /Rollback/i });
+    fireEvent.click(confirmBtn);
+
+    // The POST /api/agents/prod/billing/rollback is called.
+    await waitFor(() => {
+      const rollbackCall = calls.find(
+        (c) => c.url.includes("/rollback") && c.method === "POST",
+      );
+      expect(rollbackCall).toBeDefined();
+      expect(JSON.parse(rollbackCall!.body)).toMatchObject({ version: "billing-v1" });
+    });
+  });
+
+  it("renders calm 'not available' when online score store is unconfigured (501)", async () => {
+    installFetch({ onlineScore: null }); // null → 501
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    // The section itself is hidden when 501 + no regression + no canary + versions < 2
+    // but DEFAULT_DETAIL has 2 versions so the rollback section shows → section renders.
+    // However in this test versions are from DEFAULT_DETAIL (2 versions), so section is shown.
+    // The "not available" text is shown for the score area.
+    await screen.findByTestId("online-score-unavailable");
   });
 });
