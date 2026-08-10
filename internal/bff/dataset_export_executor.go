@@ -317,15 +317,20 @@ func (s *Server) exportOneTrace(ctx context.Context, datasetID, traceID string, 
 // span carrying an Input when no root id is resolved (a malformed parent chain). Returns the persisted
 // (already-M11-redacted) strings verbatim — the caller re-redacts before persistence.
 func traceInputOutput(detail TraceDetail) (input, output string) {
-	// Prefer the resolved root span (the trace's request/response boundary).
+	// Prefer the resolved root span (the trace's request/response boundary) ONLY IF it carries a
+	// payload. A real managed-agent trace's root `agent.invoke` span is often EMPTY — the actual
+	// request/response payload lives on a child `managed-agent` observation — so an empty root must
+	// fall through to the first payload-bearing span rather than returning ("","") and yielding an
+	// empty (skipped) case. (The m69.12 live tier caught this: export found the traces but appended
+	// 0 cases because the root-span read short-circuited before the fallback.)
 	if detail.RootSpanID != "" {
 		for i := range detail.Spans {
-			if detail.Spans[i].ID == detail.RootSpanID {
+			if detail.Spans[i].ID == detail.RootSpanID && strings.TrimSpace(detail.Spans[i].Input) != "" {
 				return detail.Spans[i].Input, detail.Spans[i].Output
 			}
 		}
 	}
-	// Fallback: the first span that carries an input (a malformed/absent root chain still yields a case).
+	// Fallback: the first span that carries an input (an empty/absent root chain still yields a case).
 	for i := range detail.Spans {
 		if strings.TrimSpace(detail.Spans[i].Input) != "" {
 			return detail.Spans[i].Input, detail.Spans[i].Output

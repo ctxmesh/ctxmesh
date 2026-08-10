@@ -569,3 +569,33 @@ func TestExecuteDatasetExport_RealPostgres(t *testing.T) {
 	assert.Contains(t, piiCase.Input, "[REDACTED:email]")
 	assert.Contains(t, piiCase.Input, "[REDACTED:ssn]")
 }
+
+// TestTraceInputOutput_EmptyRootFallsThroughToChild is the m69.12 live-fix regression: a real
+// managed-agent trace's root `agent.invoke` span is EMPTY; the request/response payload lives on a child
+// `managed-agent` observation. traceInputOutput must fall through to the child rather than returning the
+// empty root (the live bug: export found the traces but appended 0 cases).
+func TestTraceInputOutput_EmptyRootFallsThroughToChild(t *testing.T) {
+	detail := TraceDetail{
+		RootSpanID: "root",
+		Spans: []SpanSummary{
+			{ID: "root", Input: "", Output: ""},
+			{ID: "child", ParentID: "root", Input: "the real prompt", Output: "the real answer"},
+		},
+	}
+	in, out := traceInputOutput(detail)
+	assert.Equal(t, "the real prompt", in, "empty root must fall through to the child payload")
+	assert.Equal(t, "the real answer", out)
+}
+
+// TestTraceInputOutput_PopulatedRootWins — a root span that DOES carry a payload is still preferred.
+func TestTraceInputOutput_PopulatedRootWins(t *testing.T) {
+	detail := TraceDetail{
+		RootSpanID: "root",
+		Spans: []SpanSummary{
+			{ID: "root", Input: "root prompt", Output: "root answer"},
+			{ID: "child", ParentID: "root", Input: "child prompt", Output: "child answer"},
+		},
+	}
+	in, _ := traceInputOutput(detail)
+	assert.Equal(t, "root prompt", in, "a populated root wins over the child")
+}

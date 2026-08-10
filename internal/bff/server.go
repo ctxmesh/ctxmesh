@@ -790,6 +790,7 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/datasets/{name}/cases", s.handleListDatasetCases)
 		authed.HandleFunc("POST /api/datasets/{name}/cases/{caseId}/labels", s.handleAppendLabel)
 		authed.HandleFunc("POST /api/datasets/{name}/cases/from-run", s.handleFromRun)
+		authed.HandleFunc("POST /api/datasets/{name}/pin", s.handlePinDataset)
 
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)

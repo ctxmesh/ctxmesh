@@ -511,3 +511,58 @@ func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, FromRunResponse{CaseID: caseID})
 }
+
+// PinDatasetResponse is the POST /api/datasets/{name}/pin body — the new immutable version number.
+type PinDatasetResponse struct {
+	Dataset   string `json:"dataset"`
+	Namespace string `json:"namespace"`
+	Version   int    `json:"version"`
+}
+
+// handlePinDataset serves POST /api/datasets/{name}/pin (m69.12): freezes the dataset's draft head into a
+// NEW immutable version (the case set + each case's latest label snapshot; ADR 0062 Fork 1). An
+// `EvalSuite.datasetRef: <name>@<version>` then gates reproducibly against it. The store's PinVersion had
+// no API surface (the m69.12 live tier gap) — the loop (export → label → PIN → gate) needs this to create
+// a name@version ref via the console/API rather than only at the SQL tier.
+func (s *Server) handlePinDataset(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.callerClient(w, r); !ok {
+		return
+	}
+	if s.datasetStore == nil {
+		writeError(w, http.StatusNotImplemented, "dataset store not configured: set CONTROLPLANE_DSN to enable datasets")
+		return
+	}
+	datasetName := r.PathValue("name")
+	if datasetName == "" {
+		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
+		return
+	}
+	ns := r.Header.Get(kbNamespaceHeader)
+	if ns == "" {
+		ns = r.URL.Query().Get("namespace")
+	}
+	if ns == "" {
+		ns = defaultCreateNamespace
+	}
+	ds, err := s.datasetStore.EnsureDataset(r.Context(), ns, datasetName)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("dataset %q not found in namespace %q", datasetName, ns))
+			return
+		}
+		s.log.Error(err, "ensure dataset for pin", "name", datasetName, "ns", ns)
+		writeError(w, http.StatusInternalServerError, "failed to look up dataset")
+		return
+	}
+	version, err := s.datasetStore.PinVersion(r.Context(), ds.ID)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrInvalid) {
+			writeError(w, http.StatusUnprocessableEntity, "cannot pin an empty dataset: add cases first")
+			return
+		}
+		s.log.Error(err, "pin dataset failed", "dataset", ds.ID)
+		writeError(w, http.StatusInternalServerError, "failed to pin dataset")
+		return
+	}
+	writeJSON(w, http.StatusOK, PinDatasetResponse{Dataset: datasetName, Namespace: ns, Version: version})
+}
