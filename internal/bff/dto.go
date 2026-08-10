@@ -1049,6 +1049,71 @@ type GenerateInvalidResponse struct {
 	Regenerate bool `json:"regenerate"`
 }
 
+// --- Refine an existing agent spec (POST /api/agents/refine, m71.1) -----------
+//
+// Refine is a PURE editing endpoint: it takes an existing simplified agent.yaml
+// (CurrentSpec) plus a natural-language instruction and rewrites the whole document
+// via the caller's connected provider model. Like generate it is caller-scoped and
+// NEVER writes to the cluster — the caller reviews the result before any apply.
+
+// RefineTurn is one prior exchange in the conversation transcript (optional
+// context the caller passes so the model understands the editing history).
+// Role is "user" or "assistant"; Text is the turn's content. Both are
+// treated as UNTRUSTED flavor-text — they inform the model but cannot override
+// the CurrentSpec or the Instruction. The server caps the transcript to the last
+// maxTranscriptTurns turns regardless of how many the client sends.
+type RefineTurn struct {
+	// Role is the participant: "user" (the person) or "assistant" (the model).
+	Role string `json:"role"`
+	// Text is the turn's natural-language content (flavor; not applied literally).
+	Text string `json:"text"`
+}
+
+// RefineAgentRequest is the POST /api/agents/refine body. CurrentSpec is the
+// existing simplified agent.yaml to rewrite; Instruction is the change to apply.
+// Transcript is optional prior context (capped server-side to maxTranscriptTurns).
+// Provider/Model/Namespace have the same meaning as GenerateAgentRequest.
+type RefineAgentRequest struct {
+	// CurrentSpec is the existing simplified agent.yaml (required). The server
+	// rejects inline credential material in this field before any model call.
+	CurrentSpec string `json:"currentSpec"`
+	// Instruction is the natural-language change to apply (required). E.g.
+	// "add a budget of $0.10 per conversation" or "rename the agent to invoicer".
+	Instruction string `json:"instruction"`
+	// Transcript is the optional prior conversation context (flavor only). The
+	// server caps it to the last maxTranscriptTurns turns; longer lists are silently
+	// trimmed from the front.
+	Transcript []RefineTurn `json:"transcript,omitempty"`
+	// Provider optionally names the connected provider route (same as generate).
+	Provider string `json:"provider,omitempty"`
+	// Model optionally pins the model (same as generate).
+	Model string `json:"model,omitempty"`
+	// Namespace scopes the connected-provider lookup; empty → the default namespace.
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// RefineAgentResponse is returned by POST /api/agents/refine on a SUCCESSFUL
+// refine: the rewritten simplified agent.yaml, its expand-validated CRD preview,
+// a server-computed changed-fields diff, and the model/provider that produced it.
+// Nothing is applied. No secret material is present.
+type RefineAgentResponse struct {
+	// AgentYAML is the full rewritten simplified agent.yaml (expand-validated).
+	AgentYAML string `json:"agentYAML"`
+	// Expanded is the CRD manifest preview (the internal/expand output), identical
+	// to POST /api/expand of the new AgentYAML.
+	Expanded string `json:"expanded"`
+	// Diff is the server-computed summary of what changed: a sorted list of
+	// top-level agent.yaml field names that were added, removed, or modified
+	// (e.g. ["systemPrompt", "tools"]). Empty when nothing changed.
+	Diff []string `json:"diff"`
+	// Model is the model that produced the refined config.
+	Model string `json:"model"`
+	// Provider is the connected provider the refine ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+}
+
 // --- Feedback / scores (GET /api/feedback?traceId=<id>) ----------------------
 //
 // The feedback panel reads Langfuse SCORES attached to one trace — the

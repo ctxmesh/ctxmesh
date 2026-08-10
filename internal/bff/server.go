@@ -1138,6 +1138,9 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/agents/generate", notImplemented("create-from-prompt generation"))
 	}
 
+	// Pure spec-editing (m71.1, extracted to keep Handler under gocyclo).
+	s.registerRefineRoute(authed)
+
 	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
 	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by
 	// TWO factors, in order:
