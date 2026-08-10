@@ -51,6 +51,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/bff"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
@@ -348,6 +349,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		ToolRegistryStore:           toolStore,
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
 		AuditStore:                  auditlog.NewPostgresStore(cpDB),
+		AlertStore:                  alertstore.NewPostgresStore(cpDB),
 		RunWorkerDispatch:           runWorkerDispatch,
 		CallerClients:               callerClients,
 		Scheme:                      scheme,

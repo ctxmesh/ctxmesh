@@ -692,6 +692,36 @@ export interface AuditListParams {
   cursor?: string;
 }
 
+// --- Alerts feed (GET /api/alerts) ------------------------------------------
+// The fired-alert console feed (M70, ADR 0063 D2): a newest-first list of alerts
+// fired by AlertPolicy conditions. Read-only — the controller auto-resolves on
+// condition true→false transitions; a manual ack path is a follow-up task.
+
+export interface AlertSummary {
+  id: number;
+  namespace: string;
+  policy: string;
+  condition: string;
+  agent?: string; // "namespace/agent" or absent for policy-level alerts
+  type: string;   // "regressionDetected" | "budgetSoft" | …
+  value?: string;
+  message?: string;
+  firedAt: string;    // RFC3339
+  resolvedAt: string | null; // RFC3339 or null (still firing)
+  firing: boolean;    // true when resolvedAt is null
+}
+
+// AlertListResponse mirrors the BFF's AlertListResponse: items is non-null on the wire.
+export interface AlertListResponse {
+  items: AlertSummary[];
+}
+
+// AlertListParams are the query params for GET /api/alerts.
+export interface AlertListParams {
+  namespace?: string;
+  limit?: number;
+}
+
 // --- GuardrailPolicies (GET /api/guardrailpolicies) -------------------------
 // The content-governance policies (m66.10, ADR 0059): PII scanning, pattern deny-
 // lists, an optional LLM-judge, per-user rate limits. Read-only surface (caller-scoped).
@@ -2460,6 +2490,35 @@ export const api = {
     }
     return (await res.json()) as AuditListResponse;
   },
+
+  // listAlerts reads the fired-alert feed (GET /api/alerts, M70, ADR 0063 D2).
+  // Returns null on 501 (the alert store is not configured — control-plane DSN
+  // absent) as the calm sentinel: callers render "not enabled", NOT an error.
+  // A 403 (the caller lacks `list alertpolicies`) throws a typed ApiError
+  // (isForbidden) so the page shows an honest forbidden state — never a fake empty
+  // list. Any other non-2xx throws too (retryable).
+  listAlerts: async (
+    params: AlertListParams = {},
+    signal?: AbortSignal,
+  ): Promise<AlertListResponse | null> => {
+    const qs = new URLSearchParams();
+    if (params.namespace) qs.set("namespace", params.namespace);
+    if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    const res = await apiFetch(`/api/alerts${suffix}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (res.status === 501) return null; // alert store not configured — calm sentinel
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `alerts failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as AlertListResponse;
+  },
+
   traceLink: (traceId: string, signal?: AbortSignal) =>
     getJSON<TraceLinkResponse>(
       `/api/traces/${encodeURIComponent(traceId)}`,

@@ -38,6 +38,10 @@ const (
 	// only a persona whose ClusterRole grants `list auditlogs` sees the audit surface. Not a CRD —
 	// the persona's RBAC on this name IS the audit-read policy (the toolregistries pattern).
 	resourceAuditLogs = "auditlogs"
+	// resourceAlerts is the CRD plural resource name GET /api/alerts authorizes against (M70,
+	// ADR 0063 D2): the caller's RBAC on `list alertpolicies` gates the fired-alert feed,
+	// mirroring the CRD path the API server would have enforced (exact RBAC parity, ADR 0011).
+	resourceAlerts = "alertpolicies"
 )
 
 // authorizeStore runs a caller-scoped SelfSubjectAccessReview for a store-backed
