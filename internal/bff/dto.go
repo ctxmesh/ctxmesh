@@ -1128,6 +1128,64 @@ type RefineAgentResponse struct {
 	Warnings []string `json:"warnings"`
 }
 
+// --- Team generation (POST /api/teams/generate, ADR 0065 D4) -----------------
+//
+// Team generation composes an AgentTeam spec from EXISTING, published members of
+// a named AgentRegistry. The LLM call runs SERVER-SIDE through the caller's
+// connected provider (caller-scoped key, never returned); the emitted YAML is
+// decoded into an AgentTeam and referentially validated (every agentRef must be
+// in the eligible member set — hallucinated refs are caught before any apply).
+// Generation NEVER auto-applies — it returns the spec for review.
+
+// GenerateTeamRequest is the POST /api/teams/generate body.
+type GenerateTeamRequest struct {
+	// Description is the natural-language description of the team to compose. Required.
+	Description string `json:"description"`
+	// RegistryRef is the name of the AgentRegistry whose published members are the
+	// eligible agent pool. Required.
+	RegistryRef string `json:"registryRef"`
+	// Provider optionally names the connected provider route (same as generate).
+	Provider string `json:"provider,omitempty"`
+	// Model optionally pins the generation model (same as generate).
+	Model string `json:"model,omitempty"`
+	// Namespace scopes the registry + provider lookups; empty → the default namespace.
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// GenerateTeamResponse is returned by POST /api/teams/generate on a SUCCESSFUL
+// generation: the emitted AgentTeam YAML plus the eligible member names.
+// Nothing is applied. No secret material is present.
+type GenerateTeamResponse struct {
+	// TeamYAML is the model-emitted AgentTeam YAML (referentially validated).
+	TeamYAML string `json:"teamYAML"`
+	// Model is the model that produced the spec.
+	Model string `json:"model"`
+	// Provider is the connected provider the generation ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+	// EligibleMembers are the AgentDeployment names that were offered to the model
+	// (published members of the registry, excluding drafts).
+	EligibleMembers []string `json:"eligibleMembers"`
+}
+
+// GenerateTeamInvalidResponse is returned (HTTP 422) when the model produced an
+// AgentTeam YAML that fails decode or referential validation. Not a 500; the
+// caller can regenerate.
+type GenerateTeamInvalidResponse struct {
+	// Error is the client-safe headline.
+	Error string `json:"error"`
+	// Reason is the decode/validation failure message.
+	Reason string `json:"reason"`
+	// TeamYAML is the raw model output (unvalidated) for the regenerate affordance.
+	TeamYAML string `json:"teamYAML"`
+	// Model / Provider identify the generation source.
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	// Regenerate signals the UI to surface the regenerate affordance (always true).
+	Regenerate bool `json:"regenerate"`
+}
+
 // --- Feedback / scores (GET /api/feedback?traceId=<id>) ----------------------
 //
 // The feedback panel reads Langfuse SCORES attached to one trace — the

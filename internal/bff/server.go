@@ -857,6 +857,10 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
 		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
 		authed.HandleFunc("GET /api/teams", s.handleListTeams)
+		// Team generation (ADR 0065 D4): compose an AgentTeamSpec from existing registry members.
+		// Caller-scoped, cost-tagged, NEVER auto-applies â returns spec + eligible members for review.
+		// The Go 1.22 ServeMux treats "POST /api/teams/generate" as distinct from "GET /api/teams".
+		authed.HandleFunc("POST /api/teams/generate", s.handleGenerateTeam)
 		// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
 		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
 		// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
