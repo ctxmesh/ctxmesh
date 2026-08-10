@@ -26,35 +26,7 @@ metadata:
     control-plane: bff
   name: agent-engine-bff-role
   namespace: {{ .Values.namespace }}
-# The BFF SA holds NO caller-scoped agent-CRD access (ADR 0011 — every user-facing
-# CRD op runs on the caller's own token) and no infra reads today. The online-scoring
-# worker's per-agent policy read is CLUSTER-scoped (agents span namespaces), so it is
-# the ClusterRole below, not this namespaced Role.
 rules: []
----
-# The ONE sanctioned SA-side CROSS-NAMESPACE read (M69, ADR 0062 Fork 2): the
-# online-scoring worker resolves each agent's EvalSuite.online policy — an off-request
-# control-plane read (governance #8) of AgentDeployment.spec.evalSuiteRef →
-# EvalSuite.spec.online, gated on ONLINE_SCORER_ENABLED. A ClusterRole because agents
-# live in many namespaces (a namespaced Role in the install ns would grant zero access
-# in an agent's own namespace). Read-only get/list, never a write.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: agent-engine
-    control-plane: bff
-  name: agent-engine-bff-online-scorer
-rules:
-- apiGroups:
-  - agents.ctxmesh.ai
-  resources:
-  - agentdeployments
-  - evalsuites
-  verbs:
-  - get
-  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -69,23 +41,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: agent-engine-bff-role
-subjects:
-- kind: ServiceAccount
-  name: agent-engine-bff
-  namespace: {{ .Values.namespace }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: agent-engine
-    control-plane: bff
-  name: agent-engine-bff-online-scorer
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: agent-engine-bff-online-scorer
 subjects:
 - kind: ServiceAccount
   name: agent-engine-bff
