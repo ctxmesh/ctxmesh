@@ -1,0 +1,222 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: alertpolicies.agents.ctxmesh.ai
+spec:
+  group: agents.ctxmesh.ai
+  names:
+    kind: AlertPolicy
+    listKind: AlertPolicyList
+    plural: alertpolicies
+    shortNames:
+    - ap
+    singular: alertpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.conditions[*].name
+      name: Conditions
+      priority: 1
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AlertPolicy defines a set of threshold rules that fire notifications to console or webhook channels
+          when any AgentDeployment metric (errorRate, p95Latency, budget, forecast, regression, runFailureRate)
+          breaches its threshold. This is the M70 alerting-plane CRD (ADR 0063 D2). Detection and routing
+          only — actuation (auto-rollback) is a separate controller path (ADR 0063 D4, deferred).
+
+          It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook
+          (the KnowledgeBase precedent).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AlertPolicySpec defines the desired state of an AlertPolicy
+              (M70, ADR 0063 D2).
+            properties:
+              conditions:
+                description: |-
+                  conditions is the list of threshold rules. The policy fires when ANY condition is breached.
+                  At least one condition is required.
+                items:
+                  description: AlertCondition defines a single threshold rule. The
+                    policy fires when any condition is breached.
+                  properties:
+                    name:
+                      description: |-
+                        name is a stable identifier for this condition; it keys the per-condition status in
+                        AlertPolicyStatus.conditions.
+                      type: string
+                    threshold:
+                      description: |-
+                        threshold is the numeric firing threshold; semantics depend on type:
+                          errorRate / runFailureRate — fraction 0..1 (e.g. "0.05" = 5 %)
+                          p95Latency                 — milliseconds (e.g. "500")
+                          budgetSoft                 — fraction-of-budget 0..1 (e.g. "0.8" = 80 % consumed)
+                          forecastExceeded           — USD (e.g. "10.00")
+                          regressionDetected         — ignored (event-driven; the RegressionDetected condition on the
+                                                       AgentDeployment triggers this regardless of a numeric threshold)
+                        Stored as a string to carry rates/ms/USD uniformly without lossy float conversion.
+                      type: string
+                    type:
+                      description: type selects the condition kind.
+                      enum:
+                      - errorRate
+                      - p95Latency
+                      - budgetSoft
+                      - forecastExceeded
+                      - regressionDetected
+                      - runFailureRate
+                      type: string
+                    window:
+                      description: |-
+                        window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected
+                        (which is event-driven, not window-based).
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                minItems: 1
+                type: array
+              route:
+                description: route describes where fired alerts are delivered.
+                properties:
+                  channels:
+                    description: channels is the list of notification destinations.
+                      At least one is required.
+                    items:
+                      description: AlertChannel describes a single notification destination.
+                      properties:
+                        type:
+                          description: |-
+                            type selects the channel kind.
+                              webhook — external POST, signed with the HMAC key from secretRef.
+                              console — the durable console alert feed (cpDB alert_events table).
+                          enum:
+                          - webhook
+                          - console
+                          type: string
+                        webhook:
+                          description: webhook configures the external POST endpoint.
+                            Required when type=webhook; ignored otherwise.
+                          properties:
+                            secretRef:
+                              description: |-
+                                secretRef names a Secret (in the same namespace as the AlertPolicy) that holds the
+                                HMAC signing key under the key "signingKey". The controller (trusted SA) reads this
+                                Secret to sign outbound payloads; the BFF never reads it (ADR 0011).
+                              type: string
+                            url:
+                              description: url is the HTTPS endpoint that receives
+                                the signed alert POST.
+                              type: string
+                          required:
+                          - url
+                          type: object
+                      required:
+                      - type
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - channels
+                type: object
+              selector:
+                description: |-
+                  selector picks the AgentDeployments this policy watches. An empty selector matches all
+                  AgentDeployments in the same namespace.
+                properties:
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: matchLabels selects AgentDeployments whose labels
+                      match all of the specified key/value pairs.
+                    type: object
+                  names:
+                    description: names lists explicit AgentDeployment names to watch.
+                      Takes union with matchLabels.
+                    items:
+                      type: string
+                    type: array
+                type: object
+            required:
+            - conditions
+            - route
+            type: object
+          status:
+            description: |-
+              AlertPolicyStatus defines the observed state of an AlertPolicy. Populated by the reconciler
+              (m70.4 evaluation, not this skeleton task m70.3).
+            properties:
+              conditions:
+                description: conditions reflects the per-spec-condition firing state.
+                  Keyed by AlertCondition.name.
+                items:
+                  description: |-
+                    AlertConditionStatus records the per-condition firing state, stamped by the reconciler each
+                    evaluation cycle (m70.4). The name matches AlertCondition.name so callers can correlate.
+                  properties:
+                    firing:
+                      description: firing is true when the condition is currently
+                        breached.
+                      type: boolean
+                    lastNotifiedTime:
+                      description: lastNotifiedTime is when the most recent alert
+                        notification was sent for this condition.
+                      format: date-time
+                      type: string
+                    lastTransitionTime:
+                      description: lastTransitionTime is when the Firing field last
+                        changed.
+                      format: date-time
+                      type: string
+                    lastValue:
+                      description: lastValue is the most recent evaluated metric value
+                        (string, same encoding as Threshold).
+                      type: string
+                    name:
+                      description: name matches the AlertCondition.name this status
+                        entry corresponds to.
+                      type: string
+                  required:
+                  - firing
+                  - name
+                  type: object
+                type: array
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation most recently
+                  reconciled.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -396,6 +396,16 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)
 	}
+	// AlertPolicy reconciler (M70, ADR 0063 D2): detection-only skeleton; evaluation logic (m70.4)
+	// is wired separately. No external stores required — the reconciler reads only AlertPolicy and
+	// AgentDeployment objects from the manager cache.
+	if err := (&controller.AlertPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	// Control-plane audit (M11.4, PRD §20): a controller-emitted audit trail of

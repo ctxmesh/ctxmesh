@@ -18,6 +18,7 @@ resources:
 - bases/agents.ctxmesh.ai_clustercredentialstores.yaml
 - bases/agents.ctxmesh.ai_tenants.yaml
 - bases/agents.ctxmesh.ai_knowledgebases.yaml
+- bases/agents.ctxmesh.ai_alertpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
