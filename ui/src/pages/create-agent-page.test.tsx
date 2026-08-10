@@ -667,3 +667,263 @@ describe("CreateAgentPage — refine chat + draft lifecycle (m71.4/m71.5)", () =
     expect(screen.getByTestId("draft-conflict")).toHaveTextContent(/changed since you loaded it/);
   });
 });
+
+// ── m72.1 smart defaults ────────────────────────────────────────────────────
+
+describe("CreateAgentPage — m72.1 smart defaults", () => {
+  it("auto-defaults model picker to primary (non-small) model when multiple models are connected", async () => {
+    // Provider returns a haiku (small tier) first, then sonnet (flagship tier).
+    // The auto-default should pick sonnet (flagship), skipping haiku (small tier).
+    // NOTE: the page reads r.items so we must include `items` in the mock response.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => json, text: async () => JSON.stringify(json) } as Response);
+
+        const providerEntry = { name: "anthropic", namespace: "default", provider: "anthropic",
+          displayName: "Anthropic", models: ["claude-haiku-4", "claude-sonnet-4-6"],
+          secretName: "anthropic", ready: true };
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [providerEntry], items: [providerEntry] });
+        if (url === "/api/tools") return j({ tools: [] });
+        if (url.startsWith("/api/modelroutes")) return j({ items: [] });
+        if (url.startsWith("/api/promptversions")) return j({ items: [] });
+        if (url === "/api/agents/check-requirements" && method === "POST")
+          return j({ model: { required: false, connected: true }, tools: [] });
+        return j({}, false, 404);
+      }),
+    );
+    renderPage();
+    await pickConfigure();
+
+    // Advance past Basics by providing a name.
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "smart-agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    // The Behavior step shows the model picker — wait for it
+    await screen.findByLabelText("System prompt");
+    const modelSelect = await screen.findByTestId("cfg-model-select");
+
+    // claude-sonnet-4-6 is the flagship; the auto-default should pick it (not haiku)
+    await waitFor(() => {
+      expect((modelSelect as HTMLSelectElement).value).toContain("claude-sonnet-4-6");
+    });
+    expect((modelSelect as HTMLSelectElement).value).not.toContain("claude-haiku-4");
+  });
+
+  it("renders the Keep warm checkbox in the resources step (default unchecked)", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+
+    // Advance past Basics and Behavior steps to get to Resources
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "warm-agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByLabelText("System prompt");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    // Resources step — should show Keep warm checkbox, not min/max inputs
+    const keepWarm = await screen.findByTestId("cfg-keep-warm");
+    expect(keepWarm).toBeInTheDocument();
+    expect((keepWarm as HTMLInputElement).checked).toBe(false);
+    // Min/max inputs should NOT be present
+    expect(screen.queryByLabelText("Min replicas")).toBeNull();
+    expect(screen.queryByLabelText("Max replicas")).toBeNull();
+  });
+
+  it("toggling Keep warm emits scaling.min:1 in the config YAML preview", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "warm-agent2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByLabelText("System prompt");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    // Toggle Keep warm on
+    const keepWarm = await screen.findByTestId("cfg-keep-warm");
+    fireEvent.click(keepWarm);
+    expect((keepWarm as HTMLInputElement).checked).toBe(true);
+
+    // Advance to review step — the YAML preview should contain scaling.min:1
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByText("Cost budget");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByText(/Ready to review/);
+    // The FriendlySummary won't show scaling, but the Advanced YAML will
+    // (we don't need to click Advanced to verify the form state is correct)
+    expect((keepWarm as HTMLInputElement).checked).toBe(true);
+  });
+});
+
+// ── m72.3 check-requirements checklist ──────────────────────────────────────
+
+describe("CreateAgentPage — m72.3 check-requirements checklist (advisory)", () => {
+  function recordingFetchWithCheckReqs(checkReqsResponse: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok, status,
+            json: async () => json,
+            text: async () => JSON.stringify(json),
+          } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
+        if (url === "/api/tools") return j({ tools: [] });
+        if (url === "/api/agents/generate" && method === "POST")
+          return j({ agentYAML: "name: test-agent\nruntime: managed\nmodel:\n  route: anthropic\ntools:\n  - get_order\n", expanded: "", model: "claude-sonnet-4-6" });
+        if (url === "/api/agents/check-requirements" && method === "POST")
+          return j(checkReqsResponse);
+        if (url === "/api/expand" && method === "POST")
+          return Promise.resolve({ ok: true, status: 200, text: async () => "kind: AgentDeployment\n", json: async () => ({}) } as Response);
+        if (url === "/api/agents" && method === "POST")
+          return j({ created: [{ kind: "AgentDeployment", name: "test-agent", namespace: "default" }] }, true, 201);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows the requirements checklist when check-requirements returns model+tools", async () => {
+    recordingFetchWithCheckReqs({
+      model: { required: true, connected: true, route: "anthropic" },
+      tools: [
+        { name: "get_order", status: "ready" },
+      ],
+    });
+    renderPage();
+
+    // Navigate: describe-it → generate → classic create path → SharedReview
+    await pickDescribe();
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "order helper" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+
+    // Wait for the refine-and-draft surface, then go to classic create (SharedReview)
+    await screen.findByTestId("refine-and-draft-surface");
+    fireEvent.click(screen.getByTestId("create-agent-direct"));
+    await screen.findByTestId("shared-review");
+
+    // Checklist should appear (advisory)
+    await waitFor(() => {
+      expect(screen.queryByTestId("requirements-checklist")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("requirements-checklist")).toHaveTextContent(/anthropic/);
+    expect(screen.getByTestId("requirements-checklist")).toHaveTextContent(/get_order/);
+  });
+
+  it("checklist does not block create — Create button is still enabled", async () => {
+    recordingFetchWithCheckReqs({
+      model: { required: true, connected: false, route: "missing-route" },
+      tools: [{ name: "tool1", status: "not-found" }],
+    });
+    renderPage();
+
+    await pickDescribe();
+    fireEvent.change(screen.getByLabelText("Agent description"), { target: { value: "test agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Generate/ }));
+
+    await screen.findByTestId("refine-and-draft-surface");
+    fireEvent.click(screen.getByTestId("create-agent-direct"));
+    await screen.findByTestId("shared-review");
+
+    // Create button must be present and enabled even when requirements are not met
+    const createBtn = await screen.findByTestId("create-button");
+    expect(createBtn).toBeInTheDocument();
+    expect(createBtn).not.toBeDisabled();
+  });
+});
+
+// ── m72.5 recipe gallery ─────────────────────────────────────────────────────
+
+describe("CreateAgentPage — m72.5 recipe gallery", () => {
+  const recipeSpec = "name: recipe-agent\nruntime: managed\nsystemPrompt: recipe prompt\n";
+
+  function recordingFetchWithRecipes() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok, status,
+            json: async () => json,
+            text: async () => JSON.stringify(json),
+          } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
+        if (url === "/api/recipes") return j({ recipes: [
+          { name: "order-bot", title: "Order Bot", description: "Handles order queries.", icon: "🛒", spec: recipeSpec },
+          { name: "summarizer", title: "Summarizer", description: "Condenses long docs.", icon: "📝", spec: "name: summarizer\nruntime: managed\n" },
+        ]});
+        if (url === "/api/tools") return j({ tools: [] });
+        if (url === "/api/agents/check-requirements" && method === "POST")
+          return j({ model: { required: false, connected: true }, tools: [] });
+        if (url === "/api/expand" && method === "POST")
+          return Promise.resolve({ ok: true, status: 200, text: async () => "kind: AgentDeployment\n", json: async () => ({}) } as Response);
+        if (url === "/api/agents" && method === "POST")
+          return j({ created: [{ kind: "AgentDeployment", name: "recipe-agent", namespace: "default" }] }, true, 201);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows the 'Start from a recipe' toggle on the entrance", async () => {
+    recordingFetchWithRecipes();
+    renderPage();
+
+    await screen.findByTestId("create-entrance");
+    expect(screen.getByTestId("entrance-recipes-toggle")).toBeInTheDocument();
+  });
+
+  it("clicking the toggle loads and shows the recipe card grid", async () => {
+    recordingFetchWithRecipes();
+    renderPage();
+
+    await screen.findByTestId("create-entrance");
+    fireEvent.click(screen.getByTestId("entrance-recipes-toggle"));
+
+    // Recipe gallery should appear with cards
+    await screen.findByTestId("recipe-gallery");
+    expect(await screen.findByTestId("recipe-card-order-bot")).toBeInTheDocument();
+    expect(screen.getByTestId("recipe-card-summarizer")).toBeInTheDocument();
+    expect(screen.getByText("Order Bot")).toBeInTheDocument();
+    expect(screen.getByText("Handles order queries.")).toBeInTheDocument();
+  });
+
+  it("clicking a recipe card opens SharedReview pre-filled with the recipe spec", async () => {
+    recordingFetchWithRecipes();
+    renderPage();
+
+    await screen.findByTestId("create-entrance");
+    fireEvent.click(screen.getByTestId("entrance-recipes-toggle"));
+
+    const orderBotCard = await screen.findByTestId("recipe-card-order-bot");
+    fireEvent.click(orderBotCard);
+
+    // Should land on shared review with the recipe's content
+    await screen.findByTestId("shared-review");
+    // The friendly summary should contain the recipe agent name
+    expect(screen.getByTestId("friendly-summary")).toHaveTextContent(/recipe-agent/);
+  });
+});

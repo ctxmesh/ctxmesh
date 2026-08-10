@@ -1165,6 +1165,11 @@ func (s *Server) Handler() http.Handler {
 	// console reads) but performs no cluster lookup.
 	authed.HandleFunc("GET /api/recipes", s.handleListRecipes)
 
+	// Check-requirements (ADR 0066 D3): a read-only advisory probe. Registered via a
+	// helper (like registerRefineRoute) so its caller-scoped guard doesn't add a
+	// branch to Handler()'s cyclomatic complexity.
+	s.registerCheckRequirementsRoute(authed)
+
 	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
 	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by
 	// TWO factors, in order:
