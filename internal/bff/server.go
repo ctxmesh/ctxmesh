@@ -727,6 +727,15 @@ func (s *Server) Handler() http.Handler {
 		// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
 		// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
 		authed.HandleFunc("DELETE /api/agents/{ns}/{name}", s.handleDeleteAgent)
+		// Publish a draft agent (ADR 0065 D1 — draft early, iterate live, publish
+		// when done): removes the agents.ctxmesh.ai/stage=draft label from the
+		// AgentDeployment so it becomes visible to the default list and team/registry
+		// consumption. Idempotent (already-published → 200 no-op). Caller-scoped
+		// (ADR 0011): the Get+Patch run through the caller's token; a viewer's Patch
+		// surfaces as 403. The Go 1.22 ServeMux treats this sub-path pattern as MORE
+		// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
+		// never shadows those routes.
+		authed.HandleFunc("POST /api/agents/{ns}/{name}/publish", s.handlePublishAgent)
 		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
 		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
 		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
@@ -848,6 +857,13 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
 		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
 		authed.HandleFunc("GET /api/teams", s.handleListTeams)
+		// Team create (ADR 0065 D4): caller-scoped CRD create from a reviewed AgentTeam YAML.
+		// The Go 1.22 ServeMux distinguishes "POST /api/teams" from "GET /api/teams".
+		authed.HandleFunc("POST /api/teams", s.handleCreateTeam)
+		// Team generation (ADR 0065 D4): compose an AgentTeamSpec from existing registry members.
+		// Caller-scoped, cost-tagged, NEVER auto-applies â returns spec + eligible members for review.
+		// The Go 1.22 ServeMux treats "POST /api/teams/generate" as distinct from "GET /api/teams".
+		authed.HandleFunc("POST /api/teams/generate", s.handleGenerateTeam)
 		// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
 		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
 		// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
@@ -986,6 +1002,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("caller-scoped agent runs"))
 		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
 		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
+		authed.Handle("POST /api/agents/{ns}/{name}/publish", notImplemented("caller-scoped agent publish"))
 		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/modelroutes", notImplemented("caller-scoped model route list"))
@@ -1137,6 +1154,9 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		authed.Handle("POST /api/agents/generate", notImplemented("create-from-prompt generation"))
 	}
+
+	// Pure spec-editing (m71.1, extracted to keep Handler under gocyclo).
+	s.registerRefineRoute(authed)
 
 	// Connect-a-provider (m14.4, ADR 0015): validate a pasted key server-side and
 	// create Secret + SecretBinding + ModelRoute with the CALLER'S client. Gated by

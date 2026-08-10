@@ -125,7 +125,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// NOT the caller's session — FUNC-9/ADR 0027), an unreachable provider → 502
 	// (honest, never a 500).
 	output, err := chatComplete(r.Context(), s.providerHTTP,
-		gen.provider, gen.apiKey, gen.baseURL, gen.model, generationSystemPrompt, req.Description)
+		gen.provider, gen.apiKey, gen.baseURL, gen.model, generationSystemPrompt, req.Description, generationCostTag)
 	if err != nil {
 		if pe, isPE := isProviderError(err); isPE {
 			writeError(w, pe.status, pe.msg)

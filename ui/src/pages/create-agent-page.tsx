@@ -8,6 +8,7 @@ import {
   Plus,
   Rocket,
   Search,
+  Send,
   Server,
   Sparkles,
   Terminal,
@@ -38,6 +39,8 @@ import {
   type ProviderSummary,
   type CreatedObject,
   type GenerateAgentResponse,
+  type RefineAgentResponse,
+  type RefineTurn,
 } from "@/lib/api";
 import {
   emptyForm,
@@ -83,6 +86,7 @@ type DescribeStage =
   | { kind: "prompt" }
   | { kind: "generating" }
   | { kind: "review"; gen: GenerateAgentResponse }
+  | { kind: "refining" }
   | { kind: "regenerate"; reason: string; rawYAML: string };
 
 // CreateState covers the shared review's Preview/Create lifecycle. It carries
@@ -95,6 +99,16 @@ type CreateState =
   | { kind: "creating" }
   | { kind: "created"; created: CreatedObject[] }
   | { kind: "error"; message: string; status?: number; forbidden?: boolean };
+
+type DraftState =
+  | { kind: "none" }
+  | { kind: "creating" }
+  | { kind: "created"; ns: string; name: string; resourceVersion?: string; isDraft: boolean }
+  | { kind: "applying" }
+  | { kind: "publishing" }
+  | { kind: "published" }
+  | { kind: "conflict" }
+  | { kind: "error"; message: string };
 
 export function CreateAgentPage() {
   const [params] = useSearchParams();
@@ -311,30 +325,15 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
   const generating = stage.kind === "generating";
   const ready = description.trim().length > 0;
 
-  // The generation review advanced past → the shared review with the generated
-  // tools pre-selected + the generated agentYAML as the base.
+  // The generation review advanced past → the refine + draft surface (m71.4/m71.5).
   if (stage.kind === "review") {
     return (
-      <SharedReview
-        baseYAML={stage.gen.agentYAML}
-        initialTools={parseToolsFromYAML(stage.gen.agentYAML)}
-        summary={summarizeYAML(stage.gen.agentYAML)}
-        advancedYAML={stage.gen.expanded ?? stage.gen.agentYAML}
-        // m21: run the agent on the SAME model the user picked to generate — the BFF
-        // ensures a route for it (so any connected model works, not just the primary).
-        modelPick={(() => {
-          const hit = modelChoices.find((c) => c.id === model);
-          return hit
-            ? { connection: hit.connection, provider: hit.provider, model }
-            : undefined;
-        })()}
-        onBack={() => setStage({ kind: "review", gen: stage.gen })}
-        header={
-          <GenerationReviewHeader
-            gen={stage.gen}
-            onRegenerate={() => setStage({ kind: "prompt" })}
-          />
-        }
+      <RefineAndDraftSurface
+        gen={stage.gen}
+        model={model}
+        modelChoices={modelChoices}
+        onBack={() => setStage({ kind: "prompt" })}
+        onRegenerate={() => setStage({ kind: "prompt" })}
       />
     );
   }
@@ -416,6 +415,538 @@ function DescribeFlow({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// RefineAndDraftSurface — the builder surface (m71.4 + m71.5): after generation,
+// the user can refine by chat (each message calls /api/agents/refine), create a
+// draft (labeled stage:draft), test it inline, and publish.
+// The one-shot path (generate → create without refining) is also preserved.
+function RefineAndDraftSurface({
+  gen,
+  model,
+  modelChoices,
+  onBack,
+  onRegenerate,
+}: {
+  gen: GenerateAgentResponse;
+  model: string;
+  modelChoices: { id: string; provider: string; connection: string }[];
+  onBack: () => void;
+  onRegenerate: () => void;
+}) {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const { namespace, list } = useNamespace();
+  const nsOptions =
+    list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
+  const [targetNs, setTargetNs] = React.useState(namespace || "default");
+  React.useEffect(() => {
+    if (list.kind !== "ready") return;
+    const names = list.namespaces.map((n) => n.name);
+    if (names.length > 0 && !names.includes(targetNs)) setTargetNs(names[0]);
+  }, [list, targetNs]);
+
+  const { can, reprobe } = useCapabilities();
+  const canCreate = can(RES_AGENTS, "create");
+
+  // The current candidate spec — starts at the generated YAML, evolves with each refine turn.
+  const [candidateYAML, setCandidateYAML] = React.useState(gen.agentYAML);
+
+  // The refine chat state: transcript (capped to 8 turns), input, loading.
+  const [refineTranscript, setRefineTranscript] = React.useState<RefineTurn[]>([]);
+  const [refineDiff, setRefineDiff] = React.useState<string[] | null>(null);
+  const [refineInput, setRefineInput] = React.useState("");
+  const [refineLoading, setRefineLoading] = React.useState(false);
+  const [refineError, setRefineError] = React.useState<string | null>(null);
+
+  // The draft lifecycle state.
+  const [draftState, setDraftState] = React.useState<DraftState>({ kind: "none" });
+
+  // The inline test chat state for the created draft.
+  const [testTurns, setTestTurns] = React.useState<{ id: number; role: "user" | "agent"; text: string; pending?: boolean; error?: string }[]>([]);
+  const [testInput, setTestInput] = React.useState("");
+  const [testBusy, setTestBusy] = React.useState(false);
+  const [testConvId] = React.useState(() => `draft-test-${Date.now()}`);
+  const testTurnId = React.useRef(0);
+
+  // The advanced YAML view toggle.
+  const [showYAML, setShowYAML] = React.useState(false);
+  // The expanded form shown in the Advanced section — starts as the generated CRD
+  // preview and updates whenever refineAgent returns an expanded field.
+  const [advancedYAML, setAdvancedYAML] = React.useState(gen.expanded ?? gen.agentYAML);
+
+  // The summary from the current candidate.
+  const summary = React.useMemo(() => summarizeYAML(candidateYAML), [candidateYAML]);
+
+  async function onRefine() {
+    const instruction = refineInput.trim();
+    if (!instruction || refineLoading) return;
+    setRefineLoading(true);
+    setRefineError(null);
+    setRefineDiff(null);
+    const userTurn: RefineTurn = { role: "user", text: instruction };
+    // Cap transcript to last 8 turns client-side.
+    const capped = [...refineTranscript, userTurn].slice(-8);
+    try {
+      const res: RefineAgentResponse = await api.refineAgent({
+        currentSpec: candidateYAML,
+        instruction,
+        transcript: capped.slice(0, -1), // send history before this turn
+      });
+      if (res.regenerate) {
+        setRefineError(res.reason ?? res.error ?? "Refinement needs another pass.");
+        setRefineTranscript((t) => [...t, userTurn]);
+      } else {
+        setCandidateYAML(res.agentYAML);
+        if (res.expanded) setAdvancedYAML(res.expanded);
+        setRefineDiff(res.diff ?? null);
+        const assistantTurn: RefineTurn = {
+          role: "assistant",
+          text: res.diff && res.diff.length > 0
+            ? `Applied: changed ${res.diff.join(", ")}.`
+            : "Applied the refinement.",
+        };
+        setRefineTranscript((t) => [...t, userTurn, assistantTurn].slice(-8));
+      }
+    } catch (err) {
+      setRefineError(err instanceof Error ? err.message : "refinement failed");
+      setRefineTranscript((t) => [...t, userTurn]);
+    } finally {
+      setRefineLoading(false);
+      setRefineInput("");
+    }
+  }
+
+  function onRefineKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void onRefine();
+    }
+  }
+
+  async function onCreateDraft() {
+    if (!canCreate) return;
+    setDraftState({ kind: "creating" });
+    try {
+      const modelPick = modelChoices.find((c) => c.id === model);
+      const res = await api.createAgent(
+        candidateYAML,
+        targetNs,
+        modelPick ? { connection: modelPick.connection, provider: modelPick.provider, model: modelPick.id } : undefined,
+        "draft",
+      );
+      const agent = res.created?.find((o) => o.kind === "AgentDeployment") ?? res.created?.[0];
+      if (!agent) throw new Error("No agent returned from create");
+      setDraftState({ kind: "created", ns: agent.namespace, name: agent.name, isDraft: true });
+      toast({ variant: "success", title: "Draft created", description: `${agent.name} — test it below, then publish when ready.` });
+    } catch (err) {
+      if (err instanceof ApiError && err.isForbidden) reprobe();
+      setDraftState({ kind: "error", message: err instanceof Error ? err.message : "create failed" });
+    }
+  }
+
+  async function onApplyRefinement() {
+    if (draftState.kind !== "created") return;
+    const { ns, name, resourceVersion } = draftState;
+    setDraftState({ kind: "applying" });
+    try {
+      await api.updateAgentSpec(ns, name, candidateYAML, resourceVersion);
+      // Re-fetch the resourceVersion after apply.
+      const detail = await api.agentDetail(ns, name);
+      setDraftState({
+        kind: "created",
+        ns,
+        name,
+        resourceVersion: detail.resourceVersion,
+        isDraft: detail.isDraft ?? true,
+      });
+      toast({ variant: "success", title: "Refinement applied", description: "The draft agent has been updated." });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setDraftState({ kind: "conflict" });
+        return;
+      }
+      setDraftState({
+        kind: "created",
+        ns,
+        name,
+        resourceVersion,
+        isDraft: true,
+      });
+    }
+  }
+
+  async function onPublish() {
+    if (draftState.kind !== "created") return;
+    const { ns, name } = draftState;
+    setDraftState({ kind: "publishing" });
+    try {
+      await api.publishAgent(ns, name);
+      setDraftState({ kind: "published" });
+      toast({ variant: "success", title: "Agent published", description: `${name} is now live.` });
+      setTimeout(() => {
+        navigate(`/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`);
+      }, 1200);
+    } catch (err) {
+      setDraftState({ kind: "error", message: err instanceof Error ? err.message : "publish failed" });
+    }
+  }
+
+  async function onTestSend() {
+    if (!testInput.trim() || testBusy || draftState.kind !== "created") return;
+    const text = testInput.trim();
+    const userId = ++testTurnId.current;
+    const agentId = ++testTurnId.current;
+    setTestTurns((t) => [
+      ...t,
+      { id: userId, role: "user", text },
+      { id: agentId, role: "agent", text: "", pending: true },
+    ]);
+    setTestInput("");
+    setTestBusy(true);
+    try {
+      const res = await api.invoke({
+        agent: draftState.name,
+        namespace: draftState.ns,
+        input: { input: text },
+        conversationId: testConvId,
+      });
+      setTestTurns((ts) =>
+        ts.map((t) =>
+          t.id === agentId ? { ...t, pending: false, text: res.response } : t,
+        ),
+      );
+    } catch (err) {
+      setTestTurns((ts) =>
+        ts.map((t) =>
+          t.id === agentId
+            ? { ...t, pending: false, error: err instanceof Error ? err.message : "invoke failed" }
+            : t,
+        ),
+      );
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
+  function onTestKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void onTestSend();
+    }
+  }
+
+  const draftCreated = draftState.kind === "created";
+  const draftApplying = draftState.kind === "applying";
+  const draftPublishing = draftState.kind === "publishing";
+  const hasRefinements = refineTranscript.length > 0;
+
+  // The one-shot path: if no refine turns and no draft, show the SharedReview directly.
+  // This preserves the existing flow where users can just generate + create without refining.
+  const [useOneShot, setUseOneShot] = React.useState(false);
+  if (useOneShot) {
+    const hit = modelChoices.find((c) => c.id === model);
+    return (
+      <SharedReview
+        baseYAML={candidateYAML}
+        initialTools={parseToolsFromYAML(candidateYAML)}
+        summary={summarizeYAML(candidateYAML)}
+        advancedYAML={advancedYAML}
+        modelPick={hit ? { connection: hit.connection, provider: hit.provider, model: hit.id } : undefined}
+        onBack={onBack}
+        header={<GenerationReviewHeader gen={gen} onRegenerate={onRegenerate} />}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-4" data-testid="refine-and-draft-surface">
+      {/* Generation summary header */}
+      <div className="rounded-lg border bg-card p-5 shadow-card">
+        <GenerationReviewHeader gen={gen} onRegenerate={onRegenerate} />
+        <div className="mt-4">
+          <FriendlySummary summary={{ ...summary, tools: parseToolsFromYAML(candidateYAML) }} />
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowYAML((v) => !v)}
+          className="mt-3 flex w-full items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+          aria-expanded={showYAML}
+          data-testid="advanced-toggle"
+        >
+          <ChevronRight
+            className={`h-4 w-4 transition-transform ${showYAML ? "rotate-90" : ""}`}
+          />
+          Advanced — view agent.yaml
+        </button>
+        {showYAML && (
+          <Textarea
+            aria-label="Advanced — generated manifest"
+            data-testid="advanced-yaml"
+            readOnly
+            className="mt-3 min-h-[10rem] font-mono text-xs"
+            value={advancedYAML}
+          />
+        )}
+      </div>
+
+      {/* Refine chat panel (m71.4) */}
+      <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="refine-chat-panel">
+        <p className="mb-1 text-sm font-semibold">Refine by chat</p>
+        <p className="mb-3 text-xs text-muted-foreground">
+          Say what to change — "add web search", "be stricter" — and we update
+          the spec. Or skip straight to create.
+        </p>
+        {/* Transcript */}
+        {refineTranscript.length > 0 && (
+          <div className="mb-3 space-y-2" data-testid="refine-transcript">
+            {refineTranscript.map((turn, i) => (
+              <div
+                key={i}
+                className={`flex ${turn.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-xl px-3 py-2 text-xs ${
+                    turn.role === "user"
+                      ? "bg-primary text-primary-foreground rounded-br-sm"
+                      : "border bg-surface-2/40 text-foreground rounded-bl-sm"
+                  }`}
+                  data-testid={turn.role === "user" ? "refine-turn-user" : "refine-turn-assistant"}
+                >
+                  {turn.text}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Diff chip */}
+        {refineDiff && refineDiff.length > 0 && (
+          <div
+            className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-success/40 bg-success/10 px-3 py-1 text-xs text-success-foreground"
+            data-testid="refine-diff-chip"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Changed: {refineDiff.join(", ")}
+          </div>
+        )}
+        {/* Refine error */}
+        {refineError && (
+          <p
+            className="mb-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning-foreground"
+            role="alert"
+            data-testid="refine-error"
+          >
+            {refineError}
+          </p>
+        )}
+        {/* Refine input */}
+        <div className="flex items-end gap-2">
+          <Textarea
+            aria-label="Refine instruction"
+            rows={2}
+            value={refineInput}
+            onChange={(e) => setRefineInput(e.target.value)}
+            onKeyDown={onRefineKeyDown}
+            placeholder="Add web search, be stricter about formatting…"
+            className="resize-none text-xs"
+            data-testid="refine-input"
+            disabled={refineLoading}
+          />
+          <Button
+            size="icon"
+            onClick={() => void onRefine()}
+            disabled={refineLoading || !refineInput.trim()}
+            data-testid="refine-send"
+            aria-label="Send refinement"
+            className="h-9 w-9 shrink-0"
+          >
+            <Send className="h-4 w-4" />
+          </Button>
+        </div>
+        {refineLoading && (
+          <p className="mt-1.5 text-xs text-muted-foreground" data-testid="refine-loading">
+            Refining…
+          </p>
+        )}
+        <p className="mt-1.5 text-[10px] text-muted-foreground">
+          Enter to send · Shift+Enter for newline · transcript capped to 8 turns
+        </p>
+      </div>
+
+      {/* Draft lifecycle + inline test (m71.5) */}
+      <div className="rounded-lg border bg-surface-2/40 p-4" data-testid="draft-lifecycle">
+        {/* Conflict error */}
+        {draftState.kind === "conflict" && (
+          <p
+            className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            role="alert"
+            data-testid="draft-conflict"
+          >
+            The agent changed since you loaded it — reload to get the latest version.
+          </p>
+        )}
+        {/* General error */}
+        {draftState.kind === "error" && (
+          <p
+            className="mb-3 text-xs text-destructive"
+            role="alert"
+            data-testid="draft-error"
+          >
+            {draftState.message}
+          </p>
+        )}
+        {/* Published success */}
+        {draftState.kind === "published" && (
+          <div className="mb-3 flex items-center gap-2 text-success" data-testid="draft-published">
+            <CheckCircle2 className="h-4 w-4" />
+            <p className="text-sm font-medium">Published — opening the agent page…</p>
+          </div>
+        )}
+        {/* Namespace selector */}
+        {canCreate && nsOptions.length > 0 && draftState.kind === "none" && (
+          <div className="mb-3">
+            <FormField id="draft-namespace" label="Namespace">
+              <Select
+                id="draft-namespace"
+                value={nsOptions.includes(targetNs) ? targetNs : ""}
+                onChange={(e) => setTargetNs(e.target.value)}
+                data-testid="draft-namespace-select"
+              >
+                {nsOptions.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </Select>
+            </FormField>
+          </div>
+        )}
+        {/* Action buttons row */}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="ghost" onClick={onBack} disabled={draftState.kind === "creating" || draftState.kind === "publishing"}>
+            Back
+          </Button>
+          {/* One-shot path (skip refine → classic create flow) */}
+          {draftState.kind === "none" && (
+            <Button
+              variant="outline"
+              onClick={() => setUseOneShot(true)}
+              data-testid="create-agent-direct"
+            >
+              <Rocket className="h-4 w-4" />
+              Create agent (classic)
+            </Button>
+          )}
+          {/* Create draft & test */}
+          {canCreate && draftState.kind === "none" && (
+            <Button
+              onClick={() => void onCreateDraft()}
+              data-testid="create-draft-button"
+            >
+              <Sparkles className="h-4 w-4" />
+              Create draft & test
+            </Button>
+          )}
+          {/* Apply refinement to live draft */}
+          {draftCreated && hasRefinements && (
+            <Button
+              variant="outline"
+              onClick={() => void onApplyRefinement()}
+              disabled={draftApplying}
+              data-testid="apply-refinement-button"
+            >
+              {draftApplying ? "Applying…" : "Apply refinement"}
+            </Button>
+          )}
+          {/* Publish */}
+          {draftCreated && (
+            <Button
+              onClick={() => void onPublish()}
+              disabled={draftPublishing}
+              data-testid="publish-button"
+            >
+              <Rocket className="h-4 w-4" />
+              {draftPublishing ? "Publishing…" : "Publish"}
+            </Button>
+          )}
+          {/* Creating/applying spinner states */}
+          {(draftState.kind === "creating") && (
+            <p className="text-xs text-muted-foreground" data-testid="draft-creating">
+              Creating draft…
+            </p>
+          )}
+        </div>
+        {/* Inline test panel (shown after draft is created) */}
+        {draftCreated && (
+          <div className="mt-4 rounded-lg border bg-card" data-testid="draft-test-panel">
+            <div className="border-b px-4 py-3">
+              <p className="text-sm font-medium">Test draft: {draftState.name}</p>
+              <p className="text-xs text-muted-foreground">
+                Try it out — the first invoke may wait while the draft deploys.
+              </p>
+            </div>
+            {/* Test chat thread */}
+            <div className="flex flex-col gap-3 px-4 py-4" style={{ minHeight: "10rem" }} data-testid="draft-test-thread">
+              {testTurns.length === 0 ? (
+                <p className="text-xs text-muted-foreground" data-testid="draft-test-empty">
+                  Send a message to test the draft agent.
+                </p>
+              ) : (
+                testTurns.map((t) => (
+                  <div key={t.id} className={`flex ${t.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`max-w-[85%] rounded-xl px-3 py-2 text-xs ${
+                        t.role === "user"
+                          ? "bg-primary text-primary-foreground rounded-br-sm"
+                          : "border bg-surface-2/30 rounded-bl-sm"
+                      }`}
+                      data-testid={t.role === "user" ? "test-turn-user" : "test-turn-agent"}
+                    >
+                      {t.pending ? (
+                        <span className="inline-flex items-center gap-1" data-testid="test-pending">
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.25s]" />
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40 [animation-delay:-0.12s]" />
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-foreground/40" />
+                        </span>
+                      ) : t.error ? (
+                        <span className="text-destructive" role="alert">{t.error}</span>
+                      ) : (
+                        t.text
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            {/* Test input */}
+            <div className="border-t p-3">
+              <div className="flex items-end gap-2">
+                <Textarea
+                  aria-label="Test message"
+                  rows={2}
+                  value={testInput}
+                  onChange={(e) => setTestInput(e.target.value)}
+                  onKeyDown={onTestKeyDown}
+                  placeholder="Test your draft agent…"
+                  className="resize-none text-xs"
+                  data-testid="draft-test-input"
+                  disabled={testBusy}
+                />
+                <Button
+                  size="icon"
+                  onClick={() => void onTestSend()}
+                  disabled={testBusy || !testInput.trim()}
+                  data-testid="draft-test-send"
+                  aria-label="Send test message"
+                  className="h-9 w-9 shrink-0"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

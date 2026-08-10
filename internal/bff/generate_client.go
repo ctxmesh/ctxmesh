@@ -65,7 +65,7 @@ const chatRoleUser = "user"
 //
 // httpClient lets tests point the call at an httptest fake provider; nil uses a
 // bounded default client. baseURL overrides the provider default when non-empty.
-func chatComplete(ctx context.Context, httpClient *http.Client, provider, apiKey, baseURL, model, systemPrompt, description string) (string, error) {
+func chatComplete(ctx context.Context, httpClient *http.Client, provider, apiKey, baseURL, model, systemPrompt, description, costTag string) (string, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
@@ -80,11 +80,14 @@ func chatComplete(ctx context.Context, httpClient *http.Client, provider, apiKey
 		c = &http.Client{Timeout: defaultProviderTimeout}
 	}
 
+	if strings.TrimSpace(costTag) == "" {
+		costTag = generationCostTag
+	}
 	switch provider {
 	case providerAnthropic:
-		return anthropicChat(ctx, c, apiKey, baseURL, model, systemPrompt, description)
+		return anthropicChat(ctx, c, apiKey, baseURL, model, systemPrompt, description, costTag)
 	case providerOpenAI:
-		return openaiChat(ctx, c, apiKey, baseURL, model, systemPrompt, description)
+		return openaiChat(ctx, c, apiKey, baseURL, model, systemPrompt, description, costTag)
 	default:
 		return "", &providerError{
 			status: http.StatusBadRequest,
@@ -123,7 +126,7 @@ type anthropicChatResponse struct {
 // anthropicChat POSTs the Messages API with the x-api-key auth scheme (the same
 // scheme the connect probe uses). The cost tag rides on metadata.user_id — the
 // only free-form metadata field the Messages API accepts.
-func anthropicChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, systemPrompt, description string) (string, error) {
+func anthropicChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, systemPrompt, description, costTag string) (string, error) {
 	base := providerBaseURL(baseURL, anthropicDefaultBaseURL)
 	payload := anthropicChatRequest{
 		Model:     model,
@@ -132,7 +135,7 @@ func anthropicChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, 
 		Messages:  []anthropicChatMessage{{Role: chatRoleUser, Content: description}},
 		// Anthropic's Messages API only accepts metadata.user_id; use it as the
 		// visible cost tag so generation spend is attributable (ADR 0014).
-		Metadata: map[string]string{"user_id": generationCostTag},
+		Metadata: map[string]string{"user_id": costTag},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -192,7 +195,7 @@ type openaiChatResponse struct {
 
 // openaiChat POSTs Chat Completions with the Bearer auth scheme (shared by most
 // OpenAI-compatible gateways). The cost tag rides on the request metadata.
-func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, systemPrompt, description string) (string, error) {
+func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, systemPrompt, description, costTag string) (string, error) {
 	base := providerBaseURL(baseURL, openaiDefaultBaseURL)
 	msgs := make([]openaiChatMessage, 0, 2)
 	if systemPrompt != "" {
@@ -203,7 +206,7 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 		Model:     model,
 		MaxTokens: maxGenerationTokens,
 		Messages:  msgs,
-		Metadata:  map[string]string{"purpose": generationCostTag},
+		Metadata:  map[string]string{"purpose": costTag},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

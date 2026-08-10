@@ -90,6 +90,13 @@ type AgentSummary struct {
 	// Both power the SRE fleet drift badges (m18.12).
 	Drift            bool `json:"drift"`
 	ManagedOutsideUI bool `json:"managedOutsideUI"`
+	// IsDraft is true when the AgentDeployment carries the
+	// agents.ctxmesh.ai/stage=draft label (ADR 0065 D1 — draft early, iterate
+	// live, publish when done). Draft agents are excluded from the default list
+	// (included only via ?includeDrafts=true) and from team/registry consumption
+	// until published via POST /api/agents/{ns}/{name}/publish. Omitted (false)
+	// on the wire for non-draft agents — backward-compatible.
+	IsDraft bool `json:"isDraft,omitempty"`
 }
 
 // AgentListResponse is returned by GET /api/agents. It carries the list-contract
@@ -173,6 +180,13 @@ type AgentDetailResponse struct {
 	Conditions    []AgentCondition `json:"conditions"`
 	Bindings      []AgentBinding   `json:"bindings"`
 	Versions      []string         `json:"versions"`
+	// ResourceVersion is the AgentDeployment's live resourceVersion — the client
+	// carries it back into a PUT edit as the optimistic-concurrency guard (m71.3, ADR
+	// 0065): a stale value → 409 instead of clobbering a concurrent edit.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+	// IsDraft is true when the agent carries the `agents.ctxmesh.ai/stage: draft` label
+	// (m71.2) — a not-yet-published draft in the conversational builder.
+	IsDraft bool `json:"isDraft,omitempty"`
 	// ManagedOutsideUI is true when the AgentDeployment does NOT carry the
 	// source-spec annotation (ADR 0017) — a kubectl-created agent the console never
 	// captured a simplified spec for. An edit of such an agent is DEGRADED: only the
@@ -1049,6 +1063,129 @@ type GenerateInvalidResponse struct {
 	Regenerate bool `json:"regenerate"`
 }
 
+// --- Refine an existing agent spec (POST /api/agents/refine, m71.1) -----------
+//
+// Refine is a PURE editing endpoint: it takes an existing simplified agent.yaml
+// (CurrentSpec) plus a natural-language instruction and rewrites the whole document
+// via the caller's connected provider model. Like generate it is caller-scoped and
+// NEVER writes to the cluster — the caller reviews the result before any apply.
+
+// RefineTurn is one prior exchange in the conversation transcript (optional
+// context the caller passes so the model understands the editing history).
+// Role is "user" or "assistant"; Text is the turn's content. Both are
+// treated as UNTRUSTED flavor-text — they inform the model but cannot override
+// the CurrentSpec or the Instruction. The server caps the transcript to the last
+// maxTranscriptTurns turns regardless of how many the client sends.
+type RefineTurn struct {
+	// Role is the participant: "user" (the person) or "assistant" (the model).
+	Role string `json:"role"`
+	// Text is the turn's natural-language content (flavor; not applied literally).
+	Text string `json:"text"`
+}
+
+// RefineAgentRequest is the POST /api/agents/refine body. CurrentSpec is the
+// existing simplified agent.yaml to rewrite; Instruction is the change to apply.
+// Transcript is optional prior context (capped server-side to maxTranscriptTurns).
+// Provider/Model/Namespace have the same meaning as GenerateAgentRequest.
+type RefineAgentRequest struct {
+	// CurrentSpec is the existing simplified agent.yaml (required). The server
+	// rejects inline credential material in this field before any model call.
+	CurrentSpec string `json:"currentSpec"`
+	// Instruction is the natural-language change to apply (required). E.g.
+	// "add a budget of $0.10 per conversation" or "rename the agent to invoicer".
+	Instruction string `json:"instruction"`
+	// Transcript is the optional prior conversation context (flavor only). The
+	// server caps it to the last maxTranscriptTurns turns; longer lists are silently
+	// trimmed from the front.
+	Transcript []RefineTurn `json:"transcript,omitempty"`
+	// Provider optionally names the connected provider route (same as generate).
+	Provider string `json:"provider,omitempty"`
+	// Model optionally pins the model (same as generate).
+	Model string `json:"model,omitempty"`
+	// Namespace scopes the connected-provider lookup; empty → the default namespace.
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// RefineAgentResponse is returned by POST /api/agents/refine on a SUCCESSFUL
+// refine: the rewritten simplified agent.yaml, its expand-validated CRD preview,
+// a server-computed changed-fields diff, and the model/provider that produced it.
+// Nothing is applied. No secret material is present.
+type RefineAgentResponse struct {
+	// AgentYAML is the full rewritten simplified agent.yaml (expand-validated).
+	AgentYAML string `json:"agentYAML"`
+	// Expanded is the CRD manifest preview (the internal/expand output), identical
+	// to POST /api/expand of the new AgentYAML.
+	Expanded string `json:"expanded"`
+	// Diff is the server-computed summary of what changed: a sorted list of
+	// top-level agent.yaml field names that were added, removed, or modified
+	// (e.g. ["systemPrompt", "tools"]). Empty when nothing changed.
+	Diff []string `json:"diff"`
+	// Model is the model that produced the refined config.
+	Model string `json:"model"`
+	// Provider is the connected provider the refine ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+}
+
+// --- Team generation (POST /api/teams/generate, ADR 0065 D4) -----------------
+//
+// Team generation composes an AgentTeam spec from EXISTING, published members of
+// a named AgentRegistry. The LLM call runs SERVER-SIDE through the caller's
+// connected provider (caller-scoped key, never returned); the emitted YAML is
+// decoded into an AgentTeam and referentially validated (every agentRef must be
+// in the eligible member set — hallucinated refs are caught before any apply).
+// Generation NEVER auto-applies — it returns the spec for review.
+
+// GenerateTeamRequest is the POST /api/teams/generate body.
+type GenerateTeamRequest struct {
+	// Description is the natural-language description of the team to compose. Required.
+	Description string `json:"description"`
+	// RegistryRef is the name of the AgentRegistry whose published members are the
+	// eligible agent pool. Required.
+	RegistryRef string `json:"registryRef"`
+	// Provider optionally names the connected provider route (same as generate).
+	Provider string `json:"provider,omitempty"`
+	// Model optionally pins the generation model (same as generate).
+	Model string `json:"model,omitempty"`
+	// Namespace scopes the registry + provider lookups; empty → the default namespace.
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// GenerateTeamResponse is returned by POST /api/teams/generate on a SUCCESSFUL
+// generation: the emitted AgentTeam YAML plus the eligible member names.
+// Nothing is applied. No secret material is present.
+type GenerateTeamResponse struct {
+	// TeamYAML is the model-emitted AgentTeam YAML (referentially validated).
+	TeamYAML string `json:"teamYAML"`
+	// Model is the model that produced the spec.
+	Model string `json:"model"`
+	// Provider is the connected provider the generation ran through.
+	Provider string `json:"provider"`
+	// Warnings are advisory notes for the reviewer (never fatal). [] not null.
+	Warnings []string `json:"warnings"`
+	// EligibleMembers are the AgentDeployment names that were offered to the model
+	// (published members of the registry, excluding drafts).
+	EligibleMembers []string `json:"eligibleMembers"`
+}
+
+// GenerateTeamInvalidResponse is returned (HTTP 422) when the model produced an
+// AgentTeam YAML that fails decode or referential validation. Not a 500; the
+// caller can regenerate.
+type GenerateTeamInvalidResponse struct {
+	// Error is the client-safe headline.
+	Error string `json:"error"`
+	// Reason is the decode/validation failure message.
+	Reason string `json:"reason"`
+	// TeamYAML is the raw model output (unvalidated) for the regenerate affordance.
+	TeamYAML string `json:"teamYAML"`
+	// Model / Provider identify the generation source.
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	// Regenerate signals the UI to surface the regenerate affordance (always true).
+	Regenerate bool `json:"regenerate"`
+}
+
 // --- Feedback / scores (GET /api/feedback?traceId=<id>) ----------------------
 //
 // The feedback panel reads Langfuse SCORES attached to one trace — the
@@ -1257,6 +1394,8 @@ func newAgentDetail(
 	return AgentDetailResponse{
 		Name:               ad.Name,
 		Namespace:          ad.Namespace,
+		ResourceVersion:    ad.ResourceVersion,
+		IsDraft:            isDraftAgent(ad),
 		Image:              ad.Spec.Image,
 		ExecutionModel:     ad.Spec.ExecutionModel,
 		Role:               ad.Spec.Role,

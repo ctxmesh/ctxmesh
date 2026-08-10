@@ -109,6 +109,42 @@ func TestEditRoundTripAppliesAndReStamps(t *testing.T) {
 	assert.Equal(t, fromEdited, fromAnnotation, "source-spec must be re-stamped to the edited spec")
 }
 
+// TestEditConcurrentEditGuard proves the m71.3 optimistic-concurrency guard: a PUT
+// carrying a STALE resourceVersion is refused with 409 (the live object untouched),
+// while a matching resourceVersion applies. Empty (unset) is unaffected — the other
+// edit tests exercise that path.
+func TestEditConcurrentEditGuard(t *testing.T) {
+	const original = "name: echo\nimage: img:1\n"
+	const edited = "name: echo\nimage: img:2\n"
+
+	ad := consoleAgent(t, "echo", original, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	putRV := func(rv string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(UpdateAgentRequest{AgentYAML: edited, ResourceVersion: rv})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/agents/"+detailNS+"/echo", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer caller-token")
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A stale resourceVersion → 409; the live object is NOT clobbered.
+	rec := putRV("stale-does-not-match")
+	require.Equal(t, http.StatusConflict, rec.Code, "a stale resourceVersion must 409; body: %s", rec.Body.String())
+	var got agentsv1alpha1.AgentDeployment
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
+	assert.Equal(t, "img:1", got.Spec.Image, "a 409 must not clobber the live object")
+
+	// The matching (live) resourceVersion → applies.
+	rec2 := putRV(got.ResourceVersion)
+	require.Equal(t, http.StatusOK, rec2.Code, "a matching resourceVersion must apply; body: %s", rec2.Body.String())
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
+	assert.Equal(t, "img:2", got.Spec.Image, "the edit must land when the resourceVersion matches")
+}
+
 // TestEditRoundTripInlineSecretRejected proves Mode A runs the create guard: an
 // edited spec carrying inline credential material is a teaching 400 and the live
 // object is untouched.
