@@ -421,6 +421,42 @@ spec:
                       free-form string). Ignored for non-members.
                     maxLength: 63
                     type: string
+                  rollout:
+                    description: |-
+                      rollout optionally selects a progressive-delivery strategy for a GATED serving
+                      agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
+                      behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is
+                      untouched. When strategy is "canary", a candidate that PASSES the offline gate is
+                      served a NAMED-revision traffic split {old: 100-canaryPercent, candidate:
+                      canaryPercent} instead of being held at 0%, so both arms accumulate online scores;
+                      the human completes it with `promote=<candidate>` (100% candidate) or aborts
+                      (100% old). SERVING execution model only — for eventing/job the canary strategy is
+                      deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
+                      (double side-effects) and auto-progression is deferred.
+                    properties:
+                      canaryPercent:
+                        default: 10
+                        description: |-
+                          canaryPercent is the percent of live traffic routed to the CANDIDATE revision
+                          during a canary rollout; the remainder (100 - canaryPercent) stays on the old
+                          serving revision. Bounded to 1..99 so the split is a real canary — 0 would serve
+                          no candidate traffic (indistinguishable from a hold) and 100 would be a full
+                          promote (use `promote` for that). Only consulted when strategy == "canary".
+                        format: int32
+                        maximum: 99
+                        minimum: 1
+                        type: integer
+                      strategy:
+                        description: |-
+                          strategy selects the rollout strategy. "" (default) is today's promote-all/hold —
+                          a passing-but-unapproved candidate is held at 0% until the human promotes it.
+                          "canary" serves a named-revision Knative traffic split {old, candidate:N%} while
+                          the human decides, so both arms accumulate online scores (ADR 0062 Fork 3).
+                        enum:
+                        - ""
+                        - canary
+                        type: string
+                    type: object
                   runtime:
                     description: |-
                       runtime optionally configures runtime authoring primitives: structured
@@ -1074,6 +1110,42 @@ spec:
                       free-form string). Ignored for non-members.
                     maxLength: 63
                     type: string
+                  rollout:
+                    description: |-
+                      rollout optionally selects a progressive-delivery strategy for a GATED serving
+                      agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
+                      behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is
+                      untouched. When strategy is "canary", a candidate that PASSES the offline gate is
+                      served a NAMED-revision traffic split {old: 100-canaryPercent, candidate:
+                      canaryPercent} instead of being held at 0%, so both arms accumulate online scores;
+                      the human completes it with `promote=<candidate>` (100% candidate) or aborts
+                      (100% old). SERVING execution model only — for eventing/job the canary strategy is
+                      deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
+                      (double side-effects) and auto-progression is deferred.
+                    properties:
+                      canaryPercent:
+                        default: 10
+                        description: |-
+                          canaryPercent is the percent of live traffic routed to the CANDIDATE revision
+                          during a canary rollout; the remainder (100 - canaryPercent) stays on the old
+                          serving revision. Bounded to 1..99 so the split is a real canary — 0 would serve
+                          no candidate traffic (indistinguishable from a hold) and 100 would be a full
+                          promote (use `promote` for that). Only consulted when strategy == "canary".
+                        format: int32
+                        maximum: 99
+                        minimum: 1
+                        type: integer
+                      strategy:
+                        description: |-
+                          strategy selects the rollout strategy. "" (default) is today's promote-all/hold —
+                          a passing-but-unapproved candidate is held at 0% until the human promotes it.
+                          "canary" serves a named-revision Knative traffic split {old, candidate:N%} while
+                          the human decides, so both arms accumulate online scores (ADR 0062 Fork 3).
+                        enum:
+                        - ""
+                        - canary
+                        type: string
+                    type: object
                   runtime:
                     description: |-
                       runtime optionally configures runtime authoring primitives: structured
