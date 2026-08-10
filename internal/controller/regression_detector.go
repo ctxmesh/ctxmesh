@@ -199,8 +199,8 @@ func (r *RegressionDetectorReconciler) evaluate(
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonInsufficientData,
 			fmt.Sprintf("could not read online-score aggregates: %v", err)
 	}
-	currentWindows := filterByVersion(all, serving, baselineWindowLimit)
-	baselineWindows := filterByVersion(all, baseline, baselineWindowLimit)
+	currentWindows := filterByVersion(all, serving)
+	baselineWindows := filterByVersion(all, baseline)
 	if len(currentWindows) == 0 || len(baselineWindows) == 0 {
 		return onlinescore.RegressionVerdict{}, metav1.ConditionUnknown, reasonInsufficientData,
 			fmt.Sprintf("insufficient online-score data (serving %q: %d windows, baseline %q: %d windows)",
@@ -249,17 +249,7 @@ func (r *RegressionDetectorReconciler) priorVersion(
 	if len(mine) < 2 {
 		return "", false, nil // no prior version to baseline against
 	}
-	// Oldest → newest by creation timestamp (tie-break on name for determinism).
-	slices.SortFunc(mine, func(a, b agentsv1alpha1.AgentVersion) int {
-		ta, tb := a.CreationTimestamp.Time, b.CreationTimestamp.Time
-		if ta.Equal(tb) {
-			return strings.Compare(a.Name, b.Name)
-		}
-		if ta.Before(tb) {
-			return -1
-		}
-		return 1
-	})
+	sortVersionsByCreation(mine)
 	// Find the serving version and return the one immediately before it.
 	for i := range mine {
 		if mine[i].Name == serving {
@@ -274,14 +264,33 @@ func (r *RegressionDetectorReconciler) priorVersion(
 	return mine[len(mine)-1].Name, true, nil
 }
 
+// sortVersionsByCreation orders an AgentVersion slice oldest → newest by CreationTimestamp,
+// tie-breaking on name for determinism (second-granularity timestamps collide often). Shared
+// by the regression detector's baseline resolution and the rollback actuator's healthy-target
+// check so both agree on version ordering.
+func sortVersionsByCreation(versions []agentsv1alpha1.AgentVersion) {
+	slices.SortFunc(versions, func(a, b agentsv1alpha1.AgentVersion) int {
+		ta, tb := a.CreationTimestamp.Time, b.CreationTimestamp.Time
+		if ta.Equal(tb) {
+			return strings.Compare(a.Name, b.Name)
+		}
+		if ta.Before(tb) {
+			return -1
+		}
+		return 1
+	})
+}
+
 // filterByVersion returns the aggregates for exactly `version`, preserving the input order
-// (most-recent-first from ListAggregates), capped at limit.
-func filterByVersion(all []onlinescore.Aggregate, version string, limit int) []onlinescore.Aggregate {
-	out := make([]onlinescore.Aggregate, 0, limit)
+// (most-recent-first from ListAggregates), capped at baselineWindowLimit (enough to cover the
+// persistence horizon plus a comparable baseline window). Shared by the regression detector and
+// the rollback actuator's healthy-target check.
+func filterByVersion(all []onlinescore.Aggregate, version string) []onlinescore.Aggregate {
+	out := make([]onlinescore.Aggregate, 0, baselineWindowLimit)
 	for i := range all {
 		if all[i].AgentVersion == version {
 			out = append(out, all[i])
-			if limit > 0 && len(out) >= limit {
+			if len(out) >= baselineWindowLimit {
 				break
 			}
 		}
