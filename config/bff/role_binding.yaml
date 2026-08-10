@@ -20,3 +20,25 @@ subjects:
 - kind: ServiceAccount
   name: bff
   namespace: system
+---
+# Binds the BFF SA to the cross-namespace online-scorer ClusterRole (M69, ADR
+# 0062 Fork 2). ClusterRoleBinding because the online-scoring worker reads
+# AgentDeployment + EvalSuite across ALL agent namespaces to resolve each
+# agent's EvalSuite.online policy. Read-only (get/list) — the same trust class
+# as the worker's cpDB + Langfuse creds, NOT the ADR-0011 caller-scoped path.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    control-plane: bff
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+  name: bff-online-scorer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bff-online-scorer
+subjects:
+- kind: ServiceAccount
+  name: bff
+  namespace: system

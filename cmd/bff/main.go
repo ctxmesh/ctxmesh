@@ -42,6 +42,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver for the durable run store
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -312,6 +313,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// per-(namespace, agent, version, window) online-score vector.
 	onlineStore := onlinescore.NewPostgresStore(cpDB)
 
+	// Per-agent online-config resolver (M69, ADR 0062 Fork 2, m69.6): a READ-ONLY client over
+	// AgentDeployment + EvalSuite that the online-scoring worker consults for each agent's EvalSuite.online
+	// policy. Built ONLY when the worker is enabled (ONLINE_SCORER_ENABLED=1) so a BFF without the worker
+	// never constructs an unused client. This is a narrow, off-request control-plane read (governance #8),
+	// NOT the caller-scoped CRD path (ADR 0011) — the BFF SA carries an explicit get/list on
+	// agentdeployments + evalsuites for exactly this worker (config/bff/role.yaml). A nil resolver ⇒ the
+	// worker uses its process-wide defaults for every agent (m69.5 back-compat).
+	onlineResolver := buildOnlineResolver(cfg, scheme, log)
+
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
 		TokenServiceHTTPClient:      tsHTTPClient,
@@ -322,6 +332,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		KnowledgeStore:              knowledgeStore,
 		DatasetStore:                datasetStore,
 		OnlineStore:                 onlineStore,
+		OnlineResolver:              onlineResolver,
 		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
@@ -391,6 +402,27 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+// buildOnlineResolver constructs the per-agent online-config resolver for the online-scoring worker (ADR
+// 0062 Fork 2, m69.6), GATED on ONLINE_SCORER_ENABLED=1 so a BFF that does not run the worker never builds
+// an unused client. It builds a DIRECT read-only controller-runtime client from the in-cluster rest.Config
+// with the platform scheme (which knows AgentDeployment + EvalSuite) — no cache, acceptable for a 60s-tick
+// worker that reads a handful of small objects per tick. If the client cannot be built, it logs and
+// returns nil (the worker then falls back to its process-wide defaults for every agent) rather than
+// failing BFF start-up — the resolver is an enhancement, not a hard dependency of the process.
+func buildOnlineResolver(cfg *rest.Config, scheme *runtime.Scheme, log logr.Logger) bff.OnlineConfigResolver {
+	if os.Getenv("ONLINE_SCORER_ENABLED") != "1" {
+		return nil
+	}
+	reader, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		log.Error(err, "online-scoring worker: could not build the per-agent config resolver client; "+
+			"using process defaults for every agent (ADR 0062 Fork 2, m69.6)")
+		return nil
+	}
+	log.Info("online-scoring worker: per-agent config resolver wired (AgentDeployment + EvalSuite reads)")
+	return bff.NewK8sOnlineConfigResolver(reader)
 }
 
 // maybeStartOnlineScorer starts the online-scoring worker (ADR 0062 Fork 2, m69.5) when

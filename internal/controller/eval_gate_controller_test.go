@@ -312,3 +312,59 @@ func TestGate_NoEvalSuiteRef_UnchangedDeploy(t *testing.T) {
 	updated := getDeploy(t, name, namespace)
 	assert.Nil(t, updated.Status.Gate, "no gate status when there is no evalSuiteRef")
 }
+
+// TestEvalSuite_OnlineBlock_RoundTrip: an EvalSuite carrying an `online` block (ADR 0062 Fork 2, M69)
+// applies against the real CRD schema (envtest) and reads back byte-stably. This validates that the
+// v1alpha1 field additions propagated through `make manifests` into the served CRD and round-trip via the
+// v1beta1 storage version (which reuses the v1alpha1 spec) — the offline gate fields are unaffected.
+func TestEvalSuite_OnlineBlock_RoundTrip(t *testing.T) {
+	const namespace = "default"
+
+	es := &agentsv1alpha1.EvalSuite{
+		ObjectMeta: metav1.ObjectMeta{Name: "online-suite", Namespace: namespace},
+		Spec: agentsv1alpha1.EvalSuiteSpec{
+			Dataset:   agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
+			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
+			Threshold: "0.8",
+			Gate:      eval.GateBlock,
+			Online: &agentsv1alpha1.OnlineScoringSpec{
+				SampleRate:      "0.05",
+				MaxScoredPerDay: 25,
+				Window:          "24h",
+				MinSamples:      10,
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, es), "the CRD schema must accept the online block")
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, es) })
+
+	var got agentsv1alpha1.EvalSuite
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(es), &got))
+
+	// The offline gate fields are unaffected.
+	assert.Equal(t, "0.8", got.Spec.Threshold)
+	assert.Equal(t, eval.GateBlock, got.Spec.Gate)
+
+	// The online block reads back exactly.
+	require.NotNil(t, got.Spec.Online, "the online block must persist + read back")
+	assert.Equal(t, "0.05", got.Spec.Online.SampleRate)
+	assert.Equal(t, int32(25), got.Spec.Online.MaxScoredPerDay)
+	assert.Equal(t, "24h", got.Spec.Online.Window)
+	assert.Equal(t, int32(10), got.Spec.Online.MinSamples)
+
+	// An EvalSuite WITHOUT an online block still applies (the field is optional) and reads back nil.
+	esNoOnline := &agentsv1alpha1.EvalSuite{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-online-suite", Namespace: namespace},
+		Spec: agentsv1alpha1.EvalSuiteSpec{
+			Dataset:   agentsv1alpha1.DatasetRef{Ref: "golden-cases"},
+			Scorers:   []agentsv1alpha1.ScorerSpec{{Name: "accuracy", Type: eval.ScorerTypeMock, Weight: 1}},
+			Threshold: "0.9",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, esNoOnline))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, esNoOnline) })
+
+	var gotNoOnline agentsv1alpha1.EvalSuite
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(esNoOnline), &gotNoOnline))
+	assert.Nil(t, gotNoOnline.Spec.Online, "the online block is optional (absent ⇒ nil, platform defaults)")
+}
