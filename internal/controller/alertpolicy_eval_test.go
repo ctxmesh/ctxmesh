@@ -1,0 +1,303 @@
+//go:build integration
+
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
+)
+
+// fakeAlertStore is a minimal in-memory alertstore.Store for the evaluator tests: it records appended
+// alerts and honours Resolve, so a test can assert the fire-once + resolve behaviour without Postgres.
+type fakeAlertStore struct {
+	mu     sync.Mutex
+	nextID int64
+	alerts []alertstore.Alert
+}
+
+func newFakeAlertStore() *fakeAlertStore { return &fakeAlertStore{} }
+
+func (f *fakeAlertStore) Append(_ context.Context, a alertstore.Alert) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	a.ID = f.nextID
+	if a.FiredAt.IsZero() {
+		a.FiredAt = time.Now().UTC()
+	}
+	f.alerts = append(f.alerts, a)
+	return a.ID, nil
+}
+
+func (f *fakeAlertStore) List(_ context.Context, namespace string, limit int) ([]alertstore.Alert, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Newest-first, matching the Postgres contract.
+	out := make([]alertstore.Alert, 0, len(f.alerts))
+	for _, a := range slices.Backward(f.alerts) {
+		if a.Namespace == namespace {
+			out = append(out, a)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeAlertStore) Resolve(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.alerts {
+		if f.alerts[i].ID == id && f.alerts[i].ResolvedAt == nil {
+			t := time.Now().UTC()
+			f.alerts[i].ResolvedAt = &t
+			return nil
+		}
+	}
+	return nil // best-effort: missing id is a no-op
+}
+
+// count / openCount return the total and unresolved alert counts for a namespace.
+func (f *fakeAlertStore) count(namespace string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for i := range f.alerts {
+		if f.alerts[i].Namespace == namespace {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeAlertStore) openCount(namespace string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for i := range f.alerts {
+		if f.alerts[i].Namespace == namespace && f.alerts[i].ResolvedAt == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// fakeRollupStore is a minimal costrollup.Store returning seeded rows; only Range is exercised.
+type fakeRollupStore struct {
+	rows []costrollup.Rollup
+}
+
+func (f *fakeRollupStore) Upsert(_ context.Context, _ costrollup.Rollup) error { return nil }
+
+func (f *fakeRollupStore) Range(_ context.Context, scopeType, scopeID string, _, _ time.Time) ([]costrollup.Rollup, error) {
+	out := make([]costrollup.Rollup, 0, len(f.rows))
+	for _, r := range f.rows {
+		if r.ScopeType == scopeType && r.ScopeID == scopeID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// apEvalReconciler builds an AlertPolicyReconciler backed by envtest + the supplied fakes.
+func apEvalReconciler(alerts alertstore.Store, rollups costrollup.Store) *AlertPolicyReconciler {
+	return &AlertPolicyReconciler{
+		Client:  k8sClient,
+		Scheme:  k8sClient.Scheme(),
+		Alerts:  alerts,
+		Rollups: rollups,
+	}
+}
+
+// mkAgentDeployRegressed creates an AgentDeployment and stamps RegressionDetected=<status> on it.
+func mkAgentDeployRegressed(t *testing.T, name, namespace string, labels map[string]string, status metav1.ConditionStatus) *agentsv1alpha1.AgentDeployment {
+	t.Helper()
+	d := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, d))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(d), d))
+	setRegressionStatus(t, d, status)
+	return d
+}
+
+// setRegressionStatus stamps/updates the RegressionDetected condition to the given status.
+func setRegressionStatus(t *testing.T, d *agentsv1alpha1.AgentDeployment, status metav1.ConditionStatus) {
+	t.Helper()
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(d), d))
+	apimeta.SetStatusCondition(&d.Status.Conditions, metav1.Condition{
+		Type:    conditionRegressionDetected,
+		Status:  status,
+		Reason:  "Test",
+		Message: "test-driven",
+	})
+	require.NoError(t, k8sClient.Status().Update(testCtx, d))
+}
+
+func reconcileAPEval(t *testing.T, r *AlertPolicyReconciler, name, namespace string) {
+	t.Helper()
+	_, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: namespace},
+	})
+	require.NoError(t, err, "alertpolicy eval reconcile must not error")
+}
+
+func apConditionStatus(t *testing.T, name, namespace, condName string) *agentsv1beta1.AlertConditionStatus {
+	t.Helper()
+	var ap agentsv1beta1.AlertPolicy
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ap))
+	for i := range ap.Status.Conditions {
+		if ap.Status.Conditions[i].Name == condName {
+			return &ap.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+// TestAlertPolicy_RegressionFireDedupResolve exercises the full fire-once/dedup/resolve cycle for a
+// regressionDetected condition: an AgentDeployment with RegressionDetected=True + a policy selecting it
+// fires exactly one alert; a second reconcile appends NO new alert (dedup); flipping the condition to
+// False resolves the alert and clears Firing.
+func TestAlertPolicy_RegressionFireDedupResolve(t *testing.T) {
+	const (
+		ns       = "default"
+		agent    = "ap-eval-reg-agent"
+		policy   = "ap-eval-reg-policy"
+		condName = "regressed"
+	)
+	labels := map[string]string{"app": "ap-eval-reg"}
+
+	deploy := mkAgentDeployRegressed(t, agent, ns, labels, metav1.ConditionTrue)
+
+	spec := agentsv1beta1.AlertPolicySpec{
+		Selector:   agentsv1beta1.AlertSelector{MatchLabels: labels},
+		Conditions: []agentsv1beta1.AlertCondition{{Name: condName, Type: "regressionDetected"}},
+		Route:      agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policy, ns, spec)
+
+	alerts := newFakeAlertStore()
+	r := apEvalReconciler(alerts, nil)
+
+	// First reconcile: false→true transition → Firing=true + exactly one alert.
+	reconcileAPEval(t, r, policy, ns)
+	cs := apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs, "condition status must be recorded")
+	assert.True(t, cs.Firing, "condition must be firing")
+	assert.Equal(t, agent, cs.LastValue, "lastValue must name the breaching agent")
+	assert.Equal(t, 1, alerts.count(ns), "exactly one alert must be appended on the first transition")
+
+	// Second reconcile: still firing → NO new alert (dedup).
+	reconcileAPEval(t, r, policy, ns)
+	assert.Equal(t, 1, alerts.count(ns), "a still-firing condition must NOT append a new alert (dedup)")
+
+	// Flip RegressionDetected to False → Firing=false + the alert resolved.
+	setRegressionStatus(t, deploy, metav1.ConditionFalse)
+	reconcileAPEval(t, r, policy, ns)
+	cs = apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs)
+	assert.False(t, cs.Firing, "condition must clear when the regression resolves")
+	assert.Equal(t, 1, alerts.count(ns), "resolving must not append a new alert")
+	assert.Equal(t, 0, alerts.openCount(ns), "the open alert must be resolved on true→false")
+}
+
+// TestAlertPolicy_BudgetSoftFires exercises the budgetSoft condition: a tenant-labelled namespace with a
+// Tenant carrying a budget + a seeded cost-rollup above the threshold fires.
+func TestAlertPolicy_BudgetSoftFires(t *testing.T) {
+	const (
+		ns       = "ap-eval-budget-ns"
+		tenant   = "ap-eval-budget-tenant"
+		policy   = "ap-eval-budget-policy"
+		condName = "budget-80"
+	)
+
+	// A namespace stamped with the authoritative tenant label (resolveTenantForNamespace reads it).
+	nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   ns,
+		Labels: map[string]string{agentsv1alpha1.TenantLabel: tenant},
+	}}
+	require.NoError(t, k8sClient.Create(testCtx, nsObj))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, nsObj) })
+
+	// A Tenant with a $100 budget.
+	tnt := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: tenant},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tnt))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tnt) })
+
+	// Rollup: $85 MTD spend → above the 0.8 (=$80) soft threshold.
+	rollups := &fakeRollupStore{rows: []costrollup.Rollup{
+		{ScopeType: "tenant", ScopeID: tenant, Day: time.Now().UTC().Truncate(24 * time.Hour), SpendUSD: 85.0},
+	}}
+
+	spec := agentsv1beta1.AlertPolicySpec{
+		Conditions: []agentsv1beta1.AlertCondition{{Name: condName, Type: "budgetSoft", Threshold: "0.8"}},
+		Route:      agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policy, ns, spec)
+
+	alerts := newFakeAlertStore()
+	r := apEvalReconciler(alerts, rollups)
+
+	reconcileAPEval(t, r, policy, ns)
+	cs := apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs, "budgetSoft condition status must be recorded")
+	assert.True(t, cs.Firing, "budgetSoft must fire when spend >= budget * threshold")
+	assert.Equal(t, "85.000000/100.000000", cs.LastValue, "lastValue must be spend/budget")
+	assert.Equal(t, 1, alerts.count(ns), "budgetSoft firing must append exactly one alert")
+
+	// Below threshold: a fresh policy with $70 spend must NOT fire.
+	rollupsLow := &fakeRollupStore{rows: []costrollup.Rollup{
+		{ScopeType: "tenant", ScopeID: tenant, Day: time.Now().UTC().Truncate(24 * time.Hour), SpendUSD: 70.0},
+	}}
+	const policyLow = "ap-eval-budget-policy-low"
+	mkAlertPolicy(t, policyLow, ns, spec)
+	alertsLow := newFakeAlertStore()
+	rLow := apEvalReconciler(alertsLow, rollupsLow)
+	reconcileAPEval(t, rLow, policyLow, ns)
+	csLow := apConditionStatus(t, policyLow, ns, condName)
+	require.NotNil(t, csLow)
+	assert.False(t, csLow.Firing, "budgetSoft must NOT fire below the threshold")
+	assert.Equal(t, 0, alertsLow.count(ns), "no alert below threshold")
+}
