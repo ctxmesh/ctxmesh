@@ -192,6 +192,9 @@ type AgentDetailResponse struct {
 	// GuardrailPolicyRef is the name of the GuardrailPolicy (same namespace) that
 	// governs this agent's content (m66.10, ADR 0059). Empty when not set.
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
+	// Gate is the deploy-gate projection (m69.11, ADR 0062 Fork 3) — the phase-
+	// based canary/promote state. Nil when no EvalSuite is wired (no gate active).
+	Gate *AgentGateDetail `json:"gate,omitempty"`
 }
 
 // AgentRuntimeDetail is the read-only projection of spec.runtime for the agent
@@ -1157,6 +1160,20 @@ func conditionReady(conds []metav1.Condition) bool {
 	return c != nil && c.Status == metav1.ConditionTrue
 }
 
+// AgentGateDetail is the deploy-gate projection for the agent detail page
+// (m69.11, ADR 0062 Fork 3). Phase drives the canary/promote state machine.
+// Only phase is surfaced — the full gate score (score/threshold/decision) stays
+// on the EvalSuite detail; here we only need phase for the UI canary arms.
+type AgentGateDetail struct {
+	// Phase is the current gate state: pending | scoring | awaiting-promotion |
+	// promoted | blocked | warned | canary | aborted.
+	Phase string `json:"phase,omitempty"`
+	// ScoredRevision is the candidate revision name the gate scored (the "-h<digest>"
+	// revision), matching what the canary old-arm's Knative revision name looks like.
+	// The UI pairs online-score data by version name using this.
+	ScoredRevision string `json:"scoredRevision,omitempty"`
+}
+
 // newAgentDetail projects an AgentDeployment plus the bindings/versions that
 // reference it onto the flat agent-landing DTO. The caller passes the CRD lists it
 // already read caller-scoped; this helper only projects (no I/O), so it stays
@@ -1257,6 +1274,19 @@ func newAgentDetail(
 		Drift:              drift,
 		Runtime:            newAgentRuntimeDetail(ad.Spec.Runtime),
 		GuardrailPolicyRef: ad.Spec.GuardrailPolicyRef,
+		Gate:               newAgentGateDetail(ad.Status.Gate),
+	}
+}
+
+// newAgentGateDetail projects a *GateStatus onto the detail DTO. Returns nil
+// when gate is nil (no EvalSuite wired — the JSON field is omitted entirely).
+func newAgentGateDetail(gate *agentsv1alpha1.GateStatus) *AgentGateDetail {
+	if gate == nil {
+		return nil
+	}
+	return &AgentGateDetail{
+		Phase:          gate.Phase,
+		ScoredRevision: gate.ScoredRevision,
 	}
 }
 

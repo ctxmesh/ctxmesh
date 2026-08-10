@@ -640,6 +640,14 @@ func (s *Server) Handler() http.Handler {
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
+		// Online-score surface (m69.11, ADR 0062 Fork 2): the improvement-loop production signal for the
+		// agent detail page. Caller-scoped (ADR 0011): caller-Get gates access, cpDB read returns the
+		// 3-component (operational/feedback/judge) per-version aggregates. 501 when the store is absent.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/online-score", s.handleAgentOnlineScore)
+		// Rollback (m69.11, ADR 0062 Fork 4): set the agents.ctxmesh.ai/rollback=<version> annotation
+		// on the AgentDeployment via the CALLER'S client (caller-scoped PATCH - ADR 0011). The rollback
+		// controller (m69.8) actuates the guarded spec revert; this endpoint only sets the annotation.
+		authed.HandleFunc("POST /api/agents/{ns}/{name}/rollback", s.handleAgentRollback)
 		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
 		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
 		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
@@ -991,6 +999,8 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
 		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
 		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
+		authed.Handle("GET /api/agents/{ns}/{name}/online-score", notImplemented("caller-scoped online score"))
+		authed.Handle("POST /api/agents/{ns}/{name}/rollback", notImplemented("caller-scoped agent rollback"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
