@@ -727,6 +727,15 @@ func (s *Server) Handler() http.Handler {
 		// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
 		// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
 		authed.HandleFunc("DELETE /api/agents/{ns}/{name}", s.handleDeleteAgent)
+		// Publish a draft agent (ADR 0065 D1 — draft early, iterate live, publish
+		// when done): removes the agents.ctxmesh.ai/stage=draft label from the
+		// AgentDeployment so it becomes visible to the default list and team/registry
+		// consumption. Idempotent (already-published → 200 no-op). Caller-scoped
+		// (ADR 0011): the Get+Patch run through the caller's token; a viewer's Patch
+		// surfaces as 403. The Go 1.22 ServeMux treats this sub-path pattern as MORE
+		// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
+		// never shadows those routes.
+		authed.HandleFunc("POST /api/agents/{ns}/{name}/publish", s.handlePublishAgent)
 		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
 		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
 		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
@@ -986,6 +995,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("caller-scoped agent runs"))
 		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
 		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
+		authed.Handle("POST /api/agents/{ns}/{name}/publish", notImplemented("caller-scoped agent publish"))
 		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
 		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
 		authed.Handle("GET /api/modelroutes", notImplemented("caller-scoped model route list"))

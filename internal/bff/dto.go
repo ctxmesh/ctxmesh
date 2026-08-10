@@ -90,6 +90,13 @@ type AgentSummary struct {
 	// Both power the SRE fleet drift badges (m18.12).
 	Drift            bool `json:"drift"`
 	ManagedOutsideUI bool `json:"managedOutsideUI"`
+	// IsDraft is true when the AgentDeployment carries the
+	// agents.ctxmesh.ai/stage=draft label (ADR 0065 D1 — draft early, iterate
+	// live, publish when done). Draft agents are excluded from the default list
+	// (included only via ?includeDrafts=true) and from team/registry consumption
+	// until published via POST /api/agents/{ns}/{name}/publish. Omitted (false)
+	// on the wire for non-draft agents — backward-compatible.
+	IsDraft bool `json:"isDraft,omitempty"`
 }
 
 // AgentListResponse is returned by GET /api/agents. It carries the list-contract

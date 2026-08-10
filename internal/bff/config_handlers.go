@@ -85,6 +85,14 @@ type CreateAgentRequest struct {
 	// agent.yaml before expand — so the user picks a MODEL, never authors a route.
 	// Absent → the agent.yaml's own model.route is used (the Advanced path).
 	Model *ModelPick `json:"model,omitempty"`
+	// Stage, when set to "draft", creates the agent as a draft (ADR 0065 D1 —
+	// draft early, iterate live, publish when done). A draft is a real deployed
+	// AgentDeployment carrying the agents.ctxmesh.ai/stage=draft label; it is
+	// excluded from the default list and team/registry consumption until published
+	// via POST /api/agents/{ns}/{name}/publish. Any other value (including "")
+	// creates a normal (immediately published) agent — byte-for-byte unchanged for
+	// existing callers.
+	Stage string `json:"stage,omitempty"`
 }
 
 // ModelPick is the picked (connection, model) a create request may carry instead of a
@@ -174,7 +182,13 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
 		callerOwner = userGrantHash(username)
 	}
-	created, err := createAgentFromYAML(r.Context(), caller, caller, s.promptStore, s.toolRegistryStore, s.scheme, agentYAML, ns, callerOwner)
+
+	// Draft create (ADR 0065 D1): when the caller requests stage=draft, stamp the
+	// agents.ctxmesh.ai/stage=draft label on the primary AgentDeployment BEFORE
+	// the create so the object is born as a draft. The label is stamped via
+	// createAgentOpts — a per-create option passed through to createAgentFromYAML.
+	createOpts := createAgentOptions{draft: req.Stage == stageDraft}
+	created, err := createAgentFromYAML(r.Context(), caller, caller, s.promptStore, s.toolRegistryStore, s.scheme, agentYAML, ns, callerOwner, createOpts)
 	if err != nil {
 		var ce *createError
 		if errors.As(err, &ce) {
