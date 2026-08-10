@@ -95,6 +95,50 @@ func (m *memStore) Delete(_ context.Context, ns, name string) error {
 	return nil
 }
 
+// ListCatalog implements Store.ListCatalog — the in-memory twin of the Postgres catalog query.
+// The same predicate as pgstore: managed-by=agent-engine-mcp AND one of:
+//   - org visibility in any member namespace
+//   - public visibility (any namespace)
+//   - team visibility in callerNS
+//
+// private is never returned (leak-safe). Results are sorted by (namespace, name).
+func (m *memStore) ListCatalog(_ context.Context, callerNS string, members []string) ([]ToolRegistry, error) {
+	memberSet := make(map[string]struct{}, len(members))
+	for _, ns := range members {
+		memberSet[ns] = struct{}{}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var matched []ToolRegistry
+	for _, tr := range m.rows {
+		if tr.Labels[labelManagedByKey] != labelManagedByMCP {
+			continue
+		}
+		vis := tr.Labels[labelVisibilityKey]
+		switch vis {
+		case visOrg:
+			if _, ok := memberSet[tr.Namespace]; ok {
+				matched = append(matched, cloneRegistry(tr))
+			}
+		case visPublic:
+			matched = append(matched, cloneRegistry(tr))
+		case visTeam:
+			if tr.Namespace == callerNS {
+				matched = append(matched, cloneRegistry(tr))
+			}
+			// visPrivate and anything else: never returned.
+		}
+	}
+
+	// Sort by (namespace, name) for stable output, matching the pgstore ORDER BY.
+	slices.SortStableFunc(matched, func(a, b ToolRegistry) int {
+		return strings.Compare(a.Namespace+"\x00"+a.Name, b.Namespace+"\x00"+b.Name)
+	})
+	return matched, nil
+}
+
 func (m *memStore) List(_ context.Context, opts controlplane.ListOptions) (controlplane.Page[ToolRegistry], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

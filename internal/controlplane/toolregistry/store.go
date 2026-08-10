@@ -40,6 +40,19 @@ const (
 	sortByUpdatedAt = "updated_at"
 )
 
+// Catalog label values shared between pgstore and memstore (and the BFF's ADR 0067 §1/§2 labels).
+// The BFF defines its own copies; these are for the store implementations only.
+const (
+	labelManagedByKey  = "app.kubernetes.io/managed-by"
+	labelManagedByMCP  = "agent-engine-mcp"
+	labelVisibilityKey = "mcp.ctxmesh.ai/visibility"
+
+	visOrg     = "org"
+	visPublic  = "public"
+	visTeam    = "team"
+	visPrivate = "private"
+)
+
 // ToolEntry is one catalog tool. Mirrors api ToolEntry; InputSchema is kept verbatim as raw JSON.
 type ToolEntry struct {
 	Name           string          `json:"name"`
@@ -79,4 +92,16 @@ type Store interface {
 	// is delegated to the CRD/etcd during the migration window (ADR 0042); do not assume compare-and-swap.
 	Upsert(ctx context.Context, tr ToolRegistry) (*ToolRegistry, error)
 	Delete(ctx context.Context, namespace, name string) error
+	// ListCatalog returns the cross-tenant catalog rows visible to callerNS (ADR 0067 §6, m73.4).
+	// It filters to managed-by=agent-engine-mcp rows whose visibility qualifies them under the
+	// tenant-membership model:
+	//   - org rows in any namespace in members (tenant-wide sharing);
+	//   - public rows in any namespace (world-readable);
+	//   - team rows in callerNS only (within-namespace sharing).
+	// private rows are NEVER returned (leak-safe: a private server in a shared namespace stays private).
+	// Results are ordered by (namespace, name). callerNS must be a member of members (the caller
+	// ensures this defensively); the first two clauses already cover own-ns org/public, so the third
+	// clause only adds own-ns team rows. No pagination for v1 — a simple slice is returned; the
+	// catalog is bounded by the number of MCP servers registered in a tenant's namespaces.
+	ListCatalog(ctx context.Context, callerNS string, members []string) ([]ToolRegistry, error)
 }

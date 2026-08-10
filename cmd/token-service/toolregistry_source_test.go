@@ -40,6 +40,9 @@ func (f *fakeTRStore) Upsert(context.Context, toolregistry.ToolRegistry) (*toolr
 	panic("unused")
 }
 func (f *fakeTRStore) Delete(context.Context, string, string) error { panic("unused") }
+func (f *fakeTRStore) ListCatalog(context.Context, string, []string) ([]toolregistry.ToolRegistry, error) {
+	panic("unused")
+}
 
 func TestToolRegistrySource_ProjectsAndCaches(t *testing.T) {
 	ctx := context.Background()
