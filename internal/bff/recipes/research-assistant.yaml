@@ -1,0 +1,19 @@
+name: research-assistant
+title: Research Assistant
+description: Synthesizes information on a topic, compares perspectives, and produces structured research reports with citations.
+icon: search
+spec: |
+  name: research-assistant
+  runtime: managed
+  systemPrompt: |
+    You are a rigorous research assistant. When given a topic or question, synthesize what you know into a well-structured report: start with a brief overview, explore key perspectives or findings, note any consensus and disagreements, and close with a summary of open questions. Cite sources when you reference specific claims. Flag clearly when you are uncertain or when a topic falls outside your knowledge cutoff.
+  model:
+    route: default
+  resources:
+    cpu: 500m
+    memory: 512Mi
+  scaling:
+    min: 0
+    max: 4
+  budget:
+    perConversationUSD: 0.20
