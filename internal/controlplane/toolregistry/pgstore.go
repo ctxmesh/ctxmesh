@@ -166,6 +166,44 @@ func (s *pgStore) Delete(ctx context.Context, ns, name string) error {
 	return nil
 }
 
+// ListCatalog implements Store.ListCatalog — the cross-tenant catalog read (ADR 0067 §6, m73.4).
+// The WHERE is leak-safe: private rows are NEVER returned even if callerNS is in members.
+// COALESCE($1::text[], '{}') mirrors the namespacetenant SetMembers prune pattern: pgx stdlib
+// binds a nil/empty []string as SQL NULL, and `namespace = ANY(NULL)` is NULL (never TRUE),
+// which would silently drop the org clause; the COALESCE forces an empty array instead.
+func (s *pgStore) ListCatalog(ctx context.Context, callerNS string, members []string) ([]ToolRegistry, error) {
+	// The label key/value strings are package constants (labelManagedByKey / labelManagedByMCP /
+	// labelVisibilityKey / visOrg / visPublic / visTeam) — interpolated into the SQL template once
+	// so the query is a fixed string with only the positional args ($1, $2) varying per call.
+	q := "SELECT " + pgColumns + " FROM tool_registries" +
+		" WHERE labels->>'" + labelManagedByKey + "' = '" + labelManagedByMCP + "'" +
+		" AND (" +
+		" (namespace = ANY(COALESCE($1::text[], '{}'::text[])) AND labels->>'" + labelVisibilityKey + "' = '" + visOrg + "')" +
+		" OR (labels->>'" + labelVisibilityKey + "' = '" + visPublic + "')" +
+		" OR (namespace = $2 AND labels->>'" + labelVisibilityKey + "' = '" + visTeam + "')" +
+		" )" +
+		" ORDER BY namespace, name"
+
+	rows, err := s.db.QueryContext(ctx, q, members, callerNS)
+	if err != nil {
+		return nil, fmt.Errorf("toolregistry: list catalog: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ToolRegistry
+	for rows.Next() {
+		tr, err := scanRegistry(rows)
+		if err != nil {
+			return nil, fmt.Errorf("toolregistry: list catalog scan: %w", err)
+		}
+		out = append(out, *tr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("toolregistry: list catalog rows: %w", err)
+	}
+	return out, nil
+}
+
 func (s *pgStore) List(ctx context.Context, opts controlplane.ListOptions) (controlplane.Page[ToolRegistry], error) {
 	where, args := s.filter(opts)
 	page := controlplane.Page[ToolRegistry]{Items: make([]ToolRegistry, 0)}
