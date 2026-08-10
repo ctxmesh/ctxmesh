@@ -258,6 +258,16 @@ type AgentDeploymentReconciler struct {
 	// pod template and the pushed manifest are computed by the same
 	// resolveAgentBindings logic, so different readers would silently drift them.
 	Registry RegistryReader
+
+	// OnlineScore is the control-plane online-score aggregate store (from cpDB, the SAME
+	// store the RegressionDetectorReconciler reads). The HUMAN rollback actuator's
+	// healthy-target damping guard (m69.8, ADR 0062 Fork 4 (c)) reads it to refuse a
+	// rollback to a version that itself regressed vs its baseline. nil (dev without cpDB,
+	// or envtests that don't exercise the store) ⇒ the store-backed half of the
+	// healthy-target check is skipped; the condition-based half (RegressionDetected on the
+	// serving version) still applies. This is GUARD-side only — it is never used to
+	// auto-trigger a rollback (the auto-trigger is deferred, PRD §17.4).
+	OnlineScore onlineScoreReader
 }
 
 // registryReader returns the configured RegistryReader. REQUIRED post-retirement
@@ -295,6 +305,17 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
+	}
+
+	// ── Step 1b: Human rollback actuator (m69.8, ADR 0062 Fork 4) ─────────────
+	// A `agents.ctxmesh.ai/rollback=<agentversion>` annotation reverts the serving spec to
+	// that version's snapshot, guarded by the damping mechanism. It runs BEFORE the spec-hash
+	// / workload steps because a rollback rewrites spec — the ordinary path must reconcile the
+	// REVERTED spec, not the pre-revert one. The revert is a spec Update that re-enqueues the
+	// object, so the following reconcile rolls the workload through the normal path (the
+	// actuator never touches Knative traffic; the auto-trigger is DEFERRED, PRD §17.4).
+	if handled, rerr := r.maybeRollback(ctx, &deploy); handled {
+		return ctrl.Result{}, rerr
 	}
 
 	// Normalise the execution model. The CRD default fills "serving" for omitted

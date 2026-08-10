@@ -291,6 +291,12 @@ func main() {
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.
 		Registry: registryReader,
+		// Online-score store (m69.8, ADR 0062 Fork 4): the SAME cpDB store the regression
+		// detector reads (below). The human rollback actuator's healthy-target damping guard
+		// reads it to refuse a rollback to a version that itself regressed. nil-safe (dev
+		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
+		// deferred, so this is guard-side only).
+		OnlineScore: onlinescore.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
