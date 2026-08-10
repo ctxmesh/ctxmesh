@@ -324,6 +324,62 @@ func (s *pgStore) ListCases(ctx context.Context, datasetID string) ([]Case, erro
 	return out, nil
 }
 
+func (s *pgStore) ListDatasets(ctx context.Context, namespace string) ([]Dataset, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("dataset: %w: namespace is required", controlplane.ErrInvalid)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, namespace, name, display_name, created_at, updated_at
+		FROM datasets WHERE namespace = $1
+		ORDER BY created_at, id`, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("dataset: list datasets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]Dataset, 0)
+	for rows.Next() {
+		var d Dataset
+		if err := rows.Scan(&d.ID, &d.Namespace, &d.Name, &d.DisplayName, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("dataset: list datasets scan: %w", err)
+		}
+		d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dataset: list datasets rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *pgStore) LatestLabel(ctx context.Context, caseID string) (*Label, error) {
+	// Assert the case exists so an unknown ID is ErrNotFound (not a silently-null result masking a typo).
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT true FROM dataset_cases WHERE id = $1`, caseID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) || missingID(err) {
+		return nil, fmt.Errorf("dataset: %w: case %q", controlplane.ErrNotFound, caseID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dataset: latest label exists check: %w", err)
+	}
+
+	var l Label
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, case_id, value, correction, note, author, created_at
+		FROM dataset_labels WHERE case_id = $1
+		ORDER BY seq DESC LIMIT 1`, caseID).
+		Scan(&l.ID, &l.CaseID, &l.Value, &l.Correction, &l.Note, &l.Author, &l.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil // case exists but has no labels yet — caller checks for nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("dataset: latest label: %w", err)
+	}
+	l.CreatedAt = l.CreatedAt.UTC()
+	return &l, nil
+}
+
 // marshalTags encodes tags to a jsonb literal, treating nil as {} so a tagless row round-trips to nil on read
 // (parity with the twin).
 func marshalTags(tags map[string]string) ([]byte, error) {

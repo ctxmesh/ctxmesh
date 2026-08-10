@@ -731,6 +731,20 @@ func (s *Server) Handler() http.Handler {
 		// store / Langfuse adapter is unwired; 400 on a bad body. Returns 202 + {runId, status}.
 		authed.HandleFunc("POST /api/datasets/{name}/export", s.handleExportDataset)
 
+		// Dataset labeling API (M69, ADR 0062 Fork 5 — the improvement loop's human-labeling path).
+		// Caller-scoped (ADR 0011): the caller must present a valid token; the author on a label append is
+		// derived from the authenticated caller identity (SelfSubjectReview), never a client field.
+		// All degrade honestly (501) when the dataset store is not configured.
+		//
+		// NOTE: Go 1.22 ServeMux: "POST /api/datasets/{name}/cases/from-run" is MORE SPECIFIC than
+		// "POST /api/datasets/{name}/cases/{caseId}/labels" because the literal segment "from-run" is
+		// longer than the wildcard, so the from-run route wins on that path and the label route never
+		// sees it — the two patterns do not conflict.
+		authed.HandleFunc("GET /api/datasets", s.handleListDatasets)
+		authed.HandleFunc("GET /api/datasets/{name}/cases", s.handleListDatasetCases)
+		authed.HandleFunc("POST /api/datasets/{name}/cases/{caseId}/labels", s.handleAppendLabel)
+		authed.HandleFunc("POST /api/datasets/{name}/cases/from-run", s.handleFromRun)
+
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
 		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
