@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -86,6 +87,10 @@ type AlertPolicyReconciler struct {
 
 	// Audit is the control-plane audit store (from cpDB). nil ⇒ fired alerts are not audited.
 	Audit auditlog.Store
+
+	// HTTPClient is the HTTP client used for webhook dispatch (m70.5). nil ⇒ a default client with
+	// a 5 s per-attempt timeout is used. Override in tests to point at an httptest.Server.
+	HTTPClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=alertpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -460,6 +465,10 @@ func (r *AlertPolicyReconciler) recordFired(
 				"alertpolicy", ap.Name, "condition", cond.Name)
 		}
 	}
+
+	// Dispatch notifications AFTER durable persistence — a webhook failure must not prevent the
+	// alert from being recorded. notifyChannels never returns an error (logs + continues on failure).
+	r.notifyChannels(ctx, ap, cond, value, msg, now.Time)
 }
 
 // resolveOpen best-effort resolves the open (unresolved) durable alert for this condition on a true→false
