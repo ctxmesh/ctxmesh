@@ -180,6 +180,13 @@ type AgentDetailResponse struct {
 	Conditions    []AgentCondition `json:"conditions"`
 	Bindings      []AgentBinding   `json:"bindings"`
 	Versions      []string         `json:"versions"`
+	// ResourceVersion is the AgentDeployment's live resourceVersion — the client
+	// carries it back into a PUT edit as the optimistic-concurrency guard (m71.3, ADR
+	// 0065): a stale value → 409 instead of clobbering a concurrent edit.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+	// IsDraft is true when the agent carries the `agents.ctxmesh.ai/stage: draft` label
+	// (m71.2) — a not-yet-published draft in the conversational builder.
+	IsDraft bool `json:"isDraft,omitempty"`
 	// ManagedOutsideUI is true when the AgentDeployment does NOT carry the
 	// source-spec annotation (ADR 0017) — a kubectl-created agent the console never
 	// captured a simplified spec for. An edit of such an agent is DEGRADED: only the
@@ -1329,6 +1336,8 @@ func newAgentDetail(
 	return AgentDetailResponse{
 		Name:               ad.Name,
 		Namespace:          ad.Namespace,
+		ResourceVersion:    ad.ResourceVersion,
+		IsDraft:            isDraftAgent(ad),
 		Image:              ad.Spec.Image,
 		ExecutionModel:     ad.Spec.ExecutionModel,
 		Role:               ad.Spec.Role,

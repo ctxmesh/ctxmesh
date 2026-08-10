@@ -130,6 +130,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optimistic-concurrency guard (m71.3, ADR 0065): if the client supplied the
+	// resourceVersion it loaded and the live object has advanced since, refuse the edit
+	// (409) rather than let the SSA force-apply clobber a concurrent change. Empty ⇒ no
+	// guard (the SSA apply is force-owned as before — backward-compatible).
+	if rv := strings.TrimSpace(body.ResourceVersion); rv != "" && rv != live.ResourceVersion {
+		writeError(w, http.StatusConflict,
+			"the agent changed since you loaded it — reload and re-apply your edit")
+		return
+	}
+
 	stored, consoleManaged := live.Annotations[expand.AnnotationSourceSpec]
 
 	// Derive the edited simplified spec. A full agentYAML wins; otherwise the field
@@ -258,6 +268,13 @@ type UpdateAgentRequest struct {
 	Scaling        *editScalingSpec `json:"scaling,omitempty"`
 	ExecutionModel *string          `json:"executionModel,omitempty"`
 	Role           *string          `json:"role,omitempty"`
+	// ResourceVersion, when set, is the AgentDeployment resourceVersion the client
+	// loaded before composing this edit (m71.3, ADR 0065). It is an OPTIMISTIC-
+	// CONCURRENCY guard for the conversational builder's refine→edit loop: if the live
+	// object has advanced since (a concurrent edit / another session), the apply is
+	// refused with 409 instead of last-write-wins clobbering the newer state. Empty ⇒
+	// no guard (backward-compatible; the SSA apply is force-owned as before).
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 type editScalingSpec struct {
