@@ -1125,6 +1125,46 @@ export interface ProviderListResponse {
   items: ProviderSummary[];
 }
 
+// --- Recipes (GET /api/recipes) -----------------------------------------------
+// Recipe gallery (m72.5, ADR 0066 D5). Read-only — no auth needed. Clicking a
+// recipe pre-fills the shared review surface with the recipe's spec.
+
+// RecipeSummary is the BFF's recipe projection: name/title/description for the
+// card grid plus the full simplified agent.yaml spec for pre-filling the review.
+export interface RecipeSummary {
+  name: string;
+  title: string;
+  description: string;
+  icon: string;
+  spec: string;
+}
+
+export interface RecipeListResponse {
+  recipes: RecipeSummary[];
+}
+
+// --- Check requirements (POST /api/agents/check-requirements) ----------------
+// Advisory pre-flight for the create surface (m72.3, ADR 0066 D3). Caller-scoped,
+// read-only — no cluster write. Response is advisory; the create flow shows a
+// checklist but does NOT gate on it.
+
+export interface ModelRequirement {
+  required: boolean;
+  connected: boolean;
+  route?: string;
+}
+
+export interface ToolRequirement {
+  name: string;
+  /** "ready" | "needs-approval" | "needs-consent" | "not-found" */
+  status: string;
+}
+
+export interface CheckRequirementsResponse {
+  model: ModelRequirement;
+  tools: ToolRequirement[];
+}
+
 // --- BYO-MCP (POST/GET /api/mcpservers, GET /api/tools) ----------------------
 // The add-an-MCP flow (ADR 0016). The BFF probes the server + runs tools/list
 // discovery, stores an optional bearer key as a Secret (attached at the egress
@@ -4527,5 +4567,47 @@ export const api = {
   costChargebackCSVUrl: (tenant: string, period: string): string => {
     const qs = new URLSearchParams({ tenant, period, format: "csv" });
     return `/api/cost/chargeback?${qs.toString()}`;
+  },
+
+  // listRecipes returns the embedded recipe gallery (GET /api/recipes, m72.5).
+  // No auth header required; the endpoint is public on the authed mux (session
+  // cookie is sufficient). A 404 = recipes kill-switch (just show empty gallery).
+  listRecipes: async (signal?: AbortSignal): Promise<RecipeListResponse> => {
+    const res = await apiFetch("/api/recipes", { signal });
+    if (res.status === 404) return { recipes: [] };
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `list recipes failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RecipeListResponse;
+  },
+
+  // checkRequirements runs the advisory pre-flight against a candidate agent.yaml
+  // (POST /api/agents/check-requirements, m72.3, ADR 0066 D3). Caller-scoped,
+  // read-only. A 501 = endpoint absent (older server) → return empty response so
+  // the UI degrades silently (no checklist shown).
+  checkRequirements: async (
+    agentYAML: string,
+    namespace: string,
+    signal?: AbortSignal,
+  ): Promise<CheckRequirementsResponse> => {
+    const res = await apiFetch("/api/agents/check-requirements", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentYAML, namespace }),
+      signal,
+    });
+    if (res.status === 501) {
+      return { model: { required: false, connected: true }, tools: [] };
+    }
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `check-requirements failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as CheckRequirementsResponse;
   },
 };
