@@ -696,8 +696,11 @@ func TestProxy_AgentIdentityTraceTag(t *testing.T) {
 		AgentRoute:     "/invoke",
 	})
 
-	// The trace-level identity tag is present and namespace-qualified.
-	if got, want := attrs[langfuseTraceTagsAttr], "agent:team-a/foo"; got != want {
+	// The trace-level identity tag is present and namespace-qualified, AND the
+	// ADDITIVE version tag `version:<v>` follows it (m69.5, ADR 0062 Fork 2) — the
+	// invokeSpanAttrs helper joins the string-slice with "," so the two tags read as
+	// "agent:...,version:..." (agent first, then version).
+	if got, want := attrs[langfuseTraceTagsAttr], "agent:team-a/foo,version:v0.0.1"; got != want {
 		t.Errorf("%s = %q, want %q", langfuseTraceTagsAttr, got, want)
 	}
 	// The existing attributes are UNCHANGED (non-breaking).
@@ -709,6 +712,27 @@ func TestProxy_AgentIdentityTraceTag(t *testing.T) {
 	}
 	if attrs["agent.route"] != "/invoke" {
 		t.Errorf("agent.route = %q, want %q", attrs["agent.route"], "/invoke")
+	}
+}
+
+// TestProxy_VersionTraceTag: the agent.invoke span's `langfuse.trace.tags` carries
+// the ADDITIVE `version:<agentVersion>` tag alongside the agent tag (m69.5, ADR 0062
+// Fork 2) so the online-scoring worker can group a trace by the exact version that
+// served it — agent tag FIRST, then version. When AgentVersion is empty, NO version
+// tag is stamped (nothing to group on) — the tags slice is the agent tag alone.
+func TestProxy_VersionTraceTag(t *testing.T) {
+	t.Parallel()
+
+	// Version present → both tags, agent first then version.
+	withVer := Config{AgentName: "foo", AgentNamespace: "team-a", AgentVersion: "v2"}
+	if got, want := invokeSpanAttrs(t, withVer)[langfuseTraceTagsAttr], "agent:team-a/foo,version:v2"; got != want {
+		t.Errorf("%s = %q, want %q (agent tag first, version tag second)", langfuseTraceTagsAttr, got, want)
+	}
+
+	// Version ABSENT → the agent tag alone, no trailing version tag.
+	noVer := Config{AgentName: "foo", AgentNamespace: "team-a"}
+	if got, want := invokeSpanAttrs(t, noVer)[langfuseTraceTagsAttr], "agent:team-a/foo"; got != want {
+		t.Errorf("version-absent %s = %q, want %q (no version tag when empty)", langfuseTraceTagsAttr, got, want)
 	}
 }
 

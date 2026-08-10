@@ -1,8 +1,16 @@
 import * as React from "react";
 import { Link, useParams } from "react-router-dom";
-import { ExternalLink, Boxes, Brain } from "lucide-react";
+import { ExternalLink, Boxes, Brain, PlusCircle } from "lucide-react";
 
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { TraceExplorer } from "@/components/dashboard/trace-explorer";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
@@ -24,6 +32,114 @@ import { api, ApiError, type TraceDetailResponse } from "@/lib/api";
 //   trace-page              — root container
 //   trace-header            — the header block (name / timestamp / totals)
 //   trace-langfuse-linkout  — the link-out button/anchor
+
+// AddToDatasetPanel — the "add to dataset" on-ramp (m69.3, ADR 0062 Fork 5).
+// POSTs to /api/datasets/{name}/cases/from-run which fetches the trace, redacts PII,
+// and appends the result as a case. 501-calm when the dataset store is unconfigured.
+//
+// data-testid contract:
+//   add-to-dataset-panel   — root container
+//   add-to-dataset-input   — dataset name text input
+//   add-to-dataset-submit  — the submit button
+//   add-to-dataset-result  — success/error message after submission
+
+type AddToDatasetState =
+  | { kind: "idle" }
+  | { kind: "submitting" }
+  | { kind: "success"; caseId: string }
+  | { kind: "unconfigured" } // 501 calm
+  | { kind: "error"; message: string };
+
+function AddToDatasetPanel({ traceId }: { traceId: string }) {
+  const [datasetName, setDatasetName] = React.useState("");
+  const [state, setState] = React.useState<AddToDatasetState>({ kind: "idle" });
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const name = datasetName.trim();
+    if (!name) return;
+    setState({ kind: "submitting" });
+    try {
+      const result = await api.addRunToDataset(name, { traceId });
+      setState({ kind: "success", caseId: result.caseId });
+    } catch (err) {
+      if (err instanceof ApiError && err.isNotImplemented) {
+        setState({ kind: "unconfigured" });
+        return;
+      }
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : "failed to add to dataset",
+      });
+    }
+  }
+
+  return (
+    <Card data-testid="add-to-dataset-panel">
+      <CardHeader>
+        <CardTitle className="text-base">Add to dataset</CardTitle>
+        <CardDescription>
+          Redact PII from this trace and add it as a labeled case in a dataset (m69.3,
+          ADR 0062 Fork 5). Creates the dataset if it does not exist.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          onSubmit={(e) => void onSubmit(e)}
+          className="flex items-center gap-3"
+        >
+          <Input
+            data-testid="add-to-dataset-input"
+            placeholder="dataset-name"
+            value={datasetName}
+            onChange={(e) => setDatasetName(e.target.value)}
+            disabled={state.kind === "submitting"}
+            className="max-w-xs font-mono"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            data-testid="add-to-dataset-submit"
+            disabled={!datasetName.trim() || state.kind === "submitting"}
+          >
+            <PlusCircle className="h-3.5 w-3.5" />
+            {state.kind === "submitting" ? "Adding…" : "Add to dataset"}
+          </Button>
+        </form>
+        {state.kind === "success" && (
+          <p className="mt-3 text-sm text-success" data-testid="add-to-dataset-result">
+            Added as case{" "}
+            <span className="font-mono">{state.caseId}</span>.{" "}
+            <a
+              href={`/datasets/${encodeURIComponent(datasetName.trim())}`}
+              className="underline hover:no-underline"
+            >
+              View dataset →
+            </a>
+          </p>
+        )}
+        {state.kind === "unconfigured" && (
+          <p
+            className="mt-3 text-sm text-muted-foreground"
+            data-testid="add-to-dataset-result"
+          >
+            Dataset store not configured — set{" "}
+            <span className="font-mono">CONTROLPLANE_DSN</span> to enable this.
+          </p>
+        )}
+        {state.kind === "error" && (
+          <p
+            className="mt-3 text-sm text-destructive"
+            role="alert"
+            data-testid="add-to-dataset-result"
+          >
+            {state.message}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 type PageState =
   | { kind: "loading" }
@@ -228,6 +344,9 @@ export function TracePage() {
 
       {/* ── Feedback panel (m16.9) ─────────────────────────────────────────── */}
       <FeedbackPanel traceId={id} />
+
+      {/* ── Add to dataset (m69.3, ADR 0062 Fork 5) ──────────────────────── */}
+      <AddToDatasetPanel traceId={id} />
     </div>
   );
 }

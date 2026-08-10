@@ -32,7 +32,9 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
@@ -107,6 +109,34 @@ type Server struct {
 	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
 	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
 	embedder credplane.Embedder
+
+	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
+	// cpDB. The dataset-export executor (m69.2) WRITES it DIRECTLY — EnsureDataset/AppendCase — copying
+	// M66-redacted, traceId-lineaged cases out of Langfuse (governance #8: the run-worker is a trusted
+	// control-plane workload holding cpDB + Langfuse creds; agent pods never touch this). nil ⇒ the export
+	// endpoint + executor degrade honestly (501 / a clear failed-run reason), never a panic. Constructed in
+	// cmd/bff/main.go from CONTROLPLANE_DSN.
+	datasetStore dataset.Store
+
+	// onlineStore is the control-plane Postgres store for per-agent-version online score aggregates
+	// (M69, ADR 0062 Fork 2), built from cpDB. The online-scoring worker (m69.5) WRITES it DIRECTLY —
+	// UpsertAggregate — folding production traces (operational + feedback + judge) into the
+	// per-(namespace, agent, version, window) vector (governance #8: the trusted off-request worker holds
+	// cpDB + Langfuse creds; agent pods never touch this). nil ⇒ the online-scoring worker does not start
+	// (cmd/bff/main.go gates on it), so a missing store is an honest no-op, never a panic.
+	onlineStore onlinescore.Store
+
+	// judgeCounters bounds the online-scoring worker's SAMPLED judge to a per-(agent, day) cost cap
+	// (m69.5, ADR 0062 Fork 2): an in-memory best-effort counter that resets lazily when the date rolls.
+	// Always non-nil (constructed in NewServer) so the worker never nil-derefs it.
+	judgeCounters *judgeCounter
+
+	// onlineResolver resolves the PER-AGENT online-scoring policy from the agent's EvalSuite.online block
+	// (ADR 0062 Fork 2, m69.6). nil ⇒ the online-scoring worker uses its process-wide config for every
+	// agent (m69.5 back-compat); a real k8sOnlineConfigResolver (a read-only client over AgentDeployment +
+	// EvalSuite) is wired in cmd/bff/main.go when the worker is enabled. A resolve error falls back to the
+	// process defaults for that agent — never a fabricated verdict.
+	onlineResolver OnlineConfigResolver
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
 	// the console read path (list an agent's memories). nil ⇒ the memory endpoint returns 501.
@@ -398,6 +428,19 @@ type Options struct {
 	// which the ingestion executor writes directly (governance #8). Optional — nil ⇒ the ingest endpoint +
 	// executor degrade honestly. Constructed in cmd/bff/main.go from CONTROLPLANE_DSN (cpDB).
 	KnowledgeStore knowledge.Store
+	// DatasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), which the
+	// dataset-export executor writes directly (governance #8). Optional — nil ⇒ the export endpoint +
+	// executor degrade honestly (501 / a clear failed-run reason). Constructed in cmd/bff/main.go from cpDB.
+	DatasetStore dataset.Store
+	// OnlineStore is the control-plane Postgres store for online score aggregates (M69, ADR 0062 Fork 2),
+	// which the online-scoring worker (m69.5) writes directly (governance #8). Optional — nil ⇒ the
+	// online-scoring worker does not start (an honest no-op). Constructed in cmd/bff/main.go from cpDB.
+	OnlineStore onlinescore.Store
+	// OnlineResolver resolves the per-agent online-scoring policy from the EvalSuite.online block (ADR 0062
+	// Fork 2, m69.6). Optional — nil ⇒ the worker uses its process-wide config for every agent (m69.5).
+	// Constructed in cmd/bff/main.go (a read-only client over AgentDeployment + EvalSuite) only when the
+	// online-scoring worker is enabled.
+	OnlineResolver OnlineConfigResolver
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
 	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
@@ -444,7 +487,11 @@ func NewServer(opts Options) *Server {
 		runWorkerDispatch:        opts.RunWorkerDispatch,
 		docStore:                 opts.DocStore,
 		knowledgeStore:           opts.KnowledgeStore,
+		datasetStore:             opts.DatasetStore,
+		onlineStore:              opts.OnlineStore,
+		onlineResolver:           opts.OnlineResolver,
 		embedder:                 opts.Embedder,
+		judgeCounters:            &judgeCounter{},
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
@@ -565,6 +612,11 @@ func (s *Server) Handler() http.Handler {
 	authed := http.NewServeMux()
 	if s.callerClients != nil {
 		authed.HandleFunc("GET /api/agents", s.handleListAgents)
+		// Eval-gated deploys metric (M69, ADR 0062 governance #2): the PRD §5
+		// ">50% of production deploys gated by an EvalSuite" counter. Caller-scoped
+		// (ADR 0011): reads AgentDeployments through the caller's own token — the K8s
+		// API server's RBAC decides visibility, not the BFF SA. No new RBAC grant.
+		authed.HandleFunc("GET /api/metrics/eval-gated", s.handleEvalGatedMetric)
 		// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
 		// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
 		// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22
@@ -588,6 +640,14 @@ func (s *Server) Handler() http.Handler {
 		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
 		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
+		// Online-score surface (m69.11, ADR 0062 Fork 2): the improvement-loop production signal for the
+		// agent detail page. Caller-scoped (ADR 0011): caller-Get gates access, cpDB read returns the
+		// 3-component (operational/feedback/judge) per-version aggregates. 501 when the store is absent.
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/online-score", s.handleAgentOnlineScore)
+		// Rollback (m69.11, ADR 0062 Fork 4): set the agents.ctxmesh.ai/rollback=<version> annotation
+		// on the AgentDeployment via the CALLER'S client (caller-scoped PATCH - ADR 0011). The rollback
+		// controller (m69.8) actuates the guarded spec revert; this endpoint only sets the annotation.
+		authed.HandleFunc("POST /api/agents/{ns}/{name}/rollback", s.handleAgentRollback)
 		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
 		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
 		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
@@ -709,6 +769,28 @@ func (s *Server) Handler() http.Handler {
 		// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
 		// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
 		authed.HandleFunc("POST /api/knowledgebases/{name}/ingest", s.handleIngestKB)
+
+		// Dataset export trigger (M69, ADR 0062 Fork 1): pin an ExportSpec (target dataset + agent tag +
+		// timerange) and create a durable export Run the worker drives — it copies production traces OUT of
+		// Langfuse into the control-plane dataset store, M66-REDACTED (the PII P1), with source-trace lineage.
+		// Caller-scoped (ADR 0011): the caller's own token gates who can trigger an export. 501 when the dataset
+		// store / Langfuse adapter is unwired; 400 on a bad body. Returns 202 + {runId, status}.
+		authed.HandleFunc("POST /api/datasets/{name}/export", s.handleExportDataset)
+
+		// Dataset labeling API (M69, ADR 0062 Fork 5 — the improvement loop's human-labeling path).
+		// Caller-scoped (ADR 0011): the caller must present a valid token; the author on a label append is
+		// derived from the authenticated caller identity (SelfSubjectReview), never a client field.
+		// All degrade honestly (501) when the dataset store is not configured.
+		//
+		// NOTE: Go 1.22 ServeMux: "POST /api/datasets/{name}/cases/from-run" is MORE SPECIFIC than
+		// "POST /api/datasets/{name}/cases/{caseId}/labels" because the literal segment "from-run" is
+		// longer than the wildcard, so the from-run route wins on that path and the label route never
+		// sees it — the two patterns do not conflict.
+		authed.HandleFunc("GET /api/datasets", s.handleListDatasets)
+		authed.HandleFunc("GET /api/datasets/{name}/cases", s.handleListDatasetCases)
+		authed.HandleFunc("POST /api/datasets/{name}/cases/{caseId}/labels", s.handleAppendLabel)
+		authed.HandleFunc("POST /api/datasets/{name}/cases/from-run", s.handleFromRun)
+		authed.HandleFunc("POST /api/datasets/{name}/pin", s.handlePinDataset)
 
 		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
@@ -918,6 +1000,8 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
 		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
 		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
+		authed.Handle("GET /api/agents/{ns}/{name}/online-score", notImplemented("caller-scoped online score"))
+		authed.Handle("POST /api/agents/{ns}/{name}/rollback", notImplemented("caller-scoped agent rollback"))
 	}
 
 	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).

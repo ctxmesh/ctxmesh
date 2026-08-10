@@ -1,6 +1,7 @@
 import {
   Boxes,
   Coins,
+  Database,
   FlaskConical,
   GitBranch,
   GitFork,
@@ -49,7 +50,8 @@ export type Milestone =
   | "M64"
   | "M66"
   | "M67"
-  | "M68";
+  | "M68"
+  | "M69";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -251,6 +253,17 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Coins,
         milestone: "M16",
         route: "/cost",
+      },
+      {
+        // Datasets (M69) — human-labeled eval datasets for the improvement loop
+        // (ADR 0062 Fork 5). Each dataset is a collection of redacted trace cases
+        // labeled pass/fail/flag. Read-open (the API is the RBAC gate); add-case is
+        // done from the trace view or via the from-run on-ramp.
+        id: "datasets",
+        label: "Datasets",
+        icon: Database,
+        milestone: "M69",
+        route: "/datasets",
       },
       {
         // Audit (M63) — the compliance trail ("who connected/consented/invoked

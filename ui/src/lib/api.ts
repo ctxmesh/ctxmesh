@@ -204,6 +204,12 @@ export interface AgentDetailResponse {
   // m66.10 — optional guardrail policy reference (ADR 0059). Present when
   // spec.guardrailPolicyRef is set. The detail page links to /guardrails.
   guardrailPolicyRef?: string;
+  // m69.11 — optional gate projection (ADR 0062 Fork 3). Phase drives the
+  // canary/promote state machine; absent when no EvalSuite is wired.
+  gate?: {
+    phase?: string;
+    scoredRevision?: string;
+  };
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -295,6 +301,57 @@ export interface LongTermMemoryConfig {
   enabled: boolean;
   perUser: boolean;
   embeddingRoute?: string;
+}
+
+// --- Online-score (m69.11, ADR 0062 Fork 2) -----------------------------------
+// The 3-component per-version online-score aggregates served by
+// GET /api/agents/{ns}/{name}/online-score. Un-collapsed (operational / feedback
+// / judge) so the UI can show each component independently.
+
+export interface OnlineScoreOperational {
+  total: number;
+  errorCount: number;
+  toolFailCount: number;
+  latencyP95Ms: number;
+}
+
+export interface OnlineScoreFeedback {
+  count: number;
+  sumVal: number;
+}
+
+export interface OnlineScoreJudge {
+  count: number;
+  sumVal: number;
+}
+
+export interface OnlineScoreWindow {
+  agentVersion: string;
+  windowStart: string; // RFC3339 UTC, truncated to hour
+  operational: OnlineScoreOperational;
+  feedback: OnlineScoreFeedback;
+  judge: OnlineScoreJudge;
+}
+
+export interface OnlineScoreResponse {
+  namespace: string;
+  name: string;
+  windows: OnlineScoreWindow[];
+}
+
+// --- Rollback (m69.11, ADR 0062 Fork 4) --------------------------------------
+// POST /api/agents/{ns}/{name}/rollback — sets the rollback annotation via the
+// caller's PATCH. The rollback controller (m69.8) actuates the guarded revert.
+
+export interface RollbackRequest {
+  version: string;
+}
+
+export interface RollbackResponse {
+  namespace: string;
+  name: string;
+  targetVersion: string;
+  annotationSet: boolean;
 }
 
 // --- Run inspector (GET /api/traces/{id}/detail, m14.8) ----------------------
@@ -733,6 +790,65 @@ export interface KBSearchHit {
 // KBSearchResponse mirrors the BFF's search response — ranked chunks with citations.
 export interface KBSearchResponse {
   results: KBSearchHit[];
+}
+
+// --- Datasets (GET /api/datasets, GET /api/datasets/{name}/cases, POST labels + from-run) ---
+// The labeling console (m69.3, ADR 0062 Fork 5): list datasets, browse draft-head cases
+// with their latest label, append labels, and add a single run as a dataset case (the on-ramp).
+
+// DatasetSummary mirrors BFF's DatasetListItem — one dataset in the list.
+export interface DatasetSummary {
+  id: string;
+  name: string;
+  namespace: string;
+  caseCount: number;
+  createdAt: string;
+}
+
+// DatasetListResponse mirrors BFF's DatasetListResponse.
+export interface DatasetListResponse {
+  items: DatasetSummary[];
+}
+
+// CaseLabelSummary mirrors BFF's CaseLabelSummary — the latest label on a case.
+export interface CaseLabelSummary {
+  value: string;
+  correction?: string;
+  note?: string;
+  author: string;
+  createdAt: string;
+}
+
+// DatasetCase mirrors BFF's DatasetCaseItem — one case in the draft head.
+export interface DatasetCase {
+  id: string;
+  input: string;
+  expected?: string;
+  sourceTraceId?: string;
+  tags?: Record<string, string>;
+  createdAt: string;
+  // latestLabel is absent when the case has not been labeled yet.
+  latestLabel?: CaseLabelSummary;
+}
+
+// DatasetCasesResponse mirrors BFF's DatasetCasesResponse.
+export interface DatasetCasesResponse {
+  datasetId: string;
+  name: string;
+  cases: DatasetCase[];
+}
+
+// AppendLabelRequest is the POST /api/datasets/{name}/cases/{caseId}/labels body.
+// The author is always derived from the authenticated caller on the server — never sent by the client.
+export interface AppendLabelRequest {
+  value: string;
+  correction?: string;
+  note?: string;
+}
+
+// FromRunRequest is the POST /api/datasets/{name}/cases/from-run body — the single-run on-ramp.
+export interface FromRunRequest {
+  traceId: string;
 }
 
 // --- Workflows (GET /api/workflows, POST /api/workflows/{name}/runs) ---------
@@ -1461,6 +1577,20 @@ export interface GenerateAgentResponse {
   error?: string;
   reason?: string;
   regenerate?: boolean;
+}
+
+// EvalGatedMetricResponse mirrors the BFF's EvalGatedMetricResponse DTO (GET
+// /api/metrics/eval-gated, M69, ADR 0062 governance #2): a LIVE SNAPSHOT of the
+// PRD §5 ">50% of production deploys gated by an EvalSuite" quality metric.
+// Caller-scoped (ADR 0011): the BFF reads AgentDeployments via the caller's own
+// token; RBAC governs visibility. Historical per-promotion count is deferred.
+export interface EvalGatedMetricResponse {
+  /** Total AgentDeployments visible to the caller. */
+  total: number;
+  /** AgentDeployments with a non-empty spec.evalSuiteRef. */
+  gated: number;
+  /** gated/total*100 rounded to one decimal; 0 when total==0. */
+  percent: number;
 }
 
 export class ApiError extends Error {
@@ -3443,6 +3573,59 @@ export const api = {
     return (await res.json()) as AgentMemoryListResponse;
   },
 
+  // agentOnlineScore reads the improvement-loop online score aggregates for an agent
+  // (m69.11, ADR 0062 Fork 2). Returns null on 501 (control-plane store not configured)
+  // so the caller degrades to "not available" rather than an error — same discipline as
+  // agentMemory. The response carries the 3-component (operational/feedback/judge)
+  // un-collapsed per-version vector.
+  agentOnlineScore: async (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<OnlineScoreResponse | null> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/online-score`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (res.status === 501) return null;
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `online score failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as OnlineScoreResponse;
+  },
+
+  // agentRollback posts a rollback request — sets the rollback annotation on the
+  // AgentDeployment via the caller's PATCH (m69.11, ADR 0062 Fork 4). The
+  // rollback controller (m69.8) actuates the guarded revert; this is fire-and-signal
+  // (the annotation is set; controller acts asynchronously). A 404 means the agent
+  // is not found, a 403 means RBAC denied the patch.
+  agentRollback: async (
+    ns: string,
+    name: string,
+    version: string,
+    signal?: AbortSignal,
+  ): Promise<RollbackResponse> => {
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/rollback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ version } satisfies RollbackRequest),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `rollback failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RollbackResponse;
+  },
+
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
   // listMcpToolBindings reads one page window of MCPToolBindings through the
   // list contract. Pass agentName/namespace to scope to a single agent.
@@ -3883,5 +4066,122 @@ export const api = {
       );
     }
     return (await res.json()) as PromptDiffResponse;
+  },
+
+  // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
+  // listDatasets reads all datasets in the caller's namespace. 501-calm when the store is
+  // unconfigured (dataset store needs CONTROLPLANE_DSN); 502-error on a fetch failure.
+  listDatasets: async (signal?: AbortSignal, namespace?: string): Promise<DatasetListResponse> => {
+    const path = namespace
+      ? `/api/datasets?namespace=${encodeURIComponent(namespace)}`
+      : "/api/datasets";
+    const res = await apiFetch(path, { signal });
+    if (res.status === 501) return { items: [] }; // calm unconfigured degrade
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `list datasets failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DatasetListResponse;
+  },
+
+  // listDatasetCases reads the draft-head cases + latest label for one dataset.
+  // 501-calm (unconfigured); 404 when the dataset does not exist → throws.
+  listDatasetCases: async (
+    name: string,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<DatasetCasesResponse> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(name)}/cases?namespace=${encodeURIComponent(ns)}`,
+      { signal },
+    );
+    if (res.status === 501) return { datasetId: "", name, cases: [] }; // calm degrade
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `list dataset cases failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as DatasetCasesResponse;
+  },
+
+  // appendLabel appends a label to a case. The author is always the authenticated caller.
+  // 201 on success; throws on any error (404 case not found, 400 missing value, 501 unconfigured).
+  appendLabel: async (
+    datasetName: string,
+    caseId: string,
+    req: AppendLabelRequest,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<void> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?namespace=${encodeURIComponent(ns)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `append label failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // addRunToDataset posts the single-run on-ramp — one trace → one redacted case in the dataset.
+  // 201 on success with {caseId}; 501-calm when unconfigured (store or Langfuse adapter absent).
+  // Throws on 400 (missing traceId), 422 (trace has no input), or 502 (Langfuse fetch failed).
+  addRunToDataset: async (
+    datasetName: string,
+    req: FromRunRequest,
+    signal?: AbortSignal,
+    namespace?: string,
+  ): Promise<{ caseId: string }> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?namespace=${encodeURIComponent(ns)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `add run to dataset failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as { caseId: string };
+  },
+
+  // evalGatedMetric fetches the PRD §5 ">50% of production deploys gated by an
+  // EvalSuite" live-snapshot metric (GET /api/metrics/eval-gated, M69, ADR 0062
+  // governance #2). Caller-scoped (ADR 0011): the BFF reads AgentDeployments via
+  // the caller's own token; RBAC governs visibility. ?namespace narrows to one ns.
+  evalGatedMetric: async (
+    opts?: { namespace?: string; signal?: AbortSignal },
+  ): Promise<EvalGatedMetricResponse> => {
+    const params = new URLSearchParams();
+    if (opts?.namespace) params.set("namespace", opts.namespace);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const res = await apiFetch(`/api/metrics/eval-gated${qs}`, {
+      signal: opts?.signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `eval-gated metric failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as EvalGatedMetricResponse;
   },
 };

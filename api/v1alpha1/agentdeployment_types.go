@@ -291,6 +291,44 @@ type AgentDeploymentSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
+
+	// rollout optionally selects a progressive-delivery strategy for a GATED serving
+	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
+	// behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is
+	// untouched. When strategy is "canary", a candidate that PASSES the offline gate is
+	// served a NAMED-revision traffic split {old: 100-canaryPercent, candidate:
+	// canaryPercent} instead of being held at 0%, so both arms accumulate online scores;
+	// the human completes it with `promote=<candidate>` (100% candidate) or aborts
+	// (100% old). SERVING execution model only — for eventing/job the canary strategy is
+	// deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
+	// (double side-effects) and auto-progression is deferred.
+	// +optional
+	Rollout *RolloutSpec `json:"rollout,omitempty"`
+}
+
+// RolloutSpec selects a progressive-delivery strategy for a serving agent's rollout
+// (ADR 0062 Fork 3, M69). It applies only when the agent references an EvalSuite (the
+// gate decides which revision serves) and uses the serving execution model; otherwise
+// it is ignored and today's promote-all/hold behavior applies.
+type RolloutSpec struct {
+	// strategy selects the rollout strategy. "" (default) is today's promote-all/hold —
+	// a passing-but-unapproved candidate is held at 0% until the human promotes it.
+	// "canary" serves a named-revision Knative traffic split {old, candidate:N%} while
+	// the human decides, so both arms accumulate online scores (ADR 0062 Fork 3).
+	// +optional
+	// +kubebuilder:validation:Enum="";canary
+	Strategy string `json:"strategy,omitempty"`
+
+	// canaryPercent is the percent of live traffic routed to the CANDIDATE revision
+	// during a canary rollout; the remainder (100 - canaryPercent) stays on the old
+	// serving revision. Bounded to 1..99 so the split is a real canary — 0 would serve
+	// no candidate traffic (indistinguishable from a hold) and 100 would be a full
+	// promote (use `promote` for that). Only consulted when strategy == "canary".
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	CanaryPercent int32 `json:"canaryPercent,omitempty"`
 }
 
 // RuntimeSpec configures runtime authoring primitives applied by the managed
@@ -461,11 +499,14 @@ type CustomDetector struct {
 //	                 → warned                             (fail, gate:warn → promote anyway)
 type GateStatus struct {
 	// phase is the current gate state: pending | scoring | awaiting-promotion |
-	// promoted | blocked | warned. A passing candidate rests at awaiting-promotion
-	// until a human approval signal (the agents.ctxmesh.ai/promote annotation)
-	// flips it to promoted — v1 does NOT auto-promote (PRD §17.4).
+	// promoted | blocked | warned | canary | aborted. A passing candidate rests at
+	// awaiting-promotion until a human approval signal (the agents.ctxmesh.ai/promote
+	// annotation) flips it to promoted — v1 does NOT auto-promote (PRD §17.4). When the
+	// deployment requests a canary rollout (spec.rollout.strategy == "canary"), a
+	// passing candidate rests at `canary` instead (serving a named traffic split); the
+	// human completes it (promote → promoted) or aborts it (→ aborted). ADR 0062 Fork 3.
 	// +optional
-	// +kubebuilder:validation:Enum=pending;scoring;awaiting-promotion;promoted;blocked;warned
+	// +kubebuilder:validation:Enum=pending;scoring;awaiting-promotion;promoted;blocked;warned;canary;aborted
 	Phase string `json:"phase,omitempty"`
 
 	// score is the candidate's weighted-mean suite score for the scored revision,
@@ -505,6 +546,64 @@ type GateStatus struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// RollbackEvent is one record in the rollback history the damping guards read
+// (ADR 0062 Fork 4, M69). It records a completed spec-revert: which version the
+// serving spec was reverted TO, which version it was reverted FROM, and when. The
+// two-version flap detector reads recent events to refuse rolling back TO a version
+// that was recently rolled back FROM.
+type RollbackEvent struct {
+	// toVersion is the AgentVersion the serving spec was reverted to (the rollback
+	// target — an explicit AgentVersion name).
+	// +kubebuilder:validation:MaxLength=253
+	ToVersion string `json:"toVersion"`
+
+	// fromVersion is the AgentVersion the serving spec matched immediately before the
+	// revert (the version rolled back FROM), captured from status.latestVersion. Empty
+	// when no serving version was recorded yet.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	FromVersion string `json:"fromVersion,omitempty"`
+
+	// at is when the rollback was actuated.
+	At metav1.Time `json:"at"`
+}
+
+// RollbackStatus reports the human-rollback actuator state (ADR 0062 Fork 4, M69 —
+// the HUMAN actuator; the AUTO-rollback trigger is DEFERRED per PRD §17.4). It is
+// set only after at least one rollback (or refused rollback) has been evaluated;
+// nil otherwise (byte-compatible with the pre-M69 status). The damping guards
+// (cooldown, two-version flap detector, freeze-after-auto-action, healthy-target)
+// read this to decide whether to honour a `agents.ctxmesh.ai/rollback=<version>`
+// annotation.
+type RollbackStatus struct {
+	// rolledBackTo is the AgentVersion the serving spec was last reverted to by a
+	// human rollback. Empty until the first successful rollback.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	RolledBackTo string `json:"rolledBackTo,omitempty"`
+
+	// lastRollbackAt is when the last SUCCESSFUL rollback was actuated. The cooldown
+	// guard refuses a second rollback within rollbackCooldown of this time.
+	// +optional
+	LastRollbackAt *metav1.Time `json:"lastRollbackAt,omitempty"`
+
+	// history is the recent rollback events (most-recent-first, bounded), the input
+	// to the two-version flap detector: a rollback TO a version that appears as a
+	// fromVersion within the flap window is refused.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	History []RollbackEvent `json:"history,omitempty"`
+
+	// frozenUntilAck, when true, freezes further AUTO-actions on this deployment
+	// until a human acknowledges (ADR 0062 Fork 4 damping (d)). In v1 (human-only
+	// rollback) it is DEFINED and HONORED but never set — no auto-path exists to set
+	// it (the auto-rollback trigger is deferred, PRD §17.4). A future auto-action sets
+	// it; a human rollback is always permitted regardless (a human ack IS the human).
+	// +optional
+	FrozenUntilAck bool `json:"frozenUntilAck,omitempty"`
+}
+
 // AgentDeploymentStatus defines the observed state of AgentDeployment.
 type AgentDeploymentStatus struct {
 	// conditions reflect the current reconciliation state of the AgentDeployment.
@@ -519,6 +618,13 @@ type AgentDeploymentStatus struct {
 	// without an evalSuiteRef is byte-compatible with the pre-M9 status (PRD §17).
 	// +optional
 	Gate *GateStatus `json:"gate,omitempty"`
+
+	// rollback reports the human-rollback actuator state (ADR 0062 Fork 4, M69). Nil
+	// until a `agents.ctxmesh.ai/rollback=<version>` annotation is first evaluated —
+	// byte-compatible with the pre-M69 status. The AUTO-rollback trigger is DEFERRED
+	// (PRD §17.4); this records only human-actuated rollbacks + their damping state.
+	// +optional
+	Rollback *RollbackStatus `json:"rollback,omitempty"`
 
 	// url is the public HTTP endpoint assigned to the agent, copied verbatim from
 	// the Knative Service status once it becomes ready.

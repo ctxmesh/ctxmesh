@@ -644,7 +644,7 @@ func TestReconcile_RuntimeInjection(t *testing.T) {
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Runtime: &agentsv1alpha1.RuntimeSpec{
 				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
-					Default:      "allow",
+					Default:       "allow",
 					ParallelLimit: 4,
 				},
 				Resilience: &agentsv1alpha1.ResilienceSpec{
@@ -722,7 +722,7 @@ func TestReconcile_RuntimeDigestRoll(t *testing.T) {
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Runtime: &agentsv1alpha1.RuntimeSpec{
 				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
-					Default:      "allow",
+					Default:       "allow",
 					ParallelLimit: 3,
 				},
 			},

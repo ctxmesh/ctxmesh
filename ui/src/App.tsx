@@ -38,6 +38,7 @@ import { TeamsPage } from "@/pages/teams-page";
 import { GuardrailPoliciesPage } from "@/pages/guardrail-policies-page";
 import { WorkflowsPage } from "@/pages/workflows-page";
 import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
+import { DatasetsPage, DatasetDetailPage } from "@/pages/datasets-page";
 import {
   SecretBindingDetailPage,
   NewSecretBindingPage,
@@ -189,6 +190,9 @@ export function App() {
             {/* m68.13: KnowledgeBases — managed RAG corpora (list + detail, upload, ingest, test-query). */}
             <Route path="knowledgebases" element={<KnowledgeBasesPage />} />
             <Route path="knowledgebases/:ns/:name" element={<KBDetailPage />} />
+            {/* m69.3: Datasets — human-labeled eval cases (list + detail + label form). */}
+            <Route path="datasets" element={<DatasetsPage />} />
+            <Route path="datasets/:name" element={<DatasetDetailPage />} />
             {/* The agent LANDING page (m14.11) — closes the aha loop: status
                 timeline + live log tail + Run panel + the native run inspector.
                 Reached from the agents list row-click and the create→landing

@@ -46,6 +46,35 @@ func TestSpecHash_Determinism(t *testing.T) {
 	assert.Len(t, h1, 8, "specHash must return exactly 8 hex characters")
 }
 
+// TestSpecHash_NoRollout_ByteForByte is the M69.9 M4-landmine guard: adding the
+// optional Rollout block to the spec must NOT change the specHash (hence the
+// revision name / ksvc) for a deployment that does NOT set it. Rollout is a nil
+// pointer with omitempty, so it is omitted from the canonical JSON entirely — a
+// no-rollout spec hashes identically to a pre-M69 spec.
+func TestSpecHash_NoRollout_ByteForByte(t *testing.T) {
+	base := agentsv1alpha1.AgentDeploymentSpec{
+		Image:          "ghcr.io/ctxmesh/echo-agent:latest",
+		ExecutionModel: "serving",
+		Port:           8080,
+	}
+	withNilRollout := base
+	withNilRollout.Rollout = nil
+
+	hBase, err := specHash(base)
+	require.NoError(t, err)
+	hNil, err := specHash(withNilRollout)
+	require.NoError(t, err)
+	assert.Equal(t, hBase, hNil,
+		"an absent (nil) Rollout must not change the specHash — a no-rollout deployment's revision is byte-for-byte unchanged")
+
+	// A SET Rollout is a real config change → a different hash (a distinct revision).
+	withCanary := base
+	withCanary.Rollout = &agentsv1alpha1.RolloutSpec{Strategy: "canary", CanaryPercent: 10}
+	hCanary, err := specHash(withCanary)
+	require.NoError(t, err)
+	assert.NotEqual(t, hBase, hCanary, "a set Rollout block is a real config change and must alter the specHash")
+}
+
 func TestSpecHash_DifferentSpecs(t *testing.T) {
 	spec1 := agentsv1alpha1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:v1",
