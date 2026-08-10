@@ -162,17 +162,23 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, guardrailD)
 
-	neither := combinedBindingDigest("", "", "", "", "", "", "", "", "")
-	toolsOnly := combinedBindingDigest(toolD, "", "", "", "", "", "", "", "")
-	memOnly := combinedBindingDigest("", memD, "", "", "", "", "", "", "")
-	regOnly := combinedBindingDigest("", "", regD, "", "", "", "", "", "")
-	budgetOnly := combinedBindingDigest("", "", "", budD, "", "", "", "", "")
-	promptOnly := combinedBindingDigest("", "", "", "", promptD, "", "", "", "")
-	tenantOnly := combinedBindingDigest("", "", "", "", "", tenantD, "", "", "")
-	proxyOnly := combinedBindingDigest("", "", "", "", "", "", proxyD, "", "")
-	runtimeOnly := combinedBindingDigest("", "", "", "", "", "", "", runtimeD, "")
-	guardrailOnly := combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD)
-	all := combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD)
+	kbD := knowledgeBasesDigest([]kbRosterEntry{
+		{Name: "docs-kb", Namespace: "default", EmbeddingRoute: "text-embedding-3-small"},
+	})
+	require.NotEmpty(t, kbD)
+
+	neither := combinedBindingDigest("", "", "", "", "", "", "", "", "", "")
+	toolsOnly := combinedBindingDigest(toolD, "", "", "", "", "", "", "", "", "")
+	memOnly := combinedBindingDigest("", memD, "", "", "", "", "", "", "", "")
+	regOnly := combinedBindingDigest("", "", regD, "", "", "", "", "", "", "")
+	budgetOnly := combinedBindingDigest("", "", "", budD, "", "", "", "", "", "")
+	promptOnly := combinedBindingDigest("", "", "", "", promptD, "", "", "", "", "")
+	tenantOnly := combinedBindingDigest("", "", "", "", "", tenantD, "", "", "", "")
+	proxyOnly := combinedBindingDigest("", "", "", "", "", "", proxyD, "", "", "")
+	runtimeOnly := combinedBindingDigest("", "", "", "", "", "", "", runtimeD, "", "")
+	guardrailOnly := combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD, "")
+	kbOnly := combinedBindingDigest("", "", "", "", "", "", "", "", "", kbD)
+	all := combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD, kbD)
 
 	assert.Equal(t, "", neither, "no structural input of any type → empty digest (bare revision name)")
 	assert.NotEmpty(t, toolsOnly)
@@ -184,15 +190,16 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	assert.NotEmpty(t, proxyOnly)
 	assert.NotEmpty(t, runtimeOnly)
 	assert.NotEmpty(t, guardrailOnly)
+	assert.NotEmpty(t, kbOnly)
 	assert.NotEmpty(t, all)
-	// All ten non-empty outcomes must be mutually distinct.
+	// All eleven non-empty outcomes must be mutually distinct.
 	distinct := map[string]bool{
 		toolsOnly: true, memOnly: true, regOnly: true, budgetOnly: true,
 		promptOnly: true, tenantOnly: true, proxyOnly: true, runtimeOnly: true,
-		guardrailOnly: true, all: true,
+		guardrailOnly: true, kbOnly: true, all: true,
 	}
-	assert.Len(t, distinct, 10,
-		"tools / memory / registry / budget / prompt / tenant / proxy / runtime / guardrail / all must all differ")
+	assert.Len(t, distinct, 11,
+		"tools / memory / registry / budget / prompt / tenant / proxy / runtime / guardrail / kb / all must all differ")
 	assert.Len(t, all, 8, "combined digest is 8 hex chars — the bounded suffix budget")
 }
 
@@ -245,25 +252,35 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, guardrailD1, guardrailD2, "precondition: a policy edit flips the guardrail digest")
 
-	base := combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1)
-	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1),
+	kbD1 := knowledgeBasesDigest([]kbRosterEntry{
+		{Name: "docs-kb", Namespace: "default", EmbeddingRoute: "text-embedding-3-small"},
+	})
+	kbD2 := knowledgeBasesDigest([]kbRosterEntry{
+		{Name: "docs-kb", Namespace: "default", EmbeddingRoute: "text-embedding-3-large"},
+	})
+	require.NotEqual(t, kbD1, kbD2, "precondition: embeddingRoute change flips the kb digest")
+
+	base := combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1)
+	assert.NotEqual(t, base, combinedBindingDigest(toolD2, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"tool component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD2, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"memory component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD2, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"registry component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD2, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"budget component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD2, tenantD1, proxyD1, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD2, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"prompt component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD2, proxyD1, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD2, proxyD1, runtimeD1, guardrailD1, kbD1),
 		"tenant component change must flip the combined digest")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD2, runtimeD1, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD2, runtimeD1, guardrailD1, kbD1),
 		"proxy component change must flip the combined digest (M53 — the cutover must roll a revision)")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD2, guardrailD1),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD2, guardrailD1, kbD1),
 		"runtime component change must flip the combined digest (M65 — a runtime edit must roll a revision)")
-	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD2),
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD2, kbD1),
 		"guardrail component change must flip the combined digest (M66 — a policy edit must roll a revision)")
+	assert.NotEqual(t, base, combinedBindingDigest(toolD1, memD1, regD1, budD1, promptD1, tenantD1, proxyD1, runtimeD1, guardrailD1, kbD2),
+		"kb component change must flip the combined digest (M68 — a KB embeddingRoute change must roll a revision)")
 }
 
 // TestCombinedBindingDigest_Deterministic: identical inputs always produce the
@@ -289,16 +306,21 @@ func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD), combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD))
-	assert.Equal(t, combinedBindingDigest(toolD, "", "", "", "", "", "", "", ""), combinedBindingDigest(toolD, "", "", "", "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", memD, "", "", "", "", "", "", ""), combinedBindingDigest("", memD, "", "", "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", regD, "", "", "", "", "", ""), combinedBindingDigest("", "", regD, "", "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", budD, "", "", "", "", ""), combinedBindingDigest("", "", "", budD, "", "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", promptD, "", "", "", ""), combinedBindingDigest("", "", "", "", promptD, "", "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", tenantD, "", "", ""), combinedBindingDigest("", "", "", "", "", tenantD, "", "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", proxyD, "", ""), combinedBindingDigest("", "", "", "", "", "", proxyD, "", ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", runtimeD, ""), combinedBindingDigest("", "", "", "", "", "", "", runtimeD, ""))
-	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD), combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD))
+	kbD := knowledgeBasesDigest([]kbRosterEntry{
+		{Name: "docs-kb", Namespace: "default", EmbeddingRoute: "text-embedding-3-small"},
+	})
+
+	assert.Equal(t, combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD, kbD), combinedBindingDigest(toolD, memD, regD, budD, promptD, tenantD, proxyD, runtimeD, guardrailD, kbD))
+	assert.Equal(t, combinedBindingDigest(toolD, "", "", "", "", "", "", "", "", ""), combinedBindingDigest(toolD, "", "", "", "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", memD, "", "", "", "", "", "", "", ""), combinedBindingDigest("", memD, "", "", "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", regD, "", "", "", "", "", "", ""), combinedBindingDigest("", "", regD, "", "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", budD, "", "", "", "", "", ""), combinedBindingDigest("", "", "", budD, "", "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", promptD, "", "", "", "", ""), combinedBindingDigest("", "", "", "", promptD, "", "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", tenantD, "", "", "", ""), combinedBindingDigest("", "", "", "", "", tenantD, "", "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", proxyD, "", "", ""), combinedBindingDigest("", "", "", "", "", "", proxyD, "", "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", runtimeD, "", ""), combinedBindingDigest("", "", "", "", "", "", "", runtimeD, "", ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD, ""), combinedBindingDigest("", "", "", "", "", "", "", "", guardrailD, ""))
+	assert.Equal(t, combinedBindingDigest("", "", "", "", "", "", "", "", "", kbD), combinedBindingDigest("", "", "", "", "", "", "", "", "", kbD))
 }
 
 // TestRegistryMembershipDigest_Component pins the registry component's own
@@ -413,8 +435,8 @@ func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 	promptV2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "resolved-v2")
 	require.NotEqual(t, promptV1, promptV2, "precondition: a prompt swap changes the prompt component")
 
-	combinedV1 := combinedBindingDigest("", "", "", "", promptV1, "", "", "", "")
-	combinedV2 := combinedBindingDigest("", "", "", "", promptV2, "", "", "", "")
+	combinedV1 := combinedBindingDigest("", "", "", "", promptV1, "", "", "", "", "")
+	combinedV2 := combinedBindingDigest("", "", "", "", promptV2, "", "", "", "", "")
 
 	// The revision-name suffix changes (a new revision rolls) ...
 	assert.NotEqual(t, combinedV1, combinedV2,

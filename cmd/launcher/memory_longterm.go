@@ -250,16 +250,26 @@ func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // post sends payload to the token-service path, optionally decoding the response body into out.
 func (p *longTermProxy) post(ctx context.Context, path string, payload any, out *json.RawMessage) error {
+	return postToTokenService(ctx, p.client, p.tokenServiceURL, path, payload, out)
+}
+
+// postToTokenService POSTs a JSON payload to baseURL+path over client and, on a 200, optionally copies the
+// (bounded) response body into out. It is the ONE forwarding contract the launcher's token-service read proxies
+// share (long-term memory + managed-RAG knowledge), so both surfaces marshal, header, bound, and error identically
+// — a non-200 is a returned error (never swallowed), and out is untouched on failure.
+func postToTokenService(
+	ctx context.Context, client *http.Client, baseURL, path string, payload any, out *json.RawMessage,
+) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.tokenServiceURL+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("call token-service: %w", err)
 	}

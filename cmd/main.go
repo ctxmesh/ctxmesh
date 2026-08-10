@@ -52,8 +52,10 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controller"
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	// +kubebuilder:scaffold:imports
 )
@@ -353,6 +355,25 @@ func main() {
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
+		os.Exit(1)
+	}
+	// KnowledgeBase reconciler (M68, ADR 0061): the finalizer's two-store GC + the status projection
+	// from the corpus-status channel need the knowledge store (from the manager's existing cpDB) + the
+	// durable object store (from OBJECT_STORE_ADDR). Both are typed-nil-safe: an unconfigured store ⇒ the
+	// finalizer skips that half with a WARN and status stays validate-only (a dev deployment without them).
+	var kbObjStore objectstore.ObjectStore
+	if ms, dsErr := objectstore.NewMinioStore(); dsErr != nil {
+		setupLog.Error(dsErr, "Failed to init the durable KB object store (OBJECT_STORE_ADDR)")
+		os.Exit(1)
+	} else if ms != nil {
+		kbObjStore = ms
+	}
+	if err := (&controller.KnowledgeBaseReconciler{
+		Client:      mgr.GetClient(),
+		Knowledge:   knowledge.NewPostgresStore(cpDB),
+		ObjectStore: kbObjStore,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "knowledgebase")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

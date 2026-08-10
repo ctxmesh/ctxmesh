@@ -54,6 +54,7 @@ func newTestMemoryServer(t *testing.T) (*miniredis.Miniredis, *httptest.Server) 
 		memoryConfig{BackendAddr: mr.Addr(), Port: defaultMemoryPort, Namespace: "test-ns", Agent: "test-agent"},
 		tp.Tracer(tracerName),
 		nil,
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -115,7 +116,7 @@ func TestMemoryForwardsToProxy(t *testing.T) {
 			Port: defaultMemoryPort, Namespace: "team-alpha", Agent: "support",
 			Scope: "shared", Registry: "reg-1", ProxyURL: proxy.URL, TokenPath: tokenPath,
 		},
-		tp.Tracer(tracerName), nil)
+		tp.Tracer(tracerName), nil, nil)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
 
@@ -521,6 +522,7 @@ func TestMemorySharedScopeKeysUnderRegistry(t *testing.T) {
 		},
 		tp.Tracer(tracerName),
 		nil,
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -545,6 +547,7 @@ func TestMemorySharedScopeFallsBackToPrivateWithoutRegistry(t *testing.T) {
 		memoryConfig{Namespace: "ns", Agent: "a", Scope: "shared", Registry: ""},
 		tp.Tracer(tracerName),
 		nil,
+		nil,
 	)
 	if ms.prefix != "mem:ns/a:" {
 		t.Errorf("prefix = %q, want the private fallback mem:ns/a:", ms.prefix)
@@ -559,6 +562,7 @@ func TestMemoryPrivateScopeUnchanged(t *testing.T) {
 		nil,
 		memoryConfig{Namespace: "ns", Agent: "a", Registry: "team-x"},
 		tp.Tracer(tracerName),
+		nil,
 		nil,
 	)
 	if ms.prefix != "mem:ns/a:" {
@@ -758,6 +762,7 @@ func TestMemoryBackendDownReturns502(t *testing.T) {
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
 		nil,
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -799,6 +804,7 @@ func TestMemoryBackendUnreachable(t *testing.T) {
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
 		nil,
+		nil,
 	)
 	srv := httptest.NewServer(ms.handler())
 	t.Cleanup(srv.Close)
@@ -824,6 +830,7 @@ func TestMemorySpansEmitted(t *testing.T) {
 		newRedisStore(mr.Addr()),
 		memoryConfig{Namespace: "ns", Agent: "ag"},
 		tp.Tracer(tracerName),
+		nil,
 		nil,
 	)
 	srv := httptest.NewServer(ms.handler())

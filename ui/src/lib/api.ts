@@ -666,6 +666,75 @@ export interface GuardrailPolicyListResponse {
   items: GuardrailPolicySummary[];
 }
 
+// --- KnowledgeBases (GET /api/knowledgebases, POST /api/knowledgebases/{name}/search) ---
+// The enterprise-RAG demo surface (m68.13, ADR 0061): upload docs → ingest → watch phase →
+// test-query with citations. Read-only list (caller-scoped); test-query proxies to the
+// token-service /v1/knowledge/search and returns ranked chunks with citation fields.
+
+// KBCondition mirrors one status.Condition on a KnowledgeBase.
+export interface KBCondition {
+  type: string;
+  // "True" | "False" | "Unknown"
+  status: string;
+  reason?: string;
+  message?: string;
+  lastTransitionTime?: string;
+}
+
+// KBSummary is the BFF's flat projection for the KB list.
+export interface KBSummary {
+  name: string;
+  namespace: string;
+  // phase: "Pending" | "Ingesting" | "Ready" | "PartiallyIngested" | "Failed" | "BudgetExceeded"
+  phase: string;
+  chunkCount: number;
+  documentCount: number;
+  sizeBytes: number;
+  lastIngestedAt?: string; // RFC3339 or absent
+  embeddingRoute: string;
+}
+
+// KBDetail extends KBSummary with full spec + conditions for the detail page.
+export interface KBDetail extends KBSummary {
+  displayName?: string;
+  sourceType: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  chunkSplitter: string;
+  ingestionRunRef?: string;
+  conditions: KBCondition[];
+}
+
+// KBListResponse mirrors the BFF's list-contract DTO for KnowledgeBases.
+export interface KBListResponse {
+  items: KBSummary[];
+}
+
+// KBSearchRequest is the POST /api/knowledgebases/{name}/search body (m68.13).
+export interface KBSearchRequest {
+  query: string;
+  topK?: number;
+  threshold?: number;
+}
+
+// KBSearchHit is one ranked chunk from the test-query search (m68.11 citation surface).
+export interface KBSearchHit {
+  content: string;
+  // documentRef is the source document filename — the citation anchor.
+  documentRef: string;
+  // chunkIndex is the chunk's ordinal within the document.
+  chunkIndex: number;
+  // score is the cosine similarity in [0,1].
+  score: number;
+  // truncated is true when the chunk's content was trimmed to the max-chunk-chars cap.
+  truncated?: boolean;
+}
+
+// KBSearchResponse mirrors the BFF's search response — ranked chunks with citations.
+export interface KBSearchResponse {
+  results: KBSearchHit[];
+}
+
 // --- Workflows (GET /api/workflows, POST /api/workflows/{name}/runs) ---------
 // The Workflow CR list surface (m67.9, ADR 0060): declarative graphs of agent invocations.
 // Read-only list (caller-scoped); invoke via POST to create a workflow instance run.
@@ -3089,6 +3158,89 @@ export const api = {
   // A 403 surfaces as a typed ApiError (isForbidden).
   listWorkflows: (signal?: AbortSignal) =>
     getJSON<WorkflowListResponse>("/api/workflows", signal),
+
+  // listKnowledgeBases reads the KnowledgeBase CRs (m68.13, ADR 0061) — managed RAG corpora
+  // (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
+  listKnowledgeBases: (signal?: AbortSignal, namespace?: string) => {
+    const path = namespace
+      ? `/api/knowledgebases?namespace=${encodeURIComponent(namespace)}`
+      : "/api/knowledgebases";
+    return getJSON<KBListResponse>(path, signal);
+  },
+
+  // getKnowledgeBase reads one KnowledgeBase's full detail (spec + status + conditions)
+  // (m68.13, ADR 0061). A 403 → isForbidden; a 404 → isNotFound.
+  getKnowledgeBase: (name: string, namespace?: string, signal?: AbortSignal) => {
+    const ns = namespace ?? "default";
+    return getJSON<KBDetail>(
+      `/api/knowledgebases/${encodeURIComponent(name)}?namespace=${encodeURIComponent(ns)}`,
+      signal,
+    );
+  },
+
+  // searchKnowledgeBase runs the console test-query: forwards to the token-service
+  // /v1/knowledge/search and returns ranked chunks with citations (m68.13, ADR 0061).
+  // A 501 (token-service unconfigured) surfaces as ApiError.isNotImplemented — the caller
+  // must render a calm "unavailable" state on 501.
+  searchKnowledgeBase: async (
+    name: string,
+    req: KBSearchRequest,
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<KBSearchResponse> => {
+    const ns = namespace ?? "default";
+    return postJSON<KBSearchRequest, KBSearchResponse>(
+      `/api/knowledgebases/${encodeURIComponent(name)}/search?namespace=${encodeURIComponent(ns)}`,
+      req,
+      signal,
+    );
+  },
+
+  // uploadKBDocument uploads a raw document to the KB's durable bucket (m68.13, ADR 0061 Fork 4).
+  // Returns 201 + {documentRef, key, size} on success; throws ApiError on failure.
+  uploadKBDocument: async (
+    name: string,
+    file: File,
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<{ documentRef: string; key: string; size: number }> => {
+    const ns = namespace ?? "default";
+    const path = `/api/knowledgebases/${encodeURIComponent(name)}/documents?filename=${encodeURIComponent(file.name)}&namespace=${encodeURIComponent(ns)}`;
+    const res = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `upload document failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as { documentRef: string; key: string; size: number };
+  },
+
+  // ingestKB triggers ingestion for a KnowledgeBase (m68.13, ADR 0061 Fork 2).
+  // Returns 202 + {runId, status, documentCount} on success.
+  ingestKB: async (
+    name: string,
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<{ runId: string; status: string; documentCount: number }> => {
+    const ns = namespace ?? "default";
+    const res = await apiFetch(
+      `/api/knowledgebases/${encodeURIComponent(name)}/ingest?namespace=${encodeURIComponent(ns)}`,
+      { method: "POST", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `start ingestion failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as { runId: string; status: string; documentCount: number };
+  },
 
   // createWorkflowRun starts a workflow instance run via POST /api/workflows/{name}/runs (m67.9, ADR 0060).
   // Returns 202 Accepted with {id, status} on success; throws ApiError on failure.

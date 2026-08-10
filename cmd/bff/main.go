@@ -52,10 +52,12 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/agentmemory"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
@@ -203,11 +205,13 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
 	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
 	var grantStore credresolve.GrantWriter
+	var tsHTTPClient *http.Client // reused by the KB test-query endpoint (m68.13)
 	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
 		httpClient, tlsErr := tokenServiceHTTPClient(tsURL)
 		if tlsErr != nil {
 			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
 		}
+		tsHTTPClient = httpClient
 		grantStore = credplane.NewClient(tsURL, httpClient)
 		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
 	}
@@ -276,10 +280,33 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// pinned onto the run (run.NodeEndpoints), exactly as a single run pins its Endpoint. The off-request
 	// workflow executor then launches nodes off the PINNED endpoints — so the BFF needs NO agent-CRD RBAC
 	// (config/bff/role.yaml is `rules: []`, ADR 0011) and there is no privileged off-request cluster client.
+
+	// Durable KB object store (M68, ADR 0061 Fork 4): OBJECT_STORE_ADDR unset ⇒ nil ⇒ the upload endpoint
+	// returns an honest 501 (see newDocStore — it is typed-nil-safe).
+	docStore, err := newDocStore()
+	if err != nil {
+		return fmt.Errorf("init durable KB object store: %w", err)
+	}
+
+	// KB ingestion direct-write path (M68, ADR 0061 governance #8): the run-worker is a TRUSTED control-plane
+	// workload that already holds the controlplane DSN, so the ingestion executor (m68.6) EMBEDS + WRITES
+	// knowledge_chunks DIRECTLY — no token-service proxy hop (agent pods never do this; they read via proxy).
+	//   - the knowledge store rides the already-open cpDB (the same pgvector Postgres as memory).
+	//   - the gateway embedder is built from MODEL_GATEWAY_URL, exactly as the token-service builds its memory
+	//     embedder (the same seam). Absent ⇒ nil ⇒ the ingest endpoint + executor degrade honestly (501 / a
+	//     clear failed-run reason), never a panic.
+	knowledgeStore := knowledge.NewPostgresStore(cpDB)
+	ingestEmbedder := newIngestEmbedder(log)
+
 	srv := bff.NewServer(bff.Options{
+		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
+		TokenServiceHTTPClient:      tsHTTPClient,
 		GrantStore:                  grantStore,
 		TenantUsage:                 tenantUsage,
 		RunStore:                    runStore,
+		DocStore:                    docStore,
+		KnowledgeStore:              knowledgeStore,
+		Embedder:                    ingestEmbedder,
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
@@ -392,6 +419,37 @@ func envInt(raw string) int {
 		return 0
 	}
 	return n
+}
+
+// newDocStore builds the durable KB object store (M68, ADR 0061 Fork 4) from OBJECT_STORE_ADDR.
+// It is typed-nil-safe: when OBJECT_STORE_ADDR is unset, NewMinioStore returns a nil *minioKBStore,
+// which this returns as a genuine nil ObjectStore interface (never a typed-nil wrapped in the
+// interface) so the upload handler's `docStore == nil` 501-gate works. Unset ⇒ (nil, nil).
+func newDocStore() (objectstore.ObjectStore, error) {
+	ms, err := objectstore.NewMinioStore()
+	if err != nil {
+		return nil, err
+	}
+	if ms == nil {
+		return nil, nil
+	}
+	return ms, nil
+}
+
+// newIngestEmbedder builds the gateway embedder the KB ingestion executor uses to embed chunk texts directly
+// (M68, ADR 0061 Fork 2 / governance #8 — the trusted worker embeds + writes, agent pods do not). It reads the
+// gateway base URL from MODEL_GATEWAY_URL (the same seam the token-service memory embedder uses) + the optional
+// MODEL_GATEWAY_KEY. Unset ⇒ nil, so the ingest endpoint + executor degrade honestly (501 / a failed-run reason).
+func newIngestEmbedder(log logr.Logger) credplane.Embedder {
+	gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL"))
+	if gwURL == "" {
+		log.Info("KB ingestion embedder DISABLED: MODEL_GATEWAY_URL unset — the ingest endpoint returns 501")
+		return nil
+	}
+	log.Info("KB ingestion embedder enabled (ADR 0061 Fork 2): gateway embeddings, direct-write from worker",
+		"gateway", gwURL)
+	return credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
+		&http.Client{Timeout: 60 * time.Second})
 }
 
 // tokenServiceHTTPClient builds the http.Client the BFF uses to delegate grant writes to

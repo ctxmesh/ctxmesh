@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 )
 
 const (
@@ -67,6 +68,7 @@ type TenantReconciler struct {
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=knowledgebases,verbs=get;list;watch
 
 // Reconcile converges the Tenant's member namespaces: it stamps/updates a
 // ResourceQuota on each owned namespace and prunes any it no longer owns.
@@ -114,7 +116,14 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("pruning dropped namespaces: %w", err)
 	}
 
-	return ctrl.Result{}, r.updateStatus(ctx, &tenant, owned, contested)
+	// Aggregate corpus bytes across member namespaces for the storage soft-cap check
+	// (ADR 0061 governance #7, M68 m68.12). Pure K8s list+sum — never re-queries Postgres.
+	totalBytes, err := r.aggregateCorpusBytes(ctx, owned)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("aggregating corpus bytes: %w", err)
+	}
+
+	return ctrl.Result{}, r.updateStatus(ctx, &tenant, owned, contested, totalBytes)
 }
 
 // resolveOwnership splits the tenant's requested namespaces into the ones it owns
@@ -363,9 +372,34 @@ func (r *TenantReconciler) pruneNamespaces(ctx context.Context, tenantName strin
 	return nil
 }
 
-// updateStatus writes memberNamespaces + the Ready / NamespaceConflict conditions.
-func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alpha1.Tenant, owned, contested []string) error {
+// aggregateCorpusBytes sums KnowledgeBase.status.sizeBytes across all member namespaces.
+// It reads only K8s objects (no Postgres) — the KB controller projects sizeBytes from the
+// corpus-status row. An empty owned list returns 0. Per-namespace List errors are returned
+// so the reconcile requeues; a single-namespace error is not suppressed (partial aggregation
+// would silently under-report and miss a soft-cap breach).
+func (r *TenantReconciler) aggregateCorpusBytes(ctx context.Context, owned []string) (int64, error) {
+	var total int64
+	for _, ns := range owned {
+		var kbList agentsv1beta1.KnowledgeBaseList
+		if err := r.List(ctx, &kbList, client.InNamespace(ns)); err != nil {
+			return 0, fmt.Errorf("listing KnowledgeBases in namespace %q: %w", ns, err)
+		}
+		for i := range kbList.Items {
+			total += kbList.Items[i].Status.SizeBytes
+		}
+	}
+	return total, nil
+}
+
+// updateStatus writes memberNamespaces + the Ready / NamespaceConflict / StorageSoftCapExceeded
+// conditions and updates the corpus-bytes gauge + totalCorpusBytes status field.
+func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alpha1.Tenant, owned, contested []string, totalCorpusBytes int64) error {
 	tenant.Status.MemberNamespaces = int32(len(owned))
+	tenant.Status.TotalCorpusBytes = totalCorpusBytes
+
+	// Update the per-tenant corpus-bytes gauge (tenant label, SOFT signal — no block).
+	tenantCorpusBytesGauge.WithLabelValues(tenant.Name).Set(float64(totalCorpusBytes))
+
 	meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -384,32 +418,73 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 	} else {
 		meta.RemoveStatusCondition(&tenant.Status.Conditions, "NamespaceConflict")
 	}
+
+	// Storage soft-cap check (ADR 0061 governance #7, M68 m68.12).
+	// SOFT: exceeding the cap WARNS (condition + event) — it NEVER blocks ingestion.
+	// Hard enforcement (blocking uploads/ingestion at the cap, per-user storage accounting)
+	// is deferred: m52 Theme M "hard storage-quota enforcement + per-user storage accounting".
+	if tenant.Spec.Storage != nil && tenant.Spec.Storage.CorpusBytesSoftCap != "" {
+		capQ, err := resource.ParseQuantity(tenant.Spec.Storage.CorpusBytesSoftCap)
+		if err == nil { // parse errors are rejected at admission (CEL) — be defensive
+			capBytes := capQ.Value()
+			if totalCorpusBytes > capBytes {
+				meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+					Type:   "StorageSoftCapExceeded",
+					Status: metav1.ConditionTrue,
+					Reason: "CorpusBytesExceedSoftCap",
+					Message: fmt.Sprintf(
+						"tenant corpus is %d bytes, exceeding the soft cap of %d bytes (%s); "+
+							"ingestion is NOT blocked — this is a warning only. "+
+							"Hard enforcement is deferred (m52 Theme M).",
+						totalCorpusBytes, capBytes, tenant.Spec.Storage.CorpusBytesSoftCap),
+					ObservedGeneration: tenant.Generation,
+				})
+			} else {
+				meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageSoftCapExceeded")
+			}
+		}
+	} else {
+		meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageSoftCapExceeded")
+	}
+
 	return r.Status().Update(ctx, tenant)
 }
 
-// SetupWithManager wires the Tenant controller. It also watches Namespaces so a
-// member namespace created after the Tenant gets quota'd, mapping a namespace to
-// every tenant that lists it.
+// mapObjectNSToTenants maps a namespaced object (e.g. a KnowledgeBase or Namespace) to the
+// Tenant(s) whose member namespace list includes that namespace. The tenant controller must
+// re-reconcile when a KnowledgeBase.status.sizeBytes changes so the soft-cap check stays current.
+func mapObjectNSToTenants(ctx context.Context, mgr ctrl.Manager, objNS string) []reconcile.Request {
+	var list agentsv1alpha1.TenantList
+	if err := mgr.GetClient().List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if slices.Contains(list.Items[i].Spec.Namespaces, objNS) {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: client.ObjectKey{Name: list.Items[i].Name},
+			})
+		}
+	}
+	return reqs
+}
+
+// SetupWithManager wires the Tenant controller. It also watches Namespaces (so a
+// member namespace created after the Tenant gets quota'd) and KnowledgeBases (so a
+// sizeBytes update re-triggers the storage soft-cap check — ADR 0061 governance #7).
 func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapNamespaceToTenants := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			var list agentsv1alpha1.TenantList
-			if err := mgr.GetClient().List(ctx, &list); err != nil {
-				return nil
-			}
-			var reqs []reconcile.Request
-			for i := range list.Items {
-				if slices.Contains(list.Items[i].Spec.Namespaces, obj.GetName()) {
-					reqs = append(reqs, reconcile.Request{
-						NamespacedName: client.ObjectKey{Name: list.Items[i].Name},
-					})
-				}
-			}
-			return reqs
+			return mapObjectNSToTenants(ctx, mgr, obj.GetName())
+		})
+	mapKBToTenants := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return mapObjectNSToTenants(ctx, mgr, obj.GetNamespace())
 		})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.Tenant{}).
 		Watches(&corev1.Namespace{}, mapNamespaceToTenants).
+		Watches(&agentsv1beta1.KnowledgeBase{}, mapKBToTenants).
 		Named("tenant").
 		Complete(r)
 }

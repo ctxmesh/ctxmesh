@@ -5,6 +5,7 @@ Constructed by :func:`ctxmesh.agent.from_env` (in-pod) or
 launcher endpoint and applies the run context:
 
     client.memory     -> :2998               (M5)
+    client.knowledge  -> :2998               (M68) — knowledge-base retrieval
     client.tools      -> :2999               (M4)
     client.feedback   -> :2995               (M9)
     client.model      -> $MODEL_GATEWAY_URL   (M2/M8) — emits an LLM span
@@ -27,6 +28,7 @@ from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.feedback import FeedbackClient
+from ctxmesh.knowledge import KnowledgeClient
 from ctxmesh.memory import MemoryClient
 from ctxmesh.model import ModelClient
 from ctxmesh.tools import ToolsClient
@@ -44,6 +46,7 @@ class Client:
     ):
         self._config = config
         self.memory = MemoryClient(config)
+        self.knowledge = KnowledgeClient(config)
         self.tools = ToolsClient(config)
         self.feedback = FeedbackClient(config)
         # trace must exist before model: model.chat wraps its round-trip in an
