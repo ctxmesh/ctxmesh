@@ -429,6 +429,16 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Resolve the OLD serving revision from the LIVE ksvc BEFORE any candidate write —
+	// it is the "old" arm of a canary split (the serving revision that is NOT the
+	// candidate). Read here (pre-apply) so the split pins the revision genuinely serving
+	// today. "" ⇒ no ksvc yet, or the only serving revision IS the candidate (no old arm).
+	oldRev, err := r.currentServingRevision(ctx, deploy, candidateRev)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
 	if err != nil {
 		// A missing/invalid EvalSuite is USER input (surfaced from evaluateGate as an
@@ -438,6 +448,19 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 			return r.setGateBlockedStatus(ctx, deploy, ge.reason, ge.Error())
 		}
 		return ctrl.Result{}, fmt.Errorf("evaluating deploy gate: %w", err)
+	}
+	// A PASSING candidate on a CANARY-configured serving deployment with a distinct OLD
+	// serving revision takes the canary path (ADR 0062 Fork 3) — for BOTH the
+	// unapproved case (hold at a named {old, candidate:N%} split so both arms accumulate
+	// online scores) AND the human-completion case (promote=<candidate> → 100% candidate,
+	// abort → 100% old). The ordinary promote path leaves ksvc.Spec.Traffic alone, so a
+	// canary MUST route through reconcileCanary to set the named split/completion traffic.
+	// A gate:warn/blocked candidate (Decision != promoted) never canaries. A first deploy
+	// with no old arm (oldRev == "") is a degenerate canary → fall through to the ordinary
+	// path (hold at 0% until promoted, or promote-all — unchanged).
+	if outcome != nil && outcome.status.Decision == eval.DecisionPromoted &&
+		canaryConfigured(deploy, execModelServing) && oldRev != "" && oldRev != candidateRev {
+		return r.reconcileCanary(ctx, deploy, hash, versionName, candidateRev, oldRev, outcome)
 	}
 	if outcome != nil && !outcome.promote {
 		// Gate held the rollout (blocked or awaiting-promotion): do NOT apply the
@@ -484,6 +507,28 @@ func (r *AgentDeploymentReconciler) candidateRevisionName(
 		revName = revName + "-h" + pod.digest
 	}
 	return revName, nil
+}
+
+// currentServingRevision returns the "old" arm for a canary split against
+// candidateRev: the revision the agent's Knative Service serves today that is NOT
+// the candidate. Returns "" when no ksvc exists yet OR the only serving revision is
+// the candidate (a first deploy / already-promoted candidate has no distinct old
+// arm). A NotFound ksvc is not an error — it just means there is no old revision to
+// split against. See oldServingRevision for the resolution order.
+func (r *AgentDeploymentReconciler) currentServingRevision(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	candidateRev string,
+) (string, error) {
+	var ksvc servingv1.Service
+	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &ksvc)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading current ksvc for serving revision: %w", err)
+	}
+	return oldServingRevision(&ksvc, candidateRev), nil
 }
 
 // reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a

@@ -291,6 +291,44 @@ type AgentDeploymentSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	GuardrailPolicyRef string `json:"guardrailPolicyRef,omitempty"`
+
+	// rollout optionally selects a progressive-delivery strategy for a GATED serving
+	// agent (ADR 0062 Fork 3, M69). Absent (or strategy "") ⇒ today's promote-all/hold
+	// behavior, byte-for-byte unchanged — a no-rollout deployment's Knative Service is
+	// untouched. When strategy is "canary", a candidate that PASSES the offline gate is
+	// served a NAMED-revision traffic split {old: 100-canaryPercent, candidate:
+	// canaryPercent} instead of being held at 0%, so both arms accumulate online scores;
+	// the human completes it with `promote=<candidate>` (100% candidate) or aborts
+	// (100% old). SERVING execution model only — for eventing/job the canary strategy is
+	// deferred and the agent falls back to promote-all/hold. Shadow rollout is rejected
+	// (double side-effects) and auto-progression is deferred.
+	// +optional
+	Rollout *RolloutSpec `json:"rollout,omitempty"`
+}
+
+// RolloutSpec selects a progressive-delivery strategy for a serving agent's rollout
+// (ADR 0062 Fork 3, M69). It applies only when the agent references an EvalSuite (the
+// gate decides which revision serves) and uses the serving execution model; otherwise
+// it is ignored and today's promote-all/hold behavior applies.
+type RolloutSpec struct {
+	// strategy selects the rollout strategy. "" (default) is today's promote-all/hold —
+	// a passing-but-unapproved candidate is held at 0% until the human promotes it.
+	// "canary" serves a named-revision Knative traffic split {old, candidate:N%} while
+	// the human decides, so both arms accumulate online scores (ADR 0062 Fork 3).
+	// +optional
+	// +kubebuilder:validation:Enum="";canary
+	Strategy string `json:"strategy,omitempty"`
+
+	// canaryPercent is the percent of live traffic routed to the CANDIDATE revision
+	// during a canary rollout; the remainder (100 - canaryPercent) stays on the old
+	// serving revision. Bounded to 1..99 so the split is a real canary — 0 would serve
+	// no candidate traffic (indistinguishable from a hold) and 100 would be a full
+	// promote (use `promote` for that). Only consulted when strategy == "canary".
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	CanaryPercent int32 `json:"canaryPercent,omitempty"`
 }
 
 // RuntimeSpec configures runtime authoring primitives applied by the managed
@@ -461,11 +499,14 @@ type CustomDetector struct {
 //	                 → warned                             (fail, gate:warn → promote anyway)
 type GateStatus struct {
 	// phase is the current gate state: pending | scoring | awaiting-promotion |
-	// promoted | blocked | warned. A passing candidate rests at awaiting-promotion
-	// until a human approval signal (the agents.ctxmesh.ai/promote annotation)
-	// flips it to promoted — v1 does NOT auto-promote (PRD §17.4).
+	// promoted | blocked | warned | canary | aborted. A passing candidate rests at
+	// awaiting-promotion until a human approval signal (the agents.ctxmesh.ai/promote
+	// annotation) flips it to promoted — v1 does NOT auto-promote (PRD §17.4). When the
+	// deployment requests a canary rollout (spec.rollout.strategy == "canary"), a
+	// passing candidate rests at `canary` instead (serving a named traffic split); the
+	// human completes it (promote → promoted) or aborts it (→ aborted). ADR 0062 Fork 3.
 	// +optional
-	// +kubebuilder:validation:Enum=pending;scoring;awaiting-promotion;promoted;blocked;warned
+	// +kubebuilder:validation:Enum=pending;scoring;awaiting-promotion;promoted;blocked;warned;canary;aborted
 	Phase string `json:"phase,omitempty"`
 
 	// score is the candidate's weighted-mean suite score for the scored revision,
