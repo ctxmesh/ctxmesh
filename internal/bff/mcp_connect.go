@@ -48,6 +48,8 @@ import (
 	"slices"
 	"strings"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
 
@@ -123,16 +125,48 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
 		localName = mcpServerName(originName)
 	}
 
+	res, mErr := s.materializePublishedMCP(r, caller, originNS, originName, localName, callerNS)
+	if mErr != nil {
+		writeError(w, mErr.status, mErr.msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, MCPConnectResponse{Status: res.status, Server: res.summary})
+}
+
+// mcpMaterializeResult is the outcome of materializePublishedMCP: the materialized
+// (or idempotently already-present) local copy's status + non-secret summary.
+type mcpMaterializeResult struct {
+	// status is "connected" for a fresh materialize or "already-connected" for an
+	// idempotent re-connect (an existing local copy of the same name).
+	status string
+	// summary is the list DTO of the local copy — NO secret material.
+	summary MCPServerSummary
+}
+
+// materializePublishedMCP is the shared discover-then-materialize core (m73.6, ADR 0067
+// §3) reused by BOTH POST /api/mcp/connect (handleMCPConnect) and the fork ref-closure's
+// compose-connect (m74.4, ADR 0068 §5 — the flywheel compounding). It reads the origin's
+// NON-secret definition, re-checks discoverability (the security gate — never trust that
+// the caller only connects catalog entries), and materializes a FROZEN local copy into
+// the caller's namespace with NO credential (the crux — apiKey "" + oauthSecretData nil).
+//
+// It returns a typed *createError already carrying the right HTTP status: an
+// undiscoverable / absent / erroring origin → 404 (never 403 — do not confirm the server
+// exists); an existing local copy of the same name → status "already-connected" (a benign
+// idempotent re-connect, NOT an error). The materialize itself runs caller-scoped, so the
+// caller's own-namespace RBAC is enforced by createMCPObjects (no BFF-SA grant).
+func (s *Server) materializePublishedMCP(r *http.Request, caller client.Client, originNS, originName, localName, callerNS string) (*mcpMaterializeResult, *createError) {
+	ctx := r.Context()
+
 	// 1. Read the origin's NON-secret definition from the store (BFF cpDB connection,
 	// amended-ADR-0011 — the caller has no RBAC in originNS). A miss is folded into the
 	// same 404 as an undiscoverable server below (do not distinguish "absent" from
 	// "hidden" — both must be indistinguishable to the caller).
-	originRec, gErr := s.toolRegistryStore.Get(r.Context(), originNS, originName)
+	originRec, gErr := s.toolRegistryStore.Get(ctx, originNS, originName)
 	if gErr != nil {
 		// ErrNotFound and any other store error alike → the undiscoverable 404. A
 		// transient store error must not confirm existence; fail-closed to 404.
-		writeError(w, http.StatusNotFound, "no such discoverable MCP server")
-		return
+		return nil, &createError{status: http.StatusNotFound, msg: "no such discoverable MCP server"}
 	}
 	origin := storeToolRegistryToCRD(originRec)
 
@@ -142,8 +176,7 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
 	// the caller's tenant), OR originNS == the caller's own namespace. Otherwise 404 —
 	// never 403 (a 403 would confirm the server exists to a caller who may not see it).
 	if !s.mcpConnectDiscoverable(r, origin, originNS, callerNS) {
-		writeError(w, http.StatusNotFound, "no such discoverable MCP server")
-		return
+		return nil, &createError{status: http.StatusNotFound, msg: "no such discoverable MCP server"}
 	}
 
 	// 3. Read the origin's NON-secret definition: url, tools, authType, and the OAuth
@@ -168,7 +201,7 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
 	// so the copy is not attributed to a wrong owner). The copy is private; the owner
 	// gate keys on this hash.
 	callerOwner := ""
-	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+	if username, uErr := callerUsername(ctx, caller); uErr == nil {
 		callerOwner = userGrantHash(username)
 	}
 
@@ -193,44 +226,38 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
 		originName:       originName,
 	}
 
-	created, cErr := s.createMCPObjects(r.Context(), caller, spec)
+	created, cErr := s.createMCPObjects(ctx, caller, spec)
 	if cErr != nil {
 		// 4. Idempotent re-connect: a local copy of that name already exists → the store
 		// Create 409s (toolRegistryStoreWriteError maps ErrConflict → StatusConflict). We
-		// treat that as a benign already-connected outcome: 200 with the existing summary,
-		// so a double-click on "Connect" is not a scary error. Any other createError is a
-		// real failure and surfaces honestly.
+		// treat that as a benign already-connected outcome: the existing summary, so a
+		// double-click on "Connect" is not a scary error. Any other createError is a real
+		// failure and surfaces honestly.
 		if cErr.status == http.StatusConflict {
-			if existing, xErr := s.toolRegistryStore.Get(r.Context(), callerNS, localName); xErr == nil {
-				writeJSON(w, http.StatusOK, MCPConnectResponse{
-					Status: "already-connected",
-					Server: mcpServerSummaryFromRegistry(storeToolRegistryToCRD(existing)),
-				})
-				return
+			if existing, xErr := s.toolRegistryStore.Get(ctx, callerNS, localName); xErr == nil {
+				return &mcpMaterializeResult{
+					status:  "already-connected",
+					summary: mcpServerSummaryFromRegistry(storeToolRegistryToCRD(existing)),
+				}, nil
 			}
 		}
-		writeError(w, cErr.status, cErr.msg)
-		return
+		return nil, cErr
 	}
 	_ = created // the flat created-object identities are not surfaced by connect.
 
 	// 5. Return the materialized server summary (list DTO shape — NO secret material).
 	// Re-read the just-created copy from the store so the summary reflects exactly what
 	// was persisted (labels/annotations), consistent with the origin projection.
-	copyRec, rErr := s.toolRegistryStore.Get(r.Context(), callerNS, localName)
+	copyRec, rErr := s.toolRegistryStore.Get(ctx, callerNS, localName)
 	if rErr != nil {
 		// The create succeeded but the read-back failed — surface a summary built from the
 		// spec rather than a 500, so the caller still gets the identity of what was made.
-		writeJSON(w, http.StatusOK, MCPConnectResponse{
-			Status: "connected",
-			Server: mcpServerSummaryFromSpec(spec),
-		})
-		return
+		return &mcpMaterializeResult{status: "connected", summary: mcpServerSummaryFromSpec(spec)}, nil
 	}
-	writeJSON(w, http.StatusOK, MCPConnectResponse{
-		Status: "connected",
-		Server: mcpServerSummaryFromRegistry(storeToolRegistryToCRD(copyRec)),
-	})
+	return &mcpMaterializeResult{
+		status:  "connected",
+		summary: mcpServerSummaryFromRegistry(storeToolRegistryToCRD(copyRec)),
+	}, nil
 }
 
 // mcpConnectDiscoverable reports whether the origin server is DISCOVERABLE by a caller

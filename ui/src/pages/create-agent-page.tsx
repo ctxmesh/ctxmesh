@@ -117,6 +117,11 @@ export function CreateAgentPage() {
   // m21: arriving from Providers ("Use") carries ?provider= (provider-as-model-home):
   // jump straight to Configure with that provider's model pre-picked.
   const initialProvider = params.get("provider") ?? "";
+  // m74 P1-2: arriving from the template gallery "Install" CTA carries ?recipe=<name>.
+  // We fetch the recipe list and pre-fill the recipe flow — the same path as the
+  // in-page recipe picker (m72.5). Never read ?spec= (a full YAML in a query string
+  // is fragile and may be truncated by URL-length limits).
+  const initialRecipe = params.get("recipe") ?? "";
   const [mode, setMode] = React.useState<Mode>(
     initialProvider ? "configure" : "entrance",
   );
@@ -128,6 +133,24 @@ export function CreateAgentPage() {
     setRecipeSpec(spec);
     setMode("recipe");
   }
+
+  // Bootstrap the recipe flow when arriving via ?recipe=<name> from the gallery.
+  React.useEffect(() => {
+    if (!initialRecipe) return;
+    api
+      .listRecipes()
+      .then((r) => {
+        const found = (r.recipes ?? []).find((rec) => rec.name === initialRecipe);
+        if (found) {
+          setRecipeSpec(found.spec);
+          setMode("recipe");
+        }
+        // If not found, fall through to the entrance (the recipe may have been removed).
+      })
+      .catch(() => {
+        /* soft miss: fall through to the entrance */
+      });
+  }, [initialRecipe]);
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">

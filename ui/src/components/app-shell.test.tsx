@@ -14,7 +14,7 @@ function installFetch(caps: {
   ok: boolean;
   status?: number;
   body: unknown;
-  namespaces?: { name: string }[];
+  namespaces?: { name: string; displayName?: string }[];
 }) {
   vi.stubGlobal(
     "fetch",
@@ -100,8 +100,8 @@ describe("AppShell (re-housed console)", () => {
       expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument(),
     );
     expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
-    // The namespace picker is in the header.
-    expect(screen.getByLabelText("Namespace")).toBeInTheDocument();
+    // The workspace switcher (friendly label over namespace — ADR 0068 §7) is in the header.
+    expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
   });
 
   it("hides write-only nav for a viewer (read-only chrome by construction)", async () => {
@@ -128,15 +128,21 @@ describe("AppShell (re-housed console)", () => {
     expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
   });
 
-  it("offers namespace options from GET /api/namespaces", async () => {
-    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }, { name: "prod" }] });
+  it("offers namespace options from GET /api/namespaces, showing displayName when set", async () => {
+    installFetch({
+      ...ALLOW_ALL,
+      namespaces: [{ name: "team-a", displayName: "Team A" }, { name: "prod" }],
+    });
     renderShell();
-    const picker = (await screen.findByLabelText("Namespace")) as HTMLSelectElement;
+    // The switcher is labelled "Workspace" (ADR 0068 §7 — UI-only friendly label).
+    const picker = (await screen.findByLabelText("Workspace")) as HTMLSelectElement;
+    // "Team A" is the display name for the team-a namespace.
     await waitFor(() =>
-      expect(within(picker).queryByText("team-a")).not.toBeNull(),
+      expect(within(picker).queryByText("Team A")).not.toBeNull(),
     );
+    // "prod" has no display name, so the raw name is shown.
     expect(within(picker).queryByText("prod")).not.toBeNull();
-    // "All namespaces" is always the honest default.
-    expect(within(picker).queryByText("All namespaces")).not.toBeNull();
+    // "All workspaces" is always the honest default.
+    expect(within(picker).queryByText("All workspaces")).not.toBeNull();
   });
 });

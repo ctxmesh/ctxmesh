@@ -18,6 +18,9 @@ package bff
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -26,6 +29,7 @@ import (
 	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -35,6 +39,12 @@ import (
 // server's own decision about the CALLER — the BFF re-implements no authz and
 // gates nothing server-side. whoami/capabilities are DISPLAY-ONLY: the UI hides
 // or disables affordances the caller lacks; enforcement stays with K8s.
+
+// annNamespaceDisplayName is the annotation key on a Namespace object that
+// carries its human-readable display label (ADR 0068 §7). A friendly view over a
+// namespace — metadata only, no policy. "workspace" is a UI-only concept; the
+// wire stays namespace + display-name.
+const annNamespaceDisplayName = "agents.ctxmesh.ai/display-name"
 
 // The golden CRD resource names (plural, as the API server expects them in a
 // SelfSubjectAccessReview's ResourceAttributes) the console probes capabilities
@@ -246,10 +256,89 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 
 	summaries := make([]NamespaceSummary, 0, len(list.Items))
 	for i := range list.Items {
-		summaries = append(summaries, NamespaceSummary{Name: list.Items[i].Name})
+		ns := &list.Items[i]
+		s := NamespaceSummary{Name: ns.Name}
+		if dn := ns.Annotations[annNamespaceDisplayName]; dn != "" {
+			s.DisplayName = dn
+		}
+		summaries = append(summaries, s)
 	}
 	// Stable order so the SPA's namespace picker is deterministic.
 	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
 
 	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+}
+
+// handleSetNamespaceDisplayName serves PUT /api/namespaces/{name}/display-name
+// (ADR 0068 §7). It sets or clears the agents.ctxmesh.ai/display-name annotation
+// on the named Namespace through the CALLER-SCOPED client — the caller needs
+// "update namespaces" in their own RBAC; an honest 403 is returned if not. This
+// is a pure annotation write — no CRD, no new type, no policy change. An empty
+// displayName removes the annotation (reverts to showing the raw namespace name
+// in the UI). "workspace" never appears in this path — that word is UI-only.
+func (s *Server) handleSetNamespaceDisplayName(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "missing namespace name")
+		return
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	var req SetNamespaceDisplayNameRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+
+	// Fetch the current namespace so we can patch annotations in place.
+	var ns corev1.Namespace
+	if err := caller.Get(r.Context(), client.ObjectKey{Name: name}, &ns); err != nil {
+		switch {
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, "forbidden: not allowed to read namespace")
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
+		case apierrors.IsNotFound(err):
+			writeError(w, http.StatusNotFound, fmt.Sprintf("namespace %q not found", name))
+		default:
+			s.log.Error(err, "get namespace failed", "namespace", name)
+			writeError(w, http.StatusInternalServerError, "failed to read namespace")
+		}
+		return
+	}
+
+	// Set or clear the display-name annotation.
+	if req.DisplayName == "" {
+		delete(ns.Annotations, annNamespaceDisplayName)
+	} else {
+		if ns.Annotations == nil {
+			ns.Annotations = make(map[string]string)
+		}
+		ns.Annotations[annNamespaceDisplayName] = req.DisplayName
+	}
+
+	if err := caller.Update(r.Context(), &ns); err != nil {
+		switch {
+		case apierrors.IsForbidden(err):
+			writeError(w, http.StatusForbidden, "forbidden: not allowed to update namespace")
+		case apierrors.IsUnauthorized(err):
+			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
+		default:
+			s.log.Error(err, "update namespace annotations failed", "namespace", name)
+			writeError(w, http.StatusInternalServerError, "failed to update namespace")
+		}
+		return
+	}
+
+	summary := NamespaceSummary{Name: ns.Name, DisplayName: ns.Annotations[annNamespaceDisplayName]}
+	writeJSON(w, http.StatusOK, summary)
 }
