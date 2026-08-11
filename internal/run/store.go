@@ -159,6 +159,12 @@ func NewMemStore() Store {
 	return &memStore{entries: map[string]*entry{}, spawnCnt: map[string]int{}}
 }
 
+// Durable reports that the hot mem store is NOT durable across a pod restart (M75, m75.1, ADR 0069 §1).
+// The share-link mint refuses to create a public link into a non-durable store — a share whose backing
+// run vanishes on restart is a broken link. This satisfies the optional DurableStore capability the BFF
+// type-asserts (a mem store answers false; the Postgres store answers true) without widening Store.
+func (m *memStore) Durable() bool { return false }
+
 // ReserveSpawn increments the tree's total-spawn count and admits when it is within maxTotal.
 func (m *memStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 	m.mu.Lock()

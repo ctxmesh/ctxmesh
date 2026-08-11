@@ -1,0 +1,243 @@
+//go:build integration
+
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package sharedrun_test
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
+)
+
+// eachStore runs one behavioural contract against the in-memory twin AND the Postgres store (the
+// publishedartifact / namespacetenant conformance pattern). The twin always runs; the Postgres store runs
+// only when CONTROLPLANE_TEST_DSN points at a throwaway DB (migrated by OpenDB + truncated first) — CI
+// without a DB still exercises the contract via the twin. This satisfies m75.1's real-Postgres DoD: point
+// CONTROLPLANE_TEST_DSN at a live pg16 (pgvector/pgvector:pg16 — plain postgres:16 fails migration 0003)
+// and the same asserts run, including the hash-only-at-rest column check below.
+func eachStore(t *testing.T, fn func(t *testing.T, s sharedrun.Store)) {
+	t.Helper()
+	t.Run("mem", func(t *testing.T) { fn(t, sharedrun.NewMemStore()) })
+
+	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
+	if dsn == "" {
+		t.Log("CONTROLPLANE_TEST_DSN unset — skipping the Postgres conformance run (the twin still ran)")
+		return
+	}
+	db, err := controlplane.OpenDB(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`TRUNCATE shared_runs`)
+	require.NoError(t, err)
+	t.Run("postgres", func(t *testing.T) { fn(t, sharedrun.NewPostgresStore(db)) })
+}
+
+func hashToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestStore_Create_GetByTokenHash is the core round-trip: Create stores a record; GetByTokenHash finds it
+// by the hash; the stored hash matches SHA-256(token) and is NOT the token itself.
+func TestStore_Create_GetByTokenHash(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		const token = "s3cr3t-token-never-stored"
+		h := hashToken(token)
+
+		rec := sharedrun.SharedRun{
+			ID:             "share-1",
+			TokenHash:      h,
+			RunID:          "run-abc",
+			Namespace:      "team-a",
+			CreatedBy:      "alice",
+			ExpiresAt:      time.Now().Add(time.Hour),
+			IncludeContent: true,
+		}
+		require.NoError(t, s.Create(ctx, rec))
+
+		got, ok, err := s.GetByTokenHash(ctx, h)
+		require.NoError(t, err)
+		require.True(t, ok, "the share must be found by its token hash")
+		assert.Equal(t, "share-1", got.ID)
+		assert.Equal(t, "run-abc", got.RunID)
+		assert.Equal(t, "team-a", got.Namespace)
+		assert.Equal(t, "alice", got.CreatedBy)
+		assert.True(t, got.IncludeContent)
+		assert.False(t, got.Revoked)
+
+		// The hash-at-rest guarantee: the stored hash is SHA-256(token), never the token.
+		assert.Equal(t, h, got.TokenHash)
+		assert.NotEqual(t, token, got.TokenHash, "the token itself must never be stored")
+
+		// A missing hash returns not-found (never an error).
+		_, ok, err = s.GetByTokenHash(ctx, hashToken("some-other-token"))
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+}
+
+// TestStore_HashOnlyAtRest_PostgresColumn asserts DIRECTLY against the Postgres row that the token_hash
+// column holds the hash and the raw token appears NOWHERE in the row (the m75.1 DoD: query the row, assert
+// token_hash != token). Skipped without a DSN (there is no column to query in the twin).
+func TestStore_HashOnlyAtRest_PostgresColumn(t *testing.T) {
+	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CONTROLPLANE_TEST_DSN unset — the hash-at-rest column check needs a real Postgres row")
+	}
+	db, err := controlplane.OpenDB(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`TRUNCATE shared_runs`)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	s := sharedrun.NewPostgresStore(db)
+	const token = "raw-token-that-must-not-leak-into-the-row"
+	h := hashToken(token)
+	require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+		ID: "share-hash", TokenHash: h, RunID: "run-1", Namespace: "ns", CreatedBy: "bob",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	var storedHash string
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT token_hash FROM shared_runs WHERE id = $1`, "share-hash").Scan(&storedHash))
+	assert.Equal(t, h, storedHash, "token_hash column holds the SHA-256")
+	assert.NotEqual(t, token, storedHash, "the raw token must never be in the row")
+
+	// Belt-and-braces: the raw token must not appear as a substring of ANY text column.
+	var hits int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT count(*) FROM shared_runs
+		WHERE id LIKE '%' || $1 || '%'
+		   OR token_hash LIKE '%' || $1 || '%'
+		   OR run_id LIKE '%' || $1 || '%'
+		   OR namespace LIKE '%' || $1 || '%'
+		   OR created_by LIKE '%' || $1 || '%'`, token).Scan(&hits))
+	assert.Equal(t, 0, hits, "the raw token must not appear in any column")
+}
+
+// TestStore_Revoke_Idempotent_HidesFromList: Revoke flips the flag; GetByTokenHash still returns the row
+// (revoked=true — the handler decides via IsLive), ListForRun drops it, and a double-revoke is a no-op.
+func TestStore_Revoke_Idempotent_HidesFromList(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		h := hashToken("revoke-me")
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "share-r", TokenHash: h, RunID: "run-r", Namespace: "ns", CreatedBy: "carol",
+			ExpiresAt: time.Now().Add(time.Hour),
+		}))
+
+		require.NoError(t, s.Revoke(ctx, "share-r"))
+		// The row is still fetchable by hash (raw row), but marked revoked — IsLive is false.
+		got, ok, err := s.GetByTokenHash(ctx, h)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.True(t, got.Revoked)
+		assert.False(t, got.IsLive(time.Now()), "a revoked share is not live")
+
+		// The manage list excludes revoked shares.
+		list, err := s.ListForRun(ctx, "run-r")
+		require.NoError(t, err)
+		assert.Empty(t, list, "revoked shares are excluded from the manage list")
+
+		// Idempotent: a second revoke + revoking an absent id are both no-op successes.
+		require.NoError(t, s.Revoke(ctx, "share-r"))
+		require.NoError(t, s.Revoke(ctx, "does-not-exist"))
+	})
+}
+
+// TestStore_ExpiryHonored: an expired share fetches by hash but IsLive(now) is false (the public read 404s
+// it). A future-expiry share is live. Expiry is a value check, not a store filter — the handler decides.
+func TestStore_ExpiryHonored(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		now := time.Now()
+
+		expiredHash := hashToken("expired")
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "share-expired", TokenHash: expiredHash, RunID: "run-e", Namespace: "ns", CreatedBy: "dan",
+			ExpiresAt: now.Add(-time.Minute), // already expired
+		}))
+		liveHash := hashToken("live")
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "share-live", TokenHash: liveHash, RunID: "run-e", Namespace: "ns", CreatedBy: "dan",
+			ExpiresAt: now.Add(time.Hour),
+		}))
+
+		expired, ok, err := s.GetByTokenHash(ctx, expiredHash)
+		require.NoError(t, err)
+		require.True(t, ok, "the store returns the raw row even when expired (handler decides)")
+		assert.False(t, expired.IsLive(now), "an expired share is not live")
+
+		live, ok, err := s.GetByTokenHash(ctx, liveHash)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.True(t, live.IsLive(now), "a future-expiry share is live")
+	})
+}
+
+// TestStore_ListForRun: returns all non-revoked shares for a run, newest-first, scoped to that run only.
+func TestStore_ListForRun(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		base := time.Now()
+
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "s-old", TokenHash: hashToken("t-old"), RunID: "run-list", Namespace: "ns", CreatedBy: "e",
+			CreatedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
+		}))
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "s-new", TokenHash: hashToken("t-new"), RunID: "run-list", Namespace: "ns", CreatedBy: "e",
+			CreatedAt: base, ExpiresAt: base.Add(time.Hour),
+		}))
+		// A share on a DIFFERENT run must not appear.
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "s-other", TokenHash: hashToken("t-other"), RunID: "run-other", Namespace: "ns", CreatedBy: "e",
+			ExpiresAt: base.Add(time.Hour),
+		}))
+
+		list, err := s.ListForRun(ctx, "run-list")
+		require.NoError(t, err)
+		require.Len(t, list, 2, "exactly the two shares on run-list")
+		assert.Equal(t, "s-new", list[0].ID, "newest-first ordering")
+		assert.Equal(t, "s-old", list[1].ID)
+	})
+}
+
+// TestStore_Create_Validates: missing required fields are rejected before any write.
+func TestStore_Create_Validates(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		exp := time.Now().Add(time.Hour)
+		assert.Error(t, s.Create(ctx, sharedrun.SharedRun{ID: "", TokenHash: "h", RunID: "r", ExpiresAt: exp}))
+		assert.Error(t, s.Create(ctx, sharedrun.SharedRun{ID: "i", TokenHash: "", RunID: "r", ExpiresAt: exp}))
+		assert.Error(t, s.Create(ctx, sharedrun.SharedRun{ID: "i", TokenHash: "h", RunID: "", ExpiresAt: exp}))
+		assert.Error(t, s.Create(ctx, sharedrun.SharedRun{ID: "i", TokenHash: "h", RunID: "r"}), "zero expiry rejected")
+	})
+}

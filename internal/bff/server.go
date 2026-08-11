@@ -40,6 +40,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -107,6 +108,12 @@ type Server struct {
 	// GET /api/templates (m74.2) + fork (m74.3) read it. nil ⇒ the publish/unpublish endpoints return
 	// 501 (CONTROLPLANE_DSN unset), never a panic.
 	publishedArtifactStore publishedartifact.Store
+
+	// sharedRunStore is the control-plane Postgres store for shared_runs — the single-run capability link
+	// (M75, m75.1, ADR 0069 §1). POST /api/runs/{id}/shares mints a revocable, expiring share (caller-scoped
+	// authz + a hash-only record); DELETE/GET manage it; the m75.2 public read looks a run up by token hash.
+	// nil ⇒ the share endpoints return 501 (CONTROLPLANE_DSN unset), never a panic.
+	sharedRunStore sharedrun.Store
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -444,6 +451,10 @@ type Options struct {
 	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
 	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
 	PublishedArtifactStore publishedartifact.Store
+	// SharedRunStore is the control-plane Postgres store for shared_runs — the single-run capability link
+	// (M75, m75.1, ADR 0069 §1). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside PublishedArtifactStore.
+	// nil ⇒ the /api/runs/{id}/shares endpoints return 501.
+	SharedRunStore sharedrun.Store
 	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
@@ -534,6 +545,7 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		publishedArtifactStore:   opts.PublishedArtifactStore,
+		sharedRunStore:           opts.SharedRunStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -1183,6 +1195,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerExtAuthRoutes(authed)
 
 	s.registerRunRoutes(authed)
+	s.registerShareRoutes(authed)
 	s.registerWorkflowRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
