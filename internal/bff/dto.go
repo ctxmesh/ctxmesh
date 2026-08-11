@@ -306,8 +306,19 @@ type CapabilitiesResponse struct {
 }
 
 // NamespaceSummary is the flat projection of one Namespace the caller can see.
+// DisplayName carries the human-readable label from the
+// agents.ctxmesh.ai/display-name annotation; empty when the annotation is unset
+// (the UI falls back to Name). It is omitted from the wire when empty.
 type NamespaceSummary struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// SetNamespaceDisplayNameRequest is the body for
+// PUT /api/namespaces/{name}/display-name.
+// An empty DisplayName clears the annotation (removes the friendly label).
+type SetNamespaceDisplayNameRequest struct {
+	DisplayName string `json:"displayName"`
 }
 
 // NamespaceListResponse is returned by GET /api/namespaces — the namespaces the

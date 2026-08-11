@@ -1040,6 +1040,10 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/whoami", s.handleWhoAmI)
 		authed.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 		authed.HandleFunc("GET /api/namespaces", s.handleNamespaces)
+		// PUT /api/namespaces/{name}/display-name — set or clear the human-readable
+		// display label on a namespace (ADR 0068 §7). Caller needs "update namespaces";
+		// the API server enforces it — honest 403 if denied. "workspace" is UI-only.
+		authed.HandleFunc("PUT /api/namespaces/{name}/display-name", s.handleSetNamespaceDisplayName)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
 		} else {
@@ -1105,6 +1109,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
+		authed.Handle("PUT /api/namespaces/{name}/display-name", notImplemented("caller-scoped namespace display-name"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))

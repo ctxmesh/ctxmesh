@@ -1,6 +1,7 @@
 import { Globe, LogOut } from "lucide-react";
 
 import type { CommandItem } from "@/components/kit";
+import type { NamespaceSummary } from "@/lib/api";
 import { NAV_SECTIONS, type NavItem } from "@/lib/nav";
 
 // palette-commands - the pure command-model for the shell's cmd-K palette
@@ -14,8 +15,10 @@ export interface BuildCommandsArgs {
   can: (resource: string, verb: string) => boolean;
   /** Route to a path (react-router navigate). */
   navigate: (to: string) => void;
-  /** Namespaces the caller can switch to (from the namespace picker's list). */
-  namespaces: string[];
+  /** Namespaces the caller can switch to (from the namespace picker's list).
+   *  Each entry carries the raw name (used as the scope key) and an optional
+   *  displayName (ADR 0068 §7 — friendly label, UI-only). */
+  namespaces: NamespaceSummary[];
   /** The currently-selected namespace ("" = all namespaces). */
   currentNamespace: string;
   /** Select a namespace (re-scopes the list + capability probe). */
@@ -68,26 +71,30 @@ export function buildCommands({
   const actionCmds: CommandItem[] = [];
 
   // Namespace switching as sub-commands - one keystroke from inside the palette,
-  // never re-offering the current scope.
+  // never re-offering the current scope. Labels use the display name (friendly
+  // label, ADR 0068 §7) falling back to the raw namespace name.
   for (const ns of namespaces) {
-    if (ns === currentNamespace) continue;
+    if (ns.name === currentNamespace) continue;
+    const label = ns.displayName ?? ns.name;
     actionCmds.push({
-      id: `ns-${ns}`,
-      group: "Switch namespace",
-      label: ns,
+      id: `ns-${ns.name}`,
+      group: "Switch workspace",
+      label,
+      // Include the raw name as a keyword so the palette matches even if the
+      // user types the namespace name rather than the display label.
+      keywords: `workspace switch scope ${ns.name}`,
       icon: Globe,
-      keywords: "namespace switch scope",
-      onRun: () => setNamespace(ns),
+      onRun: () => setNamespace(ns.name),
     });
   }
-  // "All namespaces" is always a reachable scope (the honest default).
+  // "All workspaces" is always a reachable scope (the honest default).
   if (currentNamespace !== "") {
     actionCmds.push({
       id: "ns-all",
-      group: "Switch namespace",
-      label: "All namespaces",
+      group: "Switch workspace",
+      label: "All workspaces",
       icon: Globe,
-      keywords: "namespace switch scope all cluster",
+      keywords: "workspace switch scope all cluster namespace",
       onRun: () => setNamespace(""),
     });
   }

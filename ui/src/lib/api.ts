@@ -459,6 +459,9 @@ export interface CapabilitiesResponse {
 // "no namespaces exist"). Namespaces is non-null on the wire ([] not null).
 export interface NamespaceSummary {
   name: string;
+  /** Human-readable label from the agents.ctxmesh.ai/display-name annotation.
+   *  Absent (undefined) when the annotation is not set — fall back to `name`. */
+  displayName?: string;
 }
 
 export interface NamespaceListResponse {
@@ -2593,6 +2596,34 @@ export const api = {
   // A 403 is an honest "can't list namespaces", never a silent empty list.
   namespaces: (signal?: AbortSignal) =>
     getJSON<NamespaceListResponse>("/api/namespaces", signal),
+
+  // setNamespaceDisplayName sets or clears the human-readable display label on a
+  // namespace via PUT /api/namespaces/{name}/display-name (ADR 0068 §7). An empty
+  // displayName removes the annotation. A 403 means the caller lacks "update
+  // namespaces" — the API server enforces it. This is the only write path that
+  // touches namespace metadata; "workspace" is a UI-only label over this.
+  setNamespaceDisplayName: async (
+    name: string,
+    displayName: string,
+    signal?: AbortSignal,
+  ): Promise<NamespaceSummary> => {
+    const res = await apiFetch(
+      `/api/namespaces/${encodeURIComponent(name)}/display-name`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName }),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `set display-name failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as NamespaceSummary;
+  },
   // topology fetches the cluster graph. In raw mode (no params / params.group="")
   // it returns the flat {nodes, edges} graph (M12 dashboard backward-compatible).
   // In grouped mode (params.group="registry"|"namespace") the response includes
