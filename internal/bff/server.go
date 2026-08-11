@@ -40,6 +40,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -107,6 +108,18 @@ type Server struct {
 	// GET /api/templates (m74.2) + fork (m74.3) read it. nil ⇒ the publish/unpublish endpoints return
 	// 501 (CONTROLPLANE_DSN unset), never a panic.
 	publishedArtifactStore publishedartifact.Store
+
+	// sharedRunStore is the control-plane Postgres store for shared_runs — the single-run capability link
+	// (M75, m75.1, ADR 0069 §1). POST /api/runs/{id}/shares mints a revocable, expiring share (caller-scoped
+	// authz + a hash-only record); DELETE/GET manage it; the m75.2 public read looks a run up by token hash.
+	// nil ⇒ the share endpoints return 501 (CONTROLPLANE_DSN unset), never a panic.
+	sharedRunStore sharedrun.Store
+
+	// sharedRunLimiter is the per-IP token-bucket that bounds the UNAUTHENTICATED public read
+	// (GET /api/shared/runs/{token}, m75.2). 256-bit tokens make brute force moot, but the endpoint is
+	// anonymous so it is not left unbounded — over budget → 429 (a non-oracle status). Always non-nil
+	// (built in NewServer); its allow() is a no-op when disabled.
+	sharedRunLimiter *ipRateLimiter
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -444,6 +457,10 @@ type Options struct {
 	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
 	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
 	PublishedArtifactStore publishedartifact.Store
+	// SharedRunStore is the control-plane Postgres store for shared_runs — the single-run capability link
+	// (M75, m75.1, ADR 0069 §1). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside PublishedArtifactStore.
+	// nil ⇒ the /api/runs/{id}/shares endpoints return 501.
+	SharedRunStore sharedrun.Store
 	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
@@ -534,6 +551,8 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		publishedArtifactStore:   opts.PublishedArtifactStore,
+		sharedRunStore:           opts.SharedRunStore,
+		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -652,6 +671,17 @@ func (s *Server) Handler() http.Handler {
 	// session. Tells the SPA whether OIDC/SSO is available (issuer + public PKCE client
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
+	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
+	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
+	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
+	// token reads ONE run's allowlist projection. The token IS the capability; there is no caller.
+	// Uniform 404 at every failure (no oracle), the newSharedRunView allowlist projection only,
+	// no-referrer/noindex headers, per-IP rate limit, and NO token in any log (see handler). A
+	// nil store (no cpDB) returns 404 — never 501 — so an anonymous caller cannot learn the
+	// feature exists. Only GET is registered; a POST/DELETE/… on this path does not match the
+	// GET-only pattern and falls to the "/api/" catch-all → requireAuth → 401 (no bearer). Either
+	// way a non-GET verb NEVER reaches the projection — the read is GET-only.
+	api.HandleFunc("GET /api/shared/runs/{token}", s.handleSharedRunPublic)
 
 	s.registerSpawnRoute(api)
 	s.registerHandoffRoute(api)
@@ -1183,6 +1213,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerExtAuthRoutes(authed)
 
 	s.registerRunRoutes(authed)
+	s.registerShareRoutes(authed)
 	s.registerWorkflowRunRoutes(authed)
 	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
 	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);

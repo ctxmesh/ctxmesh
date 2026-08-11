@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Link, useParams } from "react-router-dom";
-import { ExternalLink, Boxes, Brain, PlusCircle } from "lucide-react";
+import { ExternalLink, Boxes, Brain, PlusCircle, Share2 } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -15,6 +15,7 @@ import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { TraceExplorer } from "@/components/dashboard/trace-explorer";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type TraceDetailResponse } from "@/lib/api";
+import { ShareRunDialog } from "@/components/dashboard/share-run-dialog";
 
 // TracePage — the full-page single-trace view (m16.7). Reached via /traces/:id
 // and from the "View full trace" link in RunInspector.
@@ -164,6 +165,7 @@ function fmtTimestamp(ts: string): string {
 export function TracePage() {
   const { id = "" } = useParams();
   const [state, setState] = React.useState<PageState>({ kind: "loading" });
+  const [shareOpen, setShareOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (!id) return;
@@ -301,26 +303,39 @@ export function TracePage() {
           )}
         </div>
 
-        <dl className="flex shrink-0 flex-wrap gap-x-6 gap-y-2 text-sm">
-          <div className="flex flex-col items-end">
-            <dt className="text-xs text-muted-foreground">Tokens</dt>
-            <dd className="tabular-nums font-medium">
-              {rollup.tokens.toLocaleString()}
-            </dd>
-          </div>
-          <div className="flex flex-col items-end">
-            <dt className="text-xs text-muted-foreground">Cost</dt>
-            <dd className="tabular-nums font-medium">{fmtCost(rollup.costUSD)}</dd>
-          </div>
-          <div className="flex flex-col items-end">
-            <dt className="text-xs text-muted-foreground">Latency</dt>
-            <dd className="tabular-nums font-medium">{Math.round(rollup.latencyMs)}ms</dd>
-          </div>
-          <div className="flex flex-col items-end">
-            <dt className="text-xs text-muted-foreground">Spans</dt>
-            <dd className="tabular-nums font-medium">{rollup.spanCount}</dd>
-          </div>
-        </dl>
+        <div className="flex flex-wrap items-start gap-4">
+          <dl className="flex shrink-0 flex-wrap gap-x-6 gap-y-2 text-sm">
+            <div className="flex flex-col items-end">
+              <dt className="text-xs text-muted-foreground">Tokens</dt>
+              <dd className="tabular-nums font-medium">
+                {rollup.tokens.toLocaleString()}
+              </dd>
+            </div>
+            <div className="flex flex-col items-end">
+              <dt className="text-xs text-muted-foreground">Cost</dt>
+              <dd className="tabular-nums font-medium">{fmtCost(rollup.costUSD)}</dd>
+            </div>
+            <div className="flex flex-col items-end">
+              <dt className="text-xs text-muted-foreground">Latency</dt>
+              <dd className="tabular-nums font-medium">{Math.round(rollup.latencyMs)}ms</dd>
+            </div>
+            <div className="flex flex-col items-end">
+              <dt className="text-xs text-muted-foreground">Spans</dt>
+              <dd className="tabular-nums font-medium">{rollup.spanCount}</dd>
+            </div>
+          </dl>
+          {/* Share button (m75.4) */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShareOpen(true)}
+            data-testid="trace-share-btn"
+            className="shrink-0"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+            Share
+          </Button>
+        </div>
       </div>
 
       {/* ── Span tree ──────────────────────────────────────────────────────── */}
@@ -347,6 +362,21 @@ export function TracePage() {
 
       {/* ── Add to dataset (m69.3, ADR 0062 Fork 5) ──────────────────────── */}
       <AddToDatasetPanel traceId={id} />
+
+      {/* ── Share dialog (m75.4) ───────────────────────────────────────────── */}
+      <ShareRunDialog
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        runId={id}
+        runData={{
+          agent: rollup.agentName,
+          namespace: rollup.agentNs,
+          status: rollup.name,
+          messageCount: rollup.spanCount,
+          messageRoles: [],
+          errorCategory: undefined,
+        }}
+      />
     </div>
   );
 }

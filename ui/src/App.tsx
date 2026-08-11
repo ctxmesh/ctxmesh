@@ -50,6 +50,7 @@ import {
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
+import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
 import { NAV_ITEMS } from "@/lib/nav";
@@ -165,6 +166,8 @@ export function App() {
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />
+          {/* Public shared-run page (m75.4) — no auth, no app-shell chrome */}
+          <Route path="shared/runs/:token" element={<SharedRunPage />} />
           {/* Standalone per-agent chatbox (m37) — authenticated (same console login) but
               CHROME-LESS: it sits OUTSIDE the AppShell so there's no nav/sidebar, just the
               chat. Pinned to one agent by the URL. */}
