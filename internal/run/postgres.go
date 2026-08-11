@@ -150,6 +150,9 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS export_spec text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
 CREATE INDEX IF NOT EXISTS runs_waiting ON runs (id) WHERE status = 'waiting';
+-- List runs paused for human approval (M75, ADR 0069 §3): the AlertPolicy approvalWaiting condition
+-- reads runs in requires_action per namespace to fire the HITL notification. A small partial index.
+CREATE INDEX IF NOT EXISTS runs_requires_action ON runs (namespace) WHERE status = 'requires_action';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
 CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
@@ -168,6 +171,11 @@ func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 	}
 	return &pgStore{db: db, pollInterval: 250 * time.Millisecond, now: time.Now}, nil
 }
+
+// Durable reports that the Postgres store IS durable across a pod restart (M75, m75.1, ADR 0069 §1) — so
+// the share-link mint (which refuses a non-durable backing store) is permitted against it. This is the
+// Postgres side of the optional DurableStore capability the BFF type-asserts.
+func (p *pgStore) Durable() bool { return true }
 
 func (p *pgStore) Create(r *Run) error {
 	ctx := context.Background()
@@ -213,6 +221,29 @@ func (p *pgStore) Create(r *Run) error {
 
 func (p *pgStore) Get(id string) (*Run, error) {
 	r, _, err := p.getWithVersion(context.Background(), p.db, id)
+	return r, err
+}
+
+// GetByTraceID looks up a run by its trace_id column. Returns (nil, nil) when no row matches —
+// not an error, just "not found by trace id". The share mint calls this as a FALLBACK when
+// runStore.Get(id) returns ErrNotFound (the UI's trace-detail page keys by traceId, not run.ID).
+// Note: adding an index on trace_id would speed this up at scale — deferred as a follow-up since
+// share minting is a rare, user-initiated action and an unindexed scan over the runs table is
+// acceptable for now.
+func (p *pgStore) GetByTraceID(traceID string) (*Run, error) {
+	const sel = `SELECT id FROM runs WHERE trace_id = $1 LIMIT 1`
+	var id string
+	err := p.db.QueryRowContext(context.Background(), sel, traceID).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil // not found — not an error
+	case err != nil:
+		return nil, fmt.Errorf("run: get by trace id: %w", err)
+	}
+	r, _, err := p.getWithVersion(context.Background(), p.db, id)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil // row disappeared between the two selects — treat as not found
+	}
 	return r, err
 }
 
@@ -826,6 +857,56 @@ func (p *pgStore) List() []*Run {
 		}
 	}
 	return out
+}
+
+// WaitingApproval is the projection of a plan_approval-paused run the AlertPolicy approvalWaiting
+// condition notifies about (M75, ADR 0069 §3): just the id, the target agent, and the approval summary.
+type WaitingApproval struct {
+	ID      string
+	Agent   string
+	Message string
+}
+
+// ListWaitingApproval returns the runs in the given namespace currently paused in requires_action with
+// RequiresAction.Kind == plan_approval (M75, ADR 0069 §3). It reads the partial-indexed requires_action
+// rows for the namespace and filters on the JSON action kind in Go (mirroring how the store already
+// unmarshals requires_action). Read-only; it never mutates a run. A query/scan error is returned so the
+// caller (the reconciler) can log + skip — a bad read must never wedge the reconcile.
+func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]WaitingApproval, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, agent, requires_action FROM runs WHERE namespace=$1 AND status=$2`,
+		namespace, string(StatusRequiresAction))
+	if err != nil {
+		return nil, fmt.Errorf("run: list requires_action: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []WaitingApproval
+	for rows.Next() {
+		var (
+			id     string
+			agent  string
+			action []byte
+		)
+		if err := rows.Scan(&id, &agent, &action); err != nil {
+			return nil, fmt.Errorf("run: list requires_action scan: %w", err)
+		}
+		if len(action) == 0 {
+			continue // requires_action with no action record — nothing to key on, skip
+		}
+		var a Action
+		if err := json.Unmarshal(action, &a); err != nil {
+			return nil, fmt.Errorf("run: list requires_action unmarshal: %w", err)
+		}
+		if a.Kind != ActionPlanApproval {
+			continue // a different pause (consent / mid-run approval) — not a plan_approval wait
+		}
+		out = append(out, WaitingApproval{ID: id, Agent: agent, Message: a.Message})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: list requires_action rows: %w", err)
+	}
+	return out, nil
 }
 
 func (p *pgStore) AppendEvent(id string, kind EventKind, data string) error {

@@ -60,6 +60,21 @@ const (
 	condTypeP95Latency         = "p95Latency"
 	condTypeForecastExceeded   = "forecastExceeded"
 	condTypeRunFailureRate     = "runFailureRate"
+	// condTypeApprovalWaiting is a per-RUN, event-driven condition (ADR 0069 §3, M75). Unlike the
+	// aggregate conditions above (one firing state per condition name), it fires ONE alert per
+	// currently-waiting run — a run paused on requires_action/plan_approval — so the selected agents'
+	// approvers get a "notify me a run needs approval" signal. It is evaluated on a SEPARATE path
+	// (evaluateApprovalWaiting), NOT through the aggregate applyConditionResult loop, precisely because
+	// the aggregate fire-once dedup is keyed on the condition NAME; approval-waiting must dedup per
+	// (policy, condition, runID) or the second simultaneously-waiting run silently never notifies.
+	condTypeApprovalWaiting = "approvalWaiting"
+)
+
+// Audit-entry constants for AlertPolicy-fired alerts (shared by recordFired + recordApprovalWaiting).
+const (
+	auditSourceController = "controller"
+	auditActorAlertPolicy = "alertpolicy-controller"
+	auditDetailKeyAgent   = "agent"
 )
 
 // AlertPolicyReconciler reconciles an AlertPolicy object (M70, ADR 0063 D2). It evaluates each policy
@@ -92,6 +107,39 @@ type AlertPolicyReconciler struct {
 	// HTTPClient is the HTTP client used for webhook dispatch (m70.5). nil ⇒ a default client with
 	// a 5 s per-attempt timeout is used. Override in tests to point at an httptest.Server.
 	HTTPClient *http.Client
+
+	// Runs is the read side of the durable run store (from cpDB), used ONLY by the approvalWaiting
+	// condition (M75, ADR 0069 §3) to list runs currently paused on plan_approval. nil ⇒ approval-
+	// waiting evaluation is skipped (a dev deployment without cpDB, or a policy with no approvalWaiting
+	// condition never calls it). It is deliberately a NARROW read interface — no run mutation reaches
+	// the reconciler.
+	Runs ApprovalRunLister
+
+	// ConsoleURL is the browser-reachable console origin (from CONSOLE_URL, mirroring the BFF). It is
+	// the prefix for the approval-waiting notification's deep-link to the AUTHENTICATED console approval
+	// view. Empty ⇒ the payload carries a relative path (still a pointer, never a capability). This is a
+	// POINTER only — NEVER the public share link, NEVER an approve-magic-link (approval stays caller-
+	// scoped via POST /api/runs/{id}/resume).
+	ConsoleURL string
+}
+
+// ApprovalRunLister is the narrow read the AlertPolicyReconciler needs to fire approval-waiting
+// notifications (M75, ADR 0069 §3): list the runs in a namespace currently paused on plan_approval.
+// The durable run store (run.PostgresStore) satisfies it; a nil lister disables approval-waiting eval.
+// It exposes NO mutation — the reconciler can never resume/cancel a run (approval stays caller-scoped).
+type ApprovalRunLister interface {
+	// ListWaitingApproval returns the runs in the given namespace that are currently paused in
+	// requires_action with RequiresAction.Kind == plan_approval. It returns only the fields the
+	// reconciler needs (id, agent, message); a store/read error returns it (the caller logs + skips —
+	// a failed read must never wedge the reconcile, and a transient miss simply re-fires next tick).
+	ListWaitingApproval(ctx context.Context, namespace string) ([]WaitingApprovalRun, error)
+}
+
+// WaitingApprovalRun is the projection of a plan_approval-paused run the reconciler notifies about.
+type WaitingApprovalRun struct {
+	ID      string // the run id — the per-run dedup key + the deep-link target
+	Agent   string // the AgentDeployment name, matched against the policy's selected agents
+	Message string // the RequiresAction.Message (the approval summary), surfaced in the notification
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=alertpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -129,6 +177,13 @@ func (r *AlertPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	now := metav1.Now()
 	for i := range ap.Spec.Conditions {
 		cond := ap.Spec.Conditions[i]
+		if cond.Type == condTypeApprovalWaiting {
+			// Per-RUN, event-driven: handled on its own pass below with per-(policy,condition,runID)
+			// dedup. It never touches the aggregate .status firing state (the condition-name key would
+			// collapse many waiting runs into one alert).
+			r.evaluateApprovalWaiting(ctx, &ap, cond, agents, now)
+			continue
+		}
 		firing, value := r.evaluateCondition(ctx, &ap, cond, agents)
 		if r.applyConditionResult(ctx, &ap, cond, firing, value, now) {
 			changed = true
@@ -230,6 +285,11 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 		// and treat as not firing — NEVER error, so the rest of the policy still evaluates.
 		log.V(1).Info("alert condition type not yet evaluated — no data source (m52 Theme Q)",
 			"alertpolicy", ap.Name, "condition", cond.Name, "type", cond.Type)
+		return false, ""
+
+	case condTypeApprovalWaiting:
+		// Handled on the separate per-run pass (evaluateApprovalWaiting) — abstain on the aggregate
+		// path so a misroute is a no-op rather than a spurious condition-level fire.
 		return false, ""
 
 	default:
@@ -522,9 +582,9 @@ func (r *AlertPolicyReconciler) recordFired(
 	if r.Audit != nil {
 		if err := r.Audit.Append(ctx, auditlog.Entry{
 			OccurredAt:   now.Time,
-			Source:       "controller",
-			Actor:        "alertpolicy-controller",
-			ActorKind:    "controller",
+			Source:       auditSourceController,
+			Actor:        auditActorAlertPolicy,
+			ActorKind:    auditSourceController,
 			Action:       "alert.fired",
 			ResourceKind: "AlertPolicy",
 			ResourceName: ap.Name,

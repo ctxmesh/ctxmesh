@@ -658,3 +658,131 @@ func TestPostgresStore_ReserveSpawn(t *testing.T) {
 	ok, _ = s.ReserveSpawn("root-y", 1)
 	assert.True(t, ok, "an independent tree")
 }
+
+// TestPostgresStore_ListWaitingApproval proves the M75 approval-waiting read (ADR 0069 §3): it returns
+// ONLY the runs in a namespace paused in requires_action with Kind==plan_approval, scoped to the
+// namespace, carrying id + agent + the approval message. Runs in other states, other pause kinds, or
+// other namespaces are excluded.
+func TestPostgresStore_ListWaitingApproval(t *testing.T) {
+	s := openPGStore(t)
+	ctx := context.Background()
+
+	// r1: ns-a, agent-a, paused on plan_approval → INCLUDED.
+	r1 := New("wa-1", "ns-a", "agent-a", nil, "", t0)
+	require.NoError(t, s.Create(r1))
+	_, err := s.Update("wa-1", func(x *Run) error {
+		if err := x.Transition(StatusRunning, t0); err != nil {
+			return err
+		}
+		if err := x.Transition(StatusRequiresAction, t0.Add(time.Second)); err != nil {
+			return err
+		}
+		x.RequiresAction = &Action{Kind: ActionPlanApproval, Message: "approve the plan"}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// r2: ns-a, agent-b, paused on plan_approval → INCLUDED (a SECOND run in the same ns).
+	r2 := New("wa-2", "ns-a", "agent-b", nil, "", t0)
+	require.NoError(t, s.Create(r2))
+	_, err = s.Update("wa-2", func(x *Run) error {
+		if err := x.Transition(StatusRunning, t0); err != nil {
+			return err
+		}
+		if err := x.Transition(StatusRequiresAction, t0.Add(time.Second)); err != nil {
+			return err
+		}
+		x.RequiresAction = &Action{Kind: ActionPlanApproval, Message: "approve plan 2"}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// r3: ns-a, paused on CONSENT (not plan_approval) → EXCLUDED.
+	r3 := New("wa-3", "ns-a", "agent-c", nil, "", t0)
+	require.NoError(t, s.Create(r3))
+	_, err = s.Update("wa-3", func(x *Run) error {
+		if err := x.Transition(StatusRunning, t0); err != nil {
+			return err
+		}
+		if err := x.Transition(StatusRequiresAction, t0.Add(time.Second)); err != nil {
+			return err
+		}
+		x.RequiresAction = &Action{Kind: ActionConsentRequired, Servers: []string{"gh"}}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// r4: ns-a, still RUNNING (not paused) → EXCLUDED.
+	r4 := New("wa-4", "ns-a", "agent-d", nil, "", t0)
+	require.NoError(t, s.Create(r4))
+	_, err = s.Update("wa-4", func(x *Run) error { return x.Transition(StatusRunning, t0) })
+	require.NoError(t, err)
+
+	// r5: ns-B, plan_approval → EXCLUDED from an ns-a query (namespace scope).
+	r5 := New("wa-5", "ns-b", "agent-a", nil, "", t0)
+	require.NoError(t, s.Create(r5))
+	_, err = s.Update("wa-5", func(x *Run) error {
+		if err := x.Transition(StatusRunning, t0); err != nil {
+			return err
+		}
+		if err := x.Transition(StatusRequiresAction, t0.Add(time.Second)); err != nil {
+			return err
+		}
+		x.RequiresAction = &Action{Kind: ActionPlanApproval, Message: "other ns"}
+		return nil
+	})
+	require.NoError(t, err)
+
+	got, err := s.ListWaitingApproval(ctx, "ns-a")
+	require.NoError(t, err)
+
+	byID := map[string]WaitingApproval{}
+	for _, w := range got {
+		byID[w.ID] = w
+	}
+	require.Len(t, got, 2, "only the two plan_approval-waiting runs in ns-a")
+	require.Contains(t, byID, "wa-1")
+	require.Contains(t, byID, "wa-2")
+	assert.Equal(t, "agent-a", byID["wa-1"].Agent)
+	assert.Equal(t, "approve the plan", byID["wa-1"].Message)
+	assert.Equal(t, "agent-b", byID["wa-2"].Agent)
+
+	// An empty namespace returns nothing (not an error).
+	empty, err := s.ListWaitingApproval(ctx, "ns-empty")
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// TestPostgresStore_GetByTraceID proves the m75.5 trace-id fallback resolves against REAL Postgres —
+// the share mint's by-traceId path (the trace-detail page keys a run by its traceId, distinct from
+// run.ID). It creates a run whose ID and TraceID are DISTINCT, then asserts: GetByTraceID(traceID)
+// finds it (its ID matches — the SELECT keys on the trace_id column, not id), GetByTraceID(the run.ID)
+// returns nil (the id is NOT a trace_id), and GetByTraceID("nonexistent") returns (nil, nil) — a miss
+// is not an error. This is the real-SQL coverage a memstore test cannot give (M73/M74 shipped
+// real-PG-only "simple query" bugs — the column keyed here is exercised against Postgres, not mocked).
+func TestPostgresStore_GetByTraceID(t *testing.T) {
+	s := openPGStore(t)
+
+	const runID = "run-gbt-internal"
+	const traceID = "trace-gbt-distinct" // deliberately != runID
+	r := New(runID, "ns", "agent-x", nil, "", t0)
+	r.TraceID = traceID
+	require.NoError(t, s.Create(r))
+
+	// GetByTraceID(traceID) → the run (keyed on the trace_id column).
+	got, err := s.GetByTraceID(traceID)
+	require.NoError(t, err)
+	require.NotNil(t, got, "GetByTraceID must find the run by its trace_id")
+	assert.Equal(t, runID, got.ID, "the resolved run's ID is the real run.ID, not the traceId")
+	assert.Equal(t, traceID, got.TraceID)
+
+	// GetByTraceID(the run.ID) → nil: the id is NOT a trace_id (the two columns are distinct).
+	byRunID, err := s.GetByTraceID(runID)
+	require.NoError(t, err)
+	assert.Nil(t, byRunID, "the run.ID is not a trace_id — GetByTraceID(run.ID) must miss")
+
+	// GetByTraceID("nonexistent") → (nil, nil): a miss is not an error.
+	none, err := s.GetByTraceID("nonexistent")
+	require.NoError(t, err, "a trace-id miss is (nil, nil), never an error")
+	assert.Nil(t, none)
+}

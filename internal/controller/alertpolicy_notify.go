@@ -66,6 +66,11 @@ const (
 var webhookRetryDelays = []time.Duration{200 * time.Millisecond, 400 * time.Millisecond}
 
 // webhookPayload is the JSON body sent to an external webhook on a fired alert.
+//
+// RunID + Link are set ONLY for the per-run approvalWaiting notification (M75, ADR 0069 §3): Link is a
+// POINTER to the AUTHENTICATED console approval view (never the public share link, never an approve-magic-
+// link — approval stays caller-scoped via POST /api/runs/{id}/resume). Both are omitempty so aggregate-
+// condition payloads are byte-for-byte unchanged.
 type webhookPayload struct {
 	Policy    string `json:"policy"`
 	Namespace string `json:"namespace"`
@@ -73,7 +78,9 @@ type webhookPayload struct {
 	Type      string `json:"type"`
 	Value     string `json:"value"`
 	Message   string `json:"message"`
-	FiredAt   string `json:"firedAt"` // RFC3339
+	FiredAt   string `json:"firedAt"`         // RFC3339
+	RunID     string `json:"runId,omitempty"` // approvalWaiting: the waiting run's id
+	Link      string `json:"link,omitempty"`  // approvalWaiting: deep-link to the console approval view
 }
 
 // httpClient returns the effective HTTP client: the injected one if set, otherwise a default with
@@ -100,9 +107,7 @@ func (r *AlertPolicyReconciler) notifyChannels(
 	value, msg string,
 	firedAt time.Time,
 ) {
-	log := logf.FromContext(ctx)
-
-	payload := webhookPayload{
+	r.dispatchChannels(ctx, ap, cond, webhookPayload{
 		Policy:    ap.Name,
 		Namespace: ap.Namespace,
 		Condition: cond.Name,
@@ -110,7 +115,21 @@ func (r *AlertPolicyReconciler) notifyChannels(
 		Value:     value,
 		Message:   msg,
 		FiredAt:   firedAt.UTC().Format(time.RFC3339),
-	}
+	})
+}
+
+// dispatchChannels marshals a payload once and delivers it to every channel in ap.Spec.Route.Channels
+// (console = a no-op pull feed; webhook = a signed POST). It is the shared body of notifyChannels
+// (aggregate conditions) and notifyApprovalChannels (per-run approvalWaiting). It never returns an
+// error: any per-channel failure is logged and the loop continues.
+func (r *AlertPolicyReconciler) dispatchChannels(
+	ctx context.Context,
+	ap *agentsv1beta1.AlertPolicy,
+	cond agentsv1beta1.AlertCondition,
+	payload webhookPayload,
+) {
+	log := logf.FromContext(ctx)
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		// json.Marshal on a plain struct with no custom marshalers cannot fail in practice, but guard.
@@ -141,6 +160,31 @@ func (r *AlertPolicyReconciler) notifyChannels(
 				"alertpolicy", ap.Name, "condition", cond.Name, "type", ch.Type)
 		}
 	}
+}
+
+// notifyApprovalChannels dispatches a PER-RUN approvalWaiting notification (M75, ADR 0069 §3). The
+// payload carries the waiting run's id + a deep-link to the AUTHENTICATED console approval view (a
+// POINTER) — never the public share link, never an approve-magic-link (approval stays caller-scoped via
+// POST /api/runs/{id}/resume). It reuses the exact same channel dispatch as the aggregate conditions.
+func (r *AlertPolicyReconciler) notifyApprovalChannels(
+	ctx context.Context,
+	ap *agentsv1beta1.AlertPolicy,
+	cond agentsv1beta1.AlertCondition,
+	w WaitingApprovalRun,
+	msg, link string,
+	firedAt time.Time,
+) {
+	r.dispatchChannels(ctx, ap, cond, webhookPayload{
+		Policy:    ap.Name,
+		Namespace: ap.Namespace,
+		Condition: cond.Name,
+		Type:      condTypeApprovalWaiting,
+		Value:     w.Agent,
+		Message:   msg,
+		FiredAt:   firedAt.UTC().Format(time.RFC3339),
+		RunID:     w.ID,
+		Link:      link,
+	})
 }
 
 // dispatchWebhook POSTs body to the configured URL with optional HMAC signing. It retries on

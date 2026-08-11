@@ -79,6 +79,9 @@ spec:
                           forecastExceeded           — USD (e.g. "10.00")
                           regressionDetected         — ignored (event-driven; the RegressionDetected condition on the
                                                        AgentDeployment triggers this regardless of a numeric threshold)
+                          approvalWaiting            — ignored (event-driven, per-RUN; the condition merely opts the
+                                                       selected agents into HITL approval-waiting notifications — a run
+                                                       pausing on plan_approval fires a per-run alert, ADR 0069 §3)
                         Stored as a string to carry rates/ms/USD uniformly without lossy float conversion.
                       type: string
                     type:
@@ -90,11 +93,12 @@ spec:
                       - forecastExceeded
                       - regressionDetected
                       - runFailureRate
+                      - approvalWaiting
                       type: string
                     window:
                       description: |-
-                        window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected
-                        (which is event-driven, not window-based).
+                        window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected and
+                        approvalWaiting (both event-driven, not window-based).
                       type: string
                   required:
                   - name
