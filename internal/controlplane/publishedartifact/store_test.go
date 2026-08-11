@@ -178,3 +178,142 @@ func TestStore_Publish_Validates(t *testing.T) {
 		assert.Error(t, err, "empty spec_json is rejected")
 	})
 }
+
+// TestStore_ListTemplates_VisibilityPredicate: the leak-safe WHERE — org/public/team visible per the
+// membership set, private never returned, tombstoned never returned, latest-version-per-origin.
+func TestStore_ListTemplates_VisibilityPredicate(t *testing.T) {
+	eachStore(t, func(t *testing.T, s publishedartifact.Store) {
+		ctx := context.Background()
+
+		// org artifact in ns-b (a member) — visible to ns-caller.
+		_, err := s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-b", OriginName: "org-agent",
+			SpecJSON: json.RawMessage(`{"name":"org-agent"}`), Visibility: "org", ContentHash: "h1",
+		})
+		require.NoError(t, err)
+
+		// org artifact in ns-outside (NOT a member) — must not leak.
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-outside", OriginName: "leaked-agent",
+			SpecJSON: json.RawMessage(`{"name":"leaked-agent"}`), Visibility: "org", ContentHash: "h2",
+		})
+		require.NoError(t, err)
+
+		// public artifact in an unrelated namespace — always visible.
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-unrelated", OriginName: "public-agent",
+			SpecJSON: json.RawMessage(`{"name":"public-agent"}`), Visibility: "public", ContentHash: "h3",
+		})
+		require.NoError(t, err)
+
+		// team artifact in callerNS — visible (own-ns team).
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-caller", OriginName: "team-agent",
+			SpecJSON: json.RawMessage(`{"name":"team-agent"}`), Visibility: "team", ContentHash: "h4",
+		})
+		require.NoError(t, err)
+
+		// team artifact in ns-b (a member, but NOT callerNS) — must NOT appear (team is own-ns only).
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-b", OriginName: "sibling-team-agent",
+			SpecJSON: json.RawMessage(`{"name":"sibling-team-agent"}`), Visibility: "team", ContentHash: "h5",
+		})
+		require.NoError(t, err)
+
+		// private artifact in callerNS — must NEVER appear.
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-caller", OriginName: "private-agent",
+			SpecJSON: json.RawMessage(`{"name":"private-agent"}`), Visibility: "private", ContentHash: "h6",
+		})
+		require.NoError(t, err)
+
+		rows, err := s.ListTemplates(ctx, "ns-caller", []string{"ns-caller", "ns-b"})
+		require.NoError(t, err)
+
+		names := make(map[string]bool)
+		for _, r := range rows {
+			names[r.OriginName] = true
+		}
+
+		assert.True(t, names["org-agent"], "org artifact from member ns-b must appear")
+		assert.True(t, names["public-agent"], "public artifact must appear regardless of membership")
+		assert.True(t, names["team-agent"], "team artifact in callerNS must appear")
+		assert.False(t, names["leaked-agent"], "org artifact in non-member ns must NOT appear (leak-safe)")
+		assert.False(t, names["sibling-team-agent"], "team artifact in sibling member ns must NOT appear")
+		assert.False(t, names["private-agent"], "private artifact must NEVER appear")
+	})
+}
+
+// TestStore_ListTemplates_LatestVersionWins: DISTINCT ON (kind, origin_namespace, origin_name)
+// ORDER BY version DESC returns only the highest non-tombstoned version per origin.
+func TestStore_ListTemplates_LatestVersionWins(t *testing.T) {
+	eachStore(t, func(t *testing.T, s publishedartifact.Store) {
+		ctx := context.Background()
+
+		_, err := s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-a", OriginName: "evolving",
+			SpecJSON: json.RawMessage(`{"v":1}`), Visibility: "org", ContentHash: "h-v1",
+		})
+		require.NoError(t, err)
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-a", OriginName: "evolving",
+			SpecJSON: json.RawMessage(`{"v":2}`), Visibility: "org", ContentHash: "h-v2",
+		})
+		require.NoError(t, err)
+
+		rows, err := s.ListTemplates(ctx, "ns-caller", []string{"ns-caller", "ns-a"})
+		require.NoError(t, err)
+		require.Len(t, rows, 1, "exactly one row per origin (latest version)")
+		assert.Equal(t, 2, rows[0].Version, "version must be 2 (latest)")
+		assert.Equal(t, "h-v2", rows[0].ContentHash)
+		assert.JSONEq(t, `{"v":2}`, string(rows[0].SpecJSON))
+	})
+}
+
+// TestStore_ListTemplates_TombstonedExcluded: a tombstoned artifact must never appear.
+func TestStore_ListTemplates_TombstonedExcluded(t *testing.T) {
+	eachStore(t, func(t *testing.T, s publishedartifact.Store) {
+		ctx := context.Background()
+
+		_, err := s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-caller", OriginName: "dead-agent",
+			SpecJSON: json.RawMessage(`{"v":1}`), Visibility: "public", ContentHash: "h1",
+		})
+		require.NoError(t, err)
+		require.NoError(t, s.Tombstone(ctx, kindAgent, "ns-caller", "dead-agent"))
+
+		rows, err := s.ListTemplates(ctx, "ns-caller", []string{"ns-caller"})
+		require.NoError(t, err)
+		assert.Empty(t, rows, "tombstoned artifact must not appear")
+	})
+}
+
+// TestStore_ListTemplates_EmptyMembersPublicOnly: when members is nil/empty, only public rows appear
+// (the COALESCE guard — parity with the m73.3 fix that guarded the org clause against SQL NULL).
+func TestStore_ListTemplates_EmptyMembersPublicOnly(t *testing.T) {
+	eachStore(t, func(t *testing.T, s publishedartifact.Store) {
+		ctx := context.Background()
+
+		_, err := s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-a", OriginName: "org-agent",
+			SpecJSON: json.RawMessage(`{"v":1}`), Visibility: "org", ContentHash: "h1",
+		})
+		require.NoError(t, err)
+		_, err = s.Publish(ctx, publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-a", OriginName: "public-agent",
+			SpecJSON: json.RawMessage(`{"v":1}`), Visibility: "public", ContentHash: "h2",
+		})
+		require.NoError(t, err)
+
+		// nil members → COALESCE makes it an empty array → no org matches, only public.
+		rows, err := s.ListTemplates(ctx, "ns-caller", nil)
+		require.NoError(t, err)
+
+		names := make(map[string]bool)
+		for _, r := range rows {
+			names[r.OriginName] = true
+		}
+		assert.True(t, names["public-agent"], "public artifact must appear even with nil members")
+		assert.False(t, names["org-agent"], "org artifact must NOT appear when members is nil (COALESCE guard)")
+	})
+}

@@ -42,6 +42,12 @@ const (
 	// ADR 0063 D2): the caller's RBAC on `list alertpolicies` gates the fired-alert feed,
 	// mirroring the CRD path the API server would have enforced (exact RBAC parity, ADR 0011).
 	resourceAlerts = "alertpolicies"
+	// resourceAgentDeployments is the CRD plural resource name GET /api/templates authorizes against
+	// (M74, m74.2, ADR 0068 §2): a caller-scoped SSAR `list agentdeployments` in the caller's OWN
+	// namespace proves the caller is a legitimate member-namespace principal. Exact RBAC parity with
+	// the CRD list the API server would have enforced (ADR 0011). NO BFF-SA grant — SSAR is a
+	// self-check the caller's token authorizes; the BFF never gains list rights it doesn't hold.
+	resourceAgentDeployments = "agentdeployments"
 )
 
 // authorizeStore runs a caller-scoped SelfSubjectAccessReview for a store-backed
