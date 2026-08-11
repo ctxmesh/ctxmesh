@@ -666,7 +666,10 @@ export function PlaygroundPage() {
                     >
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                       <div className="space-y-2">
-                        <p className="font-medium">Approval needed to continue</p>
+                        {/* m75.3: this is the deep-link target of the HITL approval-waiting
+                            notification (ADR 0069 §3). The approver arrives here (caller-scoped —
+                            NOT via a magic link) and approves/denies via /api/runs/{id}/resume. */}
+                        <p className="font-medium">Waiting for your approval</p>
                         <p className="text-muted-foreground">{run.approval.summary}</p>
                         <div className="flex flex-wrap gap-2">
                           <Button

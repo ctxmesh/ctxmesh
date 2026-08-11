@@ -75,6 +75,13 @@ spec:
           # then get the direct Valkey address (the legacy pre-cutover path).
           - name: STATELAYER_PROXY_URL
             value: http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080
+          # CONSOLE_URL (M75, ADR 0069 §3) — the browser-reachable console origin, used by the
+          # AlertPolicy approvalWaiting condition to build the HITL notification's deep-link to the
+          # AUTHENTICATED console approval view (a POINTER, never the public share link, never an
+          # approve-magic-link). Empty (the default) ⇒ the payload carries a relative path. Mirrors the
+          # BFF's CONSOLE_URL; the Helm chart can template it from the same console-origin value.
+          - name: CONSOLE_URL
+            value: ""
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a

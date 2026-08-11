@@ -150,6 +150,9 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS export_spec text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
 CREATE INDEX IF NOT EXISTS runs_waiting ON runs (id) WHERE status = 'waiting';
+-- List runs paused for human approval (M75, ADR 0069 §3): the AlertPolicy approvalWaiting condition
+-- reads runs in requires_action per namespace to fire the HITL notification. A small partial index.
+CREATE INDEX IF NOT EXISTS runs_requires_action ON runs (namespace) WHERE status = 'requires_action';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
 CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
@@ -831,6 +834,56 @@ func (p *pgStore) List() []*Run {
 		}
 	}
 	return out
+}
+
+// WaitingApproval is the projection of a plan_approval-paused run the AlertPolicy approvalWaiting
+// condition notifies about (M75, ADR 0069 §3): just the id, the target agent, and the approval summary.
+type WaitingApproval struct {
+	ID      string
+	Agent   string
+	Message string
+}
+
+// ListWaitingApproval returns the runs in the given namespace currently paused in requires_action with
+// RequiresAction.Kind == plan_approval (M75, ADR 0069 §3). It reads the partial-indexed requires_action
+// rows for the namespace and filters on the JSON action kind in Go (mirroring how the store already
+// unmarshals requires_action). Read-only; it never mutates a run. A query/scan error is returned so the
+// caller (the reconciler) can log + skip — a bad read must never wedge the reconcile.
+func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]WaitingApproval, error) {
+	rows, err := p.db.QueryContext(ctx,
+		`SELECT id, agent, requires_action FROM runs WHERE namespace=$1 AND status=$2`,
+		namespace, string(StatusRequiresAction))
+	if err != nil {
+		return nil, fmt.Errorf("run: list requires_action: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []WaitingApproval
+	for rows.Next() {
+		var (
+			id     string
+			agent  string
+			action []byte
+		)
+		if err := rows.Scan(&id, &agent, &action); err != nil {
+			return nil, fmt.Errorf("run: list requires_action scan: %w", err)
+		}
+		if len(action) == 0 {
+			continue // requires_action with no action record — nothing to key on, skip
+		}
+		var a Action
+		if err := json.Unmarshal(action, &a); err != nil {
+			return nil, fmt.Errorf("run: list requires_action unmarshal: %w", err)
+		}
+		if a.Kind != ActionPlanApproval {
+			continue // a different pause (consent / mid-run approval) — not a plan_approval wait
+		}
+		out = append(out, WaitingApproval{ID: id, Agent: agent, Message: a.Message})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: list requires_action rows: %w", err)
+	}
+	return out, nil
 }
 
 func (p *pgStore) AppendEvent(id string, kind EventKind, data string) error {

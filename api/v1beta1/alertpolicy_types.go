@@ -46,7 +46,7 @@ type AlertCondition struct {
 	Name string `json:"name"`
 
 	// type selects the condition kind.
-	// +kubebuilder:validation:Enum=errorRate;p95Latency;budgetSoft;forecastExceeded;regressionDetected;runFailureRate
+	// +kubebuilder:validation:Enum=errorRate;p95Latency;budgetSoft;forecastExceeded;regressionDetected;runFailureRate;approvalWaiting
 	Type string `json:"type"`
 
 	// threshold is the numeric firing threshold; semantics depend on type:
@@ -56,12 +56,15 @@ type AlertCondition struct {
 	//   forecastExceeded           — USD (e.g. "10.00")
 	//   regressionDetected         — ignored (event-driven; the RegressionDetected condition on the
 	//                                AgentDeployment triggers this regardless of a numeric threshold)
+	//   approvalWaiting            — ignored (event-driven, per-RUN; the condition merely opts the
+	//                                selected agents into HITL approval-waiting notifications — a run
+	//                                pausing on plan_approval fires a per-run alert, ADR 0069 §3)
 	// Stored as a string to carry rates/ms/USD uniformly without lossy float conversion.
 	// +optional
 	Threshold string `json:"threshold,omitempty"`
 
-	// window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected
-	// (which is event-driven, not window-based).
+	// window is the evaluation look-back window (e.g. "5m", "1h"). Ignored by regressionDetected and
+	// approvalWaiting (both event-driven, not window-based).
 	// +optional
 	Window string `json:"window,omitempty"`
 }
