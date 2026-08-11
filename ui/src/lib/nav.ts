@@ -10,6 +10,7 @@ import {
   GitFork,
   KeyRound,
   LayoutDashboard,
+  Library,
   MessagesSquare,
   Network,
   PlugZap,
@@ -55,7 +56,8 @@ export type Milestone =
   | "M68"
   | "M69"
   | "M70"
-  | "M73";
+  | "M73"
+  | "M74";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -164,6 +166,18 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Waypoints,
         milestone: "M64",
         route: "/teams",
+      },
+      {
+        // Template Gallery (m74.6) — the unified gallery for agent templates
+        // (recipes ∪ published agents) and the MCP catalog in two tabs. Fork
+        // an agent recipe or connect an MCP server from one surface.
+        // Read-open: any authenticated caller can browse; Fork/Connect are
+        // gated server-side by agent creation rights.
+        id: "gallery",
+        label: "Gallery",
+        icon: Library,
+        milestone: "M74",
+        route: "/gallery",
       },
       // "New agent" is NOT a nav item (m25 S8) — it lives as the primary action
       // (top-right button) ON the Agents page, next to the list it creates into,

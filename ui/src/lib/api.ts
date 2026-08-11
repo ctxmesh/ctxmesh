@@ -214,6 +214,9 @@ export interface AgentDetailResponse {
   };
   resourceVersion?: string;
   isDraft?: boolean;
+  // m74.6 — Kubernetes labels forwarded from the AgentDeployment CR. Used to
+  // surface the fork-needs-rebinding banner when the label is present.
+  labels?: Record<string, string>;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -1354,6 +1357,64 @@ export interface ConnectMcpResponse {
   namespace?: string;
 }
 
+
+// --- Template gallery (GET /api/templates, m74.6) ---------------------------
+// Discoverable templates across the tenant: recipes (built-in) and published
+// agents. Each entry carries enough to render a gallery card and a Fork CTA.
+
+// TemplateProvenance describes the origin of a published-agent template.
+export interface TemplateProvenance {
+  originNamespace?: string;
+  originName?: string;
+  version?: string;
+  publishedAt?: string;
+}
+
+// TemplateEntry is one discoverable template (recipe or published agent).
+export interface TemplateEntry {
+  kind: string;
+  // source: "recipe" for built-in recipes, "published" for published agents.
+  source: "recipe" | "published";
+  name: string;
+  description?: string;
+  spec?: string;
+  // provenance: undefined for recipes (built-in), TemplateProvenance for published.
+  provenance?: TemplateProvenance | "builtin";
+  // visibility: "team" | "org" | "public" (absent for built-in recipes).
+  visibility?: string;
+}
+
+export interface TemplateListResponse {
+  templates: TemplateEntry[];
+}
+
+// PublishTemplateRequest is the POST /api/templates body — publish an owned
+// agent as a template (visibility team|org|public).
+export interface PublishTemplateRequest {
+  kind: string;
+  originNamespace: string;
+  originName: string;
+  visibility: "team" | "org" | "public";
+}
+
+// PublishTemplateResponse is the 200 body from POST /api/templates.
+export interface PublishTemplateResponse {
+  version: string;
+  name?: string;
+  namespace?: string;
+}
+
+// ForkAgentResponse is the 200 body from POST /api/agents/{ns}/{name}/fork.
+// needsRebinding lists dangling resource references (e.g. model routes) the
+// forked agent cannot resolve in the caller's namespace. unresolvedRefs lists
+// specific names that need rebinding. status "already-forked" = the caller
+// already has a fork of this agent.
+export interface ForkAgentResponse {
+  created: boolean;
+  needsRebinding: string[];
+  unresolvedRefs: string[];
+  status?: string;
+}
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
 // The merged tool catalog — curated ToolRegistry entries + the user's own
@@ -4714,6 +4775,93 @@ export const api = {
       );
     }
     return (await res.json()) as RecipeListResponse;
+  },
+
+  // getTemplates returns the discoverable template gallery (GET /api/templates,
+  // m74.6): recipes (built-in) ∪ published agents visible to this caller.
+  // A 404 = kill-switch (endpoint absent) → return empty list.
+  getTemplates: async (
+    namespace?: string,
+    signal?: AbortSignal,
+  ): Promise<TemplateEntry[]> => {
+    const path = namespace
+      ? `/api/templates?namespace=${encodeURIComponent(namespace)}`
+      : "/api/templates";
+    const res = await apiFetch(path, { signal });
+    if (res.status === 404) return [];
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `getTemplates failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as TemplateListResponse;
+    return data.templates ?? [];
+  },
+
+  // publishTemplate publishes an owned agent as a template (POST /api/templates,
+  // m74.6). visibility ∈ "team" | "org" | "public". A 403 surfaces the tier
+  // requirement (e.g. org-wide requires Tenant-admin).
+  publishTemplate: (
+    kind: string,
+    originNamespace: string,
+    originName: string,
+    visibility: "team" | "org" | "public",
+  ) =>
+    postJSON<PublishTemplateRequest, PublishTemplateResponse>("/api/templates", {
+      kind,
+      originNamespace,
+      originName,
+      visibility,
+    }),
+
+  // unpublishTemplate removes a published template (DELETE /api/templates/{kind}/{ns}/{name},
+  // m74.6). A 403 = not the owner or missing rights.
+  unpublishTemplate: async (
+    kind: string,
+    namespace: string,
+    name: string,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/templates/${encodeURIComponent(kind)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `unpublishTemplate failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // forkAgent forks a template/agent into the caller's namespace
+  // (POST /api/agents/{ns}/{name}/fork, m74.6). Returns the fork outcome:
+  // needsRebinding lists dangling refs (model routes, tools) the caller must
+  // rebind. A 404 = not discoverable; 409 = name collision with a different origin.
+  forkAgent: async (
+    originNamespace: string,
+    originName: string,
+    name?: string,
+    signal?: AbortSignal,
+  ): Promise<ForkAgentResponse> => {
+    const body: { name?: string } = {};
+    if (name) body.name = name;
+    const res = await apiFetch(
+      `/api/agents/${encodeURIComponent(originNamespace)}/${encodeURIComponent(originName)}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (res.ok) {
+      return (await res.json()) as ForkAgentResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `forkAgent failed (${res.status})`),
+      res.status,
+    );
   },
 
   // checkRequirements runs the advisory pre-flight against a candidate agent.yaml
