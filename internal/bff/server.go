@@ -1263,6 +1263,15 @@ func (s *Server) Handler() http.Handler {
 			// (team → update toolregistries in ns; org → update tenants/<tenant>;
 			// public → update tenants cluster-wide). Publish NEVER opens egress (m14.6 B1).
 			authed.HandleFunc("POST /api/mcp/publish", s.handleMCPPublish)
+			// Discover-then-materialize (m73.6, ADR 0067 §3): "Connect" imports a
+			// catalog-discovered server's DEFINITION into the caller's OWN namespace so they
+			// can use it with their OWN credential. The credential-safety crux: the
+			// publisher's token NEVER crosses the namespace boundary — the copy is created
+			// with NO credential material and the consumer OBO-connects their own later. A
+			// security gate re-checks the origin is discoverable by the caller (else 404); the
+			// origin read is a store read (amended-ADR-0011, like the catalog), the create is
+			// caller-scoped (SSAR-gated by createMCPObjects). Same mcpEnabled + callerClients gate.
+			authed.HandleFunc("POST /api/mcp/connect", s.handleMCPConnect)
 			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
 			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
 			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries

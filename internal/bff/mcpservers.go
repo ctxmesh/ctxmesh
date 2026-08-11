@@ -72,6 +72,16 @@ const (
 	labelMCPScope = "mcp.ctxmesh.ai/scope"
 	labelMCPOwner = "mcp.ctxmesh.ai/owner"
 
+	// labelMCPOriginNamespace / labelMCPOriginName stamp the PROVENANCE of a
+	// discover-then-materialize copy (m73.6, ADR 0067 §3): when "Connect" imports a
+	// catalog-discovered server's DEFINITION into the caller's own namespace, the
+	// local copy records where it was materialized from. They are metadata-only —
+	// the copy is a FROZEN one-time snapshot (no watch/sync back to the origin) and
+	// no credential resolution ever keys on them. NON-secret: they name a namespace +
+	// object name, never any token. Absent on a natively-registered server.
+	labelMCPOriginNamespace = "mcp.ctxmesh.ai/origin-namespace"
+	labelMCPOriginName      = "mcp.ctxmesh.ai/origin-name"
+
 	// The scope values. personal is the default for a user-added server (visible only to
 	// its owner); public is a no-auth / deliberately-open server (visible to all); org is
 	// an admin-shared server (visible to all). A server with NO scope label is
@@ -349,6 +359,12 @@ type mcpCreateSpec struct {
 	// annotations so a per-user grant can later be begun from {server, ns} (ADR 0031).
 	// No token material — those live only in oauthSecretData.
 	oauthConfig mcpOAuthConfig
+	// originNamespace / originName, when non-empty, stamp the discover-then-materialize
+	// PROVENANCE labels (m73.6, ADR 0067 §3) on the created copy: which origin
+	// namespace + server this local definition was imported from. Empty on a native
+	// register (no origin). NON-secret — a namespace + name, never a credential.
+	originNamespace string
+	originName      string
 }
 
 // createMCPObjects creates, with the caller's client and in dependency order:
@@ -384,6 +400,15 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 	}
 	if spec.credentialSource != "" {
 		labels[labelMCPCredentialSource] = spec.credentialSource
+	}
+	// Provenance for a discover-then-materialize copy (m73.6, ADR 0067 §3). Stamped
+	// atomically with the rest of the object so the copy carries its origin from
+	// creation. Metadata-only — a resolve/revoke never keys on these.
+	if spec.originNamespace != "" {
+		labels[labelMCPOriginNamespace] = spec.originNamespace
+	}
+	if spec.originName != "" {
+		labels[labelMCPOriginName] = spec.originName
 	}
 	hasKey := strings.TrimSpace(spec.apiKey) != ""
 	hasOAuth := len(spec.oauthSecretData) > 0
