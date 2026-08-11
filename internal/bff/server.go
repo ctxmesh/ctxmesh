@@ -115,6 +115,12 @@ type Server struct {
 	// nil ⇒ the share endpoints return 501 (CONTROLPLANE_DSN unset), never a panic.
 	sharedRunStore sharedrun.Store
 
+	// sharedRunLimiter is the per-IP token-bucket that bounds the UNAUTHENTICATED public read
+	// (GET /api/shared/runs/{token}, m75.2). 256-bit tokens make brute force moot, but the endpoint is
+	// anonymous so it is not left unbounded — over budget → 429 (a non-oracle status). Always non-nil
+	// (built in NewServer); its allow() is a no-op when disabled.
+	sharedRunLimiter *ipRateLimiter
+
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
 	// OBJECT_STORE_ADDR is unset — the upload endpoint returns 501 honestly rather
@@ -546,6 +552,7 @@ func NewServer(opts Options) *Server {
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
+		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -664,6 +671,17 @@ func (s *Server) Handler() http.Handler {
 	// session. Tells the SPA whether OIDC/SSO is available (issuer + public PKCE client
 	// id) so it offers "Sign in with SSO"; token login (ADR 0012) is the fallback.
 	api.HandleFunc("GET /api/authconfig", s.handleAuthConfig)
+	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
+	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
+	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
+	// token reads ONE run's allowlist projection. The token IS the capability; there is no caller.
+	// Uniform 404 at every failure (no oracle), the newSharedRunView allowlist projection only,
+	// no-referrer/noindex headers, per-IP rate limit, and NO token in any log (see handler). A
+	// nil store (no cpDB) returns 404 — never 501 — so an anonymous caller cannot learn the
+	// feature exists. Only GET is registered; a POST/DELETE/… on this path does not match the
+	// GET-only pattern and falls to the "/api/" catch-all → requireAuth → 401 (no bearer). Either
+	// way a non-GET verb NEVER reaches the projection — the read is GET-only.
+	api.HandleFunc("GET /api/shared/runs/{token}", s.handleSharedRunPublic)
 
 	s.registerSpawnRoute(api)
 	s.registerHandoffRoute(api)

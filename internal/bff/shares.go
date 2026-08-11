@@ -22,8 +22,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,6 +68,20 @@ const (
 	errorCategoryGuardrail  = "guardrail"
 	errorCategoryValidation = "validation"
 	errorCategoryOther      = "error"
+
+	// sharedRunNotFoundMsg is the SINGLE, non-revealing body the public read returns for EVERY failure —
+	// missing token, malformed token, no row, revoked, expired, deleted run, and a not-configured store all
+	// return this exact 404 (ADR 0069 §1/§2: no oracle that distinguishes the failure modes). A store error
+	// is the only non-404 (500), and it too never echoes the underlying error.
+	sharedRunNotFoundMsg = "shared run not found"
+
+	// sharedRunRatePerIP / sharedRunBurstPerIP bound public-read attempts per client IP (token-bucket
+	// hygiene — 256-bit tokens make brute force moot, but the endpoint is unauthenticated so it is not left
+	// unbounded). A refill of 5/s with a burst of 20 is generous for a human loading a page and its assets
+	// while giving a scanner nothing useful. Over budget → 429 (a non-oracle status: it says nothing about
+	// whether the token was valid).
+	sharedRunRatePerIP  = 5.0
+	sharedRunBurstPerIP = 20.0
 )
 
 // durableRunStore is the OPTIONAL capability a run.Store implements to declare whether it survives a pod
@@ -356,6 +373,218 @@ func (s *Server) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
 func hashShareToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The UNAUTHENTICATED public read (m75.2, ADR 0069 §1/§2).
+// ---------------------------------------------------------------------------------------------------
+//
+// GET /api/shared/runs/{token} is the platform's FIRST genuinely unauthenticated read surface — it is
+// mounted on the `api` (UNAUTHED) mux, NOT behind requireAuth, and there is NO caller (writeSharedRunError
+// never consults an identity). The security posture is:
+//
+//   - Uniform 404 at EVERY failure (writeSharedRunError): missing/malformed token, no row, revoked,
+//     expired, deleted run, and a not-configured store are indistinguishable — no oracle, no timing tell.
+//     A store error is the ONLY non-404 (500), and it too never echoes the underlying error.
+//   - The response is ALWAYS the newSharedRunView allowlist projection (m75.1) — the *run.Run is never
+//     marshalled directly (ADR 0069 §2). The token presented is hashed with hashShareToken (m75.1) and the
+//     row looked up by that hash; the raw token is never stored and never logged.
+//   - Security headers (Referrer-Policy: no-referrer, X-Robots-Tag: noindex) keep the in-URL token from
+//     leaking via Referer or search indexing.
+//   - A per-IP token bucket bounds attempts (thin brute-force hygiene; a valid token is a 256-bit secret).
+
+// writeSharedRunError is the SOLE 404 writer for the public read. Every failure funnels through it so the
+// body + status are byte-identical — a caller cannot distinguish "no such token" from "revoked" from
+// "expired" from "the run was deleted" (ADR 0069 §1: no oracle). It also sets the no-leak headers so even
+// an error response does not leak the token via Referer/indexing.
+func writeSharedRunError(w http.ResponseWriter) {
+	setSharedRunHeaders(w)
+	writeError(w, http.StatusNotFound, sharedRunNotFoundMsg)
+}
+
+// setSharedRunHeaders stamps the no-leak headers on a shared-run response (success OR failure): the token
+// sits in the URL, so Referrer-Policy: no-referrer stops it leaking via the Referer header on any outbound
+// link/asset, and X-Robots-Tag: noindex keeps a crawled link out of a search index (ADR 0069 §2).
+func setSharedRunHeaders(w http.ResponseWriter) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Robots-Tag", "noindex")
+}
+
+// handleSharedRunPublic serves GET /api/shared/runs/{token} — the unauthenticated public read (m75.2, ADR
+// 0069 §1/§2). It hashes the presented token, looks up the raw row, and returns the newSharedRunView
+// allowlist projection ONLY for a live share of an existing run. Every other outcome is a uniform 404.
+//
+// Nil-store choice (deliberate): with no cpDB the share store is nil, and this returns 404 — NOT 501. An
+// unauthenticated caller must not learn the feature exists or is misconfigured; 501 would be an oracle
+// ("shares are a thing here, just not wired") on an anonymous surface. 404 == "no such shared run", which
+// is exactly the truth from the caller's side.
+func (s *Server) handleSharedRunPublic(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit BEFORE any store work — a scanner gets a cheap 429, never touches the DB.
+	if !s.sharedRunLimiter.allow(clientIP(r)) {
+		setSharedRunHeaders(w)
+		writeError(w, http.StatusTooManyRequests, "too many requests")
+		return
+	}
+
+	// Nil store (no cpDB) → 404, not 501: never reveal the feature to an anonymous caller.
+	if s.sharedRunStore == nil {
+		writeSharedRunError(w)
+		return
+	}
+
+	token := r.PathValue("token")
+	if token == "" {
+		writeSharedRunError(w)
+		return
+	}
+
+	// Reuse m75.1's hashing — the token is stored ONLY as this hash (never reimplemented differently).
+	tokenHash := hashShareToken(token)
+
+	share, found, err := s.sharedRunStore.GetByTokenHash(r.Context(), tokenHash)
+	if err != nil {
+		// A store error is a 500, not a 404 (it is not "no such share") — but the error is NEVER echoed to
+		// the caller, and only a hash PREFIX (never the raw token) is logged.
+		s.log.Error(err, "shared run: lookup failed", "tokenHashPrefix", tokenHashPrefix(tokenHash))
+		setSharedRunHeaders(w)
+		writeError(w, http.StatusInternalServerError, "failed to read the shared run")
+		return
+	}
+	if !found {
+		writeSharedRunError(w) // no row — uniform 404
+		return
+	}
+	if !share.IsLive(time.Now()) {
+		writeSharedRunError(w) // revoked or expired — SAME 404 as a missing token (no oracle)
+		return
+	}
+
+	rn, err := s.runStore.Get(share.RunID)
+	if err != nil {
+		if errors.Is(err, run.ErrNotFound) {
+			writeSharedRunError(w) // the run was deleted — a dead link cascades to the SAME 404 (intended)
+			return
+		}
+		s.log.Error(err, "shared run: run store read failed", "tokenHashPrefix", tokenHashPrefix(tokenHash))
+		setSharedRunHeaders(w)
+		writeError(w, http.StatusInternalServerError, "failed to read the shared run")
+		return
+	}
+	if rn == nil { // defensive: a (nil, nil) store contract still 404s, never panics on the deref below
+		writeSharedRunError(w)
+		return
+	}
+
+	// The SOLE path from a run.Run to the unauthenticated route: the m75.1 allowlist projection, gated by
+	// the share's includeContent flag. The run DTO is NEVER marshalled directly (ADR 0069 §2).
+	setSharedRunHeaders(w)
+	writeJSON(w, http.StatusOK, newSharedRunView(rn, share.IncludeContent))
+}
+
+// tokenHashPrefix returns the first 8 hex chars of a token hash for a log line — enough to correlate a
+// request in the logs, NEVER enough to reconstruct the token (which is a 256-bit secret and is itself
+// never logged). The raw token must never appear in any log.
+func tokenHashPrefix(tokenHash string) string {
+	if len(tokenHash) < 8 {
+		return tokenHash
+	}
+	return tokenHash[:8]
+}
+
+// clientIP extracts the best-effort client IP for the per-IP rate limiter. It prefers the LAST hop of
+// X-Forwarded-For when present (the edge appends the real client), else the RemoteAddr host. This is
+// rate-limit-only; it is NOT an authorization input (there is no caller to authorize).
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[len(parts)-1])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// ---------------------------------------------------------------------------------------------------
+// A minimal in-memory per-IP token-bucket limiter (stdlib only — no new dep).
+// ---------------------------------------------------------------------------------------------------
+
+// ipRateLimiter is a tiny per-key token-bucket limiter for the unauthenticated public read. It is
+// deliberately minimal (a map of buckets refilled lazily on access) — enough to deny a scanner an
+// unbounded endpoint without pulling in a dependency. Buckets are kept in a bounded map; when the map
+// grows past maxBuckets an admission-time sweep drops FULL (idle) buckets, so a churn of distinct IPs
+// cannot grow memory without bound.
+type ipRateLimiter struct {
+	mu         sync.Mutex
+	buckets    map[string]*tokenBucket
+	rate       float64 // tokens added per second
+	burst      float64 // bucket capacity
+	maxBuckets int
+}
+
+type tokenBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+// newIPRateLimiter builds a per-IP token-bucket limiter with the given steady-state rate (tokens/sec) and
+// burst (capacity). A zero/negative burst disables limiting (allow always) — used so tests and the
+// nil-config path never accidentally throttle.
+func newIPRateLimiter(rate, burst float64) *ipRateLimiter {
+	return &ipRateLimiter{
+		buckets:    make(map[string]*tokenBucket),
+		rate:       rate,
+		burst:      burst,
+		maxBuckets: 4096,
+	}
+}
+
+// allow reports whether a request from key may proceed, consuming one token. It refills the bucket by the
+// elapsed time since its last touch (capped at burst) and admits when at least one token remains. A
+// disabled limiter (burst <= 0) always admits.
+func (l *ipRateLimiter) allow(key string) bool {
+	if l == nil || l.burst <= 0 {
+		return true
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b, ok := l.buckets[key]
+	if !ok {
+		if len(l.buckets) >= l.maxBuckets {
+			l.sweepFullLocked(now)
+		}
+		l.buckets[key] = &tokenBucket{tokens: l.burst - 1, last: now}
+		return true
+	}
+	// Refill by elapsed time, capped at burst.
+	elapsed := now.Sub(b.last).Seconds()
+	b.tokens = minFloat(l.burst, b.tokens+elapsed*l.rate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// sweepFullLocked drops buckets that have refilled to capacity (idle since their last use), reclaiming
+// memory under a churn of distinct IPs. Caller holds l.mu.
+func (l *ipRateLimiter) sweepFullLocked(now time.Time) {
+	for k, b := range l.buckets {
+		if minFloat(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate) >= l.burst {
+			delete(l.buckets, k)
+		}
+	}
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ---------------------------------------------------------------------------------------------------
