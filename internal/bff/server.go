@@ -36,6 +36,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -93,6 +94,11 @@ type Server struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Required for the
 	// ToolRegistry + MCP-server APIs; nil ⇒ those endpoints return 501.
 	toolRegistryStore toolregistry.Store
+
+	// namespaceTenantStore is the read side of the namespace→tenant membership mirror (ADR 0067 §6,
+	// m73.3). Used by GET /api/catalog to resolve tenant membership without BFF RBAC on namespaces
+	// (ADR 0011). nil ⇒ the catalog degrades to own-ns + public only (fail-closed, never a panic).
+	namespaceTenantStore namespacetenant.Store
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -422,6 +428,10 @@ type Options struct {
 	// source of truth (ToolRegistry is retired as a CRD, ADR 0044). Wired from
 	// CONTROLPLANE_DSN in cmd/bff/main.go; nil ⇒ the ToolRegistry/MCP APIs serve 501.
 	ToolRegistryStore toolregistry.Store
+	// NamespaceTenantStore is the read side of the namespace→tenant membership mirror (ADR 0067 §6,
+	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
+	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
+	NamespaceTenantStore namespacetenant.Store
 	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
@@ -510,6 +520,7 @@ func NewServer(opts Options) *Server {
 		convStore:                opts.ConvStore,
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
+		namespaceTenantStore:     opts.NamespaceTenantStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -1226,6 +1237,12 @@ func (s *Server) Handler() http.Handler {
 			authed.HandleFunc("DELETE /api/mcpservers/{ns}/{name}", s.handleDeleteMCPServer)
 			authed.HandleFunc("GET /api/mcpservers/{ns}/{name}/references", s.handleMCPServerReferences)
 			authed.HandleFunc("GET /api/tools", s.handleListTools)
+			// Cross-tenant MCP catalog (m73.4, ADR 0067 §6): the discovery-only list of org/public/team
+			// MCP servers visible to the caller's tenant, without leaking private servers. A single
+			// own-namespace SSAR gates entry (the sole authz); the store read uses the BFF's own cpDB
+			// connection (the amended-ADR-0011 model — not the caller-scoped client). GET /api/catalog
+			// is in the SAME mcpEnabled + callerClients gate as the other MCP endpoints.
+			authed.HandleFunc("GET /api/catalog", s.handleCatalog)
 			// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
 			// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
 			// their OWN grant. Both are CALLER-SCOPED — the invoking user's identity is
@@ -1241,6 +1258,20 @@ func (s *Server) Handler() http.Handler {
 			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
 			// scope change is written caller-scoped (a viewer can't update it → 403).
 			authed.HandleFunc("POST /api/mcp/org-credential", s.handleSetOrgCredential)
+			// Tiered visibility publish (m73.5, ADR 0067 §5): widen a registered MCP server
+			// to team / org / public visibility. Each tier is gated by a caller-scoped SSAR
+			// (team → update toolregistries in ns; org → update tenants/<tenant>;
+			// public → update tenants cluster-wide). Publish NEVER opens egress (m14.6 B1).
+			authed.HandleFunc("POST /api/mcp/publish", s.handleMCPPublish)
+			// Discover-then-materialize (m73.6, ADR 0067 §3): "Connect" imports a
+			// catalog-discovered server's DEFINITION into the caller's OWN namespace so they
+			// can use it with their OWN credential. The credential-safety crux: the
+			// publisher's token NEVER crosses the namespace boundary — the copy is created
+			// with NO credential material and the consumer OBO-connects their own later. A
+			// security gate re-checks the origin is discoverable by the caller (else 404); the
+			// origin read is a store read (amended-ADR-0011, like the catalog), the create is
+			// caller-scoped (SSAR-gated by createMCPObjects). Same mcpEnabled + callerClients gate.
+			authed.HandleFunc("POST /api/mcp/connect", s.handleMCPConnect)
 			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
 			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
 			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
@@ -1269,6 +1300,8 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("GET /api/mcp/approvals", notImplemented("caller-scoped MCP approval queue"))
 			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
 			authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", notImplemented("caller-scoped MCP reject"))
+			authed.Handle("GET /api/catalog", notImplemented("caller-scoped MCP catalog"))
+			authed.Handle("POST /api/mcp/publish", notImplemented("caller-scoped MCP publish"))
 		}
 	}
 

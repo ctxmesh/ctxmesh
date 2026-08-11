@@ -95,6 +95,19 @@ func (s *Server) handleSetOrgCredential(w http.ResponseWriter, r *http.Request) 
 	}
 	tr.Labels[labelMCPScope] = scopeOrg
 	delete(tr.Labels, labelMCPOwner) // org has no single owner
+	// ADR 0067 §2: stamp the two new axes alongside the legacy label (rollback aid).
+	// Set credentialSource=shared (this is the shared-credential path).
+	// Visibility: set to team ONLY if the current visibility is private (i.e. max(current, team)).
+	// An org/public server already at a wider visibility MUST NOT be downgraded to team
+	// by setting a shared credential (m73.5 refinement). The credential axis and the
+	// visibility axis are orthogonal — promoting a credential never narrows who can see it.
+	tr.Labels[labelMCPCredentialSource] = credSourceShared
+	currentVis := tr.Labels[labelMCPVisibility]
+	if currentVis == "" || currentVis == visibilityPrivate {
+		// Default / private: elevate to team (the minimum shared-credential visibility).
+		tr.Labels[labelMCPVisibility] = visibilityTeam
+	}
+	// If currentVis is already team, org, or public: leave it unchanged (never downgrade).
 
 	// Retired (RETIRE_TR, ADR 0044): the org-promote authz — the SSAR VerbUpdate IS
 	// the admin gate (exact RBAC parity with the CRD update this replaces). It runs

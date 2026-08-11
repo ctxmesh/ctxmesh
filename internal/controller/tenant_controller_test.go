@@ -34,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 )
 
 func makeNamespace(t *testing.T, name string) {
@@ -44,6 +45,15 @@ func makeNamespace(t *testing.T, name string) {
 func reconcileTenant(t *testing.T, name string) {
 	t.Helper()
 	r := &TenantReconciler{Client: k8sClient}
+	_, err := r.Reconcile(testCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+	require.NoError(t, err, "tenant reconcile must not error")
+}
+
+// reconcileTenantWithStore drives a reconcile with the membership-mirror store wired (m73.3), so the
+// envtest suite exercises the mirror through the REAL Reconcile flow (converge + finalizer delete).
+func reconcileTenantWithStore(t *testing.T, name string, store namespacetenant.Store) {
+	t.Helper()
+	r := &TenantReconciler{Client: k8sClient, NamespaceTenant: store}
 	_, err := r.Reconcile(testCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
 	require.NoError(t, err, "tenant reconcile must not error")
 }
@@ -637,4 +647,48 @@ func TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded(t *testing
 		"StorageSoftCapExceeded must be CLEARED once corpus bytes drop back under the soft cap")
 	assert.Equal(t, int64(2*1024*1024*1024), got2.Status.TotalCorpusBytes,
 		"totalCorpusBytes must reflect the updated (smaller) size")
+}
+
+// TestTenant_MembershipMirror_WiredThroughReconcile drives the full Reconcile with the membership
+// mirror store wired (m73.3, ADR 0067 §6) against envtest, proving the mirror converges to the
+// tenant's OWNED set on converge (upsert + prune) and is cleared on the finalizer delete path — the
+// exact wiring cmd/main.go injects. Uses the in-memory store so it needs no Postgres.
+func TestTenant_MembershipMirror_WiredThroughReconcile(t *testing.T) {
+	makeNamespace(t, "tnt-mirror-1")
+	makeNamespace(t, "tnt-mirror-2")
+	mem := namespacetenant.NewMemStore()
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"tnt-mirror-1", "tnt-mirror-2"},
+			Quota:      &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+
+	reconcileTenantWithStore(t, "mirror-tenant", mem) // first pass may only add the finalizer
+	reconcileTenantWithStore(t, "mirror-tenant", mem)
+
+	members, err := mem.MembersOf(testCtx, "mirror-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tnt-mirror-1", "tnt-mirror-2"}, members,
+		"the mirror must reflect the tenant's owned member namespaces")
+
+	// Drop one namespace → the converge sync prunes it from the mirror.
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "mirror-tenant"}, tenant))
+	tenant.Spec.Namespaces = []string{"tnt-mirror-1"}
+	require.NoError(t, k8sClient.Update(testCtx, tenant))
+	reconcileTenantWithStore(t, "mirror-tenant", mem)
+
+	members, err = mem.MembersOf(testCtx, "mirror-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tnt-mirror-1"}, members, "dropped namespace must be pruned from the mirror")
+
+	// Delete the tenant → the finalizer path clears the mirror.
+	require.NoError(t, k8sClient.Delete(testCtx, tenant))
+	reconcileTenantWithStore(t, "mirror-tenant", mem)
+
+	members, err = mem.MembersOf(testCtx, "mirror-tenant")
+	require.NoError(t, err)
+	assert.Empty(t, members, "the finalizer delete path must clear the tenant's mirror rows")
 }

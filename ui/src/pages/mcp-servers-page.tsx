@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Plus, Trash2, Users, Wrench } from "lucide-react";
+import { Building2, ExternalLink, Globe, Lock, Plus, Share2, Trash2, Users, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,6 +47,8 @@ export function McpServersPage() {
   const [toDelete, setToDelete] = React.useState<McpServerSummary | null>(null);
   // The server currently being shared org-wide (its org-credential dialog is open).
   const [toOrg, setToOrg] = React.useState<McpServerSummary | null>(null);
+  // The server queued for a visibility publish action.
+  const [toPublish, setToPublish] = React.useState<McpServerSummary | null>(null);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
@@ -160,6 +162,18 @@ export function McpServersPage() {
                         {s.scope}
                       </Badge>
                     )}
+                    {s.visibility && (
+                      <ServerVisibilityBadge visibility={s.visibility} name={s.name} />
+                    )}
+                    {s.credentialSource && s.credentialSource !== "none" && (
+                      <Badge
+                        variant="outline"
+                        className="text-[10px]"
+                        data-testid={`cred-source-${s.name}`}
+                      >
+                        {s.credentialSource}
+                      </Badge>
+                    )}
                   </div>
                   <p className="truncate text-xs text-muted-foreground">{s.url}</p>
                   <p className="text-xs text-muted-foreground">{s.namespace}</p>
@@ -182,9 +196,24 @@ export function McpServersPage() {
                       size="sm"
                       onClick={() => setToOrg(s)}
                       data-testid={`org-cred-${s.name}`}
-                      aria-label={`Share ${s.name} with your org`}
+                      aria-label={`Share credential for ${s.name} with your org`}
+                      title="Share credential"
                     >
-                      <Users className="h-3.5 w-3.5" />
+                      <Users className="mr-1 h-3.5 w-3.5" />
+                      Share credential
+                    </Button>
+                  )}
+                  {canPromote && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setToPublish(s)}
+                      data-testid={`publish-mcp-${s.name}`}
+                      aria-label={`Publish ${s.name}`}
+                      title="Publish"
+                    >
+                      <Share2 className="mr-1 h-3.5 w-3.5" />
+                      Publish
                     </Button>
                   )}
                   {canDelete && (
@@ -226,7 +255,38 @@ export function McpServersPage() {
           }}
         />
       )}
+
+      {toPublish && (
+        <PublishDialog
+          server={toPublish}
+          onClose={() => setToPublish(null)}
+          onDone={() => {
+            setToPublish(null);
+            load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// ServerVisibilityBadge (m73.7) — shows the m73 visibility field alongside the
+// legacy scope badge in each server row.
+function ServerVisibilityBadge({ visibility, name }: { visibility: string; name: string }) {
+  const icon =
+    visibility === "public" ? <Globe className="h-3 w-3" /> :
+    visibility === "org" ? <Building2 className="h-3 w-3" /> :
+    visibility === "team" ? <Users className="h-3 w-3" /> :
+    <Lock className="h-3 w-3" />;
+  return (
+    <Badge
+      variant={visibility === "public" ? "secondary" : "outline"}
+      className="gap-1 text-[10px]"
+      data-testid={`visibility-${name}`}
+    >
+      {icon}
+      {visibility}
+    </Badge>
   );
 }
 
@@ -302,6 +362,10 @@ function SetOrgCredentialDialog({
           shared credential. Every user&apos;s runs then use it — no per-user connect. The
           credential is stored server-side only.
         </p>
+        <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="org-cred-caution">
+          This shares ONE credential with everyone — every user&apos;s runs use it. If teammates
+          should connect their own accounts instead, use Publish.
+        </p>
         <div className="mt-4 space-y-1.5">
           <Label htmlFor="org-cred">Shared credential (bearer token)</Label>
           <Input
@@ -330,6 +394,170 @@ function SetOrgCredentialDialog({
             data-testid="org-cred-submit"
           >
             {busy ? "Setting…" : "Set org credential"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// PublishDialog (m73.7) — widens a server's visibility. Pick team/org/public →
+// calls POST /api/mcp/publish → on success reloads the list; on 403 surfaces the
+// tier requirement honestly. Do NOT auto-publish — this is an explicit user action.
+type PublishVisibility = "team" | "org" | "public";
+
+function PublishDialog({
+  server,
+  onClose,
+  onDone,
+}: {
+  server: McpServerSummary;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  // Default to server's current visibility if it's a known publish tier, else "team".
+  const defaultVisibility: PublishVisibility =
+    server.visibility === "org" || server.visibility === "public" || server.visibility === "team"
+      ? (server.visibility as PublishVisibility)
+      : "team";
+  const [selected, setSelected] = React.useState<PublishVisibility>(defaultVisibility);
+  const [publicConfirmed, setPublicConfirmed] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
+
+  // Reset the public-confirm checkbox whenever the user changes their selection.
+  function handleSelect(v: PublishVisibility) {
+    setSelected(v);
+    if (v !== "public") setPublicConfirmed(false);
+  }
+
+  const isPublishDisabled = busy || (selected === "public" && !publicConfirmed);
+
+  async function onPublish() {
+    if (isPublishDisabled) return;
+    setBusy(true);
+    try {
+      await api.publishMcpServer(server.namespace, server.name, selected);
+      toast({
+        variant: "success",
+        title: "Visibility updated",
+        description: `${server.name} is now ${selected}-visible.`,
+      });
+      onDone();
+    } catch (err) {
+      const isForbidden = err instanceof ApiError && err.isForbidden;
+      toast({
+        variant: "error",
+        title: "Publish failed",
+        description: isForbidden
+          ? `You need ${
+              selected === "public"
+                ? "Platform-admin"
+                : selected === "org"
+                ? "Tenant-admin"
+                : "team-admin"
+            } rights to publish ${selected}-wide.`
+          : err instanceof Error
+          ? err.message
+          : "publish failed",
+      });
+      setBusy(false);
+      onClose();
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Publish ${server.name}`}
+    >
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
+      >
+        <h2 className="text-lg font-semibold tracking-snug">Publish {server.name}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Publishing shares only the server definition — teammates discover it and connect
+          their OWN accounts; your credentials are never shared.
+        </p>
+        {server.visibility && (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="publish-current-visibility">
+            Currently: <span className="font-medium">{server.visibility}</span>
+          </p>
+        )}
+        {server.credentialSource === "shared" && (
+          <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="publish-shared-cred-warning">
+            Caution: this server uses a shared credential — widening visibility also widens
+            access to that credential.
+          </p>
+        )}
+        <div className="mt-4 space-y-2">
+          {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
+            <label
+              key={v}
+              className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-accent/40"
+              data-testid={`publish-option-${v}`}
+            >
+              <input
+                type="radio"
+                name="visibility"
+                value={v}
+                checked={selected === v}
+                onChange={() => handleSelect(v)}
+                className="accent-primary"
+              />
+              <div>
+                <p className="font-medium capitalize">{v}</p>
+                <p className="text-xs text-muted-foreground">
+                  {v === "team"
+                    ? "Visible to your team's namespace"
+                    : v === "org"
+                    ? "Visible org-wide (Tenant-admin required)"
+                    : "Visible to everyone (Platform-admin required)"}
+                </p>
+              </div>
+            </label>
+          ))}
+        </div>
+        {selected === "public" && (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-public-warning">
+              Public means every tenant on this cluster can discover it.
+            </p>
+            <label className="flex cursor-pointer items-center gap-2 text-sm" data-testid="publish-public-confirm-label">
+              <input
+                type="checkbox"
+                checked={publicConfirmed}
+                onChange={(e) => setPublicConfirmed(e.target.checked)}
+                className="accent-primary"
+                data-testid="publish-public-confirm"
+              />
+              I understand this is discoverable by all tenants
+            </label>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          Requires the matching role — a 403 will tell you which role is needed.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => void onPublish()}
+            disabled={isPublishDisabled}
+            data-testid="publish-submit"
+          >
+            {busy ? "Publishing…" : `Publish as ${selected}`}
           </Button>
         </div>
       </div>

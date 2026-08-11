@@ -56,6 +56,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/dataset"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
@@ -261,7 +262,8 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	}
 	defer func() { _ = cpDB.Close() }()
 	promptStore := promptversion.NewPostgresStore(cpDB)
-	toolStore := toolregistry.NewPostgresStore(cpDB) // shares the handle + migrations
+	toolStore := toolregistry.NewPostgresStore(cpDB)        // shares the handle + migrations
+	nsTenantStore := namespacetenant.NewPostgresStore(cpDB) // m73.4: namespace→tenant mirror for catalog
 	log.Info("control-plane store enabled (ADR 0042/0044): PromptVersions + ToolRegistries served from Postgres")
 
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
@@ -353,6 +355,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		ConvStore:                   convStore,
 		PromptStore:                 promptStore,
 		ToolRegistryStore:           toolStore,
+		NamespaceTenantStore:        nsTenantStore,
 		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
 		AuditStore:                  auditlog.NewPostgresStore(cpDB),
 		AlertStore:                  alertstore.NewPostgresStore(cpDB),

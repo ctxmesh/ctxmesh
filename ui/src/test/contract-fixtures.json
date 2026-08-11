@@ -115,7 +115,9 @@
         "toolCount": 3,
         "status": "approved",
         "secretName": "acme-key",
-        "scope": ""
+        "scope": "",
+        "visibility": "",
+        "credentialSource": ""
       }
     ],
     "items": [
@@ -126,7 +128,9 @@
         "toolCount": 3,
         "status": "approved",
         "secretName": "acme-key",
-        "scope": ""
+        "scope": "",
+        "visibility": "",
+        "credentialSource": ""
       }
     ]
   },

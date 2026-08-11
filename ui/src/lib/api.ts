@@ -1264,6 +1264,11 @@ export interface McpServerSummary {
   authType?: string;
   // Visibility/credential scope (ADR 0029): "public" | "personal" | "org".
   scope?: string;
+  // m73.1: visibility and credentialSource from BFF DTO
+  // visibility: "private" | "team" | "org" | "public"
+  visibility?: string;
+  // credentialSource: "byo-oauth" | "shared" | "none" — derived/read-only, never a secret
+  credentialSource?: string;
 }
 
 // SetOrgCredentialResponse reports the outcome of promoting a server to org scope +
@@ -1301,6 +1306,51 @@ export interface McpServerListResponse {
   servers?: McpServerSummary[];
   items?: McpServerSummary[];
 }
+
+// --- MCP catalog (GET /api/catalog, m73) ------------------------------------
+// CatalogEntry is one discoverable MCP server in the cross-namespace catalog
+// (GET /api/catalog). Discovery-only: NO secretName. The caller can Connect
+// an entry to their own namespace via POST /api/mcp/connect.
+export interface CatalogEntry {
+  name: string;
+  namespace: string;
+  url?: string;
+  description?: string;
+  toolCount: number;
+  authType?: string;
+  // visibility: "private" | "team" | "org" | "public"
+  visibility: string;
+  // credentialSource: "byo-oauth" | "shared" | "none" — derived/read-only
+  credentialSource?: string;
+}
+
+export interface CatalogResponse {
+  entries: CatalogEntry[];
+}
+
+// PublishMcpRequest is the POST /api/mcp/publish body — widens a server's visibility.
+export interface PublishMcpRequest {
+  namespace: string;
+  name: string;
+  // visibility ∈ "team" | "org" | "public"
+  visibility: "team" | "org" | "public";
+}
+
+// ConnectMcpRequest is the POST /api/mcp/connect body — materializes a discovered
+// server into the caller's namespace.
+export interface ConnectMcpRequest {
+  originNamespace: string;
+  originName: string;
+  name?: string;
+}
+
+// ConnectMcpResponse is the 200 body from POST /api/mcp/connect.
+export interface ConnectMcpResponse {
+  status?: string; // "already-connected" when already present
+  name?: string;
+  namespace?: string;
+}
+
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
 // The merged tool catalog — curated ToolRegistry entries + the user's own
@@ -2981,6 +3031,57 @@ export const api = {
   // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
   listMcpServers: (signal?: AbortSignal) =>
     getJSON<McpServerListResponse>("/api/mcpservers", signal),
+
+  // getCatalog fetches the cross-namespace MCP server catalog (GET /api/catalog,
+  // m73). Returns servers discoverable by this caller — their org-in-tenant +
+  // public + own-namespace team entries. Discovery-only: NO secretName.
+  getCatalog: (namespace?: string, signal?: AbortSignal) =>
+    getJSON<CatalogResponse>(
+      namespace
+        ? `/api/catalog?namespace=${encodeURIComponent(namespace)}`
+        : "/api/catalog",
+      signal,
+    ),
+
+  // publishMcpServer widens a registered server's visibility (POST /api/mcp/publish,
+  // m73). visibility ∈ "team" | "org" | "public". A 403 surfaces the tier
+  // requirement (e.g. org-wide requires Tenant-admin).
+  publishMcpServer: (
+    namespace: string,
+    name: string,
+    visibility: "team" | "org" | "public",
+  ) =>
+    postJSON<PublishMcpRequest, McpServerSummary>("/api/mcp/publish", {
+      namespace,
+      name,
+      visibility,
+    }),
+
+  // connectMcpServer materializes a discovered catalog server into the caller's
+  // namespace (POST /api/mcp/connect, m73). Returns the new summary or
+  // { status: "already-connected" } if already present. A 404 = not discoverable.
+  connectMcpServer: async (
+    originNamespace: string,
+    originName: string,
+    name?: string,
+    signal?: AbortSignal,
+  ): Promise<ConnectMcpResponse> => {
+    const body: ConnectMcpRequest = { originNamespace, originName };
+    if (name) body.name = name;
+    const res = await apiFetch("/api/mcp/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.ok) {
+      return (await res.json()) as ConnectMcpResponse;
+    }
+    throw new ApiError(
+      await errorMessage(res, `connectMcpServer failed (${res.status})`),
+      res.status,
+    );
+  },
 
   // setOrgCredential promotes an MCP server to ORG scope and sets its shared
   // credential (m25.9/m26.5, ADR 0029 §7) — the fully-headless path: every user's runs

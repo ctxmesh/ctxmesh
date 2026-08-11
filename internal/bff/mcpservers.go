@@ -72,6 +72,16 @@ const (
 	labelMCPScope = "mcp.ctxmesh.ai/scope"
 	labelMCPOwner = "mcp.ctxmesh.ai/owner"
 
+	// labelMCPOriginNamespace / labelMCPOriginName stamp the PROVENANCE of a
+	// discover-then-materialize copy (m73.6, ADR 0067 §3): when "Connect" imports a
+	// catalog-discovered server's DEFINITION into the caller's own namespace, the
+	// local copy records where it was materialized from. They are metadata-only —
+	// the copy is a FROZEN one-time snapshot (no watch/sync back to the origin) and
+	// no credential resolution ever keys on them. NON-secret: they name a namespace +
+	// object name, never any token. Absent on a natively-registered server.
+	labelMCPOriginNamespace = "mcp.ctxmesh.ai/origin-namespace"
+	labelMCPOriginName      = "mcp.ctxmesh.ai/origin-name"
+
 	// The scope values. personal is the default for a user-added server (visible only to
 	// its owner); public is a no-auth / deliberately-open server (visible to all); org is
 	// an admin-shared server (visible to all). A server with NO scope label is
@@ -79,6 +89,36 @@ const (
 	scopePublic   = "public"
 	scopePersonal = "personal"
 	scopeOrg      = "org"
+
+	// labelMCPVisibility / labelMCPCredentialSource are the ADR 0067 §1/§2 two-axis
+	// split of the legacy single-axis labelMCPScope. They are written alongside the
+	// legacy label for one release (rollback aid) and are the authoritative read path
+	// once stamped.
+	//
+	// visibility ∈ {private, team, org, public} controls who can see the server in
+	// listings:
+	//   private  — owner only (owner-gate via labelMCPOwner)
+	//   team     — all members of the namespace (no owner gate)
+	//   org      — all org members
+	//   public   — unauthenticated / all callers
+	//
+	// credential-source ∈ {byo-oauth, shared, none} names how the server is
+	// authenticated at egress:
+	//   byo-oauth — per-user OAuth grant (owner supplies the credential)
+	//   shared    — an org-level shared credential (promote path)
+	//   none      — no auth required (open/public MCP server)
+	labelMCPVisibility       = "mcp.ctxmesh.ai/visibility"
+	labelMCPCredentialSource = "mcp.ctxmesh.ai/credential-source"
+
+	visibilityPrivate = "private"
+	visibilityTeam    = "team"
+	visibilityOrg     = "org"
+	visibilityPublic  = "public"
+
+	credSourceByoOAuth = "byo-oauth"
+	credSourceShared   = "shared"
+	credSourceNone     = "none"
+
 	// annMCPURL persists the registered server's URL on the ToolRegistry so the
 	// list projection can surface it (non-secret).
 	annMCPURL = "agents.ctxmesh.ai/mcp-url"
@@ -173,29 +213,50 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	// names make a re-register a clean AlreadyExists → 409 (documented idempotency,
 	// like the m14.4 provider orphan note).
 	status := s.mcpApprovalStatus()
-	// Scope + owner (ADR 0029 §1/§3): a no-auth server is public (open to all); a keyed
-	// server is personal to the registrant, owned by the caller's HMAC'd identity.
-	scope := scopePersonal
-	owner := ""
+	// ADR 0067 §2 (reach-preserving new default):
+	//   no-auth server  → visibility=team, credentialSource=none, scope=public (legacy inverse)
+	//   keyed/OAuth server → visibility=private, credentialSource=byo-oauth, scope=personal (legacy inverse)
+	// Both axes are validated via validateMCPCells before the create.
+	var (
+		scope            string
+		visibility       string
+		credentialSource string
+		owner            string
+	)
 	if strings.TrimSpace(req.APIKey) == "" {
+		// No-auth / open server: team-visible, no credential.
 		scope = scopePublic
-	} else if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
-		owner = userGrantHash(username)
+		visibility = visibilityTeam
+		credentialSource = credSourceNone
+		// Stamp owner when the identity is resolvable (harmless; enables "my servers" UX).
+		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+			owner = userGrantHash(username)
+		}
 	} else {
-		// A keyed server is personal, owned by the registrant. If the identity can't be
-		// resolved (never in prod — the same caller client would then also fail the object
-		// create below), register without an owner label rather than failing the whole flow.
-		s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
+		// Keyed server: private to the registrant.
+		scope = scopePersonal
+		visibility = visibilityPrivate
+		credentialSource = credSourceByoOAuth
+		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+			owner = userGrantHash(username)
+		} else {
+			// If the identity can't be resolved (never in prod — the same caller client
+			// would then also fail the object create below), register without an owner label
+			// rather than failing the whole flow.
+			s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
+		}
 	}
 	created, cErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
-		name:      name,
-		namespace: ns,
-		url:       strings.TrimSpace(req.URL),
-		apiKey:    req.APIKey,
-		tools:     tools,
-		status:    status,
-		scope:     scope,
-		owner:     owner,
+		name:             name,
+		namespace:        ns,
+		url:              strings.TrimSpace(req.URL),
+		apiKey:           req.APIKey,
+		tools:            tools,
+		status:           status,
+		scope:            scope,
+		owner:            owner,
+		visibility:       visibility,
+		credentialSource: credentialSource,
 	})
 	if cErr != nil {
 		writeError(w, cErr.status, cErr.msg)
@@ -287,11 +348,23 @@ type mcpCreateSpec struct {
 	// Empty scope stamps nothing (the object is then grandfathered as org on read).
 	scope string
 	owner string
+	// visibility / credentialSource are the ADR 0067 §1/§2 two-axis split. They are
+	// written alongside the legacy scope label for one release (rollback aid). When
+	// non-empty they are authoritative; absent means the row was created pre-m73 and
+	// mcpVisibility() forward-maps from the legacy scope.
+	visibility       string
+	credentialSource string
 	// oauthConfig, when authType == oauthAuthType, is the discovered OAuth CLIENT config
 	// (endpoints + public clientId + scope + redirect). It is persisted as NON-SECRET
 	// annotations so a per-user grant can later be begun from {server, ns} (ADR 0031).
 	// No token material — those live only in oauthSecretData.
 	oauthConfig mcpOAuthConfig
+	// originNamespace / originName, when non-empty, stamp the discover-then-materialize
+	// PROVENANCE labels (m73.6, ADR 0067 §3) on the created copy: which origin
+	// namespace + server this local definition was imported from. Empty on a native
+	// register (no origin). NON-secret — a namespace + name, never a credential.
+	originNamespace string
+	originName      string
 }
 
 // createMCPObjects creates, with the caller's client and in dependency order:
@@ -317,6 +390,25 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 	}
 	if spec.owner != "" {
 		labels[labelMCPOwner] = spec.owner
+	}
+	// ADR 0067 §1/§2: stamp the two new axes alongside the legacy label (rollback aid).
+	// When visibility is non-empty, both axes are written; their values have already been
+	// validated by the caller (validateMCPCells). An empty visibility means the spec was
+	// built by a pre-m73 call site — those go through the normal legacy scope label only.
+	if spec.visibility != "" {
+		labels[labelMCPVisibility] = spec.visibility
+	}
+	if spec.credentialSource != "" {
+		labels[labelMCPCredentialSource] = spec.credentialSource
+	}
+	// Provenance for a discover-then-materialize copy (m73.6, ADR 0067 §3). Stamped
+	// atomically with the rest of the object so the copy carries its origin from
+	// creation. Metadata-only — a resolve/revoke never keys on these.
+	if spec.originNamespace != "" {
+		labels[labelMCPOriginNamespace] = spec.originNamespace
+	}
+	if spec.originName != "" {
+		labels[labelMCPOriginName] = spec.originName
 	}
 	hasKey := strings.TrimSpace(spec.apiKey) != ""
 	hasOAuth := len(spec.oauthSecretData) > 0
@@ -715,15 +807,74 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, MCPServerListResponse{Servers: summaries, Items: summaries})
 }
 
+// mcpVisibility returns the two-axis ADR 0067 §1/§2 view of a ToolRegistry:
+// (visibility, credentialSource). It is a dual-read helper — it prefers the new
+// labels when present, and falls back to a lossless forward-mapping from the
+// legacy labelMCPScope so pre-m73 rows are never mis-classified:
+//
+//	personal  → (private,  byo-oauth)
+//	org       → (team,     shared)
+//	public    → (team,     none)     ← reach-preserving, not visibilityPublic
+//	absent    → (team,     shared)   ← grandfathered org (matches the §R7 default)
+//
+// The mapping is a one-way translation; the returned values are never written
+// back to the store here (callers that write must stamp all three labels).
+func mcpVisibility(tr *agentsv1alpha1.ToolRegistry) (visibility, credentialSource string) {
+	if v := tr.Labels[labelMCPVisibility]; v != "" {
+		// New labels present — read them directly.
+		cs := tr.Labels[labelMCPCredentialSource]
+		if cs == "" {
+			cs = credSourceNone
+		}
+		return v, cs
+	}
+	// Legacy forward-mapping (dual-read).
+	switch tr.Labels[labelMCPScope] {
+	case scopePersonal:
+		return visibilityPrivate, credSourceByoOAuth
+	case scopeOrg:
+		return visibilityTeam, credSourceShared
+	case scopePublic:
+		return visibilityTeam, credSourceNone
+	default: // absent / unknown → grandfathered org
+		return visibilityTeam, credSourceShared
+	}
+}
+
+// validateMCPCells returns a *createError (400) when the (visibility,
+// credentialSource) combination is semantically invalid. Only write paths call
+// this — never read paths. The two forbidden cells are:
+//   - (private, shared):  a private server cannot have a shared credential
+//     (shared credentials are org-level; a private server is owner-gated).
+//   - (public, shared):   a public server cannot have a shared credential
+//     (public means no-auth; a shared credential implies an org identity gate).
+func validateMCPCells(visibility, credentialSource string) *createError {
+	switch {
+	case visibility == visibilityPrivate && credentialSource == credSourceShared:
+		return &createError{
+			status: http.StatusBadRequest,
+			msg:    fmt.Sprintf("invalid MCP server configuration: visibility %q with credential-source %q is not allowed — a private server cannot use a shared credential", visibility, credentialSource),
+		}
+	case visibility == visibilityPublic && credentialSource == credSourceShared:
+		return &createError{
+			status: http.StatusBadRequest,
+			msg:    fmt.Sprintf("invalid MCP server configuration: visibility %q with credential-source %q is not allowed — a public server cannot use a shared credential", visibility, credentialSource),
+		}
+	}
+	return nil
+}
+
 // mcpScopeVisibleTo reports whether a register-managed server is visible to the caller
-// identified by callerOwner (their userGrantHash), per ADR 0029 §3: public + org are
-// visible to all; a personal server only to its owner; a server with NO scope label is
-// grandfathered as org (visible to all) — behavior-preserving for pre-m25 servers (R7).
+// identified by callerOwner (their userGrantHash). It uses the derived ADR 0067
+// visibility axis (dual-read via mcpVisibility): only a private server is owner-gated;
+// team/org/public are visible to all callers. A server with NO labels is grandfathered
+// as team (visible to all) — behavior-preserving for pre-m25/pre-m73 servers (R7).
 func mcpScopeVisibleTo(tr *agentsv1alpha1.ToolRegistry, callerOwner string) bool {
-	if tr.Labels[labelMCPScope] == scopePersonal {
+	vis, _ := mcpVisibility(tr)
+	if vis == visibilityPrivate {
 		return callerOwner != "" && tr.Labels[labelMCPOwner] == callerOwner
 	}
-	return true // public, org, or absent (grandfathered org)
+	return true // team, org, public, or absent (grandfathered)
 }
 
 // mcpServerSummaryFromRegistry projects a register-managed ToolRegistry onto the
@@ -742,15 +893,20 @@ func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSumm
 	if scope == "" {
 		scope = scopeOrg
 	}
+	// ADR 0067 §1/§2: populate the two new axes alongside the legacy Scope field so
+	// consumers can adopt the new fields incrementally (back-compat: Scope stays).
+	vis, cs := mcpVisibility(tr)
 	return MCPServerSummary{
-		Name:       tr.Name,
-		Namespace:  tr.Namespace,
-		URL:        tr.Annotations[annMCPURL],
-		ToolCount:  len(tr.Spec.Tools),
-		Status:     status,
-		SecretName: tr.Annotations[annMCPSecret],
-		AuthType:   mcpServerSummaryAuthType(tr),
-		Scope:      scope,
+		Name:             tr.Name,
+		Namespace:        tr.Namespace,
+		URL:              tr.Annotations[annMCPURL],
+		ToolCount:        len(tr.Spec.Tools),
+		Status:           status,
+		SecretName:       tr.Annotations[annMCPSecret],
+		AuthType:         mcpServerSummaryAuthType(tr),
+		Scope:            scope,
+		Visibility:       vis,
+		CredentialSource: cs,
 	}
 }
 
