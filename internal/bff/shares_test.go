@@ -354,6 +354,34 @@ func TestCreateShare_MintByRunIDStillWorks(t *testing.T) {
 	assert.Equal(t, runID, got.RunID, "stored run_id must be the real run.ID when resolved by run.ID")
 }
 
+// TestListShares_ByTraceID is the P1-2 regression fix: the manage list page passes the traceId as
+// the runId path param (the trace-detail page identifies a run by traceId). Before the fix,
+// handleListShares discarded the resolved run and called ListForRun with the raw traceId —
+// which never matches a shared_runs.run_id (stored as the real run.ID) → zero rows.
+//
+// This test mints a share via the traceId, then GETs the list via the traceId, and asserts
+// that exactly one share is returned.
+func TestListShares_ByTraceID(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	audit := &captureAuditStore{}
+	runStore, _, traceID := seededDurableRunStoreWithTraceID(t)
+	s := shareTestServer(t, store, audit, runStore, nil)
+
+	// Mint via traceId (the path the trace-detail page follows).
+	mintRec := doShareRequest(t, s, http.MethodPost, "/api/runs/"+traceID+"/shares", `{"includeContent":false}`)
+	require.Equal(t, http.StatusCreated, mintRec.Code, "mint by traceId must succeed: "+mintRec.Body.String())
+
+	// List via traceId — this is the bug: before the fix, ListForRun was called with the raw
+	// traceId, not rn.ID, so the store returned 0 rows. After the fix it uses rn.ID.
+	listRec := doShareRequest(t, s, http.MethodGet, "/api/runs/"+traceID+"/shares", "")
+	require.Equal(t, http.StatusOK, listRec.Code, "list by traceId must succeed: "+listRec.Body.String())
+
+	var list []ShareSummary
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+	require.Len(t, list, 1, "list by traceId must return the minted share — not an empty list")
+	assert.False(t, list[0].Revoked)
+}
+
 // TestCreateShare_BadIDOrTraceID404 proves that an id that is neither a known run.ID nor a known
 // traceId returns 404 — the uniform "run not found" semantics are preserved.
 func TestCreateShare_BadIDOrTraceID404(t *testing.T) {

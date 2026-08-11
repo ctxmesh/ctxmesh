@@ -1917,8 +1917,11 @@ export interface SharedRunView {
   messageCount: number;
   messageRoles: string[];
   errorCategory?: string;
-  // Content fields — only when includeContent=true
-  input?: string;
+  // Content fields — only when includeContent=true.
+  // input is json.RawMessage from the backend — may be a string or an object
+  // (e.g. {"input":"Hello"} for a console-created run). Typed unknown so the
+  // render layer must check before using it as a React child.
+  input?: unknown;
   messages?: { role: string; content: string }[];
   error?: string;
 }

@@ -1,14 +1,17 @@
+import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { SharedRunPage } from "@/pages/shared-run-page";
+import { SharedRunPage, SharedRunErrorBoundaryForTest } from "@/pages/shared-run-page";
 import type { SharedRunView } from "@/lib/api";
 
-// SharedRunPage — m75.4 tests.
+// SharedRunPage — m75.4 / m75.5 tests.
 //
 // Coverage:
 //   • metadata-only view renders run details (no transcript block)
 //   • with-content view renders transcript (input + messages)
+//   • object input (json.RawMessage) renders as JSON string — no "Objects are not valid" crash
+//   • ErrorBoundary shows a friendly fallback on a thrown child render error
 //   • 404 (uniform) → friendly unavailable state (expired/revoked/bad token)
 //   • network error → friendly unavailable state
 //   • getSharedRun sends NO Authorization header (no-auth plain fetch)
@@ -31,6 +34,18 @@ const CONTENT_VIEW: SharedRunView = {
     { role: "user", content: "Hello" },
     { role: "assistant", content: "Hi there!" },
   ],
+};
+
+// OBJECT_INPUT_VIEW simulates a console-created run where the backend field is
+// json.RawMessage and the /invoke body is an object ({"input":"Hello"}).
+// SharedRunView.input is typed `unknown` to reflect this — rendering it
+// directly as a React child would crash with "Objects are not valid as a React
+// child". The page must JSON.stringify it instead.
+const OBJECT_INPUT_VIEW: SharedRunView = {
+  ...METADATA_VIEW,
+  // Simulate a deserialized json.RawMessage object (not a plain string).
+  input: { input: "Hello from console" } as unknown as string,
+  messages: [],
 };
 
 function installFetch(
@@ -141,5 +156,47 @@ describe("SharedRunPage (m75.4)", () => {
 
     await screen.findByTestId("shared-run-content");
     expect(screen.queryByTestId("shared-run-unavailable")).toBeNull();
+  });
+
+  // P1-1 regression: an object input (json.RawMessage) must render as its
+  // JSON string representation, NOT crash with "Objects are not valid as a
+  // React child".
+  it("renders an object input as a JSON string — no crash on non-string input", async () => {
+    installFetch({ view: OBJECT_INPUT_VIEW });
+    renderPage();
+
+    await screen.findByTestId("shared-run-content");
+    // The transcript block must be present (input is defined).
+    expect(screen.getByTestId("shared-run-transcript")).toBeInTheDocument();
+    // The input is rendered as the JSON-stringified form, not as a React object.
+    expect(screen.getByText(/"input":\s*"Hello from console"/)).toBeInTheDocument();
+  });
+
+  // P1-1 regression: the SharedRunErrorBoundary (wrapping SharedRunPage) must
+  // catch a synchronous render throw and show a friendly fallback — not a white
+  // screen. Since the boundary is local to the module we test it via the
+  // exported SharedRunErrorBoundaryForTest wrapper (exported for test-only).
+  it("ErrorBoundary shows a friendly fallback when a child throws during render", async () => {
+    // Suppress the expected React error-boundary console.error output.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    // A component that always throws during render — simulates "Objects are not
+    // valid as a React child" (the real crash this boundary defends against).
+    function Bomber(): React.ReactElement {
+      throw new Error("render bomb");
+    }
+
+    render(
+      <SharedRunErrorBoundaryForTest>
+        <Bomber />
+      </SharedRunErrorBoundaryForTest>,
+    );
+
+    // The boundary fallback — not a blank page — must be visible.
+    expect(
+      screen.getByText(/This shared run couldn't be displayed/i),
+    ).toBeInTheDocument();
+
+    spy.mockRestore();
   });
 });
