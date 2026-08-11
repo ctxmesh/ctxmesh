@@ -39,6 +39,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -99,6 +100,13 @@ type Server struct {
 	// m73.3). Used by GET /api/catalog to resolve tenant membership without BFF RBAC on namespaces
 	// (ADR 0011). nil ⇒ the catalog degrades to own-ns + public only (fail-closed, never a panic).
 	namespaceTenantStore namespacetenant.Store
+
+	// publishedArtifactStore is the control-plane Postgres store for published_artifacts — the
+	// immutable, versioned snapshot-at-publish table (M74, m74.1, ADR 0068 §1). POST /api/templates
+	// snapshots an agent's source-spec into it (caller-scoped GET + INSERT, no BFF-SA RBAC); a later
+	// GET /api/templates (m74.2) + fork (m74.3) read it. nil ⇒ the publish/unpublish endpoints return
+	// 501 (CONTROLPLANE_DSN unset), never a panic.
+	publishedArtifactStore publishedartifact.Store
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -432,6 +440,10 @@ type Options struct {
 	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
+	// PublishedArtifactStore is the control-plane Postgres store for published_artifacts — the
+	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
+	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
+	PublishedArtifactStore publishedartifact.Store
 	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
@@ -521,6 +533,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
+		publishedArtifactStore:   opts.PublishedArtifactStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -747,6 +760,14 @@ func (s *Server) Handler() http.Handler {
 		// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
 		// never shadows those routes.
 		authed.HandleFunc("POST /api/agents/{ns}/{name}/publish", s.handlePublishAgent)
+		// Snapshot-at-publish: publish an agent's source-spec as an immutable, versioned
+		// template into published_artifacts (M74, m74.1, ADR 0068 §1). POST snapshots the
+		// caller-scoped source-spec (a GET of the agent authorizes it — no BFF-SA RBAC);
+		// DELETE tombstones every version (idempotent). Both are nil-safe: a BFF without the
+		// published-artifact store serves 501, never a panic. The {kind}/{namespace}/{name}
+		// DELETE pattern is distinct from POST /api/templates so the two never conflict.
+		authed.HandleFunc("POST /api/templates", s.handlePublishTemplate)
+		authed.HandleFunc("DELETE /api/templates/{kind}/{namespace}/{name}", s.handleUnpublishTemplate)
 		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
 		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
 		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
