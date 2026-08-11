@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -415,4 +416,129 @@ func TestNamespacesNoTokenIs401(t *testing.T) {
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, listed, "no namespace list must run for a token-less request")
+}
+
+// TestNamespacesDisplayNameAnnotation proves the display-name annotation is
+// projected into the NamespaceSummary.DisplayName field and omitted when unset.
+func TestNamespacesDisplayNameAnnotation(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name:        "prod",
+				Annotations: map[string]string{annNamespaceDisplayName: "Production"},
+			}},
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "dev"}},
+		).
+		Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body NamespaceListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Namespaces, 2)
+	// dev: no annotation → DisplayName is empty (omitted from wire).
+	assert.Equal(t, "dev", body.Namespaces[0].Name)
+	assert.Empty(t, body.Namespaces[0].DisplayName)
+	// prod: annotation present → DisplayName populated.
+	assert.Equal(t, "prod", body.Namespaces[1].Name)
+	assert.Equal(t, "Production", body.Namespaces[1].DisplayName)
+	// On the wire, displayName must be absent for dev (omitempty).
+	assert.NotContains(t, rec.Body.String(), `"displayName":""`)
+}
+
+// --- PUT /api/namespaces/{name}/display-name --------------------------------
+
+// TestSetNamespaceDisplayNameSets proves a PUT with a non-empty displayName
+// stamps the annotation on the namespace and returns the updated summary.
+func TestSetNamespaceDisplayNameSets(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "prod"}}).
+		Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	body := `{"displayName":"Production"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/namespaces/prod/display-name",
+		strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var summary NamespaceSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, "prod", summary.Name)
+	assert.Equal(t, "Production", summary.DisplayName)
+
+	// Confirm the annotation was written through to the fake store.
+	var ns corev1.Namespace
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: "prod"}, &ns))
+	assert.Equal(t, "Production", ns.Annotations[annNamespaceDisplayName])
+}
+
+// TestSetNamespaceDisplayNameClears proves an empty displayName removes the
+// annotation from the namespace.
+func TestSetNamespaceDisplayNameClears(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name:        "prod",
+			Annotations: map[string]string{annNamespaceDisplayName: "Production"},
+		}}).
+		Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	body := `{"displayName":""}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/namespaces/prod/display-name",
+		strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var summary NamespaceSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
+	assert.Equal(t, "prod", summary.Name)
+	assert.Empty(t, summary.DisplayName)
+
+	// Annotation removed from the store.
+	var ns corev1.Namespace
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Name: "prod"}, &ns))
+	assert.Empty(t, ns.Annotations[annNamespaceDisplayName])
+}
+
+// TestSetNamespaceDisplayNameForbiddenIs403 proves a caller denied "update
+// namespaces" by the API server gets an honest 403 — never a silent success.
+func TestSetNamespaceDisplayNameForbiddenIs403(t *testing.T) {
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "prod"}}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+				return apierrors.NewForbidden(
+					schema.GroupResource{Resource: "namespaces"}, "prod", assert.AnError)
+			},
+		}).
+		Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/namespaces/prod/display-name",
+		strings.NewReader(`{"displayName":"x"}`))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	var errBody errorBody
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errBody))
+	assert.NotEmpty(t, errBody.Error)
 }

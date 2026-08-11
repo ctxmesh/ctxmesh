@@ -211,7 +211,7 @@ func TestPublishAgentRemovesDraftLabel(t *testing.T) {
 
 	var resp AgentPublishResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "published", resp.Status)
+	assert.Equal(t, statusPublished, resp.Status)
 	assert.Equal(t, "echo", resp.Name)
 	assert.Equal(t, detailNS, resp.Namespace)
 
@@ -236,7 +236,7 @@ func TestPublishAgentIsIdempotent(t *testing.T) {
 
 	var resp AgentPublishResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "published", resp.Status)
+	assert.Equal(t, statusPublished, resp.Status)
 
 	// Pre-existing labels must be intact (the no-op must not clobber them).
 	var got agentsv1alpha1.AgentDeployment

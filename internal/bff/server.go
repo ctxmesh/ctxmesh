@@ -39,6 +39,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/promptversion"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -99,6 +100,13 @@ type Server struct {
 	// m73.3). Used by GET /api/catalog to resolve tenant membership without BFF RBAC on namespaces
 	// (ADR 0011). nil ⇒ the catalog degrades to own-ns + public only (fail-closed, never a panic).
 	namespaceTenantStore namespacetenant.Store
+
+	// publishedArtifactStore is the control-plane Postgres store for published_artifacts — the
+	// immutable, versioned snapshot-at-publish table (M74, m74.1, ADR 0068 §1). POST /api/templates
+	// snapshots an agent's source-spec into it (caller-scoped GET + INSERT, no BFF-SA RBAC); a later
+	// GET /api/templates (m74.2) + fork (m74.3) read it. nil ⇒ the publish/unpublish endpoints return
+	// 501 (CONTROLPLANE_DSN unset), never a panic.
+	publishedArtifactStore publishedartifact.Store
 
 	// docStore is the durable KB object store (M68, ADR 0061 Fork 4) used by the
 	// BFF document-upload endpoint and the m68.6 source-resolution seam. nil when
@@ -432,6 +440,10 @@ type Options struct {
 	// m73.3). Wired from CONTROLPLANE_DSN in cmd/bff/main.go alongside ToolRegistryStore. nil ⇒
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
+	// PublishedArtifactStore is the control-plane Postgres store for published_artifacts — the
+	// snapshot-at-publish table (M74, m74.1, ADR 0068 §1). Wired from CONTROLPLANE_DSN in
+	// cmd/bff/main.go alongside NamespaceTenantStore. nil ⇒ POST/DELETE /api/templates return 501.
+	PublishedArtifactStore publishedartifact.Store
 	// TenantUsage reads a tenant's live quota consumption from the shared state-layer Valkey (M49). Optional —
 	// nil ⇒ the tenant usage endpoint returns 501.
 	TenantUsage TenantUsageReader
@@ -521,6 +533,7 @@ func NewServer(opts Options) *Server {
 		promptStore:              opts.PromptStore,
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
+		publishedArtifactStore:   opts.PublishedArtifactStore,
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
@@ -726,10 +739,22 @@ func (s *Server) Handler() http.Handler {
 		// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
 		// beside the detail GET. It needs the scheme (to decode/apply manifests); when
 		// the scheme is absent the route serves an honest 501 below.
+		// Fork = install-from-template = the ONE create path (M74, m74.3, ADR 0068 §4/§6):
+		// duplicate an OWN agent in-place or install a cross-namespace PUBLISHED one, always
+		// into the CALLER's own namespace, stamping fork-origin provenance. The origin
+		// source-spec is resolved caller-scoped (own-ns live GET) or from the published
+		// snapshot (cross-ns, with a discoverability re-check gate → 404), then forked through
+		// createAgentFromYAML — no parallel fork subsystem. Like the edit route it needs the
+		// scheme (to decode/apply the expanded manifests), so it shares this scheme guard —
+		// absent scheme → an honest 501 for both. The Go 1.22 ServeMux treats this sub-path
+		// pattern as MORE SPECIFIC than the {ns}/{name} GET/PUT/DELETE routes below, so it
+		// never shadows them.
 		if s.scheme != nil {
 			authed.HandleFunc("PUT /api/agents/{ns}/{name}", s.handleUpdateAgent)
+			authed.HandleFunc("POST /api/agents/{ns}/{name}/fork", s.handleForkAgent)
 		} else {
 			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
+			authed.Handle("POST /api/agents/{ns}/{name}/fork", notImplemented("agent fork"))
 		}
 		// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
 		// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
@@ -747,6 +772,20 @@ func (s *Server) Handler() http.Handler {
 		// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
 		// never shadows those routes.
 		authed.HandleFunc("POST /api/agents/{ns}/{name}/publish", s.handlePublishAgent)
+		// Snapshot-at-publish: publish an agent's source-spec as an immutable, versioned
+		// template into published_artifacts (M74, m74.1, ADR 0068 §1). POST snapshots the
+		// caller-scoped source-spec (a GET of the agent authorizes it — no BFF-SA RBAC);
+		// DELETE tombstones every version (idempotent). Both are nil-safe: a BFF without the
+		// published-artifact store serves 501, never a panic. The {kind}/{namespace}/{name}
+		// DELETE pattern is distinct from POST /api/templates so the two never conflict.
+		authed.HandleFunc("POST /api/templates", s.handlePublishTemplate)
+		authed.HandleFunc("DELETE /api/templates/{kind}/{namespace}/{name}", s.handleUnpublishTemplate)
+		// Cross-tenant template gallery (M74, m74.2, ADR 0068 §2/§3): Go-embedded recipes ∪
+		// published agents visible to the caller's tenant. Gate: caller-scoped SSAR `list
+		// agentdeployments` in callerNS (membership proof — amended-ADR-0011 model; NO BFF-SA
+		// RBAC grant; SelfSubjectAccessReview is a self-check the caller's token authorizes).
+		// The Go 1.22 ServeMux treats "GET /api/templates" as distinct from POST + DELETE above.
+		authed.HandleFunc("GET /api/templates", s.handleTemplates)
 		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
 		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
 		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
@@ -1001,6 +1040,10 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("GET /api/whoami", s.handleWhoAmI)
 		authed.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 		authed.HandleFunc("GET /api/namespaces", s.handleNamespaces)
+		// PUT /api/namespaces/{name}/display-name — set or clear the human-readable
+		// display label on a namespace (ADR 0068 §7). Caller needs "update namespaces";
+		// the API server enforces it — honest 403 if denied. "workspace" is UI-only.
+		authed.HandleFunc("PUT /api/namespaces/{name}/display-name", s.handleSetNamespaceDisplayName)
 		if s.scheme != nil {
 			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
 		} else {
@@ -1066,6 +1109,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
 		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
 		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
+		authed.Handle("PUT /api/namespaces/{name}/display-name", notImplemented("caller-scoped namespace display-name"))
 		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))

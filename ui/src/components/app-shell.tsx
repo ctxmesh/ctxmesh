@@ -54,16 +54,17 @@ function WhoAmIBadge({
   );
 }
 
-// NamespacePicker scopes the agents list + the capability probe (§5). "" = all
-// namespaces the caller can see (the honest default). A can't-list-namespaces
-// 403 is shown honestly (the picker offers only "All namespaces" + says why),
-// NEVER masqueraded as an empty cluster.
-function NamespacePicker() {
+// WorkspaceSwitcher is the header's workspace/namespace selector (ADR 0068 §7).
+// Each namespace is shown by its display name (the agents.ctxmesh.ai/display-name
+// annotation) falling back to the raw namespace name when no label is set.
+// "Workspace" is a UI-only friendly label for what is technically a namespace —
+// no API route, DTO, or Go identifier uses that word (ADR 0068 §7 discipline).
+// A can't-list-namespaces 403 is shown honestly; "" = all namespaces (default).
+function WorkspaceSwitcher() {
   const { namespace, setNamespace, list } = useNamespace();
 
   const forbidden = list.kind === "forbidden";
-  const options =
-    list.kind === "ready" ? list.namespaces.map((n) => n.name) : [];
+  const namespaces = list.kind === "ready" ? list.namespaces : [];
 
   return (
     <div className="flex items-center gap-2">
@@ -71,11 +72,11 @@ function NamespacePicker() {
         htmlFor="ns-picker"
         className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
       >
-        Namespace
+        Workspace
       </label>
       <Select
         id="ns-picker"
-        aria-label="Namespace"
+        aria-label="Workspace"
         value={namespace}
         onChange={(e) => setNamespace(e.target.value)}
         className="h-8 w-44 text-xs"
@@ -85,10 +86,10 @@ function NamespacePicker() {
             : undefined
         }
       >
-        <option value="">All namespaces</option>
-        {options.map((ns) => (
-          <option key={ns} value={ns}>
-            {ns}
+        <option value="">All workspaces</option>
+        {namespaces.map((ns) => (
+          <option key={ns.name} value={ns.name}>
+            {ns.displayName ?? ns.name}
           </option>
         ))}
       </Select>
@@ -243,7 +244,7 @@ function ShellChrome() {
                   Namespace + Capabilities providers, so it RBAC-filters exactly
                   like the nav and shares the shell's sign-out flow. */}
               <ShellCommandPalette onLogout={onLogout} />
-              <NamespacePicker />
+              <WorkspaceSwitcher />
               {session && (
                 <WhoAmIBadge
                   username={session.user.username}

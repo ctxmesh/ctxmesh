@@ -11,9 +11,11 @@ import {
   Plus,
   RotateCcw,
   Server,
+  Share2,
   SlidersHorizontal,
   Terminal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +32,7 @@ import {
   ForbiddenInline,
   Wizard,
   type WizardStep,
+  useFocusTrap,
   useToast,
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
@@ -56,6 +59,11 @@ import {
   type OnlineScoreWindow,
   type RunSummary,
 } from "@/lib/api";
+
+// FORK_NEEDS_REBINDING_LABEL is the Kubernetes label the operator sets on a
+// forked agent that has unresolved references (model route, tools). Its presence
+// in the agent's labels drives the "Needs attention" banner (m74.6).
+const FORK_NEEDS_REBINDING_LABEL = "agents.ctxmesh.ai/fork-needs-rebinding";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
@@ -101,6 +109,8 @@ export function AgentDetailPage() {
   // they survive a hard reload and can be triggered from the list's row actions.
   const editOpen = searchParams.get("edit") === "1";
   const deleteOpen = searchParams.get("delete") === "1";
+  // Publish-as-template dialog — local state (not deep-linked, no reload needed).
+  const [publishOpen, setPublishOpen] = React.useState(false);
 
   function openEdit() {
     setSearchParams((p) => { p.set("edit", "1"); return p; });
@@ -188,13 +198,43 @@ export function AgentDetailPage() {
 
   const detail = state.detail;
 
+  // m74.6: fork-needs-rebinding banner — visible when the label is set on the
+  // AgentDeployment CR (the operator stamps it at fork time when refs are dangling).
+  const needsRebinding =
+    detail.labels?.[FORK_NEEDS_REBINDING_LABEL] === "true";
+
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="agent-detail-page">
       <AgentHeader
         detail={detail}
         onEdit={openEdit}
         onDelete={openDelete}
+        onPublish={() => setPublishOpen(true)}
       />
+
+      {/* m74.6: needs-rebinding banner — shown when the agent was forked and
+          has dangling references (model route or tools not connected yet). */}
+      {needsRebinding && (
+        <div
+          className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/30"
+          role="alert"
+          data-testid="needs-rebinding-banner"
+        >
+          <div className="flex items-start gap-3">
+            <Wrench className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="space-y-1">
+              <p className="font-medium text-amber-900 dark:text-amber-200">
+                Needs attention — connect resources before running
+              </p>
+              <p className="text-sm text-amber-700 dark:text-amber-300">
+                This agent was forked from a template but has unresolved references. Connect a
+                model route and any required tools so it can run successfully. Use the Bindings
+                tab to review what is connected.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-1 border-b" role="tablist" aria-label="Agent detail">
         {TABS.map((t) => (
@@ -273,6 +313,17 @@ export function AgentDetailPage() {
           onDeleted={() => navigate("/agents")}
         />
       )}
+
+      {/* Publish-as-template dialog (m74.6) — opened by the Publish button in
+          the header (RBAC-gated: update agentdeployments). */}
+      {publishOpen && (
+        <PublishTemplateDialog
+          agentNamespace={detail.namespace}
+          agentName={detail.name}
+          onClose={() => setPublishOpen(false)}
+          onDone={() => setPublishOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -282,14 +333,19 @@ function AgentHeader({
   detail,
   onEdit,
   onDelete,
+  onPublish,
 }: {
   detail: AgentDetailResponse;
   onEdit: () => void;
   onDelete: () => void;
+  onPublish: () => void;
 }) {
   const { can } = useCapabilities();
   const canEdit = can(RES_AGENTS, "update");
   const canDelete = can(RES_AGENTS, "delete");
+  // Publish-as-template is gated on agent update rights (the publisher must own
+  // the agent). Display-only — the API is the real RBAC gate (ADR 0011).
+  const canPublish = can(RES_AGENTS, "update");
 
   return (
     <div className="space-y-3">
@@ -323,6 +379,17 @@ function AgentHeader({
         </Link>
         {/* RBAC-aware write affordances — hidden for viewers */}
         <div className="ml-auto flex items-center gap-2">
+          {canPublish && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onPublish}
+              data-testid="publish-agent-button"
+            >
+              <Share2 className="h-4 w-4" />
+              Publish
+            </Button>
+          )}
           {canEdit && (
             <Button
               variant="outline"
@@ -3053,7 +3120,7 @@ function CanaryArms({
         Canary in progress — comparing serving arms:
       </p>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {sorted.map((v, i) => {
+        {sorted.map((v: string, i: number) => {
           const w = latestByVersion.get(v)!;
           const label = sorted.length === 2
             ? i === 0 ? "Baseline (old)" : "Candidate (new)"
@@ -3082,3 +3149,157 @@ function CanaryArms({
   );
 }
 
+
+
+// ── Publish-as-template dialog (m74.6) ───────────────────────────────────────
+// Mirrors the m73.7 PublishDialog in mcp-servers-page.tsx. Pick visibility
+// (team/org/public) → POST /api/templates → on success close; on 403 surface
+// the tier requirement honestly. Public requires an explicit confirm checkbox
+// (blast-radius acknowledgement).
+type PublishVisibility = "team" | "org" | "public";
+
+function PublishTemplateDialog({
+  agentNamespace,
+  agentName,
+  onClose,
+  onDone,
+}: {
+  agentNamespace: string;
+  agentName: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const [selected, setSelected] = React.useState<PublishVisibility>("team");
+  const [publicConfirmed, setPublicConfirmed] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
+
+  function handleSelect(v: PublishVisibility) {
+    setSelected(v);
+    if (v !== "public") setPublicConfirmed(false);
+  }
+
+  const isPublishDisabled = busy || (selected === "public" && !publicConfirmed);
+
+  async function onPublish() {
+    if (isPublishDisabled) return;
+    setBusy(true);
+    try {
+      await api.publishTemplate("agent", agentNamespace, agentName, selected);
+      toast({
+        variant: "success",
+        title: "Published",
+        description: `${agentName} is now available as a ${selected}-visible template.`,
+      });
+      onDone();
+    } catch (err) {
+      const isForbidden = err instanceof ApiError && err.isForbidden;
+      toast({
+        variant: "error",
+        title: "Publish failed",
+        description: isForbidden
+          ? `You need ${
+              selected === "public"
+                ? "Platform-admin"
+                : selected === "org"
+                ? "Tenant-admin"
+                : "team-admin"
+            } rights to publish ${selected}-wide.`
+          : err instanceof Error
+          ? err.message
+          : "publish failed",
+      });
+      setBusy(false);
+      onClose();
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Publish ${agentName} as template`}
+    >
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
+      >
+        <h2 className="text-lg font-semibold tracking-snug">
+          Publish {agentName} as a template
+        </h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Publishing shares the agent definition so teammates can fork it into their own
+          namespace. Your secrets and credentials are never shared.
+        </p>
+        <div className="mt-4 space-y-2">
+          {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
+            <label
+              key={v}
+              className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-accent/40"
+              data-testid={`publish-template-option-${v}`}
+            >
+              <input
+                type="radio"
+                name="template-visibility"
+                value={v}
+                checked={selected === v}
+                onChange={() => handleSelect(v)}
+                className="accent-primary"
+              />
+              <div>
+                <p className="font-medium capitalize">{v}</p>
+                <p className="text-xs text-muted-foreground">
+                  {v === "team"
+                    ? "Visible to your team's namespace"
+                    : v === "org"
+                    ? "Visible org-wide (Tenant-admin required)"
+                    : "Visible to everyone (Platform-admin required)"}
+                </p>
+              </div>
+            </label>
+          ))}
+        </div>
+        {selected === "public" && (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-template-public-warning">
+              Public means every tenant on this cluster can discover and fork this template.
+            </p>
+            <label className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={publicConfirmed}
+                onChange={(e) => setPublicConfirmed(e.target.checked)}
+                className="accent-primary"
+                data-testid="publish-template-public-confirm"
+              />
+              I understand this template is discoverable by all tenants
+            </label>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          Requires the matching role — a 403 will tell you which role is needed.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => void onPublish()}
+            disabled={isPublishDisabled}
+            data-testid="publish-template-submit"
+          >
+            {busy ? "Publishing…" : `Publish as ${selected}`}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

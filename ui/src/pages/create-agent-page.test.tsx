@@ -927,3 +927,69 @@ describe("CreateAgentPage — m72.5 recipe gallery", () => {
     expect(screen.getByTestId("friendly-summary")).toHaveTextContent(/recipe-agent/);
   });
 });
+
+// ── m74 P1-2 — Install recipe via ?recipe= pre-fills the create flow ──────────
+
+describe("CreateAgentPage — m74 P1-2: ?recipe=<name> pre-fills the create flow", () => {
+  const recipeSpec = "name: order-bot\nruntime: managed\nsystemPrompt: handle orders\n";
+
+  function renderWithRecipeParam(recipeName: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (json: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => json, text: async () => JSON.stringify(json) } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
+        if (url === "/api/providers" && method === "GET")
+          return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
+        if (url === "/api/recipes")
+          return j({ recipes: [
+            { name: "order-bot", title: "Order Bot", description: "Handles orders.", icon: "🛒", spec: recipeSpec },
+          ]});
+        if (url === "/api/tools") return j({ tools: [] });
+        if (url === "/api/agents/check-requirements" && method === "POST")
+          return j({ model: { required: false, connected: true }, tools: [] });
+        if (url === "/api/expand" && method === "POST")
+          return Promise.resolve({ ok: true, status: 200, text: async () => "kind: AgentDeployment\n", json: async () => ({}) } as Response);
+        if (url === "/api/agents" && method === "POST")
+          return j({ created: [{ kind: "AgentDeployment", name: "order-bot", namespace: "default" }] }, true, 201);
+        return j({}, false, 404);
+      }),
+    );
+
+    return render(
+      <MemoryRouter initialEntries={[`/agents/new?recipe=${encodeURIComponent(recipeName)}`]}>
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <Routes>
+                <Route path="/agents/new" element={<CreateAgentPage />} />
+              </Routes>
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("arriving via ?recipe=<name> pre-fills SharedReview with the recipe's spec", async () => {
+    renderWithRecipeParam("order-bot");
+
+    // The page fetches the recipe list and immediately transitions to the recipe review.
+    // We should land on the shared review with the recipe's content pre-filled.
+    await screen.findByTestId("shared-review");
+    // The friendly summary must reflect the recipe agent (order-bot).
+    expect(screen.getByTestId("friendly-summary")).toHaveTextContent(/order-bot/);
+  });
+
+  it("arriving via ?recipe=<unknown> falls through to the entrance without crashing", async () => {
+    renderWithRecipeParam("nonexistent-recipe");
+    // Falls back to the entrance (recipe not found) — no crash, entrance is shown.
+    expect(await screen.findByTestId("create-entrance")).toBeInTheDocument();
+  });
+});

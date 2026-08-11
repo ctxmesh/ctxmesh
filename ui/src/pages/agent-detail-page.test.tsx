@@ -1518,3 +1518,200 @@ describe("ImprovementLoopSection (m69.11)", () => {
     await screen.findByTestId("online-score-unavailable");
   });
 });
+
+// ── m74.6: Publish-as-template + needs-rebinding banner ─────────────────────
+describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding banner", () => {
+  function installFetchWithPublish(opts: {
+    publishStatus?: number;
+    detail?: unknown;
+  } = {}) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok,
+            status,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({
+            namespace: "",
+            allowed: {
+              agentdeployments: { create: true, update: true, delete: true },
+              memorybindings: { create: true, update: true, delete: true },
+              agentscalingpolicies: { create: true, update: true, delete: true },
+            },
+          });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+
+        // publish template endpoint
+        if (url === "/api/templates" && method === "POST") {
+          const status = opts.publishStatus ?? 200;
+          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          return j({ version: "v1", name: "billing", namespace: "prod" });
+        }
+
+        // agent detail
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) {
+          return j(opts.detail ?? DEFAULT_DETAIL, true, 200);
+        }
+
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows the Publish button in the header when the caller can update agentdeployments", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("publish-agent-button")).toBeInTheDocument();
+  });
+
+  it("hides the Publish button when the caller cannot update agentdeployments", async () => {
+    installFetch({
+      caps: {
+        agentdeployments: { create: false, update: false, delete: false },
+        memorybindings: { create: false, update: false, delete: false },
+        agentscalingpolicies: { create: false, update: false, delete: false },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("publish-agent-button")).toBeNull();
+  });
+
+  it("opens the publish dialog with team selected by default on Publish click", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+
+    expect(await screen.findByRole("dialog", { name: /Publish billing as template/ })).toBeInTheDocument();
+    expect(screen.getByTestId("publish-template-option-team")).toBeInTheDocument();
+    expect(screen.getByTestId("publish-template-option-org")).toBeInTheDocument();
+    expect(screen.getByTestId("publish-template-option-public")).toBeInTheDocument();
+  });
+
+  it("calls POST /api/templates and shows success toast on publish", async () => {
+    const calls: { url: string; method: string; body: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, body: typeof init?.body === "string" ? init.body : "" });
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") return j({ version: "v1" });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.url === "/api/templates" && c.method === "POST")).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Published")).toBeInTheDocument();
+    });
+  });
+
+  it("shows honest 403 error when publish is forbidden", async () => {
+    installFetchWithPublish({ publishStatus: 403 });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Publish failed")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/team-admin/)).toBeInTheDocument();
+  });
+
+  it("public publish requires confirm checkbox before submitting (blast-radius gate)", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+
+    // Select public tier
+    const publicOption = screen.getByTestId("publish-template-option-public");
+    fireEvent.click(publicOption.querySelector("input")!);
+
+    // Warning should appear
+    expect(await screen.findByTestId("publish-template-public-warning")).toBeInTheDocument();
+    // Submit should be disabled
+    expect(screen.getByTestId("publish-template-submit")).toBeDisabled();
+
+    // Check the confirm checkbox
+    fireEvent.click(screen.getByTestId("publish-template-public-confirm"));
+    expect(screen.getByTestId("publish-template-submit")).not.toBeDisabled();
+  });
+
+  it("renders the needs-rebinding banner when the fork label is present", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(screen.getByText(/Needs attention/)).toBeInTheDocument();
+    expect(screen.getByText(/connect resources before running/i)).toBeInTheDocument();
+  });
+
+  it("does not render the needs-rebinding banner when the fork label is absent", async () => {
+    installFetch();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("needs-rebinding-banner")).toBeNull();
+  });
+
+  it("does not render the needs-rebinding banner when the fork label is false", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "false" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("needs-rebinding-banner")).toBeNull();
+  });
+});
