@@ -200,7 +200,7 @@ describe("buildCommands (RBAC + namespace sub-commands)", () => {
     const cmds = buildCommands({
       can: (_r, verb) => verb !== "create", // viewer: no create
       navigate: () => {},
-      namespaces: [],
+      namespaces: [] as { name: string; displayName?: string }[],
       currentNamespace: "",
       setNamespace: () => {},
       onLogout: () => {},
@@ -211,21 +211,40 @@ describe("buildCommands (RBAC + namespace sub-commands)", () => {
     expect(labels).not.toContain("Playground");
   });
 
-  it("offers non-current namespaces as switch sub-commands + Sign out", () => {
+  it("offers non-current namespaces as switch sub-commands + Sign out, using displayName when set", () => {
     const cmds = buildCommands({
       can: () => true,
       navigate: () => {},
-      namespaces: ["team-a", "prod"],
+      namespaces: [
+        { name: "team-a", displayName: "Team A" },
+        { name: "prod", displayName: "Production" },
+      ],
       currentNamespace: "team-a",
       setNamespace: () => {},
       onLogout: () => {},
     });
-    const nsCmds = cmds.filter((c) => c.group === "Switch namespace").map((c) => c.label);
-    // The current namespace is not re-offered; the others + "All namespaces" are.
+    const nsCmds = cmds.filter((c) => c.group === "Switch workspace").map((c) => c.label);
+    // The current namespace is not re-offered; the others + "All workspaces" are.
+    // Labels use displayName (ADR 0068 §7 — friendly label in the UI).
+    expect(nsCmds).not.toContain("Team A");
     expect(nsCmds).not.toContain("team-a");
-    expect(nsCmds).toContain("prod");
-    expect(nsCmds).toContain("All namespaces");
+    expect(nsCmds).toContain("Production");
+    expect(nsCmds).toContain("All workspaces");
     expect(cmds.some((c) => c.label === "Sign out")).toBe(true);
+  });
+
+  it("falls back to raw namespace name when displayName is absent", () => {
+    const cmds = buildCommands({
+      can: () => true,
+      navigate: () => {},
+      namespaces: [{ name: "staging" }],
+      currentNamespace: "",
+      setNamespace: () => {},
+      onLogout: () => {},
+    });
+    const nsCmds = cmds.filter((c) => c.group === "Switch workspace").map((c) => c.label);
+    // No displayName set → falls back to raw name.
+    expect(nsCmds).toContain("staging");
   });
 
   it("gates on the same resource the nav uses (agentdeployments create)", () => {
@@ -237,7 +256,7 @@ describe("buildCommands (RBAC + namespace sub-commands)", () => {
         return true;
       },
       navigate: () => {},
-      namespaces: [],
+      namespaces: [] as { name: string; displayName?: string }[],
       currentNamespace: "",
       setNamespace: () => {},
       onLogout: () => {},

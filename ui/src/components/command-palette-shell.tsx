@@ -57,11 +57,12 @@ export function ShellCommandPalette({ onLogout }: { onLogout: () => void }) {
   const { namespace, setNamespace, list } = useNamespace();
 
   const namespaces = React.useMemo(
-    () => (list.kind === "ready" ? list.namespaces.map((n) => n.name) : []),
+    () => (list.kind === "ready" ? list.namespaces : []),
     [list],
   );
   // Stable key so the command memo only rebuilds when the namespace SET changes.
-  const namespacesKey = namespaces.join(" ");
+  // Include display names in the key so renaming a namespace refreshes the palette.
+  const namespacesKey = namespaces.map((n) => `${n.name}:${n.displayName ?? ""}`).join(" ");
 
   const commands = React.useMemo(
     () =>
