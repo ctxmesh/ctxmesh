@@ -2,6 +2,53 @@ import * as React from "react";
 import { useParams } from "react-router-dom";
 import { api, ApiError, type SharedRunView } from "@/lib/api";
 
+// Page-level ErrorBoundary — the shared-run page is the only unauthenticated
+// route, so a render crash here would be seen by anonymous outsiders as a
+// blank white screen (there is no global ErrorBoundary in this app). This
+// boundary is LOCAL to SharedRunPage; do not widen it to App.tsx.
+interface EBState {
+  crashed: boolean;
+}
+class SharedRunErrorBoundary extends React.Component<
+  React.PropsWithChildren<object>,
+  EBState
+> {
+  constructor(props: React.PropsWithChildren<object>) {
+    super(props);
+    this.state = { crashed: false };
+  }
+
+  static getDerivedStateFromError(): EBState {
+    return { crashed: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // Log to console for operator visibility; never rethrow (keeps the boundary intact).
+    console.error("[SharedRunPage] render error", error, info.componentStack);
+  }
+
+  override render() {
+    if (this.state.crashed) {
+      return (
+        <div className="min-h-screen bg-background">
+          <main className="mx-auto max-w-3xl px-4 py-10">
+            <div className="rounded-lg border bg-card p-8 text-center shadow-card">
+              <p className="text-base font-medium text-foreground">
+                This shared run couldn&apos;t be displayed
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                An unexpected error occurred while rendering this page. The link
+                may reference content that cannot be shown.
+              </p>
+            </div>
+          </main>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // SharedRunPage — the public, unauthenticated shared-run view (m75.4).
 // Route: /shared/runs/:token (mounted OUTSIDE RequireAuth + AppShell in App.tsx)
 // No console chrome — a standalone read-only page.
@@ -48,7 +95,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export function SharedRunPage() {
+function SharedRunPageInner() {
   const { token = "" } = useParams();
   const [state, setPageState] = React.useState<PageState>({ kind: "loading" });
 
@@ -190,9 +237,11 @@ export function SharedRunPage() {
                     <p className="mb-2 text-xs font-medium text-muted-foreground">
                       Input
                     </p>
-                    <p className="whitespace-pre-wrap text-sm">
-                      {state.view.input}
-                    </p>
+                    <pre className="whitespace-pre-wrap text-sm font-mono">
+                      {typeof state.view.input === "string"
+                        ? state.view.input
+                        : JSON.stringify(state.view.input, null, 2)}
+                    </pre>
                   </div>
                 )}
 
@@ -233,3 +282,19 @@ export function SharedRunPage() {
     </div>
   );
 }
+
+// SharedRunPage is the public entry point. It wraps the inner page with a
+// page-local ErrorBoundary so a render crash (e.g. unexpected content shape)
+// is caught and shown as a friendly fallback to anonymous visitors, rather
+// than a white-screen.
+export function SharedRunPage() {
+  return (
+    <SharedRunErrorBoundary>
+      <SharedRunPageInner />
+    </SharedRunErrorBoundary>
+  );
+}
+
+// Exported ONLY for unit-testing the boundary's fallback render. Do not use
+// in production code outside this file.
+export { SharedRunErrorBoundary as SharedRunErrorBoundaryForTest };

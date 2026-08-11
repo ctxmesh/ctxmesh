@@ -322,11 +322,12 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := r.PathValue("id")
 
-	if _, ok := s.authorizeShareForRun(w, r, caller, runID); !ok {
+	rn, ok := s.authorizeShareForRun(w, r, caller, runID)
+	if !ok {
 		return
 	}
 
-	recs, err := s.sharedRunStore.ListForRun(r.Context(), runID)
+	recs, err := s.sharedRunStore.ListForRun(r.Context(), rn.ID)
 	if err != nil {
 		s.log.Error(err, "share: could not list shares", "run", runID)
 		writeError(w, http.StatusInternalServerError, "failed to list share links")
