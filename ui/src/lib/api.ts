@@ -1409,11 +1409,15 @@ export interface PublishTemplateResponse {
 // forked agent cannot resolve in the caller's namespace. unresolvedRefs lists
 // specific names that need rebinding. status "already-forked" = the caller
 // already has a fork of this agent.
+// agent carries the FORK's own namespace + name (the caller's namespace, not
+// the origin's) — clients MUST navigate to agent.namespace/agent.name, never
+// to the origin coordinates.
 export interface ForkAgentResponse {
-  created: boolean;
+  status: string;
+  agent: AgentSummary;
+  created: CreatedObject[];
   needsRebinding: string[];
   unresolvedRefs: string[];
-  status?: string;
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
