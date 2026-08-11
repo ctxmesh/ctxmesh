@@ -149,10 +149,29 @@ func (s *Server) registerShareRoutes(authed *http.ServeMux) {
 // the broader, correct gate — an operator with read on the agent may legitimately share a run they did not
 // personally create, exactly as they can already GET it. We authorize on agent access, not creator-match.
 func (s *Server) authorizeShareForRun(w http.ResponseWriter, r *http.Request, caller client.Client, runID string) (*run.Run, bool) {
+	// Resolve the run by its internal ID first; if not found, fall back to traceId. The
+	// trace-detail page (/traces/:id) identifies a run by traceId, which is DISTINCT from
+	// run.ID, so the Share button on that page passes a traceId — not the internal ID. We
+	// resolve by either so the mint works in both contexts. The stored shared_runs.run_id is
+	// ALWAYS the real run.ID (rn.ID below), never the traceId.
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
-		return nil, false
+		if !errors.Is(err, run.ErrNotFound) {
+			s.log.Error(err, "share: run store read failed", "id", runID)
+			writeError(w, http.StatusInternalServerError, "failed to read run")
+			return nil, false
+		}
+		// Not found by run.ID — try traceId fallback.
+		rn, err = s.runStore.GetByTraceID(runID)
+		if err != nil {
+			s.log.Error(err, "share: run store trace-id lookup failed", "traceId", runID)
+			writeError(w, http.StatusInternalServerError, "failed to read run")
+			return nil, false
+		}
+		if rn == nil {
+			writeError(w, http.StatusNotFound, "run not found")
+			return nil, false
+		}
 	}
 	// Caller-scoped authz: read the run's AgentDeployment through the CALLER'S client. Their RBAC — not
 	// the BFF's — is the gate (ADR 0011). A denial is an honest 403; a missing agent a 404.

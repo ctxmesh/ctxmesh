@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { DatasetsPage, DatasetDetailPage } from "@/pages/datasets-page";
 import { TracePage } from "@/pages/trace-page";
+import { ToastProvider } from "@/components/kit";
 import type { DatasetSummary, DatasetCase, SpanSummary } from "@/lib/api";
 
 // DatasetsPage + DatasetDetailPage (m69.3, ADR 0062 Fork 5) — human-labeling dataset surfaces.
@@ -398,11 +399,13 @@ function installTraceFetch(opts: {
 describe("TracePage — AddToDatasetPanel (m69.3)", () => {
   function renderTrace(traceId = "t1") {
     return render(
-      <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
-        <Routes>
-          <Route path="/traces/:id" element={<TracePage />} />
-        </Routes>
-      </MemoryRouter>,
+      <ToastProvider>
+        <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
+          <Routes>
+            <Route path="/traces/:id" element={<TracePage />} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>,
     );
   }
 
