@@ -191,10 +191,11 @@ function TemplatesTab() {
   }, [load]);
 
   async function handleFork(entry: TemplateEntry) {
-    // Recipe: pre-fill the create-agent flow with the recipe spec (m72 path).
+    // Recipe: pre-fill the create-agent flow via ?recipe=<name>. CreateAgentPage fetches
+    // the recipe list and finds the spec by name — avoids a fragile ?spec= blob in the URL
+    // that URL-length limits or encoding differences could corrupt (m74 P1-2 fix).
     if (entry.source === "recipe") {
-      const spec = entry.spec ?? "";
-      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}&spec=${encodeURIComponent(spec)}`);
+      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}`);
       return;
     }
 
@@ -214,12 +215,18 @@ function TemplatesTab() {
     try {
       const res = await api.forkAgent(prov.originNamespace, prov.originName ?? entry.name);
 
+      // Navigate to the FORK's own coordinates, not the origin's.
+      // res.agent carries the fork's namespace + name (the caller's namespace).
+      const forkNs = res.agent?.namespace ?? "";
+      const forkName = res.agent?.name ?? entry.name;
+
       if (res.status === "already-forked") {
         toast({
           variant: "info",
           title: "Already forked",
           description: `You already have a fork of ${entry.name} in your namespace.`,
         });
+        navigate(`/agents/${encodeURIComponent(forkNs)}/${encodeURIComponent(forkName)}`);
         return;
       }
 
@@ -244,7 +251,7 @@ function TemplatesTab() {
           description: `${entry.name} is now in your namespace.`,
         });
       }
-      navigate(`/agents/${encodeURIComponent(prov.originNamespace)}/${encodeURIComponent(entry.name)}`);
+      navigate(`/agents/${encodeURIComponent(forkNs)}/${encodeURIComponent(forkName)}`);
     } catch (err) {
       const isNotFound = err instanceof ApiError && err.isNotFound;
       const isConflict = err instanceof ApiError && err.status === 409;

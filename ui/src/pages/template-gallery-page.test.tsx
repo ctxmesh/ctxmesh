@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
 import { ToastProvider } from "@/components/kit";
+
+// LocationSpy captures the last navigation target so tests can assert routing.
+function LocationSpy({ onLocation }: { onLocation: (loc: string) => void }) {
+  const loc = useLocation();
+  onLocation(loc.pathname + loc.search);
+  return null;
+}
 
 // Fake fetch for the template gallery page. Covers:
 //   - GET /api/templates  — the template list (recipes + published agents)
@@ -104,14 +111,18 @@ function makeFetch(opts?: {
 
       // Fork
       if (path.endsWith("/fork") && method === "POST") {
-        const status = opts?.forkStatus ?? 200;
+        const status = opts?.forkStatus ?? 201;
         if (status >= 400) return j({ error: "not found" }, false, status);
         return j(
           opts?.forkResponse ?? {
-            created: true,
+            status: "forked",
+            agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+            created: [],
             needsRebinding: [],
             unresolvedRefs: [],
           },
+          true,
+          status,
         );
       }
 
@@ -127,10 +138,15 @@ function makeFetch(opts?: {
   );
 }
 
-function renderPage() {
+function renderPage(onLocation?: (loc: string) => void) {
   return render(
     <MemoryRouter>
       <ToastProvider>
+        {onLocation && (
+          <Routes>
+            <Route path="*" element={<LocationSpy onLocation={onLocation} />} />
+          </Routes>
+        )}
         <TemplateGalleryPage />
       </ToastProvider>
     </MemoryRouter>,
@@ -180,18 +196,47 @@ describe("TemplateGalleryPage — templates tab", () => {
     expect(originEl).toHaveTextContent("prod/support-agent");
   });
 
-  it("recipe fork navigates to create-agent with the spec pre-filled", async () => {
+  it("recipe Install navigates to /agents/new?recipe=<name> (not ?spec=)", async () => {
     makeFetch();
-    const { container } = renderPage();
-    void container; // suppress unused warning
+    let lastLocation = "";
+    renderPage((loc) => { lastLocation = loc; });
 
     const forkBtn = await screen.findByTestId(`fork-template-${defaultRecipe.name}`);
     expect(forkBtn).toHaveTextContent("Install");
     fireEvent.click(forkBtn);
-    // Navigation happens (no error thrown) — the test just verifies the button label
-    // and that no toast-error appeared.
+
+    // Navigates with ?recipe=<name>, not a fragile ?spec= blob.
     await waitFor(() => {
-      expect(screen.queryByText("Fork failed")).toBeNull();
+      expect(lastLocation).toContain("/agents/new");
+      expect(lastLocation).toContain(`recipe=${encodeURIComponent(defaultRecipe.name)}`);
+      // Must NOT carry the raw spec in the URL (that path is buggy and was replaced).
+      expect(lastLocation).not.toContain("spec=");
+    });
+    // No error toast.
+    expect(screen.queryByText("Fork failed")).toBeNull();
+  });
+
+  it("published agent fork navigates to the FORK's namespace/name, not the origin's", async () => {
+    // The fork response carries agent.namespace="my-ns" (the caller's ns), NOT "prod" (the origin).
+    makeFetch({
+      templates: [defaultPublished],
+      forkStatus: 201,
+      forkResponse: {
+        status: "forked",
+        agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+        created: [],
+        needsRebinding: [],
+        unresolvedRefs: [],
+      },
+    });
+    let lastLocation = "";
+    renderPage((loc) => { lastLocation = loc; });
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    await waitFor(() => {
+      // Must navigate to the FORK's coordinates (my-ns/support-agent), not the origin's (prod/…).
+      expect(lastLocation).toBe("/agents/my-ns/support-agent");
     });
   });
 
@@ -214,7 +259,13 @@ describe("TemplateGalleryPage — templates tab", () => {
         if (path === "/api/templates") return j({ templates: [defaultPublished] });
         if (path === "/api/catalog") return j({ entries: [] });
         if (path.endsWith("/fork") && method === "POST")
-          return j({ created: true, needsRebinding: [], unresolvedRefs: [] });
+          return j({
+            status: "forked",
+            agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+            created: [],
+            needsRebinding: [],
+            unresolvedRefs: [],
+          }, true, 201);
         return j({}, false, 404);
       }),
     );
@@ -236,8 +287,11 @@ describe("TemplateGalleryPage — templates tab", () => {
   it("shows needs-attention toast when fork returns dangling refs", async () => {
     makeFetch({
       templates: [defaultPublished],
+      forkStatus: 201,
       forkResponse: {
-        created: true,
+        status: "forked",
+        agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+        created: [],
         needsRebinding: ["model-route"],
         unresolvedRefs: ["tools/my-tool"],
       },

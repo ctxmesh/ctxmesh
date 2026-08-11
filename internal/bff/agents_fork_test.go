@@ -135,6 +135,10 @@ func TestFork_DuplicateInPlace(t *testing.T) {
 	assert.Empty(t, resp.NeedsRebinding, "m74.3 copies the source-spec as-is")
 	assert.NotNil(t, resp.UnresolvedRefs)
 	assert.Empty(t, resp.UnresolvedRefs)
+	// P1-1 fix: the response must expose the FORK's namespace+name (the caller's ns),
+	// not the origin's, so the UI navigates to the caller's copy, not the publisher's.
+	assert.Equal(t, "my-assistant", resp.Agent.Name, "Agent.Name must be the fork's local name")
+	assert.Equal(t, forkCallerNS, resp.Agent.Namespace, "Agent.Namespace must be the CALLER's namespace, not the origin's")
 
 	// The forked AgentDeployment landed under the local name, with provenance.
 	var forked agentsv1alpha1.AgentDeployment
