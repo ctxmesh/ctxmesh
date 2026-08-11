@@ -196,9 +196,11 @@ export function McpServersPage() {
                       size="sm"
                       onClick={() => setToOrg(s)}
                       data-testid={`org-cred-${s.name}`}
-                      aria-label={`Share ${s.name} with your org`}
+                      aria-label={`Share credential for ${s.name} with your org`}
+                      title="Share credential"
                     >
-                      <Users className="h-3.5 w-3.5" />
+                      <Users className="mr-1 h-3.5 w-3.5" />
+                      Share credential
                     </Button>
                   )}
                   {canPromote && (
@@ -208,8 +210,10 @@ export function McpServersPage() {
                       onClick={() => setToPublish(s)}
                       data-testid={`publish-mcp-${s.name}`}
                       aria-label={`Publish ${s.name}`}
+                      title="Publish"
                     >
-                      <Share2 className="h-3.5 w-3.5" />
+                      <Share2 className="mr-1 h-3.5 w-3.5" />
+                      Publish
                     </Button>
                   )}
                   {canDelete && (
@@ -358,6 +362,10 @@ function SetOrgCredentialDialog({
           shared credential. Every user&apos;s runs then use it — no per-user connect. The
           credential is stored server-side only.
         </p>
+        <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="org-cred-caution">
+          This shares ONE credential with everyone — every user&apos;s runs use it. If teammates
+          should connect their own accounts instead, use Publish.
+        </p>
         <div className="mt-4 space-y-1.5">
           <Label htmlFor="org-cred">Shared credential (bearer token)</Label>
           <Input
@@ -408,12 +416,26 @@ function PublishDialog({
   onDone: () => void;
 }) {
   const { toast } = useToast();
-  const [selected, setSelected] = React.useState<PublishVisibility>("team");
+  // Default to server's current visibility if it's a known publish tier, else "team".
+  const defaultVisibility: PublishVisibility =
+    server.visibility === "org" || server.visibility === "public" || server.visibility === "team"
+      ? (server.visibility as PublishVisibility)
+      : "team";
+  const [selected, setSelected] = React.useState<PublishVisibility>(defaultVisibility);
+  const [publicConfirmed, setPublicConfirmed] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
 
+  // Reset the public-confirm checkbox whenever the user changes their selection.
+  function handleSelect(v: PublishVisibility) {
+    setSelected(v);
+    if (v !== "public") setPublicConfirmed(false);
+  }
+
+  const isPublishDisabled = busy || (selected === "public" && !publicConfirmed);
+
   async function onPublish() {
-    if (busy) return;
+    if (isPublishDisabled) return;
     setBusy(true);
     try {
       await api.publishMcpServer(server.namespace, server.name, selected);
@@ -464,9 +486,20 @@ function PublishDialog({
       >
         <h2 className="text-lg font-semibold tracking-snug">Publish {server.name}</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Widen this server&apos;s visibility. Requires the matching role — a 403 will
-          tell you which role is needed.
+          Publishing shares only the server definition — teammates discover it and connect
+          their OWN accounts; your credentials are never shared.
         </p>
+        {server.visibility && (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="publish-current-visibility">
+            Currently: <span className="font-medium">{server.visibility}</span>
+          </p>
+        )}
+        {server.credentialSource === "shared" && (
+          <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="publish-shared-cred-warning">
+            Caution: this server uses a shared credential — widening visibility also widens
+            access to that credential.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
             <label
@@ -479,7 +512,7 @@ function PublishDialog({
                 name="visibility"
                 value={v}
                 checked={selected === v}
-                onChange={() => setSelected(v)}
+                onChange={() => handleSelect(v)}
                 className="accent-primary"
               />
               <div>
@@ -495,13 +528,33 @@ function PublishDialog({
             </label>
           ))}
         </div>
-        <div className="mt-6 flex justify-end gap-2">
+        {selected === "public" && (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-public-warning">
+              Public means every tenant on this cluster can discover it.
+            </p>
+            <label className="flex cursor-pointer items-center gap-2 text-sm" data-testid="publish-public-confirm-label">
+              <input
+                type="checkbox"
+                checked={publicConfirmed}
+                onChange={(e) => setPublicConfirmed(e.target.checked)}
+                className="accent-primary"
+                data-testid="publish-public-confirm"
+              />
+              I understand this is discoverable by all tenants
+            </label>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          Requires the matching role — a 403 will tell you which role is needed.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button
             onClick={() => void onPublish()}
-            disabled={busy}
+            disabled={isPublishDisabled}
             data-testid="publish-submit"
           >
             {busy ? "Publishing…" : `Publish as ${selected}`}

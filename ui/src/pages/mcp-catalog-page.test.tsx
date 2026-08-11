@@ -140,4 +140,29 @@ describe("McpCatalogPage (m73.7)", () => {
     // namespace "shared" appears in the namespace line
     expect(screen.getByText(/namespace:/)).toBeInTheDocument();
   });
+
+  it("byo-oauth connect toast mentions connecting your own account (P1-2)", async () => {
+    const byoEntry = { ...defaultEntry, credentialSource: "byo-oauth" };
+    fakeFetch({ entries: [byoEntry], connectBody: { name: "acme-mcp", namespace: "default" } });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("connect-entry-acme-mcp"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/You'll connect your own account/)).toBeInTheDocument();
+      expect(screen.getByText(/publisher's credentials are never shared/)).toBeInTheDocument();
+    });
+  });
+
+  it("non-byo-oauth connect toast uses shorter message (P1-2)", async () => {
+    // defaultEntry has credentialSource: "shared" — should use the short toast
+    fakeFetch({ connectBody: { name: "acme-mcp", namespace: "default" } });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("connect-entry-acme-mcp"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/is now available in your MCP servers/)).toBeInTheDocument();
+    });
+  });
 });
