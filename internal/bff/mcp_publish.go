@@ -189,7 +189,7 @@ func (s *Server) handleMCPPublish(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated server summary (same shape as the list DTO — no credential material).
 	writeJSON(w, http.StatusOK, MCPPublishResponse{
-		Status: "published",
+		Status: statusPublished,
 		Server: mcpServerSummaryFromRegistry(tr),
 	})
 }

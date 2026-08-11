@@ -768,6 +768,12 @@ func (s *Server) Handler() http.Handler {
 		// DELETE pattern is distinct from POST /api/templates so the two never conflict.
 		authed.HandleFunc("POST /api/templates", s.handlePublishTemplate)
 		authed.HandleFunc("DELETE /api/templates/{kind}/{namespace}/{name}", s.handleUnpublishTemplate)
+		// Cross-tenant template gallery (M74, m74.2, ADR 0068 §2/§3): Go-embedded recipes ∪
+		// published agents visible to the caller's tenant. Gate: caller-scoped SSAR `list
+		// agentdeployments` in callerNS (membership proof — amended-ADR-0011 model; NO BFF-SA
+		// RBAC grant; SelfSubjectAccessReview is a self-check the caller's token authorizes).
+		// The Go 1.22 ServeMux treats "GET /api/templates" as distinct from POST + DELETE above.
+		authed.HandleFunc("GET /api/templates", s.handleTemplates)
 		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
 		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
 		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan

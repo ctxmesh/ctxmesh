@@ -99,6 +99,54 @@ func (s *pgStore) Tombstone(ctx context.Context, kind, ns, name string) error {
 	return nil
 }
 
+// ListTemplates returns the latest non-tombstoned version per (kind, origin_namespace, origin_name) that is
+// visible to the caller's tenant (m74.2, ADR 0068 §2/§3). DISTINCT ON with ORDER BY version DESC picks the
+// latest version per artifact. The leak-safe WHERE never returns private rows. COALESCE($1::text[], '{}')
+// mirrors the m73.3 fix: pgx stdlib binds a nil/empty []string as SQL NULL, and `origin_namespace =
+// ANY(NULL)` is NULL (never TRUE) — the COALESCE forces an empty array so the org clause degrades to no
+// org rows rather than silently dropping it.
+func (s *pgStore) ListTemplates(ctx context.Context, callerNS string, members []string) ([]PublishedArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (kind, origin_namespace, origin_name)
+			kind, origin_namespace, origin_name, version, spec_json, visibility, content_hash, published_at, tombstoned
+		FROM published_artifacts
+		WHERE NOT tombstoned
+		  AND (
+		        (origin_namespace = ANY(COALESCE($1::text[], '{}'::text[])) AND visibility = 'org')
+		     OR (visibility = 'public')
+		     OR (origin_namespace = $2 AND visibility = 'team')
+		  )
+		ORDER BY kind, origin_namespace, origin_name, version DESC`,
+		members, callerNS)
+	if err != nil {
+		return nil, fmt.Errorf("publishedartifact: list templates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []PublishedArtifact
+	for rows.Next() {
+		var (
+			rec     PublishedArtifact
+			specRaw []byte
+		)
+		if sErr := rows.Scan(
+			&rec.Kind, &rec.OriginNamespace, &rec.OriginName, &rec.Version,
+			&specRaw, &rec.Visibility, &rec.ContentHash, &rec.PublishedAt, &rec.Tombstoned,
+		); sErr != nil {
+			return nil, fmt.Errorf("publishedartifact: list templates scan: %w", sErr)
+		}
+		if len(specRaw) > 0 {
+			rec.SpecJSON = append([]byte(nil), specRaw...)
+		}
+		rec.PublishedAt = rec.PublishedAt.UTC()
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("publishedartifact: list templates rows: %w", err)
+	}
+	return out, nil
+}
+
 // GetLatest returns the highest-version non-tombstoned release, and whether one exists. A missing / fully-
 // tombstoned artifact returns (nil, false, nil).
 func (s *pgStore) GetLatest(ctx context.Context, kind, ns, name string) (*PublishedArtifact, bool, error) {

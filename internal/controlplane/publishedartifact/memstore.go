@@ -19,6 +19,7 @@ package publishedartifact
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 )
@@ -85,6 +86,56 @@ func (s *memStore) Tombstone(_ context.Context, kind, ns, name string) error {
 		versions[i].Tombstoned = true
 	}
 	return nil
+}
+
+// ListTemplates implements Store.ListTemplates — the cross-tenant template catalog read (m74.2, ADR 0068 §2/§3).
+// It applies the same leak-safe predicate as the pgStore in Go: latest non-tombstoned version per origin,
+// private rows never returned. members is the full tenant member-namespace set including callerNS.
+func (s *memStore) ListTemplates(_ context.Context, callerNS string, members []string) ([]PublishedArtifact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// latest tracks the winning (highest version) artifact per origin for the visible rows.
+	type latestEntry struct {
+		rec     PublishedArtifact
+		version int
+	}
+	seen := make(map[originKey]latestEntry)
+
+	for k, versions := range s.data {
+		for i := range versions {
+			rec := &versions[i]
+			if rec.Tombstoned {
+				continue
+			}
+			// Leak-safe visibility predicate — mirrors the pgStore SQL exactly.
+			// "private" and any unknown value leave visible=false (zero value) — never returned.
+			var visible bool
+			switch rec.Visibility {
+			case "public":
+				visible = true
+			case "org":
+				visible = slices.Contains(members, k.ns)
+			case "team":
+				visible = k.ns == callerNS
+			}
+			if !visible {
+				continue
+			}
+			// Keep only the latest version per origin.
+			if e, ok := seen[k]; !ok || rec.Version > e.version {
+				out := *rec
+				out.SpecJSON = append([]byte(nil), rec.SpecJSON...)
+				seen[k] = latestEntry{rec: out, version: rec.Version}
+			}
+		}
+	}
+
+	result := make([]PublishedArtifact, 0, len(seen))
+	for _, e := range seen {
+		result = append(result, e.rec)
+	}
+	return result, nil
 }
 
 func (s *memStore) GetLatest(_ context.Context, kind, ns, name string) (*PublishedArtifact, bool, error) {

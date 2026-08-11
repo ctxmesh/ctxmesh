@@ -39,7 +39,13 @@ const stageLabel = "agents.ctxmesh.ai/stage"
 // before publishing to team/registry consumption. Draft agents are excluded from
 // the default list (GET /api/agents) and from team-generate; they are included
 // only when the caller explicitly opts in via ?includeDrafts=true.
-const stageDraft = "draft"
+const (
+	stageDraft = "draft"
+	// statusPublished is the action-outcome string returned by POST /api/agents/{ns}/{name}/publish
+	// and POST /api/mcp/servers/{ns}/{name}/publish on success. Named once so agents_draft.go and
+	// mcp_publish.go agree on the wire value.
+	statusPublished = "published"
+)
 
 // AgentPublishResponse is returned by POST /api/agents/{ns}/{name}/publish on
 // success: the identity of the published agent and the action status. The status
@@ -102,7 +108,7 @@ func (s *Server) handlePublishAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AgentPublishResponse{
 		Namespace: ns,
 		Name:      name,
-		Status:    "published",
+		Status:    statusPublished,
 	})
 }
 

@@ -50,8 +50,7 @@ type PublishedArtifact struct {
 // Store persists and reads published_artifacts. Writes come from POST /api/templates (Publish) and
 // DELETE /api/templates/{kind}/{ns}/{name} (Tombstone), both caller-scoped in the BFF (a caller-scoped
 // GET of the agent authorizes the write — ADR 0068 §1, no BFF-SA RBAC). GetLatest is the fork read
-// (m74.3). The cross-tenant catalog LIST is m74.2 — deliberately NOT on this interface yet, but the record
-// + the discovery index (visibility, origin_namespace) are shaped so it is a cheap add.
+// (m74.3). ListTemplates is the cross-tenant catalog LIST (m74.2, ADR 0068 §2/§3).
 type Store interface {
 	// Publish INSERTs a new immutable release at version = COALESCE(MAX(version),0)+1 for the
 	// (Kind, OriginNamespace, OriginName) group and returns the assigned version. Version, PublishedAt,
@@ -71,4 +70,14 @@ type Store interface {
 	// exists. A missing / fully-tombstoned artifact returns (nil, false, nil) — not an error. The m74.3
 	// fork reads the published spec through this.
 	GetLatest(ctx context.Context, kind, ns, name string) (*PublishedArtifact, bool, error)
+
+	// ListTemplates returns the latest non-tombstoned version per (kind, origin_namespace, origin_name)
+	// that is visible to the caller's tenant (m74.2, ADR 0068 §2/§3). The WHERE is leak-safe:
+	//   - org rows from any member namespace of the caller's tenant
+	//   - public rows from any namespace
+	//   - team rows from callerNS only (own-namespace team visibility)
+	//   - private rows are NEVER returned
+	// members is the full member-namespace set of the caller's tenant (including callerNS); COALESCE
+	// guards against a nil/empty slice binding as SQL NULL (the same m73.3 fix carried forward).
+	ListTemplates(ctx context.Context, callerNS string, members []string) ([]PublishedArtifact, error)
 }
