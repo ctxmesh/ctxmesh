@@ -1258,6 +1258,11 @@ func (s *Server) Handler() http.Handler {
 			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
 			// scope change is written caller-scoped (a viewer can't update it → 403).
 			authed.HandleFunc("POST /api/mcp/org-credential", s.handleSetOrgCredential)
+			// Tiered visibility publish (m73.5, ADR 0067 §5): widen a registered MCP server
+			// to team / org / public visibility. Each tier is gated by a caller-scoped SSAR
+			// (team → update toolregistries in ns; org → update tenants/<tenant>;
+			// public → update tenants cluster-wide). Publish NEVER opens egress (m14.6 B1).
+			authed.HandleFunc("POST /api/mcp/publish", s.handleMCPPublish)
 			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
 			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
 			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
@@ -1287,6 +1292,7 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
 			authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", notImplemented("caller-scoped MCP reject"))
 			authed.Handle("GET /api/catalog", notImplemented("caller-scoped MCP catalog"))
+			authed.Handle("POST /api/mcp/publish", notImplemented("caller-scoped MCP publish"))
 		}
 	}
 
