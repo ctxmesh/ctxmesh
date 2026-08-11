@@ -72,6 +72,15 @@ const (
 	// labelForkContentHash is the sha256 of the canonical source-spec the fork was cut from,
 	// so the staleness compare is a pure hash equality (fork's pinned hash vs latest published).
 	labelForkContentHash = "agents.ctxmesh.ai/fork-content-hash"
+	// labelForkNeedsRebinding marks a forked agent whose ref-closure (ADR 0068 §5) left at
+	// least one same-namespace name-reference unresolvable in the target namespace (a model
+	// route, a non-published tool, or a secret binding — never copied cross-namespace). It is
+	// stamped "true" so the agent detail (m74.6) can surface a degraded/needs-attention state
+	// rather than the user discovering a crash-loop. Metadata-only; no runtime path keys on it.
+	labelForkNeedsRebinding = "agents.ctxmesh.ai/fork-needs-rebinding"
+	// labelValueTrue is the stamped value of labelForkNeedsRebinding (a present-and-"true"
+	// label). Named so the literal is not repeated (goconst).
+	labelValueTrue = "true"
 )
 
 // forkProvenance is the origin identity + pinned version/hash a fork stamps onto its copy.
@@ -189,7 +198,7 @@ func (s *Server) handleForkAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Fork via the shared helper (the ONE create path), caller-scoped, in the caller's ns.
-	resp, fErr := s.forkFromSourceSpec(r.Context(), caller, sourceSpec, prov, callerNS, localName)
+	resp, fErr := s.forkFromSourceSpec(r, caller, sourceSpec, prov, callerNS, localName)
 	if fErr != nil {
 		writeError(w, fErr.status, fErr.msg)
 		return
@@ -256,10 +265,15 @@ func (s *Server) resolveForkOrigin(r *http.Request, caller client.Client, origin
 
 // forkFromSourceSpec is the shared fork helper (ADR 0068 §4): it creates the forked agent
 // through the ONE create path (createAgentFromYAML) in the target namespace under localName,
-// caller-scoped, then stamps the provenance labels on the created AgentDeployment. The
-// source-spec is copied AS-IS — the per-class ref-closure (secrets / tools / prompts) is
-// m74.4, so needsRebinding / unresolvedRefs are returned EMPTY here.
-func (s *Server) forkFromSourceSpec(ctx context.Context, caller client.Client, sourceSpec string, prov forkProvenance, callerNS, localName string) (ForkAgentResponse, *createError) {
+// caller-scoped, then stamps the provenance labels on the created AgentDeployment. AFTER the
+// create it runs the ref-closure pass (m74.4, ADR 0068 §5) over the source-spec — detecting
+// same-namespace name-references that dangle cross-namespace and returning them in
+// needsRebinding / unresolvedRefs, best-effort composing M73 connect for published tools, and
+// stamping a degraded label when any rebinding is needed — so a fork never silently creates a
+// crash-looping agent.
+func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourceSpec string, prov forkProvenance, callerNS, localName string) (ForkAgentResponse, *createError) {
+	ctx := r.Context()
+
 	// Rename the source-spec's agent to the local name so the fork lands under localName (a
 	// cross-namespace fork of "assistant" may be installed locally as "my-assistant"). A map
 	// overlay preserves every field the fork doesn't touch (crucially `tools`, ADR 0017).
@@ -290,6 +304,22 @@ func (s *Server) forkFromSourceSpec(ctx context.Context, caller client.Client, s
 		return ForkAgentResponse{}, pErr
 	}
 
+	// Ref-closure pass (ADR 0068 §5) — AFTER the create: the agent exists first, then we
+	// detect the source-spec's dangling same-namespace refs, best-effort materialize published
+	// tools (compose M73 connect), and flag the rest. A ref-closure error must NOT fail the
+	// fork (the agent is already created) — closeForkRefs degrades to flagging, never 500s.
+	needsRebinding, unresolvedRefs := s.closeForkRefs(r, caller, sourceSpec, callerNS, localName)
+
+	// Degraded status (ADR 0068 §5): a non-empty needsRebinding means the fork can't reach a
+	// model / a tool until the user connects one — stamp the needs-rebinding label so the agent
+	// detail (m74.6) surfaces a degraded/needs-attention state. Best-effort: a label-stamp
+	// failure does not fail the fork (the arrays already carry the honest signal).
+	if len(needsRebinding) > 0 {
+		if lErr := s.stampForkNeedsRebinding(ctx, caller, callerNS, localName); lErr != nil {
+			s.log.Error(lErr, "fork: stamping needs-rebinding label failed", "namespace", callerNS, "name", localName)
+		}
+	}
+
 	// Re-read the just-created (now labelled) agent for the summary — parity with what landed.
 	summary := AgentSummary{Name: localName, Namespace: callerNS}
 	var forked agentsv1alpha1.AgentDeployment
@@ -301,8 +331,8 @@ func (s *Server) forkFromSourceSpec(ctx context.Context, caller client.Client, s
 		Status:         "forked",
 		Agent:          summary,
 		Created:        created,
-		NeedsRebinding: []string{}, // m74.4 ref-closure — empty in m74.3 (source-spec copied as-is).
-		UnresolvedRefs: []string{},
+		NeedsRebinding: needsRebinding,
+		UnresolvedRefs: unresolvedRefs,
 	}, nil
 }
 
@@ -329,6 +359,26 @@ func (s *Server) stampForkProvenance(ctx context.Context, caller client.Client, 
 		return classifyApplyError(pErr, agentDeploymentKind, name)
 	}
 	return nil
+}
+
+// stampForkNeedsRebinding patches the degraded-status label (labelForkNeedsRebinding="true")
+// onto the forked AgentDeployment, caller-scoped (ADR 0068 §5). A merge patch touches only the
+// label — it never clobbers spec/status. Called only when the ref-closure left at least one
+// unresolvable rebinding, so the agent detail can surface a needs-attention state. Errors are
+// returned (not swallowed) for the caller to log; a stamp failure does not fail the fork.
+func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string) error {
+	var ad agentsv1alpha1.AgentDeployment
+	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
+		return gErr
+	}
+	base := ad.DeepCopy()
+	lbls := ad.GetLabels()
+	if lbls == nil {
+		lbls = map[string]string{}
+	}
+	lbls[labelForkNeedsRebinding] = labelValueTrue
+	ad.SetLabels(lbls)
+	return caller.Patch(ctx, &ad, client.MergeFrom(base))
 }
 
 // forkOriginMatches reports whether an existing local agent is a fork of the SAME origin as
