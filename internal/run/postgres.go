@@ -169,6 +169,11 @@ func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 	return &pgStore{db: db, pollInterval: 250 * time.Millisecond, now: time.Now}, nil
 }
 
+// Durable reports that the Postgres store IS durable across a pod restart (M75, m75.1, ADR 0069 §1) — so
+// the share-link mint (which refuses a non-durable backing store) is permitted against it. This is the
+// Postgres side of the optional DurableStore capability the BFF type-asserts.
+func (p *pgStore) Durable() bool { return true }
+
 func (p *pgStore) Create(r *Run) error {
 	ctx := context.Background()
 	msgs, err := json.Marshal(r.Messages)
