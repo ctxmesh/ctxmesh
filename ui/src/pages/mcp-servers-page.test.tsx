@@ -174,3 +174,86 @@ describe("McpServersPage delete (m26.4)", () => {
     expect(screen.queryByTestId("delete-mcp-scalekit-mcp-server")).toBeNull();
   });
 });
+
+describe("McpServersPage publish + badges (m73.7)", () => {
+  const rowWithBadges: McpRow & { visibility?: string; credentialSource?: string } = {
+    ...defaultRow,
+    visibility: "team",
+    credentialSource: "byo-oauth",
+  };
+
+  function publishFetch(opts?: { publishStatus?: number }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const path = url.split("?")[0];
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({
+            ok,
+            status,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          } as Response);
+
+        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (path.startsWith("/api/capabilities"))
+          return j({
+            namespace: "",
+            allowed: { agentregistries: { create: true, update: true, delete: true } },
+          });
+        if (path === "/api/mcpservers" && method === "GET")
+          return j({ items: [rowWithBadges] });
+        if (path === "/api/mcp/publish" && method === "POST") {
+          const status = opts?.publishStatus ?? 200;
+          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          return j({
+            name: defaultRow.name,
+            namespace: defaultRow.namespace,
+            visibility: "org",
+          });
+        }
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows visibility and credentialSource badges on the server row", async () => {
+    publishFetch();
+    renderPage();
+
+    expect(
+      await screen.findByTestId(`visibility-${defaultRow.name}`),
+    ).toHaveTextContent("team");
+    expect(screen.getByTestId(`cred-source-${defaultRow.name}`)).toHaveTextContent(
+      "byo-oauth",
+    );
+  });
+
+  it("opens publish dialog and submits, showing success toast", async () => {
+    publishFetch();
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    // The publish dialog opens with team selected by default
+    expect(await screen.findByTestId("publish-option-org")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("publish-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Visibility updated/)).toBeInTheDocument();
+    });
+  });
+
+  it("shows honest 403 error on publish forbidden", async () => {
+    publishFetch({ publishStatus: 403 });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    fireEvent.click(await screen.findByTestId("publish-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Publish failed/)).toBeInTheDocument();
+    });
+  });
+});

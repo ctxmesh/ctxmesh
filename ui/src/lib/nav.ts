@@ -1,6 +1,8 @@
 import {
   Bell,
+  BookOpen,
   Boxes,
+  Building2,
   Coins,
   Database,
   FlaskConical,
@@ -14,12 +16,11 @@ import {
   ScrollText,
   Shield,
   SlidersHorizontal,
+  Store,
   TestTube2,
   Users,
   Waypoints,
   Wrench,
-  BookOpen,
-  Building2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -53,7 +54,8 @@ export type Milestone =
   | "M67"
   | "M68"
   | "M69"
-  | "M70";
+  | "M70"
+  | "M73";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -235,6 +237,16 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: BookOpen,
         milestone: "M17",
         route: "/tools/catalog",
+      },
+      {
+        // MCP Catalog (m73.7) — discover cross-namespace MCP servers (team/org/public)
+        // and connect them into your namespace. Read-open: any caller can browse;
+        // Connect materializes a copy server-side (no secret shared in the catalog).
+        id: "mcp-catalog",
+        label: "MCP Catalog",
+        icon: Store,
+        milestone: "M73",
+        route: "/tools/mcp-catalog",
       },
     ],
   },
