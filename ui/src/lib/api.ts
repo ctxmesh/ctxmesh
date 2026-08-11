@@ -1876,6 +1876,53 @@ export interface EvalGatedMetricResponse {
   percent: number;
 }
 
+// --- Run Shares (m75.4) -------------------------------------------------------
+// POST /api/runs/{id}/shares → CreateRunShareResponse (token shown ONCE)
+// GET /api/runs/{id}/shares → RunShare[]
+// DELETE /api/runs/{id}/shares/{shareId} → 204
+// GET /api/shared/runs/{token} → SharedRunView (NO auth — plain fetch)
+
+export interface CreateRunShareRequest {
+  includeContent: boolean;
+  ttlHours?: number;
+}
+
+export interface CreateRunShareResponse {
+  id: string;
+  token: string; // returned ONCE — surface immediately, never retrievable again
+  expiresAt: string; // RFC3339
+  includeContent: boolean;
+}
+
+export interface RunShare {
+  id: string;
+  createdAt: string; // RFC3339
+  expiresAt: string; // RFC3339
+  revoked: boolean;
+  includeContent: boolean;
+  // NOTE: NO token — the backend never returns the token after creation
+}
+
+// SharedRunView is the public, unauthenticated projection (GET /api/shared/runs/{token}).
+// Always present: id, namespace, agent, status, timestamps, messageCount, messageRoles, errorCategory.
+// Present ONLY when includeContent=true: input, messages, error.
+// NEVER contains: traceId, lineage.
+export interface SharedRunView {
+  id: string;
+  namespace: string;
+  agent: string;
+  status: string;
+  createdAt: string; // RFC3339
+  updatedAt: string; // RFC3339
+  messageCount: number;
+  messageRoles: string[];
+  errorCategory?: string;
+  // Content fields — only when includeContent=true
+  input?: string;
+  messages?: { role: string; content: string }[];
+  error?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -4893,5 +4940,96 @@ export const api = {
       );
     }
     return (await res.json()) as CheckRequirementsResponse;
+  },
+
+  // createRunShare creates a share link for a run (POST /api/runs/{id}/shares).
+  // The token is returned ONCE — surface it immediately to the user, it is never
+  // retrievable again. ttlHours defaults to 168 (7 days) when omitted.
+  createRunShare: async (
+    runId: string,
+    includeContent: boolean,
+    ttlHours?: number,
+    signal?: AbortSignal,
+  ): Promise<CreateRunShareResponse> => {
+    const body: CreateRunShareRequest = { includeContent };
+    if (ttlHours && ttlHours > 0) body.ttlHours = ttlHours;
+    const res = await apiFetch(
+      `/api/runs/${encodeURIComponent(runId)}/shares`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `createRunShare failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as CreateRunShareResponse;
+  },
+
+  // listRunShares lists the shares for a run (GET /api/runs/{id}/shares).
+  // NO token is returned — the backend hides it after creation.
+  listRunShares: async (
+    runId: string,
+    signal?: AbortSignal,
+  ): Promise<RunShare[]> => {
+    const res = await apiFetch(
+      `/api/runs/${encodeURIComponent(runId)}/shares`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listRunShares failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as { shares?: RunShare[]; items?: RunShare[] } | RunShare[];
+    if (Array.isArray(data)) return data;
+    return data.shares ?? data.items ?? [];
+  },
+
+  // revokeRunShare revokes a share (DELETE /api/runs/{id}/shares/{shareId}).
+  revokeRunShare: async (
+    runId: string,
+    shareId: string,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await apiFetch(
+      `/api/runs/${encodeURIComponent(runId)}/shares/${encodeURIComponent(shareId)}`,
+      { method: "DELETE", signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `revokeRunShare failed (${res.status})`),
+        res.status,
+      );
+    }
+  },
+
+  // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).
+  // This is a NO-AUTH fetch — it MUST NOT send an Authorization header.
+  // The public page at /shared/runs/:token uses this without a logged-in session.
+  // 404 (uniform) = bad/expired/revoked token — show friendly unavailable message.
+  getSharedRun: async (
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<SharedRunView> => {
+    // Plain fetch — no apiFetch (which would add Authorization: Bearer).
+    // This endpoint is public and must work completely without auth.
+    const res = await fetch(
+      `/api/shared/runs/${encodeURIComponent(token)}`,
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `shared run unavailable (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as SharedRunView;
   },
 };

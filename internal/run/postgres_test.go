@@ -752,3 +752,37 @@ func TestPostgresStore_ListWaitingApproval(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+// TestPostgresStore_GetByTraceID proves the m75.5 trace-id fallback resolves against REAL Postgres —
+// the share mint's by-traceId path (the trace-detail page keys a run by its traceId, distinct from
+// run.ID). It creates a run whose ID and TraceID are DISTINCT, then asserts: GetByTraceID(traceID)
+// finds it (its ID matches — the SELECT keys on the trace_id column, not id), GetByTraceID(the run.ID)
+// returns nil (the id is NOT a trace_id), and GetByTraceID("nonexistent") returns (nil, nil) — a miss
+// is not an error. This is the real-SQL coverage a memstore test cannot give (M73/M74 shipped
+// real-PG-only "simple query" bugs — the column keyed here is exercised against Postgres, not mocked).
+func TestPostgresStore_GetByTraceID(t *testing.T) {
+	s := openPGStore(t)
+
+	const runID = "run-gbt-internal"
+	const traceID = "trace-gbt-distinct" // deliberately != runID
+	r := New(runID, "ns", "agent-x", nil, "", t0)
+	r.TraceID = traceID
+	require.NoError(t, s.Create(r))
+
+	// GetByTraceID(traceID) → the run (keyed on the trace_id column).
+	got, err := s.GetByTraceID(traceID)
+	require.NoError(t, err)
+	require.NotNil(t, got, "GetByTraceID must find the run by its trace_id")
+	assert.Equal(t, runID, got.ID, "the resolved run's ID is the real run.ID, not the traceId")
+	assert.Equal(t, traceID, got.TraceID)
+
+	// GetByTraceID(the run.ID) → nil: the id is NOT a trace_id (the two columns are distinct).
+	byRunID, err := s.GetByTraceID(runID)
+	require.NoError(t, err)
+	assert.Nil(t, byRunID, "the run.ID is not a trace_id — GetByTraceID(run.ID) must miss")
+
+	// GetByTraceID("nonexistent") → (nil, nil): a miss is not an error.
+	none, err := s.GetByTraceID("nonexistent")
+	require.NoError(t, err, "a trace-id miss is (nil, nil), never an error")
+	assert.Nil(t, none)
+}

@@ -291,3 +291,76 @@ func TestCreateShare_StoreNotConfiguredIs501(t *testing.T) {
 	rec := doShareRequest(t, s, http.MethodPost, "/api/runs/run-share-1/shares", `{}`)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 }
+
+// seededDurableRunStoreWithTraceID returns a durable-reporting run store holding a run whose
+// run.ID and run.TraceID are DISTINCT — exactly the production case where the trace-detail page
+// (/traces/:id) passes the traceId to the Share button rather than the internal run.ID.
+func seededDurableRunStoreWithTraceID(t *testing.T) (runStore run.Store, runID, traceID string) {
+	t.Helper()
+	base := run.NewMemStore()
+	runID = "run-internal-id-99"
+	traceID = "trace-distinct-id-99" // deliberately different from runID
+	rn := run.New(runID, "team-a", "assistant", json.RawMessage(`{"prompt":"hi"}`), "conv-trace", time.Now())
+	rn.TraceID = traceID
+	rn.CallerUsername = "alice@example.com"
+	require.NoError(t, base.Create(rn))
+	return durableMemRunStore{base}, runID, traceID
+}
+
+// TestCreateShare_MintByTraceID is the core regression fix (m75.5): the Share button on the
+// trace-detail page (/traces/:id) passes the run's traceId — which is DISTINCT from run.ID.
+// The mint must resolve the run by traceId when the direct run.ID lookup fails, and the stored
+// shared_runs.run_id must be the real run.ID (not the traceId) so the public read resolves it.
+func TestCreateShare_MintByTraceID(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	audit := &captureAuditStore{}
+	runStore, runID, traceID := seededDurableRunStoreWithTraceID(t)
+	s := shareTestServer(t, store, audit, runStore, nil)
+
+	// Mint using the traceId (the path the trace-detail page follows).
+	rec := doShareRequest(t, s, http.MethodPost, "/api/runs/"+traceID+"/shares", `{"includeContent":false}`)
+	require.Equal(t, http.StatusCreated, rec.Code, "minting by traceId must succeed: "+rec.Body.String())
+
+	var resp CreateShareResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+
+	// Critical: the stored run_id must be the real run.ID, NOT the traceId.
+	got, ok, err := store.GetByTokenHash(context.Background(), hashShareToken(resp.Token))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, runID, got.RunID,
+		"stored run_id must be the real run.ID — not the traceId — so the public read resolves it")
+	assert.NotEqual(t, traceID, got.RunID,
+		"the traceId must NEVER be stored as run_id in shared_runs")
+}
+
+// TestCreateShare_MintByRunIDStillWorks proves the existing by-run.ID path is unaffected by the
+// traceId fallback — a caller who already has the internal run.ID can still mint normally.
+func TestCreateShare_MintByRunIDStillWorks(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	runStore, runID, _ := seededDurableRunStoreWithTraceID(t)
+	s := shareTestServer(t, store, &captureAuditStore{}, runStore, nil)
+
+	rec := doShareRequest(t, s, http.MethodPost, "/api/runs/"+runID+"/shares", `{}`)
+	require.Equal(t, http.StatusCreated, rec.Code, "minting by run.ID must still work: "+rec.Body.String())
+
+	var resp CreateShareResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	got, ok, err := store.GetByTokenHash(context.Background(), hashShareToken(resp.Token))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, runID, got.RunID, "stored run_id must be the real run.ID when resolved by run.ID")
+}
+
+// TestCreateShare_BadIDOrTraceID404 proves that an id that is neither a known run.ID nor a known
+// traceId returns 404 — the uniform "run not found" semantics are preserved.
+func TestCreateShare_BadIDOrTraceID404(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	runStore, _, _ := seededDurableRunStoreWithTraceID(t)
+	s := shareTestServer(t, store, &captureAuditStore{}, runStore, nil)
+
+	rec := doShareRequest(t, s, http.MethodPost, "/api/runs/totally-unknown-id/shares", `{}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an unknown id/traceId must return 404")
+}

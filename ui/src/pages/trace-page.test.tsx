@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { TracePage } from "@/pages/trace-page";
+import { ToastProvider } from "@/components/kit";
 import type { SpanSummary } from "@/lib/api";
 
 // TracePage — m16.7 tests.
@@ -86,11 +87,13 @@ function installFetch(opts: {
 
 function renderPage(traceId = "t1") {
   return render(
-    <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
-      <Routes>
-        <Route path="/traces/:id" element={<TracePage />} />
-      </Routes>
-    </MemoryRouter>,
+    <ToastProvider>
+      <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
+        <Routes>
+          <Route path="/traces/:id" element={<TracePage />} />
+        </Routes>
+      </MemoryRouter>
+    </ToastProvider>,
   );
 }
 

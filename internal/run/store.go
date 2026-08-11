@@ -67,6 +67,11 @@ type Store interface {
 	Create(r *Run) error
 	// Get returns a COPY of the run (callers must not mutate the store's object).
 	Get(id string) (*Run, error)
+	// GetByTraceID returns a COPY of the run whose TraceID matches traceID, or (nil, nil) if none
+	// is found (not an error — a nil run means "not found by trace id"). Callers must not mutate
+	// the returned run. This is the fallback resolution path for the share mint, which is keyed by
+	// the trace-detail page's traceId rather than the internal run.ID.
+	GetByTraceID(traceID string) (*Run, error)
 	// Update applies fn to the stored run atomically and returns a copy. A non-nil error from fn
 	// (e.g. an illegal Transition) aborts the update, leaving the run unchanged.
 	Update(id string, fn func(*Run) error) (*Run, error)
@@ -319,6 +324,17 @@ func (m *memStore) Get(id string) (*Run, error) {
 		return nil, ErrNotFound
 	}
 	return cloneRun(e.run), nil
+}
+
+func (m *memStore) GetByTraceID(traceID string) (*Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.entries {
+		if e.run.TraceID == traceID {
+			return cloneRun(e.run), nil
+		}
+	}
+	return nil, nil // not found — not an error
 }
 
 func (m *memStore) Update(id string, fn func(*Run) error) (*Run, error) {
