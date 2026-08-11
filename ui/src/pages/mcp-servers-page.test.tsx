@@ -256,4 +256,75 @@ describe("McpServersPage publish + badges (m73.7)", () => {
       expect(screen.getByText(/Publish failed/)).toBeInTheDocument();
     });
   });
+
+  it("public publish requires confirm checkbox before Publish button is enabled (P1-3)", async () => {
+    publishFetch();
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    // Select public tier
+    fireEvent.click(screen.getByTestId("publish-option-public").querySelector("input")!);
+
+    // Warning should appear
+    expect(await screen.findByTestId("publish-public-warning")).toBeInTheDocument();
+    // Publish button should be disabled until checkbox is checked
+    const submitBtn = screen.getByTestId("publish-submit");
+    expect(submitBtn).toBeDisabled();
+
+    // Check the confirm checkbox
+    fireEvent.click(screen.getByTestId("publish-public-confirm"));
+    expect(submitBtn).not.toBeDisabled();
+  });
+
+  it("shared-cred warning renders in publish dialog (P1-3)", async () => {
+    const sharedCredRow: McpRow & { visibility?: string; credentialSource?: string } = {
+      ...defaultRow,
+      visibility: "team",
+      credentialSource: "shared",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const path = url.split("?")[0];
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (path.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentregistries: { create: true, update: true, delete: true } } });
+        if (path === "/api/mcpservers" && method === "GET") return j({ items: [sharedCredRow] });
+        return j({}, false, 404);
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    expect(await screen.findByTestId("publish-shared-cred-warning")).toBeInTheDocument();
+    expect(screen.getByTestId("publish-shared-cred-warning")).toHaveTextContent(
+      /widening visibility also widens access to that credential/,
+    );
+  });
+
+  it("SetOrgCredentialDialog caution line renders (P1-1)", async () => {
+    recordingFetch();
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`org-cred-${defaultRow.name}`));
+    expect(await screen.findByTestId("org-cred-caution")).toBeInTheDocument();
+    expect(screen.getByTestId("org-cred-caution")).toHaveTextContent(
+      /If teammates should connect their own accounts instead, use Publish/,
+    );
+  });
+
+  it("publish dialog shows current visibility and safety subtitle (P1-3)", async () => {
+    publishFetch();
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    // Safety subtitle
+    expect(await screen.findByText(/teammates discover it and connect their OWN accounts/)).toBeInTheDocument();
+    // Current visibility shown (rowWithBadges has visibility: "team")
+    expect(screen.getByTestId("publish-current-visibility")).toHaveTextContent("Currently: team");
+  });
 });

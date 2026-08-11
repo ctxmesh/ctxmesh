@@ -184,10 +184,13 @@ export function McpCatalogPage() {
           description: `${entry.name} is already in your namespace.`,
         });
       } else {
+        const isByoOauth = entry.credentialSource === "byo-oauth";
         toast({
           variant: "success",
           title: "Connected",
-          description: `${entry.name} is now available in your MCP servers.`,
+          description: isByoOauth
+            ? `${entry.name} is now in your MCP servers. You'll connect your own account the first time an agent uses it — the publisher's credentials are never shared.`
+            : `${entry.name} is now available in your MCP servers.`,
         });
         navigate("/tools/mcp-servers");
       }
