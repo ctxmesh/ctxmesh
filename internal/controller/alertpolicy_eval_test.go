@@ -367,3 +367,65 @@ func TestAlertPolicy_ForecastExceededFires(t *testing.T) {
 	assert.False(t, csLo.Firing, "forecastExceeded must NOT fire when the projection is below the cap")
 	assert.Equal(t, 0, alertsLo.count(ns), "no alert below the cap")
 }
+
+// fakeEvalApprovalLister is a minimal ApprovalRunLister for the envtest approvalWaiting test: it returns
+// a fixed set of plan_approval-waiting runs.
+type fakeEvalApprovalLister struct {
+	runs []WaitingApprovalRun
+}
+
+func (l *fakeEvalApprovalLister) ListWaitingApproval(_ context.Context, _ string) ([]WaitingApprovalRun, error) {
+	return append([]WaitingApprovalRun(nil), l.runs...), nil
+}
+
+// TestAlertPolicy_ApprovalWaitingFullReconcile exercises the FULL Reconcile path (M75, ADR 0069 §3): a
+// policy with an approvalWaiting condition selecting an agent, with TWO runs of that agent waiting on
+// plan_approval, fires TWO per-run alerts (per-run dedup — the second waiting run MUST fire) through the
+// real reconcile against the envtest API server; a re-reconcile appends none (dedup holds).
+func TestAlertPolicy_ApprovalWaitingFullReconcile(t *testing.T) {
+	const (
+		ns     = "default"
+		agent  = "ap-eval-approval-agent"
+		policy = "ap-eval-approval-policy"
+	)
+
+	// The selected agent must exist for selectedAgents to match it by name.
+	d := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, d))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
+
+	spec := agentsv1beta1.AlertPolicySpec{
+		Selector:   agentsv1beta1.AlertSelector{Names: []string{agent}},
+		Conditions: []agentsv1beta1.AlertCondition{{Name: "await", Type: condTypeApprovalWaiting}},
+		Route:      agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policy, ns, spec)
+
+	alerts := newFakeAlertStore()
+	r := apEvalReconciler(alerts, nil)
+	r.Runs = &fakeEvalApprovalLister{runs: []WaitingApprovalRun{
+		{ID: "eval-run-1", Agent: agent, Message: "approve plan 1"},
+		{ID: "eval-run-2", Agent: agent, Message: "approve plan 2"},
+	}}
+	r.ConsoleURL = "https://console.example.com"
+
+	// First reconcile: BOTH waiting runs fire (per-run dedup — the second run is not dropped).
+	reconcileAPEval(t, r, policy, ns)
+	require.Equal(t, 2, alerts.openCount(ns),
+		"both simultaneously-waiting runs must fire a per-run approval-waiting alert")
+
+	// Second reconcile with the same runs still waiting: NO new alert (dedup by (policy, condition, runID)).
+	reconcileAPEval(t, r, policy, ns)
+	assert.Equal(t, 2, alerts.count(ns), "a re-reconcile must not re-fire while both runs still wait")
+
+	// One run leaves the waiting state: its alert resolves, the other stays open.
+	r.Runs = &fakeEvalApprovalLister{runs: []WaitingApprovalRun{
+		{ID: "eval-run-2", Agent: agent, Message: "approve plan 2"},
+	}}
+	reconcileAPEval(t, r, policy, ns)
+	assert.Equal(t, 1, alerts.openCount(ns), "the departed run's alert must resolve; the still-waiting one stays open")
+	assert.Equal(t, 2, alerts.count(ns), "no new alert appended on the resolve reconcile")
+}

@@ -61,8 +61,33 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/run"
 	// +kubebuilder:scaffold:imports
 )
+
+// approvalRunLister adapts the durable run store's ListWaitingApproval to the controller's
+// ApprovalRunLister (M75, ADR 0069 §3): it maps run.WaitingApproval → controller.WaitingApprovalRun so
+// the AlertPolicy reconciler stays decoupled from the run package. It exposes ONLY the read — no run
+// mutation reaches the reconciler.
+type approvalRunLister struct {
+	store interface {
+		ListWaitingApproval(ctx context.Context, namespace string) ([]run.WaitingApproval, error)
+	}
+}
+
+func (a approvalRunLister) ListWaitingApproval(
+	ctx context.Context, namespace string,
+) ([]controller.WaitingApprovalRun, error) {
+	waiting, err := a.store.ListWaitingApproval(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]controller.WaitingApprovalRun, 0, len(waiting))
+	for _, w := range waiting {
+		out = append(out, controller.WaitingApprovalRun{ID: w.ID, Agent: w.Agent, Message: w.Message})
+	}
+	return out, nil
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -404,17 +429,36 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)
 	}
+	// The durable run store over the manager's existing cpDB (M75, ADR 0069 §3): the AlertPolicy
+	// approvalWaiting condition reads runs paused on plan_approval to fire the HITL notification. It is
+	// the SAME Postgres run store the BFF/run-worker build from cpDB — a read-only wiring, no config
+	// change, no new RBAC. Nil-safe: if it fails to build, approval-waiting eval is simply disabled
+	// (Runs stays nil) and the rest of the reconciler is unaffected.
+	var approvalRuns controller.ApprovalRunLister
+	if runStore, runErr := run.NewPostgresStore(context.Background(), cpDB); runErr != nil {
+		setupLog.Error(runErr, "run store for approvalWaiting notifications unavailable — "+
+			"HITL approval-waiting alerts disabled (the rest of alerting is unaffected)")
+	} else if lister, ok := runStore.(interface {
+		ListWaitingApproval(ctx context.Context, namespace string) ([]run.WaitingApproval, error)
+	}); ok {
+		approvalRuns = approvalRunLister{store: lister}
+	}
+
 	// AlertPolicy reconciler (M70, ADR 0063 D2): evaluates each policy condition, fires once per
 	// false→true transition (dedup in .status), and PERSISTS fired alerts to the durable alerts ledger
 	// + audit_log (m70.4). Stores are the manager's existing cpDB (mirrors the regression detector +
 	// KnowledgeBase wiring); all nil-safe if cpDB were absent. NOTIFICATION dispatch (webhook/console
-	// feed) is a separate task (m70.5). The reconciler reads Tenants for the budgetSoft condition.
+	// feed) is m70.5. The reconciler reads Tenants for the budgetSoft condition. Runs + ConsoleURL are
+	// the M75 approvalWaiting condition (ADR 0069 §3): the run store lists plan_approval-waiting runs
+	// and ConsoleURL prefixes the notification's deep-link to the AUTHENTICATED console approval view.
 	if err := (&controller.AlertPolicyReconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Alerts:  alertstore.NewPostgresStore(cpDB),
-		Rollups: costrollup.NewPostgresStore(cpDB),
-		Audit:   auditlog.NewPostgresStore(cpDB),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Alerts:     alertstore.NewPostgresStore(cpDB),
+		Rollups:    costrollup.NewPostgresStore(cpDB),
+		Audit:      auditlog.NewPostgresStore(cpDB),
+		Runs:       approvalRuns,
+		ConsoleURL: os.Getenv("CONSOLE_URL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")
 		os.Exit(1)
