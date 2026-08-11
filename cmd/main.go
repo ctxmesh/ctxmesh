@@ -55,6 +55,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
@@ -362,6 +363,11 @@ func main() {
 	}
 	if err := (&controller.TenantReconciler{
 		Client: mgr.GetClient(),
+		// Namespace→tenant membership mirror (m73.3, ADR 0067 §6): the reconcile mirrors the tenant's
+		// owned member namespaces into a small (namespace, tenant) index so the m73.4 catalog resolves
+		// membership without the BFF reading namespaces (ADR 0011). The manager's existing cpDB store
+		// (mirrors the KnowledgeBase / regression-detector wiring); nil-safe if cpDB were absent.
+		NamespaceTenant: namespacetenant.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)

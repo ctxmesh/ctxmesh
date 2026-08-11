@@ -66,6 +66,14 @@ const (
 	// through to per-user consent, preserving today's behavior).
 	mcpScopeLabel = "mcp.ctxmesh.ai/scope"
 	scopeOrgValue = "org"
+	// mcpCredentialSourceLabel / credentialSourceSharedValue MUST match
+	// internal/bff.labelMCPCredentialSource + its credSourceShared value. Per ADR 0067 the
+	// single `scope` label was split into two axes; credential-source is the REAL directive
+	// for releasing the admin-set shared credential (the axis isOrgScoped actually cares
+	// about). The legacy `scope == org` read is kept as a dual-read fallback for the
+	// deprecation window (a pre-m73 row carries only the scope label).
+	mcpCredentialSourceLabel    = "mcp.ctxmesh.ai/credential-source"
+	credentialSourceSharedValue = "shared"
 )
 
 const (
@@ -134,14 +142,16 @@ func run(log logr.Logger) error {
 		}
 		return tr.Annotations[mcpAuthTypeAnnotation] == oauthAuthType, nil
 	}
-	// isOrgScoped drives org-scope resolution (ADR 0029 §2): when the invoker has no
-	// personal grant and the server is EXPLICITLY org-scoped, resolve the shared credential.
+	// isOrgScoped drives shared-credential resolution (ADR 0029 §2, refined by ADR 0067): when the
+	// invoker has no personal grant and the server's credential-source is `shared`, resolve the
+	// admin-set shared credential. Per ADR 0067 credential-source is the real axis; the legacy
+	// `scope == org` read is kept as a dual-read fallback for the deprecation window (orgScopedFromLabels).
 	isOrgScoped := func(ctx context.Context, ns, server string) (bool, error) {
 		tr, err := getTR(ctx, ns, server)
 		if err != nil || tr == nil {
 			return false, err
 		}
-		return tr.Labels[mcpScopeLabel] == scopeOrgValue, nil
+		return orgScopedFromLabels(tr.Labels), nil
 	}
 
 	// The credential backend is CONFIG-SELECTED per the CredentialStore / ClusterCredentialStore
@@ -269,6 +279,18 @@ func run(log logr.Logger) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// orgScopedFromLabels reports whether a server's store-record labels direct the runtime to release
+// the admin-set SHARED credential (ADR 0029 §2, refined by ADR 0067). It DUAL-READs the two-axis
+// taxonomy: the authoritative signal is credentialSource == shared; the legacy scope == org read is
+// the fallback for the deprecation window, so a pre-m73 row (scope-only) AND a post-migration row
+// (credential-source only) AND a dual-write-window row (both) all resolve the shared credential. A
+// private/byo-oauth/none server, or one with neither label, is not org-scoped (fail-closed to
+// per-user consent). Extracted as a pure function so the survives-the-relabel proof is a plain unit test.
+func orgScopedFromLabels(labels map[string]string) bool {
+	return labels[mcpCredentialSourceLabel] == credentialSourceSharedValue ||
+		labels[mcpScopeLabel] == scopeOrgValue
 }
 
 // serverMTLS loads the mTLS server config from mounted cert/key/CA files.

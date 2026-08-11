@@ -882,7 +882,14 @@ type MCPServerSummary struct {
 	AuthType string `json:"authType,omitempty"`
 	// Scope is the visibility/credential scope (ADR 0029): "public", "personal", or
 	// "org". Absent-label servers are grandfathered to "org" here (visibility only).
+	// Kept for back-compat; new consumers should prefer Visibility + CredentialSource.
 	Scope string `json:"scope"`
+	// Visibility is the ADR 0067 §1 visibility axis: "private", "team", "org", or
+	// "public". Populated via dual-read from the new labels or from the legacy Scope.
+	Visibility string `json:"visibility"`
+	// CredentialSource is the ADR 0067 §2 credential axis: "byo-oauth", "shared", or
+	// "none". Populated via dual-read from the new labels or from the legacy Scope.
+	CredentialSource string `json:"credentialSource"`
 }
 
 // RegisterMCPServerResponse is returned by POST /api/mcpservers on success: the
