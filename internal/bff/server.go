@@ -739,10 +739,22 @@ func (s *Server) Handler() http.Handler {
 		// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
 		// beside the detail GET. It needs the scheme (to decode/apply manifests); when
 		// the scheme is absent the route serves an honest 501 below.
+		// Fork = install-from-template = the ONE create path (M74, m74.3, ADR 0068 §4/§6):
+		// duplicate an OWN agent in-place or install a cross-namespace PUBLISHED one, always
+		// into the CALLER's own namespace, stamping fork-origin provenance. The origin
+		// source-spec is resolved caller-scoped (own-ns live GET) or from the published
+		// snapshot (cross-ns, with a discoverability re-check gate → 404), then forked through
+		// createAgentFromYAML — no parallel fork subsystem. Like the edit route it needs the
+		// scheme (to decode/apply the expanded manifests), so it shares this scheme guard —
+		// absent scheme → an honest 501 for both. The Go 1.22 ServeMux treats this sub-path
+		// pattern as MORE SPECIFIC than the {ns}/{name} GET/PUT/DELETE routes below, so it
+		// never shadows them.
 		if s.scheme != nil {
 			authed.HandleFunc("PUT /api/agents/{ns}/{name}", s.handleUpdateAgent)
+			authed.HandleFunc("POST /api/agents/{ns}/{name}/fork", s.handleForkAgent)
 		} else {
 			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
+			authed.Handle("POST /api/agents/{ns}/{name}/fork", notImplemented("agent fork"))
 		}
 		// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
 		// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
