@@ -15,6 +15,10 @@ import type { AuditEvent } from "@/lib/api";
 //   • 501 degrades calmly to audit-unavailable (NOT an error) — store not configured
 //   • 403 surfaces the forbidden state (NOT a fake empty list) — no operator persona
 //   • 500 surfaces a visible, retryable error
+//   m76.5 H1: action + kind are Select dropdowns; "Any" clears the filter
+//   m76.5 H2: from/to datetime-local inputs send RFC3339 query params
+//   m76.5 H3: row-click opens the detail drawer with the full detail map + trace link
+//   m76.5 H4: requiresWrite is gone (nav.ts rename — verified in nav.test.tsx)
 
 function event(over: Partial<AuditEvent> = {}): AuditEvent {
   return {
@@ -107,23 +111,29 @@ describe("AuditPage — basic rendering (m63.5)", () => {
     expect(screen.getByLabelText("Filter by resource kind")).toBeInTheDocument();
   });
 
-  it("a row's trace_id links to /traces/:id; a row without one shows no link", async () => {
+  it("a row's trace_id is surfaced as a View-run link in the detail drawer (H3)", async () => {
     installFetch(() => ({
       ok: true,
       body: {
         items: [
-          event({ id: 10, traceId: "trace-abc" }),
-          event({ id: 11, traceId: undefined }),
+          event({ id: 10, actor: "alice", traceId: "trace-abc" }),
+          event({ id: 11, actor: "bob", traceId: undefined }),
         ],
         nextCursor: "",
       },
     }));
 
     renderPage();
+    await screen.findByText("alice");
 
+    // The trace link is now in the drawer footer — open the drawer first.
+    fireEvent.click(screen.getByText("alice"));
     const link = await screen.findByTestId("audit-trace-link-10");
     expect(link).toHaveAttribute("href", "/traces/trace-abc");
-    // A row with no trace has no "View run" link.
+    // Close the drawer by clicking the X.
+    fireEvent.click(screen.getByRole("button", { name: /Close panel/ }));
+
+    // The row with no trace has no "View run" link.
     expect(screen.queryByTestId("audit-trace-link-11")).not.toBeInTheDocument();
   });
 });
@@ -131,7 +141,7 @@ describe("AuditPage — basic rendering (m63.5)", () => {
 // ── Filters → query params ────────────────────────────────────────────────────
 
 describe("AuditPage — filters issue correct server-side params (m63.5)", () => {
-  it("actor + action + kind filters send ?actor=&action=&kind=", async () => {
+  it("actor filter sends ?actor=", async () => {
     const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
 
     renderPage();
@@ -139,6 +149,17 @@ describe("AuditPage — filters issue correct server-side params (m63.5)", () =>
 
     fireEvent.change(screen.getByLabelText("Filter by actor"), { target: { value: "alice" } });
     await waitFor(() => expect(captured.some((u) => u.includes("actor=alice"))).toBe(true));
+  });
+});
+
+// ── H1: action + kind are Select dropdowns ────────────────────────────────────
+
+describe("AuditPage — H1: action + kind Select dropdowns (m76.5)", () => {
+  it("action Select sends ?action= when a value is chosen", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
 
     fireEvent.change(screen.getByLabelText("Filter by action"), {
       target: { value: "grant.create" },
@@ -146,11 +167,178 @@ describe("AuditPage — filters issue correct server-side params (m63.5)", () =>
     await waitFor(() =>
       expect(captured.some((u) => u.includes("action=grant.create"))).toBe(true),
     );
+  });
+
+  it("action Select 'Any' (value='') omits ?action= from the request", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    // First set a value, then clear it back to "Any".
+    fireEvent.change(screen.getByLabelText("Filter by action"), {
+      target: { value: "connect" },
+    });
+    await waitFor(() => expect(captured.some((u) => u.includes("action=connect"))).toBe(true));
+
+    fireEvent.change(screen.getByLabelText("Filter by action"), {
+      target: { value: "" },
+    });
+    await waitFor(() => {
+      const last = captured[captured.length - 1];
+      expect(last).not.toContain("action=");
+    });
+  });
+
+  it("kind Select sends ?kind= when a value is chosen", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
 
     fireEvent.change(screen.getByLabelText("Filter by resource kind"), {
       target: { value: "MCPGrant" },
     });
     await waitFor(() => expect(captured.some((u) => u.includes("kind=MCPGrant"))).toBe(true));
+  });
+
+  it("kind Select 'Any' (value='') omits ?kind= from the request", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    fireEvent.change(screen.getByLabelText("Filter by resource kind"), {
+      target: { value: "Provider" },
+    });
+    await waitFor(() => expect(captured.some((u) => u.includes("kind=Provider"))).toBe(true));
+
+    fireEvent.change(screen.getByLabelText("Filter by resource kind"), {
+      target: { value: "" },
+    });
+    await waitFor(() => {
+      const last = captured[captured.length - 1];
+      expect(last).not.toContain("kind=");
+    });
+  });
+});
+
+// ── H2: date-range from/to inputs ─────────────────────────────────────────────
+
+describe("AuditPage — H2: date-range from/to inputs (m76.5)", () => {
+  it("from input sends ?from= as RFC3339", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    // datetime-local value; the component converts to RFC3339 (toRFC3339).
+    fireEvent.change(screen.getByLabelText("Filter from date"), {
+      target: { value: "2026-08-03T14:00" },
+    });
+    // The param will be URL-encoded RFC3339 — just check "from=" is present.
+    await waitFor(() => expect(captured.some((u) => u.includes("from="))).toBe(true));
+  });
+
+  it("to input sends ?to= as RFC3339", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    fireEvent.change(screen.getByLabelText("Filter to date"), {
+      target: { value: "2026-08-03T16:00" },
+    });
+    await waitFor(() => expect(captured.some((u) => u.includes("to="))).toBe(true));
+  });
+
+  it("empty from/to inputs omit the params", async () => {
+    const captured = installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    // Wait for initial load with no date params.
+    await waitFor(() => expect(captured.length).toBeGreaterThan(0));
+    const first = captured[0];
+    expect(first).not.toContain("from=");
+    expect(first).not.toContain("to=");
+  });
+});
+
+// ── H3: row-click detail drawer ───────────────────────────────────────────────
+
+describe("AuditPage — H3: row-click detail drawer (m76.5)", () => {
+  it("clicking a row opens the detail drawer with the full detail map", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          event({
+            id: 42,
+            actor: "alice",
+            action: "grant.create",
+            resourceKind: "MCPGrant",
+            resourceName: "scalekit",
+            namespace: "team-a",
+            detail: { server: "scalekit", requestId: "req-1" },
+          }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("alice");
+
+    // Click the row — the table row is keyboard/click accessible via onRowClick.
+    fireEvent.click(screen.getByText("alice"));
+
+    // The detail drawer opens.
+    const drawer = await screen.findByTestId("audit-detail-drawer");
+
+    // The full detail map entries are rendered inside the drawer.
+    expect(drawer).toHaveTextContent("server");
+    expect(drawer).toHaveTextContent("scalekit");
+    expect(drawer).toHaveTextContent("requestId");
+    expect(drawer).toHaveTextContent("req-1");
+  });
+
+  it("the drawer shows the View run link when traceId is present", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          event({ id: 10, actor: "bob", traceId: "trace-xyz", detail: {} }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("bob");
+    fireEvent.click(screen.getByText("bob"));
+
+    await screen.findByTestId("audit-detail-drawer");
+    const link = screen.getByTestId("audit-trace-link-10");
+    expect(link).toHaveAttribute("href", "/traces/trace-xyz");
+  });
+
+  it("the drawer has no View run link when traceId is absent", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [event({ id: 20, actor: "carol", traceId: undefined, detail: {} })],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("carol");
+    fireEvent.click(screen.getByText("carol"));
+
+    await screen.findByTestId("audit-detail-drawer");
+    expect(screen.queryByTestId("audit-trace-link-20")).not.toBeInTheDocument();
   });
 });
 

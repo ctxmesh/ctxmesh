@@ -156,7 +156,7 @@ function Sidebar() {
   const { can } = useCapabilities();
 
   const visible = (it: NavItem): boolean =>
-    !it.requiresWrite || can(it.requiresWrite.resource, it.requiresWrite.verb);
+    !it.requiresCapability || can(it.requiresCapability.resource, it.requiresCapability.verb);
 
   return (
     <aside className="sticky top-0 h-screen overflow-y-auto border-r bg-card">

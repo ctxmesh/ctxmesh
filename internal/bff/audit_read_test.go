@@ -154,3 +154,38 @@ func TestListAudit_FiltersByActorAndAction(t *testing.T) {
 	require.Len(t, byAction.Items, 1, "action filter selects only the revoke")
 	assert.Equal(t, "bob", byAction.Items[0].Actor)
 }
+
+// TestListAudit_DateRangeFilter proves the ?from= and ?to= query params reach the store
+// and narrow the result set correctly (m76.5 H2): RFC3339 strings are parsed and passed as
+// time.Time to the store Query. Malformed / missing params are silently ignored (zero = unbounded).
+func TestListAudit_DateRangeFilter(t *testing.T) {
+	base := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	s := newAuditServer(t, nil,
+		auditlog.Entry{Actor: "a", Action: "create", Namespace: "ns1", OccurredAt: base},
+		auditlog.Entry{Actor: "b", Action: "update", Namespace: "ns1", OccurredAt: base.Add(time.Hour)},
+		auditlog.Entry{Actor: "c", Action: "delete", Namespace: "ns1", OccurredAt: base.Add(2 * time.Hour)},
+	)
+
+	// from=11:00 → 2 rows (11, 12).
+	from11 := base.Add(time.Hour).Format(time.RFC3339)
+	fromOnly, code := getAudit(t, s, "from="+from11)
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, fromOnly.Items, 2, "from=11:00 returns rows at or after 11:00")
+
+	// to=11:00 → 2 rows (10, 11).
+	to11 := base.Add(time.Hour).Format(time.RFC3339)
+	toOnly, code := getAudit(t, s, "to="+to11)
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, toOnly.Items, 2, "to=11:00 returns rows at or before 11:00")
+
+	// from=11:00&to=11:00 → exactly the 11:00 row.
+	window, code := getAudit(t, s, "from="+from11+"&to="+to11)
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, window.Items, 1)
+	assert.Equal(t, "b", window.Items[0].Actor)
+
+	// Malformed from is ignored → all 3 rows returned.
+	all, code := getAudit(t, s, "from=not-a-time")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, all.Items, 3, "malformed from is silently ignored (unbounded)")
+}
