@@ -248,6 +248,13 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if deploy.Spec.Runtime != nil && deploy.Spec.Runtime.OutputSchema != nil {
 		rn.OutputSchema = string(deploy.Spec.Runtime.OutputSchema.Raw)
 	}
+	// Record mode (M78, ADR 0071): carry the run-scoped opt-in onto the run. This is the TRIGGER —
+	// m78.2/m78.3 read rn.Record (the run-worker / launcher-config path) to inject the new
+	// controller-side interposition reason that forces both capture proxies (the launcher gateway for
+	// model I/O, the egress sidecar for tool I/O) to interpose fail-closed and stream the captured
+	// I/O into a portable fixture (internal/replay). m78.1 defines the field + this plumbing point
+	// only; it does not wire the capture itself.
+	rn.Record = req.Record
 	if err := s.runStore.Create(rn); err != nil {
 		s.log.Error(err, "create run failed", "agent", req.Agent)
 		writeError(w, http.StatusInternalServerError, "failed to create the run")
@@ -455,6 +462,11 @@ type RunDetailDTO struct {
 	// lineage link). Both structured (not parsed from prose) so audit/console can render the transfer.
 	HandedOffTo        string `json:"handedOffTo,omitempty"`
 	HandoffSourceRunID string `json:"handoffSourceRunId,omitempty"`
+
+	// Record reflects whether this run is in record mode (M78, ADR 0071) — the platform capture seams
+	// record its model + tool I/O into a portable replay fixture. Surfaced so the console can badge a
+	// recorded run. Omitted (false) for a normal run.
+	Record bool `json:"record,omitempty"`
 }
 
 // WorkflowNodeStatus is the per-node status entry in the RunDetailDTO.Nodes list (m67.9).
@@ -494,6 +506,7 @@ func runToDTO(rn *run.Run) RunDetailDTO {
 		WorkflowRef:        rn.WorkflowRef,
 		HandedOffTo:        rn.HandedOffTo,
 		HandoffSourceRunID: rn.HandoffSourceRunID,
+		Record:             rn.Record,
 	}
 	// Surface the executor's cursor fields. We parse the cursor once to populate both CurrentNode
 	// (the in-flight node for backward compatibility) and the Nodes status list (m67.9: the authoritative
