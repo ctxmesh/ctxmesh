@@ -123,6 +123,23 @@ type SemanticJudge struct {
 	// +kubebuilder:default=output
 	// +optional
 	AppliesTo string `json:"appliesTo,omitempty"`
+
+	// failMode controls what happens when the JUDGE ITSELF errors or times out (a transport
+	// failure, non-200 upstream, or the round-trip exceeding the judge timeout). It is scoped
+	// to the judge ALONE and is distinct from the policy-level GuardrailPolicySpec.failMode,
+	// which governs the deterministic engine.
+	//
+	// "open" (default) preserves the judge's fail-OPEN contract: a judge error/timeout ALLOWS
+	// the call — a flaky judge must never take down all guarded traffic, and the deterministic
+	// pipeline remains the fail-closed guarantee. "closed" is a strict operator's CONSERVATIVE
+	// choice: a judge error/timeout BLOCKS the call instead of allowing it. Even in "closed"
+	// mode the judge is NOT the fail-closed guarantee — that is always the deterministic engine;
+	// this only makes a judge outage refuse rather than pass the residual content the judge would
+	// have classified.
+	// +kubebuilder:validation:Enum=open;closed
+	// +kubebuilder:default=open
+	// +optional
+	FailMode string `json:"failMode,omitempty"`
 }
 
 // UserRateLimit configures per-end-user (on-behalf-of) rate and abuse limits. These limits are
