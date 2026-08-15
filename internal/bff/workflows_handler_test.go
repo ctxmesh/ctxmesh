@@ -228,6 +228,66 @@ func TestCreateWorkflowRun_MissingWorkflow(t *testing.T) {
 	assert.Zero(t, countStoreRuns(s), "no run created for a missing workflow")
 }
 
+// newInProcessWorkflowHandlerServer mirrors newWorkflowHandlerServer but with RunWorkerDispatch=false — the
+// in-process (dev/single-pod) mode that has NO worker pool to re-claim a woken workflow run. A workflow run
+// created in this mode would stall after its first node (m52.L8), so the create-time guard (m83.1) must
+// fail-fast with 422 BEFORE minting the run.
+func newInProcessWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
+	t.Helper()
+	return NewServer(Options{
+		CallerClients:     newFakeFactory(cl),
+		Scheme:            testScheme(t),
+		Auth:              AllowAll{},
+		Adapters:          Adapters{Invoke: &fakeInvokeAdapter{resp: []byte(`{"output":"ok"}`)}},
+		RunStore:          run.NewMemStore(),
+		RunWorkerDispatch: false, // in-process mode — no worker pool to re-claim a woken workflow run
+		Log:               logr.Discard(),
+		Version:           "test",
+	})
+}
+
+// TestCreateWorkflowRun_InProcessMode_Rejected: with RunWorkerDispatch=false the shared create path fails-fast
+// with 422 (no run minted) for BOTH the CR endpoint and the inline endpoint, because a multi-advance workflow
+// cannot complete without a worker pool to re-claim the woken run (m83.1, m52.L8). The paired dispatch-on case
+// is unchanged (still 202) — covered by the happy-path tests above.
+func TestCreateWorkflowRun_InProcessMode_Rejected(t *testing.T) {
+	const wantMsg = "workflow execution requires worker-dispatch (a durable run store + RUN_WORKER_DISPATCH); " +
+		"this server is running in in-process mode and cannot complete a multi-node workflow"
+
+	// CR path: POST /api/workflows/{name}/runs.
+	t.Run("cr_path", func(t *testing.T) {
+		wf := workflowFixture("my-workflow", "prod", nil)
+		cl := newAgentFakeClient(t, wf, readyWorkflowAgent("agent-a", "prod", nil))
+		s := newInProcessWorkflowHandlerServer(t, cl)
+
+		rec := postWorkflowRun(t, s, "my-workflow", WorkflowRunRequest{Namespace: "prod"})
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+			"in-process mode must reject a CR-path workflow create with 422")
+		assert.Contains(t, rec.Body.String(), wantMsg, "the 422 body must carry the typed guard message")
+		assert.Zero(t, countStoreRuns(s), "no run must be minted when the guard fires")
+	})
+
+	// Inline path: POST /api/workflows/runs.
+	t.Run("inline_path", func(t *testing.T) {
+		objs := registryWithMembers(t, "agent-a", "agent-b")
+		cl := newAgentFakeClient(t, objs...)
+		s := newInProcessWorkflowHandlerServer(t, cl)
+
+		spec := agentsv1beta1.WorkflowSpec{
+			RegistryRef: "reg",
+			Steps: []agentsv1beta1.WorkflowStep{
+				{Name: "one", AgentRef: "agent-a", Next: "two"},
+				{Name: "two", AgentRef: "agent-b"},
+			},
+		}
+		rec := postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Spec: spec, Namespace: "prod"})
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code,
+			"in-process mode must reject an inline workflow create with 422")
+		assert.Contains(t, rec.Body.String(), wantMsg, "the 422 body must carry the typed guard message")
+		assert.Zero(t, countStoreRuns(s), "no run must be minted when the guard fires")
+	})
+}
+
 // ── POST /api/workflows/runs — inline-spec run (planning mode, m67.7, ADR 0060 §6) ───────────────────────
 
 // registryWithMembers builds an AgentRegistry + member AgentDeployments so the inline-run membership
