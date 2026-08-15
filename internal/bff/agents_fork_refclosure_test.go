@@ -193,6 +193,36 @@ func TestForkRefClosure_PublishedTool_ComposesConnect(t *testing.T) {
 	assert.Empty(t, copyCRD.Annotations[annMCPSecret], "the materialized copy references NO Secret")
 }
 
+// TestForkRefClosure_PublishedTool_ResolvedRefs_U9: when a published tool is auto-materialized via
+// compose-connect, the fork response must carry the tool name in ResolvedRefs (U9, m76.3) — so the
+// UI can celebrate "N tools connected automatically". NeedsRebinding must be empty for the same tool.
+func TestForkRefClosure_PublishedTool_ResolvedRefs_U9(t *testing.T) {
+	ctx := context.Background()
+	origin := oauthOrigin("publisher-ns", "vendor-mcp", visibilityPublic)
+	origin.Labels[labelMCPCredentialSource] = credSourceNone
+	toolStore := toolregistry.NewMemStore()
+	_, err := toolStore.Upsert(ctx, crdToolRegistryToStore(origin))
+	require.NoError(t, err)
+
+	art := publishedartifact.NewMemStore()
+	spec := `{"name":"assistant","runtime":"managed","tools":["search"]}`
+	publishRefArt(t, art, "author-ns", spec)
+	s, _ := newRefClosureServer(t, art, namespacetenant.NewMemStore(), toolStore)
+
+	rec := doFork(t, s, "author-ns", "assistant", ForkAgentRequest{Name: "local", Namespace: forkCallerNS})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp ForkAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	// U9: the auto-materialized "search" tool must appear in ResolvedRefs.
+	assert.Contains(t, resp.ResolvedRefs, "search",
+		"a published tool auto-materialized via compose-connect must appear in resolvedRefs (U9)")
+	// And NOT in NeedsRebinding — it was resolved, not flagged.
+	assert.NotContains(t, resp.NeedsRebinding, "tool: search",
+		"an auto-materialized tool must not be in needsRebinding")
+	assert.NotNil(t, resp.ResolvedRefs, "resolvedRefs must be [] not null")
+}
+
 // TestForkRefClosure_NonPublishedTool_Flags: a managed agent forked with a tool that is NOT
 // offered by any discoverable published server → needsRebinding "tool: <name>" (an honest flag
 // beats a wrong materialize) + the degraded label.
@@ -307,7 +337,7 @@ func TestForkRefClosure_MissingEvalSuiteRef(t *testing.T) {
 	require.NoError(t, err)
 
 	spec := `{"name":"assistant","image":"i","evalSuiteRef":"quality-gate"}`
-	needsRebinding, unresolvedRefs := s.closeForkRefs(r, caller, spec, forkCallerNS, "local")
+	needsRebinding, unresolvedRefs, _ := s.closeForkRefs(r, caller, spec, forkCallerNS, "local")
 	assert.Empty(t, needsRebinding)
 	assert.Contains(t, unresolvedRefs, "evalSuite: quality-gate")
 }
@@ -322,7 +352,7 @@ func TestForkRefClosure_EvalSuiteRefPresent_NoFlag(t *testing.T) {
 	require.NoError(t, err)
 
 	spec := `{"name":"assistant","image":"i","evalSuiteRef":"quality-gate"}`
-	_, unresolvedRefs := s.closeForkRefs(r, caller, spec, forkCallerNS, "local")
+	_, unresolvedRefs, _ := s.closeForkRefs(r, caller, spec, forkCallerNS, "local")
 	assert.Empty(t, unresolvedRefs, "a resolvable evalSuiteRef must not be flagged")
 }
 

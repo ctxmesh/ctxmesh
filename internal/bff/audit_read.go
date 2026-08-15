@@ -75,11 +75,25 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var from, to time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			from = t.UTC()
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			to = t.UTC()
+		}
+	}
+
 	page, err := s.auditStore.List(r.Context(), auditlog.Query{
 		Namespace:    namespace,
 		Actor:        strings.TrimSpace(r.URL.Query().Get("actor")),
 		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
 		ResourceKind: strings.TrimSpace(r.URL.Query().Get("kind")),
+		From:         from,
+		To:           to,
 		PageSize:     parseListLimit(r.URL.Query().Get("limit")),
 		Cursor:       r.URL.Query().Get("cursor"),
 	})

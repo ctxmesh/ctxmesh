@@ -121,6 +121,12 @@ func matches(e Entry, q Query) bool {
 	if q.ResourceKind != "" && e.ResourceKind != q.ResourceKind {
 		return false
 	}
+	if !q.From.IsZero() && e.OccurredAt.Before(q.From) {
+		return false
+	}
+	if !q.To.IsZero() && e.OccurredAt.After(q.To) {
+		return false
+	}
 	return true
 }
 

@@ -1,32 +1,42 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
   Building2,
+  Check,
+  Download,
   GitFork,
   Globe,
   Link2,
+  Loader2,
   Lock,
   RefreshCw,
+  Search,
   Store,
   Users,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
+  CredentialSourceBadge,
   EmptyState,
   ErrorState,
   ForbiddenInline,
-  SkeletonTable,
+  SkeletonCard,
+  useFocusTrap,
   useToast,
 } from "@/components/kit";
 import {
   api,
   ApiError,
   type CatalogEntry,
+  type McpServerSummary,
   type TemplateEntry,
 } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_AGENTS } from "@/lib/nav";
 
 // TemplateGalleryPage (m74.6) — the unified gallery surface: two tabs covering
 // agent templates (recipes ∪ published agents, GET /api/templates) and MCP
@@ -78,6 +88,17 @@ function VisibilityBadge({ visibility }: { visibility: string | undefined }) {
   }
 }
 
+// ── Card skeleton for the catalog (T12 — not SkeletonTable for a card list) ──
+function CatalogSkeleton() {
+  return (
+    <div className="space-y-3" role="status" aria-busy="true" aria-label="Loading servers">
+      {[0, 1, 2].map((i) => (
+        <SkeletonCard key={i} />
+      ))}
+    </div>
+  );
+}
+
 // ── Template tab ─────────────────────────────────────────────────────────────
 type TemplateState =
   | { kind: "loading" }
@@ -88,10 +109,14 @@ type TemplateState =
 interface TemplateCardProps {
   entry: TemplateEntry;
   onFork: (entry: TemplateEntry) => void;
-  forking: boolean;
+  // forkingKey is the unique key of the entry currently being forked (or null if none).
+  // This enables a per-entry "Forking…" spinner (U12) instead of a global disable.
+  forkingKey: string | null;
+  // canFork gates the Fork button for viewers who lack agent-create rights (U10).
+  canFork: boolean;
 }
 
-function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
+function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps) {
   const provenance = entry.provenance;
   const originLabel =
     provenance === "builtin" || provenance === undefined
@@ -104,6 +129,20 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
     provenance && provenance !== "builtin" && provenance.version
       ? provenance.version
       : null;
+
+  // U12: compute the unique key for this entry to check per-entry spinner state.
+  const entryKey =
+    provenance && provenance !== "builtin" && provenance.originNamespace
+      ? `${provenance.originNamespace}/${provenance.originName ?? entry.name}`
+      : `recipe/${entry.name}`;
+  const isThisEntryForking = forkingKey === entryKey;
+  // Block other entries while one is in flight (still a global disable for safety).
+  const isAnyForking = forkingKey !== null;
+
+  // U12: recipe uses Download icon + "Install" verb; published uses GitFork + "Fork" verb.
+  const isRecipe = entry.source === "recipe";
+  const ActionIcon = isRecipe ? Download : GitFork;
+  const actionLabel = isRecipe ? "Install" : "Fork";
 
   return (
     <li
@@ -123,11 +162,11 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
               {entry.kind}
             </Badge>
             <Badge
-              variant={entry.source === "recipe" ? "secondary" : "outline"}
+              variant={isRecipe ? "secondary" : "outline"}
               className="text-[10px]"
               data-testid={`template-source-${entry.name}`}
             >
-              {entry.source === "recipe" ? "built-in" : "published"}
+              {isRecipe ? "built-in" : "published"}
             </Badge>
             <VisibilityBadge visibility={entry.visibility} />
           </div>
@@ -142,26 +181,118 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => onFork(entry)}
-            disabled={forking}
-            data-testid={`fork-template-${entry.name}`}
-          >
-            <GitFork className="mr-1.5 h-3.5 w-3.5" />
-            {entry.source === "recipe" ? "Install" : "Fork"}
-          </Button>
+          {/* U10: display-gate the Fork button for viewers without create rights */}
+          {canFork ? (
+            <Button
+              size="sm"
+              onClick={() => onFork(entry)}
+              disabled={isAnyForking}
+              title={isAnyForking && !isThisEntryForking ? "Another fork is in progress" : undefined}
+              data-testid={`fork-template-${entry.name}`}
+            >
+              {isThisEntryForking ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  {isRecipe ? "Installing…" : "Forking…"}
+                </>
+              ) : (
+                <>
+                  <ActionIcon className="mr-1.5 h-3.5 w-3.5" />
+                  {actionLabel}
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled
+              title="You need agent-create rights to fork"
+              data-testid={`fork-template-${entry.name}`}
+            >
+              <ActionIcon className="mr-1.5 h-3.5 w-3.5" />
+              {actionLabel}
+            </Button>
+          )}
         </div>
       </div>
     </li>
   );
 }
 
+// ── Rename-on-fork dialog (U11) ───────────────────────────────────────────────
+// When forking hits a 409 (name collision with a different origin), offer the user
+// a prompt to retry with a different name.
+interface RenamePromptProps {
+  defaultName: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}
+
+function RenameOnForkDialog({ defaultName, onConfirm, onCancel }: RenamePromptProps) {
+  const [name, setName] = React.useState(defaultName + "-copy");
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onCancel });
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rename fork"
+    >
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onCancel}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative w-full max-w-sm rounded-lg border bg-card p-6 shadow-overlay outline-none"
+        data-testid="rename-fork-dialog"
+      >
+        <h2 className="text-base font-semibold">Name already taken</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          An agent named &ldquo;{defaultName}&rdquo; already exists in your namespace with a
+          different origin. Choose a different name for your fork.
+        </p>
+        <div className="mt-3">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="New name for your fork"
+            data-testid="rename-fork-input"
+            autoFocus
+          />
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+          <Button
+            onClick={() => onConfirm(name.trim())}
+            disabled={!name.trim()}
+            data-testid="rename-fork-confirm"
+          >
+            Fork as {name.trim() || "…"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TemplatesTab() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { can } = useCapabilities();
+  // U10: display-gate the Fork button for viewers lacking agent-create rights.
+  const canFork = can(RES_AGENTS, "create");
   const [state, setState] = React.useState<TemplateState>({ kind: "loading" });
+  // U12: forkingEntry tracks the unique key of the entry currently in flight for per-entry spinner.
   const [forkingEntry, setForkingEntry] = React.useState<string | null>(null);
+  // U11: rename-on-fork dialog state — shown when a 409 collision is detected.
+  const [renameDialog, setRenameDialog] = React.useState<{
+    entry: TemplateEntry;
+    defaultName: string;
+  } | null>(null);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
@@ -190,15 +321,8 @@ function TemplatesTab() {
     return () => c.abort();
   }, [load]);
 
-  async function handleFork(entry: TemplateEntry) {
-    // Recipe: pre-fill the create-agent flow via ?recipe=<name>. CreateAgentPage fetches
-    // the recipe list and finds the spec by name — avoids a fragile ?spec= blob in the URL
-    // that URL-length limits or encoding differences could corrupt (m74 P1-2 fix).
-    if (entry.source === "recipe") {
-      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}`);
-      return;
-    }
-
+  // doFork is called with an optional `localName` override (U11 rename-on-fork).
+  async function doFork(entry: TemplateEntry, localName?: string) {
     // Published agent: POST fork.
     const prov = entry.provenance;
     if (!prov || prov === "builtin" || !prov.originNamespace) {
@@ -210,10 +334,15 @@ function TemplatesTab() {
       return;
     }
 
+    // U12: unique key uses origin ns to avoid same-name collision from different namespaces.
     const key = `${prov.originNamespace}/${prov.originName ?? entry.name}`;
     setForkingEntry(key);
     try {
-      const res = await api.forkAgent(prov.originNamespace, prov.originName ?? entry.name);
+      const res = await api.forkAgent(
+        prov.originNamespace,
+        prov.originName ?? entry.name,
+        localName,
+      );
 
       // Navigate to the FORK's own coordinates, not the origin's.
       // res.agent carries the fork's namespace + name (the caller's namespace).
@@ -221,15 +350,18 @@ function TemplatesTab() {
       const forkName = res.agent?.name ?? entry.name;
 
       if (res.status === "already-forked") {
+        // U11: link to the existing fork rather than a generic message.
         toast({
           variant: "info",
           title: "Already forked",
-          description: `You already have a fork of ${entry.name} in your namespace.`,
+          description: `You already have a fork of ${entry.name}. Opening it now.`,
         });
         navigate(`/agents/${encodeURIComponent(forkNs)}/${encodeURIComponent(forkName)}`);
         return;
       }
 
+      // U9: celebrate resolved refs (tools auto-connected via compose-connect).
+      const resolvedCount = res.resolvedRefs?.length ?? 0;
       const hasDangling =
         (res.needsRebinding?.length ?? 0) > 0 ||
         (res.unresolvedRefs?.length ?? 0) > 0;
@@ -239,10 +371,21 @@ function TemplatesTab() {
           ...(res.needsRebinding ?? []),
           ...(res.unresolvedRefs ?? []),
         ].join(", ");
+        const resolvedNote =
+          resolvedCount > 0
+            ? ` (${resolvedCount} tool${resolvedCount > 1 ? "s" : ""} connected automatically)`
+            : "";
         toast({
           variant: "info",
           title: "Forked — needs attention",
-          description: `${entry.name} was forked but has dangling references: ${items}. Open the agent to fix them.`,
+          description: `${entry.name} was forked${resolvedNote} but has dangling references: ${items}. Open the agent to fix them.`,
+        });
+      } else if (resolvedCount > 0) {
+        // U9: the "compounding moment" toast — all tools connected automatically.
+        toast({
+          variant: "success",
+          title: "Forked",
+          description: `${entry.name} is now in your namespace — ${resolvedCount} tool${resolvedCount > 1 ? "s" : ""} connected automatically.`,
         });
       } else {
         toast({
@@ -255,17 +398,31 @@ function TemplatesTab() {
     } catch (err) {
       const isNotFound = err instanceof ApiError && err.isNotFound;
       const isConflict = err instanceof ApiError && err.status === 409;
-      const msg = isNotFound
-        ? `${entry.name} is no longer discoverable.`
-        : isConflict
-        ? `An agent with the name "${entry.name}" already exists in your namespace with a different origin.`
-        : err instanceof Error
-        ? err.message
-        : "fork failed";
-      toast({ variant: "error", title: "Fork failed", description: msg });
+      if (isConflict) {
+        // U11: 409 — offer rename-on-fork instead of a dead-end error.
+        setRenameDialog({ entry, defaultName: entry.name });
+      } else {
+        const msg = isNotFound
+          ? `${entry.name} is no longer discoverable.`
+          : err instanceof Error
+          ? err.message
+          : "fork failed";
+        toast({ variant: "error", title: "Fork failed", description: msg });
+      }
     } finally {
       setForkingEntry(null);
     }
+  }
+
+  async function handleFork(entry: TemplateEntry) {
+    // Recipe: pre-fill the create-agent flow via ?recipe=<name>. CreateAgentPage fetches
+    // the recipe list and finds the spec by name — avoids a fragile ?spec= blob in the URL
+    // that URL-length limits or encoding differences could corrupt (m74 P1-2 fix).
+    if (entry.source === "recipe") {
+      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}`);
+      return;
+    }
+    await doFork(entry);
   }
 
   return (
@@ -285,7 +442,7 @@ function TemplatesTab() {
         </Button>
       </div>
 
-      {state.kind === "loading" && <SkeletonTable rows={3} />}
+      {state.kind === "loading" && <CatalogSkeleton />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -313,24 +470,55 @@ function TemplatesTab() {
 
       {state.kind === "ready" && state.entries.length > 0 && (
         <ul className="space-y-2" data-testid="template-list">
-          {state.entries.map((e) => (
-            <TemplateCard
-              key={`${e.source}/${e.name}`}
-              entry={e}
-              onFork={handleFork}
-              forking={forkingEntry !== null}
-            />
-          ))}
+          {state.entries.map((e) => {
+            // U12: include origin namespace in the key to avoid React key collision for
+            // same-named templates published from different namespaces.
+            const prov = e.provenance;
+            const originNs =
+              prov && prov !== "builtin" && prov.originNamespace
+                ? prov.originNamespace
+                : "builtin";
+            const cardKey = `${e.source}/${originNs}/${e.name}`;
+            return (
+              <TemplateCard
+                key={cardKey}
+                entry={e}
+                onFork={handleFork}
+                forkingKey={forkingEntry}
+                canFork={canFork}
+              />
+            );
+          })}
         </ul>
+      )}
+
+      {/* U11: rename-on-fork dialog — shown on 409 collision */}
+      {renameDialog && (
+        <RenameOnForkDialog
+          defaultName={renameDialog.defaultName}
+          onConfirm={(newName) => {
+            const entry = renameDialog.entry;
+            setRenameDialog(null);
+            void doFork(entry, newName);
+          }}
+          onCancel={() => setRenameDialog(null)}
+        />
       )}
     </div>
   );
 }
 
-// ── MCP Catalog tab (thin wrapper — reuses the data from GET /api/catalog) ──
+// ── MCP Catalog tab ──────────────────────────────────────────────────────────
+// T10: cross-checks the catalog against the caller's owned servers to render a
+// "Connected ✓" disabled state for entries already in the caller's namespace.
+// T11: after a successful Connect, navigates with location.state.highlight so
+// McpServersPage can briefly flash the new row.
+// T12: SkeletonCard (not SkeletonTable), "Connecting…" label, catalog search/filter,
+// consistent "org" vocabulary.
+
 type CatalogState =
   | { kind: "loading" }
-  | { kind: "ready"; entries: CatalogEntry[] }
+  | { kind: "ready"; entries: CatalogEntry[]; ownedKeys: Set<string> }
   | { kind: "forbidden"; message: string }
   | { kind: "error"; message: string };
 
@@ -339,14 +527,23 @@ function McpCatalogTab() {
   const { toast } = useToast();
   const [state, setState] = React.useState<CatalogState>({ kind: "loading" });
   const [connectingEntry, setConnectingEntry] = React.useState<string | null>(null);
+  // T12 catalog search filter
+  const [search, setSearch] = React.useState("");
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
-    api
-      .getCatalog(undefined, signal)
-      .then((res) => {
+
+    // T10: fetch catalog AND owned servers in parallel; cross-check by name+ns.
+    Promise.all([
+      api.getCatalog(undefined, signal),
+      api.listMcpServers(signal),
+    ])
+      .then(([catalogRes, ownedRes]) => {
         if (signal?.aborted) return;
-        setState({ kind: "ready", entries: res.entries ?? [] });
+        const owned = ownedRes.items ?? ownedRes.servers ?? [];
+        // Build a key set of the caller's owned servers: "<ns>/<name>"
+        const ownedKeys = new Set(owned.map((s: McpServerSummary) => `${s.namespace}/${s.name}`));
+        setState({ kind: "ready", entries: catalogRes.entries ?? [], ownedKeys });
       })
       .catch((err: unknown) => {
         if (signal?.aborted) return;
@@ -384,7 +581,14 @@ function McpCatalogTab() {
           title: "Connected",
           description: `${entry.name} is now available in your MCP servers.`,
         });
-        navigate("/tools/mcp-servers");
+        // T11: pass the new copy's ns/name as a highlight anchor so McpServersPage
+        // can flash the new row. The new copy is in the caller's own namespace (from
+        // res.namespace) or falls back to the origin namespace if the BFF omits it.
+        const connectedNs = res.namespace ?? entry.namespace;
+        const connectedName = res.name ?? entry.name;
+        navigate("/tools/mcp-servers", {
+          state: { highlight: `${connectedNs}/${connectedName}` },
+        });
       }
     } catch (err) {
       const msg =
@@ -399,9 +603,22 @@ function McpCatalogTab() {
     }
   }
 
+  // T12: client-side filter over name/namespace/description
+  const filteredEntries = React.useMemo(() => {
+    if (state.kind !== "ready") return [];
+    if (!search.trim()) return state.entries;
+    const q = search.toLowerCase();
+    return state.entries.filter(
+      (e) =>
+        e.name.toLowerCase().includes(q) ||
+        e.namespace.toLowerCase().includes(q) ||
+        (e.description ?? "").toLowerCase().includes(q),
+    );
+  }, [state, search]);
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           Discoverable MCP servers across your org. Connect one to make it available in your namespace.
         </p>
@@ -416,7 +633,22 @@ function McpCatalogTab() {
         </Button>
       </div>
 
-      {state.kind === "loading" && <SkeletonTable rows={3} />}
+      {/* T12: catalog search input */}
+      {state.kind === "ready" && state.entries.length > 0 && (
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search servers…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-8"
+            data-testid="mcp-catalog-search"
+          />
+        </div>
+      )}
+
+      {/* T12: SkeletonCard instead of SkeletonTable */}
+      {state.kind === "loading" && <CatalogSkeleton />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -442,47 +674,82 @@ function McpCatalogTab() {
         />
       )}
 
-      {state.kind === "ready" && state.entries.length > 0 && (
+      {state.kind === "ready" && state.entries.length > 0 && filteredEntries.length === 0 && (
+        <p className="text-sm text-muted-foreground" data-testid="mcp-catalog-no-results">
+          No servers match &ldquo;{search}&rdquo;.
+        </p>
+      )}
+
+      {state.kind === "ready" && filteredEntries.length > 0 && (
         <ul className="space-y-2" data-testid="mcp-catalog-tab-list">
-          {state.entries.map((e) => (
-            <li
-              key={`${e.namespace}/${e.name}`}
-              className="rounded-lg border bg-card p-4 shadow-card"
-              data-testid={`mcp-catalog-entry-${e.name}`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate font-medium">{e.name}</p>
-                    <VisibilityBadge visibility={e.visibility} />
-                    {e.authType && (
-                      <Badge variant="secondary">{e.authType}</Badge>
+          {filteredEntries.map((e) => {
+            const entryKey = `${e.namespace}/${e.name}`;
+            // T10: cross-check against the caller's owned list by ns+name
+            const isConnected = state.ownedKeys.has(entryKey);
+            const isConnecting = connectingEntry === entryKey;
+            return (
+              <li
+                key={entryKey}
+                className="rounded-lg border bg-card p-4 shadow-card"
+                data-testid={`mcp-catalog-entry-${e.name}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate font-medium">{e.name}</p>
+                      <VisibilityBadge visibility={e.visibility} />
+                      {e.authType && (
+                        <Badge variant="secondary">{e.authType}</Badge>
+                      )}
+                      {/* T8: human-label credentialSource badge */}
+                      <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />
+                      {/* T10: "Connected ✓" badge for already-owned entries */}
+                      {isConnected && (
+                        <Badge
+                          variant="success"
+                          className="gap-1"
+                          data-testid={`mcp-catalog-connected-${e.name}`}
+                        >
+                          <Check className="h-3 w-3" />
+                          Connected
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      namespace: <span className="font-mono">{e.namespace}</span>
+                    </p>
+                    {e.description && (
+                      <p className="text-sm text-muted-foreground">{e.description}</p>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    namespace: <span className="font-mono">{e.namespace}</span>
-                  </p>
-                  {e.description && (
-                    <p className="text-sm text-muted-foreground">{e.description}</p>
-                  )}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant="secondary">
+                      {e.toolCount} {e.toolCount === 1 ? "tool" : "tools"}
+                    </Badge>
+                    {/* T10: disabled state for already-connected; T12: "Connecting…" */}
+                    <Button
+                      size="sm"
+                      onClick={() => handleConnect(e)}
+                      disabled={isConnected || isConnecting}
+                      data-testid={`connect-mcp-tab-${e.name}`}
+                    >
+                      {isConnected ? (
+                        <>
+                          <Check className="mr-1.5 h-3.5 w-3.5" />
+                          Connected
+                        </>
+                      ) : (
+                        <>
+                          <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                          {isConnecting ? "Connecting…" : "Connect"}
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge variant="secondary">
-                    {e.toolCount} {e.toolCount === 1 ? "tool" : "tools"}
-                  </Badge>
-                  <Button
-                    size="sm"
-                    onClick={() => handleConnect(e)}
-                    disabled={connectingEntry === `${e.namespace}/${e.name}`}
-                    data-testid={`connect-mcp-tab-${e.name}`}
-                  >
-                    <Link2 className="mr-1.5 h-3.5 w-3.5" />
-                    Connect
-                  </Button>
-                </div>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -491,7 +758,9 @@ function McpCatalogTab() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 export function TemplateGalleryPage() {
-  const [activeTab, setActiveTab] = React.useState<ActiveTab>("templates");
+  const [searchParams] = useSearchParams();
+  const initialTab: ActiveTab = searchParams.get("tab") === "mcp" ? "mcp" : "templates";
+  const [activeTab, setActiveTab] = React.useState<ActiveTab>(initialTab);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -528,7 +797,7 @@ export function TemplateGalleryPage() {
               : "border-transparent text-muted-foreground hover:text-foreground"
           }`}
         >
-          MCP Servers
+          Shared servers
         </button>
       </div>
 

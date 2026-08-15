@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 // (m13.6b). The kit ships the primitive (CommandPalette + useCommandK); this is
 // the shell adapter that (1) owns the global cmd-K / Ctrl-K binding, (2) builds
 // the command groups from live app state (lib/palette-commands), and (3)
-// RBAC-FILTERS them EXACTLY like the nav (the same `requiresWrite` capability
+// RBAC-FILTERS them EXACTLY like the nav (the same `requiresCapability` capability
 // gate the Sidebar uses, ui-foundation section 3, DISPLAY-ONLY per ADR 0011) so
 // a viewer's palette never lists write-only surfaces they can't reach. It mounts
 // INSIDE the Namespace + Capabilities providers (ShellChrome) so it reads the

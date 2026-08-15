@@ -13,9 +13,8 @@ import { api, ApiError, type GuardrailPolicySummary } from "@/lib/api";
 // A 403 surfaces as an honest forbidden state (never a fake empty list).
 //
 // data-testid contract:
-//   guardrail-policies-page     — root container
-//   guardrail-policies-table    — the DataTable (aria-label="Guardrail policies")
-//   guardrail-policy-row-{name} — each row (via rowKey)
+//   guardrail-policies-page  — root container
+//   guardrail-policies-table — the DataTable (aria-label="Guardrail policies")
 
 type LoadState =
   | { kind: "loading" }
@@ -105,11 +104,11 @@ export function GuardrailPoliciesPage() {
       hideOnMobile: true,
       cell: (p) => (
         <span className="text-sm text-muted-foreground">
-          {p.referencingAgents.length > 0
-            ? p.referencingAgents.length === 1
-              ? "1 agent"
-              : `${p.referencingAgents.length} agents`
-            : "—"}
+          {p.referencingAgents.length === 0
+            ? "—"
+            : p.referencingAgents.length === 1
+              ? p.referencingAgents[0]
+              : `${p.referencingAgents.length} agents`}
         </span>
       ),
     },

@@ -87,8 +87,9 @@ type Store interface {
 	// already-revoked share is a no-op success, never an error (so a double DELETE never 500s).
 	Revoke(ctx context.Context, id string) error
 
-	// ListForRun returns all NON-revoked share records for a run (the manage list — GET
-	// /api/runs/{id}/shares). Ordered newest-first. The BFF projects these onto a token-free DTO; the
-	// TokenHash on these records must NEVER reach the client.
+	// ListForRun returns ALL share records for a run (including revoked) for the manage list — GET
+	// /api/runs/{id}/shares. Ordered newest-first. The BFF projects these onto a token-free DTO (V11:
+	// revoked rows are included so "what did I expose?" is honestly answered; the UI badges them).
+	// The TokenHash on these records must NEVER reach the client.
 	ListForRun(ctx context.Context, runID string) ([]SharedRun, error)
 }

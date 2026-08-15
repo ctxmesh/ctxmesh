@@ -124,3 +124,37 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 });
+
+// ── K7 m76.6: GuardrailPolicy console P3 polish ──────────────────────────────
+describe("GuardrailPoliciesPage — K7 polish (m76.6)", () => {
+  it("K7(c) shows the single agent's name (not '1 agent') when exactly one agent references the policy", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          policy({ name: "solo-policy", referencingAgents: ["billing-agent"] }),
+        ],
+      },
+    }));
+    renderPage();
+    await screen.findByText("solo-policy");
+    // Shows the agent name directly — more actionable than "1 agent".
+    expect(screen.getByText("billing-agent")).toBeInTheDocument();
+    // Must NOT show the generic "1 agent" text.
+    expect(screen.queryByText("1 agent")).toBeNull();
+  });
+
+  it("K7(c) shows count for multiple agents", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          policy({ name: "multi-policy", referencingAgents: ["agent-a", "agent-b", "agent-c"] }),
+        ],
+      },
+    }));
+    renderPage();
+    await screen.findByText("multi-policy");
+    expect(screen.getByText("3 agents")).toBeInTheDocument();
+  });
+});

@@ -86,12 +86,17 @@ describe("RunsPage — basic rendering (m16.8)", () => {
 
     renderPage();
 
-    // Page root
+    // Page root — the div is rendered immediately (even during loading), so
+    // this resolves before the async fetch completes.
     expect(await screen.findByTestId("runs-page")).toBeInTheDocument();
-    // The DataTable gets aria-label="Runs"
+    // The DataTable gets aria-label="Runs" — the <table> element is always
+    // rendered (even during loading), so a sync getByRole is safe here.
     expect(screen.getByRole("table", { name: "Runs" })).toBeInTheDocument();
-    // Row data rendered
-    expect(screen.getByText("billing-agent")).toBeInTheDocument();
+    // Row data — only rendered after the fetch resolves and React re-renders.
+    // Use findByText to await the async state transition deterministically
+    // (getByText would race against the microtask queue after the fetch mock
+    // resolves, causing intermittent failures in CI — T4 flake fix).
+    expect(await screen.findByText("billing-agent")).toBeInTheDocument();
     expect(screen.getByText("support-agent")).toBeInTheDocument();
   });
 

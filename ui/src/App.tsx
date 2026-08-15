@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
@@ -15,7 +15,6 @@ import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
 import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
-import { McpCatalogPage } from "@/pages/mcp-catalog-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
 import { ToolCatalogPage } from "@/pages/tool-catalog-page";
 import { ConfigBuilderPage } from "@/pages/config-builder-page";
@@ -229,8 +228,10 @@ export function App() {
             <Route path="tools/approvals" element={<McpApprovalsPage />} />
             {/* m17.10: Tool catalog — merged curated + user-added + pending tools */}
             <Route path="tools/catalog" element={<ToolCatalogPage />} />
-            {/* m73.7: MCP Catalog — cross-namespace discoverable MCP servers */}
-            <Route path="tools/mcp-catalog" element={<McpCatalogPage />} />
+            {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single
+                discovery surface, which renders its own inline McpCatalogTab). The old
+                standalone mcp-catalog-page was deleted as dead code. */}
+            <Route path="tools/mcp-catalog" element={<Navigate to="/gallery?tab=mcp" replace />} />
             {/* m74.6: Template Gallery — agent templates (recipes ∪ published) + MCP catalog in tabs */}
             <Route path="gallery" element={<TemplateGalleryPage />} />
             {/* m15.12: ModelRoute CRUD surfaces */}
