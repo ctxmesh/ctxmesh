@@ -43,11 +43,15 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, nil, nil)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
 	assert.Empty(t, c.Ports, "no container port (Knative single-port rule)")
+	// No policy passed ⇒ no TOOL_POLICY_FILE env, no mount (permissive plumbing off).
+	_, hasPolicyEnv := envValue(c, "TOOL_POLICY_FILE")
+	assert.False(t, hasPolicyEnv, "no toolPolicy ⇒ no TOOL_POLICY_FILE env")
+	assert.Empty(t, c.VolumeMounts, "no toolPolicy ⇒ no policy mount")
 
 	for name, want := range map[string]string{
 		"MCP_CAPABILITY_PUBLIC_KEY": "PUBKEY",
@@ -76,7 +80,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false)
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, nil)
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
@@ -92,7 +96,7 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
@@ -104,6 +108,31 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		assert.NotEmpty(t, e.Value, name)
 		assert.Nil(t, e.ValueFrom, "%s must be a static value (Knative rejects valueFrom)", name)
 	}
+}
+
+// TestEgressSidecarContainer_ToolPolicyMount: when the controller passes a tool-policy mount + env
+// (M82, ADR 0074 §1), the sidecar container carries TOOL_POLICY_FILE (static, never valueFrom) and
+// the read-only policy volume mount — the DELIVERY plumbing (permissive; not yet enforced).
+func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
+	cfg := OBOEgressConfig{
+		SidecarImage:           "egress-sidecar:test",
+		CapabilityPublicKeyB64: "PUBKEY",
+		CapabilityAudience:     "aud",
+		CredentialNamespace:    "ae-credentials",
+	}
+	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
+	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, mount, env)
+
+	e, ok := envValue(c, envToolPolicyFile)
+	require.True(t, ok, "a tool-policy agent's sidecar carries TOOL_POLICY_FILE")
+	assert.Equal(t, toolPolicyMountPath+"/"+toolPolicyConfigMapKey, e.Value)
+	assert.Nil(t, e.ValueFrom, "TOOL_POLICY_FILE must be static (Knative rejects valueFrom)")
+
+	require.Len(t, c.VolumeMounts, 1, "the policy volume is mounted on the sidecar")
+	assert.Equal(t, toolPolicyVolumeName, c.VolumeMounts[0].Name)
+	assert.Equal(t, toolPolicyMountPath, c.VolumeMounts[0].MountPath)
+	assert.True(t, c.VolumeMounts[0].ReadOnly, "the policy mount is read-only")
 }
 
 func TestEgressRoutesJSON(t *testing.T) {

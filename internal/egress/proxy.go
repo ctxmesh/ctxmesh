@@ -87,6 +87,12 @@ type ProxyConfig struct {
 	// body) + verbatim (upstream response) into the run's replay fixture. nil ⇒ record mode off,
 	// the capture path is a no-op (zero overhead, the forward is byte-for-byte unchanged).
 	Recorder *ToolRecorder
+	// Policy holds the resolved spec.runtime.toolPolicy the controller delivers (M82, ADR 0074 §1),
+	// read + fsnotify-watched from the mounted TOOL_POLICY_FILE. This task DELIVERS + PARSES + HOLDS
+	// it only — ServeHTTP does NOT consult it, so behavior stays PERMISSIVE. Enforcement (deny 403 /
+	// require-approval voucher / fan-out ceiling) is a later M82 task that will read this holder on
+	// the hot path. nil ⇒ no holder wired (permissive).
+	Policy *PolicyHolder
 }
 
 // Proxy is the sidecar HTTP handler.
