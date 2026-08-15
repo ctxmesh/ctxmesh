@@ -312,9 +312,68 @@ func (s *Server) authenticatePod(ctx context.Context, token string) (string, err
 	return s.podAuth.Namespace(ctx, token)
 }
 
+// authenticateAgentNamespace verifies a launcher's pod-identity token, REQUIRES it to
+// be a per-agent identity (agent-<name>), and returns the pod's namespace (m79.2,
+// closing the m52 C7 gap). The quota/dedup paths previously authenticated only the
+// namespace, so ANY pod in a tenant namespace — even a non-agent SA (e.g. the namespace
+// `default`) — could act on those endpoints. This mirrors the memory path's authorize():
+// it resolves the FULL identity and rejects a non-agent SA, so a pod can act only when
+// it carries its OWN verified agent identity.
+//
+// The endpoints it guards key on the NAMESPACE/TENANT aggregate (an intentional shared
+// budget/seen-set), not on the agent name, so the agent name itself is not returned —
+// the agent binding is purely an authorization GATE (who may act), never a re-keying of
+// the shared scope. The check is un-forgeable: agentNameFromSA runs on the
+// TokenReview-verified SA username, never a request header/body.
+//
+// It returns (ns, nil) on success; ("", ErrTokenRejected) for an invalid token;
+// ("", errPodAuthUnavailable) when no authenticator is configured; and
+// ("", errNotAnAgentIdentity) for a verified-but-non-agent SA (→ 403, matching the
+// memory path — authenticated, not authorizable).
+func (s *Server) authenticateAgentNamespace(ctx context.Context, token string) (string, error) {
+	if s.podAuth == nil {
+		return "", errPodAuthUnavailable
+	}
+	id, err := s.podAuth.Identity(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := agentNameFromSA(id.ServiceAccount); !ok {
+		return "", errNotAnAgentIdentity
+	}
+	return id.Namespace, nil
+}
+
 // errPodAuthUnavailable signals the proxy has no pod authenticator wired (no
 // cluster config) — the quota endpoints are unavailable, not a rejection.
 var errPodAuthUnavailable = errors.New("statelayer: pod authentication is not configured")
+
+// errNotAnAgentIdentity signals a verified pod token whose SA is NOT a per-agent
+// identity (agent-<name>) — authenticated, but not authorizable on the workload
+// paths, so the handler maps it to 403 (never a guessed scope), mirroring the
+// memory path's authorize().
+var errNotAnAgentIdentity = errors.New("statelayer: pod identity is not an agent")
+
+// writeAgentAuthError maps an authenticateAgent error to the HTTP status the
+// quota/dedup/control paths share, mirroring the memory path's authorize() posture:
+//   - ErrTokenRejected        → 401 (invalid pod token)
+//   - errNotAnAgentIdentity   → 403 (verified, but not an agent — not authorizable)
+//   - anything else (infra / not-configured) → 503 (fail closed; launcher retries)
+func writeAgentAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrTokenRejected):
+		writeJSONError(w, http.StatusUnauthorized, "invalid pod token")
+	case errors.Is(err, errNotAnAgentIdentity):
+		// Authenticated, but not a per-agent identity SA (agent-<name>) — 403, never a
+		// guessed scope (matches the memory path's non-agent-SA rejection).
+		writeJSONError(w, http.StatusForbidden, "pod identity is not an agent (expected the agent-<name> ServiceAccount)")
+	default:
+		// Auth-infra failure (TokenReview unreachable) or no authenticator wired —
+		// distinct from a rejection so the launcher can fail budget CLOSED but
+		// rate/concurrency OPEN (ADR 0050 Amд 3).
+		writeJSONError(w, http.StatusServiceUnavailable, "pod authentication unavailable")
+	}
+}
 
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
