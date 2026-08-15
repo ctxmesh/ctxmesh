@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Building2, ExternalLink, Globe, Lock, Plus, Share2, Trash2, Users, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -123,7 +123,15 @@ export function McpServersPage() {
         <EmptyState
           icon={Wrench}
           title="No MCP servers yet"
-          description="Add an MCP server to give your agents tools."
+          description={
+            <>
+              Add your own MCP server, or{" "}
+              <Link to="/gallery" className="underline underline-offset-2 hover:text-foreground" data-testid="gallery-discover-link">
+                discover shared servers
+              </Link>{" "}
+              in the Gallery and connect one to your namespace.
+            </>
+          }
           action={
             canAdd
               ? { label: "Add MCP server", icon: Plus, onClick: () => navigate("/tools/add-mcp") }

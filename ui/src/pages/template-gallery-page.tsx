@@ -528,7 +528,7 @@ export function TemplateGalleryPage() {
               : "border-transparent text-muted-foreground hover:text-foreground"
           }`}
         >
-          MCP Servers
+          Shared servers
         </button>
       </div>
 
