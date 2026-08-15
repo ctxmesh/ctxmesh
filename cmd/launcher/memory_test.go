@@ -889,6 +889,13 @@ func TestMemoryConcurrentAppends(t *testing.T) {
 	const writers = 20
 	const perWriter = 10
 
+	// Use a per-test client so this test's connection pool is isolated from
+	// other parallel tests — shared http.DefaultClient can carry stale
+	// connections to already-closed test servers, causing spurious errors
+	// under high parallelism in CI (K6 flake fix).
+	client := &http.Client{}
+	t.Cleanup(func() { client.CloseIdleConnections() })
+
 	var wg sync.WaitGroup
 	for w := range writers {
 		wg.Go(func() {
@@ -899,7 +906,7 @@ func TestMemoryConcurrentAppends(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				resp, err := http.DefaultClient.Do(req)
+				resp, err := client.Do(req)
 				if err != nil {
 					t.Error(err)
 					return
