@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as capMod from "../src/_capability.js";
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { Tool, ToolsClient, DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "../src/tools.js";
-import { DiscoveryStub, startPlane, type MockPlane } from "./plane.js";
+import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "./plane.js";
 
 let plane: MockPlane;
 
@@ -276,7 +276,7 @@ describe("ToolsClient.call — full MCP session", () => {
     // name can't resolve, triggering a ConfigError (name resolution fails before the call).
     // For a server-side JSON-RPC error, we patch the stub response instead.
     const discovery2 = new DiscoveryStub({ count: 0 });
-    discovery2["routes"].set("POST /mcp/", (_s, req) => {
+    discovery2["routes"].set("POST /mcp/", (_s, req): StubResponse => {
       const msg = req.json() as { method?: string; id?: unknown };
       if (msg.method === "initialize") {
         return {
@@ -339,7 +339,7 @@ describe("ToolsClient.call — full MCP session", () => {
   it("throws ConfigError when the resolved tool list is ambiguous", async () => {
     // Patch the discovery stub's serverTools to return two tools, neither matching catalog name.
     const discovery2 = new DiscoveryStub();
-    discovery2["routes"].set("POST /mcp/", (_s, req) => {
+    discovery2["routes"].set("POST /mcp/", (_s, req): StubResponse => {
       const msg = req.json() as { method?: string; id?: unknown };
       if (msg.method === "initialize") {
         return {
@@ -379,7 +379,7 @@ describe("ToolsClient.call — full MCP session", () => {
   it("uses sole-tool fallback when the server exposes exactly one tool", async () => {
     // Point the endpoint at a stub with a differently-named sole tool.
     const discovery2 = new DiscoveryStub({ count: 99, server_version: "v2" });
-    discovery2["routes"].set("POST /mcp/", (_s, req) => {
+    discovery2["routes"].set("POST /mcp/", (_s, req): StubResponse => {
       const msg = req.json() as { method?: string; id?: unknown; params?: Record<string, unknown> };
       if (msg.method === "initialize") {
         return {

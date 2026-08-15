@@ -24,6 +24,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import {
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+  type ReadableSpan,
+  type SpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
+
 import { PlaneConfig, makeRunContext, type RunContext } from "../src/config.js";
 
 /** A captured inbound request the stub recorded, for assertions. */
@@ -36,7 +43,7 @@ export interface RecordedRequest {
   json(): unknown;
 }
 
-interface StubResponse {
+export interface StubResponse {
   status: number;
   headers?: Record<string, string>;
   body?: Buffer | string;
@@ -404,31 +411,33 @@ export class FeedbackStub extends BaseStub {
   }
 }
 
-// ── in-memory span capture (trace tests, m77.4 fills the OTel side) ─────────
-/** A minimal captured span shape the later trace tests assert on. */
-export interface CapturedSpan {
-  name: string;
-  attributes: Record<string, unknown>;
-}
-
+// ── in-memory span capture (trace tests) ────────────────────────────────────
 /**
- * A stub in-memory span capture — the analogue of the Python `InMemorySpanExporter`
- * fixture. m77.4 wires the OTel-JS SDK to feed real spans in here; for now it is a
- * plain in-process buffer so the trace-test scaffolding compiles + resets cleanly.
+ * A real in-memory span capture — the analogue of the Python `InMemorySpanExporter`
+ * fixture. Wraps an OTel-JS `InMemorySpanExporter` behind a `SimpleSpanProcessor`
+ * (synchronous export on span end, so a test can assert immediately after a scope closes,
+ * with no batch flush). Pass `.processor` into `new Client(config, { spanProcessor })` so
+ * the `TraceClient` writes its emitted spans here instead of exporting over gRPC.
+ *
+ * `finishedSpans()` returns the OTel `ReadableSpan[]` (with `.attributes`,
+ * `.spanContext()`, and — OTel-JS 2.x — `.parentSpanContext` for the parent span id).
  */
 export class InMemorySpanCollector {
-  private spans: CapturedSpan[] = [];
+  private readonly exporter = new InMemorySpanExporter();
+  readonly processor: SpanProcessor = new SimpleSpanProcessor(this.exporter);
 
-  record(span: CapturedSpan): void {
-    this.spans.push(span);
+  finishedSpans(): readonly ReadableSpan[] {
+    return this.exporter.getFinishedSpans();
   }
 
-  finishedSpans(): readonly CapturedSpan[] {
-    return this.spans;
+  /** Look a captured span up by name (the last one, if a name repeats). */
+  byName(name: string): ReadableSpan | undefined {
+    const matches = this.exporter.getFinishedSpans().filter((s) => s.name === name);
+    return matches[matches.length - 1];
   }
 
   reset(): void {
-    this.spans = [];
+    this.exporter.reset();
   }
 }
 

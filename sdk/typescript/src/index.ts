@@ -3,8 +3,8 @@
  *
  * Foundation surface (M77.1): the launcher-plane configuration and the typed error
  * hierarchy. M77.2 adds the data-plane clients (memory/knowledge/feedback/model) and
- * the Client facade. Tools+MCP (M77.3), tracing (M77.4), serve/managed-loop (M77.5)
- * land in subsequent tasks.
+ * the Client facade. Tools+MCP (M77.3), tracing + request-scope/capability + approvals
+ * (M77.4). serve/managed-loop (M77.5) lands in a subsequent task.
  */
 
 export {
@@ -32,7 +32,7 @@ export {
 
 // ── M77.2: data-plane clients + facade ────────────────────────────────────────
 
-export { CAPABILITY_HEADER, currentCapability } from "./_capability.js";
+export { CAPABILITY_HEADER, currentCapability, capabilityScope } from "./_capability.js";
 
 export { MemoryClient } from "./memory.js";
 export { KnowledgeClient } from "./knowledge.js";
@@ -52,6 +52,12 @@ export {
   HANDOFF_TOOL_NAME,
   KNOWLEDGE_SEARCH_TOOL_NAME,
 } from "./tools.js";
+
+// ── M77.4: tracing (the M10 span tree) + request-scope/capability + approvals ──
+
+export { TraceClient, SpanHandle } from "./trace.js";
+export type { SpanScope } from "./trace.js";
+export { approvalScope, pauseForApproval } from "./_approval.js";
 
 // The `agent` module: `agent.fromEnv()` / `agent.fromConfig()` — the primary entry points.
 export * as agent from "./agent.js";
