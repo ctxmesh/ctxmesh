@@ -43,4 +43,19 @@ type Store interface {
 
 	// TenantOf returns the tenant that owns the namespace, and whether a row exists.
 	TenantOf(ctx context.Context, namespace string) (tenant string, ok bool, err error)
+
+	// SetStorageHardCapExceeded projects the tenant's at-hard-cap flag onto EVERY row it owns (m80.3,
+	// ADR 0061 governance #7 hard enforcement). The Tenant controller owns the cross-namespace corpus
+	// aggregation (ADR 0011) and writes the derived flag here each reconcile; the BFF upload handler +
+	// ingestion executor read it back via StorageHardCapExceededFor WITHOUT any cross-namespace K8s
+	// read. A no-op for a tenant with no rows (nothing to enforce against).
+	SetStorageHardCapExceeded(ctx context.Context, tenant string, exceeded bool) error
+
+	// StorageHardCapExceededFor reports whether the tenant that owns namespace has reached its storage
+	// hard cap (m80.3). It resolves namespace → tenant → the projected flag in one read. Returns
+	// (false, false, nil) when no row exists for the namespace (no tenant / no cap projected) — the
+	// fail-OPEN default: an unknown namespace is not blocked (a namespace outside any tenant, or a
+	// mirror not yet converged, must never be wedged by the hard-cap guard). The controller's next
+	// reconcile projects the true state.
+	StorageHardCapExceededFor(ctx context.Context, namespace string) (exceeded bool, ok bool, err error)
 }

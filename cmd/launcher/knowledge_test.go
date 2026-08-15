@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // fakeKnowledgeService records the last search payload (on a channel) + answers search with a fixed
@@ -55,7 +57,7 @@ func fakeKnowledgeService(t *testing.T, searched chan<- map[string]any) *httptes
 func kbProxyTo(url string) *knowledgeProxy {
 	return &knowledgeProxy{
 		tokenServiceURL: url, namespace: "prod",
-		roster: map[string]string{"docs": "embed-v1"},
+		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-v1"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
 	}
@@ -149,7 +151,7 @@ func TestKnowledge_RosterGate_UnknownKBIs403(t *testing.T) {
 	ts := fakeKnowledgeService(t, nil)
 	p := &knowledgeProxy{
 		tokenServiceURL: ts.URL, namespace: "prod",
-		roster: map[string]string{"docs": "embed-v1"}, // only "docs" is granted
+		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-v1"}}, // only "docs" is granted
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
 	}
@@ -164,7 +166,7 @@ func TestKnowledge_RosterGate_GrantedKBForwards(t *testing.T) {
 	ts := fakeKnowledgeService(t, searched)
 	p := &knowledgeProxy{
 		tokenServiceURL: ts.URL, namespace: "prod",
-		roster: map[string]string{"my-kb": "text-embedding-3-small"},
+		roster: map[string]kbGrant{"my-kb": {embeddingRoute: "text-embedding-3-small"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
 	}
@@ -206,8 +208,8 @@ func TestKnowledge_RosterGate_RosterFilledFromEnv(t *testing.T) {
 	p := newKnowledgeProxy(func(string, ...any) {}, noop.NewTracerProvider().Tracer(""))
 	require.NotNil(t, p)
 	require.NotNil(t, p.roster, "roster must be populated from KNOWLEDGE_BASES env")
-	assert.Equal(t, "text-embedding-3-small", p.roster["corp-docs"], "corp-docs roster entry must be correct")
-	assert.Equal(t, "text-embedding-ada-002", p.roster["policies"], "policies roster entry must be correct")
+	assert.Equal(t, "text-embedding-3-small", p.roster["corp-docs"].embeddingRoute, "corp-docs roster entry correct")
+	assert.Equal(t, "text-embedding-ada-002", p.roster["policies"].embeddingRoute, "policies roster entry correct")
 	_, granted := p.roster["unknown"]
 	assert.False(t, granted, "unknown KB must not be in roster")
 }
@@ -219,7 +221,7 @@ func TestKnowledge_RosterFill_EmbeddingModelFromRosterWinsOverRequest(t *testing
 	ts := fakeKnowledgeService(t, searched)
 	p := &knowledgeProxy{
 		tokenServiceURL: ts.URL, namespace: "prod",
-		roster: map[string]string{"docs": "embed-from-roster"},
+		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-from-roster"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
 	}
@@ -248,8 +250,8 @@ func TestKnowledge_ParseKnowledgeRoster(t *testing.T) {
 			`{"name":"kb2","namespace":"ns","embeddingRoute":"embed-v2"}]`
 		roster := parseKnowledgeRoster(raw)
 		require.NotNil(t, roster)
-		assert.Equal(t, "embed-v1", roster["kb1"])
-		assert.Equal(t, "embed-v2", roster["kb2"])
+		assert.Equal(t, "embed-v1", roster["kb1"].embeddingRoute)
+		assert.Equal(t, "embed-v2", roster["kb2"].embeddingRoute)
 	})
 	t.Run("empty entries filtered out", func(t *testing.T) {
 		raw := `[{"name":"","namespace":"ns","embeddingRoute":"embed-v1"},` +
@@ -258,11 +260,113 @@ func TestKnowledge_ParseKnowledgeRoster(t *testing.T) {
 		require.NotNil(t, roster, "kb2 has a valid name so roster is non-nil")
 		_, hasEmpty := roster[""]
 		assert.False(t, hasEmpty, "empty-name entry must be filtered")
-		assert.Equal(t, "", roster["kb2"], "empty embeddingRoute is stored (override fallback)")
+		assert.Equal(t, "", roster["kb2"].embeddingRoute, "empty embeddingRoute is stored (override fallback)")
+	})
+	t.Run("perUser flag parsed", func(t *testing.T) {
+		raw := `[{"name":"org","namespace":"ns","embeddingRoute":"e"},` +
+			`{"name":"personal","namespace":"ns","embeddingRoute":"e","perUser":true}]`
+		roster := parseKnowledgeRoster(raw)
+		require.NotNil(t, roster)
+		assert.False(t, roster["org"].perUser, "an entry without perUser defaults to org-wide")
+		assert.True(t, roster["personal"].perUser, "the perUser flag must be parsed from the roster JSON")
 	})
 	t.Run("all-empty entries → nil", func(t *testing.T) {
 		raw := `[{"name":"","namespace":"ns","embeddingRoute":"embed-v1"}]`
 		roster := parseKnowledgeRoster(raw)
 		assert.Nil(t, roster, "all-empty-name entries → nil (no grants)")
 	})
+}
+
+// ── Per-user retrieval scoping (m80.4, ADR 0061 Fork 3) ─────────────────────────────────────────────
+
+const kbTestAudience = "ctxmesh-test-aud"
+
+// kbPerUserProxy builds a per-user knowledge proxy over the given token-service, wired with a fresh
+// verifier keyed to the returned signer so a test can mint a valid run capability for it.
+func kbPerUserProxy(t *testing.T, url string) (*knowledgeProxy, *runcap.Signer) {
+	t.Helper()
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	p := &knowledgeProxy{
+		tokenServiceURL: url, namespace: "prod",
+		roster:   map[string]kbGrant{"personal": {embeddingRoute: "embed-v1", perUser: true}},
+		verifier: runcap.NewVerifier(pub, kbTestAudience, nil),
+		client:   &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
+		logf: func(string, ...any) {},
+	}
+	return p, runcap.NewSigner(priv, kbTestAudience, nil)
+}
+
+// kbPostWithCap posts a search carrying a run capability header.
+func kbPostWithCap(t *testing.T, p *knowledgeProxy, body, capToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	p.register(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge/search", bytes.NewReader([]byte(body)))
+	if capToken != "" {
+		req.Header.Set(runcap.HeaderName, capToken)
+	}
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// A per-user KB scopes the search subject to the invoking user's hashed id (from the verified run
+// capability) — so a user retrieves only their own chunks. The forwarded payload carries that subject.
+func TestKnowledge_PerUser_ScopesSubjectToCaller(t *testing.T) {
+	searched := make(chan map[string]any, 1)
+	ts := fakeKnowledgeService(t, searched)
+	p, signer := kbPerUserProxy(t, ts.URL)
+	token, err := signer.Mint(runcap.MintRequest{User: "u-alicehash", Agent: "asst", RunID: "run-1", TTL: time.Minute})
+	require.NoError(t, err)
+
+	rec := kbPostWithCap(t, p, `{"knowledgeBase":"personal","query":"my notes"}`, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	select {
+	case body := <-searched:
+		assert.Equal(t, "u-alicehash", body["subject"],
+			"a per-user KB must scope the search to the invoking user's hashed id (their own chunks only)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("search not forwarded")
+	}
+}
+
+// A per-user KB search WITHOUT a run capability is refused (fail-closed) — never degraded to subject ""
+// (which would leak org-wide / other users' chunks).
+func TestKnowledge_PerUser_NoCapabilityRefused(t *testing.T) {
+	ts := fakeKnowledgeService(t, nil)
+	p, _ := kbPerUserProxy(t, ts.URL)
+	rec := kbPostWithCap(t, p, `{"knowledgeBase":"personal","query":"q"}`, "")
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a per-user KB with no run capability must be refused, never searched under subject \"\"")
+}
+
+// A per-user KB search when the proxy has NO verifier is refused (fail-closed): the launcher cannot trust
+// any user id, so it must not fall back to org-wide.
+func TestKnowledge_PerUser_NoVerifierRefused(t *testing.T) {
+	ts := fakeKnowledgeService(t, nil)
+	p, signer := kbPerUserProxy(t, ts.URL)
+	p.verifier = nil // simulate MCP_CAPABILITY_PUBLIC_KEY unset
+	token, err := signer.Mint(runcap.MintRequest{User: "u-alicehash", Agent: "asst", RunID: "run-1", TTL: time.Minute})
+	require.NoError(t, err)
+	rec := kbPostWithCap(t, p, `{"knowledgeBase":"personal","query":"q"}`, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "no verifier ⇒ per-user retrieval refused (fail-closed)")
+}
+
+// An ORG-WIDE KB is unchanged: subject stays "" and no run capability is required — proving the !perUser
+// path did not regress under the per-user changes.
+func TestKnowledge_OrgWide_SubjectEmptyNoCapabilityNeeded(t *testing.T) {
+	searched := make(chan map[string]any, 1)
+	ts := fakeKnowledgeService(t, searched)
+	p, _ := kbPerUserProxy(t, ts.URL)
+	// Add an org-wide KB alongside the per-user one.
+	p.roster["docs"] = kbGrant{embeddingRoute: "embed-v1", perUser: false}
+	rec := kbPostWithCap(t, p, `{"knowledgeBase":"docs","query":"q"}`, "") // no capability
+	require.Equal(t, http.StatusOK, rec.Code, "an org-wide KB needs no run capability")
+	select {
+	case body := <-searched:
+		assert.Equal(t, "", body["subject"], "an org-wide KB must keep subject \"\" (unchanged)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("search not forwarded")
+	}
 }

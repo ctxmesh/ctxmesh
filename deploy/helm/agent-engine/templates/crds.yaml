@@ -324,6 +324,15 @@ spec:
                     un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                     refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                   properties:
+                    autoInject:
+                      description: |-
+                        autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                        M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                        turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                        prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                        the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                        unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                      type: boolean
                     name:
                       description: name is the KnowledgeBase CR name. Required.
                       maxLength: 253
@@ -1269,6 +1278,15 @@ spec:
                     un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                     refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                   properties:
+                    autoInject:
+                      description: |-
+                        autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                        M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                        turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                        prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                        the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                        unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                      type: boolean
                     name:
                       description: name is the KnowledgeBase CR name. Required.
                       maxLength: 253
@@ -3459,6 +3477,15 @@ spec:
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                       properties:
+                        autoInject:
+                          description: |-
+                            autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                            M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                            turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                            prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                            the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                            unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                          type: boolean
                         name:
                           description: name is the KnowledgeBase CR name. Required.
                           maxLength: 253
@@ -4206,6 +4233,15 @@ spec:
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                       properties:
+                        autoInject:
+                          description: |-
+                            autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                            M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                            turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                            prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                            the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                            unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                          type: boolean
                         name:
                           description: name is the KnowledgeBase CR name. Required.
                           maxLength: 253
@@ -7119,9 +7155,11 @@ spec:
               perUser:
                 description: |-
                   perUser enables per-user corpus scoping (isolates chunk retrieval to the invoking user's
-                  hash, the ADR 0045 subject mandate). v1 gates per-user INGESTION off (org-wide corpora
-                  only); the field + the knowledge_chunks.subject column exist from day one so per-user
-                  ingestion can be enabled without a schema migration. Defaults to false.
+                  hash, the ADR 0045 subject mandate). When true, ingestion stamps each uploading user's
+                  server-derived subject hash on their chunks and retrieval scopes to the invoking user's hash,
+                  so a user retrieves ONLY their own chunks; when false (default) the corpus is org-wide
+                  (subject "", shared) — the byte-for-byte-unchanged legacy behaviour. The knowledge_chunks.subject
+                  column exists from day one so enabling per-user needs no schema migration. Defaults to false.
                 type: boolean
               source:
                 description: |-
@@ -7147,6 +7185,17 @@ spec:
                 required:
                 - type
                 type: object
+              userStorageSoftCap:
+                description: |-
+                  userStorageSoftCap is the WARN-ONLY per-user storage soft cap in bytes for a perUser corpus.
+                  When a single user's ingested bytes exceed this value the controller reflects a
+                  UserStorageSoftCapExceeded condition (True) on status — a visible signal, NEVER an
+                  ingestion block (it mirrors the tenant corpusBytesSoftCap; the ingestion-blocking hard cap is
+                  the tenant storage.corpusBytesHardCap, m80.3). 0 (unset) disables the per-user soft cap. Ignored
+                  for an org-wide (perUser=false) corpus, which has no per-user accounting. (ADR 0061 Fork 3, m80.4)
+                format: int64
+                minimum: 0
+                type: integer
             required:
             - embeddingRoute
             - source
@@ -8847,20 +8896,38 @@ spec:
                 type: object
               storage:
                 description: |-
-                  storage is the corpus storage soft cap (ADR 0061 governance #7, M68). When set and the
-                  aggregate KnowledgeBase.status.sizeBytes across all member namespaces exceeds the cap,
-                  the controller sets a StorageSoftCapExceeded condition and emits a Warning event. It
-                  NEVER blocks ingestion — soft only. Hard enforcement is m52 Theme M.
-                  Omitted ⇒ no storage cap is tracked.
+                  storage is the corpus storage quota (ADR 0061 governance #7). It carries two independent caps:
+                  corpusBytesSoftCap (M68 — WARNS via StorageSoftCapExceeded, never blocks) and corpusBytesHardCap
+                  (m80.3 — sets StorageHardCapExceeded AND blocks new corpus growth: 413 on upload + a fast typed
+                  ingestion failure at/over the cap). Either may be set independently.
+                  Omitted ⇒ no storage cap is tracked or enforced.
                 properties:
+                  corpusBytesHardCap:
+                    description: |-
+                      corpusBytesHardCap is the tenant-aggregate HARD cap on total KnowledgeBase corpus bytes
+                      (m80.3, ADR 0061 governance #7 hard-enforcement). It is a Kubernetes quantity string
+                      (e.g. "20Gi"). When totalCorpusBytes >= this value the controller sets a
+                      StorageHardCapExceeded condition AND enforcement blocks new corpus growth: an upload to an
+                      at-cap tenant returns HTTP 413 (typed storage_quota_exceeded) and an ingestion run fails
+                      fast (typed storage_quota_exceeded → phase Failed) before fetching documents.
+                      Enforcement reads the controller's PROJECTED at-cap state (ADR 0011 — no cross-namespace
+                      read at the enforcement point), so it is bounded-eventually-consistent: a burst between
+                      reconciles can overshoot by at most (burst × the 25 MiB per-upload cap). This is a storage
+                      governance guardrail, not a security boundary.
+                      Empty means no hard cap is enforced (backward-compatible default).
+                    type: string
+                    x-kubernetes-validations:
+                    - message: corpusBytesHardCap must be a valid Kubernetes quantity
+                        (e.g. "20Gi")
+                      rule: self == '' || isQuantity(self)
                   corpusBytesSoftCap:
                     description: |-
                       corpusBytesSoftCap is the tenant-aggregate soft cap on total KnowledgeBase corpus bytes
                       (the sum of KnowledgeBase.status.sizeBytes across all member namespaces). It is a
                       Kubernetes quantity string (e.g. "10Gi", "50Gi"). When the aggregate exceeds this value
                       the controller sets a StorageSoftCapExceeded condition on the Tenant and emits a Warning
-                      event. It NEVER blocks ingestion — hard enforcement is m52 Theme M.
-                      Empty means no cap is tracked.
+                      event. It NEVER blocks ingestion — that is corpusBytesHardCap's job.
+                      Empty means no soft cap is tracked.
                     type: string
                     x-kubernetes-validations:
                     - message: corpusBytesSoftCap must be a valid Kubernetes quantity
@@ -8876,7 +8943,9 @@ spec:
                   conditions surface the tenant's health. Ready=true when every member
                   namespace was reconciled; a "NamespaceConflict" warning condition lists any
                   namespaces skipped because another tenant already claims them;
-                  "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap.
+                  "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap;
+                  "StorageHardCapExceeded" fires when the corpus bytes reach the hard cap (which
+                  also blocks new uploads/ingestion — m80.3).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -8944,8 +9013,8 @@ spec:
               totalCorpusBytes:
                 description: |-
                   totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
-                  namespaces, updated on every reconcile when storage.corpusBytesSoftCap is set.
-                  Reported for observability; hard storage-quota enforcement is m52 Theme M.
+                  namespaces, updated on every reconcile when EITHER storage.corpusBytesSoftCap or
+                  storage.corpusBytesHardCap is set. Reported for observability and the hard-cap check.
                 format: int64
                 type: integer
             type: object

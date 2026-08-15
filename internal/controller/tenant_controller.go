@@ -460,8 +460,6 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 
 	// Storage soft-cap check (ADR 0061 governance #7, M68 m68.12).
 	// SOFT: exceeding the cap WARNS (condition + event) — it NEVER blocks ingestion.
-	// Hard enforcement (blocking uploads/ingestion at the cap, per-user storage accounting)
-	// is deferred: m52 Theme M "hard storage-quota enforcement + per-user storage accounting".
 	if tenant.Spec.Storage != nil && tenant.Spec.Storage.CorpusBytesSoftCap != "" {
 		capQ, err := resource.ParseQuantity(tenant.Spec.Storage.CorpusBytesSoftCap)
 		if err == nil { // parse errors are rejected at admission (CEL) — be defensive
@@ -474,7 +472,7 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 					Message: fmt.Sprintf(
 						"tenant corpus is %d bytes, exceeding the soft cap of %d bytes (%s); "+
 							"ingestion is NOT blocked — this is a warning only. "+
-							"Hard enforcement is deferred (m52 Theme M).",
+							"Hard enforcement is corpusBytesHardCap (m80.3).",
 						totalCorpusBytes, capBytes, tenant.Spec.Storage.CorpusBytesSoftCap),
 					ObservedGeneration: tenant.Generation,
 				})
@@ -486,7 +484,61 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 		meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageSoftCapExceeded")
 	}
 
+	// Storage HARD-cap check (ADR 0061 governance #7 hard enforcement, m80.3, m52 Theme M).
+	// HARD: at/over the cap the controller sets a StorageHardCapExceeded condition AND
+	// enforcement blocks new corpus growth (upload → 413, ingestion → fast typed failure).
+	// The controller OWNS the cross-namespace aggregation (ADR 0011): it computes the at-cap
+	// state here and PROJECTS it into the namespace→tenant mirror below, so the BFF/run-worker
+	// enforce off the projection WITHOUT any cross-namespace K8s read (no BFF-SA/run-worker RBAC).
+	// >= (not >) — the cap is inclusive: totalCorpusBytes exactly at the cap is already "full".
+	hardCapExceeded := false
+	if tenant.Spec.Storage != nil && tenant.Spec.Storage.CorpusBytesHardCap != "" {
+		capQ, err := resource.ParseQuantity(tenant.Spec.Storage.CorpusBytesHardCap)
+		if err == nil { // parse errors are rejected at admission (CEL) — be defensive
+			capBytes := capQ.Value()
+			if totalCorpusBytes >= capBytes {
+				hardCapExceeded = true
+				meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+					Type:   "StorageHardCapExceeded",
+					Status: metav1.ConditionTrue,
+					Reason: "CorpusBytesReachedHardCap",
+					Message: fmt.Sprintf(
+						"tenant corpus is %d bytes, at or over the hard cap of %d bytes (%s); "+
+							"new uploads and ingestion runs are BLOCKED until the corpus drops below the cap.",
+						totalCorpusBytes, capBytes, tenant.Spec.Storage.CorpusBytesHardCap),
+					ObservedGeneration: tenant.Generation,
+				})
+			} else {
+				meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageHardCapExceeded")
+			}
+		}
+	} else {
+		meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageHardCapExceeded")
+	}
+
+	// Project the at-hard-cap state into the membership mirror so enforcement reads it ADR-0011-clean
+	// (the BFF/run-worker read the control-plane DB they already hold, not the K8s API). Best-effort:
+	// a mirror write blip is logged (not swallowed) and self-heals next reconcile, exactly like
+	// syncMembershipMirror — the K8s status write below is the authoritative record either way.
+	r.syncStorageState(ctx, tenant.Name, hardCapExceeded)
+
 	return r.Status().Update(ctx, tenant)
+}
+
+// syncStorageState projects the tenant's at-hard-cap flag into the namespace→tenant mirror (ADR 0067 §6,
+// m80.3) so the BFF upload handler + ingestion executor can read it WITHOUT a cross-namespace K8s read
+// (ADR 0011 — the enforcement point owns no Tenant/agent-CRD RBAC; the CONTROLLER owns the aggregation
+// and projects the state). No-op when the store is unconfigured (nil — envtest without a control-plane
+// DB). Best-effort on the converge path: a store error is LOGGED (not swallowed, not returned) so a
+// Postgres blip never rolls back the K8s status write; the next reconcile re-drives the projection.
+func (r *TenantReconciler) syncStorageState(ctx context.Context, tenantName string, hardCapExceeded bool) {
+	if r.NamespaceTenant == nil {
+		return
+	}
+	if err := r.NamespaceTenant.SetStorageHardCapExceeded(ctx, tenantName, hardCapExceeded); err != nil {
+		logf.FromContext(ctx).Error(err, "storage hard-cap state projection failed; will re-converge next reconcile",
+			"tenant", tenantName)
+	}
 }
 
 // mapObjectNSToTenants maps a namespaced object (e.g. a KnowledgeBase or Namespace) to the

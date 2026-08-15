@@ -128,6 +128,11 @@ type CorpusStatus struct {
 	Partial        bool
 	IngestionRunID string
 	LastIngestedAt *time.Time
+	// SizePerSubject is the per-user storage aggregation for a PER-USER corpus: subject hash → approximate
+	// bytes (org-wide subject "" excluded). nil/empty for an org-wide corpus. The ingestion executor computes
+	// it (SizePerSubject) at a run's terminal phase and projects it here; the KB controller reads it to reflect
+	// the UserStorageSoftCapExceeded condition (ADR 0061 Fork 3, m80.4). WARN-only — never blocks ingestion.
+	SizePerSubject map[string]int64
 	UpdatedAt      time.Time
 }
 
@@ -163,6 +168,14 @@ type Store interface {
 	// CountAndSize returns the chunk count + an approximate size (sum of len(content) bytes) of a corpus — for
 	// the KnowledgeBase.status projection (documentCount/chunkCount) and the tenant storage soft-cap.
 	CountAndSize(ctx context.Context, namespace, knowledgeBase string) (chunkCount int, sizeBytes int64, err error)
+
+	// SizePerSubject returns the approximate per-user storage (sum of len(content) bytes) of a PER-USER corpus,
+	// grouped by subject — SUM(size) GROUP BY subject over one corpus (the (namespace, knowledge_base, subject,
+	// embedding_model) filter index supports it). Org-wide chunks (subject "") are EXCLUDED from the result: the
+	// map keys are only the per-user subject hashes, so an org-wide corpus yields an empty map. Feeds the per-user
+	// storage soft-cap accounting (ADR 0061 Fork 3, m80.4) — the executor projects it onto the corpus-status row
+	// and the KB controller reflects a UserStorageSoftCapExceeded condition (WARN-only, never blocks).
+	SizePerSubject(ctx context.Context, namespace, knowledgeBase string) (sizeBySubject map[string]int64, err error)
 
 	// UpsertCorpusStatus writes the coarse corpus-status row (ADR 0061 Fork 2 — the STATUS CHANNEL). The
 	// ingestion executor calls this ONCE at a run's terminal phase (never per-batch); the KB controller reads

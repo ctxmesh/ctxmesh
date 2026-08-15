@@ -53,6 +53,11 @@ type IngestionDoc struct {
 	Key         string `json:"key"`
 	Filename    string `json:"filename,omitempty"`
 	ContentType string `json:"contentType,omitempty"`
+	// Subject is the per-user corpus owner's server-derived subject hash for a PER-USER KB (recovered from
+	// the document's object key at ingest-create, ADR 0061 Fork 3), or "" for an org-wide corpus. The executor
+	// stamps it onto every chunk this document produces so a user retrieves only their own chunks. It is pinned
+	// here at create so a live-edited KB / re-derivation cannot retroactively re-attribute an in-flight ingest.
+	Subject string `json:"subject,omitempty"`
 }
 
 // IngestionSpec is the resolved ingestion parameters pinned onto the run (run.IngestionSpec JSON) at
@@ -129,7 +134,7 @@ func ingestionReasonToPhase(reason ingestionReason) string {
 	switch reason {
 	case ingestionBudgetExceeded:
 		return kbPhaseBudgetExceeded
-	case ingestionFailed:
+	case ingestionFailed, ingestionStorageQuotaExceeded:
 		return kbPhaseFailed
 	default:
 		return kbPhaseFailed
@@ -146,6 +151,11 @@ const (
 	// `failed` but the outcome is coded BudgetExceeded so the reconcile sets phase BudgetExceeded (resumable —
 	// the cursor is preserved; a later re-ingest continues). ADR 0061 Fork 2.
 	ingestionBudgetExceeded ingestionReason = "BudgetExceeded"
+	// ingestionStorageQuotaExceeded — the tenant is at/over its corpus storage HARD cap (m80.3, ADR 0061
+	// governance #7 hard enforcement). The run fails FAST (phase Failed) BEFORE any source document is fetched,
+	// so a run cannot grow a corpus that is already at the cap. The at-cap state is the controller's PROJECTED
+	// flag read from the namespace→tenant mirror (ADR 0011 — the run-worker does not aggregate cross-namespace).
+	ingestionStorageQuotaExceeded ingestionReason = "StorageQuotaExceeded"
 )
 
 // IngestionOutcome is the executor-written terminal outcome, persisted in run.Outcome (JSON). It is the SEAM the
@@ -220,7 +230,11 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
+		// The run is unreadable here — route through failIngestion (which itself re-reads best-effort) so the
+		// run terminates `failed` AND the corpus-status projection is attempted, rather than a bare return that
+		// leaves the run `running` and the KB stuck `Ingesting` forever (an m68.14-class out-of-band failure).
 		s.log.Error(err, "ingestion: could not load the run", "run", runID)
+		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("loading the ingestion run: %v", err))
 		return
 	}
 
@@ -232,6 +246,28 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 	if strings.TrimSpace(spec.KnowledgeBase) == "" {
 		s.failIngestion(runID, ingestionFailed, "ingestion spec has no knowledgeBase")
 		return
+	}
+
+	// Storage HARD-cap gate (m80.3, ADR 0061 governance #7 hard enforcement). Fail the run FAST — BEFORE
+	// fetching any source document / embedding anything — when the tenant is already at its corpus hard cap,
+	// so an ingestion cannot grow a corpus that is at the limit. The at-cap state is the Tenant controller's
+	// PROJECTED flag read from the namespace→tenant mirror (ADR 0011: the controller owns the cross-namespace
+	// corpus aggregation; the run-worker holds NO Tenant/agent-CRD cross-namespace RBAC and does NOT aggregate).
+	// Bounded eventual consistency (the guardrail, not a security boundary): a run that started just before a
+	// reconcile flipped the flag can still complete — the cap is re-enforced on the NEXT upload/ingest. Route
+	// the terminal through failIngestion so it projects phase Failed (the m80.1 corpus-status path). Fail-OPEN
+	// on a store error / unknown namespace: never wedge ingestion for a namespace the mirror hasn't converged.
+	if s.namespaceTenantStore != nil {
+		exceeded, _, capErr := s.namespaceTenantStore.StorageHardCapExceededFor(ctx, spec.Namespace)
+		if capErr != nil {
+			s.log.Error(capErr, "ingestion: storage hard-cap lookup failed; allowing (fail-open)",
+				"run", runID, "ns", spec.Namespace, "kb", spec.KnowledgeBase)
+		} else if exceeded {
+			s.failIngestion(runID, ingestionStorageQuotaExceeded, fmt.Sprintf(
+				"tenant storage hard cap reached for namespace %q — the corpus is at or over its configured "+
+					"limit; delete documents or raise the tenant's storage.corpusBytesHardCap before re-ingesting", spec.Namespace))
+			return
+		}
 	}
 
 	cursor, err := parseIngestionCursor(rn.Cursor)
@@ -334,38 +370,53 @@ func (s *Server) ingestOneDocument(
 		return ingestDocDone, false
 	}
 
-	// (c) Batch-embed the chunk texts in sub-batches, building knowledge.Chunk records.
-	records, result, halted := s.embedChunks(ctx, runID, spec, doc, chunks)
+	// (c) Embed + upsert the chunk texts in bounded sub-batches. embedAndUpsertChunks STREAMS each sub-batch
+	// (embed → build records → upsert → release) so the executor's peak heap is O(one document + ONE embed-batch),
+	// never O(all chunks of the document) — the m80.2 bounded-buffering fix. It returns the number of chunks
+	// upserted for this document (correctness is unchanged: the same records land under the same content-hash-
+	// idempotent Upsert; only the buffering window shrank).
+	upserted, result, halted := s.embedAndUpsertChunks(ctx, runID, spec, doc, chunks)
 	if halted || result == ingestReclaimable {
 		return result, halted
 	}
 
-	// (d) Upsert (content-hash idempotent) then sweep this document's PRIOR-run chunks (a shrunk/re-ingested doc
-	// must not leave stale chunks serving wrong text — the correctness half of re-ingest, ADR 0061 Fork 2).
-	if len(records) > 0 {
-		if uErr := s.knowledgeStore.Upsert(ctx, records); uErr != nil {
-			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
-			return 0, true
-		}
-	}
+	// (d) Sweep this document's PRIOR-run chunks (a shrunk/re-ingested doc must not leave stale chunks serving
+	// wrong text — the correctness half of re-ingest, ADR 0061 Fork 2). This runs AFTER every current-run batch
+	// has upserted; SweepOrphans deletes only ingestion_run_id <> runID, so the batches just written survive.
 	if _, sErr := s.knowledgeStore.SweepOrphans(ctx, spec.Namespace, spec.KnowledgeBase, doc.Key, runID); sErr != nil {
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for document %q: %v", doc.Key, sErr))
 		return 0, true
 	}
 
-	cursor.Chunks += len(records)
-	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("ingestion-document:%s:%d", doc.Key, len(records)))
+	cursor.Chunks += upserted
+	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("ingestion-document:%s:%d", doc.Key, upserted))
 	return ingestDocDone, false
 }
 
-// embedChunks batch-embeds a document's chunk texts (sub-batched) and assembles knowledge.Chunk records with
-// full provenance. It handles the budget/rate branch per sub-batch: on 429 it backs off + retries in-executor
-// (up to embedRateRetries) and returns ingestReclaimable when still failing; on 402 it fail-softs the run to
-// BudgetExceeded (returning halted=true); a non-budget embed error after retries fails the run fast.
-func (s *Server) embedChunks(
+// embedAndUpsertChunks embeds a document's chunk texts in bounded sub-batches and upserts EACH sub-batch as it is
+// embedded, so the executor never holds more than ONE embed-batch's worth of vectors in memory at a time (the
+// m80.2 bounded-buffering fix). Peak transient heap is O(embedSubBatch × vector-dim), independent of the
+// document's total chunk count — a 25 MiB doc that chunks into tens of thousands of vectors no longer materialises
+// them all at once. It returns the number of chunks upserted for the document.
+//
+// Correctness is UNCHANGED versus the prior accumulate-then-upsert form: every record is built identically (same
+// provenance, same content) and lands under the same content-hash-idempotent Upsert. Splitting the doc's chunks
+// across several Upsert calls within ONE run is safe — the caller's SweepOrphans deletes only
+// ingestion_run_id <> runID, so batches written earlier in the same run are never swept by the sweep that follows.
+//
+// It handles the budget/rate branch per sub-batch: on 429 it backs off + retries in-executor (up to
+// embedRateRetries) and returns ingestReclaimable when still failing; on 402 it fail-softs the run to
+// BudgetExceeded (returning halted=true); a non-budget embed error (or an Upsert error) after retries fails the
+// run fast. A resumable stop (429) after some batches already upserted is safe: those chunks carry this run's id,
+// so a later resume re-embeds the whole document (the cursor marks a doc done only after the WHOLE doc completes)
+// and the content-hash-idempotent Upsert overwrites them in place — never a duplicate row.
+func (s *Server) embedAndUpsertChunks(
 	ctx context.Context, runID string, spec IngestionSpec, doc IngestionDoc, chunks []ingest.TextChunk,
-) (records []knowledge.Chunk, result docOutcome, halted bool) {
+) (upserted int, result docOutcome, halted bool) {
 	now := time.Now()
+	// One reusable per-batch buffer, sized to the largest sub-batch (embedSubBatch, or the whole doc when smaller).
+	// Reused across sub-batches so the record slice is allocated once, not per batch — peak heap stays O(one batch).
+	records := make([]knowledge.Chunk, 0, min(embedSubBatch, len(chunks)))
 	for start := 0; start < len(chunks); start += embedSubBatch {
 		end := min(start+embedSubBatch, len(chunks))
 		batch := chunks[start:end]
@@ -381,28 +432,29 @@ func (s *Server) embedChunks(
 				// BUDGET exhausted → fail-soft, resumable (the cursor is preserved). ADR 0061 Fork 2.
 				s.failIngestion(runID, ingestionBudgetExceeded,
 					fmt.Sprintf("tenant budget exceeded while embedding document %q: %v", doc.Key, err))
-				return nil, 0, true
+				return 0, 0, true
 			case 429:
 				// RATE-limited after in-executor retries → leave reclaimable (the cursor preserves progress).
-				return nil, ingestReclaimable, false
+				return 0, ingestReclaimable, false
 			default:
 				// A genuine embed error → fail-fast.
 				s.failIngestion(runID, ingestionFailed,
 					fmt.Sprintf("embedding document %q: %v", doc.Key, err))
-				return nil, 0, true
+				return 0, 0, true
 			}
 		}
 		if len(vecs) != len(batch) {
 			s.failIngestion(runID, ingestionFailed,
 				fmt.Sprintf("embedding document %q: got %d vectors for %d chunks", doc.Key, len(vecs), len(batch)))
-			return nil, 0, true
+			return 0, 0, true
 		}
 
+		records = records[:0] // reuse the backing array; only this batch's records are live at once.
 		for i, ch := range batch {
 			records = append(records, knowledge.Chunk{
 				Namespace:      spec.Namespace,
 				KnowledgeBase:  spec.KnowledgeBase,
-				Subject:        "", // org-wide — v1 gates per-user ingestion off (ADR 0061 Fork 3).
+				Subject:        doc.Subject, // "" = org-wide; the per-user owner's hash for a perUser KB (ADR 0061 Fork 3).
 				DocumentRef:    doc.Key,
 				ChunkIndex:     ch.Index,
 				StartOffset:    ch.StartOffset,
@@ -417,8 +469,16 @@ func (s *Server) embedChunks(
 				UpdatedAt:      now,
 			})
 		}
+
+		// Upsert THIS sub-batch immediately (content-hash idempotent) rather than accumulating every batch first —
+		// the buffering bound. A failure fails the run fast; the cursor is preserved so a resume re-drives the doc.
+		if uErr := s.knowledgeStore.Upsert(ctx, records); uErr != nil {
+			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
+			return 0, 0, true
+		}
+		upserted += len(records)
 	}
-	return records, ingestDocDone, false
+	return upserted, ingestDocDone, false
 }
 
 // embedBatchWithRetry calls EmbedBatch, retrying on 429 (rate) with a linear back-off up to embedRateRetries.
@@ -494,6 +554,18 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 		chunkCount, sizeBytes = cnt, sz
 	}
 
+	// Per-user storage accounting (ADR 0061 Fork 3, m80.4): aggregate this corpus's bytes per subject so the KB
+	// controller can reflect a UserStorageSoftCapExceeded condition. Org-wide corpora yield an empty map (org-wide
+	// subject "" is excluded), so the !perUser projection carries no per-user data and is unchanged. Best-effort:
+	// a lookup failure is non-fatal (the chunks are durable; the controller re-reconciles from the next run).
+	var sizePerSubject map[string]int64
+	if perUser, err := s.knowledgeStore.SizePerSubject(ctx, spec.Namespace, spec.KnowledgeBase); err != nil {
+		s.log.Error(err, "ingestion: SizePerSubject failed; per-user accounting skipped this run",
+			"run", runID, "kb", spec.KnowledgeBase)
+	} else if len(perUser) > 0 {
+		sizePerSubject = perUser
+	}
+
 	outcome := IngestionOutcome{
 		Reason:         ingestionSucceeded,
 		Documents:      len(spec.Documents),
@@ -521,6 +593,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 		Namespace: spec.Namespace, KnowledgeBase: spec.KnowledgeBase, Phase: phase,
 		DocumentCount: len(spec.Documents), ChunkCount: chunkCount, SizeBytes: sizeBytes,
 		Partial: cursor.Partial, IngestionRunID: runID, LastIngestedAt: &now,
+		SizePerSubject: sizePerSubject,
 	})
 
 	outcomeJSON, err := json.Marshal(outcome)
@@ -549,15 +622,27 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 // intact by this call (it was persisted per-document), so a resumable failure (429/402) keeps its progress.
 func (s *Server) failIngestion(runID string, reason ingestionReason, message string) {
 	outcome := IngestionOutcome{Reason: reason, Message: message}
-	var ns, kb string // captured for the corpus-status channel projection below (empty ⇒ spec unreadable, skip)
+	var ns, kb string // captured for the corpus-status channel projection below.
 	// Enrich the outcome with the counts we can cheaply read from the run's spec + cursor (best-effort — a fail
 	// path must not itself fail). The store CountAndSize is skipped here (the corpus may be mid-write).
 	if rn, err := s.runStore.Get(runID); err == nil {
+		// ns/kb come from the Run's own Namespace + Agent columns FIRST — the ingest-create path pins
+		// run.New(runID, ns, kbName, …) (knowledgebases.go), so they are populated INDEPENDENTLY of the
+		// IngestionSpec JSON. This is what makes the corpus-status projection robust to an unparseable /
+		// missing spec (the m68.14 stuck-Ingesting bug: an early spec-read failure skipped the projection).
+		ns, kb = rn.Namespace, rn.Agent
 		var spec IngestionSpec
 		if json.Unmarshal([]byte(rn.IngestionSpec), &spec) == nil {
 			outcome.Documents = len(spec.Documents)
 			outcome.EmbeddingModel = spec.EmbeddingRoute
-			ns, kb = spec.Namespace, spec.KnowledgeBase
+			// Prefer the spec's namespace/KB when present (they are authoritative), but the columns above
+			// already guarantee a value even when this branch is skipped.
+			if spec.Namespace != "" {
+				ns = spec.Namespace
+			}
+			if spec.KnowledgeBase != "" {
+				kb = spec.KnowledgeBase
+			}
 		}
 		if cur, cErr := parseIngestionCursor(rn.Cursor); cErr == nil {
 			outcome.Chunks = cur.Chunks
@@ -571,9 +656,12 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 	}
 
 	// STATUS CHANNEL (ADR 0061 Fork 2): project the terminal FAILURE onto the corpus-status row so the KB
-	// controller reflects phase Failed / BudgetExceeded. LastIngestedAt is left nil — this run did not succeed, so
-	// recordCorpusStatus preserves the corpus's prior lastIngestedAt rather than clobbering it. A best-effort
-	// background context so a draining ctx does not skip the status write.
+	// controller reflects phase Failed / BudgetExceeded. ns/kb are resolved from the Run's own columns above, so
+	// this projection is reached even when the IngestionSpec is unparseable (the fix for the m68.14 stuck-
+	// Ingesting bug). LastIngestedAt is left nil — this run did not succeed, so recordCorpusStatus preserves the
+	// corpus's prior lastIngestedAt rather than clobbering it. A best-effort background context so a draining ctx
+	// does not skip the status write. (The guard remains as a last-resort belt-and-braces: a run with no
+	// namespace/KB at all has nowhere to project — the controller safety-net then un-sticks it off ingestionRunRef.)
 	if ns != "" && kb != "" {
 		s.recordCorpusStatus(context.Background(), runID, knowledge.CorpusStatus{
 			Namespace: ns, KnowledgeBase: kb,
@@ -607,6 +695,11 @@ func (s *Server) recordCorpusStatus(ctx context.Context, runID string, st knowle
 	if st.LastIngestedAt == nil {
 		if prior, found, err := s.knowledgeStore.GetCorpusStatus(ctx, st.Namespace, st.KnowledgeBase); err == nil && found {
 			st.LastIngestedAt = prior.LastIngestedAt // preserve the last-good timestamp across a failed run.
+			if st.SizePerSubject == nil {
+				// Preserve the last-good per-user accounting across a failed run (the chunks are still durable),
+				// so a failed re-ingest does not erase a corpus's per-user soft-cap state (m80.4).
+				st.SizePerSubject = prior.SizePerSubject
+			}
 		}
 	}
 	if err := s.knowledgeStore.UpsertCorpusStatus(ctx, st); err != nil {

@@ -28,11 +28,14 @@ import (
 type memStore struct {
 	mu   sync.RWMutex
 	data map[string]string // namespace → tenant
+	// hardCap tracks the per-tenant at-storage-hard-cap flag (m80.3). Only tenants at their hard cap
+	// have an entry (true); a tenant under cap / with no hard cap has no entry (⇒ not exceeded).
+	hardCap map[string]bool // tenant → at-hard-cap
 }
 
 // NewMemStore returns an in-memory Store (thread-safe; data is lost when the process exits).
 func NewMemStore() Store {
-	return &memStore{data: make(map[string]string)}
+	return &memStore{data: make(map[string]string), hardCap: make(map[string]bool)}
 }
 
 func (s *memStore) SetMembers(_ context.Context, tenant string, namespaces []string) error {
@@ -68,6 +71,7 @@ func (s *memStore) DeleteTenant(_ context.Context, tenant string) error {
 			delete(s.data, ns)
 		}
 	}
+	delete(s.hardCap, tenant)
 	return nil
 }
 
@@ -89,4 +93,28 @@ func (s *memStore) TenantOf(_ context.Context, namespace string) (string, bool, 
 	defer s.mu.RUnlock()
 	tenant, ok := s.data[namespace]
 	return tenant, ok, nil
+}
+
+func (s *memStore) SetStorageHardCapExceeded(_ context.Context, tenant string, exceeded bool) error {
+	if tenant == "" {
+		return fmt.Errorf("namespacetenant: tenant is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if exceeded {
+		s.hardCap[tenant] = true
+	} else {
+		delete(s.hardCap, tenant) // absent entry ⇒ not exceeded (keeps the map to only at-cap tenants).
+	}
+	return nil
+}
+
+func (s *memStore) StorageHardCapExceededFor(_ context.Context, namespace string) (bool, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tenant, ok := s.data[namespace]
+	if !ok {
+		return false, false, nil // no row for this namespace → fail-open (not blocked).
+	}
+	return s.hardCap[tenant], true, nil
 }

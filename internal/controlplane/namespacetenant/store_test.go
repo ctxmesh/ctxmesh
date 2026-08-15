@@ -158,3 +158,52 @@ func TestStore_TenantOf_Missing(t *testing.T) {
 		assert.Empty(t, tenant)
 	})
 }
+
+// TestStore_StorageHardCap_ProjectAndReadBack is the m80.3 storage-state contract: the controller
+// projects the tenant's at-hard-cap flag onto every member row (SetStorageHardCapExceeded) and the
+// BFF reads it back per namespace (StorageHardCapExceededFor). It also proves the flag is scoped to
+// the tenant, survives a membership re-sync, and clears correctly.
+func TestStore_StorageHardCap_ProjectAndReadBack(t *testing.T) {
+	eachStore(t, func(t *testing.T, s namespacetenant.Store) {
+		ctx := context.Background()
+		require.NoError(t, s.SetMembers(ctx, "team-a", []string{"ns-a1", "ns-a2"}))
+		require.NoError(t, s.SetMembers(ctx, "team-b", []string{"ns-b1"}))
+
+		// Default (no projection yet): under cap for every member.
+		for _, ns := range []string{"ns-a1", "ns-a2", "ns-b1"} {
+			exceeded, ok, err := s.StorageHardCapExceededFor(ctx, ns)
+			require.NoError(t, err)
+			assert.True(t, ok, "a member row must exist for %q", ns)
+			assert.False(t, exceeded, "the default projected flag is false for %q", ns)
+		}
+
+		// Project team-a at cap → both of its namespaces read exceeded; team-b is untouched.
+		require.NoError(t, s.SetStorageHardCapExceeded(ctx, "team-a", true))
+		for _, ns := range []string{"ns-a1", "ns-a2"} {
+			exceeded, _, err := s.StorageHardCapExceededFor(ctx, ns)
+			require.NoError(t, err)
+			assert.True(t, exceeded, "%q must read at-cap after the projection", ns)
+		}
+		bExceeded, _, err := s.StorageHardCapExceededFor(ctx, "ns-b1")
+		require.NoError(t, err)
+		assert.False(t, bExceeded, "team-b's flag must be unaffected by team-a's projection")
+
+		// A membership re-sync (adding a namespace) must not reset an existing at-cap projection.
+		require.NoError(t, s.SetMembers(ctx, "team-a", []string{"ns-a1", "ns-a2"}))
+		a1Exceeded, _, err := s.StorageHardCapExceededFor(ctx, "ns-a1")
+		require.NoError(t, err)
+		assert.True(t, a1Exceeded, "an existing at-cap projection must survive a membership re-sync")
+
+		// Clear the flag → back under cap.
+		require.NoError(t, s.SetStorageHardCapExceeded(ctx, "team-a", false))
+		a1Cleared, _, err := s.StorageHardCapExceededFor(ctx, "ns-a1")
+		require.NoError(t, err)
+		assert.False(t, a1Cleared, "clearing the projection must read back as under-cap")
+
+		// An unknown namespace fails OPEN (no row) — (false, false, nil).
+		exceeded, ok, err := s.StorageHardCapExceededFor(ctx, "no-such-ns")
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.False(t, exceeded, "an unknown namespace must fail open (not blocked)")
+	})
+}

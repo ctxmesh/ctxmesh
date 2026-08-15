@@ -202,6 +202,44 @@ func TestStore_SearchPerUserIsolation(t *testing.T) {
 	})
 }
 
+// TestStore_SizePerSubject (m80.4, ADR 0061 Fork 3): the per-user storage aggregation groups bytes by
+// subject and EXCLUDES org-wide chunks (subject ""), so an org-wide corpus yields an empty map and a
+// per-user corpus yields {subjectHash → bytes} matching each user's content size. Both stores must agree.
+func TestStore_SizePerSubject(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ensure(t, s)
+		// alice: two chunks; bob: one chunk; plus an org-wide chunk that must NOT appear in the result.
+		require.NoError(t, s.Upsert(ctx, []Chunk{
+			chunk("u-alice", "a1.md", 0, "alice one", 1, 0, 0),
+			chunk("u-alice", "a2.md", 0, "alice two longer", 0, 1, 0),
+			chunk("u-bob", "b1.md", 0, "bob only", 0, 0, 1),
+			chunk("", "shared.md", 0, "org wide shared", 1, 1, 0),
+		}))
+
+		bySubject, err := s.SizePerSubject(ctx, "prod", testKB)
+		require.NoError(t, err)
+		assert.Equal(t, int64(len("alice one")+len("alice two longer")), bySubject["u-alice"],
+			"alice's per-user size must sum only her chunks")
+		assert.Equal(t, int64(len("bob only")), bySubject["u-bob"], "bob's per-user size must sum only his chunk")
+		_, hasOrg := bySubject[""]
+		assert.False(t, hasOrg, "org-wide chunks (subject \"\") must be excluded from per-user accounting")
+		assert.Len(t, bySubject, 2, "only the two distinct per-user subjects are reported")
+	})
+}
+
+// An org-wide-only corpus yields an EMPTY per-user map (no per-user accounting for !perUser corpora).
+func TestStore_SizePerSubject_OrgWideEmpty(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ensure(t, s)
+		require.NoError(t, s.Upsert(ctx, []Chunk{chunk("", "g.md", 0, "org content", 1, 0, 0)}))
+		bySubject, err := s.SizePerSubject(ctx, "prod", testKB)
+		require.NoError(t, err)
+		assert.Empty(t, bySubject, "an org-wide corpus has no per-user rows")
+	})
+}
+
 // The similarity threshold drops weak matches.
 func TestStore_SearchThreshold(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
@@ -320,6 +358,7 @@ func TestStore_CorpusStatus_RoundTrip(t *testing.T) {
 			Partial:        false,
 			IngestionRunID: "run-abc",
 			LastIngestedAt: &now,
+			SizePerSubject: map[string]int64{"u-alice": 1500, "u-bob": 200}, // m80.4 per-user accounting
 		}
 		require.NoError(t, s.UpsertCorpusStatus(ctx, st))
 
@@ -335,6 +374,8 @@ func TestStore_CorpusStatus_RoundTrip(t *testing.T) {
 		assert.Equal(t, "run-abc", got.IngestionRunID)
 		require.NotNil(t, got.LastIngestedAt, "LastIngestedAt must survive the round-trip")
 		assert.Equal(t, now.Unix(), got.LastIngestedAt.Unix(), "LastIngestedAt must be preserved to the second")
+		assert.Equal(t, map[string]int64{"u-alice": 1500, "u-bob": 200}, got.SizePerSubject,
+			"the per-user size aggregation must survive the round-trip (m80.4)")
 
 		// A second Upsert (new phase) must overwrite — not append a second row.
 		st2 := CorpusStatus{
@@ -349,6 +390,8 @@ func TestStore_CorpusStatus_RoundTrip(t *testing.T) {
 		require.True(t, found2)
 		assert.Equal(t, "Failed", got2.Phase, "second Upsert must overwrite the phase (one row per corpus)")
 		assert.Equal(t, "run-xyz", got2.IngestionRunID, "second Upsert must overwrite the ingestion run ID")
+		assert.Empty(t, got2.SizePerSubject,
+			"an Upsert with no per-user data must clear the per-user aggregation (org-wide semantics)")
 	})
 }
 

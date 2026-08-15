@@ -91,24 +91,43 @@ type TenantModelQuota struct {
 	MaxConcurrent int32 `json:"maxConcurrent,omitempty"`
 }
 
-// TenantStorageQuota is the corpus storage soft cap for a tenant (ADR 0061 governance #7,
-// M68). It reports the total KnowledgeBase corpus bytes across all member namespaces and
-// warns (condition + event + metric) when the soft cap is exceeded.
+// TenantStorageQuota is the corpus storage quota for a tenant (ADR 0061 governance #7). It reports
+// the total KnowledgeBase corpus bytes across all member namespaces and supports two INDEPENDENT
+// caps, the standard soft-warn / hard-block pair. corpusBytesSoftCap (M68) is SOFT: exceeding it
+// WARNS via a StorageSoftCapExceeded condition (+ event + metric) but NEVER blocks — an operator
+// alerts on it. corpusBytesHardCap (m80.3, m52 Theme M) is HARD: at/over it the controller sets a
+// StorageHardCapExceeded condition AND enforcement BLOCKS new corpus growth — an upload to an at-cap
+// tenant is rejected (HTTP 413 + typed storage_quota_exceeded) and an ingestion run fails fast (typed
+// storage_quota_exceeded → phase Failed) before it fetches any documents.
 //
-// SOFT ONLY — exceeding the cap NEVER blocks ingestion or upload. It sets a
-// StorageSoftCapExceeded condition on the Tenant, emits a Warning event, and bumps a
-// Prometheus gauge so operators can alert. Hard storage-quota enforcement (blocking
-// ingestion/uploads at the cap, per-user storage accounting) is deferred to m52 Theme M.
+// The two caps are DISTINCT — the hard cap is not an overload of the soft cap. Either may be set
+// independently; unset ⇒ that cap is not enforced (backward-compatible: an existing Tenant with only
+// a soft cap is byte-for-byte unchanged).
 type TenantStorageQuota struct {
 	// corpusBytesSoftCap is the tenant-aggregate soft cap on total KnowledgeBase corpus bytes
 	// (the sum of KnowledgeBase.status.sizeBytes across all member namespaces). It is a
 	// Kubernetes quantity string (e.g. "10Gi", "50Gi"). When the aggregate exceeds this value
 	// the controller sets a StorageSoftCapExceeded condition on the Tenant and emits a Warning
-	// event. It NEVER blocks ingestion — hard enforcement is m52 Theme M.
-	// Empty means no cap is tracked.
+	// event. It NEVER blocks ingestion — that is corpusBytesHardCap's job.
+	// Empty means no soft cap is tracked.
 	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="corpusBytesSoftCap must be a valid Kubernetes quantity (e.g. \"10Gi\")"
 	// +optional
 	CorpusBytesSoftCap string `json:"corpusBytesSoftCap,omitempty"`
+
+	// corpusBytesHardCap is the tenant-aggregate HARD cap on total KnowledgeBase corpus bytes
+	// (m80.3, ADR 0061 governance #7 hard-enforcement). It is a Kubernetes quantity string
+	// (e.g. "20Gi"). When totalCorpusBytes >= this value the controller sets a
+	// StorageHardCapExceeded condition AND enforcement blocks new corpus growth: an upload to an
+	// at-cap tenant returns HTTP 413 (typed storage_quota_exceeded) and an ingestion run fails
+	// fast (typed storage_quota_exceeded → phase Failed) before fetching documents.
+	// Enforcement reads the controller's PROJECTED at-cap state (ADR 0011 — no cross-namespace
+	// read at the enforcement point), so it is bounded-eventually-consistent: a burst between
+	// reconciles can overshoot by at most (burst × the 25 MiB per-upload cap). This is a storage
+	// governance guardrail, not a security boundary.
+	// Empty means no hard cap is enforced (backward-compatible default).
+	// +kubebuilder:validation:XValidation:rule="self == '' || isQuantity(self)",message="corpusBytesHardCap must be a valid Kubernetes quantity (e.g. \"20Gi\")"
+	// +optional
+	CorpusBytesHardCap string `json:"corpusBytesHardCap,omitempty"`
 }
 
 // TenantSpec defines the desired state of a Tenant (ADR 0046). A Tenant groups
@@ -136,11 +155,11 @@ type TenantSpec struct {
 	// +optional
 	Model *TenantModelQuota `json:"model,omitempty"`
 
-	// storage is the corpus storage soft cap (ADR 0061 governance #7, M68). When set and the
-	// aggregate KnowledgeBase.status.sizeBytes across all member namespaces exceeds the cap,
-	// the controller sets a StorageSoftCapExceeded condition and emits a Warning event. It
-	// NEVER blocks ingestion — soft only. Hard enforcement is m52 Theme M.
-	// Omitted ⇒ no storage cap is tracked.
+	// storage is the corpus storage quota (ADR 0061 governance #7). It carries two independent caps:
+	// corpusBytesSoftCap (M68 — WARNS via StorageSoftCapExceeded, never blocks) and corpusBytesHardCap
+	// (m80.3 — sets StorageHardCapExceeded AND blocks new corpus growth: 413 on upload + a fast typed
+	// ingestion failure at/over the cap). Either may be set independently.
+	// Omitted ⇒ no storage cap is tracked or enforced.
 	// +optional
 	Storage *TenantStorageQuota `json:"storage,omitempty"`
 
@@ -161,15 +180,17 @@ type TenantStatus struct {
 	MemberNamespaces int32 `json:"memberNamespaces,omitempty"`
 
 	// totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
-	// namespaces, updated on every reconcile when storage.corpusBytesSoftCap is set.
-	// Reported for observability; hard storage-quota enforcement is m52 Theme M.
+	// namespaces, updated on every reconcile when EITHER storage.corpusBytesSoftCap or
+	// storage.corpusBytesHardCap is set. Reported for observability and the hard-cap check.
 	// +optional
 	TotalCorpusBytes int64 `json:"totalCorpusBytes,omitempty"`
 
 	// conditions surface the tenant's health. Ready=true when every member
 	// namespace was reconciled; a "NamespaceConflict" warning condition lists any
 	// namespaces skipped because another tenant already claims them;
-	// "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap.
+	// "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap;
+	// "StorageHardCapExceeded" fires when the corpus bytes reach the hard cap (which
+	// also blocks new uploads/ingestion — m80.3).
 	// +listType=map
 	// +listMapKey=type
 	// +optional

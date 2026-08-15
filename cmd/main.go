@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"strconv"
@@ -87,6 +88,30 @@ func (a approvalRunLister) ListWaitingApproval(
 		out = append(out, controller.WaitingApprovalRun{ID: w.ID, Agent: w.Agent, Message: w.Message})
 	}
 	return out, nil
+}
+
+// ingestionRunStatusReader adapts the durable run store's Get to the KnowledgeBase controller's
+// terminal-failed safety-net (M80, ADR 0061 Fork 2): it returns the referenced ingestion Run's raw
+// status string so the controller can un-stick a KB stuck at phase Ingesting when the run terminated
+// out-of-band (no corpus-status row was written). READ-ONLY — no run mutation reaches the reconciler,
+// and no KB-status RBAC is granted to the run-worker (ADR 0011: the CONTROLLER writes KB.status).
+type ingestionRunStatusReader struct {
+	store interface {
+		Get(id string) (*run.Run, error)
+	}
+}
+
+func (a ingestionRunStatusReader) IngestionRunStatus(
+	_ context.Context, runID string,
+) (status string, found bool, err error) {
+	rn, gErr := a.store.Get(runID)
+	if errors.Is(gErr, run.ErrNotFound) {
+		return "", false, nil // the run row is gone (swept) — the safety-net leaves phase untouched.
+	}
+	if gErr != nil {
+		return "", false, gErr
+	}
+	return string(rn.Status), true, nil
 }
 
 var (
@@ -397,10 +422,26 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)
 	}
+	// The durable run store over the manager's existing cpDB — the SAME Postgres run store the BFF/run-worker
+	// build from cpDB, a READ-ONLY controller wiring (no config change, no new RBAC). Built ONCE here and shared
+	// by the KnowledgeBase terminal-failed safety-net (M80, below) and the AlertPolicy approvalWaiting condition
+	// (M75, further below). Nil-safe: if it fails to build, both read-features degrade off (the rest is
+	// unaffected). NewPostgresStore runs its migrations session-locked, so a single instance is correct + cheap.
+	var ctrlRunStore run.Store
+	if rs, runErr := run.NewPostgresStore(context.Background(), cpDB); runErr != nil {
+		setupLog.Error(runErr, "run store for controller read-features unavailable — "+
+			"KnowledgeBase terminal-failed safety-net + HITL approval-waiting alerts disabled (the rest is unaffected)")
+	} else {
+		ctrlRunStore = rs
+	}
+
 	// KnowledgeBase reconciler (M68, ADR 0061): the finalizer's two-store GC + the status projection
 	// from the corpus-status channel need the knowledge store (from the manager's existing cpDB) + the
 	// durable object store (from OBJECT_STORE_ADDR). Both are typed-nil-safe: an unconfigured store ⇒ the
 	// finalizer skips that half with a WARN and status stays validate-only (a dev deployment without them).
+	// IngestionRuns (M80, ADR 0061 Fork 2) is the read-only run-store slice for the terminal-failed safety-net:
+	// a KB stuck Ingesting whose ingestionRunRef run terminated out-of-band (no corpus-status row) is projected
+	// Failed. nil (no cpDB run store) ⇒ the safety-net is disabled and the corpus-status channel is the sole source.
 	var kbObjStore objectstore.ObjectStore
 	if ms, dsErr := objectstore.NewMinioStore(); dsErr != nil {
 		setupLog.Error(dsErr, "Failed to init the durable KB object store (OBJECT_STORE_ADDR)")
@@ -408,10 +449,15 @@ func main() {
 	} else if ms != nil {
 		kbObjStore = ms
 	}
+	var kbIngestionRuns controller.KnowledgeBaseIngestionRunReader
+	if ctrlRunStore != nil {
+		kbIngestionRuns = ingestionRunStatusReader{store: ctrlRunStore}
+	}
 	if err := (&controller.KnowledgeBaseReconciler{
-		Client:      mgr.GetClient(),
-		Knowledge:   knowledge.NewPostgresStore(cpDB),
-		ObjectStore: kbObjStore,
+		Client:        mgr.GetClient(),
+		Knowledge:     knowledge.NewPostgresStore(cpDB),
+		ObjectStore:   kbObjStore,
+		IngestionRuns: kbIngestionRuns,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "knowledgebase")
 		os.Exit(1)
@@ -429,18 +475,13 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)
 	}
-	// The durable run store over the manager's existing cpDB (M75, ADR 0069 §3): the AlertPolicy
-	// approvalWaiting condition reads runs paused on plan_approval to fire the HITL notification. It is
-	// the SAME Postgres run store the BFF/run-worker build from cpDB — a read-only wiring, no config
-	// change, no new RBAC. Nil-safe: if it fails to build, approval-waiting eval is simply disabled
-	// (Runs stays nil) and the rest of the reconciler is unaffected.
+	// AlertPolicy approvalWaiting condition (M75, ADR 0069 §3): reads runs paused on plan_approval to fire the
+	// HITL notification, off the SHARED cpDB run store built above (a read-only wiring, no new RBAC). Nil-safe:
+	// if the shared store failed to build, approval-waiting eval is simply disabled (Runs stays nil).
 	var approvalRuns controller.ApprovalRunLister
-	if runStore, runErr := run.NewPostgresStore(context.Background(), cpDB); runErr != nil {
-		setupLog.Error(runErr, "run store for approvalWaiting notifications unavailable — "+
-			"HITL approval-waiting alerts disabled (the rest of alerting is unaffected)")
-	} else if lister, ok := runStore.(interface {
+	if lister, ok := ctrlRunStore.(interface {
 		ListWaitingApproval(ctx context.Context, namespace string) ([]run.WaitingApproval, error)
-	}); ok {
+	}); ok && ctrlRunStore != nil {
 		approvalRuns = approvalRunLister{store: lister}
 	}
 

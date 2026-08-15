@@ -55,6 +55,7 @@ from ctxmesh.errors import (
     EndpointError,
     GuardrailBlockedError,
 )
+from ctxmesh.knowledge import _auto_inject_names, _knowledge_enabled
 from ctxmesh.tools import DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
@@ -200,6 +201,51 @@ def _inject_agent_memory(
     )
 
 
+def _inject_knowledge(
+    client: Any, messages: List[Dict[str, Any]], user_input: str, config: "ManagedConfig"
+) -> None:
+    """Retrieve relevant knowledge-base chunks and prepend them to the system prompt as ephemeral
+    ``<retrieved_context>`` WITH CITATIONS (ADR 0061 governance #5, M10; RAG-style, not persisted).
+
+    Mirrors :func:`_inject_agent_memory` but for the KBs whose binding opted into ``autoInject``
+    (``config.knowledge_auto_inject``). The knowledge-vs-memory difference is provenance: each hit
+    carries ``documentRef`` + ``chunkIndex``, surfaced as ``[source: <documentRef>#<chunkIndex>]``
+    so the model can cite. Retrieval runs over the launcher ``/knowledge/search`` proxy, which
+    already scopes a perUser KB to the invoking user's subject (m80.4) — no subject logic here.
+
+    Best-effort: any retrieval failure (per KB) is swallowed so the turn proceeds without the extra
+    context. NEVER persisted — it mutates the in-memory ``messages[0]`` only, like memory."""
+    lines: List[str] = []
+    for kb_name in config.knowledge_auto_inject:
+        try:
+            hits = client.knowledge.search(
+                user_input,
+                knowledge_base=kb_name,
+                top_k=config.knowledge_top_k,
+                threshold=config.knowledge_threshold,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; a retrieval hiccup must never break the turn
+            continue
+        for hit in hits or []:
+            if not isinstance(hit, dict):
+                continue
+            content = hit.get("content")
+            if not content:
+                continue
+            doc_ref = hit.get("documentRef", "")
+            chunk_idx = hit.get("chunkIndex", 0)
+            citation = f" [source: {doc_ref}#{chunk_idx}]" if doc_ref else ""
+            lines.append(f"- {content}{citation}")
+    if not lines:
+        return
+    block = "\n".join(lines)
+    messages[0]["content"] = (
+        f"{messages[0]['content']}\n\n<retrieved_context>\n"
+        f"Relevant knowledge-base excerpts (cite the [source: …] when you use them):\n"
+        f"{block}\n</retrieved_context>"
+    )
+
+
 def _load_history(
     client: Client, conversation_id: str, max_messages: int = MAX_HISTORY_MESSAGES
 ) -> List[Dict[str, Any]]:
@@ -273,6 +319,19 @@ class ManagedConfig:
     #: When auto-retrieval is on: how many memories to retrieve + the min cosine similarity.
     agent_memory_top_k: int = 5
     agent_memory_threshold: float = 0.75
+
+    #: Knowledge auto-inject (ADR 0061 governance #5, M10) — the list of KB names (from the
+    #: KNOWLEDGE_BASES roster) whose ``autoInject`` flag is set. For each, every turn retrieves the
+    #: most relevant chunks on the user input and prepends them as ephemeral ``<retrieved_context>``
+    #: (with citations) to the system prompt — RAG-style, never persisted. Empty (the default) ⇒ no
+    #: auto-inject: knowledge stays TOOL-ONLY (the ``knowledge_search`` tool), byte-for-byte same.
+    #: Orthogonal to long-term-memory auto-retrieval (:attr:`use_agent_memory`) — an agent can have
+    #: both.
+    knowledge_auto_inject: List[str] = field(default_factory=list)
+    #: When knowledge auto-inject is on: chunks to retrieve per KB + the min cosine similarity.
+    #: Mirrors the memory knobs; a threshold keeps low-relevance chunks out of the prompt.
+    knowledge_top_k: int = 5
+    knowledge_threshold: float = 0.5
 
     #: JSON Schema (as a Python dict) that the final answer MUST conform to (m65.5, ADR 0058).
     #: When set, the loop injects ``response_format`` on every turn to steer the provider, then
@@ -372,6 +431,12 @@ class ManagedConfig:
                 type(resilience).__name__,
             )
             resilience = None
+        # Knowledge auto-inject (ADR 0061 #5, M10): the KB names whose roster entry carries
+        # autoInject=true. Derived from the already-injected KNOWLEDGE_BASES roster (no new env)
+        # so the per-binding flag threads straight through. Empty ⇒ tool-only (unchanged).
+        knowledge_auto_inject = _auto_inject_names()
+        knowledge_top_k = _int_env("KNOWLEDGE_TOP_K", 5)
+        knowledge_threshold = _float_env("KNOWLEDGE_THRESHOLD", 0.5)
         return cls(
             system_prompt=_load_system_prompt_from_env(),
             model_route=os.environ.get("MODEL_ROUTE", ""),
@@ -379,7 +444,35 @@ class ManagedConfig:
             output_schema=output_schema,
             tool_policy=tool_policy,
             resilience=resilience,
+            knowledge_auto_inject=knowledge_auto_inject,
+            knowledge_top_k=knowledge_top_k,
+            knowledge_threshold=knowledge_threshold,
         )
+
+
+def _int_env(name: str, default: int) -> int:
+    """Read an int env var, falling back to *default* on absent/blank/non-numeric (a misconfig
+    warns rather than crashing the pod — OTH-3)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _log.warning("%s=%r is not an integer; using the default %d", name, raw, default)
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """Read a float env var, falling back to *default* on absent/blank/non-numeric (OTH-3)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        _log.warning("%s=%r is not a number; using the default %s", name, raw, default)
+        return default
 
 
 def _load_system_prompt_from_env() -> str:
@@ -662,6 +755,13 @@ def run_managed_loop(
         # caller. Best-effort — a memory hiccup never breaks the turn.
         if config.use_agent_memory and client.config.longterm_wired:
             _inject_agent_memory(client, messages, user_input, config)
+
+        # Opt-in knowledge auto-inject (ADR 0061 #5, M10): for each KB whose binding set autoInject,
+        # prepend relevant chunks (with citations) as ephemeral <retrieved_context>. Inside
+        # capability_scope so a perUser KB's proxy retrieval is scoped to the caller (m80.4);
+        # best-effort — a retrieval hiccup never breaks the turn; never persisted to history.
+        if config.knowledge_auto_inject and _knowledge_enabled():
+            _inject_knowledge(client, messages, user_input, config)
 
         try:
             return _drive_loop(

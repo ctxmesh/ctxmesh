@@ -122,6 +122,15 @@ type KnowledgeBaseRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+
+	// autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+	// M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+	// turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+	// prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+	// the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+	// unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+	// +optional
+	AutoInject bool `json:"autoInject,omitempty"`
 }
 
 // LongTermMemorySpec is the folded long-term-memory config (ADR 0045): `agent`-scope memory that persists

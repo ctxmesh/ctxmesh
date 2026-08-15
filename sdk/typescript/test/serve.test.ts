@@ -193,6 +193,7 @@ async function makeFixture(opts: {
   plainContent?: string;
   withMemory?: boolean;
   toolResult?: Record<string, unknown>;
+  knowledgeEnabled?: boolean;
 } = {}): Promise<Fixture> {
   const gateway = new ToolCallGatewayServer({ alwaysToolCall: opts.alwaysToolCall, plainContent: opts.plainContent });
   const discovery = new DiscoveryStub(opts.toolResult ?? { echo: "ping" });
@@ -205,6 +206,7 @@ async function makeFixture(opts: {
     discoveryBaseUrl: discovery.baseUrl,
     memoryBaseUrl: memory ? memory.baseUrl : "http://127.0.0.1:1",
     memoryWired: Boolean(memory),
+    knowledgeEnabled: opts.knowledgeEnabled ?? false,
     run: makeRunContext({ agentName: "managed-test" }),
   });
   const client = new Client(config, { spanProcessor: spans.processor });
@@ -716,6 +718,130 @@ describe("ManagedConfig.fromEnv — the moved-into-SDK env resolution", () => {
     expect(cfg.outputSchema).toBeNull();
     expect(cfg.toolPolicy).toBeNull();
     expect(cfg.resilience).toBeNull();
+  });
+});
+
+// ── knowledge auto-inject (ADR 0061 governance #5, M10) ──────────────────────────
+//
+// A KB whose binding set autoInject prepends an ephemeral <retrieved_context> block (with
+// citations) to the system prompt each turn, RAG-style; a KB WITHOUT the flag stays TOOL-ONLY
+// (byte-for-byte unchanged). Parity with the Python tests in test_managed.py. Retrieval is
+// best-effort (swallowed) and NEVER persisted to session history.
+
+describe("runManagedLoop — knowledge auto-inject", () => {
+  it("prepends an ephemeral cited <retrieved_context> that is NOT persisted to history", async () => {
+    const fx = await makeFixture({
+      withMemory: true,
+      plainContent: "the answer is 42",
+      knowledgeEnabled: true,
+    });
+    try {
+      // Script the KB retrieval — no live launcher /knowledge/search needed.
+      fx.client.knowledge.search = async () =>
+        [{ content: "Company PTO is 25 days.", documentRef: "hr.md", chunkIndex: 2 }] as never;
+
+      const config = new ManagedConfig({
+        systemPrompt: "sys",
+        modelRoute: "m",
+        knowledgeAutoInject: ["hr-kb"],
+      });
+      const headers = { "x-conversation-id": "chat-k" };
+      await runManagedLoop(fx.client, config, "how much PTO?", { headers });
+
+      // The gateway's turn-1 SYSTEM message carries the injected, cited block.
+      const sent = fx.gateway.requests[0]!["messages"] as Array<Record<string, unknown>>;
+      const systemMsg = sent[0]!;
+      expect(systemMsg["role"]).toBe("system");
+      expect(String(systemMsg["content"])).toContain("<retrieved_context>");
+      expect(String(systemMsg["content"])).toContain("Company PTO is 25 days. [source: hr.md#2]");
+
+      // The STORED history is the clean user↔assistant exchange — NO <retrieved_context>.
+      const stored = fx.memory!.store.get("chat-k") as Array<Record<string, unknown>>;
+      expect(stored).toEqual([
+        { role: "user", content: "how much PTO?" },
+        { role: "assistant", content: "the answer is 42" },
+      ]);
+      expect(stored.every((m) => !String(m["content"]).includes("<retrieved_context>"))).toBe(true);
+    } finally {
+      await fx.stop();
+    }
+  });
+
+  it("is best-effort: a retrieval failure is swallowed and the turn proceeds", async () => {
+    const fx = await makeFixture({ plainContent: "the answer is 42", knowledgeEnabled: true });
+    try {
+      fx.client.knowledge.search = async () => {
+        throw new Error("boom — retrieval hiccup");
+      };
+      const config = new ManagedConfig({
+        systemPrompt: "sys",
+        modelRoute: "m",
+        knowledgeAutoInject: ["hr-kb"],
+      });
+      const result = await runManagedLoop(fx.client, config, "how much PTO?");
+      // The turn still produced its answer, and the system prompt was left untouched.
+      expect(result.output).toBe("the answer is 42");
+      const sent = fx.gateway.requests[0]!["messages"] as Array<Record<string, unknown>>;
+      expect(sent[0]!["content"]).toBe("sys");
+    } finally {
+      await fx.stop();
+    }
+  });
+
+  it("no auto-inject KB is byte-for-byte unchanged (knowledge.search never called)", async () => {
+    const fx = await makeFixture({ plainContent: "the answer is 42", knowledgeEnabled: true });
+    try {
+      let searched = false;
+      fx.client.knowledge.search = async () => {
+        searched = true;
+        throw new Error("knowledge.search must NOT be called without auto-inject");
+      };
+      const config = new ManagedConfig({ systemPrompt: "sys", modelRoute: "m" }); // no knowledgeAutoInject
+      await runManagedLoop(fx.client, config, "hi");
+      expect(searched).toBe(false);
+      const sent = fx.gateway.requests[0]!["messages"] as Array<Record<string, unknown>>;
+      expect(sent.map((m) => m["role"])).toEqual(["system", "user"]);
+      expect(sent[0]!["content"]).toBe("sys");
+    } finally {
+      await fx.stop();
+    }
+  });
+});
+
+describe("ManagedConfig.fromEnv — knowledge auto-inject roster + knobs", () => {
+  const saved: Record<string, string | undefined> = {};
+  const KEYS = ["KNOWLEDGE_BASES", "KNOWLEDGE_TOP_K", "KNOWLEDGE_THRESHOLD"];
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k];
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it("derives knowledgeAutoInject from the roster (only autoInject entries) + reads knobs", () => {
+    process.env.KNOWLEDGE_BASES = JSON.stringify([
+      { name: "auto-kb", namespace: "ns", embeddingRoute: "e", autoInject: true },
+      { name: "tool-kb", namespace: "ns", embeddingRoute: "e" },
+    ]);
+    process.env.KNOWLEDGE_TOP_K = "8";
+    process.env.KNOWLEDGE_THRESHOLD = "0.4";
+    const cfg = ManagedConfig.fromEnv(process.env);
+    expect(cfg.knowledgeAutoInject).toEqual(["auto-kb"]);
+    expect(cfg.knowledgeTopK).toBe(8);
+    expect(cfg.knowledgeThreshold).toBe(0.4);
+  });
+
+  it("no roster ⇒ empty auto-inject list + default knobs (knowledge-free config unchanged)", () => {
+    delete process.env.KNOWLEDGE_BASES;
+    delete process.env.KNOWLEDGE_TOP_K;
+    delete process.env.KNOWLEDGE_THRESHOLD;
+    const cfg = ManagedConfig.fromEnv(process.env);
+    expect(cfg.knowledgeAutoInject).toEqual([]);
+    expect(cfg.knowledgeTopK).toBe(5);
+    expect(cfg.knowledgeThreshold).toBe(0.5);
   });
 });
 
