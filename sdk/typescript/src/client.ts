@@ -9,8 +9,9 @@
  *     client.knowledge  -> :2998               (M68) — knowledge-base retrieval
  *     client.feedback   -> :2995               (M9)
  *     client.model      -> $MODEL_GATEWAY_URL   (M2/M8)
+ *     client.tools      -> :2999 (discovery) + MCP endpoints (M4/M77.3)
  *
- * Tools (M4/MCP) land in M77.3; trace in M77.4; serve/managed-loop in M77.5.
+ * Trace lands in M77.4; serve/managed-loop in M77.5.
  *
  * `withConversation(conversationId)` returns a new Client whose memory ops default
  * to that conversationId — bind it once per request so `client.memory.get()` needs
@@ -22,12 +23,14 @@ import { FeedbackClient } from "./feedback.js";
 import { KnowledgeClient } from "./knowledge.js";
 import { MemoryClient } from "./memory.js";
 import { ModelClient } from "./model.js";
+import { ToolsClient } from "./tools.js";
 
 export class Client {
   readonly memory: MemoryClient;
   readonly knowledge: KnowledgeClient;
   readonly feedback: FeedbackClient;
   readonly model: ModelClient;
+  readonly tools: ToolsClient;
 
   private readonly _config: PlaneConfig;
 
@@ -37,6 +40,7 @@ export class Client {
     this.knowledge = new KnowledgeClient(config);
     this.feedback = new FeedbackClient(config);
     this.model = new ModelClient(config);
+    this.tools = new ToolsClient(config, this.knowledge);
   }
 
   get config(): PlaneConfig {

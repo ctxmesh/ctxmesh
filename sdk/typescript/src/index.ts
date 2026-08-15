@@ -43,5 +43,15 @@ export type { ToolCall, ChatUsage } from "./model.js";
 
 export { Client } from "./client.js";
 
+// ── M77.3: tools client + MCP ─────────────────────────────────────────────────
+
+export {
+  ToolsClient,
+  Tool,
+  DELEGATE_TOOL_NAME,
+  HANDOFF_TOOL_NAME,
+  KNOWLEDGE_SEARCH_TOOL_NAME,
+} from "./tools.js";
+
 // The `agent` module: `agent.fromEnv()` / `agent.fromConfig()` — the primary entry points.
 export * as agent from "./agent.js";

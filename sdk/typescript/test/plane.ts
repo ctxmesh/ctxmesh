@@ -300,6 +300,42 @@ export class DiscoveryStub extends BaseStub {
   }
 }
 
+// ── delegate/handoff (:2994) ─────────────────────────────────────────────────
+/**
+ * Fake of the launcher-local delegate/handoff endpoint (:2994).
+ *
+ * POST /delegate -> {ok, answer, error}
+ * POST /handoff  -> {ok, runId, sourceRun, handedOffTo, error}
+ *
+ * Records each request so a test can assert the body and the capability header.
+ */
+export class DelegateStub extends BaseStub {
+  constructor(
+    private readonly delegateResponse: Record<string, unknown> = {
+      ok: true,
+      answer: "sub-answer",
+      subRun: "sub-1",
+    },
+    private readonly handoffResponse: Record<string, unknown> = {
+      ok: true,
+      runId: "hand-1",
+      sourceRun: "A-1",
+      handedOffTo: "billing",
+    },
+  ) {
+    super();
+  }
+
+  protected installRoutes(): void {
+    this.routes.set("POST /delegate", () =>
+      jsonResponse(200, this.delegateResponse),
+    );
+    this.routes.set("POST /handoff", () =>
+      jsonResponse(200, this.handoffResponse),
+    );
+  }
+}
+
 // ── model gateway ($MODEL_GATEWAY_URL) ──────────────────────────────────────
 /**
  * Fake of the OpenAI-compatible model gateway (POST /chat/completions).
@@ -396,37 +432,51 @@ export class InMemorySpanCollector {
   }
 }
 
-/** A started mock plane: the four stubs + a `PlaneConfig` pointed at them. */
+/** A started mock plane: the five stubs + a `PlaneConfig` pointed at them. */
 export interface MockPlane {
   memory: MemoryStub;
   discovery: DiscoveryStub;
   feedback: FeedbackStub;
   gateway: GatewayStub;
+  delegate: DelegateStub;
   spans: InMemorySpanCollector;
   config: PlaneConfig;
   stop(): Promise<void>;
 }
 
 /**
- * Start the memory/discovery/feedback/gateway stubs together and return a
+ * Start the memory/discovery/feedback/gateway/delegate stubs together and return a
  * `PlaneConfig.forTest(...)` pointed at them (the Python `plane` + `client` fixture
  * shape). Call `stop()` to tear everything down.
  */
 export async function startPlane(
-  opts: { run?: RunContext; gateway?: ConstructorParameters<typeof GatewayStub>[0] } = {},
+  opts: {
+    run?: RunContext;
+    gateway?: ConstructorParameters<typeof GatewayStub>[0];
+    delegateEnabled?: boolean;
+  } = {},
 ): Promise<MockPlane> {
   const memory = new MemoryStub();
   const discovery = new DiscoveryStub();
   const feedback = new FeedbackStub();
   const gateway = new GatewayStub(opts.gateway);
-  await Promise.all([memory.start(), discovery.start(), feedback.start(), gateway.start()]);
+  const delegate = new DelegateStub();
+  await Promise.all([
+    memory.start(),
+    discovery.start(),
+    feedback.start(),
+    gateway.start(),
+    delegate.start(),
+  ]);
 
   const config = PlaneConfig.forTest({
     memoryBaseUrl: memory.baseUrl,
     discoveryBaseUrl: discovery.baseUrl,
     feedbackBaseUrl: feedback.baseUrl,
     modelGatewayUrl: gateway.baseUrl,
+    delegateBaseUrl: delegate.baseUrl,
     run: opts.run ?? makeRunContext({ agentName: "test-agent" }),
+    delegateEnabled: opts.delegateEnabled ?? false,
   });
 
   return {
@@ -434,10 +484,17 @@ export async function startPlane(
     discovery,
     feedback,
     gateway,
+    delegate,
     spans: new InMemorySpanCollector(),
     config,
     async stop() {
-      await Promise.all([memory.stop(), discovery.stop(), feedback.stop(), gateway.stop()]);
+      await Promise.all([
+        memory.stop(),
+        discovery.stop(),
+        feedback.stop(),
+        gateway.stop(),
+        delegate.stop(),
+      ]);
     },
   };
 }
