@@ -238,6 +238,17 @@ type Run struct {
 	// Pinned so an operator editing the schema mid-run does not retroactively change validation.
 	OutputSchema string `json:"-"`
 
+	// Record, when true, opts THIS run into record mode (M78, ADR 0071 §1/§2): the launcher gateway
+	// captures model I/O and the egress sidecar captures tool I/O into a portable fixture
+	// (internal/replay). It is a RUN-SCOPED opt-in — you record a specific run, not an agent — set at
+	// create time from the run-create request (POST /api/runs {record:true}). This field is the
+	// TRIGGER m78.1 defines; the actual capture wiring (the new controller-injected interposition
+	// reason that forces both proxies to interpose, fail-closed per ADR 0071 C2, and the RECORD_MODE
+	// env it flows to the launcher/sidecar as) is m78.2/m78.3 — they READ this field to decide whether
+	// to inject that reason. Non-secret (a boolean opt-in), so it rides the run DTO. Default false ⇒
+	// a normal (non-recorded) run, so old rows load unchanged.
+	Record bool `json:"record,omitempty"`
+
 	// --- Workflow instance + wait record (M67, ADR 0060): set when this run EXECUTES a declarative
 	// Workflow (kind: workflow). A workflow instance is a Run with a WorkflowRef + a pinned SpecSnapshot
 	// (resuming against a live-edited CR is a correctness bug — CRD edits affect NEW instances only) +
