@@ -154,6 +154,17 @@ var recursiveSeps = []string{"\n\n", "\n", " ", ""}
 // as the next natural boundary.
 var markdownSeps = []string{"\n# ", "\n## ", "\n### ", "\n\n", "\n", " ", ""}
 
+// ─── segment type ────────────────────────────────────────────────────────────
+
+// segment is a text piece produced by the splitter with its EXACT rune start
+// offset in the original source text. Carrying the offset forward from the
+// point of splitting (rather than reconstructing it by search in buildChunks)
+// is what makes offsets exact even when the same text appears multiple times.
+type segment struct {
+	text      string
+	startRune int // inclusive rune offset in the original source text
+}
+
 // ─── Chunk ───────────────────────────────────────────────────────────────────
 
 // Chunk splits text into a slice of [Chunk] values according to cfg.
@@ -170,10 +181,14 @@ var markdownSeps = []string{"\n# ", "\n## ", "\n### ", "\n\n", "\n", " ", ""}
 //
 // If text is empty or entirely whitespace, Chunk returns nil (no chunks).
 func Chunk(text string, cfg ChunkConfig) []TextChunk {
-	text = strings.TrimSpace(text)
-	if text == "" {
+	// TrimSpace the input; record how many runes we stripped from the front so
+	// that offsets are still relative to the original text argument.
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
 		return nil
 	}
+	// Rune offset of trimmed within text.
+	leadingRunes := len([]rune(text[:strings.Index(text, trimmed)]))
 
 	// Defensive clamp: Overlap must be < Size.
 	if cfg.Size <= 0 {
@@ -194,28 +209,29 @@ func Chunk(text string, cfg ChunkConfig) []TextChunk {
 	sizChars := tokensToChars(cfg.Size)
 	overlapChars := tokensToChars(cfg.Overlap)
 
-	segments := splitRecursive(text, seps, sizChars)
+	// splitRecursive tracks rune offsets relative to trimmed; we bias by
+	// leadingRunes so all offsets are relative to the original text.
+	segments := splitRecursive(trimmed, leadingRunes, seps, sizChars)
 
 	return buildChunks(text, segments, overlapChars)
 }
 
 // splitRecursive recursively splits text by the first separator in seps that
-// produces pieces small enough (<=maxChars). Returns a slice of text segments
-// whose offsets are relative to the *original* text argument.
+// produces pieces small enough (<=maxChars). Returns a slice of segments where
+// each segment carries its EXACT rune start offset relative to the root source
+// (via the baseRune accumulator passed through recursion).
 //
-// The function works on string positions rather than rune indices for speed;
-// StartOffset/EndOffset conversion happens in buildChunks.
-func splitRecursive(text string, seps []string, maxChars int) []string {
-	// Already small enough — return as-is.
+// baseRune is the rune offset of text's first character within the root source.
+func splitRecursive(text string, baseRune int, seps []string, maxChars int) []segment {
+	// Already small enough — return as-is with the exact base offset.
 	if len(text) <= maxChars {
-		return []string{text}
+		return []segment{{text: text, startRune: baseRune}}
 	}
 
 	for i, sep := range seps {
 		if sep == "" {
-			// Last-resort hard split at maxChars boundary (character-aligned; we
-			// accept a mid-word cut here only as a true last resort).
-			return hardSplit(text, maxChars)
+			// Last-resort hard split at maxChars boundary.
+			return hardSplit(text, baseRune, maxChars)
 		}
 
 		// Try splitting on this separator; recurse on pieces that are still large.
@@ -225,83 +241,131 @@ func splitRecursive(text string, seps []string, maxChars int) []string {
 			continue
 		}
 
-		var result []string
+		var result []segment
+		// byteCursor tracks the byte position within text as we walk parts.
+		// After processing parts[j], byteCursor is advanced past parts[j] + sep,
+		// so at the start of parts[j] it equals the sum of all prior part bytes
+		// and separator bytes.
+		byteCursor := 0
+
 		for j, part := range parts {
 			// Re-attach the separator (except for the first part when the separator
 			// is a leading structural marker like "\n# ").
-			segment := part
+			var segText string
+			var segByteStart int
 			if j > 0 && i < len(seps)-1 {
-				// Re-prepend the separator so Markdown headings look right.
-				segment = sep + part
+				// The separator belongs to this part. At this point byteCursor has
+				// already been advanced past parts[j-1]+sep, so it points to the start
+				// of parts[j]. The sep itself starts len(sep) bytes earlier.
+				segByteStart = byteCursor - len(sep)
+				segText = sep + part
+			} else {
+				segByteStart = byteCursor
+				segText = part
 			}
-			segment = strings.TrimSpace(segment)
-			if segment == "" {
+
+			trimmed := strings.TrimSpace(segText)
+			if trimmed == "" {
+				// Advance cursor past this part + separator.
+				byteCursor += len(part)
+				if j < len(parts)-1 {
+					byteCursor += len(sep)
+				}
 				continue
 			}
-			if len(segment) <= maxChars {
-				result = append(result, segment)
+
+			// Compute rune offset of segByteStart within text, then add baseRune.
+			runeOff := baseRune + byteToRuneOffset(text, segByteStart)
+
+			// Nudge runeOff forward past any leading whitespace that TrimSpace removed.
+			leadingBytes := strings.Index(segText, trimmed)
+			if leadingBytes > 0 {
+				runeOff += byteToRuneOffset(segText, leadingBytes)
+			}
+
+			if len(trimmed) <= maxChars {
+				result = append(result, segment{text: trimmed, startRune: runeOff})
 			} else {
-				result = append(result, splitRecursive(segment, seps[i+1:], maxChars)...)
+				result = append(result,
+					splitRecursive(trimmed, runeOff, seps[i+1:], maxChars)...)
+			}
+
+			// Advance byte cursor past this part + the separator that follows it.
+			byteCursor += len(part)
+			if j < len(parts)-1 {
+				byteCursor += len(sep)
 			}
 		}
 		return result
 	}
 
-	return []string{text}
+	return []segment{{text: text, startRune: baseRune}}
 }
 
-// hardSplit splits text into pieces of at most maxChars bytes (not runes; UTF-8
-// multi-byte awareness is omitted for simplicity at this tier — the overlap
-// step in buildChunks already keeps context). Used only as a last resort when no
-// separator exists.
-func hardSplit(text string, maxChars int) []string {
-	var result []string
+// byteToRuneOffset returns the number of runes in s[:byteOff]. It is O(byteOff)
+// but called only during splitting (not on the full source), so cost is bounded
+// by maxChars per call.
+func byteToRuneOffset(s string, byteOff int) int {
+	if byteOff <= 0 {
+		return 0
+	}
+	if byteOff >= len(s) {
+		return len([]rune(s))
+	}
+	return len([]rune(s[:byteOff]))
+}
+
+// hardSplit splits text into pieces of at most maxChars bytes, carrying exact
+// rune offsets. Used only as a last resort when no separator exists.
+func hardSplit(text string, baseRune int, maxChars int) []segment {
+	var result []segment
+	runeOff := baseRune
 	for len(text) > maxChars {
-		result = append(result, text[:maxChars])
+		piece := text[:maxChars]
+		result = append(result, segment{text: piece, startRune: runeOff})
+		runeOff += len([]rune(piece))
 		text = text[maxChars:]
 	}
 	if len(text) > 0 {
-		result = append(result, text)
+		result = append(result, segment{text: text, startRune: runeOff})
 	}
 	return result
 }
 
-// buildChunks takes the ordered list of text segments and maps them back to
-// rune offsets in the *original* source text. It also applies the overlap by
-// prepending overlapChars characters from the preceding chunk's tail.
-func buildChunks(sourceText string, segments []string, overlapChars int) []TextChunk {
+// buildChunks assembles TextChunks from the pre-split segments (each carrying
+// its EXACT rune start offset in the source). It applies the overlap by
+// prepending overlapChars runes from the preceding chunk's tail.
+//
+// No offset searching is performed: segment.startRune is the authoritative
+// position even for repeated text.
+func buildChunks(sourceText string, segs []segment, overlapChars int) []TextChunk {
 	runes := []rune(sourceText)
 	totalRunes := len(runes)
 
 	var chunks []TextChunk
-	searchStart := 0 // optimisation: advance search start as we consume segments
 
-	for _, seg := range segments {
-		seg = strings.TrimSpace(seg)
-		if seg == "" {
+	for _, seg := range segs {
+		segText := strings.TrimSpace(seg.text)
+		if segText == "" {
 			continue
 		}
 
-		// Find where this segment appears in the source rune slice.
-		segRunes := []rune(seg)
-		startRune := findRuneOffset(runes, segRunes, searchStart)
-		if startRune < 0 {
-			// Segment not found verbatim (can happen after separator re-attachment
-			// or TrimSpace). Fall back to a best-effort linear search from 0.
-			startRune = findRuneOffset(runes, segRunes, 0)
-		}
-		if startRune < 0 {
-			// Still not found — use the previous chunk's end as anchor and skip.
-			if len(chunks) > 0 {
-				startRune = chunks[len(chunks)-1].EndOffset
-			} else {
-				startRune = 0
-			}
+		// seg.startRune is the exact rune offset of seg.text (before TrimSpace) in
+		// the source. Nudge forward past any leading whitespace TrimSpace removed.
+		startRune := seg.startRune
+		for startRune < totalRunes && isRuneSpace(runes[startRune]) {
+			startRune++
 		}
 
-		endRune := min(startRune+len(segRunes), totalRunes)
+		segLen := len([]rune(segText))
+		endRune := min(startRune+segLen, totalRunes)
 
-		// Apply overlap: prepend overlapChars runes from the previous chunk's end.
+		// Trim trailing whitespace from the right boundary.
+		for endRune > startRune && isRuneSpace(runes[endRune-1]) {
+			endRune--
+		}
+
+		// Apply overlap: extend actualStart leftward into the previous chunk.
 		actualStart := startRune
 		if overlapChars > 0 && len(chunks) > 0 {
 			prevEnd := chunks[len(chunks)-1].EndOffset
@@ -314,16 +378,12 @@ func buildChunks(sourceText string, segments []string, overlapChars int) []TextC
 		content := string(runes[actualStart:endRune])
 		content = strings.TrimSpace(content)
 		if content == "" {
-			// Advance search pointer and skip.
-			if endRune > searchStart {
-				searchStart = endRune
-			}
 			continue
 		}
 
-		// Recompute actual start based on trimmed content.
+		// Re-trim the window: TrimSpace on the overlap-extended content may move
+		// the actual start further right.
 		actualStartRune := actualStart
-		// (We trimmed leading whitespace; nudge actualStartRune forward.)
 		for actualStartRune < endRune && isRuneSpace(runes[actualStartRune]) {
 			actualStartRune++
 		}
@@ -338,34 +398,9 @@ func buildChunks(sourceText string, segments []string, overlapChars int) []TextC
 			StartOffset: actualStartRune,
 			EndOffset:   actualEndRune,
 		})
-
-		if endRune > searchStart {
-			searchStart = endRune
-		}
 	}
 
 	return chunks
-}
-
-// findRuneOffset returns the rune index of the first occurrence of needle in
-// haystack at or after start. Returns -1 if not found.
-func findRuneOffset(haystack, needle []rune, start int) int {
-	if len(needle) == 0 {
-		return start
-	}
-	for i := start; i <= len(haystack)-len(needle); i++ {
-		match := true
-		for j, r := range needle {
-			if haystack[i+j] != r {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i
-		}
-	}
-	return -1
 }
 
 func isRuneSpace(r rune) bool {
