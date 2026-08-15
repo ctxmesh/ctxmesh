@@ -47,6 +47,7 @@ import {
   EndpointError,
   GuardrailBlockedError,
 } from "./errors.js";
+import { autoInjectNames } from "./knowledge.js";
 import type { ChatResponse, ToolCall } from "./model.js";
 import type { Tool } from "./tools.js";
 import { DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "./tools.js";
@@ -160,6 +161,17 @@ export class ManagedConfig {
   useAgentMemory: boolean;
   agentMemoryTopK: number;
   agentMemoryThreshold: number;
+  /**
+   * Knowledge auto-inject (ADR 0061 governance #5, M10) — KB names (from the KNOWLEDGE_BASES
+   * roster) whose `autoInject` flag is set. For each, every turn retrieves the most relevant chunks
+   * on the user input and prepends them as ephemeral `<retrieved_context>` (with citations) to the
+   * system prompt — RAG-style, never persisted. Empty (the default) ⇒ knowledge stays TOOL-ONLY
+   * (the `knowledge_search` tool), byte-for-byte unchanged. Parity with Python `knowledge_auto_inject`.
+   */
+  knowledgeAutoInject: string[];
+  /** When knowledge auto-inject is on: chunks to retrieve per KB + the min cosine similarity. */
+  knowledgeTopK: number;
+  knowledgeThreshold: number;
   /** JSON Schema the final answer should conform to (m65.5). `null` leaves the loop unchanged. */
   outputSchema: Record<string, unknown> | null;
   /** Tool-use policy (m65.6). `null` leaves the loop unchanged. */
@@ -176,6 +188,9 @@ export class ManagedConfig {
     useAgentMemory?: boolean;
     agentMemoryTopK?: number;
     agentMemoryThreshold?: number;
+    knowledgeAutoInject?: string[];
+    knowledgeTopK?: number;
+    knowledgeThreshold?: number;
     outputSchema?: Record<string, unknown> | null;
     toolPolicy?: Record<string, unknown> | null;
     resilience?: Record<string, unknown> | null;
@@ -188,6 +203,9 @@ export class ManagedConfig {
     this.useAgentMemory = init.useAgentMemory ?? false;
     this.agentMemoryTopK = init.agentMemoryTopK ?? 5;
     this.agentMemoryThreshold = init.agentMemoryThreshold ?? 0.75;
+    this.knowledgeAutoInject = init.knowledgeAutoInject ?? [];
+    this.knowledgeTopK = init.knowledgeTopK ?? 5;
+    this.knowledgeThreshold = init.knowledgeThreshold ?? 0.5;
     this.outputSchema = init.outputSchema ?? null;
     this.toolPolicy = init.toolPolicy ?? null;
     this.resilience = init.resilience ?? null;
@@ -225,6 +243,13 @@ export class ManagedConfig {
       warn(`AGENT_RUNTIME.resilience is not a JSON object; ignoring`);
     }
 
+    // Knowledge auto-inject (ADR 0061 governance #5, M10): the KB names whose roster entry carries
+    // autoInject=true. Derived from the already-injected KNOWLEDGE_BASES roster (no new env) so the
+    // controller's per-binding flag threads straight through. Empty ⇒ tool-only (byte-for-byte unchanged).
+    const knowledgeAutoInject = autoInjectNames();
+    const knowledgeTopK = intEnv(env, "KNOWLEDGE_TOP_K", 5);
+    const knowledgeThreshold = floatEnv(env, "KNOWLEDGE_THRESHOLD", 0.5);
+
     return new ManagedConfig({
       systemPrompt: loadSystemPromptFromEnv(env),
       modelRoute: env["MODEL_ROUTE"] ?? "",
@@ -232,8 +257,35 @@ export class ManagedConfig {
       outputSchema,
       toolPolicy,
       resilience,
+      knowledgeAutoInject,
+      knowledgeTopK,
+      knowledgeThreshold,
     });
   }
+}
+
+/** Read an int env var, falling back to `def` on absent/blank/non-numeric (a misconfig warns — OTH-3). */
+function intEnv(env: Record<string, string | undefined>, name: string, def: number): number {
+  const raw = (env[name] ?? "").trim();
+  if (!raw) return def;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    warn(`${name}=${JSON.stringify(raw)} is not an integer; using the default ${def}`);
+    return def;
+  }
+  return parsed;
+}
+
+/** Read a float env var, falling back to `def` on absent/blank/non-numeric (OTH-3). */
+function floatEnv(env: Record<string, string | undefined>, name: string, def: number): number {
+  const raw = (env[name] ?? "").trim();
+  if (!raw) return def;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) {
+    warn(`${name}=${JSON.stringify(raw)} is not a number; using the default ${def}`);
+    return def;
+  }
+  return parsed;
 }
 
 function isNullish(value: unknown): boolean {
@@ -446,6 +498,58 @@ async function injectAgentMemory(
   first["content"] =
     `${String(first["content"] ?? "")}\n\n<retrieved_context>\n` +
     `Relevant long-term memory about this user/agent:\n${lines}\n</retrieved_context>`;
+}
+
+/**
+ * Opt-in knowledge auto-inject (ADR 0061 governance #5, M10): for each KB whose binding set
+ * `autoInject`, retrieve the most relevant chunks on the user input and prepend them to the system
+ * prompt as ephemeral `<retrieved_context>` WITH CITATIONS (RAG-style, never persisted).
+ *
+ * Mirrors `injectAgentMemory` but for knowledge; the knowledge-vs-memory difference is provenance:
+ * each hit carries `documentRef` + `chunkIndex`, surfaced as `[source: <documentRef>#<chunkIndex>]`
+ * so the model can cite. Retrieval runs over the launcher `/knowledge/search` proxy, which already
+ * scopes a perUser KB to the invoking user's subject (m80.4) — no subject logic here.
+ *
+ * Best-effort: any retrieval failure (per KB) is swallowed so the turn proceeds without the extra
+ * context. NEVER persisted — it mutates the in-memory `messages[0]` only. Parity with Python `_inject_knowledge`.
+ */
+async function injectKnowledge(
+  client: Client,
+  messages: Array<Record<string, unknown>>,
+  userInput: string,
+  config: ManagedConfig,
+): Promise<void> {
+  const lines: string[] = [];
+  for (const kbName of config.knowledgeAutoInject) {
+    let hits: Array<Record<string, unknown>>;
+    try {
+      hits = (await client.knowledge.search(
+        userInput,
+        kbName,
+        config.knowledgeTopK,
+        config.knowledgeThreshold,
+      )) as unknown as Array<Record<string, unknown>>;
+    } catch {
+      // Best-effort; a retrieval hiccup on one KB must never break the turn.
+      continue;
+    }
+    for (const hit of hits ?? []) {
+      if (typeof hit !== "object" || hit === null) continue;
+      const content = hit["content"];
+      if (typeof content !== "string" || !content) continue;
+      const docRef = typeof hit["documentRef"] === "string" ? hit["documentRef"] : "";
+      const chunkIdx = hit["chunkIndex"] ?? 0;
+      const citation = docRef ? ` [source: ${docRef}#${chunkIdx}]` : "";
+      lines.push(`- ${content}${citation}`);
+    }
+  }
+  if (!lines.length) return;
+  const block = lines.join("\n");
+  const first = messages[0]!;
+  first["content"] =
+    `${String(first["content"] ?? "")}\n\n<retrieved_context>\n` +
+    `Relevant knowledge-base excerpts (cite the [source: …] when you use them):\n` +
+    `${block}\n</retrieved_context>`;
 }
 
 // ── tool-use policy (m65.6, ADR 0058) ──────────────────────────────────────────
@@ -665,6 +769,14 @@ export async function runManagedLoop(
 
         if (config.useAgentMemory && client.config.longtermWired) {
           await injectAgentMemory(client, messages, userInput, config);
+        }
+
+        // Opt-in knowledge auto-inject (ADR 0061 governance #5, M10): for each KB whose binding set
+        // autoInject, prepend relevant chunks (with citations) as ephemeral <retrieved_context>. Inside
+        // capabilityScope so a perUser KB's launcher proxy retrieval is scoped to the caller (m80.4).
+        // Best-effort — a retrieval hiccup never breaks the turn; never persisted to session history.
+        if (config.knowledgeAutoInject.length && client.config.knowledgeEnabled) {
+          await injectKnowledge(client, messages, userInput, config);
         }
 
         try {

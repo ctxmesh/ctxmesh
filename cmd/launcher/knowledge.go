@@ -73,7 +73,10 @@ const (
 
 // kbRosterEntry is the per-KB wire shape in the KNOWLEDGE_BASES env — matches the JSON the controller
 // stamps from kbRosterEntry in knowledge_resolve.go. Kept as a local type here (the launcher package does
-// not import the controller package — it reads the env at runtime).
+// not import the controller package — it reads the env at runtime). The controller may stamp additional
+// fields the launcher does not consult (e.g. autoInject, ADR 0061 governance #5 / M10 — an SDK-side flag
+// the in-pod SDK reads to decide auto-injection); json.Unmarshal ignores such unknown fields, so the gate
+// is unaffected.
 type kbRosterEntry struct {
 	Name           string `json:"name"`
 	Namespace      string `json:"namespace"`

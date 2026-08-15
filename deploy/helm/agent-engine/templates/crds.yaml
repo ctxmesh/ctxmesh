@@ -324,6 +324,15 @@ spec:
                     un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                     refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                   properties:
+                    autoInject:
+                      description: |-
+                        autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                        M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                        turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                        prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                        the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                        unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                      type: boolean
                     name:
                       description: name is the KnowledgeBase CR name. Required.
                       maxLength: 253
@@ -1269,6 +1278,15 @@ spec:
                     un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                     refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                   properties:
+                    autoInject:
+                      description: |-
+                        autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                        M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                        turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                        prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                        the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                        unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                      type: boolean
                     name:
                       description: name is the KnowledgeBase CR name. Required.
                       maxLength: 253
@@ -3459,6 +3477,15 @@ spec:
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                       properties:
+                        autoInject:
+                          description: |-
+                            autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                            M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                            turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                            prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                            the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                            unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                          type: boolean
                         name:
                           description: name is the KnowledgeBase CR name. Required.
                           maxLength: 253
@@ -4206,6 +4233,15 @@ spec:
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
                       properties:
+                        autoInject:
+                          description: |-
+                            autoInject is a per-binding opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+                            M10). When true, the in-pod SDK retrieves the most relevant chunks of THIS KB on the user input each
+                            turn and prepends them as an ephemeral `<retrieved_context>` block (with citations) to the system
+                            prompt — never persisted to conversation history. When false/unset (the default) the KB is TOOL-ONLY:
+                            the agent must call the `knowledge_search` tool to retrieve — today's behaviour, byte-for-byte
+                            unchanged. This is a per-KB-binding flag (one agent may auto-inject KB A while KB B stays tool-only).
+                          type: boolean
                         name:
                           description: name is the KnowledgeBase CR name. Required.
                           maxLength: 253

@@ -43,6 +43,12 @@ type kbRosterEntry struct {
 	// roster — no structural-digest churn / fleet-wide roll on upgrade; only a pod referencing a
 	// per-user KB carries the flag (and its behaviour genuinely changed, so a roll there is correct).
 	PerUser bool `json:"perUser,omitempty"`
+	// AutoInject is the per-BINDING opt-in for RAG-style knowledge auto-injection (ADR 0061 governance #5,
+	// M10). It comes from the AgentDeployment's KnowledgeBaseRef (NOT the KnowledgeBase CR) — one agent may
+	// auto-inject KB A while another leaves the same KB tool-only. The in-pod SDK reads it to decide which
+	// KBs to auto-retrieve on the user input each turn. omitempty so a no-auto-inject roster serialises
+	// byte-identically to the pre-M10 roster — no structural-digest churn / fleet-wide roll on upgrade.
+	AutoInject bool `json:"autoInject,omitempty"`
 }
 
 // kbResolveResult captures the outcome of resolving spec.knowledgeBases[].
@@ -100,6 +106,9 @@ func resolveKnowledgeBases(
 			Namespace:      ns,
 			EmbeddingRoute: kb.Spec.EmbeddingRoute,
 			PerUser:        kb.Spec.PerUser,
+			// AutoInject is a per-BINDING opt-in read from the ref (the AgentDeployment side), not the
+			// KnowledgeBase CR — the same corpus can be auto-injected by one agent and tool-only for another.
+			AutoInject: ref.AutoInject,
 		})
 	}
 
