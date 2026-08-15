@@ -395,6 +395,16 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if ge, ok := asGuardrailResolveError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ge.reason, ge.msg)
 	}
+	// In-pod tool-call governance FAIL-CLOSED (m82.3, ADR 0074 §2): a sidecar-mode (in-pod) tool with
+	// an effective require-approval rule is surfaced from buildPodTemplate as an *inPodRequireApprovalError
+	// BEFORE any workload write (no half-governed pod — the ksvc CreateOrUpdate is never reached, so the
+	// OLD revision keeps serving). require-approval is not enforceable on an in-pod tool (it binds a
+	// localhost port in the shared netns, uncapturable by the approval voucher). Report Ready=False and
+	// STOP cleanly (no requeue on user input); a spec fix (drop the rule, or make the tool remote/OBO)
+	// re-reconciles via the watch.
+	if ie, ok := asInPodRequireApprovalError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, ie.reason, ie.msg)
+	}
 	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
 	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
 	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
@@ -1017,24 +1027,68 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
 	}
+
+	// Tool-call governance (M82.3, ADR 0074 §2): resolve spec.runtime.toolPolicy up front, because for
+	// IN-POD (sidecar-mode) tools the enforcement is STRUCTURAL — a wire check at the egress sidecar is
+	// THEATER (a sidecar tool binds a deterministic localhost port in the SHARED pod netns, so a
+	// prompt-injected/custom loop just hits 127.0.0.1:<port> directly, around the sidecar). So a denied
+	// in-pod tool must simply NOT be deployed. resolveToolPolicy never fails on user input (the CRD
+	// enum bounds the shape); it only errors on a marshal bug.
+	tp, terr := resolveToolPolicy(deploy)
+	if terr != nil {
+		return podTemplate{}, terr
+	}
+	// Apply the in-pod structural policy to the bindings BEFORE Render, so the manifest, the sidecar
+	// container list, AND the egress route table are all derived from the SAME post-filter binding set
+	// (Render assigns localhost ports in binding-name order; filtering here keeps the port↔manifest↔
+	// container mapping inherently consistent — a denied middle tool cannot mis-map the survivors,
+	// since both the manifest endpoint and the container port come from one Render over the same
+	// slice). An OBO/remote tool is NOT touched here — its deny/require-approval is the m82.2 wire
+	// enforcement (it is genuinely fronted). If an in-pod tool carries an effective require-approval
+	// rule, this returns an *inPodRequireApprovalError → Reconcile sets Ready=False (no half-governed
+	// pod). A pure-allow / policy-less agent keeps every binding — byte-for-byte unchanged.
+	validBindings, err = filterInPodToolsByPolicy(validBindings, tp)
+	if err != nil {
+		return podTemplate{}, err
+	}
+
 	renderedManifest, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
-	// OBO egress (ADR 0030) + record mode (M78, ADR 0071 §1/C1): the route table the injected
-	// egress sidecar fronts — the real MCP URLs kept out of the agent's manifest.
-	//   - OBO egress on           → remote OBO servers only (EgressRoutes).
-	//   - record-capable (spec.record) → EVERY tool is fronted (RewriteAllForEgress derives the
-	//     route table from the rendered manifest) so ALL tool I/O passes the capture seam. This
-	//     REQUIRES the sidecar even when the agent has NO OBO/remote binding — the record variant
-	//     supersedes the OBO-only table (it is a superset: OBO tools keep their ServerName route +
-	//     OAuth injection). A non-record-capable agent is byte-for-byte unchanged (OBO-only table,
-	//     empty when OBO egress is off).
-	var egressRoutes []toolmanifest.Route
-	switch {
-	case recordCapable:
-		_, egressRoutes = toolmanifest.RewriteAllForEgress(renderedManifest, validBindings, egressSidecarBaseURL)
-	case r.OBOEgress.Enabled:
-		egressRoutes = toolmanifest.EgressRoutes(validBindings)
+	// Tool-call governance (M82, ADR 0074 §1): front-all-tools is now the ONLY manifest mode —
+	// always-on, no flag. EVERY tool of EVERY tool-having agent is fronted through the per-pod
+	// egress sidecar (RewriteAllForEgress derives the route table from the rendered manifest), so
+	// the sidecar is the authoritative tool-call chokepoint (OBO credential injection + record
+	// capture + — in later M82 tasks — policy enforcement). This supersedes the M78 record-only /
+	// ADR 0030 OBO-only variants: OBO tools keep their ServerName route + OAuth injection, so the
+	// front-all table is a strict superset of the OBO-only one; record capture stays gated on the
+	// per-run record header at the sidecar, unaffected. An agent with NO tool gets no routes and no
+	// sidecar (byte-for-byte unchanged). NOTE (ADR 0074 Consequences): this changes the content-
+	// addressed manifest version + adds the sidecar to pods that today have only in-pod tools — a
+	// one-time fleet ROLL, expected.
+	_, egressRoutes := toolmanifest.RewriteAllForEgress(renderedManifest, validBindings, egressSidecarBaseURL)
+
+	// Tool-call governance (M82, ADR 0074 §1/§6): deliver the SAME resolved spec.runtime.toolPolicy
+	// the SDK receives (via AGENT_RUNTIME) to the egress sidecar — the authoritative tool-call
+	// chokepoint — as a controller-owned, STABLE-named <agent>-toolpolicy ConfigMap mounted
+	// read-only on the sidecar with the static TOOL_POLICY_FILE path env (the M81-K3 pattern:
+	// the sidecar reads + fsnotify-watches it, so a policy edit reloads live without a revision
+	// roll). This task lands the PLUMBING only — the sidecar parses + holds the policy but does
+	// NOT enforce it yet (enforcement is a later M82 task); behavior stays PERMISSIVE. Only
+	// materialised when the agent has ≥1 tool (an egress route ⇒ a sidecar to mount it on) AND a
+	// toolPolicy is set; a policy-less or tool-less agent gets no ConfigMap (byte-compatible
+	// pre-M82). The ConfigMap is SECURITY-CRITICAL (§6a): the owner-ref + CreateOrUpdate reverts a
+	// namespace-level edit so policy can't be flipped out from under the CR.
+	var toolPolicyVol *corev1.Volume
+	var toolPolicyMount *corev1.VolumeMount
+	var toolPolicyEnv []corev1.EnvVar
+	if len(egressRoutes) > 0 {
+		// tp was resolved above (it drives the in-pod structural filter); here it materialises the
+		// controller-owned <agent>-toolpolicy ConfigMap for the sidecar's OBO/remote wire enforcement.
+		toolPolicyVol, toolPolicyMount, toolPolicyEnv, err = r.reconcileToolPolicyConfigMap(ctx, deploy, tp)
+		if err != nil {
+			return podTemplate{}, err
+		}
 	}
 
 	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
@@ -1397,6 +1451,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// launcher reloads via the watch — the revision name is unchanged, so no roll.
 		volumes = append(volumes, *guardrailVol)
 	}
+	if toolPolicyVol != nil {
+		// Tool-call governance (M82, ADR 0074 §1): the <agent>-toolpolicy ConfigMap volume, mounted
+		// read-only on the EGRESS SIDECAR container below. Like the guardrail volume, the policy
+		// rides the watched mounted file (the sidecar reloads via fsnotify), so a policy edit updates
+		// this ConfigMap in place without rolling the revision — the mount itself is structurally
+		// constant for any tool-having agent.
+		volumes = append(volumes, *toolPolicyVol)
+	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
 		// A projected VOLUME (not valueFrom) — Knative admits it (verified on 1.22.1). The
@@ -1429,20 +1491,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		volumes = append(volumes, toolsVolume(deploy.Name))
 	}
 
-	// OBO egress (ADR 0030) + record mode (M78, ADR 0071 §1/C1): inject the injecting egress
-	// sidecar when
-	//   - OBO egress is on AND the agent has ≥1 remote OBO tool (the manifest endpoints were
-	//     rewritten to 127.0.0.1:<port>/<server>; the sidecar verifies the run capability,
-	//     resolves the invoking user's credential, forwards to the real MCP server), OR
-	//   - the agent is RECORD-CAPABLE (spec.record) AND has ≥1 tool to front — the sidecar is the
-	//     TOOL capture seam, so it is injected EVEN WITH NO OBO/remote binding (egressRoutes was
-	//     built from RewriteAllForEgress in record mode ⇒ it fronts every tool). recordCapable
-	//     also injects RECORD_CAPABLE + the object-store env (fail-closed C2 sink).
-	// A non-record-capable agent with OBO egress off gets no sidecar — byte-for-byte unchanged.
-	injectSidecar := (r.OBOEgress.Enabled || recordCapable) && len(egressRoutes) > 0
-	if injectSidecar {
+	// Tool-call governance (M82, ADR 0074 §1): the egress sidecar is the ALWAYS-ON authoritative
+	// tool-call chokepoint — inject it whenever the agent has ≥1 tool (front-all rewrote every
+	// endpoint above, so len(egressRoutes) > 0 iff the agent has a tool). This supersedes the
+	// prior gate on (OBO egress enabled || record-capable): the sidecar now fronts every tool for
+	// every tool-having agent (OBO credential injection when a route is OAuth, record capture gated
+	// on the per-run header, and — in later M82 tasks — policy enforcement). recordCapable still
+	// adds RECORD_CAPABLE + the object-store env (fail-closed C2 sink) to the container. A non-tool
+	// agent gets no routes and no sidecar — byte-for-byte unchanged.
+	if len(egressRoutes) > 0 {
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership), egressRoutesJSON(egressRoutes), recordCapable))
+		containers = append(containers, egressSidecarContainer(
+			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
+			egressRoutesJSON(egressRoutes), recordCapable, toolPolicyMount, toolPolicyEnv))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
@@ -1467,9 +1528,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes, recordCapable); ed != "" {
 		// The egress sidecar (image + routes — the real URLs now live in pod env, not the
 		// hot-path manifest) is pod-template state, so fold it into the tool component: adding/
-		// removing the sidecar or changing a route rolls a new revision. Inert when OBO is off
-		// (egressRoutes is nil ⇒ egressDigest is "").
+		// removing the sidecar or changing a route rolls a new revision. Inert when the agent has
+		// no tool (egressRoutes is nil ⇒ egressDigest is "").
 		toolDigest += "e" + ed
+	}
+	// Tool-call governance (M82, ADR 0074 §1): fold the PRESENCE of a tool policy into the tool
+	// component — a PRESENCE marker, not the content (like the guardrail presence digest). Adding or
+	// removing spec.runtime.toolPolicy is a STRUCTURAL pod change (the <agent>-toolpolicy volume +
+	// mount + TOOL_POLICY_FILE env on the sidecar appear/disappear), so it must roll a new revision;
+	// EDITING an already-present policy's CONTENT keeps the SAME marker → the SAME revision name →
+	// NO roll (the content rides the watched mounted ConfigMap, which the sidecar reloads live —
+	// the K3 point). "" when no policy, symmetric with the other components.
+	if toolPolicyMount != nil {
+		toolDigest += "p" + toolPolicyPresenceDigest()
 	}
 	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
 	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the

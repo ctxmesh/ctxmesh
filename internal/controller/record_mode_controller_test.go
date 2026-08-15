@@ -164,10 +164,13 @@ func TestRecordMode_FrontsAllTools_SidecarInjected(t *testing.T) {
 	}
 }
 
-// TestRecordMode_NonRecordAgentUnchanged proves a NON-record agent with the SAME plain-remote tool
-// gets NO egress sidecar and keeps its endpoint verbatim (byte-for-byte the pre-M78 behavior) —
-// the record path is fully gated on spec.record.
-func TestRecordMode_NonRecordAgentUnchanged(t *testing.T) {
+// TestRecordMode_NonRecordAgent_FrontedButNoRecordEnv proves the M82 always-on front-all boundary
+// (ADR 0074 §1): a NON-record agent with a plain-remote tool NOW gets the egress sidecar injected +
+// its endpoint fronted through it (front-all is the only manifest mode), but the RECORD-specific env
+// (RECORD_CAPABLE + the object-store fixture sink) is STILL gated on spec.record — so it is ABSENT.
+// This is the pre-M82 "no sidecar for a non-record agent" test, updated for the always-on chokepoint:
+// the sidecar exists for every tool-having agent, record capture stays record-gated.
+func TestRecordMode_NonRecordAgent_FrontedButNoRecordEnv(t *testing.T) {
 	const ns = "default"
 	agent := mkRecordAgent(t, "rec-plain", ns, false) // record = false
 	const url = "http://mcp-open.default.svc.cluster.local/mcp"
@@ -184,17 +187,27 @@ func TestRecordMode_NonRecordAgentUnchanged(t *testing.T) {
 	reconcileNN(t, newRecordReconciler(), agent.Name, ns)
 	reconcileBinding(t, newRecordBindingReconciler(), binding.Name, ns)
 
-	// No egress sidecar for a non-record agent (OBO egress is off + no OBO tool).
+	// M82: the egress sidecar IS injected for a non-record tool agent (front-all is always-on) —
+	// but it carries NO record env (RECORD_CAPABLE / object-store), which stays gated on spec.record.
 	ksvc := getKsvc(t, agent.Name, ns)
-	_, ok := containerByName(ksvc.Spec.Template.Spec.Containers, egressSidecarContainerName)
-	assert.False(t, ok, "a non-record agent with OBO egress off must get NO egress sidecar")
+	sidecar, ok := containerByName(ksvc.Spec.Template.Spec.Containers, egressSidecarContainerName)
+	require.True(t, ok, "M82: a non-record tool agent gets the always-on egress sidecar")
+	env := map[string]corev1.EnvVar{}
+	for _, e := range sidecar.Env {
+		env[e.Name] = e
+	}
+	assert.NotContains(t, env, "RECORD_CAPABLE", "a NON-record agent's sidecar carries no record env")
+	assert.NotContains(t, env, "OBJECT_STORE_ADDR", "a NON-record agent's sidecar carries no fixture-sink env")
 
-	// The tool endpoint is the real URL verbatim (no rewrite).
+	// The tool endpoint is fronted through the egress sidecar (front-all), not verbatim.
 	var cm corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		client.ObjectKey{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm))
 	var m toolmanifest.Manifest
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
 	require.Len(t, m.Tools, 1)
-	assert.Equal(t, url, m.Tools[0].Endpoint, "a non-record agent keeps its remote endpoint verbatim")
+	// A remote tool is fronted under its SERVER segment (= RegistryRef), not its tool name.
+	assert.Equal(t, "http://127.0.0.1:8899/reg-plain", m.Tools[0].Endpoint,
+		"M82 front-all: a non-record agent's tool is fronted through the egress sidecar under its server segment")
+	assert.NotContains(t, m.Tools[0].Endpoint, "mcp-open.default", "the real URL must not reach the agent manifest")
 }

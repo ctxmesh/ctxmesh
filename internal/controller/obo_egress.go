@@ -81,7 +81,16 @@ type OBOEgressConfig struct {
 // address + dev creds so it has a sink to Put the TOOL-channel fixture to. All STATIC env
 // (reconcile-time constants), NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom
 // guard). false ⇒ no record env, the OBO sidecar is byte-for-byte unchanged.
-func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string, recordCapable bool) corev1.Container {
+//
+// toolPolicyMount / toolPolicyEnv (M82, ADR 0074 §1) deliver the resolved spec.runtime.toolPolicy
+// to the sidecar as a mounted, read-only ConfigMap file + the static TOOL_POLICY_FILE path env (the
+// sidecar reads + fsnotify-watches it). Both nil ⇒ no toolPolicy set (permissive; the sidecar
+// starts with no policy). This task is PLUMBING only — the policy is delivered + parsed + held but
+// NOT yet enforced (enforcement is a later M82 task).
+func egressSidecarContainer(
+	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string, recordCapable bool,
+	toolPolicyMount *corev1.VolumeMount, toolPolicyEnv []corev1.EnvVar,
+) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
 		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
@@ -109,10 +118,19 @@ func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, bound
 		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
 		env = append(env, objectStoreEnv()...)
 	}
+	// Tool-call governance (M82, ADR 0074 §1): the resolved tool-policy file path (TOOL_POLICY_FILE)
+	// — STATIC (a mounted path, never valueFrom). Appended after the record env so the sidecar reads
+	// + watches the mounted ConfigMap. Absent ⇒ no policy (permissive).
+	env = append(env, toolPolicyEnv...)
+	var mounts []corev1.VolumeMount
+	if toolPolicyMount != nil {
+		mounts = append(mounts, *toolPolicyMount)
+	}
 	return corev1.Container{
-		Name:  egressSidecarContainerName,
-		Image: cfg.SidecarImage,
-		Env:   env,
+		Name:         egressSidecarContainerName,
+		Image:        cfg.SidecarImage,
+		Env:          env,
+		VolumeMounts: mounts,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("25m"),

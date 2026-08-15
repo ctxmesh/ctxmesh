@@ -447,6 +447,14 @@ type ToolPolicySpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	ParallelLimit int32 `json:"parallelLimit,omitempty"`
+
+	// maxToolCallsPerRun caps the total number of tool calls a single run may
+	// forward through the egress sidecar (an anti-DoS fan-out ceiling). 0 means
+	// unlimited (the default). Enforced fail-closed at the sidecar: once a run
+	// exceeds this, further tool calls are denied with a terminal 403.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
 }
 
 // ToolPolicyOverride is one named tool-level policy override.

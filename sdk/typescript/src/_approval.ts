@@ -71,3 +71,73 @@ export function pauseForApproval(key: string, summary: string): void {
     { key, summary },
   );
 }
+
+// ── The stateless approval VOUCHER (ADR 0074 §3, m82.4) ──────────────────────────────────────────
+//
+// require-approval is enforced at the egress WIRE, not just here in the loop: a tool call for a
+// require-approval tool is FORWARDED by the sidecar only when the request carries a valid, signed
+// `X-Ctxmesh-Approval` voucher (a short-lived token bound to {runId, toolName} the BFF minted on a
+// human's approval). `pauseForApproval` is now the PRESENTATION UX — necessary but no longer
+// sufficient — and the SDK must RELAY the voucher on the tool-call retry so the sidecar forwards it.
+//
+// The voucher arrives on the RESUMED run's inbound `/invoke` headers (the BFF stamped
+// `X-Ctxmesh-Approval` after approval-grant). We hold it request-scoped in `AsyncLocalStorage` and
+// relay it on every outbound tool call — the exact sibling of the run-capability relay
+// (`_capability.ts`) and the record toggle (`_record.ts`). The sidecar's {tool, run} binding means a
+// voucher only unlocks the ONE approved tool; relaying it on every call is safe.
+
+/**
+ * The header the BFF stamps on a resumed run and the SDK relays on each tool-call egress — MUST match
+ * `runcap.ApprovalHeaderName` on the Go side (internal/runcap) + `hdrApproval` (internal/bff).
+ * Case-insensitive on the wire.
+ */
+export const APPROVAL_HEADER = "X-Ctxmesh-Approval";
+
+/**
+ * The request-scoped approval-voucher store. No value bound ⇒ a run with no granted require-approval
+ * tool: the tool client relays no voucher and a require-approval tool gets the sidecar's 403
+ * `approval_required`.
+ */
+const voucherStore = new AsyncLocalStorage<string | undefined>();
+
+/**
+ * Return the approval voucher bound to the CURRENT request context, or `undefined`. The tool client
+ * relays it on each outbound MCP tool call; `undefined` outside a resumed/approved run.
+ */
+export function currentApprovalVoucher(): string | undefined {
+  return voucherStore.getStore();
+}
+
+/**
+ * Pull the approval voucher out of inbound *headers* case-insensitively (HTTP header case is not
+ * guaranteed), returning `undefined` when absent or blank.
+ */
+function extractVoucher(headers?: Record<string, string> | Headers): string | undefined {
+  if (!headers) return undefined;
+  const target = APPROVAL_HEADER.toLowerCase();
+  if (typeof (headers as Headers).get === "function") {
+    const value = (headers as Headers).get(APPROVAL_HEADER);
+    const stripped = (value ?? "").trim();
+    return stripped || undefined;
+  }
+  for (const [key, value] of Object.entries(headers as Record<string, string>)) {
+    if (key.toLowerCase() === target) {
+      const stripped = (value ?? "").trim();
+      return stripped || undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Bind the approval voucher extracted from inbound *headers* for the duration of `fn` (and everything
+ * it awaits), then unbind it. Request-scoped over AsyncLocalStorage — a reused event-loop turn can
+ * never observe a prior request's voucher. A missing/blank header binds `undefined` (no granted
+ * require-approval tool). Returns `fn`'s result.
+ */
+export function voucherScope<T>(
+  headers: Record<string, string> | Headers | undefined,
+  fn: () => T,
+): T {
+  return voucherStore.run(extractVoucher(headers), fn);
+}

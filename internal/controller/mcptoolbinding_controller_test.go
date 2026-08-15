@@ -146,9 +146,10 @@ func volumeByName(vols []corev1.Volume, name string) (corev1.Volume, bool) {
 }
 
 // TestBinding_ValidRemote_InjectionAndConfigMap: a valid remote binding →
-// AgentDeployment renders the discovery sidecar + CM volume into the ksvc, and
-// the binding reconciler writes the <agent>-tools ConfigMap with the correct
-// manifest (remote endpoint verbatim). Ready=True.
+// AgentDeployment renders the discovery sidecar + CM volume + the ALWAYS-ON egress sidecar
+// (M82, ADR 0074 §1 — front-all-tools is now the only manifest mode) into the ksvc, and
+// the binding reconciler writes the <agent>-tools ConfigMap with the tool endpoint fronted
+// THROUGH the egress sidecar (no longer verbatim). Ready=True.
 func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "wc-agent-remote", ns)
@@ -171,8 +172,11 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
 
-	// user + collector + discovery = 3 (no sidecar-mode tool container for remote).
-	require.Len(t, containers, 3, "user + collector + discovery sidecar")
+	// user + collector + discovery + egress-sidecar = 4 (M82: the egress sidecar is now injected for
+	// EVERY tool-having agent — front-all is always-on). No sidecar-mode tool container for a remote.
+	require.Len(t, containers, 4, "user + collector + discovery + egress sidecar")
+	_, hasEgress := containerByName(containers, egressSidecarContainerName)
+	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
 	disc, ok := containerByName(containers, DiscoveryContainerName)
 	require.True(t, ok, "discovery sidecar must be injected")
 	assert.Equal(t, DiscoveryImage, disc.Image, "discovery image")
@@ -192,7 +196,9 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	require.NotNil(t, vol.ConfigMap)
 	assert.Equal(t, toolsConfigMapName(agent.Name), vol.ConfigMap.Name)
 
-	// ConfigMap content: remote endpoint verbatim (carries /mcp).
+	// ConfigMap content: the tool endpoint is fronted THROUGH the egress sidecar (M82 front-all).
+	// A plain-remote tool (no OBO ServerName) routes under its unique ToolName segment; the real URL
+	// lives only in the sidecar's route table, never the agent manifest.
 	var cm corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm),
@@ -202,7 +208,11 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	require.Len(t, m.Tools, 1)
 	assert.Equal(t, "word-count", m.Tools[0].Name)
 	assert.Equal(t, toolmanifest.ModeRemote, m.Tools[0].Mode)
-	assert.Equal(t, url, m.Tools[0].Endpoint, "remote endpoint must be the binding URL verbatim")
+	// A remote tool is fronted under its SERVER segment (= RegistryRef; every remote binding gets
+	// ServerName=RegistryRef in binding_resolve). The real URL lives only in the sidecar route table.
+	assert.Equal(t, "http://127.0.0.1:8899/reg-remote", m.Tools[0].Endpoint,
+		"M82 front-all: the remote endpoint is rewritten THROUGH the egress sidecar under its server segment")
+	assert.NotContains(t, m.Tools[0].Endpoint, "mcp-echo.default", "the real URL must not reach the agent manifest")
 
 	// Binding Ready=True / Bound.
 	assertBindingReady(t, binding.Name, ns, metav1.ConditionTrue, reasonBound)
@@ -300,8 +310,11 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
-	// user + collector + discovery + tool = 4.
-	require.Len(t, containers, 4, "user + collector + discovery + sidecar tool")
+	// user + collector + discovery + tool + egress-sidecar = 5 (M82: front-all is always-on, so even
+	// an in-pod sidecar-mode tool is fronted through the injected egress sidecar).
+	require.Len(t, containers, 5, "user + collector + discovery + sidecar tool + egress sidecar")
+	_, hasEgress := containerByName(containers, egressSidecarContainerName)
+	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
 
 	tool, ok := containerByName(containers, "tool-"+binding.Name)
 	require.True(t, ok, "sidecar-mode tool container must be injected")
@@ -313,7 +326,9 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 	}
 	assert.Equal(t, "3001", toolEnv["PORT"], "first sidecar tool gets port 3001")
 
-	// Manifest endpoint = http://127.0.0.1:3001/mcp.
+	// Manifest endpoint: the in-pod sidecar tool is fronted THROUGH the egress sidecar under its
+	// ToolName segment (M82 front-all). The tool container still binds :3001 (PORT above) — its real
+	// localhost endpoint lives in the egress route table, not the agent manifest.
 	var cm corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm))
@@ -321,7 +336,8 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
 	require.Len(t, m.Tools, 1)
 	assert.Equal(t, toolmanifest.ModeSidecar, m.Tools[0].Mode)
-	assert.Equal(t, "http://127.0.0.1:3001/mcp", m.Tools[0].Endpoint)
+	assert.Equal(t, "http://127.0.0.1:8899/word-count", m.Tools[0].Endpoint,
+		"M82 front-all: the in-pod sidecar tool is fronted through the egress sidecar")
 
 	assertBindingReady(t, binding.Name, ns, metav1.ConditionTrue, reasonBound)
 }
@@ -386,11 +402,16 @@ func TestBinding_RegistryMismatch_ReadyFalse(t *testing.T) {
 	assertBindingReady(t, binding.Name, ns, metav1.ConditionFalse, reasonRegistryMismatch)
 }
 
-// TestBinding_ManifestOnlyUpdate_RevisionNameUnchanged is the LANDMINE hot-path
-// assertion at the controller level: changing ONLY a remote binding's URL must
-// NOT change the ksvc revision name (no restart), while it DOES change the CM
-// manifest (the propagated content).
-func TestBinding_ManifestOnlyUpdate_RevisionNameUnchanged(t *testing.T) {
+// TestBinding_RemoteURLUpdate_RollsRevision_M82 records the M82 front-all consequence (ADR 0074 §1):
+// with front-all always-on, a remote tool's REAL URL now lives in the egress sidecar's EGRESS_ROUTES
+// env (kept out of the agent manifest — the whole point of the chokepoint), NOT in the pushed CM. So
+// editing a remote URL is now a STRUCTURAL change (the sidecar's env must change → the pod must roll)
+// — it CHANGES the ksvc revision name. This SUPERSEDES the pre-M82 "remote-URL edit is a restart-free
+// hot-path CM push" invariant (which held only because the URL used to sit in the agent-visible CM).
+// The agent's manifest endpoint stays STABLE (it points at the sidecar under the server segment); the
+// churn is confined to the sidecar's route env. (A future routes-hot-reload seam could restore the
+// restart-free edit; deferred — not part of the M82 plumbing.)
+func TestBinding_RemoteURLUpdate_RollsRevision_M82(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "hotpath-agent", ns)
 
@@ -414,8 +435,11 @@ func TestBinding_ManifestOnlyUpdate_RevisionNameUnchanged(t *testing.T) {
 		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm1))
 	var m1 toolmanifest.Manifest
 	require.NoError(t, json.Unmarshal([]byte(cm1.Data["tools.json"]), &m1))
+	// The agent-visible endpoint points at the sidecar under the server segment (never the real URL).
+	require.Len(t, m1.Tools, 1)
+	assert.Equal(t, "http://127.0.0.1:8899/reg-hot", m1.Tools[0].Endpoint)
 
-	// Manifest-only change: edit the remote URL.
+	// Edit the remote URL. Under front-all this moves the real URL in the sidecar's EGRESS_ROUTES env.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), binding))
 	binding.Spec.Server.URL = "http://v2.svc/mcp"
 	require.NoError(t, k8sClient.Update(testCtx, binding))
@@ -425,18 +449,27 @@ func TestBinding_ManifestOnlyUpdate_RevisionNameUnchanged(t *testing.T) {
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
 
 	revAfter := getKsvc(t, agent.Name, ns).Spec.Template.Name
-	assert.Equal(t, revBefore, revAfter,
-		"manifest-only (remote URL) change must NOT alter the ksvc revision name — restart-free hot path")
+	assert.NotEqual(t, revBefore, revAfter,
+		"M82: a remote-URL edit now ROLLS the revision — the real URL lives in the sidecar's env, "+
+			"so its change is structural (supersedes the pre-M82 restart-free hot-path push)")
 
-	// But the CM manifest MUST reflect the new URL (the propagated content).
+	// The agent's manifest endpoint is UNCHANGED (still the sidecar under the server segment) — the
+	// real URL never rides the agent CM. The URL churn is confined to the sidecar's EGRESS_ROUTES env.
 	var cm2 corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm2))
 	var m2 toolmanifest.Manifest
 	require.NoError(t, json.Unmarshal([]byte(cm2.Data["tools.json"]), &m2))
 	require.Len(t, m2.Tools, 1)
-	assert.Equal(t, "http://v2.svc/mcp", m2.Tools[0].Endpoint, "CM manifest must carry the updated URL")
-	assert.NotEqual(t, m1.Version, m2.Version, "manifest version must change on a content change")
+	assert.Equal(t, "http://127.0.0.1:8899/reg-hot", m2.Tools[0].Endpoint,
+		"the agent manifest endpoint stays the sidecar segment — the real URL never reaches the agent")
+
+	// The sidecar's EGRESS_ROUTES env carries the NEW real URL (kept out of the agent manifest).
+	ksvc := getKsvc(t, agent.Name, ns)
+	sidecar, ok := containerByName(ksvc.Spec.Template.Spec.Containers, egressSidecarContainerName)
+	require.True(t, ok)
+	routes, _ := envValue(sidecar, "EGRESS_ROUTES")
+	assert.Contains(t, routes.Value, "http://v2.svc/mcp", "the sidecar route table carries the updated real URL")
 }
 
 // TestBinding_StructuralChange_RevisionNameChanged is the cold-path assertion:
