@@ -27,8 +27,9 @@ import (
 // memStore is the in-memory implementation of Store — the handler-unit-test twin and a development store.
 // It mirrors the pgStore semantics exactly: Create stores hash-only, GetByTokenHash returns the raw row
 // (revoked/expired included — the caller decides via IsLive), Revoke is idempotent, ListForRun returns
-// non-revoked rows newest-first. Data is lost when the process exits (so a share into this store is not
-// durable — the BFF refuses to mint against a non-durable run store, ADR 0069 §1).
+// ALL rows (including revoked) newest-first (V11: honest "what did I expose?" list). Data is lost when
+// the process exits (so a share into this store is not durable — the BFF refuses to mint against a
+// non-durable run store, ADR 0069 §1).
 type memStore struct {
 	mu   sync.Mutex
 	data map[string]SharedRun // id → record
@@ -97,7 +98,8 @@ func (s *memStore) ListForRun(_ context.Context, runID string) ([]SharedRun, err
 	defer s.mu.Unlock()
 	var out []SharedRun
 	for _, rec := range s.data {
-		if rec.RunID == runID && !rec.Revoked {
+		// V11: include revoked rows so the UI can badge them ("what did I expose?").
+		if rec.RunID == runID {
 			out = append(out, rec)
 		}
 	}

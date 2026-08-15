@@ -176,6 +176,49 @@ func TestSPASecurityHeaders(t *testing.T) {
 	}
 }
 
+// TestSharedSPARouteNoindex proves the V10 fix: the SPA document served for /shared/* paths carries the
+// Referrer-Policy: no-referrer and X-Robots-Tag: noindex headers (matching the JSON API handler), PLUS a
+// <meta name="robots" content="noindex"> injected into the document head. Non-shared SPA routes must NOT
+// have these headers (they are exclusive to the share path).
+func TestSharedSPARouteNoindex(t *testing.T) {
+	static := fstest.MapFS{
+		"index.html": {Data: []byte(`<!doctype html><head></head><body id=root></body>`)},
+	}
+	s := newAuthServer(t, static)
+
+	// /shared/* → noindex/no-referrer headers + meta injected.
+	sharedPaths := []string{
+		"/shared/runs/some-token-abc",
+		"/shared/runs/",
+		"/shared/anything",
+	}
+	for _, p := range sharedPaths {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		require.Equalf(t, http.StatusOK, rec.Code, "path %s must 200", p)
+		assert.Equalf(t, "no-referrer", rec.Header().Get("Referrer-Policy"),
+			"Referrer-Policy on shared path %s", p)
+		assert.Equalf(t, "noindex", rec.Header().Get("X-Robots-Tag"),
+			"X-Robots-Tag on shared path %s", p)
+		assert.Containsf(t, rec.Body.String(), `name="robots"`,
+			"meta robots tag injected on %s", p)
+		assert.Containsf(t, rec.Body.String(), `content="noindex"`,
+			"meta robots noindex injected on %s", p)
+	}
+
+	// Non-shared SPA routes must NOT carry the share-specific headers.
+	nonSharedPaths := []string{"/", "/agents", "/traces/abc", "/datasets"}
+	for _, p := range nonSharedPaths {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		require.Equalf(t, http.StatusOK, rec.Code, "path %s must 200", p)
+		assert.Emptyf(t, rec.Header().Get("X-Robots-Tag"),
+			"X-Robots-Tag must NOT be set on non-shared path %s", p)
+		// Referrer-Policy is set by the SPA security headers (no-referrer) on ALL paths — that is correct;
+		// what the test checks is the X-Robots-Tag is absent (the share-exclusive addition).
+	}
+}
+
 // TestAPIResponsesHaveNoCSP asserts the /api surface is UNCHANGED by the SPA CSP
 // work: the strict Content-Security-Policy (and its SPA companions) are NOT set
 // on API responses — they are a document/asset concern only, and adding them to

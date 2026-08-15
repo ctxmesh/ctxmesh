@@ -92,13 +92,13 @@ func (s *pgStore) Revoke(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListForRun returns all non-revoked shares for a run, newest first (the manage list). The partial index
-// idx_shared_runs_by_run serves the NOT revoked predicate.
+// ListForRun returns ALL shares for a run (including revoked), newest first (the manage list, V11:
+// revoked rows are included so the UI can badge them and give an honest "what did I expose?" view).
 func (s *pgStore) ListForRun(ctx context.Context, runID string) ([]SharedRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content
 		FROM shared_runs
-		WHERE run_id = $1 AND NOT revoked
+		WHERE run_id = $1
 		ORDER BY created_at DESC`,
 		runID)
 	if err != nil {
