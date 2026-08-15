@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,10 +34,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -54,6 +57,13 @@ import (
 // into AgentDeployment.status.conditions. Kept as a named constant to satisfy
 // the goconst linter and to make the value easy to grep.
 const conditionReady = "Ready"
+
+// reasonIdentitySAConflict is set on the AgentDeployment Ready condition when
+// the per-agent identity ServiceAccount (agent-<name>) already exists and is
+// owned by a different controller. The reconcile stops cleanly (no requeue /
+// no hot-loop) — the conflict must be resolved by a human before the agent can
+// run. Mirrors the promptResolveError / guardrailResolveError pattern.
+const reasonIdentitySAConflict = "IdentitySAConflict"
 
 // executionModel values (mirror the CRD enum on AgentDeployment.spec.executionModel).
 const (
@@ -384,6 +394,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// on user input). A GuardrailPolicy create/fix re-reconciles via the watch below.
 	if ge, ok := asGuardrailResolveError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ge.reason, ge.msg)
+	}
+	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
+	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
+	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
+	// no requeue). The user must delete or rename the conflicting SA; a re-watch
+	// will re-reconcile once the SA is gone.
+	if ce, ok := asIdentitySAConflictError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, reasonIdentitySAConflict, ce.Error())
 	}
 	return result, err
 }
@@ -1461,7 +1479,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	tenantDig := tenantDigest(tenantCtx, hasTenant)
 	// The proxy URL is injected for a memory binding (M51) OR tenant quota + token (M53);
 	// fold it into the digest so enabling/changing it rolls a new revision (M4 landmine).
-	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken)
+	// The default-token automount opt-in (m79.4) is a property of the SAME per-agent identity
+	// SA this component already tracks (the "|sa" tag), so it folds in here: toggling
+	// spec.mountServiceAccountToken flips the SA's AutomountServiceAccountToken, which must
+	// reach a running pod — so it rolls a new revision like every other pod-template change.
+	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken, mountAPIToken(deploy))
 	// Runtime config (M65): a spec.runtime add/remove/change injects/removes the
 	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
 	// folds into the combined digest like the other components.
@@ -1520,6 +1542,44 @@ func agentIdentitySAName(deployName string) string {
 	return "agent-" + deployName
 }
 
+// mountAPIToken reports whether the agent opts into auto-mounting the default kube-API
+// ServiceAccount token (m79.4, m52 C10). Default (nil/false) is HARDENED: the token is
+// stripped from the pod because the agent runtime never uses it (the state-layer proxy
+// authenticates with a dedicated projected token on a separate volume). true opts the
+// agent back in — only for one that legitimately builds an in-cluster kube config. It
+// feeds both ensureAgentIdentitySA (the SA-level AutomountServiceAccountToken) and the
+// structural digest (so toggling it rolls a new revision, the M4 landmine).
+func mountAPIToken(deploy *agentsv1alpha1.AgentDeployment) bool {
+	return deploy.Spec.MountServiceAccountToken != nil && *deploy.Spec.MountServiceAccountToken
+}
+
+// identitySAConflictError is a sentinel returned by ensureAgentIdentitySA when
+// the per-agent identity SA (agent-<name>) already exists and is owned by a
+// DIFFERENT controller. The reconcile must stop cleanly (no requeue / no
+// hot-loop): Reconcile intercepts this type, sets Ready=False
+// (reasonIdentitySAConflict), and returns nil so the controller does not
+// back-off-requeue. Mirrors the promptResolveError / guardrailResolveError
+// pattern — a human must resolve the naming collision before the agent can run.
+type identitySAConflictError struct {
+	saName    string
+	ownerKind string
+	ownerName string
+}
+
+func (e *identitySAConflictError) Error() string {
+	return fmt.Sprintf("ServiceAccount %q is already owned by %s %q; delete or rename it to resolve the conflict",
+		e.saName, e.ownerKind, e.ownerName)
+}
+
+// asIdentitySAConflictError extracts an *identitySAConflictError from err (supports wrapping).
+func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
+	var ce *identitySAConflictError
+	if errors.As(err, &ce) {
+		return ce, true
+	}
+	return nil, false
+}
+
 // ensureAgentIdentitySA reconciles the per-agent identity ServiceAccount the pod runs
 // as when it presents a projected token to the state-layer proxy (ADR 0052 §C6
 // RESOLUTION). saName == "" (a non-proxy agent) is a no-op: the pod keeps the namespace
@@ -1533,6 +1593,11 @@ func agentIdentitySAName(deployName string) string {
 // boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
 // §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
 // registry), so a stale boundary can never linger.
+//
+// If the SA already exists and is owned by a DIFFERENT controller,
+// SetControllerReference returns a *controllerutil.AlreadyOwnedError.
+// ensureAgentIdentitySA wraps it as an *identitySAConflictError so the caller
+// (Reconcile) can surface Ready=False and stop cleanly — no hot-loop.
 func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
 	if saName == "" {
 		return nil
@@ -1550,10 +1615,39 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 		} else {
 			delete(sa.Labels, registryIDLabel)
 		}
+		// Strip the unused default kube-API token from agent pods by default (m79.4, m52 C10).
+		//
+		// Setting it on THIS identity SA (not the ksvc PodSpec) is deliberate: Knative Serving
+		// restricts the RevisionSpec.PodSpec and has no automountServiceAccountToken feature flag,
+		// so setting it on the pod template would be stripped/rejected (the m5.7 landmine class).
+		// The SA-level setting removes ONLY the default auto-mounted token; the explicit projected
+		// proxy-token volume (declared on the pod spec) is UNAFFECTED.
+		//
+		// Default (hardened): false — the identity SA has zero RBAC and the runtime never reads
+		// the default token. Opt-in: true when spec.mountServiceAccountToken is set — for an agent
+		// that legitimately builds an in-cluster kube config. Reconciled here (idempotently) like
+		// the registry label so a toggle re-converges.
+		//
+		// COVERAGE: this only reaches agents that HAVE an identity SA (memory/proxy/OBO). A plain
+		// agent on the namespace's shared `default` SA is out of scope — toggling automount on a
+		// shared SA would affect every workload in the namespace; a universal identity SA is a
+		// separate follow-up.
+		sa.AutomountServiceAccountToken = ptr.To(mountAPIToken(deploy))
 		return ctrl.SetControllerReference(deploy, sa, r.Scheme)
 	}); err != nil {
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			return nil // namespace going away — nothing to own; not an error
+		}
+		// A foreign controller already owns this SA: surface it as a clear,
+		// actionable conflict rather than propagating an opaque error that
+		// would wedge the reconcile in an endless requeue loop.
+		var alreadyOwned *controllerutil.AlreadyOwnedError
+		if errors.As(err, &alreadyOwned) {
+			return &identitySAConflictError{
+				saName:    saName,
+				ownerKind: alreadyOwned.Owner.Kind,
+				ownerName: alreadyOwned.Owner.Name,
+			}
 		}
 		return fmt.Errorf("reconciling agent identity ServiceAccount %s: %w", saName, err)
 	}
@@ -1955,7 +2049,7 @@ func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promp
 // whose pod template changes (fixing the M4-landmine gap where enabling the proxy
 // on live agents would otherwise NOT roll — the pod would keep the old direct-Valkey
 // wiring). No spurious roll for agents that don't inject it.
-func statelayerProxyDigest(proxyURL string, injected bool) string {
+func statelayerProxyDigest(proxyURL string, injected, mountAPIToken bool) string {
 	if proxyURL == "" || !injected {
 		return ""
 	}
@@ -1964,7 +2058,14 @@ func statelayerProxyDigest(proxyURL string, injected bool) string {
 	// proxy-attached (same proxyURL, previously default SA) so the serviceAccountName
 	// pod-spec change actually lands — a change that didn't move the revision name would
 	// be silently dropped by the CreateOrUpdate name-guard (the M4 landmine).
-	h := sha256.Sum256([]byte(proxyURL + "|sa"))
+	//
+	// "|automount=<bool>" (m79.4): the identity SA's AutomountServiceAccountToken tracks
+	// spec.mountServiceAccountToken. It is part of the pod's effective spec (the kubelet
+	// mounts or omits the default token per the SA setting), so a toggle must roll a new
+	// revision too — otherwise an opt-in change wouldn't reach a running pod until an
+	// unrelated restart. Default false ⇒ "automount=false" (byte-different from the pre-m79.4
+	// digest, so live proxy agents roll ONCE onto the hardened SA — a real spec change).
+	h := sha256.Sum256([]byte(proxyURL + "|sa" + "|automount=" + strconv.FormatBool(mountAPIToken)))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

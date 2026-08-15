@@ -19,7 +19,6 @@ package statelayer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 )
 
@@ -47,9 +46,17 @@ type quotaSlotResponse struct {
 	Acquired bool `json:"acquired"`
 }
 
-// quotaTenant authenticates the launcher's pod token and resolves its tenant id
-// SERVER-SIDE. On any failure it writes the correct status and returns ok=false:
+// quotaTenant authenticates the launcher's pod token, BINDS it to a per-agent
+// identity (m79.2 — a non-agent SA is rejected, mirroring the memory path), and
+// resolves its tenant id SERVER-SIDE. The quota accumulators are an INTENTIONAL
+// per-TENANT aggregate budget (ADR 0047, ADR 0050 §5): all of a tenant's agents
+// deliberately share one rpm/spend/inflight ledger, so the fix binds the agent
+// identity WITHOUT re-keying the tenant scope — it rejects a pod that is not an
+// agent at all, but never re-partitions the shared budget. On any failure it writes
+// the correct status and returns ok=false:
 //   - 401  invalid pod token (the launcher fails budget CLOSED / rate+concurrency CLOSED)
+//   - 403  a verified but NON-agent SA (e.g. the namespace default) — authenticated,
+//     not authorizable on a workload path (matches the memory path's posture)
 //   - 503  auth-infra down OR the proxy has no authenticator/resolver/store configured
 //     (the launcher fails budget CLOSED / rate+concurrency OPEN — ADR 0050 Amд 3)
 //   - 404  the namespace belongs to no tenant → the launcher reads it as "no tenant
@@ -59,15 +66,13 @@ func (s *Server) quotaTenant(ctx context.Context, w http.ResponseWriter, r *http
 		writeJSONError(w, http.StatusServiceUnavailable, "quota is not configured on this proxy")
 		return "", false
 	}
-	ns, err := s.authenticatePod(ctx, bearerToken(r))
+	// Bind the VERIFIED per-agent identity: a token must be an agent-<name> SA to touch
+	// the quota paths (the ns is still what keys the tenant aggregate; the agent binding
+	// only gates WHO may act). The agent name is derived un-forgeably from the
+	// TokenReview-verified SA username, so a pod can never claim a different identity.
+	ns, err := s.authenticateAgentNamespace(ctx, bearerToken(r))
 	if err != nil {
-		if errors.Is(err, ErrTokenRejected) {
-			writeJSONError(w, http.StatusUnauthorized, "invalid pod token")
-		} else {
-			// Auth-infra failure (TokenReview unreachable) — distinct from a rejection so
-			// the launcher can fail budget CLOSED but rate/concurrency OPEN.
-			writeJSONError(w, http.StatusServiceUnavailable, "pod authentication unavailable")
-		}
+		writeAgentAuthError(w, err)
 		return "", false
 	}
 	tenantID, found, err := s.resolveTenant(ctx, ns)
