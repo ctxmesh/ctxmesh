@@ -30,7 +30,9 @@ func newDedupProxy(t *testing.T, byToken map[string]string, auth PodAuthenticato
 	t.Helper()
 	mr := miniredis.RunT(t)
 	if auth == nil {
-		auth = fakePodAuth{byToken: byToken}
+		// Each token authenticates as a per-agent identity SA — the m79.2 dedup path now
+		// requires an agent identity (a non-agent SA is 403'd).
+		auth = fakePodAuth{byToken: byToken, saByToken: agentSAsFor(byToken)}
 	}
 	s, err := NewServer(Options{
 		Store:            NewRedisStore(mr.Addr(), "", ""),
@@ -91,6 +93,56 @@ func TestDedupAuthAndValidation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusServiceUnavailable, do(t, s, "POST", "/dedup", "t", `{"messageID":"m"}`, nil).Code)
 	})
+}
+
+// m79.2 (m52 C7): the dedup path BINDS the verified per-agent identity — a verified
+// pod token whose SA is NOT a per-agent identity (e.g. the namespace default) is 403'd,
+// mirroring the memory path. Before the fix, ANY pod in a namespace could poison its
+// seen-set. The seen-set stays per-namespace (a real agent still marks the ns key).
+func TestDedupNonAgentSARejected(t *testing.T) {
+	mr := miniredis.RunT(t)
+	auth := fakePodAuth{
+		byToken:   map[string]string{"default-tok": "team-alpha-ns"},
+		saByToken: map[string]string{"default-tok": "default"}, // not an agent-<name> SA
+	}
+	s, err := NewServer(Options{
+		Store:            NewRedisStore(mr.Addr(), "", ""),
+		DedupStore:       NewRedisDedupStore(mr.Addr(), "", ""),
+		PodAuthenticator: auth,
+	})
+	require.NoError(t, err)
+
+	rec := do(t, s, "POST", "/dedup", "default-tok", `{"messageID":"m-1","ttlSeconds":600}`, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a non-agent SA must be 403, not allowed to touch the seen-set")
+	assert.Empty(t, mr.Keys(), "a rejected non-agent SA must never write a seen-key")
+}
+
+// m79.2: sibling agents in the SAME namespace still SHARE the seen-set (an intended
+// per-namespace dedup — ADR 0050 §6), so binding the identity did NOT re-partition it;
+// only WHO may act is gated (an agent, not any pod).
+func TestDedupAgentBindingSharesNamespaceSeenSet(t *testing.T) {
+	mr := miniredis.RunT(t)
+	auth := fakePodAuth{
+		byToken: map[string]string{"agentA": "team-alpha-ns", "agentB": "team-alpha-ns"},
+		saByToken: map[string]string{
+			"agentA": "agent-alpha-one",
+			"agentB": "agent-alpha-two",
+		},
+	}
+	s, err := NewServer(Options{
+		Store:            NewRedisStore(mr.Addr(), "", ""),
+		DedupStore:       NewRedisDedupStore(mr.Addr(), "", ""),
+		PodAuthenticator: auth,
+	})
+	require.NoError(t, err)
+
+	// Agent A marks m-shared seen; agent B (a sibling in the same ns) sees it as a
+	// DUPLICATE — they share the per-namespace seen-set, unchanged by the identity binding.
+	require.Equal(t, http.StatusOK, do(t, s, "POST", "/dedup", "agentA", `{"messageID":"m-shared"}`, nil).Code)
+	rec := do(t, s, "POST", "/dedup", "agentB", `{"messageID":"m-shared"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"firstSeen":false}`, rec.Body.String(), "sibling agents share the per-namespace seen-set")
+	require.Contains(t, mr.Keys(), "a2a:seen:team-alpha-ns:m-shared", "still keyed per-namespace, not per-agent")
 }
 
 // A Valkey backend failure surfaces as 502 (the launcher's dedup client fails CLOSED).

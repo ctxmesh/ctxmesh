@@ -18,7 +18,6 @@ package statelayer
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 )
@@ -52,13 +51,15 @@ func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "dedup is not configured on this proxy")
 		return
 	}
-	ns, err := s.authenticatePod(ctx, bearerToken(r))
+	// Bind the VERIFIED per-agent identity (m79.2): the seen-set stays NAMESPACE-scoped
+	// (an intentional shared per-namespace dedup so sibling agents dedup a shared A2A
+	// message together — ADR 0050 §6), so the ns is still what keys the space. The
+	// agent binding only gates WHO may act — a verified but non-agent SA (e.g. the
+	// namespace default) is now 403'd instead of being let in to poison the seen-set,
+	// mirroring the memory path. Requiring an agent identity to resolve IS the gate.
+	ns, err := s.authenticateAgentNamespace(ctx, bearerToken(r))
 	if err != nil {
-		if errors.Is(err, ErrTokenRejected) {
-			writeJSONError(w, http.StatusUnauthorized, "invalid pod token")
-		} else {
-			writeJSONError(w, http.StatusServiceUnavailable, "pod authentication unavailable")
-		}
+		writeAgentAuthError(w, err)
 		return
 	}
 
