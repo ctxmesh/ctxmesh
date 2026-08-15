@@ -32,6 +32,7 @@ from typing import Any, Dict, Iterator, List
 
 from ctxmesh import _http, _semconv
 from ctxmesh._capability import CAPABILITY_HEADER, current_capability
+from ctxmesh._record import RECORD_HEADER, current_record_run_id
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError, GuardrailBlockedError
 from ctxmesh.trace import TraceClient
@@ -307,6 +308,13 @@ class ModelClient:
         capability = current_capability()
         if capability:
             headers[CAPABILITY_HEADER] = capability
+        # Relay the record-mode capture toggle (M78, ADR 0071 §1) on the model call — the SAME
+        # request-scoped signal the BFF stamps on a recorded run's /invoke. It lets the launcher
+        # gateway capture this call's model I/O into the run's replay fixture. Bound per-request in
+        # a ContextVar (run_managed_loop / request_scope); absent ⇒ a non-recorded run — omit it.
+        record_run_id = current_record_run_id()
+        if record_run_id:
+            headers[RECORD_HEADER] = record_run_id
         return headers
 
 

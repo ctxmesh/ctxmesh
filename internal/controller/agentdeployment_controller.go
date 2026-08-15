@@ -798,8 +798,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// are injected as STATIC env (values known at reconcile time — NEVER valueFrom, the m5.7 Knative
 	// landmine / tier1 no-valueFrom guard). An agent with none gets the plain LiteLLM URL and no proxy
 	// env — byte-for-byte M2 behavior.
+	// Record mode (M78, ADR 0071 §1): a RECORD-CAPABLE agent (spec.record) is a NEW interposition
+	// reason for the launcher gateway — the capture rides the :2996 proxy (raw model I/O incl. SSE),
+	// which is conditionally interposed (ADR 0071 C2), so recording must force it on the same way a
+	// budget/quota/guardrail does. Enablement is per-DEPLOYMENT here; the per-RUN capture toggle rides
+	// the invoke (the BFF stamps X-Ctxmesh-Record when run.Record) and the BFF fails a recorded run
+	// CLOSED when the agent is NOT record-capable (no gateway to capture at). Non-record-capable agents
+	// are byte-for-byte unchanged (this reason is off, no RECORD_CAPABLE env).
+	recordCapable := deploy.Spec.Record
+
 	gatewayURL := litellmGatewayURL
-	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced {
+	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced || recordCapable {
 		gatewayURL = budgetProxyURL
 		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
 	}
@@ -834,6 +843,27 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		env = append(env, corev1.EnvVar{Name: envGuardrailPolicy, Value: gr.policyJSON})
 		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
 			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
+		}
+	}
+
+	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
+	// the launcher gateway's record-mode on (GatewayProxyEnabled + the per-run capture path). Its
+	// presence — combined with GATEWAY_UPSTREAM_URL forced above — is the interposition reason. The
+	// fixture is a DURABLE object-store blob (internal/objectstore, keyed fixtures/{runId}/…), so the
+	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO. Inject them
+	// here (env-present-guarded so a record-capable registry MEMBER — which already got them in the
+	// membership block below is not the concern; that block runs later, so guard defensively) — a
+	// record-capable non-member would otherwise have no store to write the fixture to. STATIC env,
+	// NEVER valueFrom (the m5.7 Knative landmine). All values are reconcile-time constants.
+	if recordCapable {
+		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
+		if !envVarPresent(env, "OBJECT_STORE_ADDR") && !envVarPresent(deploy.Spec.Env, "OBJECT_STORE_ADDR") {
+			env = append(
+				env,
+				corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
+				corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
+				corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
+			)
 		}
 	}
 
@@ -1215,13 +1245,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
 		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
 		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
-		// async payloads pass through capped.
-		env = append(
-			env,
-			corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
-			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
-			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
-		)
+		// async payloads pass through capped. Guard against double-injection: a
+		// record-capable agent (M78) may have already been given the same env by the
+		// record-mode block above — inject only when not already present (last-write
+		// semantics would otherwise leave a duplicate env entry).
+		if !envVarPresent(env, "OBJECT_STORE_ADDR") && !envVarPresent(deploy.Spec.Env, "OBJECT_STORE_ADDR") {
+			env = append(
+				env,
+				corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
+				corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
+				corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
+			)
+		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
 		// hoisted block below so a NON-member memory agent gets it too — Fable audit.)
