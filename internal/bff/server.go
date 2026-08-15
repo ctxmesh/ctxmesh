@@ -1510,11 +1510,23 @@ func (s *Server) spaHandler() http.Handler {
 	})
 }
 
+// isSharedRoute reports whether a request path is the SPA's public shared-run route (/shared/*).
+// Used by serveIndex to apply the noindex/no-referrer headers on the SPA document that crawlers
+// actually visit — matching what the JSON API handler (handleSharedRunPublic) already sets on the
+// data response (V10, ADR 0069 §2 stated intent).
+func isSharedRoute(urlPath string) bool {
+	return strings.HasPrefix(urlPath, "/shared/")
+}
+
 // serveIndex writes dist/index.html (the SPA shell). Used for client-side routes
 // and when the requested asset does not exist on disk. The caller (spaHandler)
 // has already applied the SPA security headers. When the request is for an agent's
 // OWN hostname (the edge set agentChatboxHeader, m37.3), it injects the agent-pin
 // meta so the SPA boots straight into that agent's chatbox instead of the console.
+// V10: /shared/* paths get the same noindex/no-referrer headers the JSON API sets,
+// plus a <meta name="robots" content="noindex"> injected into the document head
+// (belt-and-braces: response headers cover crawlers that read them; the meta covers
+// those that only read the document body).
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(s.static, indexHTML)
 	if err != nil {
@@ -1528,6 +1540,14 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	// cross-origin "connected" relay message from the MCP-consent callback (which runs at that origin).
 	if s.consoleURL != "" {
 		data = injectHeadMeta(data, "mcp-callback-origin", s.consoleURL)
+	}
+	// V10: the share token lives in the /shared/* URL. Apply the same no-leak headers the JSON API
+	// endpoint (handleSharedRunPublic) sets, so a crawler/unfurler that visits the SPA document — not
+	// just the data endpoint — also gets the noindex/no-referrer posture (ADR 0069 §2).
+	if isSharedRoute(r.URL.Path) {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Robots-Tag", "noindex")
+		data = injectHeadMeta(data, "robots", "noindex")
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// index.html must never be cached so a new build's asset hashes are picked

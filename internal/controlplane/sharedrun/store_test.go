@@ -142,9 +142,10 @@ func TestStore_HashOnlyAtRest_PostgresColumn(t *testing.T) {
 	assert.Equal(t, 0, hits, "the raw token must not appear in any column")
 }
 
-// TestStore_Revoke_Idempotent_HidesFromList: Revoke flips the flag; GetByTokenHash still returns the row
-// (revoked=true — the handler decides via IsLive), ListForRun drops it, and a double-revoke is a no-op.
-func TestStore_Revoke_Idempotent_HidesFromList(t *testing.T) {
+// TestStore_Revoke_Idempotent_ShownInList: Revoke flips the flag; GetByTokenHash still returns the row
+// (revoked=true — the handler decides via IsLive), ListForRun INCLUDES revoked rows (V11: honest
+// "what did I expose?" — the UI badges them as Revoked), and a double-revoke is a no-op.
+func TestStore_Revoke_Idempotent_ShownInList(t *testing.T) {
 	eachStore(t, func(t *testing.T, s sharedrun.Store) {
 		ctx := context.Background()
 		h := hashToken("revoke-me")
@@ -161,10 +162,11 @@ func TestStore_Revoke_Idempotent_HidesFromList(t *testing.T) {
 		assert.True(t, got.Revoked)
 		assert.False(t, got.IsLive(time.Now()), "a revoked share is not live")
 
-		// The manage list excludes revoked shares.
+		// V11: the manage list INCLUDES revoked rows (UI badges them; "what did I expose?").
 		list, err := s.ListForRun(ctx, "run-r")
 		require.NoError(t, err)
-		assert.Empty(t, list, "revoked shares are excluded from the manage list")
+		require.Len(t, list, 1, "revoked shares are now included in the list (V11)")
+		assert.True(t, list[0].Revoked, "the revoked row is present and marked revoked")
 
 		// Idempotent: a second revoke + revoking an absent id are both no-op successes.
 		require.NoError(t, s.Revoke(ctx, "share-r"))
@@ -202,7 +204,8 @@ func TestStore_ExpiryHonored(t *testing.T) {
 	})
 }
 
-// TestStore_ListForRun: returns all non-revoked shares for a run, newest-first, scoped to that run only.
+// TestStore_ListForRun: returns ALL shares for a run (including revoked, V11), newest-first, scoped to
+// that run only.
 func TestStore_ListForRun(t *testing.T) {
 	eachStore(t, func(t *testing.T, s sharedrun.Store) {
 		ctx := context.Background()
@@ -216,6 +219,12 @@ func TestStore_ListForRun(t *testing.T) {
 			ID: "s-new", TokenHash: hashToken("t-new"), RunID: "run-list", Namespace: "ns", CreatedBy: "e",
 			CreatedAt: base, ExpiresAt: base.Add(time.Hour),
 		}))
+		// A revoked share must still appear in the list (V11: honest "what did I expose?").
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "s-revoked", TokenHash: hashToken("t-revoked"), RunID: "run-list", Namespace: "ns", CreatedBy: "e",
+			CreatedAt: base.Add(-2 * time.Hour), ExpiresAt: base.Add(time.Hour),
+		}))
+		require.NoError(t, s.Revoke(ctx, "s-revoked"))
 		// A share on a DIFFERENT run must not appear.
 		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
 			ID: "s-other", TokenHash: hashToken("t-other"), RunID: "run-other", Namespace: "ns", CreatedBy: "e",
@@ -224,9 +233,12 @@ func TestStore_ListForRun(t *testing.T) {
 
 		list, err := s.ListForRun(ctx, "run-list")
 		require.NoError(t, err)
-		require.Len(t, list, 2, "exactly the two shares on run-list")
+		require.Len(t, list, 3, "all three shares on run-list (including revoked, V11)")
 		assert.Equal(t, "s-new", list[0].ID, "newest-first ordering")
 		assert.Equal(t, "s-old", list[1].ID)
+		assert.Equal(t, "s-revoked", list[2].ID)
+		// Revoked row is present and marked revoked.
+		assert.True(t, list[2].Revoked, "the revoked row is included and flagged")
 	})
 }
 

@@ -368,14 +368,6 @@ export function TracePage() {
         open={shareOpen}
         onClose={() => setShareOpen(false)}
         runId={id}
-        runData={{
-          agent: rollup.agentName,
-          namespace: rollup.agentNs,
-          status: rollup.name,
-          messageCount: rollup.spanCount,
-          messageRoles: [],
-          errorCategory: undefined,
-        }}
       />
     </div>
   );
