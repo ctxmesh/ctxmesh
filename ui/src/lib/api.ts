@@ -2313,6 +2313,51 @@ export interface RunDetail {
 
 export type RunEventKind = "state" | "message" | "token" | "step";
 
+// StepMeta is the metadata a `step` run event carries (M78, ADR 0071 §4/§C3): the loop step
+// number, the boundary kind (model/tool), the tool name (tool steps), and best-effort token
+// counts. `ref` (the fixture coordinate) is NOT resolved by the console — the fixture stepper is
+// deferred; the console renders only the visible metadata.
+export interface StepMeta {
+  step: number;
+  kind: "model" | "tool";
+  tool?: string;
+  tokens?: { prompt?: number; completion?: number };
+}
+
+// formatRunStep renders a `step` run event's Data into a compact live step-visibility label
+// (M78, ADR 0071 §4). It handles BOTH forms of the EventStep Data (BACKWARD-COMPAT):
+//   - the NEW step-metadata JSON object → "Step N · <kind> · <tool> · ↑P ↓C"
+//   - the LEGACY plain-string label (workflow plan-approval: "plan-approved"/"plan-rejected")
+//     → returned verbatim.
+// Parse-with-fallback: anything that is not a well-formed step-metadata object (a bare label, a
+// malformed frame, an empty string) falls back to the trimmed raw text — never throws, never
+// renders "[object Object]".
+export function formatRunStep(data: string): string {
+  const raw = (data ?? "").trim();
+  if (raw === "") return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw; // a legacy plain-string label (e.g. "plan-approved").
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    // JSON that isn't an object (a quoted string / number) → show its string form (the label).
+    return typeof parsed === "string" ? parsed : raw;
+  }
+  const meta = parsed as Partial<StepMeta>;
+  if (typeof meta.step !== "number" || (meta.kind !== "model" && meta.kind !== "tool")) {
+    // A JSON object that is not the step-metadata shape → fall back to the raw text.
+    return raw;
+  }
+  const segments: string[] = [`Step ${meta.step}`, meta.kind];
+  if (meta.kind === "tool" && meta.tool) segments.push(meta.tool);
+  const prompt = meta.tokens?.prompt ?? 0;
+  const completion = meta.tokens?.completion ?? 0;
+  if (prompt > 0 || completion > 0) segments.push(`↑${prompt} ↓${completion}`);
+  return segments.join(" · ");
+}
+
 export interface RunStreamHandlers {
   /** One SSE frame arrived, in wire order (monotonic seq for resume). */
   onEvent: (kind: RunEventKind, data: string, seq: number) => void;

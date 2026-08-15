@@ -219,10 +219,11 @@ type InvokeAdapter interface {
 // StreamingInvokeAdapter is an OPTIONAL capability an InvokeAdapter may also implement (ADR 0034,
 // m32.7): stream the agent's tokens as they generate. The run executor type-asserts for it — an
 // adapter without it (e.g. a test fake) just uses the request/response Invoke. InvokeStream POSTs
-// with `Accept: text/event-stream`, calls onToken per content delta, and returns the agent's final
-// `done` envelope (the same shape Invoke returns, so consent/output parsing is unchanged).
+// with `Accept: text/event-stream`, calls onToken per content delta, calls onStep with each `step`
+// metadata frame's raw JSON (M78, ADR 0071 §4 — live step-visibility), and returns the agent's
+// final `done` envelope (the same shape Invoke returns, so consent/output parsing is unchanged).
 type StreamingInvokeAdapter interface {
-	InvokeStream(ctx context.Context, endpoint string, body []byte, onToken func(string)) (final []byte, traceID string, err error)
+	InvokeStream(ctx context.Context, endpoint string, body []byte, onToken func(string), onStep func(string)) (final []byte, traceID string, err error)
 }
 
 // ExpandAdapter reuses the `agent-engine expand` logic server-side (agent.yaml →

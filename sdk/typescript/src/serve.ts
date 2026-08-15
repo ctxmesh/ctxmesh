@@ -42,9 +42,9 @@ import * as agentModule from "./agent.js";
 import { Client } from "./client.js";
 import { ApprovalRequiredError, ConsentRequiredError } from "./errors.js";
 import { ManagedConfig, mintConversationId, runManagedLoop } from "./managed.js";
-import type { ManagedResult } from "./managed.js";
+import type { ManagedResult, StepFrame } from "./managed.js";
 
-export type { ManagedResult } from "./managed.js";
+export type { ManagedResult, StepFrame } from "./managed.js";
 
 /** What a handler may return: a bare answer string, or a full ManagedResult. */
 export type HandlerResult = string | ManagedResult;
@@ -71,6 +71,12 @@ export interface InvokeRequest {
   client?: Client;
   /** Stream a content delta as an SSE `token` frame. A no-op when the caller did not stream. */
   emitToken: (text: string) => void;
+  /**
+   * Stream a `step` metadata frame as an SSE `step` frame (M78, ADR 0071 §4/§C3) — lightweight
+   * live step-visibility (step N, kind, tool, token counts, a fixture ref). A no-op when the
+   * caller did not request streaming, so the same handler works for both modes.
+   */
+  emitStep: (frame: StepFrame) => void;
 }
 
 /** Parse the /invoke body into `{input, approvals}`. Tolerant: non-JSON is the raw prompt. */
@@ -141,7 +147,7 @@ export async function processInvoke(
   agentName: string,
   rawBody: Buffer | string,
   headers: Record<string, string>,
-  opts: { onToken?: (text: string) => void } = {},
+  opts: { onToken?: (text: string) => void; onStep?: (frame: StepFrame) => void } = {},
 ): Promise<Record<string, unknown>> {
   const { input, approvals } = parseBody(rawBody);
   const conversationId = autonomousConversationId(headers);
@@ -152,6 +158,7 @@ export async function processInvoke(
     conversationId,
     client,
     emitToken: opts.onToken ?? (() => undefined),
+    emitStep: opts.onStep ?? (() => undefined),
   };
 
   // requestScope binds capability + approvals + trace.requestContext for the handler's life.
@@ -200,6 +207,7 @@ function managedHandler(config: ManagedConfig): Handler {
       approvals: req.approvals,
       conversationId: req.conversationId,
       onToken: req.emitToken,
+      onStep: req.emitStep,
     });
 }
 
@@ -297,6 +305,9 @@ async function stream(
   try {
     const body = await processInvoke(client, handler, agentName, raw, headers, {
       onToken: (text: string) => emit({ type: "token", text }),
+      // Step-visibility (M78, ADR 0071 §4/§C3): each `step` metadata frame the managed loop emits
+      // becomes an SSE `step` frame the BFF republishes onto the run stream.
+      onStep: (frame: StepFrame) => emit({ type: "step", ...frame }),
     });
     body["type"] = "done";
     emit(body);

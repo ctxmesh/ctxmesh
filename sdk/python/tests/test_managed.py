@@ -654,6 +654,80 @@ def test_managed_loop_streams_the_answer(monkeypatch):
         assert result.tools_called == []
 
 
+# ── M78 (ADR 0071 §4/§C3): the managed loop emits `step` metadata for live step-visibility ──
+
+
+def test_managed_loop_emits_step_frames_per_boundary(tool_gateway, echo_discovery):
+    """With on_step wired, the loop emits a well-formed `step` metadata frame at each boundary:
+    a `model` frame after each model call (with token counts) and a `tool` frame per tool dispatch
+    (with the tool name). The two-turn fixture → model, tool, model (step 1 model + tool, step 2
+    model). ref is null when NOT recording (no X-Ctxmesh-Record header)."""
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="sys", model_route="tool-mock")
+
+    frames: list = []
+    result = run_managed_loop(client, config, "please echo ping", on_step=frames.append)
+    assert result.tools_called == [TOOL_NAME]
+
+    # Boundary order: step-1 model call, step-1 tool dispatch, step-2 (final) model call.
+    kinds = [(f["step"], f["kind"]) for f in frames]
+    assert kinds == [(1, "model"), (1, "tool"), (2, "model")]
+
+    # Every frame carries the pinned contract shape: step (1-based int), kind, tokens block, ref.
+    for f in frames:
+        assert isinstance(f["step"], int) and f["step"] >= 1
+        assert f["kind"] in ("model", "tool")
+        assert set(f["tokens"]) == {"prompt", "completion"}
+        assert f["ref"] is None, "ref is null for a non-recorded run (best-effort, ADR 0071 §C3)"
+
+    model_frames = [f for f in frames if f["kind"] == "model"]
+    tool_frames = [f for f in frames if f["kind"] == "tool"]
+    # A model frame carries the response usage token counts (the m14.2 fixture USAGE), no `tool`.
+    assert model_frames[0]["tokens"] == {
+        "prompt": USAGE["prompt_tokens"],
+        "completion": USAGE["completion_tokens"],
+    }
+    assert "tool" not in model_frames[0]
+    # A tool frame names the dispatched tool; its token counts are zero.
+    assert tool_frames[0]["tool"] == TOOL_NAME
+    assert tool_frames[0]["tokens"] == {"prompt": 0, "completion": 0}
+
+
+def test_managed_loop_step_ref_populated_when_recording(tool_gateway, echo_discovery):
+    """In record mode (the BFF stamped X-Ctxmesh-Record) the step frame's `ref` is a lightweight
+    logical coordinate into the fixture — channel (model/tool) + the 0-based per-channel index the
+    (deferred) stepper resolves against. Model steps index the model channel; tool steps the tool
+    channel — matching the fixture's per-channel ordering (ADR 0071 §2)."""
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="sys", model_route="tool-mock")
+
+    frames: list = []
+    run_managed_loop(
+        client,
+        config,
+        "please echo ping",
+        on_step=frames.append,
+        headers={"X-Ctxmesh-Record": "run-rec-1"},
+    )
+
+    refs = [(f["kind"], f["ref"]) for f in frames]
+    assert refs == [
+        ("model", {"channel": "model", "index": 0}),
+        ("tool", {"channel": "tool", "index": 0}),
+        ("model", {"channel": "model", "index": 1}),
+    ], "per-channel 0-based indices increment independently, populated only when recording"
+
+
+def test_managed_loop_without_on_step_is_unchanged(tool_gateway, echo_discovery):
+    """A run with NO on_step sink behaves exactly as before — emit_step is a no-op (step-visibility
+    is optional sugar, ADR 0071 §4)."""
+    client = agent.from_config(_plane(tool_gateway, echo_discovery))
+    config = ManagedConfig(system_prompt="sys", model_route="tool-mock")
+    result = run_managed_loop(client, config, "please echo ping")
+    assert result.output.startswith(FINAL_MARKER)
+    assert result.steps == 2
+
+
 # ── m66.14: guarded agents downgrade to buffered chat (ADR 0059 §4) ────────────
 
 

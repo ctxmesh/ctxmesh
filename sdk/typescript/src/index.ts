@@ -71,7 +71,7 @@ export {
   mintConversationId,
   DEFAULT_MAX_STEPS,
 } from "./managed.js";
-export type { ManagedResult, RunManagedLoopOptions } from "./managed.js";
+export type { ManagedResult, RunManagedLoopOptions, StepFrame } from "./managed.js";
 
 export {
   serve,

@@ -43,6 +43,7 @@ describe("ts-custom-agent — the no-framework loop", () => {
       approvals: [],
       client,
       emitToken: () => undefined,
+      emitStep: () => undefined,
     };
     const result = await runLoop(client, req.input, req);
 
@@ -62,6 +63,7 @@ describe("ts-custom-agent — the no-framework loop", () => {
       approvals: [],
       client,
       emitToken: () => undefined,
+      emitStep: () => undefined,
     });
 
     const spans = plane.spans.finishedSpans();

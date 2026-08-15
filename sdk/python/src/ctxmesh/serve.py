@@ -87,6 +87,10 @@ class InvokeRequest:
     #: Stream a content delta as an SSE ``token`` frame. A no-op when the caller did not request
     #: streaming, so the same handler works for both — wire it to your loop's on-token hook.
     emit_token: Callable[[str], None] = lambda _text: None
+    #: Stream a ``step`` metadata frame (M78, ADR 0071 §4/§C3) — lightweight live step-visibility
+    #: (step N, kind, tool, token counts, a fixture ref). A no-op when the caller did not request
+    #: streaming, so the same handler works for both — wire it to your loop's on-step hook.
+    emit_step: Callable[[dict], None] = lambda _frame: None
 
 
 def _parse_body(raw: bytes) -> tuple:
@@ -147,6 +151,7 @@ def process_invoke(
     headers: Mapping[str, str],
     *,
     on_token: Optional[Callable[[str], None]] = None,
+    on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Parse one /invoke, bind the run scope + trace, run *handler*, and return the envelope.
 
@@ -165,6 +170,7 @@ def process_invoke(
         conversation_id=conversation_id,
         client=client,
         emit_token=on_token or (lambda _text: None),
+        emit_step=on_step or (lambda _frame: None),
     )
     with client.trace.request_context(headers), client.request_scope(
         headers, approvals=approvals
@@ -186,6 +192,7 @@ def _managed_handler(config: ManagedConfig) -> Handler:
             approvals=req.approvals,
             conversation_id=req.conversation_id,
             on_token=req.emit_token,
+            on_step=req.emit_step,
         )
 
     return handle
@@ -245,6 +252,10 @@ def _make_request_handler(client: Client, handler: Handler, agent_name: str):
                     raw,
                     dict(self.headers),
                     on_token=lambda text: emit({"type": "token", "text": text}),
+                    # Step-visibility (M78, ADR 0071 §4/§C3): each `step` metadata frame the
+                    # managed loop emits becomes an SSE `step` frame the BFF republishes onto the
+                    # run stream.
+                    on_step=lambda frame: emit({"type": "step", **frame}),
                 )
                 body["type"] = "done"
                 emit(body)

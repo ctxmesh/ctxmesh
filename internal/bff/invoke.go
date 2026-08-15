@@ -280,16 +280,18 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 // result envelope, or an error.
 const (
 	sseEventToken = "token"
+	sseEventStep  = "step"
 	sseEventDone  = "done"
 	sseEventError = "error"
 )
 
 // InvokeStream implements StreamingInvokeAdapter (ADR 0034, m32.7): POST /invoke asking for SSE,
-// forward each `token` frame to onToken as it arrives, and return the agent's final `done` envelope
+// forward each `token` frame to onToken as it arrives, forward each `step` metadata frame's raw JSON
+// to onStep (M78, ADR 0071 §4 — live step-visibility), and return the agent's final `done` envelope
 // (same shape Invoke returns, so consent/output parsing is unchanged). Same trace/capability/
 // conversation headers as Invoke. A non-2xx or an `error` frame surfaces as an invokeError.
 func (a *httpInvokeAdapter) InvokeStream(
-	ctx context.Context, endpoint string, body []byte, onToken func(string),
+	ctx context.Context, endpoint string, body []byte, onToken func(string), onStep func(string),
 ) ([]byte, string, error) {
 	base := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	if base == "" {
@@ -365,6 +367,13 @@ func (a *httpInvokeAdapter) InvokeStream(
 		case sseEventToken:
 			if onToken != nil && ev.Text != "" {
 				onToken(ev.Text)
+			}
+		case sseEventStep:
+			// Live step-visibility (M78, ADR 0071 §4): forward the frame's raw JSON payload
+			// verbatim — the step metadata (step N, kind, tool, tokens, ref) the run store persists
+			// as an EventStep and the console renders. The BFF does not re-parse the shape.
+			if onStep != nil {
+				onStep(payload)
 			}
 		case sseEventDone:
 			final = append([]byte(nil), payload...)

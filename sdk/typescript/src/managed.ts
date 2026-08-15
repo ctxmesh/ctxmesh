@@ -36,7 +36,7 @@
 import * as fs from "node:fs";
 
 import { capabilityScope } from "./_capability.js";
-import { recordScope } from "./_record.js";
+import { currentRecordRunId, recordScope } from "./_record.js";
 import { approvalScope, pauseForApproval } from "./_approval.js";
 import * as semconv from "./_semconv.js";
 import { Client } from "./client.js";
@@ -277,6 +277,45 @@ export interface ManagedResult {
   guardrailBlocked?: { detector: string; scanPoint: string };
   /** When the agent called handoff_to (M67), the transfer outcome. */
   handoff?: Record<string, string>;
+}
+
+/**
+ * One `step` metadata frame (M78, ADR 0071 §4/§C3) — the lightweight live step-visibility event
+ * the serve streaming path emits per step boundary. Parity with Python `_step_frame`.
+ *
+ * * `step` — the 1-based loop step number (monotonic within the run).
+ * * `kind` — `"model"` at a model-call boundary, `"tool"` at a tool-dispatch boundary.
+ * * `tool` — the dispatched tool's name (a model step omits it).
+ * * `tokens` — best-effort prompt/completion counts for a model step (zero for a tool step).
+ * * `ref` — a LIGHTWEIGHT LOGICAL coordinate into the run's fixture: the channel + the 0-based
+ *   per-channel interaction index, so the (deferred) fixture stepper can resolve this step to its
+ *   recorded I/O. Populated ONLY when the run is being recorded; `null` otherwise (an empty ref for
+ *   a non-recorded run is fine, ADR 0071 §C3 — the console renders only the visible metadata).
+ */
+export interface StepFrame {
+  step: number;
+  kind: "model" | "tool";
+  tool?: string;
+  tokens: { prompt: number; completion: number };
+  ref: { channel: "model" | "tool"; index: number } | null;
+}
+
+/** Build one `step` metadata frame (M78, ADR 0071 §4/§C3). */
+function stepFrame(
+  step: number,
+  kind: "model" | "tool",
+  opts: { channelIndex: number; tool?: string; promptTokens?: number; completionTokens?: number },
+): StepFrame {
+  const frame: StepFrame = {
+    step,
+    kind,
+    tokens: { prompt: opts.promptTokens ?? 0, completion: opts.completionTokens ?? 0 },
+    // The ref is a best-effort logical coordinate — populated only in record mode; a non-recorded
+    // run carries a null ref (the console does not resolve it; the stepper is deferred).
+    ref: currentRecordRunId() !== undefined ? { channel: kind, index: opts.channelIndex } : null,
+  };
+  if (opts.tool) frame.tool = opts.tool;
+  return frame;
 }
 
 // ── tool schemas ──────────────────────────────────────────────────────────────
@@ -569,6 +608,8 @@ async function callToolWithResilience(
 export interface RunManagedLoopOptions {
   headers?: Record<string, string>;
   onToken?: (text: string) => void;
+  /** Step-visibility sink (M78, ADR 0071 §4): called with each `step` metadata frame per boundary. */
+  onStep?: (frame: StepFrame) => void;
   approvals?: Iterable<string>;
   conversationId?: string;
 }
@@ -631,6 +672,7 @@ export async function runManagedLoop(
             toolsCalled,
             consentRequired,
             onToken: opts.onToken,
+            onStep: opts.onStep,
             conversationId,
             threaded,
             userInput,
@@ -672,6 +714,8 @@ interface DriveState {
   toolsCalled: string[];
   consentRequired: string[];
   onToken?: (text: string) => void;
+  /** Step-visibility sink (M78, ADR 0071 §4): a `step` metadata frame per boundary, or undefined. */
+  onStep?: (frame: StepFrame) => void;
   conversationId: string;
   threaded: boolean;
   userInput: string;
@@ -692,6 +736,15 @@ async function driveLoop(
   state: DriveState,
 ): Promise<ManagedResult> {
   state.stepHolder.value = 0;
+
+  // Step-visibility (M78, ADR 0071 §4/§C3): emit a `step` metadata frame at each step boundary so
+  // the console can show "what step is my agent on right now". `emitStep` is a no-op unless a sink
+  // is wired (the SSE serve path). The per-channel indices are the 0-based interaction counters the
+  // (deferred) fixture stepper resolves against: modelIndex increments per model call, toolIndex per
+  // tool dispatch — matching the fixture's model/tool channel ordering (§2).
+  const emitStep = state.onStep ?? ((_frame: StepFrame): void => undefined);
+  let modelIndex = 0;
+  let toolIndex = 0;
 
   for (let step = 1; step <= config.maxSteps; step += 1) {
     state.stepHolder.value = step;
@@ -737,6 +790,18 @@ async function driveLoop(
           return r;
         },
       );
+
+      // Step-visibility (M78, ADR 0071 §4): the model-call boundary for this loop step. Token
+      // counts are best-effort from the response usage block. The ref points at this call's slot in
+      // the fixture's model channel (0-based), for the deferred stepper — null unless recording.
+      emitStep(
+        stepFrame(step, "model", {
+          channelIndex: modelIndex,
+          promptTokens: resp.usage.promptTokens,
+          completionTokens: resp.usage.completionTokens,
+        }),
+      );
+      modelIndex += 1;
 
       if (!resp.hasToolCalls) {
         // The model stopped calling tools → the final answer.
@@ -877,6 +942,13 @@ async function driveLoop(
         }
 
         messages.push({ role: "tool", tool_call_id: id, name, content });
+
+        // Step-visibility (M78, ADR 0071 §4): the tool-dispatch boundary. Emitted once per tool
+        // call in the model's original order (the same order the tool result was just appended),
+        // carrying the tool name; the ref points at this call's slot in the fixture's tool channel
+        // (0-based). No token counts for a tool step.
+        emitStep(stepFrame(step, "tool", { channelIndex: toolIndex, tool: name }));
+        toolIndex += 1;
       }
 
       return { done: false as const };
