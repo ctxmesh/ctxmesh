@@ -73,7 +73,7 @@ const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
 const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilities } from "@/lib/capabilities";
-import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
+import { navRoute, RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
 // extended m15.11). It closes the aha loop: watch the agent come alive (status
@@ -570,7 +570,7 @@ function AgentHeader({
             k="Prompt"
             v={
               <Link
-                to="/prompts"
+                to={navRoute("prompts")}
                 className="truncate text-primary hover:underline"
                 data-testid="agent-promptref-link"
               >
@@ -585,7 +585,7 @@ function AgentHeader({
             v={
               <>
                 <Link
-                  to="/guardrails"
+                  to={navRoute("guardrails")}
                   className="truncate text-primary hover:underline"
                   data-testid="agent-guardrail-policy-link"
                 >
@@ -1087,6 +1087,10 @@ function OverviewTab({
           </dl>
         </div>
 
+        {/* Runtime sits adjacent to Spec — both are spec-level authoring concerns
+            (J6 m76.6: regrouped from below Bindings). */}
+        {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
+
         <StatusTimeline conditions={detail.conditions} ready={detail.ready} phase={detail.phase} />
 
         {detail.versions.length > 0 && (
@@ -1111,8 +1115,6 @@ function OverviewTab({
           <p className="mb-3 text-sm font-medium">Bindings</p>
           <BindingsList bindings={detail.bindings} />
         </div>
-
-        {detail.runtime && <RuntimeSection runtime={detail.runtime} />}
 
         <ImprovementLoopSection
           ns={detail.namespace}
@@ -1178,6 +1180,17 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
               <Badge variant="success" className="text-[10px]" data-testid="runtime-output-schema-badge">
                 ✓ set
               </Badge>
+              {/* J6(a) m76.6: outputSchemaSet=true but no body returned — make it
+                  clear the schema is configured but not echoed (avoids the false
+                  impression that "✓ set" with no expand = no schema). */}
+              {!runtime.outputSchema && (
+                <span
+                  className="text-[10px] text-muted-foreground"
+                  data-testid="runtime-output-schema-not-returned"
+                >
+                  (content not returned)
+                </span>
+              )}
             </div>
             {runtime.outputSchema && (
               <details
@@ -1206,7 +1219,19 @@ function RuntimeSection({ runtime }: { runtime: AgentRuntimeDetail }) {
         {/* --- Tool policy --- */}
         {runtime.toolPolicy && (
           <div data-testid="runtime-tool-policy">
-            <p className="mb-1.5 text-sm text-muted-foreground">Tool policy</p>
+            <div className="mb-1.5 flex items-baseline gap-2">
+              <p className="text-sm text-muted-foreground">Tool policy</p>
+              {/* J6(c) m76.6: honesty qualifier — tool-policy is an SDK-layer authoring
+                  convention (the SDK enforces it inside the agent loop), not a hard
+                  platform enforcement boundary at the network/proxy layer. */}
+              <span
+                className="text-[10px] text-muted-foreground"
+                title="Tool policy is enforced by the agent SDK at runtime, not by a platform proxy. It is an authoring convention, not a hard network-level boundary."
+                data-testid="runtime-tool-policy-note"
+              >
+                SDK-layer convention
+              </span>
+            </div>
             <dl className="grid grid-cols-[8rem_1fr] gap-y-1 text-sm">
               <dt className="text-muted-foreground">Default rule</dt>
               <dd>
