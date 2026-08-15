@@ -284,8 +284,10 @@ rules:
   - memorybindings
   - agentregistries
   - agentteams
+  - workflows
   - agentscalingpolicies
   - evalsuites
+  - guardrailpolicies
   verbs:
   - create
   - delete
@@ -313,8 +315,10 @@ rules:
   - memorybindings/status
   - agentregistries/status
   - agentteams/status
+  - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - guardrailpolicies/status
   verbs:
   - get
   - list
@@ -367,9 +371,13 @@ rules:
   - agentscalingpolicies
   - agentteams
   - agentversions
+  - alertpolicies
+  - guardrailpolicies
+  - knowledgebases
   - mcptoolbindings
   - memorybindings
   - modelroutes
+  - workflows
   verbs:
   - create
   - delete
@@ -385,9 +393,13 @@ rules:
   - agentregistries/finalizers
   - agentscalingpolicies/finalizers
   - agentteams/finalizers
+  - alertpolicies/finalizers
+  - guardrailpolicies/finalizers
+  - knowledgebases/finalizers
   - mcptoolbindings/finalizers
   - modelroutes/finalizers
   - tenants/finalizers
+  - workflows/finalizers
   verbs:
   - update
 - apiGroups:
@@ -397,10 +409,14 @@ rules:
   - agentregistries/status
   - agentscalingpolicies/status
   - agentteams/status
+  - alertpolicies/status
+  - guardrailpolicies/status
+  - knowledgebases/status
   - mcptoolbindings/status
   - memorybindings/status
   - modelroutes/status
   - tenants/status
+  - workflows/status
   verbs:
   - get
   - patch
@@ -549,12 +565,12 @@ rules:
   - memorybindings
   - agentregistries
   - agentteams
+  - workflows
   - agentscalingpolicies
   - evalsuites
+  - guardrailpolicies
   - tenants
   - auditlogs
-  # costrollups: the M70 cost-forecast/chargeback virtual resource (ADR 0063 D1); operator-only,
-  # mirrors auditlogs. This grant IS the cost-read policy for the durable per-tenant spend ledger.
   - costrollups
   verbs:
   - '*'
@@ -569,8 +585,10 @@ rules:
   - memorybindings/status
   - agentregistries/status
   - agentteams/status
+  - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - guardrailpolicies/status
   verbs:
   - get
   - list
@@ -643,8 +661,10 @@ rules:
   - memorybindings
   - agentregistries
   - agentteams
+  - workflows
   - agentscalingpolicies
   - evalsuites
+  - guardrailpolicies
   - tenants
   verbs:
   - get
@@ -661,8 +681,10 @@ rules:
   - memorybindings/status
   - agentregistries/status
   - agentteams/status
+  - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - guardrailpolicies/status
   verbs:
   - get
   - list
@@ -923,6 +945,8 @@ spec:
         env:
         - name: STATELAYER_PROXY_URL
           value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
+        - name: CONSOLE_URL
+          value: {{ .Values.bff.consoleURL | default "" | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters
