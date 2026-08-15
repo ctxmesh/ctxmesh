@@ -27,10 +27,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/go-logr/logr"
 
@@ -219,6 +221,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Tool-policy enforcement (M82.2, ADR 0074 §2/§5) — FAIL CLOSED ──
+	// The sidecar is the authoritative chokepoint: it uniquely holds the verified runcap AND the
+	// wire tool name, so this is where deny/require-approval become unbypassable for OBO tools (a
+	// custom loop calling around the sidecar has no credential). We enforce BEFORE resolving the OBO
+	// credential — a denied call must never trigger a credential lookup — and before the record seam.
+	// On a pure-allow route this is a cheap policy read + early return: the body is NOT touched and
+	// the forward stays byte-for-byte identical to pre-M82. On a restrictive route (any deny /
+	// require-approval rule) it buffers + classifies the body and closes the §5 bypasses.
+	if !p.enforceToolPolicy(w, r, route.Name) {
+		return
+	}
+
 	// Resolve THIS user's OBO credential for THIS server, within the run's trust boundary
 	// (ADR 0033): the capability carries the boundary (the invoking agent's registry, or the
 	// agent when standalone), so an agent resolves only grants scoped to its own boundary.
@@ -262,6 +276,113 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = context.WithValue(ctx, captureCtxKey{}, capture)
 	}
 	p.reverse.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// enforceToolPolicy applies the resolved tool policy at the wire (M82.2, ADR 0074 §2/§5). It returns
+// true to CONTINUE the forward and false when it has already written a terminal response (the caller
+// must return). The regime is FAIL-CLOSED but only on a RESTRICTIVE route:
+//
+//   - No policy, or a PURE-ALLOW policy (Restricts()==false) ⇒ permissive, return true WITHOUT
+//     touching the body. The forward stays byte-for-byte identical to pre-M82 (no batch reject, no
+//     fail-closed) — a permissive route has no security need and must not break existing agents.
+//   - A RESTRICTIVE policy (any deny / require-approval rule) ⇒ buffer + classify the body and:
+//     (a) REJECT a batch array outright (the smuggling vector) — 400;
+//     (b) allow a non-tools/call method ONLY if it's on the handshake/discovery allow-list — else 403;
+//     (c) FAIL CLOSED (403) on any tools/call whose params.name can't be extracted, or a body that
+//     can't be classified at all (the fail-open bypass, closed);
+//     (d) match the WIRE params.name (not the route segment) against the per-tool rule — deny and
+//     (interim, pre-m82.4) require-approval ⇒ 403; allow ⇒ forward.
+//
+// The body is drained + restored so a forwarded call still streams the verbatim bytes (and the
+// record seam downstream re-buffers them independently).
+func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server string) bool {
+	policy := p.cfg.Policy.Load()
+	if !policy.Restricts() {
+		// Pure-allow (or no) policy: permissive, body untouched, byte-for-byte unchanged.
+		return true
+	}
+
+	// Restrictive route: we must inspect the body, so buffer + restore it (the forward still needs
+	// the verbatim bytes). A body read error on a restrictive route fails CLOSED — we cannot prove
+	// the call is allowed, so we must not forward it.
+	body, err := p.bufferRestoreBody(r)
+	if err != nil {
+		p.cfg.Log.Info("egress: policy: request body unreadable on a restrictive route — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call could not be inspected against the policy")
+		return false
+	}
+
+	wc, err := classifyWireCall(body)
+	if err != nil {
+		// Unparseable / empty body on a restrictive route: could be smuggling a denied call — fail closed.
+		p.cfg.Log.Info("egress: policy: unclassifiable request on a restrictive route — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call could not be identified against the policy")
+		return false
+	}
+	switch {
+	case wc.isBatch:
+		// (b) A JSON-RPC batch array is the bypass vector — a denied call hidden among allowed
+		// ones. MCP streamable-http never needs batches; reject outright before any per-call view.
+		p.cfg.Log.Info("egress: policy: batch request rejected on a restrictive route", "server", server)
+		writeError(w, http.StatusBadRequest, "batch_not_allowed", "batch tool requests are not allowed under this tool policy")
+		return false
+	case !wc.isToolCall:
+		// (a) A non-tools/call message: allow ONLY the handshake/discovery allow-list without a
+		// tool decision; anything else on a restrictive route needs a tool decision it can't give.
+		if isAllowlistedMethod(wc.method) {
+			return true
+		}
+		p.cfg.Log.Info("egress: policy: non-allowlisted method rejected on a restrictive route", "server", server, "method", wc.method)
+		writeError(w, http.StatusForbidden, "tool_denied", "this method is not permitted under the tool policy")
+		return false
+	case !wc.hasToolName:
+		// (c) A tools/call whose params.name can't be extracted — FAIL CLOSED (do NOT forward).
+		p.cfg.Log.Info("egress: policy: tools/call with no identifiable tool name — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call did not name a tool")
+		return false
+	}
+
+	// (d) Per-tool decision on the WIRE params.name (not the route segment — ADR 0074 §5): a
+	// multi-tool OBO server routes many tools under one ServerName segment, so each call's
+	// params.name is matched independently.
+	rule := policy.RuleFor(wc.toolName)
+	switch rule {
+	case RuleAllow:
+		return true
+	case RuleRequireApproval:
+		// Interim (pre-m82.4): treat require-approval like deny at the wire — unbypassable but
+		// unusable until the approval-voucher protocol (ADR 0074 §3) lands. 403, not forwarded.
+		p.cfg.Log.Info("egress: policy: require-approval tool blocked (voucher protocol pending, m82.4)", "server", server, "tool", wc.toolName)
+		writeError(w, http.StatusForbidden, "tool_denied", "this tool requires approval, which is not yet available")
+		return false
+	default:
+		// deny (and any non-allow value — fail closed on the unexpected).
+		p.cfg.Log.Info("egress: policy: tool denied", "server", server, "tool", wc.toolName, "rule", rule)
+		writeError(w, http.StatusForbidden, "tool_denied", "this tool is denied by the tool policy")
+		return false
+	}
+}
+
+// bufferRestoreBody reads the full request body (capped) and restores an identical reader so the
+// forward still streams the verbatim bytes. Returns the buffered bytes. An error means the body
+// could not be read/was oversize — the caller fails closed (a restrictive route must not forward a
+// call it can't inspect). A nil body yields empty bytes (classifyWireCall then fails closed).
+func (p *Proxy) bufferRestoreBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxRecordBody+1))
+	_ = r.Body.Close()
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return nil, err
+	}
+	if int64(len(b)) > maxRecordBody {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return nil, errors.New("egress: request body exceeds inspection cap")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(b))
+	return b, nil
 }
 
 // bufferRequestForRecord drains + restores the request body so the record seam captures the
@@ -336,6 +457,66 @@ func jsonRPCID(raw json.RawMessage) string {
 		return n.String()
 	}
 	return ""
+}
+
+// wireCall is the enforcement-time classification of a request body (M82.2, ADR 0074 §5). Unlike
+// parseToolCall (record mode, which fails OPEN — "couldn't identify the tool" ⇒ ("","")), this is
+// used FAIL-CLOSED on a restrictive route, so it distinguishes the cases parseToolCall collapses:
+// a batch array, a non-tools/call method (for the allow-list), and a tools/call with a present vs
+// absent params.name. err is non-nil only for a body the enforcement path cannot classify (an
+// unparseable non-batch body) — which the caller treats as fail-closed.
+type wireCall struct {
+	isBatch     bool   // top-level JSON array (a JSON-RPC batch — the bypass vector)
+	method      string // the JSON-RPC method (e.g. "tools/call", "initialize"); "" if absent
+	isToolCall  bool   // method == "tools/call"
+	toolName    string // params.name for a tools/call; "" if absent/empty
+	hasToolName bool   // params.name was present AND non-empty
+}
+
+// classifyWireCall inspects a request body for fail-closed policy enforcement. It first detects a
+// batch by the first non-space byte ('[' ⇒ a top-level JSON array) BEFORE any unmarshal, so a batch
+// is rejected structurally rather than sniffed from a decode error. Otherwise it unmarshals the
+// single JSON-RPC message and reports the method + (for a tools/call) whether params.name is present.
+// An empty body or a body that is neither a batch nor a decodable JSON object is an error (the caller
+// fails closed). This NEVER mutates the body — the verbatim bytes are still forwarded on allow.
+func classifyWireCall(body []byte) (wireCall, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return wireCall{}, errors.New("egress: empty request body")
+	}
+	// Batch detection is structural: a top-level JSON array (first non-space byte '[') is a
+	// JSON-RPC batch. MCP streamable-http does not need batches; a batch is the smuggling vector
+	// (a denied call hidden among allowed ones), so we flag it before decoding anything.
+	if trimmed[0] == '[' {
+		return wireCall{isBatch: true}, nil
+	}
+	var msg struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(trimmed, &msg); err != nil {
+		return wireCall{}, fmt.Errorf("egress: unparseable request body: %w", err)
+	}
+	wc := wireCall{method: msg.Method, isToolCall: msg.Method == "tools/call"}
+	if wc.isToolCall {
+		wc.toolName = msg.Params.Name
+		wc.hasToolName = strings.TrimSpace(msg.Params.Name) != ""
+	}
+	return wc, nil
+}
+
+// isAllowlistedMethod reports whether a non-tools/call JSON-RPC method may pass a restrictive route
+// WITHOUT a per-tool policy decision (ADR 0074 §5(a)): the MCP handshake + discovery + liveness that
+// carry no tool invocation — initialize, tools/list, ping, and any notifications/* method. Anything
+// else on a restrictive route needs a tool decision (and, absent one, fails closed).
+func isAllowlistedMethod(method string) bool {
+	switch method {
+	case "initialize", "tools/list", "ping":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/")
 }
 
 // errorBody is the sidecar's structured error surface — a machine-readable code + a short

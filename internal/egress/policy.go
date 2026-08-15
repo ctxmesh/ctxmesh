@@ -56,12 +56,24 @@ type ToolPolicyOverride struct {
 	Retryable bool   `json:"retryable,omitempty"`
 }
 
+// The normalized tool-policy rules (matches the CRD enum, lower-cased). RuleFor / normalizeRule
+// always return one of these (or a verbatim unrecognized value, treated as non-allow → fail-closed).
+const (
+	RuleAllow           = "allow"
+	RuleDeny            = "deny"
+	RuleRequireApproval = "require-approval"
+)
+
 // RuleFor returns the effective rule for a tool name: the first matching override's rule, else the
-// policy default (empty default ⇒ "allow"). It is the read the enforcement path (a later M82 task)
-// will consult; kept here so the parsed policy is exercised even while enforcement is permissive.
+// policy default (empty default ⇒ "allow"). This is the read the enforcement path consults on the
+// hot path — the toolName argument is the WIRE `params.name` (the tool the model named), NOT the
+// route's path segment (M82.2, ADR 0074 §5): a remote tool routes under its ServerName segment, so
+// for a multi-tool OBO server (one route, many tools) each tools/call's params.name is matched here
+// independently. Policy override names ARE the wire params.name (no aliasing today — see the CRD's
+// ToolPolicyOverride, keyed on the bound tool's name).
 func (p *ToolPolicy) RuleFor(toolName string) string {
 	if p == nil {
-		return "allow"
+		return RuleAllow
 	}
 	for i := range p.Overrides {
 		if p.Overrides[i].Name == toolName {
@@ -69,6 +81,29 @@ func (p *ToolPolicy) RuleFor(toolName string) string {
 		}
 	}
 	return normalizeRule(p.Default)
+}
+
+// Restricts reports whether this policy carries ANY deny or require-approval rule — i.e. it is NOT a
+// pure-allow policy. This is the gate for the §5 fail-closed body-parsing regime: on a restrictive
+// route the sidecar rejects batch bodies, requires a method allow-list for tool-less requests, and
+// fails closed on any tools/call whose params.name can't be extracted. A pure-allow policy (nil,
+// default allow with no restrictive override) returns false → the route stays byte-for-byte
+// permissive (no new rejection, no security need). A non-allow default, or any deny/require-approval
+// override, makes the whole route restrictive (an unidentifiable call could be smuggling a denied
+// tool, so it must fail closed even for tools the default would allow).
+func (p *ToolPolicy) Restricts() bool {
+	if p == nil {
+		return false
+	}
+	if normalizeRule(p.Default) != RuleAllow {
+		return true
+	}
+	for i := range p.Overrides {
+		if normalizeRule(p.Overrides[i].Rule) != RuleAllow {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeRule maps an empty rule to the CRD default ("allow") and lower-cases for a stable
