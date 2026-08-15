@@ -327,6 +327,13 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	if sa, ok := s.adapters.Invoke.(StreamingInvokeAdapter); ok {
 		resp, traceID, err = sa.InvokeStream(ctx, endpoint, input, func(text string) {
 			_ = s.runStore.AppendEvent(runID, run.EventToken, text)
+		}, func(stepJSON string) {
+			// Live step-visibility (M78, ADR 0071 §4): each `step` metadata frame the agent
+			// streamed becomes an EventStep on the run stream, its Data the raw step-metadata JSON
+			// (step N, kind, tool, tokens, ref) the console renders. Same EventStep kind the
+			// workflow plan-approval already uses (its Data is a plain label) — the console parses
+			// both forms.
+			_ = s.runStore.AppendEvent(runID, run.EventStep, stepJSON)
 		})
 	} else {
 		resp, traceID, err = s.adapters.Invoke.Invoke(ctx, endpoint, input)

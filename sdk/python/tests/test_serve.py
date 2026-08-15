@@ -100,6 +100,33 @@ def test_emit_token_is_a_noop_without_streaming(client):
     assert body["output"] == "done"
 
 
+def test_emit_step_streams_when_on_step_supplied(client):
+    # Step-visibility (M78, ADR 0071 §4): req.emit_step forwards a step metadata frame to on_step.
+    frames = []
+
+    def handler(req: InvokeRequest) -> str:
+        req.emit_step({"step": 1, "kind": "model", "tokens": {"prompt": 3, "completion": 2}})
+        return "ok"
+
+    body = process_invoke(
+        client, handler, "agent-x", b'{"input":"q"}', {}, on_step=frames.append
+    )
+    assert frames == [{"step": 1, "kind": "model", "tokens": {"prompt": 3, "completion": 2}}]
+    assert body["output"] == "ok"
+
+
+def test_emit_step_is_a_noop_without_streaming(client):
+    # No on_step → req.emit_step must be safe to call and do nothing (same handler, both modes).
+    body = process_invoke(
+        client,
+        lambda req: (req.emit_step({"step": 1, "kind": "model"}), "done")[1],
+        "agent-x",
+        b'{"input":"q"}',
+        {},
+    )
+    assert body["output"] == "done"
+
+
 # ── conversation-id resolution (m33.5) ─────────────────────────────────────────────────
 def test_autonomous_run_mints_a_conversation_id(client):
     captured = {}
@@ -190,8 +217,11 @@ def test_invoke_returns_the_envelope(running_agent):
 
 
 def test_invoke_streams_sse_when_accepted(client):
+    step_meta = {"step": 1, "kind": "model", "tokens": {"prompt": 3, "completion": 2}, "ref": None}
+
     def handler(req: InvokeRequest) -> str:
         req.emit_token("a")
+        req.emit_step(step_meta)
         req.emit_token("b")
         return "ab"
 
@@ -221,6 +251,9 @@ def test_invoke_streams_sse_when_accepted(client):
         {"type": "token", "text": "a"},
         {"type": "token", "text": "b"},
     ]
+    # The step frame streamed as an SSE `step` event (M78, ADR 0071 §4 — live step-visibility).
+    step_frames = [f for f in frames if f["type"] == "step"]
+    assert step_frames == [{"type": "step", **step_meta}]
     done = [f for f in frames if f["type"] == "done"]
     assert done and done[0]["output"] == "ab"
 

@@ -502,6 +502,42 @@ describe("PlaygroundPage", () => {
     expect(await screen.findByTestId("trace-id")).toHaveTextContent("trace-xyz");
   });
 
+  it("renders `step` metadata events (JSON + legacy label) in the run stream without crashing (M78)", async () => {
+    // Live step-visibility (ADR 0071 §4): the stream carries a new JSON step frame AND a legacy
+    // plain-label step frame (the workflow plan-approval form). Both must render/parse without
+    // breaking the stream — the run still accumulates tokens and finalizes to done.
+    recordingFetch({
+      run: {
+        frames: [
+          // The real SDK/BFF EventStep Data carries the "type":"step" SSE-envelope key verbatim.
+          'event:step\ndata:{"type":"step","step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}\n\n',
+          "event:token\ndata:Hel\n\n",
+          'event:step\ndata:{"type":"step","step":1,"kind":"tool","tool":"echo_tool","tokens":{"prompt":0,"completion":0}}\n\n',
+          "event:step\ndata:plan-approved\n\n", // legacy plain-label form — must not crash
+          "event:token\ndata:lo\n\n",
+          "event:state\ndata:succeeded\n\n",
+        ],
+        detail: {
+          id: "run-1",
+          status: "succeeded",
+          traceId: "trace-step",
+          messages: [{ role: "assistant", content: "Hello" }],
+        },
+      },
+    });
+    renderPage();
+    fillAgent("echo-agent");
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    // The stream parsed the step frames (both forms) and still finalized cleanly to done + trace.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Agent response") as HTMLTextAreaElement).value).toContain(
+        "Hello",
+      ),
+    );
+    expect(await screen.findByTestId("trace-id")).toHaveTextContent("trace-step");
+  });
+
   it("surfaces a human-in-the-loop approval and resumes on Approve (m32.4)", async () => {
     const calls = recordingFetch({
       run: {

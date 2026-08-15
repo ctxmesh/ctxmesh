@@ -327,6 +327,29 @@ describe("processInvoke — request scope + conversation id", () => {
     }, "agent-x", '{"input":"q"}', {});
     expect(body["output"]).toBe("done");
   });
+
+  it("streams step frames via emitStep when on-step is supplied (M78)", async () => {
+    const frames: import("../src/managed.js").StepFrame[] = [];
+    const handler = (req: InvokeRequest): string => {
+      req.emitStep({ step: 1, kind: "model", tokens: { prompt: 3, completion: 2 }, ref: null });
+      return "ok";
+    };
+    const body = await processInvoke(fx.client, handler, "agent-x", '{"input":"q"}', {}, {
+      onStep: (f) => frames.push(f),
+    });
+    expect(frames).toEqual([
+      { step: 1, kind: "model", tokens: { prompt: 3, completion: 2 }, ref: null },
+    ]);
+    expect(body["output"]).toBe("ok");
+  });
+
+  it("emitStep is a no-op without streaming (M78)", async () => {
+    const body = await processInvoke(fx.client, (req) => {
+      req.emitStep({ step: 1, kind: "model", tokens: { prompt: 0, completion: 0 }, ref: null });
+      return "done";
+    }, "agent-x", '{"input":"q"}', {});
+    expect(body["output"]).toBe("done");
+  });
 });
 
 // ── the full HTTP contract (a real serve() server) ──────────────────────────────
@@ -376,6 +399,7 @@ describe("makeRequestHandler — the HTTP contract", () => {
     fx = await makeFixture();
     const handler = (req: InvokeRequest): string => {
       req.emitToken("a");
+      req.emitStep({ step: 1, kind: "model", tokens: { prompt: 3, completion: 2 }, ref: null });
       req.emitToken("b");
       return "ab";
     };
@@ -393,6 +417,11 @@ describe("makeRequestHandler — the HTTP contract", () => {
     expect(tokens).toEqual([
       { type: "token", text: "a" },
       { type: "token", text: "b" },
+    ]);
+    // The step frame streamed as an SSE `step` event (M78, ADR 0071 §4 — live step-visibility).
+    const steps = frames.filter((f) => f.type === "step");
+    expect(steps).toEqual([
+      { type: "step", step: 1, kind: "model", tokens: { prompt: 3, completion: 2 }, ref: null },
     ]);
     const done = frames.filter((f) => f.type === "done");
     expect(done.length).toBe(1);
@@ -468,6 +497,68 @@ describe("runManagedLoop — the stock tool-calling loop", () => {
 
       const llmSpans = spans.filter((s) => s.attributes["openinference.span.kind"] === "LLM");
       expect(llmSpans.length).toBe(2);
+    } finally {
+      await fx.stop();
+    }
+  });
+
+  it("emits a `step` metadata frame per boundary; ref is null when not recording (M78)", async () => {
+    // Step-visibility (ADR 0071 §4/§C3): a `model` frame after each model call (with token counts)
+    // and a `tool` frame per tool dispatch (with the tool name). Two-turn fixture → model, tool,
+    // model. ref is null without an X-Ctxmesh-Record header (best-effort, §C3).
+    const fx = await makeFixture();
+    try {
+      const config = new ManagedConfig({ systemPrompt: "sys", modelRoute: "tool-mock" });
+      const frames: import("../src/managed.js").StepFrame[] = [];
+      const result = await runManagedLoop(fx.client, config, "please echo ping", {
+        onStep: (f) => frames.push(f),
+      });
+      expect(result.toolsCalled).toEqual([TOOL_NAME]);
+
+      expect(frames.map((f) => [f.step, f.kind])).toEqual([
+        [1, "model"],
+        [1, "tool"],
+        [2, "model"],
+      ]);
+      // Every frame carries the pinned contract shape (step int, kind, tokens block, ref).
+      for (const f of frames) {
+        expect(typeof f.step).toBe("number");
+        expect(["model", "tool"]).toContain(f.kind);
+        expect(Object.keys(f.tokens).sort()).toEqual(["completion", "prompt"]);
+        expect(f.ref).toBeNull();
+      }
+      const modelFrames = frames.filter((f) => f.kind === "model");
+      const toolFrames = frames.filter((f) => f.kind === "tool");
+      // A model frame carries the response usage token counts; no `tool`.
+      expect(modelFrames[0]!.tokens).toEqual({
+        prompt: USAGE.prompt_tokens,
+        completion: USAGE.completion_tokens,
+      });
+      expect(modelFrames[0]!.tool).toBeUndefined();
+      // A tool frame names the dispatched tool; zero token counts.
+      expect(toolFrames[0]!.tool).toBe(TOOL_NAME);
+      expect(toolFrames[0]!.tokens).toEqual({ prompt: 0, completion: 0 });
+    } finally {
+      await fx.stop();
+    }
+  });
+
+  it("populates the step frame's fixture ref when recording (M78)", async () => {
+    // In record mode (X-Ctxmesh-Record stamped) the ref is a lightweight logical coordinate:
+    // channel (model/tool) + the 0-based per-channel index the deferred stepper resolves against.
+    const fx = await makeFixture();
+    try {
+      const config = new ManagedConfig({ systemPrompt: "sys", modelRoute: "tool-mock" });
+      const frames: import("../src/managed.js").StepFrame[] = [];
+      await runManagedLoop(fx.client, config, "please echo ping", {
+        onStep: (f) => frames.push(f),
+        headers: { "X-Ctxmesh-Record": "run-rec-1" },
+      });
+      expect(frames.map((f) => [f.kind, f.ref])).toEqual([
+        ["model", { channel: "model", index: 0 }],
+        ["tool", { channel: "tool", index: 0 }],
+        ["model", { channel: "model", index: 1 }],
+      ]);
     } finally {
       await fx.stop();
     }
