@@ -104,6 +104,37 @@ func conversationIDFromContext(ctx context.Context) string {
 // upstream), exactly like the run capability + spawn context.
 const hdrRecord = "X-Ctxmesh-Record"
 
+// hdrApproval is the APPROVAL-VOUCHER header (ADR 0074 §3, m82.4). The BFF stamps it on a RESUMED run's
+// /invoke when a human GRANTED a require-approval tool: its value is a short-lived signed voucher bound
+// to {runID, toolName}. The SDK relays it on the require-approval tool's egress retry; the egress
+// sidecar verifies it (signature + run + tool + expiry) and forwards. It is a launcher-internal signal
+// — like the run capability + record toggle — the SDK forwards but never originates. A run with no
+// granted require-approval tool carries no header (the tool then gets the sidecar's 403 approval_required).
+const hdrApproval = "X-Ctxmesh-Approval"
+
+// approvalVoucherTTL bounds a minted approval voucher's lifetime — matched to the run capability's TTL
+// (~the run timeout, above the invoke round-trip) so a legitimate resumed run has its voucher valid for
+// the whole retry while a leaked voucher expires quickly (ADR 0074 §3: short TTL).
+const approvalVoucherTTL = runCapabilityTTL
+
+// approvalCtxKey carries a resumed run's approval voucher from the resume handler to the adapter (like
+// the run capability + record id), so the pure-HTTP adapter stamps X-Ctxmesh-Approval without the
+// handler reaching into it. Empty ⇒ no require-approval tool was granted (no header).
+type approvalCtxKey struct{}
+
+// contextWithApprovalVoucher returns ctx carrying the approval voucher for the adapter to stamp as the
+// X-Ctxmesh-Approval header on the outbound /invoke. Pass "" when nothing was approved (no header).
+func contextWithApprovalVoucher(ctx context.Context, voucher string) context.Context {
+	return context.WithValue(ctx, approvalCtxKey{}, voucher)
+}
+
+// approvalVoucherFromContext returns the approval voucher carried on ctx, or "" when the run has no
+// granted require-approval tool.
+func approvalVoucherFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(approvalCtxKey{}).(string)
+	return v
+}
+
 // recordCtxKey carries the recorded run's id from the run-worker / create-run handler to the
 // adapter (like the run capability + conversation id), so the pure-HTTP adapter stamps the
 // X-Ctxmesh-Record header without the caller reaching into it. Empty ⇒ the run is NOT recorded.
@@ -248,6 +279,12 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
 		req.Header.Set(hdrRecord, recRunID)
 	}
+	// Approval voucher (ADR 0074 §3, m82.4): stamp it when a resumed run had a require-approval tool
+	// GRANTED. The SDK relays it on that tool's egress retry; the sidecar verifies+forwards. Only when
+	// present (a resumed, human-approved run); a normal run carries nothing.
+	if voucher := approvalVoucherFromContext(ctx); voucher != "" {
+		req.Header.Set(hdrApproval, voucher)
+	}
 	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
 	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root
 	// run the run-worker tagged); a plain invoke carries none and nothing changes.
@@ -323,6 +360,11 @@ func (a *httpInvokeAdapter) InvokeStream(
 	// launcher gateway captures the model I/O (incl. SSE bytes verbatim) into the run's fixture.
 	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
 		req.Header.Set(hdrRecord, recRunID)
+	}
+	// Approval voucher (ADR 0074 §3, m82.4): same as the non-streaming Invoke path — stamp it when a
+	// resumed run had a require-approval tool granted, so the SDK can relay it on the tool retry.
+	if voucher := approvalVoucherFromContext(ctx); voucher != "" {
+		req.Header.Set(hdrApproval, voucher)
 	}
 	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
 	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root

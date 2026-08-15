@@ -225,21 +225,36 @@ func (r *MCPToolBindingReconciler) syncAgent(
 		return ctrl.Result{}, err
 	}
 
+	// Tool-call governance (M82.3, ADR 0074 §2): apply the SAME in-pod structural policy the
+	// AgentDeployment reconciler applies to the pod template, so the advertised manifest (tools.json)
+	// and the injected containers stay in lockstep — a denied (or require-approval) in-pod tool is not
+	// deployed AND not advertised. Resolve the agent's spec.runtime.toolPolicy; if the agent is gone or
+	// has no policy the set is unchanged (permissive). This drop is non-erroring here: the authoritative
+	// require-approval REJECTION is the AgentDeployment's Ready=False (no pod), so no reader of this
+	// manifest exists; the binding reconciler only reflects that reality. OBO/remote bindings pass
+	// through verbatim (wire-enforced at the sidecar, m82.2).
+	var tp resolvedToolPolicy
+	var agent agentsv1alpha1.AgentDeployment
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr == nil {
+		if tp, err = resolveToolPolicy(&agent); err != nil {
+			return ctrl.Result{}, fmt.Errorf("resolving tool policy for agent %s/%s: %w", namespace, agentName, err)
+		}
+	} else if !apierrors.IsNotFound(getErr) {
+		return ctrl.Result{}, fmt.Errorf("getting AgentDeployment %s/%s for tool policy: %w", namespace, agentName, getErr)
+	}
+	valid = dropUngovernableInPodTools(valid, tp)
+
 	// ── Manifest render (valid bindings only) ────────────────────────────────
 	manifest, _ := toolmanifest.Render(valid)
-	// Record mode (M78, ADR 0071 §1/C1) supersedes OBO-only rewrite: a RECORD-CAPABLE agent
-	// (spec.record) fronts EVERY tool through the egress sidecar so ALL tool I/O passes the
-	// capture seam — RewriteAllForEgress rewrites all endpoints (OBO tools keep their ServerName
-	// route). Otherwise, when OBO egress is on, only remote OBO endpoints are rewritten. A
-	// non-record-capable agent with OBO off keeps the verbatim manifest (byte-for-byte).
-	switch {
-	case r.recordCapable(ctx, namespace, agentName):
-		manifest, _ = toolmanifest.RewriteAllForEgress(manifest, valid, egressSidecarBaseURL)
-	case r.OBOEgress.Enabled:
-		// OBO egress (ADR 0030): redirect remote tool endpoints through the per-pod
-		// egress sidecar so the agent never holds the real MCP URL or the credential.
-		manifest, _ = toolmanifest.RewriteRemoteForEgress(manifest, valid, egressSidecarBaseURL)
-	}
+	// Tool-call governance (M82, ADR 0074 §1): front-all-tools is now the ONLY manifest mode —
+	// always-on, no flag. EVERY tool is fronted through the per-pod egress sidecar
+	// (RewriteAllForEgress), so the SDK-facing manifest matches the pod template the deployment
+	// reconciler writes (both derive from RewriteAllForEgress — a split would silently drift the
+	// pushed manifest from the injected sidecar's route table). This supersedes the M78 record-only
+	// and ADR 0030 OBO-only rewrites (OBO tools keep their ServerName route + OAuth injection, so
+	// the front-all table is a strict superset). RewriteAllForEgress leaves a no-tool manifest
+	// unchanged, so a tool-less agent is byte-for-byte unchanged.
+	manifest, _ = toolmanifest.RewriteAllForEgress(manifest, valid, egressSidecarBaseURL)
 
 	// ── Durable backing: CreateOrUpdate <agent>-tools ConfigMap ──────────────
 	if err := r.syncToolsConfigMap(ctx, namespace, agentName, manifest); err != nil {
@@ -250,21 +265,6 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	r.pushToReadyPods(ctx, namespace, agentName, manifest)
 
 	return ctrl.Result{}, nil
-}
-
-// recordCapable reports whether the agent is RECORD-CAPABLE (spec.record, M78 ADR 0071 §1/C1) —
-// the gate for fronting EVERY tool through the egress sidecar so all tool I/O is captured. It reads
-// the AgentDeployment; a missing agent (a binding created before its agent) or a read error is
-// treated as NOT record-capable (best-effort — the AgentDeployment reconciler is the single writer
-// of the pod template and re-converges the manifest on the next event, so a transient miss here
-// self-heals rather than fronting nothing). This keeps the binding controller in sync with the
-// deployment controller's own recordCapable gate (both read spec.record).
-func (r *MCPToolBindingReconciler) recordCapable(ctx context.Context, namespace, agentName string) bool {
-	var agent agentsv1alpha1.AgentDeployment
-	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); err != nil {
-		return false
-	}
-	return agent.Spec.Record
 }
 
 // writeBindingStatuses sets the Ready condition on each of the agent's bindings

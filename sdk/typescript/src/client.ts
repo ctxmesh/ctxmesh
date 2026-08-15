@@ -23,7 +23,7 @@
  * a custom loop MUST enter or its tool calls silently downgrade auth.
  */
 
-import { approvalScope } from "./_approval.js";
+import { approvalScope, voucherScope } from "./_approval.js";
 import { capabilityScope } from "./_capability.js";
 import { recordScope } from "./_record.js";
 import { PlaneConfig } from "./config.js";
@@ -82,7 +82,9 @@ export class Client {
   ): T {
     return capabilityScope(headers, () =>
       approvalScope(approvals, () =>
-        recordScope(headers, () => this.trace.requestContext(headers, fn)),
+        voucherScope(headers, () =>
+          recordScope(headers, () => this.trace.requestContext(headers, fn)),
+        ),
       ),
     );
   }

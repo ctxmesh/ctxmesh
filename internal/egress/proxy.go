@@ -27,10 +27,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -87,12 +91,81 @@ type ProxyConfig struct {
 	// body) + verbatim (upstream response) into the run's replay fixture. nil ⇒ record mode off,
 	// the capture path is a no-op (zero overhead, the forward is byte-for-byte unchanged).
 	Recorder *ToolRecorder
+	// Policy holds the resolved spec.runtime.toolPolicy the controller delivers (M82, ADR 0074 §1),
+	// read + fsnotify-watched from the mounted TOOL_POLICY_FILE. This task DELIVERS + PARSES + HOLDS
+	// it only — ServeHTTP does NOT consult it, so behavior stays PERMISSIVE. Enforcement (deny 403 /
+	// require-approval voucher / fan-out ceiling) is a later M82 task that will read this holder on
+	// the hot path. nil ⇒ no holder wired (permissive).
+	Policy *PolicyHolder
+}
+
+// runCounterTTL bounds how long a per-run fan-out counter entry lives after its last tool call
+// (M82.5). It is set generously: a run whose runcap has expired can never increment again (ServeHTTP
+// rejects the expired capability upstream, before enforcement), so the entry only needs to age out to
+// reclaim memory — an hour comfortably outlives any live run's tool-call cadence.
+const runCounterTTL = time.Hour
+
+// runCounterSoftCap is the entry count past which increment() sweeps stale entries inline. Below it,
+// increment is a pure O(1) map bump (the common path); the sweep only runs when the map has actually
+// grown, keeping the hot path cheap.
+const runCounterSoftCap = 4096
+
+// runCallEntry is one run's fan-out tally: how many tool calls it has forwarded and when it was last
+// seen (for TTL eviction).
+type runCallEntry struct {
+	count    int
+	lastSeen time.Time
+}
+
+// runCallCounter is the in-pod, per-run tool-call fan-out tally that backs the anti-DoS ceiling
+// (M82.5, ADR 0074). It is a mutex-guarded map keyed on the VERIFIED runcap RunID.
+//
+// SECURITY: runIDs come from cryptographically-VERIFIED runcaps — ServeHTTP verifies the capability's
+// signature before enforcement, so the map only ever grows with genuinely-minted runs. An attacker
+// cannot forge distinct runIDs to balloon the map, and TTL eviction reclaims finished runs. This is
+// the IN-POD floor only; cross-pod / fleet coordination (Valkey) is explicitly deferred.
+type runCallCounter struct {
+	mu  sync.Mutex
+	m   map[string]*runCallEntry
+	now func() time.Time // injectable clock for deterministic tests; defaults to time.Now
+}
+
+// newRunCallCounter builds an empty counter with the real clock.
+func newRunCallCounter() *runCallCounter {
+	return &runCallCounter{m: make(map[string]*runCallEntry), now: time.Now}
+}
+
+// increment bumps the run's tally under the lock and returns the NEW count. It opportunistically
+// sweeps stale entries (lastSeen older than runCounterTTL) — but only when the map has grown past the
+// soft cap, so the common path stays O(1). The sweep is safe to run on the same lock: a swept run
+// that later reappears simply starts a fresh entry (its runcap would have to still be valid, which
+// means it was not actually finished — a benign re-count, never an under-count of a live run).
+func (c *runCallCounter) increment(runID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if len(c.m) > runCounterSoftCap {
+		for id, e := range c.m {
+			if now.Sub(e.lastSeen) > runCounterTTL {
+				delete(c.m, id)
+			}
+		}
+	}
+	e := c.m[runID]
+	if e == nil {
+		e = &runCallEntry{}
+		c.m[runID] = e
+	}
+	e.count++
+	e.lastSeen = now
+	return e.count
 }
 
 // Proxy is the sidecar HTTP handler.
 type Proxy struct {
-	cfg     ProxyConfig
-	reverse *httputil.ReverseProxy
+	cfg         ProxyConfig
+	reverse     *httputil.ReverseProxy
+	callCounter *runCallCounter
 }
 
 type (
@@ -104,7 +177,7 @@ type (
 // NewProxy builds a Proxy. The single ReverseProxy reads the per-request upstream + injected
 // credential from the request context (stashed by ServeHTTP after verify+resolve).
 func NewProxy(cfg ProxyConfig) *Proxy {
-	p := &Proxy{cfg: cfg}
+	p := &Proxy{cfg: cfg, callCounter: newRunCallCounter()}
 	p.reverse = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			target, _ := pr.In.Context().Value(targetCtxKey{}).(*url.URL)
@@ -112,9 +185,10 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 				pr.SetURL(target)
 				pr.Out.Host = target.Host
 			}
-			// The capability is proof of identity for the sidecar ONLY — never leak it to
-			// the upstream MCP server. Strip any inbound Authorization and inject ours.
+			// The capability + approval voucher are proof for the sidecar ONLY — never leak them to
+			// the upstream MCP server. Strip them (and any inbound Authorization) and inject ours.
 			pr.Out.Header.Del(runcap.HeaderName)
+			pr.Out.Header.Del(runcap.ApprovalHeaderName)
 			pr.Out.Header.Del("Authorization")
 			if cred, _ := pr.In.Context().Value(credCtxKey{}).(string); cred != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+cred)
@@ -213,6 +287,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Tool-policy enforcement (M82.2, ADR 0074 §2/§5) — FAIL CLOSED ──
+	// The sidecar is the authoritative chokepoint: it uniquely holds the verified runcap AND the
+	// wire tool name, so this is where deny/require-approval become unbypassable for OBO tools (a
+	// custom loop calling around the sidecar has no credential). We enforce BEFORE resolving the OBO
+	// credential — a denied call must never trigger a credential lookup — and before the record seam.
+	// On a pure-allow route this is a cheap policy read + early return: the body is NOT touched and
+	// the forward stays byte-for-byte identical to pre-M82. On a restrictive route (any deny /
+	// require-approval rule) it buffers + classifies the body and closes the §5 bypasses.
+	if !p.enforceToolPolicy(w, r, route.Name, runCap.RunID) {
+		return
+	}
+
 	// Resolve THIS user's OBO credential for THIS server, within the run's trust boundary
 	// (ADR 0033): the capability carries the boundary (the invoking agent's registry, or the
 	// agent when standalone), so an agent resolves only grants scoped to its own boundary.
@@ -256,6 +342,179 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = context.WithValue(ctx, captureCtxKey{}, capture)
 	}
 	p.reverse.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// enforceToolPolicy applies the resolved tool policy at the wire (M82.2, ADR 0074 §2/§5). It returns
+// true to CONTINUE the forward and false when it has already written a terminal response (the caller
+// must return). The regime is FAIL-CLOSED but only on a RESTRICTIVE route:
+//
+//   - No policy, or a PURE-ALLOW policy (Restricts()==false) ⇒ permissive, return true WITHOUT
+//     touching the body. The forward stays byte-for-byte identical to pre-M82 (no batch reject, no
+//     fail-closed) — a permissive route has no security need and must not break existing agents.
+//   - A RESTRICTIVE policy (any deny / require-approval rule) ⇒ buffer + classify the body and:
+//     (a) REJECT a batch array outright (the smuggling vector) — 400;
+//     (b) allow a non-tools/call method ONLY if it's on the handshake/discovery allow-list — else 403;
+//     (c) FAIL CLOSED (403) on any tools/call whose params.name can't be extracted, or a body that
+//     can't be classified at all (the fail-open bypass, closed);
+//     (d) match the WIRE params.name (not the route segment) against the per-tool rule — deny ⇒ 403;
+//     require-approval ⇒ the STATELESS approval-voucher protocol (ADR 0074 §3, m82.4): forward only
+//     when the request carries a VALID X-Ctxmesh-Approval voucher (signature valid, run == this
+//     verified run, tool == this wire tool, unexpired), else a typed 403 approval_required; allow ⇒
+//     forward.
+//
+// runID is the VERIFIED run capability's run id — the voucher must be bound to it (never a header).
+// The body is drained + restored so a forwarded call still streams the verbatim bytes (and the
+// record seam downstream re-buffers them independently).
+func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server, runID string) bool {
+	policy := p.cfg.Policy.Load()
+	if !policy.NeedsInspection() {
+		// Pure-allow (or no) policy with NO active ceiling: permissive, body untouched, byte-for-byte
+		// unchanged. A ceiling>0 (even on an otherwise pure-allow policy) engages inspection below,
+		// because counting tool calls requires classifying the body.
+		return true
+	}
+
+	// Restrictive route: we must inspect the body, so buffer + restore it (the forward still needs
+	// the verbatim bytes). A body read error on a restrictive route fails CLOSED — we cannot prove
+	// the call is allowed, so we must not forward it.
+	body, err := p.bufferRestoreBody(r)
+	if err != nil {
+		p.cfg.Log.Info("egress: policy: request body unreadable on a restrictive route — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call could not be inspected against the policy")
+		return false
+	}
+
+	wc, err := classifyWireCall(body)
+	if err != nil {
+		// Unparseable / empty body on a restrictive route: could be smuggling a denied call — fail closed.
+		p.cfg.Log.Info("egress: policy: unclassifiable request on a restrictive route — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call could not be identified against the policy")
+		return false
+	}
+	switch {
+	case wc.isBatch:
+		// (b) A JSON-RPC batch array is the bypass vector — a denied call hidden among allowed
+		// ones. MCP streamable-http never needs batches; reject outright before any per-call view.
+		p.cfg.Log.Info("egress: policy: batch request rejected on a restrictive route", "server", server)
+		writeError(w, http.StatusBadRequest, "batch_not_allowed", "batch tool requests are not allowed under this tool policy")
+		return false
+	case !wc.isToolCall:
+		// (a) A non-tools/call message: allow ONLY the handshake/discovery allow-list without a
+		// tool decision; anything else on a restrictive route needs a tool decision it can't give.
+		if isAllowlistedMethod(wc.method) {
+			return true
+		}
+		p.cfg.Log.Info("egress: policy: non-allowlisted method rejected on a restrictive route", "server", server, "method", wc.method)
+		writeError(w, http.StatusForbidden, "tool_denied", "this method is not permitted under the tool policy")
+		return false
+	case !wc.hasToolName:
+		// (c) A tools/call whose params.name can't be extracted — FAIL CLOSED (do NOT forward).
+		p.cfg.Log.Info("egress: policy: tools/call with no identifiable tool name — failing closed", "server", server)
+		writeError(w, http.StatusForbidden, "tool_denied", "the tool call did not name a tool")
+		return false
+	}
+
+	// (d) Per-tool decision on the WIRE params.name (not the route segment — ADR 0074 §5): a
+	// multi-tool OBO server routes many tools under one ServerName segment, so each call's
+	// params.name is matched independently.
+	rule := policy.RuleFor(wc.toolName)
+	switch rule {
+	case RuleAllow:
+		// A forwardable tool call — apply the anti-DoS fan-out ceiling (M82.5) before forwarding.
+		return p.admitFanOut(w, policy, server, wc.toolName, runID)
+	case RuleRequireApproval:
+		// The STATELESS approval-voucher protocol (ADR 0074 §3, m82.4). A require-approval tool is
+		// FORWARDED only when the request carries a VALID approval voucher; otherwise the sidecar
+		// returns a typed 403 approval_required naming {server, tool, run} so the SDK can pause for a
+		// human, mint a voucher on approval, and RETRY carrying it. No control-plane lookup on the hot
+		// path — the voucher's signature (the SAME platform key as the runcap) is the whole proof.
+		//
+		// FAIL-CLOSED: no voucher, or a forged / expired / wrong-run / wrong-tool / runcap-as-voucher
+		// token, all yield the typed 403 — never a forward. A delegated sub-run has no human to mint a
+		// voucher, so it simply never gets one and is denied automatically.
+		voucher := strings.TrimSpace(r.Header.Get(runcap.ApprovalHeaderName))
+		if voucher == "" {
+			p.cfg.Log.Info("egress: policy: require-approval tool has no voucher — 403 approval_required", "server", server, "tool", wc.toolName)
+			writeApprovalRequired(w, server, wc.toolName, runID)
+			return false
+		}
+		if _, vErr := p.cfg.Verifier.VerifyVoucher(voucher, runID, wc.toolName); vErr != nil {
+			// A present-but-invalid voucher is a rejection, not a forward — but still surface the
+			// typed approval_required so a legitimate SDK (whose voucher expired mid-run, say) can
+			// re-request approval rather than treat it as a hard denial.
+			p.cfg.Log.Info("egress: policy: require-approval voucher rejected — 403 approval_required",
+				"server", server, "tool", wc.toolName, "reason", vErr.Error())
+			writeApprovalRequired(w, server, wc.toolName, runID)
+			return false
+		}
+		// Valid voucher for THIS run + THIS tool: the human approved it — forward (into OBO injection),
+		// but an approved dispatch still counts against the run's fan-out ceiling (M82.5).
+		p.cfg.Log.Info("egress: policy: require-approval voucher accepted — forwarding", "server", server, "tool", wc.toolName)
+		return p.admitFanOut(w, policy, server, wc.toolName, runID)
+	default:
+		// deny (and any non-allow value — fail closed on the unexpected).
+		p.cfg.Log.Info("egress: policy: tool denied", "server", server, "tool", wc.toolName, "rule", rule)
+		writeError(w, http.StatusForbidden, "tool_denied", "this tool is denied by the tool policy")
+		return false
+	}
+}
+
+// admitFanOut applies the per-run anti-DoS fan-out CEILING (M82.5, ADR 0074) at the point a tool call
+// is confirmed FORWARDABLE (an allowed tool, or a require-approval tool with a valid voucher). It
+// returns true to forward and false when it has written a terminal 403 (the caller must return). The
+// ceiling counts real fan-out only: a denied tool or an unapproved require-approval tool never reaches
+// here, so it never consumes the ceiling.
+//
+//   - MaxToolCallsPerRun <= 0 ⇒ unlimited: no counting, forward.
+//   - Empty runID under an ACTIVE ceiling ⇒ FAIL CLOSED (403): a verified runcap with no RunID is a
+//     control-plane misconfiguration, and an unattributable call cannot be bounded, so it is denied.
+//   - Otherwise increment this run's tally; the (N+1)th forwarded call (count > limit) is denied with
+//     a TERMINAL 403 (not 429 — a runaway loop must not be invited to retry; the point is to STOP the
+//     flood). Calls at or below the limit forward.
+func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, tool, runID string) bool {
+	limit := policy.MaxToolCallsPerRun
+	if limit <= 0 {
+		return true // no active ceiling — do not count.
+	}
+	if runID == "" {
+		// A verified runcap with no RunID under an active ceiling: an unattributable call cannot be
+		// bounded, so fail closed rather than let it bypass the ceiling.
+		p.cfg.Log.Info("egress: policy: tool call under an active fan-out ceiling has no run id — failing closed",
+			"server", server, "tool", tool)
+		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
+		return false
+	}
+	n := p.callCounter.increment(runID)
+	if n > int(limit) {
+		// Terminal 403 (non-retryable) — stop the flood, do NOT invite a retry-after.
+		p.cfg.Log.Info("egress: policy: run exceeded its tool-call fan-out ceiling — 403",
+			"server", server, "tool", tool, "count", n, "limit", limit)
+		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
+		return false
+	}
+	return true
+}
+
+// bufferRestoreBody reads the full request body (capped) and restores an identical reader so the
+// forward still streams the verbatim bytes. Returns the buffered bytes. An error means the body
+// could not be read/was oversize — the caller fails closed (a restrictive route must not forward a
+// call it can't inspect). A nil body yields empty bytes (classifyWireCall then fails closed).
+func (p *Proxy) bufferRestoreBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxRecordBody+1))
+	_ = r.Body.Close()
+	if err != nil {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return nil, err
+	}
+	if int64(len(b)) > maxRecordBody {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return nil, errors.New("egress: request body exceeds inspection cap")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(b))
+	return b, nil
 }
 
 // bufferRequestForRecord drains + restores the request body so the record seam captures the
@@ -332,12 +591,77 @@ func jsonRPCID(raw json.RawMessage) string {
 	return ""
 }
 
+// wireCall is the enforcement-time classification of a request body (M82.2, ADR 0074 §5). Unlike
+// parseToolCall (record mode, which fails OPEN — "couldn't identify the tool" ⇒ ("","")), this is
+// used FAIL-CLOSED on a restrictive route, so it distinguishes the cases parseToolCall collapses:
+// a batch array, a non-tools/call method (for the allow-list), and a tools/call with a present vs
+// absent params.name. err is non-nil only for a body the enforcement path cannot classify (an
+// unparseable non-batch body) — which the caller treats as fail-closed.
+type wireCall struct {
+	isBatch     bool   // top-level JSON array (a JSON-RPC batch — the bypass vector)
+	method      string // the JSON-RPC method (e.g. "tools/call", "initialize"); "" if absent
+	isToolCall  bool   // method == "tools/call"
+	toolName    string // params.name for a tools/call; "" if absent/empty
+	hasToolName bool   // params.name was present AND non-empty
+}
+
+// classifyWireCall inspects a request body for fail-closed policy enforcement. It first detects a
+// batch by the first non-space byte ('[' ⇒ a top-level JSON array) BEFORE any unmarshal, so a batch
+// is rejected structurally rather than sniffed from a decode error. Otherwise it unmarshals the
+// single JSON-RPC message and reports the method + (for a tools/call) whether params.name is present.
+// An empty body or a body that is neither a batch nor a decodable JSON object is an error (the caller
+// fails closed). This NEVER mutates the body — the verbatim bytes are still forwarded on allow.
+func classifyWireCall(body []byte) (wireCall, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return wireCall{}, errors.New("egress: empty request body")
+	}
+	// Batch detection is structural: a top-level JSON array (first non-space byte '[') is a
+	// JSON-RPC batch. MCP streamable-http does not need batches; a batch is the smuggling vector
+	// (a denied call hidden among allowed ones), so we flag it before decoding anything.
+	if trimmed[0] == '[' {
+		return wireCall{isBatch: true}, nil
+	}
+	var msg struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(trimmed, &msg); err != nil {
+		return wireCall{}, fmt.Errorf("egress: unparseable request body: %w", err)
+	}
+	wc := wireCall{method: msg.Method, isToolCall: msg.Method == "tools/call"}
+	if wc.isToolCall {
+		wc.toolName = msg.Params.Name
+		wc.hasToolName = strings.TrimSpace(msg.Params.Name) != ""
+	}
+	return wc, nil
+}
+
+// isAllowlistedMethod reports whether a non-tools/call JSON-RPC method may pass a restrictive route
+// WITHOUT a per-tool policy decision (ADR 0074 §5(a)): the MCP handshake + discovery + liveness that
+// carry no tool invocation — initialize, tools/list, ping, and any notifications/* method. Anything
+// else on a restrictive route needs a tool decision (and, absent one, fails closed).
+func isAllowlistedMethod(method string) bool {
+	switch method {
+	case "initialize", "tools/list", "ping":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/")
+}
+
 // errorBody is the sidecar's structured error surface — a machine-readable code + a short
-// message (+ the server, for consent_required). It NEVER carries token material.
+// message (+ the server, for consent_required; + the tool/run, for approval_required). It NEVER
+// carries token material.
 type errorBody struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 	Server  string `json:"server,omitempty"`
+	// Tool / Run identify the require-approval decision point (ADR 0074 §3) so the SDK can pause for a
+	// human on exactly this {tool, run} and, on approval, retry with a voucher bound to it.
+	Tool string `json:"tool,omitempty"`
+	Run  string `json:"run,omitempty"`
 }
 
 // writeError writes a JSON structured error with the given status.
@@ -356,5 +680,22 @@ func writeConsentRequired(w http.ResponseWriter, server string) {
 		Error:   "consent_required",
 		Message: "connect your account to use this tool",
 		Server:  server,
+	})
+}
+
+// writeApprovalRequired writes the structured approval_required error (ADR 0074 §3): a typed 403 that
+// names the {server, tool, run} a human must approve before the tool can run. The SDK maps it to a
+// requires_action (approval) outcome; on approval the BFF mints a voucher bound to {run, tool} and the
+// SDK retries carrying it. It is the require-approval analogue of writeConsentRequired — a structured,
+// RECOVERABLE 403, not a hard denial (deny stays "tool_denied"). It carries NO token material.
+func writeApprovalRequired(w http.ResponseWriter, server, tool, runID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(errorBody{
+		Error:   "approval_required",
+		Message: "this tool requires human approval before it can run",
+		Server:  server,
+		Tool:    tool,
+		Run:     runID,
 	})
 }
