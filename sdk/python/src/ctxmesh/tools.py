@@ -29,10 +29,16 @@ import os
 from typing import Any, Dict, List, Optional
 
 from ctxmesh import _http
+from ctxmesh._approval import APPROVAL_HEADER, current_approval_voucher
 from ctxmesh._capability import CAPABILITY_HEADER, current_capability
 from ctxmesh._record import RECORD_HEADER, current_record_run_id
 from ctxmesh.config import PlaneConfig
-from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
+from ctxmesh.errors import (
+    ApprovalRequiredError,
+    ConfigError,
+    ConsentRequiredError,
+    EndpointError,
+)
 
 #: The synthetic sub-agent-delegation tool (M64, ADR 0057). A team SUPERVISOR is given this built-in
 #: tool alongside its MCP tools; calling it starts a roster member as a durable SUB-RUN (via the
@@ -504,6 +510,14 @@ def _mcp_headers(session_id: Optional[str]) -> Dict[str, str]:
     capability = current_capability()
     if capability:
         headers[CAPABILITY_HEADER] = capability
+    # Relay the approval VOUCHER (ADR 0074 §3, m82.4) on every tool-call egress so the egress
+    # sidecar forwards a require-approval tool the human GRANTED. Bound per-request in a ContextVar
+    # (request_scope) from the resumed run's inbound X-Ctxmesh-Approval header; absent ⇒ no granted
+    # require-approval tool (the sidecar returns 403 approval_required). The voucher is bound to one
+    # {run, tool}; relaying it on every call is safe (a mismatched tool just 403s at the sidecar).
+    voucher = current_approval_voucher()
+    if voucher:
+        headers[APPROVAL_HEADER] = voucher
     # Relay the record-mode capture toggle (M78, ADR 0071 §1/C1) on every tool-call egress —
     # the SAME request-scoped signal the model relay attaches (model.py). It lets the egress
     # sidecar capture this call's tool I/O (pre-injection request + verbatim upstream response)
@@ -536,6 +550,32 @@ def _raise_if_consent_required(exc: EndpointError) -> None:
         )
 
 
+def _raise_if_approval_required(exc: EndpointError) -> None:
+    """Re-raise *exc* as an ApprovalRequiredError when it is the egress sidecar's structured
+    ``approval_required`` (ADR 0074 §3, m82.4) — a 403 whose JSON body carries
+    ``{"error":"approval_required","tool":...,"run":...}``; otherwise return so the caller
+    re-raises the original error. String-free detection — keys on the status + machine-readable.
+
+    This makes the WIRE the enforcement point for require-approval even inside the managed loop: a
+    require-approval tool that reaches egress WITHOUT a valid voucher pauses the run for a human
+    (the same requires_action outcome pause_for_approval produces). A CUSTOM loop that ignores the
+    raise is simply denied — the floor. The key mirrors the managed loop's ``tool:<name>`` so an
+    approval resolves the SAME decision point on resume."""
+    if exc.status != 403 or not exc.body:
+        return
+    try:
+        parsed = json.loads(exc.body)
+    except (ValueError, TypeError):
+        return
+    if isinstance(parsed, dict) and parsed.get("error") == "approval_required":
+        tool = str(parsed.get("tool", ""))
+        raise ApprovalRequiredError(
+            f"approval required for tool {tool!r}",
+            key=f"tool:{tool}",
+            summary=f"Approve tool {tool!r}?",
+        )
+
+
 def _mcp_post(
     endpoint: str,
     payload: Dict[str, Any],
@@ -559,9 +599,11 @@ def _mcp_post(
             expect=(200, 202),
         )
     except EndpointError as exc:
-        # The egress sidecar (ADR 0029 §2 / m25.9) may answer any forwarded request with a
-        # structured consent_required — turn it into a distinct, catchable outcome.
+        # The egress sidecar may answer any forwarded request with a structured 403 — turn each into
+        # a distinct, catchable outcome: consent_required (ADR 0029 §2 / m25.9 — connect your
+        # account) or approval_required (ADR 0074 §3 / m82.4 — a human must approve this tool).
         _raise_if_consent_required(exc)
+        _raise_if_approval_required(exc)
         raise
     new_session = resp.headers.get("mcp-session-id")
     if not expect_body:

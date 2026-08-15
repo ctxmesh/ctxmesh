@@ -24,7 +24,7 @@ from typing import Iterable, Iterator, Mapping, Optional
 
 from opentelemetry.sdk.trace import SpanProcessor
 
-from ctxmesh._approval import approval_scope
+from ctxmesh._approval import approval_scope, voucher_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh._record import record_scope
 from ctxmesh.config import PlaneConfig, RunContext
@@ -83,7 +83,12 @@ class Client:
             with client.request_scope(request.headers):
                 client.tools.call("search", {...})   # relays the user's capability
         """
-        with capability_scope(headers), approval_scope(approvals), record_scope(headers):
+        with (
+            capability_scope(headers),
+            approval_scope(approvals),
+            voucher_scope(headers),
+            record_scope(headers),
+        ):
             yield
 
     @property

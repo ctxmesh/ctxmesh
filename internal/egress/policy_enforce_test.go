@@ -17,6 +17,8 @@ limitations under the License.
 package egress
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +41,7 @@ import (
 type policyHarness struct {
 	proxy  *Proxy
 	signer *runcap.Signer
+	priv   ed25519.PrivateKey
 	holder *PolicyHolder
 	up     *upstream
 }
@@ -63,7 +66,7 @@ func newPolicyHarness(t *testing.T, policy *ToolPolicy) *policyHarness {
 		Policy:        holder,
 		Log:           logr.Discard(),
 	})
-	return &policyHarness{proxy: proxy, signer: runcap.NewSigner(priv, testAudience, nil), holder: holder, up: up}
+	return &policyHarness{proxy: proxy, signer: runcap.NewSigner(priv, testAudience, nil), priv: priv, holder: holder, up: up}
 }
 
 func (h *policyHarness) mint(t *testing.T) string {
@@ -81,6 +84,28 @@ func (h *policyHarness) send(t *testing.T, body string) *httptest.ResponseRecord
 	rec := httptest.NewRecorder()
 	h.proxy.ServeHTTP(rec, req)
 	return rec
+}
+
+// sendWithVoucher drives one request with a valid capability AND the given raw X-Ctxmesh-Approval
+// voucher header (m82.4). The capability's run is "run-1" (see mint), so a voucher for "run-1" +
+// matching tool is the happy path.
+func (h *policyHarness) sendWithVoucher(t *testing.T, body, voucher string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/"+testServer, strings.NewReader(body))
+	req.Header.Set(runcap.HeaderName, h.mint(t))
+	req.Header.Set(runcap.ApprovalHeaderName, voucher)
+	rec := httptest.NewRecorder()
+	h.proxy.ServeHTTP(rec, req)
+	return rec
+}
+
+// mintVoucher mints an approval voucher for {run, tool} with the harness's platform signer (the SAME
+// key the sidecar's verifier holds).
+func (h *policyHarness) mintVoucher(t *testing.T, run, tool string, ttl time.Duration) string {
+	t.Helper()
+	v, err := h.signer.MintApprovalVoucher(run, tool, ttl)
+	require.NoError(t, err)
+	return v
 }
 
 // toolCallBody builds a JSON-RPC tools/call body naming a tool (or empty/absent name variants).
@@ -216,13 +241,107 @@ func TestPolicyPureAllowIsPermissive(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "a nil policy is permissive")
 }
 
-// (e) require-approval → 403 interim (pre-m82.4 voucher), not forwarded.
-func TestPolicyRequireApprovalBlockedInterim(t *testing.T) {
+// (a-m82.4) A require-approval tool with NO voucher → typed 403 approval_required carrying {tool, run,
+// server}, not forwarded.
+func TestPolicyRequireApprovalNoVoucher(t *testing.T) {
 	h := newPolicyHarness(t, denyPolicy())
 	rec := h.send(t, toolCallBody("review"))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Contains(t, rec.Body.String(), "tool_denied")
-	assert.Equal(t, 0, h.up.hits, "require-approval is unbypassable-but-unusable until m82.4")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "require-approval without a voucher is not forwarded")
+
+	var body errorBody
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "approval_required", body.Error, "the 403 is TYPED approval_required, not a bare tool_denied")
+	assert.Equal(t, "review", body.Tool, "it names the tool the human must approve")
+	assert.Equal(t, "run-1", body.Run, "it names the verified run so the SDK can pause on this exact decision point")
+	assert.Equal(t, testServer, body.Server)
+}
+
+// (b-m82.4) A VALID voucher {matching run, matching tool, unexpired} → the require-approval tool is
+// forwarded (and still gets the OBO credential injected).
+func TestPolicyRequireApprovalValidVoucher(t *testing.T) {
+	h := newPolicyHarness(t, denyPolicy())
+	voucher := h.mintVoucher(t, "run-1", "review", 5*time.Minute)
+	rec := h.sendWithVoucher(t, toolCallBody("review"), voucher)
+	require.Equal(t, http.StatusOK, rec.Code, "a valid voucher forwards the require-approval tool")
+	assert.Equal(t, 1, h.up.hits)
+	assert.Equal(t, "Bearer FRESH-USER-TOKEN", h.up.gotAuth, "a voucher-approved tool still gets the OBO credential injected")
+}
+
+// (c-m82.4) A forged (bad-signature) voucher → typed 403 approval_required, not forwarded.
+func TestPolicyRequireApprovalForgedVoucher(t *testing.T) {
+	h := newPolicyHarness(t, denyPolicy())
+	// A voucher signed by a DIFFERENT platform key (an attacker's key) for the right run + tool.
+	_, otherPriv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	forgedSigner := runcap.NewSigner(otherPriv, testAudience, nil)
+	forged, err := forgedSigner.MintApprovalVoucher("run-1", "review", 5*time.Minute)
+	require.NoError(t, err)
+
+	rec := h.sendWithVoucher(t, toolCallBody("review"), forged)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "a forged voucher is never forwarded")
+	assert.Contains(t, rec.Body.String(), "approval_required")
+}
+
+// (c-m82.4) An EXPIRED voucher → typed 403 approval_required, not forwarded.
+func TestPolicyRequireApprovalExpiredVoucher(t *testing.T) {
+	h := newPolicyHarness(t, denyPolicy())
+	// Mint with a signer over the SAME platform key but a clock far in the past, so the voucher is
+	// already expired when the sidecar (real-time clock) verifies it.
+	pastSigner := runcap.NewSigner(h.priv, testAudience, func() time.Time {
+		return time.Now().Add(-time.Hour)
+	})
+	expired, err := pastSigner.MintApprovalVoucher("run-1", "review", time.Minute)
+	require.NoError(t, err)
+
+	rec := h.sendWithVoucher(t, toolCallBody("review"), expired)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "an expired voucher is never forwarded")
+	assert.Contains(t, rec.Body.String(), "approval_required")
+}
+
+// (c-m82.4) A WRONG-TOOL voucher (for tool A, presented on a call to tool B) → 403, not forwarded.
+func TestPolicyRequireApprovalWrongToolVoucher(t *testing.T) {
+	// A policy where BOTH "review" and "audit" are require-approval, so tool B is itself gated.
+	policy := &ToolPolicy{
+		Default: RuleAllow,
+		Overrides: []ToolPolicyOverride{
+			{Name: "review", Rule: RuleRequireApproval},
+			{Name: "audit", Rule: RuleRequireApproval},
+		},
+	}
+	h := newPolicyHarness(t, policy)
+	// Voucher approves "review" but the call is for "audit".
+	voucher := h.mintVoucher(t, "run-1", "review", 5*time.Minute)
+	rec := h.sendWithVoucher(t, toolCallBody("audit"), voucher)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "a voucher for tool A cannot approve tool B")
+	assert.Contains(t, rec.Body.String(), "approval_required")
+}
+
+// (c-m82.4) A WRONG-RUN voucher (for a different run than the verified capability) → 403, not forwarded.
+func TestPolicyRequireApprovalWrongRunVoucher(t *testing.T) {
+	h := newPolicyHarness(t, denyPolicy())
+	// The capability's run is "run-1"; this voucher is for "run-2".
+	voucher := h.mintVoucher(t, "run-2", "review", 5*time.Minute)
+	rec := h.sendWithVoucher(t, toolCallBody("review"), voucher)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "a voucher for run X cannot approve run Y")
+	assert.Contains(t, rec.Body.String(), "approval_required")
+}
+
+// (d-m82.4) A RUN CAPABILITY presented as the approval voucher → 403 (the typ/audience discriminator):
+// even a valid runcap for this run cannot self-approve a require-approval tool.
+func TestPolicyRequireApprovalRuncapAsVoucher(t *testing.T) {
+	h := newPolicyHarness(t, denyPolicy())
+	// A perfectly valid runcap for run-1 — but it is NOT a voucher.
+	runcapTok, err := h.signer.Mint(runcap.MintRequest{User: "u-alice", Agent: testAgent, RunID: "run-1", TTL: 5 * time.Minute})
+	require.NoError(t, err)
+	rec := h.sendWithVoucher(t, toolCallBody("review"), runcapTok)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 0, h.up.hits, "a runcap must never be redeemable as an approval voucher")
+	assert.Contains(t, rec.Body.String(), "approval_required")
 }
 
 // (f) The WIRE params.name drives the per-tool decision (not the route segment): on the SAME route

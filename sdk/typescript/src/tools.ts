@@ -23,10 +23,16 @@
  */
 
 import * as fs from "node:fs";
+import { APPROVAL_HEADER, currentApprovalVoucher } from "./_approval.js";
 import { CAPABILITY_HEADER, currentCapability } from "./_capability.js";
 import { RECORD_HEADER, currentRecordRunId } from "./_record.js";
 import { PlaneConfig } from "./config.js";
-import { ConfigError, ConsentRequiredError, EndpointError } from "./errors.js";
+import {
+  ApprovalRequiredError,
+  ConfigError,
+  ConsentRequiredError,
+  EndpointError,
+} from "./errors.js";
 import type { KnowledgeClient } from "./knowledge.js";
 
 // ── synthetic tool names ─────────────────────────────────────────────────────
@@ -622,6 +628,15 @@ function mcpHeaders(sessionId: string | undefined): Record<string, string> {
   if (capability) {
     headers[CAPABILITY_HEADER] = capability;
   }
+  // Relay the approval VOUCHER (ADR 0074 §3, m82.4) on every tool-call egress so the egress sidecar
+  // forwards a require-approval tool the human GRANTED. Bound per-request in AsyncLocalStorage
+  // (requestScope) from the resumed run's inbound X-Ctxmesh-Approval header; absent ⇒ no granted
+  // require-approval tool (the sidecar returns 403 approval_required). The voucher is bound to one
+  // {run, tool}; relaying it on every call is safe (a mismatched tool just gets the sidecar's 403).
+  const voucher = currentApprovalVoucher();
+  if (voucher) {
+    headers[APPROVAL_HEADER] = voucher;
+  }
   // Relay the record-mode capture toggle (M78, ADR 0071 §1/C1) on every tool-call
   // egress — the SAME request-scoped signal the model relay attaches (model.ts). It
   // lets the egress sidecar capture this call's tool I/O (pre-injection request +
@@ -652,6 +667,39 @@ function raiseIfConsentRequired(exc: EndpointError): void {
       `consent required: connect your account for MCP server ${JSON.stringify(server)}`,
       { server, status: exc.status, body: exc.body },
     );
+  }
+}
+
+/**
+ * Re-throw *exc* as an ApprovalRequiredError when it is the egress sidecar's structured
+ * `approval_required` (ADR 0074 §3, m82.4) — a 403 whose JSON body carries
+ * `{"error":"approval_required","tool":...,"run":...}`; otherwise return so the caller re-throws the
+ * original error. String-free detection — keys on the status + machine-readable code.
+ *
+ * This makes the WIRE the enforcement point for require-approval even inside the managed loop: a
+ * require-approval tool that reaches egress WITHOUT a valid voucher pauses the run for a human (the
+ * same requires_action outcome `pauseForApproval` produces). A CUSTOM loop that ignores the throw is
+ * simply denied — the floor. The key mirrors the managed loop's `tool:<name>` so an approval resolves
+ * the SAME decision point on resume.
+ */
+function raiseIfApprovalRequired(exc: EndpointError): void {
+  if (exc.status !== 403 || !exc.body) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(exc.body);
+  } catch {
+    return;
+  }
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as Record<string, unknown>)["error"] === "approval_required"
+  ) {
+    const tool = String((parsed as Record<string, unknown>)["tool"] ?? "");
+    throw new ApprovalRequiredError(`approval required for tool ${JSON.stringify(tool)}`, {
+      key: `tool:${tool}`,
+      summary: `Approve tool ${JSON.stringify(tool)}?`,
+    });
   }
 }
 
@@ -742,6 +790,7 @@ async function mcpPost(
   } catch (exc) {
     if (exc instanceof EndpointError) {
       raiseIfConsentRequired(exc);
+      raiseIfApprovalRequired(exc);
     }
     throw exc;
   }
@@ -754,6 +803,7 @@ async function mcpPost(
       { status, body: text },
     );
     raiseIfConsentRequired(err);
+    raiseIfApprovalRequired(err);
     throw err;
   }
 

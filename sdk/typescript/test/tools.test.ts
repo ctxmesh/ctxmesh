@@ -21,9 +21,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as apprMod from "../src/_approval.js";
 import * as capMod from "../src/_capability.js";
 import * as recordMod from "../src/_record.js";
-import { ConfigError, EndpointError } from "../src/errors.js";
+import { ApprovalRequiredError, ConfigError, EndpointError } from "../src/errors.js";
 import { Tool, ToolsClient, DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "../src/tools.js";
 import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "./plane.js";
 
@@ -471,6 +472,78 @@ describe("ToolsClient.call — full MCP session", () => {
     for (const req of mcpReqs) {
       expect(req.headers["x-ctxmesh-record"]).toBeUndefined();
     }
+  });
+
+  it("relays X-Ctxmesh-Approval on MCP tool calls when a voucher is bound (m82.4)", async () => {
+    // A resumed run with a granted require-approval tool relays the voucher on every tool-call egress
+    // so the egress sidecar forwards the approved tool.
+    vi.spyOn(apprMod, "currentApprovalVoucher").mockReturnValue("voucher-tool-token");
+
+    const client = new ToolsClient(plane.config);
+    await client.call(DiscoveryStub.CATALOG_NAME, { text: "y" });
+
+    const mcpReqs = plane.discovery.requests.filter((r) => r.path === "/mcp/");
+    expect(mcpReqs.length).toBeGreaterThan(0);
+    for (const req of mcpReqs) {
+      expect(req.headers["x-ctxmesh-approval"]).toBe("voucher-tool-token");
+    }
+  });
+
+  it("does NOT relay X-Ctxmesh-Approval when no voucher is bound (m82.4)", async () => {
+    // Default (no voucherScope active) ⇒ undefined ⇒ no header ⇒ a require-approval tool 403s.
+    const client = new ToolsClient(plane.config);
+    await client.call(DiscoveryStub.CATALOG_NAME, { text: "y" });
+
+    const mcpReqs = plane.discovery.requests.filter((r) => r.path === "/mcp/");
+    for (const req of mcpReqs) {
+      expect(req.headers["x-ctxmesh-approval"]).toBeUndefined();
+    }
+  });
+
+  it("maps a 403 approval_required from the wire to ApprovalRequiredError (m82.4)", async () => {
+    // The egress sidecar answers a require-approval tool (no voucher) with a typed 403
+    // approval_required; the SDK must surface it as ApprovalRequiredError so the managed loop pauses
+    // (and a custom loop that ignores it is denied — the floor). The key mirrors tool:<name>.
+    const discovery2 = new DiscoveryStub();
+    discovery2["routes"].set("POST /mcp/", (_s, req): StubResponse => {
+      const msg = req.json() as { method?: string; id?: unknown };
+      if (msg.method === "initialize") {
+        return {
+          status: 200,
+          headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-appr" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", capabilities: {} } }),
+        };
+      }
+      if (msg.method === "notifications/initialized") return { status: 202 };
+      if (msg.method === "tools/list") {
+        return {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: DiscoveryStub.MCP_TOOL_NAME }] } }),
+        };
+      }
+      // tools/call → the sidecar's typed 403 approval_required.
+      return {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "approval_required", tool: DiscoveryStub.MCP_TOOL_NAME, run: "run-1" }),
+      };
+    });
+    discovery2["routes"].set("GET /tools", () => ({
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: "x", tools: [{ name: DiscoveryStub.CATALOG_NAME, mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] }),
+    }));
+    await discovery2.start();
+
+    const { PlaneConfig } = await import("../src/config.js");
+    const config = PlaneConfig.forTest({ discoveryBaseUrl: discovery2.baseUrl });
+    const client = new ToolsClient(config);
+    const err = await client.call(DiscoveryStub.CATALOG_NAME, { text: "x" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect((err as ApprovalRequiredError).key).toBe(`tool:${DiscoveryStub.MCP_TOOL_NAME}`);
+
+    await discovery2.stop();
   });
 });
 

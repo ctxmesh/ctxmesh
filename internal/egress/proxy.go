@@ -120,9 +120,10 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 				pr.SetURL(target)
 				pr.Out.Host = target.Host
 			}
-			// The capability is proof of identity for the sidecar ONLY — never leak it to
-			// the upstream MCP server. Strip any inbound Authorization and inject ours.
+			// The capability + approval voucher are proof for the sidecar ONLY — never leak them to
+			// the upstream MCP server. Strip them (and any inbound Authorization) and inject ours.
 			pr.Out.Header.Del(runcap.HeaderName)
+			pr.Out.Header.Del(runcap.ApprovalHeaderName)
 			pr.Out.Header.Del("Authorization")
 			if cred, _ := pr.In.Context().Value(credCtxKey{}).(string); cred != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+cred)
@@ -229,7 +230,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// On a pure-allow route this is a cheap policy read + early return: the body is NOT touched and
 	// the forward stays byte-for-byte identical to pre-M82. On a restrictive route (any deny /
 	// require-approval rule) it buffers + classifies the body and closes the §5 bypasses.
-	if !p.enforceToolPolicy(w, r, route.Name) {
+	if !p.enforceToolPolicy(w, r, route.Name, runCap.RunID) {
 		return
 	}
 
@@ -290,12 +291,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     (b) allow a non-tools/call method ONLY if it's on the handshake/discovery allow-list — else 403;
 //     (c) FAIL CLOSED (403) on any tools/call whose params.name can't be extracted, or a body that
 //     can't be classified at all (the fail-open bypass, closed);
-//     (d) match the WIRE params.name (not the route segment) against the per-tool rule — deny and
-//     (interim, pre-m82.4) require-approval ⇒ 403; allow ⇒ forward.
+//     (d) match the WIRE params.name (not the route segment) against the per-tool rule — deny ⇒ 403;
+//     require-approval ⇒ the STATELESS approval-voucher protocol (ADR 0074 §3, m82.4): forward only
+//     when the request carries a VALID X-Ctxmesh-Approval voucher (signature valid, run == this
+//     verified run, tool == this wire tool, unexpired), else a typed 403 approval_required; allow ⇒
+//     forward.
 //
+// runID is the VERIFIED run capability's run id — the voucher must be bound to it (never a header).
 // The body is drained + restored so a forwarded call still streams the verbatim bytes (and the
 // record seam downstream re-buffers them independently).
-func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server string) bool {
+func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server, runID string) bool {
 	policy := p.cfg.Policy.Load()
 	if !policy.Restricts() {
 		// Pure-allow (or no) policy: permissive, body untouched, byte-for-byte unchanged.
@@ -350,11 +355,33 @@ func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server
 	case RuleAllow:
 		return true
 	case RuleRequireApproval:
-		// Interim (pre-m82.4): treat require-approval like deny at the wire — unbypassable but
-		// unusable until the approval-voucher protocol (ADR 0074 §3) lands. 403, not forwarded.
-		p.cfg.Log.Info("egress: policy: require-approval tool blocked (voucher protocol pending, m82.4)", "server", server, "tool", wc.toolName)
-		writeError(w, http.StatusForbidden, "tool_denied", "this tool requires approval, which is not yet available")
-		return false
+		// The STATELESS approval-voucher protocol (ADR 0074 §3, m82.4). A require-approval tool is
+		// FORWARDED only when the request carries a VALID approval voucher; otherwise the sidecar
+		// returns a typed 403 approval_required naming {server, tool, run} so the SDK can pause for a
+		// human, mint a voucher on approval, and RETRY carrying it. No control-plane lookup on the hot
+		// path — the voucher's signature (the SAME platform key as the runcap) is the whole proof.
+		//
+		// FAIL-CLOSED: no voucher, or a forged / expired / wrong-run / wrong-tool / runcap-as-voucher
+		// token, all yield the typed 403 — never a forward. A delegated sub-run has no human to mint a
+		// voucher, so it simply never gets one and is denied automatically.
+		voucher := strings.TrimSpace(r.Header.Get(runcap.ApprovalHeaderName))
+		if voucher == "" {
+			p.cfg.Log.Info("egress: policy: require-approval tool has no voucher — 403 approval_required", "server", server, "tool", wc.toolName)
+			writeApprovalRequired(w, server, wc.toolName, runID)
+			return false
+		}
+		if _, vErr := p.cfg.Verifier.VerifyVoucher(voucher, runID, wc.toolName); vErr != nil {
+			// A present-but-invalid voucher is a rejection, not a forward — but still surface the
+			// typed approval_required so a legitimate SDK (whose voucher expired mid-run, say) can
+			// re-request approval rather than treat it as a hard denial.
+			p.cfg.Log.Info("egress: policy: require-approval voucher rejected — 403 approval_required",
+				"server", server, "tool", wc.toolName, "reason", vErr.Error())
+			writeApprovalRequired(w, server, wc.toolName, runID)
+			return false
+		}
+		// Valid voucher for THIS run + THIS tool: the human approved it — forward (into OBO injection).
+		p.cfg.Log.Info("egress: policy: require-approval voucher accepted — forwarding", "server", server, "tool", wc.toolName)
+		return true
 	default:
 		// deny (and any non-allow value — fail closed on the unexpected).
 		p.cfg.Log.Info("egress: policy: tool denied", "server", server, "tool", wc.toolName, "rule", rule)
@@ -520,11 +547,16 @@ func isAllowlistedMethod(method string) bool {
 }
 
 // errorBody is the sidecar's structured error surface — a machine-readable code + a short
-// message (+ the server, for consent_required). It NEVER carries token material.
+// message (+ the server, for consent_required; + the tool/run, for approval_required). It NEVER
+// carries token material.
 type errorBody struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 	Server  string `json:"server,omitempty"`
+	// Tool / Run identify the require-approval decision point (ADR 0074 §3) so the SDK can pause for a
+	// human on exactly this {tool, run} and, on approval, retry with a voucher bound to it.
+	Tool string `json:"tool,omitempty"`
+	Run  string `json:"run,omitempty"`
 }
 
 // writeError writes a JSON structured error with the given status.
@@ -543,5 +575,22 @@ func writeConsentRequired(w http.ResponseWriter, server string) {
 		Error:   "consent_required",
 		Message: "connect your account to use this tool",
 		Server:  server,
+	})
+}
+
+// writeApprovalRequired writes the structured approval_required error (ADR 0074 §3): a typed 403 that
+// names the {server, tool, run} a human must approve before the tool can run. The SDK maps it to a
+// requires_action (approval) outcome; on approval the BFF mints a voucher bound to {run, tool} and the
+// SDK retries carrying it. It is the require-approval analogue of writeConsentRequired — a structured,
+// RECOVERABLE 403, not a hard denial (deny stays "tool_denied"). It carries NO token material.
+func writeApprovalRequired(w http.ResponseWriter, server, tool, runID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(errorBody{
+		Error:   "approval_required",
+		Message: "this tool requires human approval before it can run",
+		Server:  server,
+		Tool:    tool,
+		Run:     runID,
 	})
 }

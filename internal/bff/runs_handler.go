@@ -121,7 +121,12 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r = s.attachRunCapability(r, caller, rn.Agent, rn.Namespace)
+	// Pin the resumed run's capability to the run's STABLE id (rn.ID), NOT a fresh random one: the
+	// approval-voucher protocol (ADR 0074 §3, m82.4) binds a voucher to the runcap's `run` claim, and
+	// the egress sidecar checks voucher.run == runcap.run — so both must carry the SAME id, which only
+	// works if the id is a value the BFF knows here (rn.ID). This mirrors the durable worker path,
+	// which already pins to rn.ID.
+	r = s.attachRunCapabilityForRun(r, caller, rn.Agent, rn.Namespace, rn.ID)
 
 	// On approval, re-invoke with the approved key granted so the agent's pause_for_approval(key)
 	// proceeds instead of pausing again (the consent path re-invokes the same input unchanged — the
@@ -131,15 +136,36 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		input = withApprovals(input, []string{rn.RequiresAction.Key})
 	}
 
+	// Approval voucher (ADR 0074 §3, m82.4): a granted require-approval tool needs a wire-verifiable
+	// voucher so the tool's egress retry is FORWARDED (the SDK's pause_for_approval proceeding is
+	// necessary but no longer sufficient — the sidecar is the enforcement point). The approval key is
+	// `tool:<wireToolName>`; mint a voucher bound to {rn.ID, <wireToolName>} and thread it onto the
+	// exec context for the adapter to relay. Best-effort: no signer / non-tool key / mint failure ⇒ no
+	// voucher, and the tool simply gets the sidecar's 403 approval_required (fail-closed, never a
+	// silent allow).
+	voucher := ""
+	if isApproval && s.capabilitySigner != nil {
+		if tool, ok := approvalToolName(rn.RequiresAction.Key); ok {
+			if v, err := s.capabilitySigner.MintApprovalVoucher(rn.ID, tool, approvalVoucherTTL); err == nil {
+				voucher = v
+			} else {
+				s.log.Error(err, "approval-voucher: mint failed; the granted tool will get a 403 approval_required", "run", rn.ID, "tool", tool)
+			}
+		}
+	}
+
 	if _, err := s.runStore.Update(id, func(x *run.Run) error {
 		return x.Transition(run.StatusRunning, time.Now())
 	}); err != nil {
 		writeError(w, http.StatusConflict, "cannot resume this run")
 		return
 	}
-	execCtx := contextWithRunCapability(
-		contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-		runCapabilityFromContext(r.Context()),
+	execCtx := contextWithApprovalVoucher(
+		contextWithRunCapability(
+			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
+			runCapabilityFromContext(r.Context()),
+		),
+		voucher,
 	)
 	go s.executeRun(execCtx, id, endpoint, input)
 
@@ -751,6 +777,25 @@ func parseResumeDecision(r *http.Request) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(body.Decision))
+}
+
+// approvalToolPrefix is the stable prefix the managed loop uses for a TOOL-approval key:
+// pause_for_approval(f"tool:{name}", …) (managed.py / managed.ts). The suffix is the WIRE tool name
+// (MCP params.name) the egress sidecar sees — so a voucher bound to it matches the tool call.
+const approvalToolPrefix = "tool:"
+
+// approvalToolName extracts the wire tool name from a require-approval key, returning (name, true) for
+// a "tool:<name>" key with a non-empty name. Any other key (a non-tool HITL approval, or an empty
+// name) returns ("", false) — no voucher is minted, and the sidecar's own fail-closed 403 governs.
+func approvalToolName(key string) (string, bool) {
+	if !strings.HasPrefix(key, approvalToolPrefix) {
+		return "", false
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(key, approvalToolPrefix))
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 // withApprovals merges the granted approval keys into the run's input JSON as an `approvals` array,
