@@ -33,6 +33,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -97,10 +99,73 @@ type ProxyConfig struct {
 	Policy *PolicyHolder
 }
 
+// runCounterTTL bounds how long a per-run fan-out counter entry lives after its last tool call
+// (M82.5). It is set generously: a run whose runcap has expired can never increment again (ServeHTTP
+// rejects the expired capability upstream, before enforcement), so the entry only needs to age out to
+// reclaim memory — an hour comfortably outlives any live run's tool-call cadence.
+const runCounterTTL = time.Hour
+
+// runCounterSoftCap is the entry count past which increment() sweeps stale entries inline. Below it,
+// increment is a pure O(1) map bump (the common path); the sweep only runs when the map has actually
+// grown, keeping the hot path cheap.
+const runCounterSoftCap = 4096
+
+// runCallEntry is one run's fan-out tally: how many tool calls it has forwarded and when it was last
+// seen (for TTL eviction).
+type runCallEntry struct {
+	count    int
+	lastSeen time.Time
+}
+
+// runCallCounter is the in-pod, per-run tool-call fan-out tally that backs the anti-DoS ceiling
+// (M82.5, ADR 0074). It is a mutex-guarded map keyed on the VERIFIED runcap RunID.
+//
+// SECURITY: runIDs come from cryptographically-VERIFIED runcaps — ServeHTTP verifies the capability's
+// signature before enforcement, so the map only ever grows with genuinely-minted runs. An attacker
+// cannot forge distinct runIDs to balloon the map, and TTL eviction reclaims finished runs. This is
+// the IN-POD floor only; cross-pod / fleet coordination (Valkey) is explicitly deferred.
+type runCallCounter struct {
+	mu  sync.Mutex
+	m   map[string]*runCallEntry
+	now func() time.Time // injectable clock for deterministic tests; defaults to time.Now
+}
+
+// newRunCallCounter builds an empty counter with the real clock.
+func newRunCallCounter() *runCallCounter {
+	return &runCallCounter{m: make(map[string]*runCallEntry), now: time.Now}
+}
+
+// increment bumps the run's tally under the lock and returns the NEW count. It opportunistically
+// sweeps stale entries (lastSeen older than runCounterTTL) — but only when the map has grown past the
+// soft cap, so the common path stays O(1). The sweep is safe to run on the same lock: a swept run
+// that later reappears simply starts a fresh entry (its runcap would have to still be valid, which
+// means it was not actually finished — a benign re-count, never an under-count of a live run).
+func (c *runCallCounter) increment(runID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if len(c.m) > runCounterSoftCap {
+		for id, e := range c.m {
+			if now.Sub(e.lastSeen) > runCounterTTL {
+				delete(c.m, id)
+			}
+		}
+	}
+	e := c.m[runID]
+	if e == nil {
+		e = &runCallEntry{}
+		c.m[runID] = e
+	}
+	e.count++
+	e.lastSeen = now
+	return e.count
+}
+
 // Proxy is the sidecar HTTP handler.
 type Proxy struct {
-	cfg     ProxyConfig
-	reverse *httputil.ReverseProxy
+	cfg         ProxyConfig
+	reverse     *httputil.ReverseProxy
+	callCounter *runCallCounter
 }
 
 type (
@@ -112,7 +177,7 @@ type (
 // NewProxy builds a Proxy. The single ReverseProxy reads the per-request upstream + injected
 // credential from the request context (stashed by ServeHTTP after verify+resolve).
 func NewProxy(cfg ProxyConfig) *Proxy {
-	p := &Proxy{cfg: cfg}
+	p := &Proxy{cfg: cfg, callCounter: newRunCallCounter()}
 	p.reverse = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			target, _ := pr.In.Context().Value(targetCtxKey{}).(*url.URL)
@@ -302,8 +367,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // record seam downstream re-buffers them independently).
 func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server, runID string) bool {
 	policy := p.cfg.Policy.Load()
-	if !policy.Restricts() {
-		// Pure-allow (or no) policy: permissive, body untouched, byte-for-byte unchanged.
+	if !policy.NeedsInspection() {
+		// Pure-allow (or no) policy with NO active ceiling: permissive, body untouched, byte-for-byte
+		// unchanged. A ceiling>0 (even on an otherwise pure-allow policy) engages inspection below,
+		// because counting tool calls requires classifying the body.
 		return true
 	}
 
@@ -353,7 +420,8 @@ func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server
 	rule := policy.RuleFor(wc.toolName)
 	switch rule {
 	case RuleAllow:
-		return true
+		// A forwardable tool call — apply the anti-DoS fan-out ceiling (M82.5) before forwarding.
+		return p.admitFanOut(w, policy, server, wc.toolName, runID)
 	case RuleRequireApproval:
 		// The STATELESS approval-voucher protocol (ADR 0074 §3, m82.4). A require-approval tool is
 		// FORWARDED only when the request carries a VALID approval voucher; otherwise the sidecar
@@ -379,15 +447,52 @@ func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server
 			writeApprovalRequired(w, server, wc.toolName, runID)
 			return false
 		}
-		// Valid voucher for THIS run + THIS tool: the human approved it — forward (into OBO injection).
+		// Valid voucher for THIS run + THIS tool: the human approved it — forward (into OBO injection),
+		// but an approved dispatch still counts against the run's fan-out ceiling (M82.5).
 		p.cfg.Log.Info("egress: policy: require-approval voucher accepted — forwarding", "server", server, "tool", wc.toolName)
-		return true
+		return p.admitFanOut(w, policy, server, wc.toolName, runID)
 	default:
 		// deny (and any non-allow value — fail closed on the unexpected).
 		p.cfg.Log.Info("egress: policy: tool denied", "server", server, "tool", wc.toolName, "rule", rule)
 		writeError(w, http.StatusForbidden, "tool_denied", "this tool is denied by the tool policy")
 		return false
 	}
+}
+
+// admitFanOut applies the per-run anti-DoS fan-out CEILING (M82.5, ADR 0074) at the point a tool call
+// is confirmed FORWARDABLE (an allowed tool, or a require-approval tool with a valid voucher). It
+// returns true to forward and false when it has written a terminal 403 (the caller must return). The
+// ceiling counts real fan-out only: a denied tool or an unapproved require-approval tool never reaches
+// here, so it never consumes the ceiling.
+//
+//   - MaxToolCallsPerRun <= 0 ⇒ unlimited: no counting, forward.
+//   - Empty runID under an ACTIVE ceiling ⇒ FAIL CLOSED (403): a verified runcap with no RunID is a
+//     control-plane misconfiguration, and an unattributable call cannot be bounded, so it is denied.
+//   - Otherwise increment this run's tally; the (N+1)th forwarded call (count > limit) is denied with
+//     a TERMINAL 403 (not 429 — a runaway loop must not be invited to retry; the point is to STOP the
+//     flood). Calls at or below the limit forward.
+func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, tool, runID string) bool {
+	limit := policy.MaxToolCallsPerRun
+	if limit <= 0 {
+		return true // no active ceiling — do not count.
+	}
+	if runID == "" {
+		// A verified runcap with no RunID under an active ceiling: an unattributable call cannot be
+		// bounded, so fail closed rather than let it bypass the ceiling.
+		p.cfg.Log.Info("egress: policy: tool call under an active fan-out ceiling has no run id — failing closed",
+			"server", server, "tool", tool)
+		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
+		return false
+	}
+	n := p.callCounter.increment(runID)
+	if n > int(limit) {
+		// Terminal 403 (non-retryable) — stop the flood, do NOT invite a retry-after.
+		p.cfg.Log.Info("egress: policy: run exceeded its tool-call fan-out ceiling — 403",
+			"server", server, "tool", tool, "count", n, "limit", limit)
+		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
+		return false
+	}
+	return true
 }
 
 // bufferRestoreBody reads the full request body (capped) and restores an identical reader so the

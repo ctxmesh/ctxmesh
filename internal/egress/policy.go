@@ -47,6 +47,13 @@ type ToolPolicy struct {
 	// sidecar); retained on parse for completeness.
 	ForcedChoice  string `json:"forcedChoice,omitempty"`
 	ParallelLimit int32  `json:"parallelLimit,omitempty"`
+	// MaxToolCallsPerRun is the per-run anti-DoS fan-out ceiling (M82.5, ADR 0074): a single run may
+	// forward at most this many tool calls through the sidecar. 0 ⇒ unlimited (the default). Unlike
+	// ForcedChoice/ParallelLimit this IS wire-enforced here — the sidecar counts forwardable tool
+	// calls per verified run and denies the (N+1)th with a terminal 403. Mirrors the CRD field
+	// byte-for-byte (api/v1alpha1 ToolPolicySpec), which the controller marshals straight into the
+	// mounted ConfigMap.
+	MaxToolCallsPerRun int32 `json:"maxToolCallsPerRun,omitempty"`
 }
 
 // ToolPolicyOverride is one named tool-level rule (mirrors the CRD's ToolPolicyOverride).
@@ -104,6 +111,17 @@ func (p *ToolPolicy) Restricts() bool {
 		}
 	}
 	return false
+}
+
+// NeedsInspection reports whether the sidecar must read + classify the request body for this policy.
+// It is a SUPERSET of Restricts(): a policy needs body inspection if it restricts (has a deny /
+// require-approval rule — the §5 fail-closed regime) OR carries an active fan-out ceiling
+// (MaxToolCallsPerRun > 0). A ceiling must engage inspection even on an otherwise pure-allow policy
+// because COUNTING tool calls requires classifying the request body (a tools/call must be told apart
+// from a handshake / tools-list / notification, and a batch rejected). A nil policy, or a pure-allow
+// policy with no ceiling, returns false → the route stays byte-for-byte permissive (no body read).
+func (p *ToolPolicy) NeedsInspection() bool {
+	return p.Restricts() || (p != nil && p.MaxToolCallsPerRun > 0)
 }
 
 // normalizeRule maps an empty rule to the CRD default ("allow") and lower-cases for a stable

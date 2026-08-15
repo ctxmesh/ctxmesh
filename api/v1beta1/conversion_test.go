@@ -57,9 +57,10 @@ func TestAgentDeploymentRuntimeRoundTrip(t *testing.T) {
 			Runtime: &v1alpha1.RuntimeSpec{
 				OutputSchema: schema,
 				ToolPolicy: &v1alpha1.ToolPolicySpec{
-					Default:       "deny",
-					ForcedChoice:  "web_search",
-					ParallelLimit: 3,
+					Default:            "deny",
+					ForcedChoice:       "web_search",
+					ParallelLimit:      3,
+					MaxToolCallsPerRun: 25,
 					Overrides: []v1alpha1.ToolPolicyOverride{
 						{Name: "web_search", Rule: "allow", Retryable: true},
 						{Name: "write_file", Rule: "require-approval", Retryable: false},
@@ -94,6 +95,8 @@ func TestAgentDeploymentRuntimeRoundTrip(t *testing.T) {
 	assert.Equal(t, "deny", spoke.Spec.Runtime.ToolPolicy.Default)
 	assert.Equal(t, "web_search", spoke.Spec.Runtime.ToolPolicy.ForcedChoice)
 	assert.EqualValues(t, 3, spoke.Spec.Runtime.ToolPolicy.ParallelLimit)
+	assert.EqualValues(t, 25, spoke.Spec.Runtime.ToolPolicy.MaxToolCallsPerRun,
+		"MaxToolCallsPerRun (M82.5 fan-out ceiling) must survive ConvertFrom — a dropped field is a silently-unenforced ceiling")
 	require.Len(t, spoke.Spec.Runtime.ToolPolicy.Overrides, 2)
 	assert.Equal(t, "web_search", spoke.Spec.Runtime.ToolPolicy.Overrides[0].Name)
 	assert.True(t, spoke.Spec.Runtime.ToolPolicy.Overrides[0].Retryable)
