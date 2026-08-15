@@ -94,16 +94,16 @@ export interface NavItem {
   route?: string;
   /**
    * When set, this destination is capability-gated — hidden from any chrome whose
-   * caller isn't `allowed[requiresWrite.resource][requiresWrite.verb]` (display-only,
-   * ADR 0011). Read-open destinations omit it and are always shown. The COMMON case
-   * is a write affordance hidden from a viewer (verb "create"/"update"). But a `list`
-   * (read) verb is also valid here as a deliberate OPERATOR-ONLY *visibility* gate —
-   * e.g. Audit (`list auditlogs`, M63): a read-only page whose data spans users/
-   * namespaces, so it's shown only to the operator persona, exactly like MCP approvals.
-   * (The field name predates this read-gate use; a rename to `requiresCapability` is
-   * carded — m52 M63-UX residue.)
+   * caller isn't `allowed[requiresCapability.resource][requiresCapability.verb]`
+   * (display-only, ADR 0011). Read-open destinations omit it and are always shown.
+   * The COMMON case is a write affordance hidden from a viewer (verb "create"/"update").
+   * But a `list` (read) verb is also valid here as a deliberate OPERATOR-ONLY
+   * *visibility* gate — e.g. Audit (`list auditlogs`, M63): a read-only page whose
+   * data spans users/namespaces, so it's shown only to the operator persona, exactly
+   * like MCP approvals. Renamed from `requiresWrite` (m76.5, H4) because the field
+   * now also carries read-verb gates — the old name misled.
    */
-  requiresWrite?: { resource: string; verb: string };
+  requiresCapability?: { resource: string; verb: string };
 }
 
 export interface NavSection {
@@ -192,7 +192,7 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: FlaskConical,
         milestone: "M13",
         route: "/playground",
-        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+        requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
       {
         // Prompt version diff viewer (m17.12). Lists PromptVersions + side-by-side
@@ -240,7 +240,7 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Wrench,
         milestone: "M17",
         route: "/tools/approvals",
-        requiresWrite: { resource: RES_REGISTRIES, verb: "update" },
+        requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
       },
       {
         // Tool catalog (m17.10). The merged catalog of curated + user-added +
@@ -296,7 +296,7 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: ScrollText,
         milestone: "M63",
         route: "/audit",
-        requiresWrite: { resource: RES_AUDITLOGS, verb: "list" },
+        requiresCapability: { resource: RES_AUDITLOGS, verb: "list" },
       },
       {
         // Alerts (M70, ADR 0063 D2) — the fired-alert console feed: AlertPolicy
@@ -308,7 +308,7 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Bell,
         milestone: "M70",
         route: "/alerts",
-        requiresWrite: { resource: RES_ALERTPOLICIES, verb: "list" },
+        requiresCapability: { resource: RES_ALERTPOLICIES, verb: "list" },
       },
     ],
   },
@@ -378,7 +378,7 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: SlidersHorizontal,
         milestone: "M13",
         route: "/config",
-        requiresWrite: { resource: RES_AGENTS, verb: "create" },
+        requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
       {
         id: "registries",

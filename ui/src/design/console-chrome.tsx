@@ -86,7 +86,7 @@ export function ConsoleChrome({
         <nav className="flex-1 overflow-y-auto px-3 pb-3">
           {NAV_SECTIONS.map((section) => {
             const items = section.items.filter((it) => {
-              if (viewer && it.requiresWrite) return false;
+              if (viewer && it.requiresCapability) return false;
               if (devMode && !DEV_ALLOWED.has(it.id)) return false;
               return true;
             });

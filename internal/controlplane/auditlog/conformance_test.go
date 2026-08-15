@@ -163,6 +163,44 @@ func TestStore_PruneBefore(t *testing.T) {
 	})
 }
 
+// TestStore_DateRangeFilter proves the From/To query fields narrow the result set correctly
+// (m76.5 H2): From is inclusive lower bound, To is inclusive upper bound, and both are
+// optional (zero value = unbounded on that side). The keyset cursor continues to work inside
+// a date-windowed query.
+func TestStore_DateRangeFilter(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		base := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+		require.NoError(t, s.Append(ctx, at(base, "create", "ns1", "u")))
+		require.NoError(t, s.Append(ctx, at(base.Add(time.Hour), "update", "ns1", "u")))
+		require.NoError(t, s.Append(ctx, at(base.Add(2*time.Hour), "delete", "ns1", "u")))
+		require.NoError(t, s.Append(ctx, at(base.Add(3*time.Hour), "grant.create", "ns1", "u")))
+		require.NoError(t, s.Append(ctx, at(base.Add(4*time.Hour), "grant.revoke", "ns1", "u")))
+
+		// From only: at or after 11:00 → 4 rows (11, 12, 13, 14).
+		fromOnly, err := s.List(ctx, Query{From: base.Add(time.Hour)})
+		require.NoError(t, err)
+		assert.Len(t, fromOnly.Items, 4, "From is inclusive")
+
+		// To only: at or before 12:00 → 3 rows (10, 11, 12).
+		toOnly, err := s.List(ctx, Query{To: base.Add(2 * time.Hour)})
+		require.NoError(t, err)
+		assert.Len(t, toOnly.Items, 3, "To is inclusive")
+
+		// From + To: 11:00–13:00 → 3 rows (11, 12, 13).
+		window, err := s.List(ctx, Query{From: base.Add(time.Hour), To: base.Add(3 * time.Hour)})
+		require.NoError(t, err)
+		assert.Len(t, window.Items, 3)
+		assert.Equal(t, "grant.create", window.Items[0].Action, "newest-first within the window")
+		assert.Equal(t, "update", window.Items[2].Action)
+
+		// Neither: all 5 rows.
+		all, err := s.List(ctx, Query{})
+		require.NoError(t, err)
+		assert.Len(t, all.Items, 5, "zero From+To = unbounded")
+	})
+}
+
 func TestStore_DefaultsAndDetailRoundTrip(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
 		ctx := context.Background()

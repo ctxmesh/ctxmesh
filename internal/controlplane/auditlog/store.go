@@ -62,12 +62,14 @@ type Entry struct {
 
 // Query is the keyset list query for GET /api/audit. Filters are AND-ed; empty means "no filter".
 type Query struct {
-	Namespace    string // "" = all (requires cluster-wide audit-read; see the read handler)
-	Actor        string // exact match
-	Action       string // exact match
-	ResourceKind string // exact match
-	PageSize     int    // <=0 → DefaultPageSize; capped at MaxPageSize
-	Cursor       string // opaque keyset cursor ("" = first page)
+	Namespace    string    // "" = all (requires cluster-wide audit-read; see the read handler)
+	Actor        string    // exact match
+	Action       string    // exact match
+	ResourceKind string    // exact match
+	From         time.Time // occurred_at >= From (zero = unbounded)
+	To           time.Time // occurred_at <= To (zero = unbounded)
+	PageSize     int       // <=0 → DefaultPageSize; capped at MaxPageSize
+	Cursor       string    // opaque keyset cursor ("" = first page)
 }
 
 // Page is a page of newest-first entries + the opaque cursor for the next (older) page ("" = last page).

@@ -81,6 +81,12 @@ func (s *pgStore) List(ctx context.Context, q Query) (Page, error) {
 	if q.ResourceKind != "" {
 		add("resource_kind = $%d", q.ResourceKind)
 	}
+	if !q.From.IsZero() {
+		add("occurred_at >= $%d", q.From.UTC())
+	}
+	if !q.To.IsZero() {
+		add("occurred_at <= $%d", q.To.UTC())
+	}
 	if q.Cursor != "" {
 		// Keyset: rows strictly older than the cursor under ORDER BY occurred_at DESC, id DESC.
 		args = append(args, cur.TS, cur.ID)
