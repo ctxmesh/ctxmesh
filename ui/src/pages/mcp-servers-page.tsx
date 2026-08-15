@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Building2, ExternalLink, Globe, Lock, Plus, Share2, Trash2, Users, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   ConfirmDialog,
+  CredentialSourceBadge,
   EmptyState,
   ErrorState,
   ForbiddenInline,
@@ -35,8 +36,14 @@ type PageState =
   | { kind: "forbidden"; message: string }
   | { kind: "error"; message: string };
 
+// LocationState carries the highlight anchor from a post-connect navigation (T11).
+interface LocationState {
+  highlight?: string; // "<ns>/<name>" of the newly-connected server
+}
+
 export function McpServersPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { can } = useCapabilities();
   const canAdd = can(RES_REGISTRIES, "create");
   const canDelete = can(RES_REGISTRIES, "delete");
@@ -45,10 +52,20 @@ export function McpServersPage() {
   const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   // The server currently queued for deletion (its ConfirmDialog is open).
   const [toDelete, setToDelete] = React.useState<McpServerSummary | null>(null);
-  // The server currently being shared org-wide (its org-credential dialog is open).
-  const [toOrg, setToOrg] = React.useState<McpServerSummary | null>(null);
-  // The server queued for a visibility publish action.
-  const [toPublish, setToPublish] = React.useState<McpServerSummary | null>(null);
+  // The server queued for the unified Share flow (T5).
+  const [toShare, setToShare] = React.useState<McpServerSummary | null>(null);
+
+  // T11 — post-connect row highlight. Read once from location.state and clear so
+  // a back-navigate doesn't re-trigger the flash.
+  const highlightKey = (location.state as LocationState | null)?.highlight ?? null;
+  const [highlighted, setHighlighted] = React.useState<string | null>(highlightKey);
+  React.useEffect(() => {
+    if (!highlightKey) return;
+    // Clear location state so a reload doesn't re-highlight.
+    window.history.replaceState({}, "");
+    const t = setTimeout(() => setHighlighted(null), 2000);
+    return () => clearTimeout(t);
+  }, [highlightKey]);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setPage({ kind: "loading" });
@@ -142,103 +159,89 @@ export function McpServersPage() {
 
       {page.kind === "ready" && page.servers.length > 0 && (
         <ul className="space-y-2" data-testid="mcp-servers-list">
-          {page.servers.map((s) => (
-            <li
-              key={`${s.namespace}/${s.name}`}
-              className="rounded-lg border bg-card p-4 shadow-card"
-              data-testid={`mcp-server-${s.name}`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate font-medium">{s.name}</p>
-                    {s.authType === "oauth" ? (
-                      <Badge variant="secondary">OAuth</Badge>
-                    ) : s.secretName ? (
-                      <Badge variant="secondary">Key</Badge>
-                    ) : (
-                      <Badge variant="outline">No auth</Badge>
-                    )}
-                    {s.status === "pending" && (
-                      <Badge variant="outline">Pending approval</Badge>
-                    )}
-                    {s.scope && (
-                      <Badge
-                        variant={s.scope === "org" ? "warning" : "outline"}
-                        data-testid={`scope-${s.name}`}
-                      >
-                        {s.scope}
-                      </Badge>
-                    )}
-                    {s.visibility && (
-                      <ServerVisibilityBadge visibility={s.visibility} name={s.name} />
-                    )}
-                    {s.credentialSource && s.credentialSource !== "none" && (
-                      <Badge
+          {page.servers.map((s) => {
+            const rowKey = `${s.namespace}/${s.name}`;
+            const isHighlighted = highlighted === rowKey;
+            return (
+              <li
+                key={rowKey}
+                className={[
+                  "rounded-lg border bg-card p-4 shadow-card transition-colors duration-700",
+                  isHighlighted ? "ring-2 ring-primary bg-primary/5" : "",
+                ].join(" ")}
+                data-testid={`mcp-server-${s.name}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate font-medium">{s.name}</p>
+                      {s.authType === "oauth" ? (
+                        <Badge variant="secondary">OAuth</Badge>
+                      ) : s.secretName ? (
+                        <Badge variant="secondary">Key</Badge>
+                      ) : (
+                        <Badge variant="outline">No auth</Badge>
+                      )}
+                      {s.status === "pending" && (
+                        <Badge variant="outline">Pending approval</Badge>
+                      )}
+                      {s.scope && (
+                        <Badge
+                          variant={s.scope === "org" ? "warning" : "outline"}
+                          data-testid={`scope-${s.name}`}
+                        >
+                          {s.scope}
+                        </Badge>
+                      )}
+                      {s.visibility && (
+                        <ServerVisibilityBadge visibility={s.visibility} name={s.name} />
+                      )}
+                      <CredentialSourceBadge credentialSource={s.credentialSource} name={s.name} />
+                    </div>
+                    <p className="truncate text-xs text-muted-foreground">{s.url}</p>
+                    <p className="text-xs text-muted-foreground">{s.namespace}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant="secondary">
+                      {s.toolCount} {s.toolCount === 1 ? "tool" : "tools"}
+                    </Badge>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => navigate("/tools/catalog")}
+                    >
+                      <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                      Tools
+                    </Button>
+                    {canPromote && (
+                      <Button
                         variant="outline"
-                        className="text-[10px]"
-                        data-testid={`cred-source-${s.name}`}
+                        size="sm"
+                        onClick={() => setToShare(s)}
+                        data-testid={`share-mcp-${s.name}`}
+                        aria-label={`Share ${s.name}`}
+                        title="Share"
                       >
-                        {s.credentialSource}
-                      </Badge>
+                        <Share2 className="mr-1 h-3.5 w-3.5" />
+                        Share
+                      </Button>
+                    )}
+                    {canDelete && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setToDelete(s)}
+                        data-testid={`delete-mcp-${s.name}`}
+                        aria-label={`Delete ${s.name}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     )}
                   </div>
-                  <p className="truncate text-xs text-muted-foreground">{s.url}</p>
-                  <p className="text-xs text-muted-foreground">{s.namespace}</p>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge variant="secondary">
-                    {s.toolCount} {s.toolCount === 1 ? "tool" : "tools"}
-                  </Badge>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => navigate("/tools/catalog")}
-                  >
-                    <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                    Tools
-                  </Button>
-                  {canPromote && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setToOrg(s)}
-                      data-testid={`org-cred-${s.name}`}
-                      aria-label={`Share credential for ${s.name} with your org`}
-                      title="Share credential"
-                    >
-                      <Users className="mr-1 h-3.5 w-3.5" />
-                      Share credential
-                    </Button>
-                  )}
-                  {canPromote && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setToPublish(s)}
-                      data-testid={`publish-mcp-${s.name}`}
-                      aria-label={`Publish ${s.name}`}
-                      title="Publish"
-                    >
-                      <Share2 className="mr-1 h-3.5 w-3.5" />
-                      Publish
-                    </Button>
-                  )}
-                  {canDelete && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setToDelete(s)}
-                      data-testid={`delete-mcp-${s.name}`}
-                      aria-label={`Delete ${s.name}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -253,23 +256,12 @@ export function McpServersPage() {
         />
       )}
 
-      {toOrg && (
-        <SetOrgCredentialDialog
-          server={toOrg}
-          onClose={() => setToOrg(null)}
+      {toShare && (
+        <ShareDialog
+          server={toShare}
+          onClose={() => setToShare(null)}
           onDone={() => {
-            setToOrg(null);
-            load();
-          }}
-        />
-      )}
-
-      {toPublish && (
-        <PublishDialog
-          server={toPublish}
-          onClose={() => setToPublish(null)}
-          onDone={() => {
-            setToPublish(null);
+            setToShare(null);
             load();
           }}
         />
@@ -298,123 +290,21 @@ function ServerVisibilityBadge({ visibility, name }: { visibility: string; name:
   );
 }
 
-// SetOrgCredentialDialog (m26.5, ADR 0029 §7) — promote a server to ORG scope and set
-// its shared credential (the fully-headless path: one admin-set credential every user's
-// runs inject, no per-user consent). The credential is a password-type input, wiped from
-// state before the round-trip, sent ONLY in the request body → a Secret server-side; it
-// is never displayed, logged, or persisted client-side.
-function SetOrgCredentialDialog({
-  server,
-  onClose,
-  onDone,
-}: {
-  server: McpServerSummary;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const { toast } = useToast();
-  const [credential, setCredential] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
+// ShareDialog (m76.2 T5) — ONE unified "Share" entry point that replaces the two
+// side-by-side share controls. The user picks a mode first:
+//   - "byo" (BYO-safe, recommended): publish the server definition; teammates connect
+//     their OWN accounts — no credential sharing. Reveals a visibility picker.
+//   - "shared-cred": share ONE org credential so every user's runs inject it.
+//     Reveals a credential input. Warns clearly that this is the non-BYO path.
+//
+// Both backend paths are preserved; the entry point is unified (T5 fix).
+//
+// T7: dialogs stay OPEN on failure, showing an inline error. Only close on success.
 
-  async function onSet() {
-    if (!credential.trim() || busy) return;
-    setBusy(true);
-    const cred = credential;
-    setCredential(""); // wipe before the round-trip — the secret never lingers in state
-    try {
-      await api.setOrgCredential({
-        server: server.name,
-        namespace: server.namespace,
-        credential: cred,
-      });
-      toast({
-        variant: "success",
-        title: "Org credential set",
-        description: `${server.name} is now shared org-wide.`,
-      });
-      onDone();
-    } catch (err) {
-      toast({
-        variant: "error",
-        title: "Couldn't set org credential",
-        description: err instanceof Error ? err.message : "failed",
-      });
-      setBusy(false);
-      onClose();
-    }
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Share ${server.name} with your org`}
-    >
-      <div
-        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
-      >
-        <h2 className="text-lg font-semibold tracking-snug">
-          Share {server.name} with your org
-        </h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Promote this server to <span className="font-medium">org</span> scope and set one
-          shared credential. Every user&apos;s runs then use it — no per-user connect. The
-          credential is stored server-side only.
-        </p>
-        <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="org-cred-caution">
-          This shares ONE credential with everyone — every user&apos;s runs use it. If teammates
-          should connect their own accounts instead, use Publish.
-        </p>
-        <div className="mt-4 space-y-1.5">
-          <Label htmlFor="org-cred">Shared credential (bearer token)</Label>
-          <Input
-            id="org-cred"
-            type="password"
-            autoComplete="off"
-            value={credential}
-            onChange={(e) => setCredential(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void onSet();
-              }
-            }}
-            placeholder="paste the org's token"
-            data-testid="org-cred-input"
-          />
-        </div>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => void onSet()}
-            disabled={!credential.trim() || busy}
-            data-testid="org-cred-submit"
-          >
-            {busy ? "Setting…" : "Set org credential"}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// PublishDialog (m73.7) — widens a server's visibility. Pick team/org/public →
-// calls POST /api/mcp/publish → on success reloads the list; on 403 surfaces the
-// tier requirement honestly. Do NOT auto-publish — this is an explicit user action.
+type ShareMode = "byo" | "shared-cred";
 type PublishVisibility = "team" | "org" | "public";
 
-function PublishDialog({
+function ShareDialog({
   server,
   onClose,
   onDone,
@@ -424,54 +314,91 @@ function PublishDialog({
   onDone: () => void;
 }) {
   const { toast } = useToast();
-  // Default to server's current visibility if it's a known publish tier, else "team".
+  const [mode, setMode] = React.useState<ShareMode>("byo");
+  const [inlineError, setInlineError] = React.useState<string | null>(null);
+
+  // BYO publish sub-state
   const defaultVisibility: PublishVisibility =
     server.visibility === "org" || server.visibility === "public" || server.visibility === "team"
       ? (server.visibility as PublishVisibility)
       : "team";
   const [selected, setSelected] = React.useState<PublishVisibility>(defaultVisibility);
   const [publicConfirmed, setPublicConfirmed] = React.useState(false);
+
+  // Shared-cred sub-state
+  const [credential, setCredential] = React.useState("");
+
   const [busy, setBusy] = React.useState(false);
   const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
 
-  // Reset the public-confirm checkbox whenever the user changes their selection.
-  function handleSelect(v: PublishVisibility) {
-    setSelected(v);
-    if (v !== "public") setPublicConfirmed(false);
+  function handleModeChange(m: ShareMode) {
+    setMode(m);
+    setInlineError(null);
+    if (m !== "byo") setPublicConfirmed(false);
   }
 
-  const isPublishDisabled = busy || (selected === "public" && !publicConfirmed);
+  function handleVisibilitySelect(v: PublishVisibility) {
+    setSelected(v);
+    if (v !== "public") setPublicConfirmed(false);
+    setInlineError(null);
+  }
 
-  async function onPublish() {
-    if (isPublishDisabled) return;
+  const isSubmitDisabled =
+    busy ||
+    (mode === "byo" && selected === "public" && !publicConfirmed) ||
+    (mode === "shared-cred" && !credential.trim());
+
+  async function onSubmit() {
+    if (isSubmitDisabled) return;
     setBusy(true);
-    try {
-      await api.publishMcpServer(server.namespace, server.name, selected);
-      toast({
-        variant: "success",
-        title: "Visibility updated",
-        description: `${server.name} is now ${selected}-visible.`,
-      });
-      onDone();
-    } catch (err) {
-      const isForbidden = err instanceof ApiError && err.isForbidden;
-      toast({
-        variant: "error",
-        title: "Publish failed",
-        description: isForbidden
-          ? `You need ${
-              selected === "public"
-                ? "Platform-admin"
-                : selected === "org"
-                ? "Tenant-admin"
-                : "team-admin"
-            } rights to publish ${selected}-wide.`
+    setInlineError(null);
+
+    if (mode === "byo") {
+      try {
+        await api.publishMcpServer(server.namespace, server.name, selected);
+        toast({
+          variant: "success",
+          title: "Visibility updated",
+          description: `${server.name} is now ${selected}-visible.`,
+        });
+        onDone();
+      } catch (err) {
+        const isForbidden = err instanceof ApiError && err.isForbidden;
+        const serverMsg = err instanceof ApiError ? err.message : null;
+        const fallback = isForbidden
+          ? `You need org-admin rights to publish ${selected}-wide.`
           : err instanceof Error
           ? err.message
-          : "publish failed",
-      });
-      setBusy(false);
-      onClose();
+          : "publish failed";
+        // T7: stay open with inline error; use server message when available (T12)
+        setInlineError(serverMsg || fallback);
+        setBusy(false);
+      }
+    } else {
+      // shared-cred mode
+      const cred = credential;
+      setCredential(""); // wipe before the round-trip — the secret never lingers in state
+      try {
+        await api.setOrgCredential({
+          server: server.name,
+          namespace: server.namespace,
+          credential: cred,
+        });
+        toast({
+          variant: "success",
+          title: "Org credential set",
+          description: `${server.name} is now shared org-wide.`,
+        });
+        onDone();
+      } catch (err) {
+        const serverMsg = err instanceof ApiError ? err.message : null;
+        const fallback = err instanceof Error ? err.message : "failed";
+        // T7: stay open with inline error; use server message when available (T12)
+        setInlineError(serverMsg || fallback);
+        // Restore credential so user can fix without re-pasting
+        setCredential(cred);
+        setBusy(false);
+      }
     }
   }
 
@@ -480,7 +407,8 @@ function PublishDialog({
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label={`Publish ${server.name}`}
+      aria-label={`Share ${server.name}`}
+      data-testid="share-dialog"
     >
       <div
         className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
@@ -490,82 +418,174 @@ function PublishDialog({
       <div
         ref={panelRef}
         tabIndex={-1}
-        className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
+        className="relative w-full max-w-lg rounded-lg border bg-card p-6 shadow-overlay outline-none"
       >
-        <h2 className="text-lg font-semibold tracking-snug">Publish {server.name}</h2>
+        <h2 className="text-lg font-semibold tracking-snug">Share {server.name}</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Publishing shares only the server definition — teammates discover it and connect
-          their OWN accounts; your credentials are never shared.
+          Choose how teammates can access this server.
         </p>
         {server.visibility && (
-          <p className="mt-1 text-xs text-muted-foreground" data-testid="publish-current-visibility">
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="share-current-visibility">
             Currently: <span className="font-medium">{server.visibility}</span>
           </p>
         )}
-        {server.credentialSource === "shared" && (
-          <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="publish-shared-cred-warning">
-            Caution: this server uses a shared credential — widening visibility also widens
-            access to that credential.
-          </p>
-        )}
+
+        {/* Mode picker */}
         <div className="mt-4 space-y-2">
-          {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
-            <label
-              key={v}
-              className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-accent/40"
-              data-testid={`publish-option-${v}`}
-            >
-              <input
-                type="radio"
-                name="visibility"
-                value={v}
-                checked={selected === v}
-                onChange={() => handleSelect(v)}
-                className="accent-primary"
-              />
-              <div>
-                <p className="font-medium capitalize">{v}</p>
-                <p className="text-xs text-muted-foreground">
-                  {v === "team"
-                    ? "Visible to your team's namespace"
-                    : v === "org"
-                    ? "Visible org-wide (Tenant-admin required)"
-                    : "Visible to everyone (Platform-admin required)"}
-                </p>
-              </div>
-            </label>
-          ))}
+          <label
+            className="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent/40"
+            data-testid="share-mode-byo"
+          >
+            <input
+              type="radio"
+              name="share-mode"
+              value="byo"
+              checked={mode === "byo"}
+              onChange={() => handleModeChange("byo")}
+              className="mt-0.5 accent-primary"
+              data-testid="share-mode-byo-radio"
+            />
+            <div>
+              <p className="font-medium">Teammates connect their own accounts <span className="text-xs text-muted-foreground font-normal">(recommended)</span></p>
+              <p className="text-xs text-muted-foreground">
+                Publish the server definition — teammates discover it and connect their OWN accounts. Your credentials are never shared.
+              </p>
+            </div>
+          </label>
+
+          <label
+            className="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent/40"
+            data-testid="share-mode-shared-cred"
+          >
+            <input
+              type="radio"
+              name="share-mode"
+              value="shared-cred"
+              checked={mode === "shared-cred"}
+              onChange={() => handleModeChange("shared-cred")}
+              className="mt-0.5 accent-primary"
+              data-testid="share-mode-shared-cred-radio"
+            />
+            <div>
+              <p className="font-medium">Share one credential everyone uses</p>
+              <p className="text-xs text-muted-foreground">
+                Set one shared org credential — every user&apos;s runs inject it automatically, no per-user connect.
+              </p>
+            </div>
+          </label>
         </div>
-        {selected === "public" && (
-          <div className="mt-3 space-y-2">
-            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-public-warning">
-              Public means every tenant on this cluster can discover it.
-            </p>
-            <label className="flex cursor-pointer items-center gap-2 text-sm" data-testid="publish-public-confirm-label">
-              <input
-                type="checkbox"
-                checked={publicConfirmed}
-                onChange={(e) => setPublicConfirmed(e.target.checked)}
-                className="accent-primary"
-                data-testid="publish-public-confirm"
-              />
-              I understand this is discoverable by all tenants
-            </label>
+
+        {/* BYO sub-form: visibility picker */}
+        {mode === "byo" && (
+          <div className="mt-4 space-y-2" data-testid="share-byo-section">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Visibility</p>
+            {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
+              <label
+                key={v}
+                className="flex cursor-pointer items-center gap-3 rounded-md border p-3 hover:bg-accent/40"
+                data-testid={`publish-option-${v}`}
+              >
+                <input
+                  type="radio"
+                  name="visibility"
+                  value={v}
+                  checked={selected === v}
+                  onChange={() => handleVisibilitySelect(v)}
+                  className="accent-primary"
+                />
+                <div>
+                  <p className="font-medium capitalize">{v}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {v === "team"
+                      ? "Visible to your team's namespace"
+                      : v === "org"
+                      ? "Visible org-wide (org-admin required)"
+                      : "Visible to everyone (Platform-admin required)"}
+                  </p>
+                </div>
+              </label>
+            ))}
+            {selected === "public" && (
+              <div className="mt-2 space-y-2">
+                <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="publish-public-warning">
+                  Public means every tenant on this cluster can discover it.
+                </p>
+                <label className="flex cursor-pointer items-center gap-2 text-sm" data-testid="publish-public-confirm-label">
+                  <input
+                    type="checkbox"
+                    checked={publicConfirmed}
+                    onChange={(e) => setPublicConfirmed(e.target.checked)}
+                    className="accent-primary"
+                    data-testid="publish-public-confirm"
+                  />
+                  I understand this is discoverable by all tenants
+                </label>
+              </div>
+            )}
+            {server.credentialSource === "shared" && (
+              <p className="mt-2 text-sm text-amber-600 dark:text-amber-400" data-testid="publish-shared-cred-warning">
+                Caution: this server uses a shared credential — widening visibility also widens
+                access to that credential.
+              </p>
+            )}
           </div>
         )}
-        <p className="mt-3 text-xs text-muted-foreground">
-          Requires the matching role — a 403 will tell you which role is needed.
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
+
+        {/* Shared-cred sub-form: credential input */}
+        {mode === "shared-cred" && (
+          <div className="mt-4 space-y-3" data-testid="share-shared-cred-section">
+            <p className="text-sm text-amber-600 dark:text-amber-400" data-testid="org-cred-caution">
+              This shares ONE credential with everyone — every user&apos;s runs use it. If teammates
+              should connect their own accounts instead, choose the option above.
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="org-cred">Shared credential (bearer token)</Label>
+              <Input
+                id="org-cred"
+                type="password"
+                autoComplete="off"
+                value={credential}
+                onChange={(e) => setCredential(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void onSubmit();
+                  }
+                }}
+                placeholder="paste the org's token"
+                data-testid="org-cred-input"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* T7: inline error — stays visible without closing the dialog */}
+        {inlineError && (
+          <p
+            className="mt-3 text-sm text-destructive"
+            role="alert"
+            data-testid="share-inline-error"
+          >
+            {inlineError}
+          </p>
+        )}
+
+        <div className="mt-6 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button
-            onClick={() => void onPublish()}
-            disabled={isPublishDisabled}
-            data-testid="publish-submit"
+            onClick={() => void onSubmit()}
+            disabled={isSubmitDisabled}
+            data-testid="share-submit"
           >
-            {busy ? "Publishing…" : `Publish as ${selected}`}
+            {busy
+              ? mode === "byo"
+                ? "Publishing…"
+                : "Setting…"
+              : mode === "byo"
+              ? `Publish as ${selected}`
+              : "Set org credential"}
           </Button>
         </div>
       </div>

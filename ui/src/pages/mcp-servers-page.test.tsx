@@ -21,6 +21,8 @@ function recordingFetch(opts?: {
   references?: { kind: string; name: string; agentRef: string }[];
   caps?: Record<string, Record<string, boolean>>;
   deleteStatus?: number;
+  publishStatus?: number;
+  orgCredStatus?: number;
 }) {
   const calls: Captured[] = [];
   // The list flips to empty after a successful delete so the reload is observable.
@@ -51,7 +53,14 @@ function recordingFetch(opts?: {
         });
       }
       if (path === "/api/mcp/org-credential" && method === "POST") {
+        const status = opts?.orgCredStatus ?? 200;
+        if (status >= 400) return j({ error: "forbidden" }, false, status);
         return j({ status: "org-credential-set", server: "scalekit-mcp-server", namespace: "prod" });
+      }
+      if (path === "/api/mcp/publish" && method === "POST") {
+        const status = opts?.publishStatus ?? 200;
+        if (status >= 400) return j({ error: "forbidden" }, false, status);
+        return j({ name: defaultRow.name, namespace: defaultRow.namespace, visibility: "org" });
       }
       if (path.endsWith("/references")) {
         return j({ references: opts?.references ?? [], bindingCount: (opts?.references ?? []).length });
@@ -79,6 +88,8 @@ interface McpRow {
   status: string;
   authType?: string;
   scope?: string;
+  visibility?: string;
+  credentialSource?: string;
 }
 const defaultRow: McpRow = {
   name: "scalekit-mcp-server",
@@ -141,30 +152,6 @@ describe("McpServersPage delete (m26.4)", () => {
     expect(screen.getByText(/No MCP servers yet/)).toBeInTheDocument();
   });
 
-  it("shows the scope badge and promotes a server to org scope with a shared credential, then reloads", async () => {
-    const calls = recordingFetch();
-    renderPage();
-
-    // The current scope is surfaced as a badge.
-    expect(await screen.findByTestId("scope-scalekit-mcp-server")).toHaveTextContent("personal");
-
-    // The org-credential (share) action opens a dialog with a credential input.
-    fireEvent.click(screen.getByTestId("org-cred-scalekit-mcp-server"));
-    const input = await screen.findByTestId("org-cred-input");
-    expect(input).toHaveAttribute("type", "password"); // the secret is never a plain field
-    fireEvent.change(input, { target: { value: "org-shared-token" } });
-
-    fireEvent.click(screen.getByTestId("org-cred-submit"));
-
-    await waitFor(() => {
-      expect(calls.some((c) => c.method === "POST" && c.url === "/api/mcp/org-credential")).toBe(true);
-    });
-    // A reload follows (a second list GET after the initial one).
-    await waitFor(() => {
-      expect(calls.filter((c) => c.url === "/api/mcpservers" && c.method === "GET").length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
   it("hides the delete affordance when the caller cannot delete registries", async () => {
     recordingFetch({ caps: { agentregistries: { create: true, delete: false } } });
     renderPage();
@@ -175,162 +162,257 @@ describe("McpServersPage delete (m26.4)", () => {
   });
 });
 
-describe("McpServersPage publish + badges (m73.7)", () => {
-  const rowWithBadges: McpRow & { visibility?: string; credentialSource?: string } = {
+// ── T5: Unified Share dialog ─────────────────────────────────────────────────
+describe("McpServersPage unified Share dialog (m76.2 T5)", () => {
+  const rowWithBadges: McpRow = {
     ...defaultRow,
     visibility: "team",
     credentialSource: "byo-oauth",
   };
 
-  function publishFetch(opts?: { publishStatus?: number }) {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((input: string | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        const path = url.split("?")[0];
-        const method = init?.method ?? "GET";
-        const j = (body: unknown, ok = true, status = 200) =>
-          Promise.resolve({
-            ok,
-            status,
-            json: async () => body,
-            text: async () => JSON.stringify(body),
-          } as Response);
-
-        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
-        if (path.startsWith("/api/capabilities"))
-          return j({
-            namespace: "",
-            allowed: { agentregistries: { create: true, update: true, delete: true } },
-          });
-        if (path === "/api/mcpservers" && method === "GET")
-          return j({ items: [rowWithBadges] });
-        if (path === "/api/mcp/publish" && method === "POST") {
-          const status = opts?.publishStatus ?? 200;
-          if (status >= 400) return j({ error: "forbidden" }, false, status);
-          return j({
-            name: defaultRow.name,
-            namespace: defaultRow.namespace,
-            visibility: "org",
-          });
-        }
-        return j({}, false, 404);
-      }),
-    );
-  }
-
-  it("shows visibility and credentialSource badges on the server row", async () => {
-    publishFetch();
+  it("ONE Share button opens a unified dialog with mode choice", async () => {
+    recordingFetch({ servers: [rowWithBadges] });
     renderPage();
 
-    expect(
-      await screen.findByTestId(`visibility-${defaultRow.name}`),
-    ).toHaveTextContent("team");
-    expect(screen.getByTestId(`cred-source-${defaultRow.name}`)).toHaveTextContent(
-      "byo-oauth",
-    );
+    // Only ONE share button (not two separate org-cred + publish buttons).
+    await screen.findByTestId("mcp-server-scalekit-mcp-server");
+    expect(screen.queryByTestId(`org-cred-${defaultRow.name}`)).toBeNull();
+    expect(screen.queryByTestId(`publish-mcp-${defaultRow.name}`)).toBeNull();
+
+    const shareBtn = screen.getByTestId(`share-mcp-${defaultRow.name}`);
+    fireEvent.click(shareBtn);
+
+    // The dialog opens with both mode options.
+    expect(await screen.findByTestId("share-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("share-mode-byo")).toBeInTheDocument();
+    expect(screen.getByTestId("share-mode-shared-cred")).toBeInTheDocument();
   });
 
-  it("opens publish dialog and submits, showing success toast", async () => {
-    publishFetch();
+  it("BYO mode (default) shows visibility picker, NOT credential input", async () => {
+    recordingFetch({ servers: [rowWithBadges] });
     renderPage();
 
-    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
-    // The publish dialog opens with team selected by default
-    expect(await screen.findByTestId("publish-option-org")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("publish-submit"));
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
 
+    // BYO is default mode — visibility picker visible, cred input hidden.
+    expect(await screen.findByTestId("share-byo-section")).toBeInTheDocument();
+    expect(screen.queryByTestId("org-cred-input")).toBeNull();
+  });
+
+  it("switching to shared-cred mode shows the credential input and caution", async () => {
+    recordingFetch({ servers: [rowWithBadges] });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+
+    // Switch to shared-cred mode.
+    fireEvent.click(screen.getByTestId("share-mode-shared-cred-radio"));
+
+    expect(await screen.findByTestId("share-shared-cred-section")).toBeInTheDocument();
+    expect(screen.getByTestId("org-cred-input")).toBeInTheDocument();
+    expect(screen.getByTestId("org-cred-caution")).toBeInTheDocument();
+    // BYO section hidden.
+    expect(screen.queryByTestId("share-byo-section")).toBeNull();
+  });
+
+  it("BYO mode submits publish and closes dialog on success", async () => {
+    const calls = recordingFetch({ servers: [rowWithBadges] });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+
+    // BYO is default — submit with team visibility.
+    fireEvent.click(screen.getByTestId("share-submit"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === "POST" && c.url === "/api/mcp/publish")).toBe(true);
+    });
     await waitFor(() => {
       expect(screen.getByText(/Visibility updated/)).toBeInTheDocument();
     });
-  });
-
-  it("shows honest 403 error on publish forbidden", async () => {
-    publishFetch({ publishStatus: 403 });
-    renderPage();
-
-    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
-    fireEvent.click(await screen.findByTestId("publish-submit"));
-
+    // Dialog closes on success.
     await waitFor(() => {
-      expect(screen.getByText(/Publish failed/)).toBeInTheDocument();
+      expect(screen.queryByTestId("share-dialog")).toBeNull();
     });
   });
 
-  it("public publish requires confirm checkbox before Publish button is enabled (P1-3)", async () => {
-    publishFetch();
+  it("shared-cred mode submits org-credential and reloads on success", async () => {
+    const calls = recordingFetch({ servers: [rowWithBadges] });
     renderPage();
 
-    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
-    // Select public tier
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+    fireEvent.click(screen.getByTestId("share-mode-shared-cred-radio"));
+
+    const input = await screen.findByTestId("org-cred-input");
+    expect(input).toHaveAttribute("type", "password");
+    fireEvent.change(input, { target: { value: "org-shared-token" } });
+
+    fireEvent.click(screen.getByTestId("share-submit"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === "POST" && c.url === "/api/mcp/org-credential")).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Org credential set/)).toBeInTheDocument();
+    });
+    // A reload follows (a second list GET after the initial one).
+    await waitFor(() => {
+      expect(calls.filter((c) => c.url === "/api/mcpservers" && c.method === "GET").length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("public publish requires confirm checkbox before submit is enabled", async () => {
+    recordingFetch({ servers: [rowWithBadges] });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-byo-section");
+
+    // Select public tier.
     fireEvent.click(screen.getByTestId("publish-option-public").querySelector("input")!);
 
-    // Warning should appear
     expect(await screen.findByTestId("publish-public-warning")).toBeInTheDocument();
-    // Publish button should be disabled until checkbox is checked
-    const submitBtn = screen.getByTestId("publish-submit");
+    const submitBtn = screen.getByTestId("share-submit");
     expect(submitBtn).toBeDisabled();
 
-    // Check the confirm checkbox
     fireEvent.click(screen.getByTestId("publish-public-confirm"));
     expect(submitBtn).not.toBeDisabled();
   });
 
-  it("shared-cred warning renders in publish dialog (P1-3)", async () => {
-    const sharedCredRow: McpRow & { visibility?: string; credentialSource?: string } = {
-      ...defaultRow,
-      visibility: "team",
-      credentialSource: "shared",
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((input: string | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : input.toString();
-        const path = url.split("?")[0];
-        const method = init?.method ?? "GET";
-        const j = (body: unknown, ok = true, status = 200) =>
-          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
-        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
-        if (path.startsWith("/api/capabilities"))
-          return j({ namespace: "", allowed: { agentregistries: { create: true, update: true, delete: true } } });
-        if (path === "/api/mcpservers" && method === "GET") return j({ items: [sharedCredRow] });
-        return j({}, false, 404);
-      }),
-    );
+  it("shared-cred warning renders in BYO mode for a server with credentialSource=shared", async () => {
+    const sharedCredRow: McpRow = { ...defaultRow, visibility: "team", credentialSource: "shared" };
+    recordingFetch({ servers: [sharedCredRow] });
     renderPage();
 
-    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    // BYO section is default.
     expect(await screen.findByTestId("publish-shared-cred-warning")).toBeInTheDocument();
     expect(screen.getByTestId("publish-shared-cred-warning")).toHaveTextContent(
       /widening visibility also widens access to that credential/,
     );
   });
 
-  it("SetOrgCredentialDialog caution line renders (P1-1)", async () => {
-    recordingFetch();
+  it("shows current visibility at the top of the Share dialog", async () => {
+    recordingFetch({ servers: [rowWithBadges] });
     renderPage();
 
-    fireEvent.click(await screen.findByTestId(`org-cred-${defaultRow.name}`));
-    expect(await screen.findByTestId("org-cred-caution")).toBeInTheDocument();
-    expect(screen.getByTestId("org-cred-caution")).toHaveTextContent(
-      /If teammates should connect their own accounts instead, use Publish/,
-    );
-  });
-
-  it("publish dialog shows current visibility and safety subtitle (P1-3)", async () => {
-    publishFetch();
-    renderPage();
-
-    fireEvent.click(await screen.findByTestId(`publish-mcp-${defaultRow.name}`));
-    // Safety subtitle
-    expect(await screen.findByText(/teammates discover it and connect their OWN accounts/)).toBeInTheDocument();
-    // Current visibility shown (rowWithBadges has visibility: "team")
-    expect(screen.getByTestId("publish-current-visibility")).toHaveTextContent("Currently: team");
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    const visEl = await screen.findByTestId("share-current-visibility");
+    expect(visEl).toHaveTextContent("Currently: team");
   });
 });
 
-// m76.1: empty state cross-link to Gallery (T9 overlap noted — this test pins the
-// affordance so m76.2 doesn't re-add it and duplicate the element).
+// ── T7: dialogs keep-open on failure ────────────────────────────────────────
+describe("McpServersPage dialogs stay open on failure (m76.2 T7)", () => {
+  it("publish 403 → dialog stays open with inline error (not a toast-and-close)", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, visibility: "team" }], publishStatus: 403 });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+    fireEvent.click(screen.getByTestId("share-submit"));
+
+    // Inline error shown.
+    expect(await screen.findByTestId("share-inline-error")).toBeInTheDocument();
+    // Dialog is still open.
+    expect(screen.getByTestId("share-dialog")).toBeInTheDocument();
+  });
+
+  it("org-credential 403 → dialog stays open with inline error", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, visibility: "team" }], orgCredStatus: 403 });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+    fireEvent.click(screen.getByTestId("share-mode-shared-cred-radio"));
+
+    const input = await screen.findByTestId("org-cred-input");
+    fireEvent.change(input, { target: { value: "bad-token" } });
+    fireEvent.click(screen.getByTestId("share-submit"));
+
+    // Inline error shown, dialog still open.
+    expect(await screen.findByTestId("share-inline-error")).toBeInTheDocument();
+    expect(screen.getByTestId("share-dialog")).toBeInTheDocument();
+  });
+});
+
+// ── T8: CredentialSourceBadge — human labels ─────────────────────────────────
+describe("McpServersPage CredentialSourceBadge (m76.2 T8)", () => {
+  it("renders 'You connect your account' for byo-oauth", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, credentialSource: "byo-oauth" }] });
+    renderPage();
+
+    const badge = await screen.findByTestId(`cred-source-${defaultRow.name}`);
+    expect(badge).toHaveTextContent("You connect your account");
+  });
+
+  it("renders 'Uses a shared credential' for shared", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, credentialSource: "shared" }] });
+    renderPage();
+
+    const badge = await screen.findByTestId(`cred-source-${defaultRow.name}`);
+    expect(badge).toHaveTextContent("Uses a shared credential");
+  });
+
+  it("hides the badge when credentialSource is none", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, credentialSource: "none" }] });
+    renderPage();
+
+    await screen.findByTestId(`mcp-server-${defaultRow.name}`);
+    expect(screen.queryByTestId(`cred-source-${defaultRow.name}`)).toBeNull();
+  });
+
+  it("hides the badge when credentialSource is absent", async () => {
+    const { credentialSource: _removed, ...rowWithout } = { ...defaultRow, credentialSource: undefined };
+    recordingFetch({ servers: [rowWithout] });
+    renderPage();
+
+    await screen.findByTestId(`mcp-server-${defaultRow.name}`);
+    expect(screen.queryByTestId(`cred-source-${defaultRow.name}`)).toBeNull();
+  });
+});
+
+// ── Badges ────────────────────────────────────────────────────────────────────
+describe("McpServersPage visibility + scope badges (m73.7)", () => {
+  it("shows visibility and scope badges on the server row", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, visibility: "team", credentialSource: "byo-oauth" }] });
+    renderPage();
+
+    expect(await screen.findByTestId(`visibility-${defaultRow.name}`)).toHaveTextContent("team");
+    expect(screen.getByTestId(`scope-${defaultRow.name}`)).toHaveTextContent("personal");
+  });
+});
+
+// ── T11: post-connect row highlight ──────────────────────────────────────────
+describe("McpServersPage post-connect row highlight (m76.2 T11)", () => {
+  it("highlights the row matching location.state.highlight on mount, then fades", async () => {
+    recordingFetch();
+    render(
+      <MemoryRouter
+        initialEntries={[{ pathname: "/tools/mcp-servers", state: { highlight: "prod/scalekit-mcp-server" } }]}
+        initialIndex={0}
+      >
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <McpServersPage />
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+
+    // The row should carry the highlight ring class.
+    const row = await screen.findByTestId("mcp-server-scalekit-mcp-server");
+    expect(row.className).toMatch(/ring-2/);
+  });
+});
+
+// ── m76.1: empty state cross-link to Gallery ─────────────────────────────────
+// (pins the affordance so m76.2 doesn't re-add it and duplicate the element)
 describe("McpServersPage empty state Gallery cross-link (m76.1)", () => {
   it("shows a 'discover shared servers' link to /gallery in the empty state", async () => {
     recordingFetch({ servers: [] });
