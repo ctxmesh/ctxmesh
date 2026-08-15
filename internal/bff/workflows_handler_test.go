@@ -125,11 +125,11 @@ func drainEvents(t *testing.T, s *Server, runID string) []run.Event {
 	return evs
 }
 
-// wfHasEventPrefix returns true if any event in evs has the given Kind and a Data string
-// that starts with the given prefix.
-func wfHasEventPrefix(evs []run.Event, kind run.EventKind, prefix string) (string, bool) {
+// wfHasEventPrefix returns true if any EventStep event in evs has a Data string that starts with the given
+// prefix (every workflow node/gate event the tests assert on is an EventStep).
+func wfHasEventPrefix(evs []run.Event, prefix string) (string, bool) {
 	for _, ev := range evs {
-		if ev.Kind == kind && len(ev.Data) >= len(prefix) && ev.Data[:len(prefix)] == prefix {
+		if ev.Kind == run.EventStep && len(ev.Data) >= len(prefix) && ev.Data[:len(prefix)] == prefix {
 			return ev.Data, true
 		}
 	}
@@ -824,7 +824,7 @@ func TestWorkflowExecutor_NodeStartedEvent(t *testing.T) {
 	// The node "only" is now in flight; check the event log.
 	child := inFlightChild(t, s, wfID)
 	evs := drainEvents(t, s, wfID)
-	data, found := wfHasEventPrefix(evs, run.EventStep, "node-started:only:")
+	data, found := wfHasEventPrefix(evs, "node-started:only:")
 	assert.True(t, found, "the executor must emit a node-started event for the launched node")
 	if found {
 		assert.Equal(t, "node-started:only:"+child.ID, data,
@@ -850,7 +850,7 @@ func TestWorkflowExecutor_NodeCompletedEvent(t *testing.T) {
 	drive(t, s, wfID)
 
 	evs := drainEvents(t, s, wfID)
-	data, found := wfHasEventPrefix(evs, run.EventStep, "node-completed:only:")
+	data, found := wfHasEventPrefix(evs, "node-completed:only:")
 	assert.True(t, found, "the executor must emit a node-completed event after the node finishes")
 	if found {
 		assert.Equal(t, "node-completed:only:"+child.ID, data,
