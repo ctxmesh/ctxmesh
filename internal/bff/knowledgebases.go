@@ -160,6 +160,29 @@ func (s *Server) handleUploadKBDocument(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// --- storage hard-cap gate (m80.3, ADR 0061 governance #7 hard enforcement) -------------------
+	// Reject an upload to a tenant already at its corpus hard cap. The AT-CAP state is read from the
+	// namespace→tenant mirror the Tenant controller PROJECTS (ADR 0011: the controller owns the
+	// cross-namespace corpus aggregation; the BFF holds NO Tenant/agent-CRD cross-namespace RBAC and
+	// does NOT aggregate here). This is bounded-eventually-consistent: a burst of uploads between two
+	// reconciles can overshoot the cap by at most (burst × maxDocumentUploadBytes = 25 MiB) before the
+	// next reconcile flips the flag — an accepted tradeoff for a storage guardrail (not a security
+	// boundary). Fail-OPEN when the store is unconfigured / the namespace is unknown: the guard must
+	// never wedge uploads for a namespace outside any tenant or before the mirror has converged.
+	if s.namespaceTenantStore != nil {
+		exceeded, _, capErr := s.namespaceTenantStore.StorageHardCapExceededFor(r.Context(), ns)
+		if capErr != nil {
+			// A store read error must not silently drop the guard, but must not fail-closed either
+			// (a Postgres blip would wedge all uploads). Log + fail-open — the controller re-projects.
+			s.log.Error(capErr, "upload: storage hard-cap lookup failed; allowing (fail-open)", "ns", ns, "kb", kbName)
+		} else if exceeded {
+			writeErrorCode(w, http.StatusRequestEntityTooLarge, errCodeStorageQuotaExceeded,
+				fmt.Sprintf("tenant storage hard cap reached for namespace %q — the corpus is at or over its "+
+					"configured limit; delete documents or raise the tenant's storage.corpusBytesHardCap before uploading more", ns))
+			return
+		}
+	}
+
 	// --- build the object key ---------------------------------------------------
 	key := objectstore.KnowledgeKey(ns, kbName, filename)
 	contentType := r.Header.Get("Content-Type")

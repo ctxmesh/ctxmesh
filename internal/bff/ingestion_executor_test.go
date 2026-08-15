@@ -31,6 +31,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -428,4 +429,102 @@ func TestExecuteIngestion_UnreadableSpecStillProjectsFailed(t *testing.T) {
 		"the projected corpus-status phase must be Failed (the m68.14 stuck-Ingesting fix)")
 	assert.Equal(t, "ing-badspec", cs.IngestionRunID,
 		"the projected row must carry the ingestion run id")
+}
+
+// ── Storage HARD-cap enforcement at the ingestion executor (m80.3) ─────────────────────────────────
+
+// newIngestionTestServerWithTenantStore is newIngestionTestServer with the namespace→tenant mirror wired,
+// so the executor's storage hard-cap gate reads the controller's PROJECTED at-cap flag (ADR 0011-clean).
+func newIngestionTestServerWithTenantStore(
+	t *testing.T, embedder credplane.Embedder, nsStore namespacetenant.Store,
+) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
+	t.Helper()
+	os := objectstore.NewMemObjectStore()
+	ks := knowledge.NewMemStore()
+	s := NewServer(Options{
+		Auth:                 AllowAll{},
+		RunStore:             run.NewMemStore(),
+		DocStore:             os,
+		KnowledgeStore:       ks,
+		Embedder:             embedder,
+		NamespaceTenantStore: nsStore,
+		Log:                  logr.Discard(),
+	})
+	return s, ks, os
+}
+
+// TestExecuteIngestion_StorageHardCapFailsFast proves an ingestion run for a tenant AT its storage hard cap
+// fails FAST with the typed StorageQuotaExceeded reason (→ phase Failed) BEFORE any document is fetched/embedded.
+func TestExecuteIngestion_StorageHardCapFailsFast(t *testing.T) {
+	emb := newMockEmbedder()
+	nsStore := namespacetenant.NewMemStore()
+	const ns, kb = "team-atcap", "docs"
+	// The controller's projection: this namespace's tenant is AT the hard cap.
+	require.NoError(t, nsStore.SetMembers(context.Background(), "tenant-atcap", []string{ns}))
+	require.NoError(t, nsStore.SetStorageHardCapExceeded(context.Background(), "tenant-atcap", true))
+
+	s, ks, os := newIngestionTestServerWithTenantStore(t, emb, nsStore)
+
+	keyA := objectstore.KnowledgeKey(ns, kb, "a.md")
+	putDoc(t, os, keyA, docBodyA)
+	spec := IngestionSpec{
+		Namespace: ns, KnowledgeBase: kb, EmbeddingRoute: "embed-v1",
+		Documents: []IngestionDoc{{Key: keyA, ContentType: "text/markdown"}},
+	}
+	createIngestionRun(t, s, "ing-atcap", spec)
+
+	s.executeIngestion(context.Background(), "ing-atcap")
+
+	rn, err := s.runStore.Get("ing-atcap")
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusFailed, rn.Status, "an at-hard-cap run must fail")
+
+	oc := loadOutcome(t, s, "ing-atcap")
+	assert.Equal(t, ingestionStorageQuotaExceeded, oc.Reason, "the terminal reason must be the typed StorageQuotaExceeded")
+
+	// Nothing was embedded — the gate fired BEFORE the document loop.
+	emb.mu.Lock()
+	calls := emb.batchCalls
+	emb.mu.Unlock()
+	assert.Equal(t, 0, calls, "no document may be embedded when the hard cap is already reached")
+	chunkCount, _, err := ks.CountAndSize(context.Background(), ns, kb)
+	require.NoError(t, err)
+	assert.Equal(t, 0, chunkCount, "no chunks may be written for an at-cap ingestion")
+
+	// The failure is projected as phase Failed (the m80.1 corpus-status path).
+	cs, found, err := ks.GetCorpusStatus(context.Background(), ns, kb)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, kbPhaseFailed, cs.Phase, "a StorageQuotaExceeded run must project phase Failed")
+}
+
+// TestExecuteIngestion_StorageHardCapUnsetIsNoOp proves that when the tenant is NOT at the hard cap (the
+// unset/under-cap default) ingestion proceeds unchanged — the hard-cap gate is byte-for-byte inert.
+func TestExecuteIngestion_StorageHardCapUnsetIsNoOp(t *testing.T) {
+	emb := newMockEmbedder()
+	nsStore := namespacetenant.NewMemStore()
+	const ns, kb = "team-undercap", "docs"
+	// The tenant owns the namespace but is NOT at the hard cap (no SetStorageHardCapExceeded call).
+	require.NoError(t, nsStore.SetMembers(context.Background(), "tenant-undercap", []string{ns}))
+
+	s, ks, os := newIngestionTestServerWithTenantStore(t, emb, nsStore)
+
+	keyA := objectstore.KnowledgeKey(ns, kb, "a.md")
+	putDoc(t, os, keyA, docBodyA)
+	spec := IngestionSpec{
+		Namespace: ns, KnowledgeBase: kb, EmbeddingRoute: "embed-v1",
+		Documents: []IngestionDoc{{Key: keyA, ContentType: "text/markdown"}},
+	}
+	createIngestionRun(t, s, "ing-undercap", spec)
+
+	s.executeIngestion(context.Background(), "ing-undercap")
+
+	rn, err := s.runStore.Get("ing-undercap")
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusSucceeded, rn.Status, "an under-cap ingestion must succeed unchanged")
+	oc := loadOutcome(t, s, "ing-undercap")
+	assert.Equal(t, ingestionSucceeded, oc.Reason)
+	chunkCount, _, err := ks.CountAndSize(context.Background(), ns, kb)
+	require.NoError(t, err)
+	assert.Greater(t, chunkCount, 0, "chunks were written (ingestion proceeded)")
 }

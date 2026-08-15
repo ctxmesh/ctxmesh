@@ -692,3 +692,173 @@ func TestTenant_MembershipMirror_WiredThroughReconcile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, members, "the finalizer delete path must clear the tenant's mirror rows")
 }
+
+// ── Storage HARD-cap (m80.3, ADR 0061 governance #7 hard enforcement) ────────────────────────────
+
+// TestTenant_StorageHardCap_ReachedSetsConditionAndProjects verifies that when totalCorpusBytes >=
+// the hard cap the controller (a) sets a StorageHardCapExceeded condition and (b) PROJECTS the
+// at-cap flag into the namespace→tenant mirror so the BFF/executor can enforce it ADR-0011-clean.
+func TestTenant_StorageHardCap_ReachedSetsConditionAndProjects(t *testing.T) {
+	const ns1 = "tnt-hardcap-ns1"
+	const ns2 = "tnt-hardcap-ns2"
+	makeNamespace(t, ns1)
+	makeNamespace(t, ns2)
+
+	// total = 12GiB + 10GiB = 22GiB. Hard cap = 20Gi → over the cap.
+	mkKBWithSize(t, "kb-hc-a", ns1, 12*1024*1024*1024)
+	mkKBWithSize(t, "kb-hc-b", ns2, 10*1024*1024*1024)
+
+	mem := namespacetenant.NewMemStore()
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns1, ns2},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenantWithStore(t, "hardcap-tenant", mem) // adds finalizer
+	reconcileTenantWithStore(t, "hardcap-tenant", mem) // stamps + checks hard cap + projects
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-tenant"}, &got))
+
+	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded")
+	require.NotNil(t, cond, "StorageHardCapExceeded must be set when corpus bytes reach the hard cap")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "CorpusBytesReachedHardCap", cond.Reason)
+	assert.Contains(t, cond.Message, "BLOCKED", "the condition message must state new growth is blocked")
+
+	// totalCorpusBytes is computed even though ONLY the hard cap is set (the widened gate).
+	assert.Equal(t, int64(22*1024*1024*1024), got.Status.TotalCorpusBytes,
+		"totalCorpusBytes must be computed when only the hard cap is set")
+
+	// The at-cap flag is projected onto every member namespace's mirror row.
+	for _, ns := range []string{ns1, ns2} {
+		exceeded, ok, err := mem.StorageHardCapExceededFor(testCtx, ns)
+		require.NoError(t, err)
+		assert.True(t, ok, "a mirror row must exist for member namespace %q", ns)
+		assert.True(t, exceeded, "the at-hard-cap flag must be projected onto %q", ns)
+	}
+
+	// The tenant stays Ready — a hard-cap breach blocks NEW growth, it does not un-health the tenant.
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+}
+
+// TestTenant_StorageHardCap_UnderCapNoConditionNoProjection verifies that under the hard cap the
+// condition is not set and the projected flag stays false (enforcement is a no-op).
+func TestTenant_StorageHardCap_UnderCapNoConditionNoProjection(t *testing.T) {
+	const ns = "tnt-hardcap-under-ns"
+	makeNamespace(t, ns)
+	mkKBWithSize(t, "kb-hc-under", ns, 5*1024*1024*1024) // 5GiB < 20Gi cap
+
+	mem := namespacetenant.NewMemStore()
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-under-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenantWithStore(t, "hardcap-under-tenant", mem)
+	reconcileTenantWithStore(t, "hardcap-under-tenant", mem)
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-under-tenant"}, &got))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
+		"StorageHardCapExceeded must NOT be set when under the hard cap")
+
+	exceeded, ok, err := mem.StorageHardCapExceededFor(testCtx, ns)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.False(t, exceeded, "the projected flag must be false when under the hard cap")
+}
+
+// TestTenant_StorageHardCap_NoCapNoCondition verifies that when no hard cap is configured the
+// hard-cap machinery is inert regardless of corpus size — the backward-compatible unset default.
+func TestTenant_StorageHardCap_NoCapNoCondition(t *testing.T) {
+	const ns = "tnt-hardcap-nocap-ns"
+	makeNamespace(t, ns)
+	mkKBWithSize(t, "kb-hc-nocap", ns, 100*1024*1024*1024) // 100GiB, but no hard cap
+
+	mem := namespacetenant.NewMemStore()
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-nocap-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			// Only a SOFT cap — the hard cap is intentionally unset (backward-compatible).
+			Storage: &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenantWithStore(t, "hardcap-nocap-tenant", mem)
+	reconcileTenantWithStore(t, "hardcap-nocap-tenant", mem)
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-nocap-tenant"}, &got))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
+		"StorageHardCapExceeded must NOT be set when no hard cap is configured")
+	// The soft cap still fires (100GiB > 10Gi) — proving the hard-cap change did not disturb it.
+	assert.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded"),
+		"the soft cap must still fire independently of the hard cap")
+
+	exceeded, ok, err := mem.StorageHardCapExceededFor(testCtx, ns)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.False(t, exceeded, "no hard cap ⇒ the projected flag is never set")
+}
+
+// TestTenant_StorageHardCap_ClearedWhenCorpusShrinks verifies the at-cap condition + projection are
+// CLEARED once the corpus drops back below the hard cap (unblocking new uploads/ingestion).
+func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
+	const ns = "tnt-hardcap-clear-ns"
+	makeNamespace(t, ns)
+	mkKBWithSize(t, "kb-hc-clear", ns, 25*1024*1024*1024) // 25GiB >= 20Gi cap
+
+	mem := namespacetenant.NewMemStore()
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-clear-tenant"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{ns},
+			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
+	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
+
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-clear-tenant"}, &got))
+	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
+		"StorageHardCapExceeded must be set (25GiB >= 20Gi cap)")
+	exceeded, _, err := mem.StorageHardCapExceededFor(testCtx, ns)
+	require.NoError(t, err)
+	assert.True(t, exceeded)
+
+	// Shrink the corpus below the cap.
+	var livekb agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-hc-clear", Namespace: ns}, &livekb))
+	livekb.Status.SizeBytes = 3 * 1024 * 1024 * 1024 // 3GiB < 20Gi cap
+	require.NoError(t, k8sClient.Status().Update(testCtx, &livekb))
+
+	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
+
+	var got2 agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-clear-tenant"}, &got2))
+	assert.Nil(t, meta.FindStatusCondition(got2.Status.Conditions, "StorageHardCapExceeded"),
+		"StorageHardCapExceeded must be CLEARED once the corpus drops below the hard cap")
+	exceeded2, _, err := mem.StorageHardCapExceededFor(testCtx, ns)
+	require.NoError(t, err)
+	assert.False(t, exceeded2, "the projected flag must be cleared once under the cap (unblocking growth)")
+}

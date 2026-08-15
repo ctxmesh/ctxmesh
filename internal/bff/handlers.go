@@ -709,7 +709,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 type errorBody struct {
 	Error string `json:"error"`
+	// Code is an OPTIONAL machine-readable error code (e.g. "storage_quota_exceeded", m80.3) so a
+	// client can branch on the reason without string-matching Error. Omitted for plain errors.
+	Code string `json:"code,omitempty"`
 }
+
+// Machine-readable error codes surfaced in errorBody.Code. A small closed set — the code is the
+// contract a client branches on (never the human Error string).
+const (
+	// errCodeStorageQuotaExceeded is returned when a tenant is at/over its corpus storage hard cap
+	// (m80.3, ADR 0061 governance #7): an upload is rejected 413 and an ingestion run fails fast.
+	errCodeStorageQuotaExceeded = "storage_quota_exceeded"
+)
 
 // msgInvalidJSONBody is the client-safe message for an unparseable request body,
 // shared by the createError-returning request parsers so goconst has one canonical
@@ -718,4 +729,10 @@ const msgInvalidJSONBody = "invalid JSON body"
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, errorBody{Error: msg})
+}
+
+// writeErrorCode is writeError with a machine-readable Code (m80.3) so a client can branch on the
+// reason (e.g. storage_quota_exceeded) without parsing the human message.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, errorBody{Error: msg, Code: code})
 }
