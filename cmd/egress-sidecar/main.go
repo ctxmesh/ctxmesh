@@ -133,6 +133,17 @@ func run(log logr.Logger) error {
 		recorder = rec
 	}
 
+	// Tool-call governance (M82, ADR 0074 §1): read + hold the resolved spec.runtime.toolPolicy the
+	// controller mounts at TOOL_POLICY_FILE. PLUMBING ONLY — the policy is parsed + held behind the
+	// holder's RWMutex and the sidecar fsnotify-WATCHES it for live reload, but it is NOT enforced
+	// yet (the proxy does not consult it; behavior stays PERMISSIVE). Absent/empty ⇒ nil policy
+	// (permissive, byte-compatible pre-M82). Enforcement is a later M82 task.
+	policyHolder := &egress.PolicyHolder{}
+	toolPolicyFile := strings.TrimSpace(os.Getenv("TOOL_POLICY_FILE"))
+	if toolPolicyFile != "" {
+		loadInitialToolPolicy(policyHolder, toolPolicyFile, log)
+	}
+
 	proxy := egress.NewProxy(egress.ProxyConfig{
 		Verifier:         runcap.NewVerifier(pub, audience, nil),
 		Resolver:         resolver,
@@ -142,6 +153,7 @@ func run(log logr.Logger) error {
 		Routes:           routes,
 		Log:              log,
 		Recorder:         recorder,
+		Policy:           policyHolder,
 	})
 
 	mux := http.NewServeMux()
@@ -153,6 +165,15 @@ func run(log logr.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Tool-call governance (M82, ADR 0074 §1): fsnotify-watch the mounted tool-policy file so a
+	// controller-driven policy edit (ConfigMap update in place) reloads live — no restart. The
+	// watch is tied to the server lifecycle (ctx.Done closes it). Only when a file is mounted.
+	if toolPolicyFile != "" {
+		watchStop := make(chan struct{})
+		go watchToolPolicy(policyHolder, toolPolicyFile, log, watchStop)
+		defer close(watchStop)
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
