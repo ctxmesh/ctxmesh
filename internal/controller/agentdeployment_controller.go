@@ -862,12 +862,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
 
-	// Guardrails (M66, ADR 0059 §8): inject the resolved+validated GuardrailPolicy spec as GUARDRAIL_POLICY
-	// (STATIC JSON env — NEVER valueFrom, the m5.7 Knative landmine). Its presence flips the launcher's
-	// GatewayProxyEnabled() true (gateway.go), so the :2996 proxy starts and runs the in-path guardrail
-	// engine (m66.3) even for a guardrailed-but-unbudgeted agent. Injected ONLY when the ref resolved and
-	// validated — a broken ref already failed closed above (buildPodTemplate returned a
-	// *guardrailResolveError), so we never reach here with a policy the engine can't enforce.
+	// Guardrails (M66, ADR 0059 §8; K3, ADR 0059 Fork-2): deliver the resolved+validated GuardrailPolicy
+	// JSON as a MOUNTED, read-only per-agent ConfigMap file (<agent>-guardrail) rather than the pre-K3
+	// GUARDRAIL_POLICY env. The launcher reads GUARDRAIL_POLICY_FILE at startup AND watches it (fsnotify),
+	// so a GuardrailPolicy edit — which updates this ConfigMap in place via the existing watch-driven
+	// reconcile — propagates to the RUNNING agent WITHOUT a revision roll (the reverse of the M4 landmine;
+	// the point of K3). The mounted file's presence (GUARDRAIL_POLICY_FILE) flips GatewayProxyEnabled()
+	// true, so the :2996 proxy still starts and runs the in-path guardrail engine even for a
+	// guardrailed-but-unbudgeted agent — the interposition trigger is preserved, now keyed on the file.
+	// Injected ONLY when the ref resolved and validated — a broken ref already failed closed above
+	// (buildPodTemplate returned a *guardrailResolveError), so we never reach here with an unenforceable
+	// policy. The env carries only the static FILE PATH (no valueFrom — the m5.7 Knative landmine).
 	//
 	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
 	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
@@ -876,8 +881,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
 	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
 	// unchanged (no BFF_INTERNAL_URL injected).
+	guardrailVol, guardrailMount, guardrailEnv, err := r.reconcileGuardrailConfigMap(ctx, deploy, gr)
+	if err != nil {
+		return podTemplate{}, err
+	}
 	if gr.referenced {
-		env = append(env, corev1.EnvVar{Name: envGuardrailPolicy, Value: gr.policyJSON})
+		env = append(env, guardrailEnv...)
 		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
 			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
 		}
@@ -1319,6 +1328,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if promptMount != nil {
 		userMounts = append(userMounts, *promptMount)
 	}
+	if guardrailMount != nil {
+		// Guardrails K3: mount the <agent>-guardrail ConfigMap read-only so the launcher can read +
+		// fsnotify-watch the policy file. A core ConfigMap volume (Knative Serving admits it, same as
+		// the prompt CM). No image change — a pod-VOLUME + config change only.
+		userMounts = append(userMounts, *guardrailMount)
+	}
 	if injectPodToken {
 		// Mount the projected proxy token read-only (M53). The launcher runs in this
 		// container (baked into the agent image), so the token is co-resident with agent
@@ -1374,6 +1389,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// mount resolves. No image change — this is a pod-VOLUME + config-revision
 		// change only.
 		volumes = append(volumes, *promptVol)
+	}
+	if guardrailVol != nil {
+		// Guardrails K3 (ADR 0059 Fork-2): the <agent>-guardrail ConfigMap volume, mounted
+		// read-only into the user container above. Because the policy is NO LONGER in the
+		// structural digest (see below), a policy edit updates this ConfigMap in place and the
+		// launcher reloads via the watch — the revision name is unchanged, so no roll.
+		volumes = append(volumes, *guardrailVol)
 	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
@@ -1488,12 +1510,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
 	// folds into the combined digest like the other components.
 	runtimeDig := runtimeDigest(deploy.Spec.Runtime)
-	// Guardrails (M66, ADR 0059 §8): a guardrailPolicyRef add/remove/change repoints MODEL_GATEWAY_URL at
-	// the proxy and injects/removes/changes the GUARDRAIL_POLICY env — a STRUCTURAL change that must roll
-	// the revision, so it folds into the combined digest like the other components. gr.digest is the hash
-	// of the RESOLVED policy spec, so editing the referenced GuardrailPolicy (via the watch below) rolls a
-	// new revision — compliance tightening propagates. "" when unreferenced (symmetric with the others).
-	guardrailDig := gr.digest
+	// Guardrails (M66, ADR 0059 §8; K3, ADR 0059 Fork-2): the digest folds PRESENCE ONLY, NOT the
+	// policy CONTENT. Adding/removing the guardrailPolicyRef is a STRUCTURAL pod change — it
+	// repoints MODEL_GATEWAY_URL at the proxy and adds/removes the mounted <agent>-guardrail volume +
+	// GUARDRAIL_POLICY_FILE env — so it MUST roll a new revision (the M4 silent-loss landmine); the
+	// presence bit does exactly that. But EDITING an already-referenced policy's CONTENT must NOT roll
+	// (the whole point of K3): the content lands in the mounted ConfigMap the launcher watches, so it
+	// reloads live. Dropping gr.digest (the content hash) from the digest is what makes a policy-only
+	// edit keep the SAME revision name — the reverse of the M66 behavior, by design. "" when
+	// unreferenced (symmetric with the other components; byte-compatible pre-M66 revision name).
+	guardrailDig := guardrailPresenceDigest(gr.referenced)
 	// Knowledge bases (M68, ADR 0061): a spec.knowledgeBases add/remove/change (or a change to a bound
 	// KnowledgeBase's embeddingRoute — picked up via the watch wired in SetupWithManager) injects/removes
 	// KNOWLEDGE_BASE_ENABLED + KNOWLEDGE_BASES — a STRUCTURAL change that must roll the revision.

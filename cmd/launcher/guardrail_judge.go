@@ -417,9 +417,8 @@ func (gp *gatewayProxy) forwardJudge(ctx context.Context, r *http.Request, reqBo
 // exact same messages the deterministic engine scanned (user + tool role). The caller owns the
 // ResponseWriter, so this returns the decision rather than writing the 403 itself.
 func (gp *gatewayProxy) judgeRequest(
-	ctx context.Context, span trace.Span, r *http.Request, body []byte,
+	ctx context.Context, span trace.Span, r *http.Request, body []byte, j *semanticJudge,
 ) (guardrailDecision, bool) {
-	j := gp.judge
 	if j == nil || (!j.appliesTo(scanInput) && !j.appliesTo(scanToolOutput)) {
 		return guardrailDecision{}, false
 	}
@@ -464,9 +463,8 @@ func (gp *gatewayProxy) judgeRequest(
 // exactly as a deterministic output block does — emitting the PII-safe guardrail.decision for every
 // hit. SAFE / judge-error / auditOnly return ok=false (the completion is relayed).
 func (gp *gatewayProxy) judgeOutput(
-	ctx context.Context, span trace.Span, r *http.Request, body []byte,
+	ctx context.Context, span trace.Span, r *http.Request, body []byte, j *semanticJudge,
 ) (guardrailDecision, bool) {
-	j := gp.judge
 	if j == nil || !j.appliesTo(scanOutput) {
 		return guardrailDecision{}, false
 	}
