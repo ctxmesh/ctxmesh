@@ -6,6 +6,7 @@ import {
   Boxes,
   ChevronRight,
   ExternalLink,
+  GitFork,
   Pencil,
   Play,
   Plus,
@@ -16,6 +17,7 @@ import {
   Terminal,
   Trash2,
   Wrench,
+  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +59,7 @@ import {
   type MemoryBindingSummary,
   type OnlineScoreResponse,
   type OnlineScoreWindow,
+  type PublishTemplateResponse,
   type RunSummary,
 } from "@/lib/api";
 
@@ -64,6 +67,11 @@ import {
 // forked agent that has unresolved references (model route, tools). Its presence
 // in the agent's labels drives the "Needs attention" banner (m74.6).
 const FORK_NEEDS_REBINDING_LABEL = "agents.ctxmesh.ai/fork-needs-rebinding";
+// Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
+// Used for lineage display (U12, m76.3) and banner repair links (U5).
+const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
+const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
+const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
@@ -111,6 +119,13 @@ export function AgentDetailPage() {
   const deleteOpen = searchParams.get("delete") === "1";
   // Publish-as-template dialog — local state (not deep-linked, no reload needed).
   const [publishOpen, setPublishOpen] = React.useState(false);
+  // U7: track in-session published state. When the user publishes, we store the
+  // response (version + visibility) so the header badge can show it without a
+  // reload. No persistent read — the agent DTO doesn't yet carry published state.
+  const [publishedState, setPublishedState] = React.useState<{
+    version: string;
+    visibility: string;
+  } | null>(null);
 
   function openEdit() {
     setSearchParams((p) => { p.set("edit", "1"); return p; });
@@ -210,10 +225,25 @@ export function AgentDetailPage() {
         onEdit={openEdit}
         onDelete={openDelete}
         onPublish={() => setPublishOpen(true)}
+        publishedState={publishedState}
+        onUnpublish={() => {
+          void (async () => {
+            try {
+              await api.unpublishTemplate("agent", detail.namespace, detail.name);
+              setPublishedState(null);
+            } catch {
+              // If unpublish fails, the badge stays — the user can try again.
+            }
+          })();
+        }}
       />
 
-      {/* m74.6: needs-rebinding banner — shown when the agent was forked and
-          has dangling references (model route or tools not connected yet). */}
+      {/* m74.6 / U5: needs-rebinding banner — shown when the agent was forked and has
+          dangling references. Renders actionable repair line-items with links. The label
+          "true" means at least one ref is unresolvable; we use the agent's own data
+          (modelRoute absence, bindings list) to surface specific CTAs. The banner clears
+          when the operator removes the label (i.e. the user has connected all resources
+          and the operator re-evaluates — or they edit the agent). */}
       {needsRebinding && (
         <div
           className="rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/30"
@@ -222,14 +252,42 @@ export function AgentDetailPage() {
         >
           <div className="flex items-start gap-3">
             <Wrench className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-            <div className="space-y-1">
+            <div className="space-y-2 flex-1">
               <p className="font-medium text-amber-900 dark:text-amber-200">
                 Needs attention — connect resources before running
               </p>
               <p className="text-sm text-amber-700 dark:text-amber-300">
-                This agent was forked from a template but has unresolved references. Connect a
-                model route and any required tools so it can run successfully. Use the Bindings
-                tab to review what is connected.
+                This agent was forked from a template but has unresolved references.
+                Complete the steps below so it can run successfully.
+              </p>
+              {/* U5: actionable line items with repair links */}
+              <ul className="space-y-1 text-sm">
+                {!detail.modelRoute && (
+                  <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                    <Link
+                      to="/routes"
+                      className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                      data-testid="rebind-model-route-link"
+                    >
+                      Connect a model route
+                    </Link>
+                    <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
+                  </li>
+                )}
+                <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                  <button
+                    onClick={() => setTab("Bindings")}
+                    className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                    data-testid="rebind-bindings-tab-link"
+                  >
+                    Review and bind tools in the Bindings tab
+                  </button>
+                </li>
+              </ul>
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                This banner clears once the operator confirms all references are resolved.
               </p>
             </div>
           </div>
@@ -320,8 +378,13 @@ export function AgentDetailPage() {
         <PublishTemplateDialog
           agentNamespace={detail.namespace}
           agentName={detail.name}
+          alreadyPublished={publishedState !== null}
           onClose={() => setPublishOpen(false)}
-          onDone={() => setPublishOpen(false)}
+          onDone={(res, visibility) => {
+            setPublishOpen(false);
+            // U7: store session-level published state so header shows the badge.
+            setPublishedState({ version: res.version ?? "1", visibility });
+          }}
         />
       )}
     </div>
@@ -334,11 +397,16 @@ function AgentHeader({
   onEdit,
   onDelete,
   onPublish,
+  publishedState,
+  onUnpublish,
 }: {
   detail: AgentDetailResponse;
   onEdit: () => void;
   onDelete: () => void;
   onPublish: () => void;
+  // U7: in-session published state — shown as a badge; if null, the agent is not (yet) published.
+  publishedState: { version: string; visibility: string } | null;
+  onUnpublish: () => void;
 }) {
   const { can } = useCapabilities();
   const canEdit = can(RES_AGENTS, "update");
@@ -346,6 +414,12 @@ function AgentHeader({
   // Publish-as-template is gated on agent update rights (the publisher must own
   // the agent). Display-only — the API is the real RBAC gate (ADR 0011).
   const canPublish = can(RES_AGENTS, "update");
+
+  // U12: fork lineage — show "forked from ns/name @ version" when the provenance labels are set.
+  const forkOriginNs = detail.labels?.[LABEL_FORK_ORIGIN_NS];
+  const forkOriginName = detail.labels?.[LABEL_FORK_ORIGIN_NAME];
+  const forkOriginVersion = detail.labels?.[LABEL_FORK_ORIGIN_VERSION];
+  const hasForkLineage = !!(forkOriginNs && forkOriginName);
 
   return (
     <div className="space-y-3">
@@ -365,6 +439,29 @@ function AgentHeader({
             <AlertTriangle className="mr-1 h-3 w-3" />
             drift
           </Badge>
+        )}
+        {/* U7: published badge — shown when this agent has been published as a template
+            this session. Includes an Unpublish action. */}
+        {publishedState && (
+          <div className="flex items-center gap-1" data-testid="published-badge-group">
+            <Badge variant="secondary" data-testid="published-badge">
+              <Share2 className="mr-1 h-3 w-3" />
+              Published · {publishedState.visibility} · v{publishedState.version}
+            </Badge>
+            {canPublish && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-1.5 text-xs text-muted-foreground hover:text-destructive"
+                onClick={onUnpublish}
+                data-testid="unpublish-agent-button"
+                title="Remove this template from the gallery"
+              >
+                <X className="h-3 w-3" />
+                Unpublish
+              </Button>
+            )}
+          </div>
         )}
         {/* The namespace links to the tenant that governs it (m49.4 UX-review P1 —
             closes the observe→agent→…→tenant loop). The Tenants filter matches on
@@ -387,7 +484,7 @@ function AgentHeader({
               data-testid="publish-agent-button"
             >
               <Share2 className="h-4 w-4" />
-              Publish
+              {publishedState ? "Publish new version" : "Publish"}
             </Button>
           )}
           {canEdit && (
@@ -415,6 +512,22 @@ function AgentHeader({
           )}
         </div>
       </div>
+      {/* U12: fork lineage — "forked from ns/name @ version" */}
+      {hasForkLineage && (
+        <p
+          className="flex items-center gap-1.5 text-xs text-muted-foreground"
+          data-testid="fork-lineage"
+        >
+          <GitFork className="h-3.5 w-3.5" />
+          Forked from{" "}
+          <span className="font-mono">
+            {forkOriginNs}/{forkOriginName}
+          </span>
+          {forkOriginVersion && (
+            <span>@ {forkOriginVersion}</span>
+          )}
+        </p>
+      )}
       <dl className="grid grid-cols-1 gap-x-8 gap-y-1.5 text-sm sm:grid-cols-2 lg:grid-cols-3">
         {detail.url && (
           <HeaderKV
@@ -3161,57 +3274,64 @@ type PublishVisibility = "team" | "org" | "public";
 function PublishTemplateDialog({
   agentNamespace,
   agentName,
+  alreadyPublished,
   onClose,
   onDone,
 }: {
   agentNamespace: string;
   agentName: string;
+  // U7: whether the agent is already published this session — warn against silent re-publish.
+  alreadyPublished?: boolean;
   onClose: () => void;
-  onDone: () => void;
+  // U8: onDone now passes back the publish response + chosen visibility.
+  onDone: (res: PublishTemplateResponse, visibility: string) => void;
 }) {
   const { toast } = useToast();
   const [selected, setSelected] = React.useState<PublishVisibility>("team");
   const [publicConfirmed, setPublicConfirmed] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  // U8 / U12: inline error state — keep dialog open on failure with an error message.
+  const [inlineError, setInlineError] = React.useState<string | null>(null);
   const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onClose });
 
   function handleSelect(v: PublishVisibility) {
     setSelected(v);
     if (v !== "public") setPublicConfirmed(false);
+    setInlineError(null);
   }
 
-  const isPublishDisabled = busy || (selected === "public" && !publicConfirmed);
+  // U7: block re-publish at the same visibility (prevent silent overwrite without acknowledgement).
+  const isPublishDisabled =
+    busy || (selected === "public" && !publicConfirmed);
 
   async function onPublish() {
     if (isPublishDisabled) return;
+    setInlineError(null);
     setBusy(true);
     try {
-      await api.publishTemplate("agent", agentNamespace, agentName, selected);
+      const res = await api.publishTemplate("agent", agentNamespace, agentName, selected);
       toast({
         variant: "success",
-        title: "Published",
-        description: `${agentName} is now available as a ${selected}-visible template.`,
+        title: "Shared as template",
+        description: `${agentName} v${res.version ?? "1"} is now available as a ${selected}-visible template.`,
       });
-      onDone();
+      onDone(res, selected);
     } catch (err) {
       const isForbidden = err instanceof ApiError && err.isForbidden;
-      toast({
-        variant: "error",
-        title: "Publish failed",
-        description: isForbidden
-          ? `You need ${
-              selected === "public"
-                ? "Platform-admin"
-                : selected === "org"
-                ? "Tenant-admin"
-                : "team-admin"
-            } rights to publish ${selected}-wide.`
-          : err instanceof Error
-          ? err.message
-          : "publish failed",
-      });
+      // U8 / U12: keep dialog open, show error inline instead of closing.
+      const errMsg = isForbidden
+        ? `You need ${
+            selected === "public"
+              ? "Platform-admin"
+              : selected === "org"
+              ? "Tenant-admin"
+              : "team-admin"
+          } rights to share ${selected}-wide.`
+        : err instanceof Error
+        ? err.message
+        : "publish failed";
+      setInlineError(errMsg);
       setBusy(false);
-      onClose();
     }
   }
 
@@ -3220,7 +3340,7 @@ function PublishTemplateDialog({
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-label={`Publish ${agentName} as template`}
+      aria-label={`Share ${agentName} as template`}
     >
       <div
         className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
@@ -3233,12 +3353,23 @@ function PublishTemplateDialog({
         className="relative w-full max-w-md rounded-lg border bg-card p-6 shadow-overlay outline-none"
       >
         <h2 className="text-lg font-semibold tracking-snug">
-          Publish {agentName} as a template
+          Share {agentName} as a template
         </h2>
+        {/* U8: immutable snapshot copy note */}
         <p className="mt-1 text-sm text-muted-foreground">
-          Publishing shares the agent definition so teammates can fork it into their own
-          namespace. Your secrets and credentials are never shared.
+          Publishing shares an <strong>immutable snapshot</strong> of the current definition —
+          your secrets and credentials are never shared. Publish again to share a new version.
         </p>
+        {/* U7: warn if already published */}
+        {alreadyPublished && (
+          <p
+            className="mt-2 text-sm text-amber-600 dark:text-amber-400"
+            data-testid="publish-template-already-published-warning"
+          >
+            This agent is already published. Publishing again creates a new version at the
+            selected visibility.
+          </p>
+        )}
         <div className="mt-4 space-y-2">
           {(["team", "org", "public"] as PublishVisibility[]).map((v) => (
             <label
@@ -3284,9 +3415,16 @@ function PublishTemplateDialog({
             </label>
           </div>
         )}
-        <p className="mt-3 text-xs text-muted-foreground">
-          Requires the matching role — a 403 will tell you which role is needed.
-        </p>
+        {/* U8 / U12: inline error — keep dialog open, no HTTP copy leak */}
+        {inlineError && (
+          <p
+            className="mt-3 text-sm text-destructive"
+            role="alert"
+            data-testid="publish-template-error"
+          >
+            {inlineError}
+          </p>
+        )}
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
@@ -3296,7 +3434,8 @@ function PublishTemplateDialog({
             disabled={isPublishDisabled}
             data-testid="publish-template-submit"
           >
-            {busy ? "Publishing…" : `Publish as ${selected}`}
+            {/* U8: rename from "Publish as X" to "Share as template" */}
+            {busy ? "Sharing…" : "Share as template"}
           </Button>
         </div>
       </div>

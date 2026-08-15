@@ -111,13 +111,18 @@ type ForkAgentRequest struct {
 // "already-forked" for an idempotent re-fork of the SAME origin. Created is the flat
 // identity of every CRD object the fork created. needsRebinding / unresolvedRefs are the
 // ADR 0068 §5 ref-closure contract — EMPTY in m74.3 (the source-spec is copied as-is; the
-// per-class closure is m74.4).
+// per-class closure is m74.4). ResolvedRefs lists the tool names the ref-closure
+// auto-materialized via the M73 compose-connect flywheel (U9, m76.3): a non-empty list
+// means "N published tools were connected automatically" — the flywheel compounding moment.
 type ForkAgentResponse struct {
 	Status         string          `json:"status"`
 	Agent          AgentSummary    `json:"agent"`
 	Created        []createdObject `json:"created"`
 	NeedsRebinding []string        `json:"needsRebinding"`
 	UnresolvedRefs []string        `json:"unresolvedRefs"`
+	// ResolvedRefs lists tool names that were automatically connected during the fork
+	// ref-closure (the M73 compose-connect flywheel). Empty when no tools were auto-wired.
+	ResolvedRefs []string `json:"resolvedRefs"`
 }
 
 // handleForkAgent serves POST /api/agents/{ns}/{name}/fork (m74.3, ADR 0068 §4/§6). See the
@@ -308,7 +313,8 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 	// detect the source-spec's dangling same-namespace refs, best-effort materialize published
 	// tools (compose M73 connect), and flag the rest. A ref-closure error must NOT fail the
 	// fork (the agent is already created) — closeForkRefs degrades to flagging, never 500s.
-	needsRebinding, unresolvedRefs := s.closeForkRefs(r, caller, sourceSpec, callerNS, localName)
+	// resolvedRefs carries tool names auto-wired via compose-connect (U9, m76.3).
+	needsRebinding, unresolvedRefs, resolvedRefs := s.closeForkRefs(r, caller, sourceSpec, callerNS, localName)
 
 	// Degraded status (ADR 0068 §5): a non-empty needsRebinding means the fork can't reach a
 	// model / a tool until the user connects one — stamp the needs-rebinding label so the agent
@@ -333,6 +339,7 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 		Created:        created,
 		NeedsRebinding: needsRebinding,
 		UnresolvedRefs: unresolvedRefs,
+		ResolvedRefs:   resolvedRefs,
 	}, nil
 }
 

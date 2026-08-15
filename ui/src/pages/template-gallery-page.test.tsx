@@ -4,6 +4,8 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
 import { ToastProvider } from "@/components/kit";
+import { CapabilitiesProvider } from "@/lib/capabilities";
+import { NamespaceProvider } from "@/lib/namespace";
 
 // LocationSpy captures the last navigation target so tests can assert routing.
 function LocationSpy({ onLocation }: { onLocation: (loc: string, state: unknown) => void }) {
@@ -349,15 +351,18 @@ describe("TemplateGalleryPage — templates tab", () => {
     expect(screen.getByText(/no longer discoverable/)).toBeInTheDocument();
   });
 
-  it("shows 409 conflict message when fork returns name collision", async () => {
+  it("shows rename-on-fork dialog on 409 name collision (U11 — no dead-end error)", async () => {
+    // U11: a 409 collision no longer shows a dead-end "Fork failed" toast — it opens
+    // the rename dialog so the user can retry with a different name.
     makeFetch({ templates: [defaultPublished], forkStatus: 409 });
     renderPage();
 
     fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
     await waitFor(() => {
-      expect(screen.getByText("Fork failed")).toBeInTheDocument();
+      expect(screen.getByTestId("rename-fork-dialog")).toBeInTheDocument();
     });
-    expect(screen.getByText(/already exists.*different origin/i)).toBeInTheDocument();
+    // No dead-end "Fork failed" error toast.
+    expect(screen.queryByText("Fork failed")).toBeNull();
   });
 
   it("renders empty state when no templates are returned", async () => {
@@ -610,5 +615,275 @@ describe("TemplateGalleryPage MCP catalog — search filter (m76.2 T12)", () => 
       expect(screen.getByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`)).toHaveTextContent("Connecting…");
     });
     expect(screen.getByTestId(`connect-mcp-tab-${defaultCatalogEntry.name}`)).toBeDisabled();
+  });
+});
+
+// ── Helpers for capability-aware rendering ────────────────────────────────────
+// renderPageWithCaps wraps the page in CapabilitiesProvider + NamespaceProvider
+// so that capability-gated UI (U10 etc.) is testable with real RBAC data.
+function renderPageWithCaps(onLocation?: (loc: string, state?: unknown) => void) {
+  return render(
+    <MemoryRouter>
+      <NamespaceProvider>
+        <CapabilitiesProvider>
+          <ToastProvider>
+            {onLocation && (
+              <Routes>
+                <Route path="*" element={<LocationSpy onLocation={onLocation} />} />
+              </Routes>
+            )}
+            <TemplateGalleryPage />
+          </ToastProvider>
+        </CapabilitiesProvider>
+      </NamespaceProvider>
+    </MemoryRouter>,
+  );
+}
+
+// ── U9: resolvedRefs celebrated in fork success toast ────────────────────────
+describe("TemplateGalleryPage (m76.3 U9) — resolvedRefs auto-connect toast", () => {
+  it("shows 'N tools connected automatically' toast when resolvedRefs is non-empty (U9)", async () => {
+    makeFetch({
+      templates: [defaultPublished],
+      forkStatus: 201,
+      forkResponse: {
+        status: "forked",
+        agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+        created: [],
+        needsRebinding: [],
+        unresolvedRefs: [],
+        resolvedRefs: ["search", "summarize"],
+      },
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    await waitFor(() => {
+      expect(screen.getByText("Forked")).toBeInTheDocument();
+    });
+    // U9: celebrate the auto-connected tools.
+    expect(screen.getByText(/2 tools connected automatically/)).toBeInTheDocument();
+  });
+
+  it("mentions resolved tools in needs-attention toast when there are still dangling refs (U9)", async () => {
+    makeFetch({
+      templates: [defaultPublished],
+      forkStatus: 201,
+      forkResponse: {
+        status: "forked",
+        agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+        created: [],
+        needsRebinding: ["model route: gpt4-prod"],
+        unresolvedRefs: [],
+        resolvedRefs: ["search"],
+      },
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Forked — needs attention/)).toBeInTheDocument();
+    });
+    // U9: the resolved tools note appears alongside the dangling refs.
+    expect(screen.getByText(/1 tool connected automatically/)).toBeInTheDocument();
+  });
+});
+
+// ── U10: display-gate Fork button on create capability ────────────────────────
+describe("TemplateGalleryPage (m76.3 U10) — Fork button capability gate", () => {
+  it("Fork button is disabled for a viewer without agent-create rights (U10)", async () => {
+    // Stub capabilities to deny create.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const path = url.split("?")[0];
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+
+        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (path.startsWith("/api/capabilities"))
+          return j({
+            namespace: "",
+            // Viewer: create is false.
+            allowed: { agentdeployments: { create: false, update: false, delete: false } },
+          });
+        if (path === "/api/templates" && method === "GET")
+          return j({ templates: [defaultPublished] });
+        if (path === "/api/catalog") return j({ entries: [] });
+        if (path === "/api/mcpservers") return j({ items: [] });
+        return j({}, false, 404);
+      }),
+    );
+
+    renderPageWithCaps();
+
+    const forkBtn = await screen.findByTestId(`fork-template-${defaultPublished.name}`);
+    // U10: button is disabled (can't fork without create rights).
+    expect(forkBtn).toBeDisabled();
+    // U10: specific tooltip / title.
+    expect(forkBtn).toHaveAttribute("title", "You need agent-create rights to fork");
+  });
+
+  it("Fork button is enabled for a user with agent-create rights (U10)", async () => {
+    makeFetch({ templates: [defaultPublished] });
+    renderPage();
+
+    const forkBtn = await screen.findByTestId(`fork-template-${defaultPublished.name}`);
+    expect(forkBtn).not.toBeDisabled();
+  });
+});
+
+// ── U11: rename-on-fork + already-forked link ──────────────────────────────────
+describe("TemplateGalleryPage (m76.3 U11) — rename-on-fork + already-forked link", () => {
+  it("shows rename dialog on 409 collision (U11)", async () => {
+    makeFetch({ templates: [defaultPublished], forkStatus: 409 });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    // U11: rename dialog should appear instead of a dead-end error toast.
+    await waitFor(() => {
+      expect(screen.getByTestId("rename-fork-dialog")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Fork failed")).toBeNull();
+  });
+
+  it("retries the fork with the new name from the rename dialog (U11)", async () => {
+    const calls: { url: string; method: string; body: string }[] = [];
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const path = url.split("?")[0];
+        const method = init?.method ?? "GET";
+        const body = typeof init?.body === "string" ? init.body : "";
+        calls.push({ url: path, method, body });
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+
+        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (path.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true } } });
+        if (path === "/api/templates" && method === "GET")
+          return j({ templates: [defaultPublished] });
+        if (path === "/api/catalog") return j({ entries: [] });
+        if (path === "/api/mcpservers") return j({ items: [] });
+        if (path.endsWith("/fork") && method === "POST") {
+          callCount++;
+          if (callCount === 1) {
+            // First fork → 409 collision.
+            return j({ error: "collision" }, false, 409);
+          }
+          // Second fork (with rename) → success.
+          return j({
+            status: "forked",
+            agent: { name: "support-agent-copy", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+            created: [],
+            needsRebinding: [],
+            unresolvedRefs: [],
+          }, true, 201);
+        }
+        return j({}, false, 404);
+      }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    // Wait for rename dialog.
+    await waitFor(() => expect(screen.getByTestId("rename-fork-dialog")).toBeInTheDocument());
+
+    // Clear the default and type a new name.
+    const input = screen.getByTestId("rename-fork-input");
+    fireEvent.change(input, { target: { value: "my-custom-fork" } });
+    fireEvent.click(screen.getByTestId("rename-fork-confirm"));
+
+    // The second fork request must carry the new name.
+    await waitFor(() => {
+      const forkCalls = calls.filter((c) => c.url.endsWith("/fork") && c.method === "POST");
+      expect(forkCalls.length).toBe(2);
+      expect(JSON.parse(forkCalls[1].body).name).toBe("my-custom-fork");
+    });
+  });
+
+  it("links to the existing fork on already-forked (U11)", async () => {
+    makeFetch({
+      templates: [defaultPublished],
+      forkStatus: 200,
+      forkResponse: {
+        status: "already-forked",
+        agent: { name: "support-agent", namespace: "my-ns", image: "", phase: "Ready", ready: true },
+        created: [],
+        needsRebinding: [],
+        unresolvedRefs: [],
+      },
+    });
+    let lastLocation = "";
+    renderPage((loc) => { lastLocation = loc; });
+
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    // U11: navigate to the existing fork.
+    await waitFor(() => {
+      expect(lastLocation).toBe("/agents/my-ns/support-agent");
+    });
+    // U11: toast says "Opening it now" not a dead-end message.
+    expect(screen.getByText(/Already forked/)).toBeInTheDocument();
+    expect(screen.getByText(/Opening it now/)).toBeInTheDocument();
+  });
+});
+
+// ── U12: per-entry spinner, key fix, verb+icon differentiation ─────────────────
+describe("TemplateGalleryPage (m76.3 U12) — per-entry spinner, key, verb/icon", () => {
+  it("shows 'Install' verb for recipe and 'Fork' for published (U12)", async () => {
+    makeFetch({ templates: [defaultRecipe, defaultPublished] });
+    renderPage();
+
+    // Recipe button says "Install".
+    const installBtn = await screen.findByTestId(`fork-template-${defaultRecipe.name}`);
+    expect(installBtn).toHaveTextContent("Install");
+
+    // Published button says "Fork".
+    const forkBtn = screen.getByTestId(`fork-template-${defaultPublished.name}`);
+    expect(forkBtn).toHaveTextContent("Fork");
+  });
+
+  it("shows per-entry Forking… spinner while the entry's fork is in flight (U12)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const path = url.split("?")[0];
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+
+        if (path.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (path.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true } } });
+        if (path === "/api/templates") return j({ templates: [defaultPublished] });
+        if (path === "/api/catalog") return j({ entries: [] });
+        if (path === "/api/mcpservers") return j({ items: [] });
+        // Never resolve the fork — keeps it in "Forking…" state.
+        if (path.endsWith("/fork") && method === "POST") return new Promise(() => {});
+        return j({}, false, 404);
+      }),
+    );
+
+    renderPage();
+    fireEvent.click(await screen.findByTestId(`fork-template-${defaultPublished.name}`));
+
+    await waitFor(() => {
+      expect(screen.getByTestId(`fork-template-${defaultPublished.name}`)).toHaveTextContent("Forking…");
+    });
+    expect(screen.getByTestId(`fork-template-${defaultPublished.name}`)).toBeDisabled();
   });
 });

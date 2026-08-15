@@ -1599,7 +1599,8 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
 
     fireEvent.click(screen.getByTestId("publish-agent-button"));
 
-    expect(await screen.findByRole("dialog", { name: /Publish billing as template/ })).toBeInTheDocument();
+    // U8: dialog is now titled "Share X as template" (renamed from "Publish").
+    expect(await screen.findByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-team")).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-org")).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-public")).toBeInTheDocument();
@@ -1634,31 +1635,37 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog title is now "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
 
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
     await waitFor(() => {
       expect(calls.some((c) => c.url === "/api/templates" && c.method === "POST")).toBe(true);
     });
+    // U8: success toast now says "Shared as template".
     await waitFor(() => {
-      expect(screen.getByText("Published")).toBeInTheDocument();
+      expect(screen.getByText("Shared as template")).toBeInTheDocument();
     });
   });
 
-  it("shows honest 403 error when publish is forbidden", async () => {
+  it("shows honest 403 error inline when publish is forbidden (U8 — keep dialog open)", async () => {
     installFetchWithPublish({ publishStatus: 403 });
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog title is now "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
+    // U8: error is shown inline (keeping the dialog open), not as a closing toast.
     await waitFor(() => {
-      expect(screen.getByText("Publish failed")).toBeInTheDocument();
+      expect(screen.getByTestId("publish-template-error")).toBeInTheDocument();
     });
-    expect(screen.getByText(/team-admin/)).toBeInTheDocument();
+    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(/team-admin/);
+    // The dialog stays open.
+    expect(screen.getByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
   });
 
   it("public publish requires confirm checkbox before submitting (blast-radius gate)", async () => {
@@ -1666,7 +1673,8 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog is now titled "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
 
     // Select public tier
     const publicOption = screen.getByTestId("publish-template-option-public");
@@ -1713,5 +1721,213 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("needs-rebinding-banner")).toBeNull();
+  });
+});
+
+// ── U5: needs-rebinding banner — actionable line items ────────────────────────
+describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", () => {
+  it("shows a 'Connect a model route' link when model route is missing (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "",
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("rebind-model-route-link")).toBeInTheDocument();
+    expect(screen.getByTestId("rebind-model-route-link")).toHaveTextContent("Connect a model route");
+  });
+
+  it("shows a Bindings tab link in the banner (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toHaveTextContent(/Bindings tab/i);
+  });
+
+  it("does not show 'Connect a model route' when model route is already set (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "gpt4-prod",
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
+  });
+});
+
+// ── U7: publish state badge + unpublish ──────────────────────────────────────
+describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
+  function installFetchWithPublishAndUnpublish(opts: {
+    publishStatus?: number;
+    unpublishStatus?: number;
+  } = {}) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") {
+          const status = opts.publishStatus ?? 200;
+          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          return j({ version: "3", name: "billing", namespace: "prod" });
+        }
+        if (url.match(/\/api\/templates\/.*/) && method === "DELETE") {
+          const status = opts.unpublishStatus ?? 200;
+          return j({}, status < 400, status);
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows published badge in header after publish succeeds (U7)", async () => {
+    installFetchWithPublishAndUnpublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Publish the agent.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    // Badge should appear.
+    await waitFor(() => {
+      expect(screen.getByTestId("published-badge")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/team/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/v3/);
+  });
+
+  it("shows Unpublish button after publish and calls DELETE /api/templates on click (U7)", async () => {
+    const calls: { url: string; method: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        calls.push({ url, method });
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") return j({ version: "2" });
+        if (url.match(/\/api\/templates\//) && method === "DELETE") return j({});
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Publish first.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument());
+
+    // Now unpublish.
+    fireEvent.click(screen.getByTestId("unpublish-agent-button"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes("/api/templates/") && c.method === "DELETE")).toBe(true);
+    });
+    // Badge should disappear after unpublish.
+    await waitFor(() => {
+      expect(screen.queryByTestId("published-badge")).toBeNull();
+    });
+  });
+});
+
+// ── U8: dialog immutable snapshot copy + "Share as template" button ───────────
+describe("AgentDetailPage (m76.3 U8) — publish dialog snapshot copy + rename", () => {
+  it("dialog shows the immutable snapshot note (U8)", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+      const j = (body: unknown, ok = true, status = 200) =>
+        Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+      if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+      if (url.startsWith("/api/capabilities"))
+        return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+      if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+      return j({}, false, 404);
+    }));
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    // U8: must say "immutable snapshot".
+    expect(screen.getByText(/immutable snapshot/i)).toBeInTheDocument();
+    // U8: submit button reads "Share as template", not "Publish as team".
+    expect(screen.getByTestId("publish-template-submit")).toHaveTextContent("Share as template");
+  });
+});
+
+// ── U12: fork lineage on detail page ─────────────────────────────────────────
+describe("AgentDetailPage (m76.3 U12) — fork lineage", () => {
+  it("shows fork lineage when fork-origin labels are present (U12)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: {
+          "agents.ctxmesh.ai/fork-origin-namespace": "prod",
+          "agents.ctxmesh.ai/fork-origin-name": "support-agent",
+          "agents.ctxmesh.ai/fork-origin-version": "v2",
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("fork-lineage")).toBeInTheDocument();
+    expect(screen.getByTestId("fork-lineage")).toHaveTextContent("prod/support-agent");
+    expect(screen.getByTestId("fork-lineage")).toHaveTextContent("v2");
+  });
+
+  it("does not show fork lineage when fork-origin labels are absent (U12)", async () => {
+    installFetch();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("fork-lineage")).toBeNull();
   });
 });
