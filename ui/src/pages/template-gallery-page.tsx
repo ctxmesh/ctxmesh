@@ -3,28 +3,33 @@ import { useNavigate } from "react-router-dom";
 import {
   BookOpen,
   Building2,
+  Check,
   GitFork,
   Globe,
   Link2,
   Lock,
   RefreshCw,
+  Search,
   Store,
   Users,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
+  CredentialSourceBadge,
   EmptyState,
   ErrorState,
   ForbiddenInline,
-  SkeletonTable,
+  SkeletonCard,
   useToast,
 } from "@/components/kit";
 import {
   api,
   ApiError,
   type CatalogEntry,
+  type McpServerSummary,
   type TemplateEntry,
 } from "@/lib/api";
 
@@ -76,6 +81,17 @@ function VisibilityBadge({ visibility }: { visibility: string | undefined }) {
         </Badge>
       );
   }
+}
+
+// ── Card skeleton for the catalog (T12 — not SkeletonTable for a card list) ──
+function CatalogSkeleton() {
+  return (
+    <div className="space-y-3" role="status" aria-busy="true" aria-label="Loading servers">
+      {[0, 1, 2].map((i) => (
+        <SkeletonCard key={i} />
+      ))}
+    </div>
+  );
 }
 
 // ── Template tab ─────────────────────────────────────────────────────────────
@@ -285,7 +301,7 @@ function TemplatesTab() {
         </Button>
       </div>
 
-      {state.kind === "loading" && <SkeletonTable rows={3} />}
+      {state.kind === "loading" && <CatalogSkeleton />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -327,10 +343,17 @@ function TemplatesTab() {
   );
 }
 
-// ── MCP Catalog tab (thin wrapper — reuses the data from GET /api/catalog) ──
+// ── MCP Catalog tab ──────────────────────────────────────────────────────────
+// T10: cross-checks the catalog against the caller's owned servers to render a
+// "Connected ✓" disabled state for entries already in the caller's namespace.
+// T11: after a successful Connect, navigates with location.state.highlight so
+// McpServersPage can briefly flash the new row.
+// T12: SkeletonCard (not SkeletonTable), "Connecting…" label, catalog search/filter,
+// consistent "org" vocabulary.
+
 type CatalogState =
   | { kind: "loading" }
-  | { kind: "ready"; entries: CatalogEntry[] }
+  | { kind: "ready"; entries: CatalogEntry[]; ownedKeys: Set<string> }
   | { kind: "forbidden"; message: string }
   | { kind: "error"; message: string };
 
@@ -339,14 +362,23 @@ function McpCatalogTab() {
   const { toast } = useToast();
   const [state, setState] = React.useState<CatalogState>({ kind: "loading" });
   const [connectingEntry, setConnectingEntry] = React.useState<string | null>(null);
+  // T12 catalog search filter
+  const [search, setSearch] = React.useState("");
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
-    api
-      .getCatalog(undefined, signal)
-      .then((res) => {
+
+    // T10: fetch catalog AND owned servers in parallel; cross-check by name+ns.
+    Promise.all([
+      api.getCatalog(undefined, signal),
+      api.listMcpServers(signal),
+    ])
+      .then(([catalogRes, ownedRes]) => {
         if (signal?.aborted) return;
-        setState({ kind: "ready", entries: res.entries ?? [] });
+        const owned = ownedRes.items ?? ownedRes.servers ?? [];
+        // Build a key set of the caller's owned servers: "<ns>/<name>"
+        const ownedKeys = new Set(owned.map((s: McpServerSummary) => `${s.namespace}/${s.name}`));
+        setState({ kind: "ready", entries: catalogRes.entries ?? [], ownedKeys });
       })
       .catch((err: unknown) => {
         if (signal?.aborted) return;
@@ -384,7 +416,14 @@ function McpCatalogTab() {
           title: "Connected",
           description: `${entry.name} is now available in your MCP servers.`,
         });
-        navigate("/tools/mcp-servers");
+        // T11: pass the new copy's ns/name as a highlight anchor so McpServersPage
+        // can flash the new row. The new copy is in the caller's own namespace (from
+        // res.namespace) or falls back to the origin namespace if the BFF omits it.
+        const connectedNs = res.namespace ?? entry.namespace;
+        const connectedName = res.name ?? entry.name;
+        navigate("/tools/mcp-servers", {
+          state: { highlight: `${connectedNs}/${connectedName}` },
+        });
       }
     } catch (err) {
       const msg =
@@ -399,9 +438,22 @@ function McpCatalogTab() {
     }
   }
 
+  // T12: client-side filter over name/namespace/description
+  const filteredEntries = React.useMemo(() => {
+    if (state.kind !== "ready") return [];
+    if (!search.trim()) return state.entries;
+    const q = search.toLowerCase();
+    return state.entries.filter(
+      (e) =>
+        e.name.toLowerCase().includes(q) ||
+        e.namespace.toLowerCase().includes(q) ||
+        (e.description ?? "").toLowerCase().includes(q),
+    );
+  }, [state, search]);
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           Discoverable MCP servers across your org. Connect one to make it available in your namespace.
         </p>
@@ -416,7 +468,22 @@ function McpCatalogTab() {
         </Button>
       </div>
 
-      {state.kind === "loading" && <SkeletonTable rows={3} />}
+      {/* T12: catalog search input */}
+      {state.kind === "ready" && state.entries.length > 0 && (
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search servers…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-8"
+            data-testid="mcp-catalog-search"
+          />
+        </div>
+      )}
+
+      {/* T12: SkeletonCard instead of SkeletonTable */}
+      {state.kind === "loading" && <CatalogSkeleton />}
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
@@ -442,47 +509,82 @@ function McpCatalogTab() {
         />
       )}
 
-      {state.kind === "ready" && state.entries.length > 0 && (
+      {state.kind === "ready" && state.entries.length > 0 && filteredEntries.length === 0 && (
+        <p className="text-sm text-muted-foreground" data-testid="mcp-catalog-no-results">
+          No servers match &ldquo;{search}&rdquo;.
+        </p>
+      )}
+
+      {state.kind === "ready" && filteredEntries.length > 0 && (
         <ul className="space-y-2" data-testid="mcp-catalog-tab-list">
-          {state.entries.map((e) => (
-            <li
-              key={`${e.namespace}/${e.name}`}
-              className="rounded-lg border bg-card p-4 shadow-card"
-              data-testid={`mcp-catalog-entry-${e.name}`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate font-medium">{e.name}</p>
-                    <VisibilityBadge visibility={e.visibility} />
-                    {e.authType && (
-                      <Badge variant="secondary">{e.authType}</Badge>
+          {filteredEntries.map((e) => {
+            const entryKey = `${e.namespace}/${e.name}`;
+            // T10: cross-check against the caller's owned list by ns+name
+            const isConnected = state.ownedKeys.has(entryKey);
+            const isConnecting = connectingEntry === entryKey;
+            return (
+              <li
+                key={entryKey}
+                className="rounded-lg border bg-card p-4 shadow-card"
+                data-testid={`mcp-catalog-entry-${e.name}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate font-medium">{e.name}</p>
+                      <VisibilityBadge visibility={e.visibility} />
+                      {e.authType && (
+                        <Badge variant="secondary">{e.authType}</Badge>
+                      )}
+                      {/* T8: human-label credentialSource badge */}
+                      <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />
+                      {/* T10: "Connected ✓" badge for already-owned entries */}
+                      {isConnected && (
+                        <Badge
+                          variant="success"
+                          className="gap-1"
+                          data-testid={`mcp-catalog-connected-${e.name}`}
+                        >
+                          <Check className="h-3 w-3" />
+                          Connected
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      namespace: <span className="font-mono">{e.namespace}</span>
+                    </p>
+                    {e.description && (
+                      <p className="text-sm text-muted-foreground">{e.description}</p>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    namespace: <span className="font-mono">{e.namespace}</span>
-                  </p>
-                  {e.description && (
-                    <p className="text-sm text-muted-foreground">{e.description}</p>
-                  )}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant="secondary">
+                      {e.toolCount} {e.toolCount === 1 ? "tool" : "tools"}
+                    </Badge>
+                    {/* T10: disabled state for already-connected; T12: "Connecting…" */}
+                    <Button
+                      size="sm"
+                      onClick={() => handleConnect(e)}
+                      disabled={isConnected || isConnecting}
+                      data-testid={`connect-mcp-tab-${e.name}`}
+                    >
+                      {isConnected ? (
+                        <>
+                          <Check className="mr-1.5 h-3.5 w-3.5" />
+                          Connected
+                        </>
+                      ) : (
+                        <>
+                          <Link2 className="mr-1.5 h-3.5 w-3.5" />
+                          {isConnecting ? "Connecting…" : "Connect"}
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge variant="secondary">
-                    {e.toolCount} {e.toolCount === 1 ? "tool" : "tools"}
-                  </Badge>
-                  <Button
-                    size="sm"
-                    onClick={() => handleConnect(e)}
-                    disabled={connectingEntry === `${e.namespace}/${e.name}`}
-                    data-testid={`connect-mcp-tab-${e.name}`}
-                  >
-                    <Link2 className="mr-1.5 h-3.5 w-3.5" />
-                    Connect
-                  </Button>
-                </div>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

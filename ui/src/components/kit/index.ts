@@ -61,3 +61,5 @@ export type {
 
 export { useFocusTrap } from "./use-focus-trap";
 export type { FocusTrapOptions } from "./use-focus-trap";
+
+export { CredentialSourceBadge } from "./credential-source-badge";
