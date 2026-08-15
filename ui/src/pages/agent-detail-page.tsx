@@ -484,7 +484,7 @@ function AgentHeader({
               data-testid="publish-agent-button"
             >
               <Share2 className="h-4 w-4" />
-              {publishedState ? "Publish new version" : "Publish"}
+              {publishedState ? "Share new version" : "Share as template"}
             </Button>
           )}
           {canEdit && (
@@ -3382,8 +3382,8 @@ function PublishTemplateDialog({
         </h2>
         {/* U8: immutable snapshot copy note */}
         <p className="mt-1 text-sm text-muted-foreground">
-          Publishing shares an <strong>immutable snapshot</strong> of the current definition —
-          your secrets and credentials are never shared. Publish again to share a new version.
+          Sharing a snapshot creates an <strong>immutable snapshot</strong> of the current definition —
+          your secrets and credentials are never shared. Share again to publish a new version.
         </p>
         {/* U7: warn if already published */}
         {alreadyPublished && (
@@ -3391,7 +3391,7 @@ function PublishTemplateDialog({
             className="mt-2 text-sm text-amber-600 dark:text-amber-400"
             data-testid="publish-template-already-published-warning"
           >
-            This agent is already published. Publishing again creates a new version at the
+            This agent is already published. Sharing again creates a new version at the
             selected visibility.
           </p>
         )}

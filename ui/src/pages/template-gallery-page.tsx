@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
   Building2,
@@ -758,7 +758,9 @@ function McpCatalogTab() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 export function TemplateGalleryPage() {
-  const [activeTab, setActiveTab] = React.useState<ActiveTab>("templates");
+  const [searchParams] = useSearchParams();
+  const initialTab: ActiveTab = searchParams.get("tab") === "mcp" ? "mcp" : "templates";
+  const [activeTab, setActiveTab] = React.useState<ActiveTab>(initialTab);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">

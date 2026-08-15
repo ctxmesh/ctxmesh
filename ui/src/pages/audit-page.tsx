@@ -42,34 +42,61 @@ import { api, ApiError, type AuditEvent, type AuditListParams } from "@/lib/api"
 
 const PAGE_LIMIT = 50;
 
-// AUDIT_ACTIONS — the closed vocabulary for the `action` field (BFF + controller
-// sources). Kept here (TS const) so the UI dropdown and the Go store share the
-// same enumerated values without a generated code step.
+// AUDIT_ACTIONS — the closed vocabulary for the `action` field. Enumerated directly
+// from the Go source that writes each audit row (do NOT add values not present there;
+// a non-existent value silently produces zero rows — the exact bug H1 was built to kill):
+//   "connect"         — internal/bff/audit_events.go:auditActionConnect
+//   "grant.create"    — internal/bff/audit_events.go:auditActionGrantCreate
+//   "grant.revoke"    — internal/bff/audit_events.go:auditActionGrantRevoke
+//   "share.create"    — internal/bff/shares.go:auditActionShareCreate
+//   "share.revoke"    — internal/bff/shares.go:auditActionShareRevoke
+//   "guardrail.block" — internal/bff/guardrail_event_handler.go:auditActionGuardrailBlock
+//   "create"          — internal/audit/audit.go:VerbCreate (controller CRD mutations)
+//   "update"          — internal/audit/audit.go:VerbUpdate (controller CRD mutations)
+//   "delete"          — internal/audit/audit.go:VerbDelete (controller CRD mutations)
+// NOTE: "connect.denied" was REMOVED — denial is outcome="denied" on action="connect",
+// not a separate action string. No audit row ever carries action="connect.denied".
 const AUDIT_ACTIONS = [
   "connect",
-  "connect.denied",
   "grant.create",
   "grant.revoke",
+  "share.create",
+  "share.revoke",
+  "guardrail.block",
   "create",
   "update",
   "delete",
 ] as const;
 
-// AUDIT_KINDS — the closed vocabulary for the `resourceKind` field. CRD Kinds (controller)
-// + BFF resource types. Kept in sync with the store's Entry.ResourceKind usage.
+// AUDIT_KINDS — the closed vocabulary for the `resourceKind` field. Enumerated from
+// the Go source that writes ResourceKind in each audit row:
+//   BFF rows (internal/bff/):
+//     "Provider"       — providers.go:resourceKindProvider
+//     "MCPGrant"       — mcp_grant_handlers.go:resourceKindMCPGrant
+//     "GuardrailPolicy" — guardrail_event_handler.go (literal "GuardrailPolicy")
+//     "SharedRun"      — shares.go:auditKindSharedRun
+//   Controller rows (internal/audit/auditor.go:auditedTypes — the scheme-resolved Kind):
+//     "AgentDeployment", "AgentVersion", "ModelRoute", "SecretBinding",
+//     "MCPToolBinding", "MemoryBinding", "AgentRegistry", "AgentScalingPolicy",
+//     "EvalSuite"
+// NOTE: "PromptVersion"/"ToolRegistry" were retired to Postgres (ADR 0044) and are
+// no longer CRDs — they are NOT in auditedTypes() and produce no controller rows.
+// "AgentTeam"/"Workflow"/"KnowledgeBase" were REMOVED — not in auditedTypes() and
+// have no BFF audit rows.
 const AUDIT_KINDS = [
   "Provider",
   "MCPGrant",
+  "GuardrailPolicy",
+  "SharedRun",
   "AgentDeployment",
-  "AgentRegistry",
+  "AgentVersion",
   "ModelRoute",
   "SecretBinding",
+  "MCPToolBinding",
+  "MemoryBinding",
+  "AgentRegistry",
+  "AgentScalingPolicy",
   "EvalSuite",
-  "PromptVersion",
-  "GuardrailPolicy",
-  "AgentTeam",
-  "Workflow",
-  "KnowledgeBase",
 ] as const;
 
 // toRFC3339 converts a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",

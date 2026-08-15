@@ -424,3 +424,47 @@ describe("AuditPage — 501 / 403 / 500 states (m63.5)", () => {
     expect(screen.queryByTestId("audit-unavailable")).toBeNull();
   });
 });
+
+// ── P1-2: AUDIT_ACTIONS dropdown vocabulary matches Go source ────────────────
+
+describe("AuditPage — P1-2 AUDIT_ACTIONS vocabulary (m76 close)", () => {
+  it("action dropdown includes all real BFF+controller actions", async () => {
+    installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    const select = screen.getByLabelText("Filter by action");
+    // These are the real action strings the Go source writes (verified against
+    // internal/bff/audit_events.go, shares.go, guardrail_event_handler.go,
+    // internal/audit/audit.go). Each must appear as a <option> in the Select.
+    const expected = [
+      "connect",
+      "grant.create",
+      "grant.revoke",
+      "share.create",
+      "share.revoke",
+      "guardrail.block",
+      "create",
+      "update",
+      "delete",
+    ];
+    for (const action of expected) {
+      expect(
+        Array.from((select as HTMLSelectElement).options).some((o) => o.value === action),
+        `expected action "${action}" to be an option`,
+      ).toBe(true);
+    }
+  });
+
+  it("action dropdown does NOT include connect.denied (denial is outcome=denied on action=connect)", async () => {
+    installFetch(() => ({ ok: true, body: { items: [], nextCursor: "" } }));
+    renderPage();
+    await screen.findByTestId("audit-filter-bar");
+
+    const select = screen.getByLabelText("Filter by action");
+    expect(
+      Array.from((select as HTMLSelectElement).options).some((o) => o.value === "connect.denied"),
+      'action "connect.denied" must NOT be in the dropdown — it never exists as an action value',
+    ).toBe(false);
+  });
+});
