@@ -95,6 +95,12 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
 
+.PHONY: gen-workflow-schema
+gen-workflow-schema: manifests ## Regenerate the WorkflowSpec JSON-Schema (internal/bff/workflow_spec_schema.json) from the Workflow CRD. Run after any WorkflowSpec type change.
+	go run ./hack/gen-workflow-schema \
+		-crd config/crd/bases/agents.ctxmesh.ai_workflows.yaml \
+		-out internal/bff/workflow_spec_schema.json
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
