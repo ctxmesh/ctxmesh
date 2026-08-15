@@ -120,6 +120,59 @@ func TestCreateRun_AgentFailureIsFailed(t *testing.T) {
 	assert.NotEmpty(t, got.Error)
 }
 
+// recordCapableAgent is a ready agent marked spec.record=true (record-capable).
+func recordCapableAgent(name, namespace, url string) *agentsv1alpha1.AgentDeployment {
+	a := readyAgent(name, namespace, url)
+	a.Spec.Record = true
+	return a
+}
+
+// TestCreateRun_Record_FailsClosedOnNonRecordCapableAgent proves the C2 fail-closed gate (M78, ADR
+// 0071 §1): asking to record a run against an agent that is NOT record-capable (spec.record unset)
+// is REFUSED with a clear 400 — never a silently-record-nothing run.
+func TestCreateRun_Record_FailsClosedOnNonRecordCapableAgent(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local") // NOT record-capable
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	raw, _ := json.Marshal(InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`), Record: true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "record on a non-record-capable agent must fail closed")
+	assert.Contains(t, rec.Body.String(), "record-capable", "the error must name the record-capability gap")
+}
+
+// TestCreateRun_Record_AcceptedOnRecordCapableAgent proves a record run against a record-capable
+// agent is accepted and the run carries Record=true (the per-run capture toggle propagates).
+func TestCreateRun_Record_AcceptedOnRecordCapableAgent(t *testing.T) {
+	agent := recordCapableAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`), Record: true})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.True(t, got.Record, "a recorded run must persist Record=true")
+	assert.Equal(t, run.StatusSucceeded, got.Status)
+}
+
+// TestCreateRun_NoRecord_UnaffectedByCapability proves a NON-record run is byte-for-byte unchanged
+// whether or not the agent is record-capable (record is strictly opt-in).
+func TestCreateRun_NoRecord_UnaffectedByCapability(t *testing.T) {
+	agent := recordCapableAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.False(t, got.Record, "a run that did not opt in must not be recorded")
+}
+
 func TestRunEvents_SSE(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()

@@ -25,6 +25,7 @@
 
 import { approvalScope } from "./_approval.js";
 import { capabilityScope } from "./_capability.js";
+import { recordScope } from "./_record.js";
 import { PlaneConfig } from "./config.js";
 import { FeedbackClient } from "./feedback.js";
 import { KnowledgeClient } from "./knowledge.js";
@@ -80,7 +81,9 @@ export class Client {
     fn: () => T,
   ): T {
     return capabilityScope(headers, () =>
-      approvalScope(approvals, () => this.trace.requestContext(headers, fn)),
+      approvalScope(approvals, () =>
+        recordScope(headers, () => this.trace.requestContext(headers, fn)),
+      ),
     );
   }
 

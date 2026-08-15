@@ -36,6 +36,7 @@
 import * as fs from "node:fs";
 
 import { capabilityScope } from "./_capability.js";
+import { recordScope } from "./_record.js";
 import { approvalScope, pauseForApproval } from "./_approval.js";
 import * as semconv from "./_semconv.js";
 import { Client } from "./client.js";
@@ -617,6 +618,7 @@ export async function runManagedLoop(
   // scopes over AsyncLocalStorage; they preserve across the awaited driveLoop.
   return capabilityScope(headers, () =>
     approvalScope(opts.approvals, () =>
+      recordScope(headers, () =>
       client.trace.loop("managed-agent", headers, async (root) => {
         root.setInput(userInput);
 
@@ -661,6 +663,7 @@ export async function runManagedLoop(
           throw err;
         }
       }),
+      ),
     ),
   );
 }

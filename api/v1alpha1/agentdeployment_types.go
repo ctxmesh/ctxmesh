@@ -304,6 +304,21 @@ type AgentDeploymentSpec struct {
 	// (double side-effects) and auto-progression is deferred.
 	// +optional
 	Rollout *RolloutSpec `json:"rollout,omitempty"`
+
+	// record marks this agent RECORD-CAPABLE (M78, ADR 0071 §1). Record mode captures a
+	// run's model + tool I/O into a portable replay fixture, and the capture rides the two
+	// platform proxies (the launcher gateway for model I/O, the egress sidecar for tool I/O).
+	// Those proxies are CONDITIONALLY interposed (ADR 0071 C2), so recording needs its own
+	// interposition reason: when record is true the controller FORCES the launcher gateway on
+	// (a new reason alongside budget/quota/guardrail) so it is present to capture.
+	//
+	// Enablement is PER-DEPLOYMENT (this flag) but capture is PER-RUN: a specific run opts in
+	// via POST /api/runs {record:true}, and the BFF fails that run CLOSED if the agent is not
+	// record-capable (no gateway to capture at — ADR 0071 C2, never a silent no-capture). So
+	// this flag is "may record"; the run flag is "record THIS run". Default false ⇒ the agent
+	// is not record-capable and the gateway interposition is byte-for-byte unchanged.
+	// +optional
+	Record bool `json:"record,omitempty"`
 }
 
 // RolloutSpec selects a progressive-delivery strategy for a serving agent's rollout

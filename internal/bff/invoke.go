@@ -94,6 +94,34 @@ func conversationIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// hdrRecord is the per-run RECORD-MODE capture toggle (M78, ADR 0071 §1). The BFF stamps it on a
+// recorded run's /invoke (its VALUE is the run id the fixture is keyed on) ONLY when the run opted
+// in (run.Record) against a record-capable agent (the C2 fail-closed gate at create time already
+// rejected a record run on a non-record-capable agent). The SDK relays it on each outbound model
+// call; the launcher gateway reads it to capture that call's model I/O into the run's fixture. A
+// non-recorded run carries no header ⇒ the record-capable agent's gateway captures nothing. It is a
+// launcher-internal signal — the gateway strips it before forwarding to LiteLLM (never leaks
+// upstream), exactly like the run capability + spawn context.
+const hdrRecord = "X-Ctxmesh-Record"
+
+// recordCtxKey carries the recorded run's id from the run-worker / create-run handler to the
+// adapter (like the run capability + conversation id), so the pure-HTTP adapter stamps the
+// X-Ctxmesh-Record header without the caller reaching into it. Empty ⇒ the run is NOT recorded.
+type recordCtxKey struct{}
+
+// contextWithRecord returns ctx carrying the recorded run's id for the adapter to stamp as the
+// X-Ctxmesh-Record header on the outbound /invoke. Pass "" for a non-recorded run (no header).
+func contextWithRecord(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, recordCtxKey{}, runID)
+}
+
+// recordRunIDFromContext returns the recorded run id carried on ctx, or "" when the run is not being
+// recorded (record mode off for this run).
+func recordRunIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(recordCtxKey{}).(string)
+	return id
+}
+
 // Spawn-context headers (M64, ADR 0057): the run-worker stamps a run's spawn-tree position onto its
 // /invoke so a SUPERVISOR's launcher can bound its delegations — the tree ROOT (the shared spawn-counter
 // key) and this run's DEPTH (the child's depth = this+1 vs maxSpawnDepth). The launcher reads them in the
@@ -214,6 +242,12 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	if convID := conversationIDFromContext(ctx); convID != "" {
 		req.Header.Set(hdrConversationID, convID)
 	}
+	// Record mode (M78, ADR 0071 §1): stamp the per-run capture toggle when this run is being
+	// recorded. The SDK relays it on each model call; the launcher gateway captures the model I/O
+	// into the run's fixture. Only when present (a recorded run); a normal run carries nothing.
+	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
+		req.Header.Set(hdrRecord, recRunID)
+	}
 	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
 	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root
 	// run the run-worker tagged); a plain invoke carries none and nothing changes.
@@ -281,6 +315,12 @@ func (a *httpInvokeAdapter) InvokeStream(
 	}
 	if convID := conversationIDFromContext(ctx); convID != "" {
 		req.Header.Set(hdrConversationID, convID)
+	}
+	// Record mode (M78, ADR 0071 §1): stamp the per-run capture toggle when this run is being
+	// recorded (same as the non-streaming Invoke path). The SDK relays it on each model call; the
+	// launcher gateway captures the model I/O (incl. SSE bytes verbatim) into the run's fixture.
+	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
+		req.Header.Set(hdrRecord, recRunID)
 	}
 	// Spawn-tree position (M64): stamp the root + depth so a supervisor's launcher can bound its
 	// delegations (the shared spawn-counter key + the depth guard). Only when present (a spawned/root

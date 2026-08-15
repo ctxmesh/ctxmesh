@@ -46,6 +46,7 @@ import jsonschema
 
 from ctxmesh._approval import approval_scope, pause_for_approval
 from ctxmesh._capability import capability_scope
+from ctxmesh._record import record_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import (
     ApprovalRequiredError,
@@ -613,6 +614,7 @@ def run_managed_loop(
     with (
         capability_scope(headers),
         approval_scope(approvals),
+        record_scope(headers),
         client.trace.loop("managed-agent", headers=headers) as root,
     ):
         root.set_input(user_input)

@@ -251,6 +251,28 @@ func TestInvokeAdapterAttachesConversationHeader(t *testing.T) {
 	assert.Empty(t, gotConv, "no conversation id on the context ⇒ no header (single-shot run)")
 }
 
+// TestInvokeAdapterAttachesRecordHeader proves the adapter stamps the per-run record-mode capture
+// toggle (M78, ADR 0071 §1) as X-Ctxmesh-Record: <runId> when the run is being recorded, and
+// attaches NO header for a normal (non-recorded) run.
+func TestInvokeAdapterAttachesRecordHeader(t *testing.T) {
+	var gotRecord string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRecord = r.Header.Get(hdrRecord)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithRecord(context.Background(), "run-rec-1"), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "run-rec-1", gotRecord, "the adapter stamps X-Ctxmesh-Record from the context for a recorded run")
+
+	gotRecord = ""
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, gotRecord, "no record id on the context ⇒ no header (non-recorded run)")
+}
+
 // TestInvokeAdapterAttachesSpawnHeaders proves the adapter forwards a run's spawn-tree position
 // (M64) as X-Ctxmesh-Spawn-Root/Depth when present, and attaches none for a plain (non-spawn) run.
 func TestInvokeAdapterAttachesSpawnHeaders(t *testing.T) {

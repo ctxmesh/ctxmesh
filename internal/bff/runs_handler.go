@@ -217,6 +217,16 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Record mode C2 fail-closed (M78, ADR 0071 §1): a run may ask to be recorded (req.Record) ONLY
+	// against a RECORD-CAPABLE agent (spec.record) — the controller then forced the launcher gateway on
+	// so it can capture. Recording against a non-record-capable agent has NO gateway to capture at, so
+	// we REFUSE the run here with a clear error rather than silently capturing nothing (never a silent
+	// no-capture). This is the fail-closed enablement gate; the per-run capture toggle rides the invoke.
+	if req.Record && !deploy.Spec.Record {
+		writeError(w, http.StatusBadRequest,
+			"record requested but the gateway is not interposed — the agent is not record-capable (set spec.record on the AgentDeployment)")
+		return
+	}
 	r, ok = attachConversationID(w, r, req.ConversationID)
 	if !ok {
 		return
@@ -270,6 +280,12 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
 			runCapabilityFromContext(r.Context()),
 		)
+		// Record mode (M78, ADR 0071 §1): carry the run id so the adapter stamps X-Ctxmesh-Record on
+		// the in-process (dev / single-pod) path too — the same per-run capture toggle the run-worker
+		// sets in dispatch mode. Only when this run opted in (req.Record, already gated record-capable).
+		if rn.Record {
+			execCtx = contextWithRecord(execCtx, runID)
+		}
 		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
 	}
 
