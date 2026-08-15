@@ -68,6 +68,16 @@ def _roster_names() -> List[str]:
     return [str(e["name"]) for e in _knowledge_roster()]
 
 
+def _auto_inject_names() -> List[str]:
+    """Return the KB names whose roster entry has ``autoInject: true`` (ADR 0061 #5, M10).
+
+    These are the corpora the in-pod SDK auto-retrieves on the user input each turn (RAG-style,
+    ephemeral ``<retrieved_context>``). A KB WITHOUT the flag stays tool-only. An empty/malformed
+    roster → [] (no auto-inject — the tool-only default is byte-for-byte unchanged).
+    """
+    return [str(e["name"]) for e in _knowledge_roster() if e.get("autoInject") is True]
+
+
 class KnowledgeClient:
     """Knowledge-base retrieval against the launcher's :2998 /knowledge/search endpoint (M68).
 

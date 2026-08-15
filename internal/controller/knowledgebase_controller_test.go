@@ -291,6 +291,64 @@ func TestKnowledgeBinding_ResolvesEnvVars(t *testing.T) {
 		"embeddingRoute must be resolved from the KnowledgeBase CR")
 }
 
+// TestKnowledgeBinding_AutoInjectFlowsIntoRoster (m80.5, ADR 0061 governance #5 / M10): the
+// per-BINDING autoInject flag on a KnowledgeBaseRef threads into the KNOWLEDGE_BASES roster JSON so
+// the in-pod SDK knows which KBs to auto-inject. A ref WITHOUT autoInject omits the field (omitempty),
+// keeping the roster byte-compatible for the tool-only case.
+func TestKnowledgeBinding_AutoInjectFlowsIntoRoster(t *testing.T) {
+	const ns = "default"
+	const autoKB = "auto-kb"
+	const toolKB = "tool-kb"
+	const agentName = "kb-autoinject-agent"
+
+	// Two KnowledgeBases, both resolvable.
+	for _, name := range []string{autoKB, toolKB} {
+		mkKnowledgeBase(t, name, ns, agentsv1beta1.KnowledgeBaseSpec{
+			EmbeddingRoute: "text-embedding-3-small",
+			Source:         agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+			Chunking:       agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+		})
+		reconcileKB(t, newKBReconciler(), name, ns)
+	}
+
+	// The agent auto-injects one KB and leaves the other tool-only — a per-binding choice.
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+				{Name: autoKB, AutoInject: true},
+				{Name: toolKB}, // AutoInject unset ⇒ tool-only
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, ns)
+
+	envMap := envByName(getKsvc(t, agentName, ns).Spec.Template.Spec.Containers[0].Env)
+	rosterJSON, hasRoster := envMap["KNOWLEDGE_BASES"]
+	require.True(t, hasRoster, "KNOWLEDGE_BASES env must be set")
+
+	var roster []kbRosterEntry
+	require.NoError(t, json.Unmarshal([]byte(rosterJSON), &roster))
+	require.Len(t, roster, 2)
+
+	byName := map[string]kbRosterEntry{}
+	for _, e := range roster {
+		byName[e.Name] = e
+	}
+	assert.True(t, byName[autoKB].AutoInject, "the auto-inject binding must carry autoInject=true in the roster")
+	assert.False(t, byName[toolKB].AutoInject, "the tool-only binding must NOT carry autoInject")
+
+	// omitempty proof: the tool-only entry serialises WITHOUT the autoInject key (byte-compatible with
+	// the pre-M10 roster — no structural-digest churn for a no-auto-inject fleet).
+	assert.NotContains(t, rosterJSON, `"name":"`+toolKB+`","namespace":"`+ns+`","embeddingRoute":"text-embedding-3-small","autoInject"`,
+		"a tool-only roster entry must omit the autoInject field")
+	assert.Contains(t, rosterJSON, `"autoInject":true`, "the auto-inject entry must stamp autoInject:true")
+}
+
 // TestKnowledgeBinding_DanglingRef_SetsCondition: when a spec.knowledgeBases[] ref points to a
 // non-existent KnowledgeBase, the controller sets a KnowledgeBasesResolved=False condition and
 // does NOT inject KNOWLEDGE_BASE_ENABLED (all refs dangling → proxy stays off).
@@ -410,6 +468,29 @@ func (f *fakePrefixDeleter) DeletePrefix(_ context.Context, prefix string) error
 	defer f.mu.Unlock()
 	f.DeletePrefixArgs = append(f.DeletePrefixArgs, prefix)
 	return f.DeletePrefixErr
+}
+
+// fakeIngestionRunReader serves a canned ingestion-run terminal status for the terminal-failed safety-net
+// (M80, ADR 0061 Fork 2). It records the last runID looked up so a test can assert the controller consulted
+// the KB's ingestionRunRef.
+type fakeIngestionRunReader struct {
+	mu sync.Mutex
+
+	// Status is the canned run status returned by IngestionRunStatus.
+	Status string
+	// Found controls the found return value (false ⇒ the run row is gone / never existed).
+	Found bool
+	// Err, if non-nil, is returned by IngestionRunStatus.
+	Err error
+	// LastRunID records the last runID passed to IngestionRunStatus.
+	LastRunID string
+}
+
+func (f *fakeIngestionRunReader) IngestionRunStatus(_ context.Context, runID string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastRunID = runID
+	return f.Status, f.Found, f.Err
 }
 
 // newKBReconcilerWith builds a KnowledgeBaseReconciler with the given fake stores wired in.
@@ -568,6 +649,109 @@ func TestKnowledgeBase_StatusProjection(t *testing.T) {
 		"reconcile must project IngestionRunID onto KB.status.ingestionRunRef")
 }
 
+// perUserKBSpec is validKBSpec with perUser + a per-user storage soft cap set (m80.4).
+func perUserKBSpec(softCap int64) agentsv1beta1.KnowledgeBaseSpec {
+	spec := validKBSpec()
+	spec.PerUser = true
+	spec.UserStorageSoftCap = softCap
+	return spec
+}
+
+// TestKnowledgeBase_UserStorageSoftCap_ExceededCondition (m80.4, ADR 0061 Fork 3): a perUser KB with a
+// configured userStorageSoftCap whose corpus-status per-subject aggregation shows a user OVER the cap must
+// get UserStorageSoftCapExceeded=True (WARN-only, ingestion never blocked); a within-cap corpus gets False.
+func TestKnowledgeBase_UserStorageSoftCap_ExceededCondition(t *testing.T) {
+	const ns = "default"
+	const name = "kb-peruser-softcap"
+
+	// alice is over the 1000-byte cap; bob is within it.
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: name, Phase: "Ready", DocumentCount: 3, ChunkCount: 9,
+			SizeBytes: 1700, IngestionRunID: "run-pu",
+			SizePerSubject: map[string]int64{"u-alice": 1500, "u-bob": 200},
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       perUserKBSpec(1000),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	cond := apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded)
+	require.NotNil(t, cond, "a perUser KB with a soft cap must carry the UserStorageSoftCapExceeded condition")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status,
+		"a user over the per-user soft cap must set UserStorageSoftCapExceeded=True")
+	assert.Contains(t, cond.Message, "u-alice", "the condition must name the over-cap user")
+
+	// Now bring alice back within the cap → the condition must flip to False (WARN cleared).
+	fakeKnowledge.mu.Lock()
+	fakeKnowledge.GetStatusResult.SizePerSubject = map[string]int64{"u-alice": 300, "u-bob": 200}
+	fakeKnowledge.mu.Unlock()
+
+	reconcileKB(t, r, name, ns)
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	cond = apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status,
+		"once all users are within the cap the condition must flip to False")
+}
+
+// TestKnowledgeBase_OrgWide_NoUserStorageCondition (m80.4): an ORG-WIDE KB (perUser=false) must NOT grow a
+// UserStorageSoftCapExceeded condition even if the corpus-status carries per-subject data — the !perUser
+// path is byte-for-byte unchanged (no per-user accounting condition).
+func TestKnowledgeBase_OrgWide_NoUserStorageCondition(t *testing.T) {
+	const ns = "default"
+	const name = "kb-orgwide-nocond"
+
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: name, Phase: "Ready", DocumentCount: 1, ChunkCount: 3,
+			SizeBytes: 500, IngestionRunID: "run-org",
+			// Even if some stray per-subject data were present, an org-wide KB must ignore it.
+			SizePerSubject: map[string]int64{"u-stray": 9999},
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(), // perUser=false, no soft cap
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	assert.Nil(t, apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded),
+		"an org-wide KB must never carry the per-user storage condition (byte-for-byte unchanged)")
+}
+
 // TestKnowledgeBase_StatusProjection_IngestingRequeue: when GetCorpusStatus returns found=false AND
 // the KB.status.Phase is already "Ingesting" (set by the BFF endpoint), the reconcile must return a
 // RequeueAfter > 0 (so the controller polls for the terminal row to appear).
@@ -609,6 +793,108 @@ func TestKnowledgeBase_StatusProjection_IngestingRequeue(t *testing.T) {
 	require.NoError(t, err, "reconcile must not error during an Ingesting poll")
 	assert.Positive(t, result.RequeueAfter,
 		"reconcile must return RequeueAfter > 0 while status is Ingesting and no terminal row is found")
+}
+
+// TestKnowledgeBase_StuckIngesting_SafetyNetProjectsFailed (M80, ADR 0061 Fork 2): the controller safety-net.
+// When the KB is stuck at phase Ingesting, NO corpus-status row exists (an out-of-band ingestion failure that
+// never wrote the status channel), but the referenced ingestionRunRef run is terminal-`failed`, the reconcile
+// must project KB.status.phase=Failed (NOT keep polling Ingesting forever) — the m68.14 stuck-Ingesting bug.
+func TestKnowledgeBase_StuckIngesting_SafetyNetProjectsFailed(t *testing.T) {
+	const ns = "default"
+	const name = "kb-stuck-safetynet"
+
+	// GetCorpusStatus returns found=false — the executor never wrote a terminal row (the out-of-band failure).
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false}
+	// The referenced ingestion run terminated `failed`.
+	fakeRuns := &fakeIngestionRunReader{Status: "failed", Found: true}
+	r := &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: fakeKnowledge, IngestionRuns: fakeRuns}
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	// First reconcile: adds finalizer + validates.
+	reconcileKB(t, r, name, ns)
+
+	// Simulate the BFF setting phase=Ingesting AND the ingestionRunRef (the run the executor launched).
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.Phase = "Ingesting"
+	live.Status.IngestionRunRef = "ing-run-oob"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+
+	// Second reconcile: no corpus-status row + phase Ingesting + the referenced run is terminal-failed → the
+	// safety-net must project Failed and NOT requeue (the run is terminal; there is nothing left to poll).
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err, "the safety-net reconcile must not error")
+	assert.Zero(t, result.RequeueAfter,
+		"a terminal-failed run un-sticks the KB: the reconcile must stop polling Ingesting")
+
+	var after agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &after))
+	assert.Equal(t, "Failed", after.Status.Phase,
+		"the safety-net must project Failed when the referenced ingestion run terminated failed out-of-band")
+	assert.Equal(t, "ing-run-oob", fakeRuns.LastRunID,
+		"the safety-net must consult the KB's ingestionRunRef")
+}
+
+// TestKnowledgeBase_StuckIngesting_SafetyNetKeepsPollingWhenRunNotTerminal (M80): the safety-net must NOT
+// fire while the referenced run is still running (or terminal-succeeded, whose Ready needs the row's counts).
+// It keeps polling (RequeueAfter > 0) and leaves phase Ingesting — proving the catch-all is narrow.
+func TestKnowledgeBase_StuckIngesting_SafetyNetKeepsPollingWhenRunNotTerminal(t *testing.T) {
+	const ns = "default"
+	const name = "kb-stuck-still-running"
+
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false}
+	// The referenced run is still `running` — the ingestion is genuinely in flight, not stuck.
+	fakeRuns := &fakeIngestionRunReader{Status: "running", Found: true}
+	r := &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: fakeKnowledge, IngestionRuns: fakeRuns}
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.Phase = "Ingesting"
+	live.Status.IngestionRunRef = "ing-run-live"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err, "the safety-net reconcile must not error while the run is in flight")
+	assert.Positive(t, result.RequeueAfter,
+		"a still-running ingestion run must keep polling (the safety-net must not fire prematurely)")
+
+	var after agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &after))
+	assert.Equal(t, "Ingesting", after.Status.Phase,
+		"the safety-net must leave phase Ingesting while the referenced run is not terminal-failed")
 }
 
 // TestKnowledgeBase_FinalizerLifecycle_NilStores: the existing test (nil stores → skip GC → finalizer

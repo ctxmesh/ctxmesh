@@ -27,6 +27,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
 // Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the launcher exposes knowledge.search that PROXIES to
@@ -48,6 +50,19 @@ import (
 // enabledTrue is the truthy value the controller stamps on the *_ENABLED feature gates.
 const enabledTrue = "true"
 
+// Per-user KB subject-resolution errors (fail-closed — a per-user corpus is never searched under subject "").
+// Kept as sentinels so the handler maps them to a single honest 4xx without leaking capability internals.
+var (
+	errKBPerUserNoVerifier    = errKBString("per-user knowledge base needs a capability verifier (MCP_CAPABILITY_PUBLIC_KEY unset)") //nolint:lll // a single clear operator-facing message
+	errKBPerUserNoCapability  = errKBString("per-user knowledge base needs the run capability (" + runcap.HeaderName + ")")
+	errKBPerUserBadCapability = errKBString("run capability verification failed")
+	errKBPerUserNoUser        = errKBString("run capability carries no user identity")
+)
+
+type errKBString string
+
+func (e errKBString) Error() string { return string(e) }
+
 // Forwarded-payload JSON keys — they MUST match the token-service knowledgeSearchRequest tags
 // (internal/credplane/knowledge.go): the launcher builds this request, the token-service decodes it.
 const (
@@ -58,29 +73,45 @@ const (
 
 // kbRosterEntry is the per-KB wire shape in the KNOWLEDGE_BASES env — matches the JSON the controller
 // stamps from kbRosterEntry in knowledge_resolve.go. Kept as a local type here (the launcher package does
-// not import the controller package — it reads the env at runtime).
+// not import the controller package — it reads the env at runtime). The controller may stamp additional
+// fields the launcher does not consult (e.g. autoInject, ADR 0061 governance #5 / M10 — an SDK-side flag
+// the in-pod SDK reads to decide auto-injection); json.Unmarshal ignores such unknown fields, so the gate
+// is unaffected.
 type kbRosterEntry struct {
 	Name           string `json:"name"`
 	Namespace      string `json:"namespace"`
 	EmbeddingRoute string `json:"embeddingRoute"`
+	PerUser        bool   `json:"perUser,omitempty"`
+}
+
+// kbGrant is the parsed per-KB grant the roster gate consults: the corpus's pinned embedding route
+// (one-way door #1) and whether retrieval must be scoped to the invoking user's subject (ADR 0061 Fork 3).
+type kbGrant struct {
+	embeddingRoute string
+	perUser        bool
 }
 
 type knowledgeProxy struct {
 	tokenServiceURL string
 	namespace       string
-	// roster is the parsed KNOWLEDGE_BASES env: kbName → embeddingRoute. It is the un-forgeable
+	// roster is the parsed KNOWLEDGE_BASES env: kbName → grant. It is the un-forgeable
 	// membership gate (mirroring DELEGATE_ROSTER) — a model/SDK cannot add entries here.
 	// nil means KNOWLEDGE_BASES was unset or unparseable (fail-safe: all KBs refused).
-	roster map[string]string // kb name → embeddingRoute
-	client *http.Client
-	tracer trace.Tracer
-	logf   func(string, ...any)
+	roster map[string]kbGrant // kb name → {embeddingRoute, perUser}
+	// verifier verifies the run capability so a per-user KB's retrieval is scoped to the invoking
+	// user's already-hashed identity (the User claim). nil ⇒ per-user KB retrieval is REFUSED (never
+	// degraded to org-wide subject "", which would cross-contaminate users) — mirrors longTermProxy.
+	verifier *runcap.Verifier
+	client   *http.Client
+	tracer   trace.Tracer
+	logf     func(string, ...any)
 }
 
 // parseKnowledgeRoster extracts the knowledge-base roster from the KNOWLEDGE_BASES env value (a JSON array
-// of {"name","namespace","embeddingRoute"} stamped by the controller). Mirrors parseRosterNames (delegate.go):
-// a malformed/empty env → nil (an empty roster refuses all KBs — the fail-safe for an unconfigured launcher).
-func parseKnowledgeRoster(raw string) map[string]string {
+// of {"name","namespace","embeddingRoute","perUser"} stamped by the controller). Mirrors parseRosterNames
+// (delegate.go): a malformed/empty env → nil (an empty roster refuses all KBs — the fail-safe for an
+// unconfigured launcher).
+func parseKnowledgeRoster(raw string) map[string]kbGrant {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -89,10 +120,10 @@ func parseKnowledgeRoster(raw string) map[string]string {
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
 		return nil
 	}
-	out := make(map[string]string, len(entries))
+	out := make(map[string]kbGrant, len(entries))
 	for _, e := range entries {
 		if n := strings.TrimSpace(e.Name); n != "" {
-			out[n] = e.EmbeddingRoute
+			out[n] = kbGrant{embeddingRoute: e.EmbeddingRoute, perUser: e.PerUser}
 		}
 	}
 	if len(out) == 0 {
@@ -118,7 +149,7 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 	if ns == "" {
 		ns = strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
 	}
-	return &knowledgeProxy{
+	p := &knowledgeProxy{
 		tokenServiceURL: strings.TrimRight(tsURL, "/"),
 		namespace:       ns,
 		roster:          parseKnowledgeRoster(os.Getenv("KNOWLEDGE_BASES")),
@@ -126,6 +157,44 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 		tracer:          tracer,
 		logf:            logf,
 	}
+	// A verifier is needed only to scope a per-user KB to the invoking user's id — reuse the OBO
+	// capability public key + audience the platform already provisions (mirrors newLongTermProxy).
+	// Without it, a per-user KB search is refused (never degraded to org-wide, which would leak
+	// across users); org-wide KBs are unaffected.
+	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
+		if pub, err := runcap.DecodePublicKey(pubB64); err == nil {
+			p.verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
+		} else {
+			logf("launcher: knowledge: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user KB retrieval refused", err)
+		}
+	}
+	return p
+}
+
+// subjectFor resolves the store subject for a KB search: "" for an org-wide corpus, or the invoking user's
+// already-hashed identity (from the verified run capability's User claim) for a per-user corpus. It returns an
+// error the handler maps to a 4xx when per-user cannot be satisfied — fail-CLOSED, never a fall back to "" (which
+// would let one user retrieve another's chunks). This is the exact discipline longTermProxy.subjectFor uses for
+// per-user memory, so a user's KB chunks (stamped at ingest with userGrantHash) are retrieved under the SAME hash.
+func (p *knowledgeProxy) subjectFor(r *http.Request, perUser bool) (string, error) {
+	if !perUser {
+		return "", nil
+	}
+	if p.verifier == nil {
+		return "", errKBPerUserNoVerifier
+	}
+	token := r.Header.Get(runcap.HeaderName)
+	if token == "" {
+		return "", errKBPerUserNoCapability
+	}
+	c, err := p.verifier.Verify(token)
+	if err != nil {
+		return "", errKBPerUserBadCapability
+	}
+	if c.User == "" {
+		return "", errKBPerUserNoUser
+	}
+	return c.User, nil
 }
 
 // register wires the retrieval endpoint onto the memory mux (the same :2998 server as /memory/agent/search).
@@ -175,7 +244,7 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// line 164) because KBs are additive capabilities, not team-roster membership: an empty KB
 	// roster means the controller injected no grants, so no KB is accessible. We explicitly chose
 	// fail-safe here over the delegate's fail-open convenience.
-	embeddingRoute, granted := p.roster[body.KnowledgeBase]
+	grant, granted := p.roster[body.KnowledgeBase]
 	if !granted {
 		http.Error(w, "knowledge base not granted to this agent", http.StatusForbidden)
 		return
@@ -183,20 +252,29 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Fill embeddingModel from the roster (the one-way door #1 guarantee). The roster carries the
 	// model the corpus was ingested with; using any other model would yield plausible-wrong results.
 	// An explicit request embeddingModel is accepted only when the roster entry is empty (edge case).
-	embeddingModel := embeddingRoute
+	embeddingModel := grant.embeddingRoute
 	if embeddingModel == "" {
 		embeddingModel = body.EmbeddingModel // fallback to request override (empty roster entry only)
+	}
+
+	// Scope the search subject: org-wide corpora ⇒ subject "" (never a client-supplied user id); a per-user
+	// corpus ⇒ the invoking user's already-hashed identity from the verified run capability (ADR 0061 Fork 3).
+	// Fail-CLOSED — a per-user KB whose subject cannot be resolved is refused, never searched under "".
+	subject, err := p.subjectFor(r, grant.perUser)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
 
 	span.SetAttributes(
 		attribute.String("knowledge.base", body.KnowledgeBase),
 		attribute.Int("knowledge.top_k", body.TopK),
 		attribute.Float64("knowledge.threshold", body.Threshold),
+		attribute.Bool("knowledge.per_user", grant.perUser),
 	)
-	// v1 corpora are org-wide ⇒ subject "" (never a raw client-supplied user id). See the type doc for the
-	// per-user seam.
 	payload := map[string]any{
-		wireKeyNamespace: p.namespace, "knowledgeBase": body.KnowledgeBase, wireKeySubject: "",
+		wireKeyNamespace: p.namespace, "knowledgeBase": body.KnowledgeBase, wireKeySubject: subject,
 		"query": body.Query, "topK": body.TopK, "threshold": body.Threshold, wireKeyEmbeddingModel: embeddingModel,
 	}
 	var out json.RawMessage

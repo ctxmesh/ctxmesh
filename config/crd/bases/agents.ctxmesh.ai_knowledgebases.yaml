@@ -127,9 +127,11 @@ spec:
               perUser:
                 description: |-
                   perUser enables per-user corpus scoping (isolates chunk retrieval to the invoking user's
-                  hash, the ADR 0045 subject mandate). v1 gates per-user INGESTION off (org-wide corpora
-                  only); the field + the knowledge_chunks.subject column exist from day one so per-user
-                  ingestion can be enabled without a schema migration. Defaults to false.
+                  hash, the ADR 0045 subject mandate). When true, ingestion stamps each uploading user's
+                  server-derived subject hash on their chunks and retrieval scopes to the invoking user's hash,
+                  so a user retrieves ONLY their own chunks; when false (default) the corpus is org-wide
+                  (subject "", shared) — the byte-for-byte-unchanged legacy behaviour. The knowledge_chunks.subject
+                  column exists from day one so enabling per-user needs no schema migration. Defaults to false.
                 type: boolean
               source:
                 description: |-
@@ -155,6 +157,17 @@ spec:
                 required:
                 - type
                 type: object
+              userStorageSoftCap:
+                description: |-
+                  userStorageSoftCap is the WARN-ONLY per-user storage soft cap in bytes for a perUser corpus.
+                  When a single user's ingested bytes exceed this value the controller reflects a
+                  UserStorageSoftCapExceeded condition (True) on status — a visible signal, NEVER an
+                  ingestion block (it mirrors the tenant corpusBytesSoftCap; the ingestion-blocking hard cap is
+                  the tenant storage.corpusBytesHardCap, m80.3). 0 (unset) disables the per-user soft cap. Ignored
+                  for an org-wide (perUser=false) corpus, which has no per-user accounting. (ADR 0061 Fork 3, m80.4)
+                format: int64
+                minimum: 0
+                type: integer
             required:
             - embeddingRoute
             - source

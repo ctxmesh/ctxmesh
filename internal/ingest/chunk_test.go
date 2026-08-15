@@ -215,6 +215,77 @@ func TestChunk_OffsetsMapsBackToSource(t *testing.T) {
 	}
 }
 
+// TestChunk_ExactOffsetsForRepeatedSegments is the key regression test for
+// m80.6 (Theme M / M9): when the same sentence appears more than once in the
+// source, each occurrence must receive its own DISTINCT and EXACT offset — the
+// second occurrence must NOT be mis-mapped to the first occurrence via a linear
+// substring search.
+//
+// The test also asserts that source[StartOffset:EndOffset] (rune-sliced) equals
+// the chunk Content (modulo TrimSpace), proving the offset is exact.
+func TestChunk_ExactOffsetsForRepeatedSegments(t *testing.T) {
+	t.Parallel()
+
+	// Build a source where the SAME sentence appears twice, separated by a
+	// unique anchor. The chunker must place chunk[0] at the first occurrence and
+	// chunk[1] at the second — not both at offset 0.
+	const repeated = "The sky is blue."
+	const anchor = "Anchor sentence here."
+	text := repeated + "\n\n" + anchor + "\n\n" + repeated
+
+	// Size small enough to split into (at least) three chunks — one per paragraph.
+	// repeated ≈ 16 chars → ~4 tokens; anchor ≈ 21 chars → ~6 tokens.
+	// Size=5 (≈20 chars) keeps each paragraph as its own chunk.
+	cfg := ChunkConfig{Size: 5, Overlap: 0, Splitter: "recursive"}
+	chunks := Chunk(text, cfg)
+	require.GreaterOrEqual(t, len(chunks), 3,
+		"expected at least 3 chunks (first-repeated, anchor, second-repeated)")
+
+	runes := []rune(text)
+
+	// 1. Verify every chunk's [StartOffset:EndOffset] maps back exactly to Content.
+	for i, c := range chunks {
+		require.GreaterOrEqual(t, c.StartOffset, 0, "chunk %d StartOffset must be >= 0", i)
+		require.LessOrEqual(t, c.EndOffset, len(runes), "chunk %d EndOffset must be <= len(source)", i)
+		require.Greater(t, c.EndOffset, c.StartOffset, "chunk %d EndOffset must be > StartOffset", i)
+
+		extracted := strings.TrimSpace(string(runes[c.StartOffset:c.EndOffset]))
+		assert.Equal(t, strings.TrimSpace(c.Content), extracted,
+			"chunk %d: source[%d:%d] must equal Content", i, c.StartOffset, c.EndOffset)
+	}
+
+	// 2. Identify the two chunks that contain the repeated sentence and verify
+	//    they have DISTINCT (non-colliding) offsets.
+	var repeatedChunks []TextChunk
+	for _, c := range chunks {
+		if strings.TrimSpace(c.Content) == repeated {
+			repeatedChunks = append(repeatedChunks, c)
+		}
+	}
+	require.Len(t, repeatedChunks, 2,
+		"expected exactly 2 chunks containing the repeated sentence")
+
+	// The first occurrence starts at rune 0; the second starts after the anchor.
+	first, second := repeatedChunks[0], repeatedChunks[1]
+	assert.NotEqual(t, first.StartOffset, second.StartOffset,
+		"two occurrences of the same sentence must have distinct StartOffsets")
+	assert.Less(t, first.StartOffset, second.StartOffset,
+		"first occurrence must have a smaller StartOffset than the second")
+
+	// 3. Confirm chunk content + count match a plain unique-text run (behaviour
+	//    unchanged by the offset fix).
+	uniqueText := "Alpha.\n\nBeta.\n\nGamma."
+	chunksUnique := Chunk(uniqueText, cfg)
+	require.NotEmpty(t, chunksUnique, "unique text must still produce chunks")
+	combined := make([]string, len(chunksUnique))
+	for i, c := range chunksUnique {
+		combined[i] = strings.TrimSpace(c.Content)
+	}
+	assert.Contains(t, combined, "Alpha.")
+	assert.Contains(t, combined, "Beta.")
+	assert.Contains(t, combined, "Gamma.")
+}
+
 // ─── Markdown splitter ────────────────────────────────────────────────────────
 
 // TestChunk_MarkdownSplitter verifies that the markdown splitter prefers to

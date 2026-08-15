@@ -54,6 +54,20 @@ function rosterNames(): string[] {
   return parseKnowledgeRoster().map((e) => String(e.name));
 }
 
+/**
+ * Return the KB names whose roster entry has `autoInject: true` (ADR 0061 governance #5, M10).
+ *
+ * These are the corpora the in-pod SDK auto-retrieves on the user input each turn (RAG-style,
+ * ephemeral `<retrieved_context>`). A KB WITHOUT the flag stays tool-only. An empty/malformed
+ * roster → [] (no auto-inject — the tool-only default is byte-for-byte unchanged).
+ * Parity with `_auto_inject_names` in the Python SDK.
+ */
+export function autoInjectNames(): string[] {
+  return parseKnowledgeRoster()
+    .filter((e) => e.autoInject === true)
+    .map((e) => String(e.name));
+}
+
 /** A single knowledge search result chunk. */
 export interface KnowledgeResult {
   content: string;
