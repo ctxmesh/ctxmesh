@@ -4,7 +4,7 @@
  * Foundation surface (M77.1): the launcher-plane configuration and the typed error
  * hierarchy. M77.2 adds the data-plane clients (memory/knowledge/feedback/model) and
  * the Client facade. Tools+MCP (M77.3), tracing + request-scope/capability + approvals
- * (M77.4). serve/managed-loop (M77.5) lands in a subsequent task.
+ * (M77.4), serve() + the managed tool-calling loop (M77.5).
  */
 
 export {
@@ -61,3 +61,22 @@ export { approvalScope, pauseForApproval } from "./_approval.js";
 
 // The `agent` module: `agent.fromEnv()` / `agent.fromConfig()` — the primary entry points.
 export * as agent from "./agent.js";
+
+// ── M77.5: serve() + the managed loop ─────────────────────────────────────────
+
+export {
+  ManagedConfig,
+  runManagedLoop,
+  mintConversationId,
+  DEFAULT_MAX_STEPS,
+} from "./managed.js";
+export type { ManagedResult, RunManagedLoopOptions } from "./managed.js";
+
+export {
+  serve,
+  processInvoke,
+  makeRequestHandler,
+  parseBody,
+  envelope,
+} from "./serve.js";
+export type { InvokeRequest, Handler, HandlerResult, ServeOptions } from "./serve.js";
