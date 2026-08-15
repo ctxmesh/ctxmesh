@@ -5,7 +5,7 @@ import { Plus, Waypoints } from "lucide-react";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
+import { api, ApiError, type AgentTeamSummary, type AgentTeamRoster } from "@/lib/api";
 
 // TeamsPage — the AgentTeam orchestration rosters (m64.11, ADR 0057).
 //
@@ -14,20 +14,108 @@ import { api, ApiError, type AgentTeamSummary } from "@/lib/api";
 // its delegations. A team is authored via YAML/kubectl for now; the conversational "describe → team"
 // builder is M71. A 403 surfaces as an honest forbidden state (never a fake empty list).
 //
+// Row-click opens an inline detail panel (I3 m76.6): per-member name → agentRef · description +
+// team-level readiness + the not-ready reason. Mirrors the tenants-page pattern.
+//
 // data-testid contract:
-//   teams-page       — root container
-//   teams-table      — the DataTable (aria-label="Agent teams")
-//   team-row-{name}  — each row (via rowKey)
+//   teams-page    — root container
+//   teams-table   — the DataTable (aria-label="Agent teams")
+//   team-detail   — the inline detail panel (row-click)
 
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; teams: AgentTeamSummary[] }
   | { kind: "error"; message: string; forbidden: boolean };
 
+// The inline detail panel for a selected team (I3 m76.6).
+// Mirrors the tenants-page detail pattern: an inline card below the table,
+// no secondary fetch needed (all data is in the list row).
+function TeamDetailPanel({
+  team,
+  onClose,
+}: {
+  team: AgentTeamSummary;
+  onClose: () => void;
+}) {
+  return (
+    <div className="rounded-lg border bg-card p-4 shadow-card" data-testid="team-detail">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-medium">{team.name}</h3>
+        <Button variant="ghost" size="sm" onClick={onClose} data-testid="team-detail-close">
+          Close
+        </Button>
+      </div>
+
+      {/* Team-level readiness */}
+      <div className="mb-3 flex items-center gap-2">
+        {team.ready ? (
+          <Badge variant="success" data-testid="team-detail-ready-badge">ready</Badge>
+        ) : (
+          <Badge variant="warning" data-testid="team-detail-notready-badge">
+            {team.reason || "not ready"}
+          </Badge>
+        )}
+        {!team.ready && team.reason && (
+          <span className="text-xs text-muted-foreground" data-testid="team-detail-notready-reason">
+            {team.reason}
+          </span>
+        )}
+      </div>
+
+      <dl className="space-y-3 text-sm">
+        <div>
+          <dt className="mb-1 text-xs text-muted-foreground">Supervisor</dt>
+          <dd className="font-medium">{team.supervisor}</dd>
+        </div>
+
+        <div>
+          <dt className="mb-1 text-xs text-muted-foreground">
+            Roster ({team.roster.length} sub-agent{team.roster.length === 1 ? "" : "s"})
+          </dt>
+          <dd>
+            {team.roster.length === 0 ? (
+              <span className="text-muted-foreground">—</span>
+            ) : (
+              <ul className="space-y-2" data-testid="team-detail-roster">
+                {team.roster.map((m: AgentTeamRoster) => (
+                  <li
+                    key={m.name}
+                    className="rounded-md border bg-surface-2/40 px-3 py-2"
+                    data-testid={`team-member-${m.name}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{m.name}</span>
+                      <span className="text-muted-foreground">→</span>
+                      <span className="font-mono text-xs text-muted-foreground">{m.agentRef}</span>
+                    </div>
+                    {m.description && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">{m.description}</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </dd>
+        </div>
+
+        <div>
+          <dt className="mb-1 text-xs text-muted-foreground">Spawn budget</dt>
+          <dd className="text-xs text-muted-foreground">
+            fan-out {team.budget.maxFanOut} · depth {team.budget.maxSpawnDepth} · total{" "}
+            {team.budget.maxTotalSpawns}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
 export function TeamsPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
+  // I3 m76.6: selected team for the inline detail panel (nil = closed).
+  const [selectedTeam, setSelectedTeam] = useState<AgentTeamSummary | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
@@ -147,6 +235,7 @@ export function TeamsPage() {
         onQueryChange={setQuery}
         queryPlaceholder="Filter teams by name…"
         ariaLabel="Agent teams"
+        onRowClick={(t) => setSelectedTeam((prev) => (prev?.name === t.name ? null : t))}
         empty={{
           icon: Waypoints,
           title: "No agent teams",
@@ -154,6 +243,11 @@ export function TeamsPage() {
             "No AgentTeams defined yet. Use the New team button to describe a team in a sentence — we compose a supervisor and roster from your registry's published agents.",
         }}
       />
+
+      {/* I3 m76.6: inline detail panel — row-click reveals roster + budget + readiness. */}
+      {selectedTeam && (
+        <TeamDetailPanel team={selectedTeam} onClose={() => setSelectedTeam(null)} />
+      )}
     </div>
   );
 }

@@ -1285,6 +1285,88 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
   });
 });
 
+// ── J6 m76.6: Runtime section P3 polish ──────────────────────────────────────
+// (a) outputSchemaSet=true with no schema body → shows "(content not returned)"
+// (b) Runtime card is placed after Spec, not after Bindings
+// (c) Tool-policy honesty qualifier is shown
+describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
+  it("J6(a) shows '(content not returned)' when outputSchemaSet is true but schema body is absent", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: { outputSchemaSet: true, outputSchema: undefined },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Badge is shown.
+    expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
+    // "(content not returned)" note is shown when the body is absent.
+    expect(screen.getByTestId("runtime-output-schema-not-returned")).toHaveTextContent(
+      "content not returned",
+    );
+    // No expand toggle since there's no body.
+    expect(screen.queryByTestId("runtime-schema-details")).toBeNull();
+  });
+
+  it("J6(a) does NOT show '(content not returned)' when schema body is present", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: {
+          outputSchemaSet: true,
+          outputSchema: JSON.stringify({ type: "object" }),
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
+    expect(screen.queryByTestId("runtime-output-schema-not-returned")).toBeNull();
+    // The expand toggle is present.
+    expect(screen.getByTestId("runtime-schema-details")).toBeInTheDocument();
+  });
+
+  it("J6(b) Runtime card appears before the status timeline (i.e. adjacent to Spec)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: { outputSchemaSet: true },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const runtimeSection = screen.getByTestId("runtime-section");
+    const statusTimeline = screen.getByTestId("status-timeline");
+    // The runtime section must appear BEFORE the status timeline in the DOM.
+    expect(
+      runtimeSection.compareDocumentPosition(statusTimeline) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("J6(c) tool-policy note is shown alongside the Tool policy heading", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: {
+          toolPolicy: {
+            default: "allow",
+            overrides: [],
+          },
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("runtime-tool-policy-note")).toHaveTextContent("SDK-layer convention");
+  });
+});
+
 // ── m66.10: GuardrailPolicyRef on the agent detail header ────────────────────
 // Tests that spec.guardrailPolicyRef is surfaced as a ResourceLink in the header,
 // and that when the agent is NotReady due to a guardrail reason, the reason is
@@ -1362,6 +1444,28 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("agent-guardrail-policy-link")).toBeNull();
     expect(screen.queryByTestId("agent-guardrail-notready-reason")).toBeNull();
+  });
+});
+
+// ── K7 m76.6: guardrail + promptRef links use navRoute ────────────────────────
+// K7(a): both /guardrails and /prompts links use navRoute() not hardcoded strings.
+describe("AgentDetailPage — K7 navRoute links (m76.6)", () => {
+  it("K7(a) guardrail link uses navRoute('guardrails') — resolves to /guardrails", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, guardrailPolicyRef: "my-policy" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const link = screen.getByTestId("agent-guardrail-policy-link");
+    // navRoute("guardrails") returns "/guardrails" — confirm the link is correct.
+    expect(link).toHaveAttribute("href", "/guardrails");
+  });
+
+  it("K7(a) promptRef link uses navRoute('prompts') — resolves to /prompts", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, promptRef: "my-prompt-v2" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const link = screen.getByTestId("agent-promptref-link");
+    expect(link).toHaveAttribute("href", "/prompts");
+    expect(link).toHaveTextContent("my-prompt-v2");
   });
 });
 
