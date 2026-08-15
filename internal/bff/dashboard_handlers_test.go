@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
 // fakeLangfuseAdapter is an in-memory LangfuseAdapter for the handler-wiring
@@ -198,15 +200,14 @@ func TestRunsRouteServesLangfuseData(t *testing.T) {
 }
 
 func TestCostRouteFoldsLangfuseAndPrometheus(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{
+	s := newPermissiveCostServer(t, Adapters{
 		Langfuse: fakeLangfuseAdapter{cost: CostSummary{
 			TotalCostUSD: 1.75, TotalTokens: 1500, Observations: 3,
 			ByModel: []MetricPoint{{Label: "chat", Value: 1.75}},
 		}},
 		Prometheus: fakePrometheusAdapter{points: []MetricPoint{{Label: "echo", Value: 42}}},
 	})
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/cost", nil))
+	rec := serveWithToken(t, s, "/api/cost")
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body CostResponse
@@ -219,11 +220,10 @@ func TestCostRouteFoldsLangfuseAndPrometheus(t *testing.T) {
 
 func TestCostRouteWithoutPrometheusHasEmptySeries(t *testing.T) {
 	// Langfuse wired, Prometheus nil → cost still renders; metric series are [].
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{
 		cost: CostSummary{TotalCostUSD: 1.0, ByModel: []MetricPoint{}},
 	}})
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/cost", nil))
+	rec := serveWithToken(t, s, "/api/cost")
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body CostResponse
@@ -349,4 +349,84 @@ func TestHandleRunsBadLimitReturns400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?limit=abc", nil))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ── Cost-view authz consistency (m79.7) ──────────────────────────────────────
+//
+// handleCost and handleCostBreakdown must share the SAME caller-scoped SSAR
+// persona gate as handleCostForecast and handleCostChargeback — one SSAR on
+// `costrollups`, denial is 403, never a data leak.
+
+// newCostLangfuseServer builds a BFF Server wired with BOTH a caller-scoped
+// factory AND a Langfuse adapter (required to register the real /api/cost and
+// /api/cost/breakdown routes), plus the given authorizer for SSAR control.
+func newCostLangfuseServer(t *testing.T, auth authz.Authorizer) *Server {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      Adapters{Langfuse: fakeLangfuseAdapter{}, Expand: NewExpandAdapter()},
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+	s.authorizer = auth
+	return s
+}
+
+// TestHandleCost_PersonaDeniedIs403: an un-granted caller is rejected with 403
+// and never receives cost data — mirrors TestCostForecast_PersonaDeniedIs403.
+func TestHandleCost_PersonaDeniedIs403(t *testing.T) {
+	s := newCostLangfuseServer(t, &recordingAuthorizer{err: authz.ErrForbidden})
+	rec := serveWithToken(t, s, "/api/cost")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "no costrollups persona ⇒ 403, never a data leak")
+}
+
+// TestHandleCost_GrantedCallerGets200: a granted caller reaches the data layer
+// and receives 200 — happy path preserved.
+func TestHandleCost_GrantedCallerGets200(t *testing.T) {
+	s := newCostLangfuseServer(t, &recordingAuthorizer{})
+	rec := serveWithToken(t, s, "/api/cost")
+	assert.Equal(t, http.StatusOK, rec.Code, "granted caller ⇒ 200 (happy path preserved)")
+}
+
+// TestHandleCost_GatesOnListCostRollups: the SSAR resource is exactly
+// `costrollups` with VerbList — same contract as forecast/chargeback.
+func TestHandleCost_GatesOnListCostRollups(t *testing.T) {
+	auth := &recordingAuthorizer{}
+	s := newCostLangfuseServer(t, auth)
+	rec := serveWithToken(t, s, "/api/cost")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, authz.VerbList, auth.last.Verb)
+	assert.Equal(t, resourceCostRollups, auth.last.Resource, "SSAR resource must be costrollups")
+	assert.Equal(t, 1, auth.count, "exactly one persona gate, never per-row")
+}
+
+// TestHandleCostBreakdown_PersonaDeniedIs403: an un-granted caller is rejected
+// with 403 — mirrors TestCostForecast_PersonaDeniedIs403.
+func TestHandleCostBreakdown_PersonaDeniedIs403(t *testing.T) {
+	s := newCostLangfuseServer(t, &recordingAuthorizer{err: authz.ErrForbidden})
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "no costrollups persona ⇒ 403, never a data leak")
+}
+
+// TestHandleCostBreakdown_GrantedCallerGets200: a granted caller reaches the
+// data layer and receives 200 — happy path preserved.
+func TestHandleCostBreakdown_GrantedCallerGets200(t *testing.T) {
+	s := newCostLangfuseServer(t, &recordingAuthorizer{})
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	assert.Equal(t, http.StatusOK, rec.Code, "granted caller ⇒ 200 (happy path preserved)")
+}
+
+// TestHandleCostBreakdown_GatesOnListCostRollups: the SSAR resource is exactly
+// `costrollups` with VerbList — same contract as forecast/chargeback.
+func TestHandleCostBreakdown_GatesOnListCostRollups(t *testing.T) {
+	auth := &recordingAuthorizer{}
+	s := newCostLangfuseServer(t, auth)
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, authz.VerbList, auth.last.Verb)
+	assert.Equal(t, resourceCostRollups, auth.last.Resource, "SSAR resource must be costrollups")
+	assert.Equal(t, 1, auth.count, "exactly one persona gate, never per-row")
 }
