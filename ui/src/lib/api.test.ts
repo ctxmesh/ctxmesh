@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   ApiError,
+  formatRunStep,
   openLogStream,
   openRunStream,
   setSessionExpiredHandler,
@@ -470,6 +471,63 @@ describe("openRunStream (run event SSE, m32.8)", () => {
     const { events, forbidden } = await collectRun("run-x");
     expect(events).toEqual([]);
     expect(forbidden).not.toBeNull();
+  });
+
+  it("parses `step` metadata frames as typed step events (M78)", async () => {
+    const stepJSON = '{"step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          sseResponse([
+            `id:1\nevent:step\ndata:${stepJSON}\n\n`,
+            "id:2\nevent:step\ndata:plan-approved\n\n", // legacy plain-label form
+            "id:3\nevent:state\ndata:succeeded\n\n",
+          ]),
+        ),
+      ),
+    );
+    const { events } = await collectRun("run-step");
+    expect(events).toEqual([
+      { kind: "step", data: stepJSON, seq: 1 },
+      { kind: "step", data: "plan-approved", seq: 2 },
+      { kind: "state", data: "succeeded", seq: 3 },
+    ]);
+  });
+});
+
+describe("formatRunStep (M78 live step-visibility, ADR 0071 §4)", () => {
+  it("renders the new JSON step metadata into a compact label", () => {
+    expect(
+      formatRunStep('{"step":2,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}'),
+    ).toBe("Step 2 · model · ↑11 ↓7");
+  });
+
+  it("tolerates the SSE-envelope `type` key the SDK/BFF carry verbatim", () => {
+    // The real EventStep Data is the SDK's SSE frame payload, which carries "type":"step".
+    // formatRunStep ignores it and renders only the visible metadata.
+    expect(
+      formatRunStep('{"type":"step","step":3,"kind":"model","tokens":{"prompt":5,"completion":4}}'),
+    ).toBe("Step 3 · model · ↑5 ↓4");
+  });
+
+  it("includes the tool name for a tool step and omits zero token counts", () => {
+    expect(
+      formatRunStep('{"step":1,"kind":"tool","tool":"echo_tool","tokens":{"prompt":0,"completion":0}}'),
+    ).toBe("Step 1 · tool · echo_tool");
+  });
+
+  it("returns a LEGACY plain-string label verbatim (backward-compat)", () => {
+    // The workflow plan-approval EventStep Data is a bare label, not JSON.
+    expect(formatRunStep("plan-approved")).toBe("plan-approved");
+    expect(formatRunStep("plan-rejected")).toBe("plan-rejected");
+  });
+
+  it("falls back to the raw text for a malformed / non-step JSON object, never throws", () => {
+    expect(formatRunStep('{"unexpected":true}')).toBe('{"unexpected":true}');
+    expect(formatRunStep("{not json")).toBe("{not json");
+    expect(formatRunStep("")).toBe("");
+    expect(formatRunStep("   ")).toBe("");
   });
 });
 

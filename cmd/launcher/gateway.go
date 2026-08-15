@@ -40,6 +40,7 @@ package main
 // straight at LiteLLM: the M2 happy path is byte-for-byte unchanged.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -116,6 +117,9 @@ type gatewayConfig struct {
 	Port int
 	// AgentName keys per-agent spend (from AGENT_NAME).
 	AgentName string
+	// AgentNamespace (POD_NAMESPACE) forms the unambiguous "<namespace>/<name>" agent identity the
+	// M78 record fixture stamps as provenance (Fixture.Agent). Not load-bearing for budget/quota.
+	AgentNamespace string
 	// ConvCapUSD / AgentCapUSD are the raw budget-cap strings (BUDGET_PER_*_USD).
 	// Empty ⇒ that dimension is unenforced.
 	ConvCapUSD  string
@@ -155,6 +159,15 @@ type gatewayConfig struct {
 	// skipped; the span event emitted by emitGuardrailDecision remains the only record.
 	// Same env the delegate client uses (delegate.go, BFFURL field) — one source of truth.
 	BFFInternalURL string
+
+	// RecordCapable (M78, ADR 0071 §1): true when the controller injected RECORD_CAPABLE=true
+	// (spec.record) — the record-mode interposition reason. Its presence FORCES the proxy on
+	// (GatewayProxyEnabled) so the gateway is interposed and CAN capture; the actual capture is
+	// gated PER-RUN by the X-Ctxmesh-Record header the BFF stamps on a recorded run's invoke,
+	// which the SDK relays on each model call. A record-capable agent whose object store is
+	// unconfigured is a startup error (fail-closed, C2) — see newGatewayProxy. Empty ⇒ the
+	// agent is not record-capable and the model path is byte-for-byte unchanged (no capture).
+	RecordCapable bool
 }
 
 // defaultPodTokenPath is where the controller mounts the launcher's projected
@@ -171,7 +184,7 @@ const defaultPodTokenPath = "/var/run/secrets/statelayer-proxy/token"
 func (c Config) GatewayProxyEnabled() bool {
 	g := c.Gateway
 	return g.UpstreamURL != "" &&
-		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" || g.GuardrailPolicy != "")
+		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" || g.GuardrailPolicy != "" || g.RecordCapable)
 }
 
 // loadGatewayConfig parses the outbound-gateway-proxy configuration from env.
@@ -211,6 +224,7 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		UpstreamURL:        strings.TrimRight(upstream, "/"),
 		Port:               port,
 		AgentName:          agentName,
+		AgentNamespace:     strings.TrimSpace(lookup("POD_NAMESPACE")),
 		ConvCapUSD:         strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
 		AgentCapUSD:        strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
 		SoftPct:            softPct,
@@ -223,6 +237,7 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
 		GuardrailPolicy:    strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
 		BFFInternalURL:     strings.TrimRight(strings.TrimSpace(lookup("BFF_INTERNAL_URL")), "/"),
+		RecordCapable:      strings.EqualFold(strings.TrimSpace(lookup("RECORD_CAPABLE")), "true"),
 	}, nil
 }
 
@@ -311,7 +326,14 @@ type gatewayProxy struct {
 	// to the BFF's ingest endpoint best-effort, async. Empty ⇒ the durable POST is skipped; the
 	// span event (emitted by emitGuardrailDecision) remains the only record.
 	bffInternalURL string
-	logf           func(string, ...any)
+	// recorder is the M78 record-mode capture (ADR 0071 §1). Non-nil ONLY for a RECORD-CAPABLE agent
+	// (RECORD_CAPABLE=true); it accumulates per-run model interactions and Puts a per-run fixture to
+	// the durable object store. nil ⇒ record mode is off and the capture path is a no-op (zero
+	// overhead, the model path byte-for-byte unchanged). Capture is further gated PER-RUN by the
+	// X-Ctxmesh-Record header on each model call (a non-recorded run through a record-capable agent
+	// captures nothing).
+	recorder *modelRecorder
+	logf     func(string, ...any)
 }
 
 // buildGatewayServer constructs the :2996 http.Server when the budget proxy is
@@ -434,6 +456,18 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
 	gp.judge = judge
+
+	// Record mode (M78, ADR 0071 §1): build the per-run model recorder for a RECORD-CAPABLE agent.
+	// FAIL-CLOSED (C2): record was requested (RECORD_CAPABLE=true) but the durable object store is
+	// not configured (OBJECT_STORE_ADDR unset ⇒ no sink for the fixture) is a HARD startup error —
+	// never a silent capture-nothing. A non-record-capable agent gets no recorder (nil), zero overhead.
+	if cfg.RecordCapable {
+		rec, rerr := newModelRecorder(cfg.AgentName, cfg.AgentNamespace, logf)
+		if rerr != nil {
+			return nil, fmt.Errorf("gateway: record mode requested but not usable: %w", rerr)
+		}
+		gp.recorder = rec
+	}
 
 	return gp, nil
 }
@@ -608,6 +642,34 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		go gp.pollControlAbort(fwdCtx, runID, cancelFwd)
 	}
 
+	// ── Record mode (M78, ADR 0071 §1): buffer the request BODY before forward ──
+	// When this call belongs to a RECORDED run (the record-capable agent got a X-Ctxmesh-Record:
+	// <runId> relayed on the model call), buffer the request body here so the fixture can capture the
+	// agent-visible request (JSON — NO credential; the gateway Authorization header is never
+	// captured, C4). forward() drains r.Body, so we buffer + restore it (the same pattern the
+	// guardrail path uses) so the forward still streams the exact bytes. recordRunID == "" for a
+	// non-recorded run through this same agent ⇒ zero overhead, no buffering.
+	recordRunID := ""
+	var recordReqBody []byte
+	if gp.recorder != nil {
+		if runID := recordRunIDFromRequest(r.Header); runID != "" {
+			recordRunID = runID
+			buffered, _, berr := readLimited(r.Body, maxGatewayReqBody)
+			if r.Body != nil {
+				_ = r.Body.Close()
+			}
+			if berr == nil {
+				recordReqBody = recordRequestBody(buffered)
+				r.Body = io.NopCloser(bytes.NewReader(buffered))
+			} else {
+				// Could not buffer the request — capture the response only (request body omitted).
+				// Never fail the model call on a record-path read error.
+				gp.logf("launcher: gateway: record: could not buffer request body for run %s: %v", recordRunID, berr)
+				r.Body = io.NopCloser(bytes.NewReader(nil))
+			}
+		}
+	}
+
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
 	resp, body, err := gp.forward(fwdCtx, r)
 	if err != nil {
@@ -642,6 +704,23 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, werr := w.Write(relayBody); werr != nil {
 		gp.logf("launcher: gateway: write response: %v", werr)
+	}
+
+	// ── Record mode (M78, ADR 0071 §1): capture the model interaction ──────
+	// Capture the exact bytes the AGENT received — the RELAYED response (post any guardrail
+	// redact/block), its relayed status + Content-Type — so a replay re-serves what the run really
+	// saw. The bytes are captured VERBATIM incl. SSE framing (forward() buffered them raw; we never
+	// parse-and-reassemble). Only for a recorded run (recordRunID != ""); the request body was
+	// buffered above (credential-free by construction, C4). Best-effort: a store failure is logged,
+	// never surfaced to the agent.
+	if recordRunID != "" {
+		relayStatus := resp.StatusCode
+		relayContentType := resp.Header.Get("Content-Type")
+		if outputBlocked {
+			relayStatus = guardrailBlockedStatus
+			relayContentType = "application/json"
+		}
+		gp.recorder.capture(ctx, recordRunID, recordReqBody, relayBody, relayContentType, relayStatus)
 	}
 
 	// ── POST-CALL accounting ───────────────────────────────────────────────
@@ -965,6 +1044,9 @@ var budgetHeaderSet = map[string]struct{}{
 	// enforce per-user limits — it is proof of WHO is invoking, not a LiteLLM credential,
 	// and must never leak upstream to the model provider.
 	strings.ToLower(runcap.HeaderName): {},
+	// The record toggle (M78) is a launcher-internal per-run signal consumed HERE to key the
+	// fixture capture — it is not a provider header and must never leak upstream to LiteLLM.
+	strings.ToLower(recordHeaderName): {},
 }
 
 // copyForwardHeaders copies request headers to the upstream request, dropping the

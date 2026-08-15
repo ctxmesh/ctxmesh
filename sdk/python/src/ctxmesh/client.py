@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace import SpanProcessor
 
 from ctxmesh._approval import approval_scope
 from ctxmesh._capability import capability_scope
+from ctxmesh._record import record_scope
 from ctxmesh.config import PlaneConfig, RunContext
 from ctxmesh.feedback import FeedbackClient
 from ctxmesh.knowledge import KnowledgeClient
@@ -82,7 +83,7 @@ class Client:
             with client.request_scope(request.headers):
                 client.tools.call("search", {...})   # relays the user's capability
         """
-        with capability_scope(headers), approval_scope(approvals):
+        with capability_scope(headers), approval_scope(approvals), record_scope(headers):
             yield
 
     @property

@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as capMod from "../src/_capability.js";
+import * as recordMod from "../src/_record.js";
 import { ConfigError, EndpointError, GuardrailBlockedError } from "../src/errors.js";
 import { ChatResponse, ModelClient } from "../src/model.js";
 import { GatewayStub, startPlane, type MockPlane } from "./plane.js";
@@ -146,6 +147,27 @@ describe("ModelClient.chat — capability relay", () => {
 
     const req = plane.gateway.requests[0];
     expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
+  });
+});
+
+describe("ModelClient.chat — record-mode relay (M78, ADR 0071)", () => {
+  it("relays X-Ctxmesh-Record when the run is being recorded", async () => {
+    vi.spyOn(recordMod, "currentRecordRunId").mockReturnValue("run-rec-42");
+
+    const client = new ModelClient(plane.config);
+    await client.chat("gpt-4o-mini", []);
+
+    const req = plane.gateway.requests[0];
+    expect(req?.headers["x-ctxmesh-record"]).toBe("run-rec-42");
+  });
+
+  it("does NOT relay the record header for a non-recorded run", async () => {
+    // Default (no recordScope active) ⇒ undefined.
+    const client = new ModelClient(plane.config);
+    await client.chat("gpt-4o-mini", []);
+
+    const req = plane.gateway.requests[0];
+    expect(req?.headers["x-ctxmesh-record"]).toBeUndefined();
   });
 });
 

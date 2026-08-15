@@ -24,6 +24,7 @@
 
 import * as fs from "node:fs";
 import { CAPABILITY_HEADER, currentCapability } from "./_capability.js";
+import { RECORD_HEADER, currentRecordRunId } from "./_record.js";
 import { PlaneConfig } from "./config.js";
 import { ConfigError, ConsentRequiredError, EndpointError } from "./errors.js";
 import type { KnowledgeClient } from "./knowledge.js";
@@ -620,6 +621,15 @@ function mcpHeaders(sessionId: string | undefined): Record<string, string> {
   const capability = currentCapability();
   if (capability) {
     headers[CAPABILITY_HEADER] = capability;
+  }
+  // Relay the record-mode capture toggle (M78, ADR 0071 §1/C1) on every tool-call
+  // egress — the SAME request-scoped signal the model relay attaches (model.ts). It
+  // lets the egress sidecar capture this call's tool I/O (pre-injection request +
+  // verbatim upstream response) into the run's replay fixture (TOOL channel). Absent
+  // ⇒ a non-recorded run — omit it, capture nothing.
+  const recordRunId = currentRecordRunId();
+  if (recordRunId) {
+    headers[RECORD_HEADER] = recordRunId;
   }
   return headers;
 }

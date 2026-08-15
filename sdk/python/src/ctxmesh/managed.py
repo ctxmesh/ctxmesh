@@ -46,6 +46,7 @@ import jsonschema
 
 from ctxmesh._approval import approval_scope, pause_for_approval
 from ctxmesh._capability import capability_scope
+from ctxmesh._record import current_record_run_id, record_scope
 from ctxmesh.client import Client
 from ctxmesh.errors import (
     ApprovalRequiredError,
@@ -538,6 +539,43 @@ def _stream_turn(
         return done.value
 
 
+def _step_frame(
+    step: int,
+    kind: str,
+    *,
+    channel_index: int,
+    tool: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> Dict[str, Any]:
+    """Build one ``step`` metadata frame (M78, ADR 0071 §4/§C3) — the lightweight live
+    step-visibility event the serve streaming path emits per step boundary.
+
+    * ``step`` — the 1-based loop step number (monotonic within the run).
+    * ``kind`` — ``"model"`` at a model-call boundary, ``"tool"`` at a tool-dispatch boundary.
+    * ``tool`` — the dispatched tool's name (a model step omits it).
+    * ``tokens`` — best-effort prompt/completion counts for a model step (zero for a tool step).
+    * ``ref`` — a LIGHTWEIGHT LOGICAL coordinate into the run's fixture: the channel
+      (``"model"``/``"tool"``) + the 0-based per-channel interaction index, so the (deferred)
+      fixture stepper can resolve this step to its recorded I/O. Populated ONLY when the run is
+      being recorded (``current_record_run_id()`` set); ``None`` otherwise — an empty ref for a
+      non-recorded run is fine (ADR 0071 §C3), the console renders only the visible metadata.
+    """
+    frame: Dict[str, Any] = {
+        "step": step,
+        "kind": kind,
+        "tokens": {"prompt": prompt_tokens, "completion": completion_tokens},
+    }
+    if tool:
+        frame["tool"] = tool
+    # The ref is a best-effort logical coordinate — populated only in record mode; a non-recorded
+    # run simply carries a null ref (the console does not resolve it; the stepper is deferred).
+    frame["ref"] = (
+        {"channel": kind, "index": channel_index} if current_record_run_id() is not None else None
+    )
+    return frame
+
+
 def run_managed_loop(
     client: Client,
     config: ManagedConfig,
@@ -545,6 +583,7 @@ def run_managed_loop(
     *,
     headers: Optional[Dict[str, str]] = None,
     on_token: Optional[Callable[[str], None]] = None,
+    on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
     approvals: Optional[Iterable[str]] = None,
     conversation_id: Optional[str] = None,
 ) -> ManagedResult:
@@ -613,6 +652,7 @@ def run_managed_loop(
     with (
         capability_scope(headers),
         approval_scope(approvals),
+        record_scope(headers),
         client.trace.loop("managed-agent", headers=headers) as root,
     ):
         root.set_input(user_input)
@@ -640,6 +680,7 @@ def run_managed_loop(
                 message_id,
                 spawn_depth,
                 breaker,
+                on_step,
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -1198,6 +1239,7 @@ def _drive_loop(
     message_id: str = "",
     spawn_depth: int = 0,
     breaker: Optional["_CircuitBreaker"] = None,
+    on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome)."""
@@ -1205,6 +1247,15 @@ def _drive_loop(
     # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
     # the max_steps budget so repair turns have a clear, explicit allowance of their own.
     schema_repairs = 0
+
+    # Step-visibility (M78, ADR 0071 §4/§C3): emit a `step` metadata frame at each step boundary
+    # so the console can show "what step is my agent on right now". `emit` is a no-op unless a sink
+    # is wired (the SSE serve path). The per-channel indices are the 0-based interaction counters
+    # the (deferred) fixture stepper resolves against: model_index increments per model call, and
+    # tool_index per tool dispatch — matching the fixture's model/tool channel ordering (§2).
+    emit_step = on_step or (lambda _frame: None)
+    model_index = 0
+    tool_index = 0
 
     for step in range(1, config.max_steps + 1):
         with client.trace.step(f"turn-{step}") as turn:
@@ -1241,6 +1292,22 @@ def _drive_loop(
             resp = _chat_with_resilience(
                 client, config, config.model_route, messages, chat_opts, on_token, spawn_depth
             )
+
+            # Step-visibility (M78, ADR 0071 §4): the model-call boundary for this loop step. Token
+            # counts are best-effort from the response usage block (absent on a stub → zero). The
+            # ref points at this call's slot in the fixture's model channel (0-based), for the
+            # deferred stepper — null unless recording (handled in _step_frame).
+            usage = getattr(resp, "usage", None) or {}
+            emit_step(
+                _step_frame(
+                    step,
+                    "model",
+                    channel_index=model_index,
+                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                )
+            )
+            model_index += 1
 
             if not resp.has_tool_calls:
                 # The model stopped calling tools → this is the final answer.
@@ -1504,6 +1571,15 @@ def _drive_loop(
                         "content": content,
                     }
                 )
+
+                # Step-visibility (M78, ADR 0071 §4): the tool-dispatch boundary. Emitted once per
+                # tool call in the model's original order (the same order the tool result was just
+                # appended), carrying the tool name; the ref points at this call's slot in the
+                # fixture's tool channel (0-based). No token counts for a tool step.
+                emit_step(
+                    _step_frame(step, "tool", channel_index=tool_index, tool=name)
+                )
+                tool_index += 1
 
     # Bound exceeded: the model kept calling tools past max_steps. Hard stop
     # rather than hang the pod (the mandatory runaway guard, ADR 0013).

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from ctxmesh import _http
 from ctxmesh._capability import CAPABILITY_HEADER, current_capability
+from ctxmesh._record import RECORD_HEADER, current_record_run_id
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, ConsentRequiredError, EndpointError
 
@@ -503,6 +504,14 @@ def _mcp_headers(session_id: Optional[str]) -> Dict[str, str]:
     capability = current_capability()
     if capability:
         headers[CAPABILITY_HEADER] = capability
+    # Relay the record-mode capture toggle (M78, ADR 0071 §1/C1) on every tool-call egress —
+    # the SAME request-scoped signal the model relay attaches (model.py). It lets the egress
+    # sidecar capture this call's tool I/O (pre-injection request + verbatim upstream response)
+    # into the run's replay fixture (TOOL channel). Bound per-request in a ContextVar
+    # (run_managed_loop / request_scope); absent ⇒ a non-recorded run — omit it, capture nothing.
+    record_run_id = current_record_run_id()
+    if record_run_id:
+        headers[RECORD_HEADER] = record_run_id
     return headers
 
 

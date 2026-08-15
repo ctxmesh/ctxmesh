@@ -217,6 +217,16 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Record mode C2 fail-closed (M78, ADR 0071 §1): a run may ask to be recorded (req.Record) ONLY
+	// against a RECORD-CAPABLE agent (spec.record) — the controller then forced the launcher gateway on
+	// so it can capture. Recording against a non-record-capable agent has NO gateway to capture at, so
+	// we REFUSE the run here with a clear error rather than silently capturing nothing (never a silent
+	// no-capture). This is the fail-closed enablement gate; the per-run capture toggle rides the invoke.
+	if req.Record && !deploy.Spec.Record {
+		writeError(w, http.StatusBadRequest,
+			"record requested but the gateway is not interposed — the agent is not record-capable (set spec.record on the AgentDeployment)")
+		return
+	}
 	r, ok = attachConversationID(w, r, req.ConversationID)
 	if !ok {
 		return
@@ -248,6 +258,13 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if deploy.Spec.Runtime != nil && deploy.Spec.Runtime.OutputSchema != nil {
 		rn.OutputSchema = string(deploy.Spec.Runtime.OutputSchema.Raw)
 	}
+	// Record mode (M78, ADR 0071): carry the run-scoped opt-in onto the run. This is the TRIGGER —
+	// m78.2/m78.3 read rn.Record (the run-worker / launcher-config path) to inject the new
+	// controller-side interposition reason that forces both capture proxies (the launcher gateway for
+	// model I/O, the egress sidecar for tool I/O) to interpose fail-closed and stream the captured
+	// I/O into a portable fixture (internal/replay). m78.1 defines the field + this plumbing point
+	// only; it does not wire the capture itself.
+	rn.Record = req.Record
 	if err := s.runStore.Create(rn); err != nil {
 		s.log.Error(err, "create run failed", "agent", req.Agent)
 		writeError(w, http.StatusInternalServerError, "failed to create the run")
@@ -263,6 +280,12 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
 			runCapabilityFromContext(r.Context()),
 		)
+		// Record mode (M78, ADR 0071 §1): carry the run id so the adapter stamps X-Ctxmesh-Record on
+		// the in-process (dev / single-pod) path too — the same per-run capture toggle the run-worker
+		// sets in dispatch mode. Only when this run opted in (req.Record, already gated record-capable).
+		if rn.Record {
+			execCtx = contextWithRecord(execCtx, runID)
+		}
 		go s.executeRun(execCtx, runID, endpoint, []byte(req.Input))
 	}
 
@@ -304,6 +327,13 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	if sa, ok := s.adapters.Invoke.(StreamingInvokeAdapter); ok {
 		resp, traceID, err = sa.InvokeStream(ctx, endpoint, input, func(text string) {
 			_ = s.runStore.AppendEvent(runID, run.EventToken, text)
+		}, func(stepJSON string) {
+			// Live step-visibility (M78, ADR 0071 §4): each `step` metadata frame the agent
+			// streamed becomes an EventStep on the run stream, its Data the raw step-metadata JSON
+			// (step N, kind, tool, tokens, ref) the console renders. Same EventStep kind the
+			// workflow plan-approval already uses (its Data is a plain label) — the console parses
+			// both forms.
+			_ = s.runStore.AppendEvent(runID, run.EventStep, stepJSON)
 		})
 	} else {
 		resp, traceID, err = s.adapters.Invoke.Invoke(ctx, endpoint, input)
@@ -455,6 +485,11 @@ type RunDetailDTO struct {
 	// lineage link). Both structured (not parsed from prose) so audit/console can render the transfer.
 	HandedOffTo        string `json:"handedOffTo,omitempty"`
 	HandoffSourceRunID string `json:"handoffSourceRunId,omitempty"`
+
+	// Record reflects whether this run is in record mode (M78, ADR 0071) — the platform capture seams
+	// record its model + tool I/O into a portable replay fixture. Surfaced so the console can badge a
+	// recorded run. Omitted (false) for a normal run.
+	Record bool `json:"record,omitempty"`
 }
 
 // WorkflowNodeStatus is the per-node status entry in the RunDetailDTO.Nodes list (m67.9).
@@ -494,6 +529,7 @@ func runToDTO(rn *run.Run) RunDetailDTO {
 		WorkflowRef:        rn.WorkflowRef,
 		HandedOffTo:        rn.HandedOffTo,
 		HandoffSourceRunID: rn.HandoffSourceRunID,
+		Record:             rn.Record,
 	}
 	// Surface the executor's cursor fields. We parse the cursor once to populate both CurrentNode
 	// (the in-flight node for backward compatibility) and the Nodes status list (m67.9: the authoritative

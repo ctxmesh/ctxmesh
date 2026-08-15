@@ -97,7 +97,26 @@ const (
 	// with. Injected as static env so the launcher authenticates to the dev store.
 	objectStoreDevAccessKey = "agent-engine-dev"
 	objectStoreDevSecretKey = "agent-engine-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
+
+	// Env-var NAMES for the durable object-store wiring — the launcher (blob offload, M78 record
+	// fixtures) and the record-capable egress sidecar (M78 tool fixtures) read them. Named
+	// constants so the several injection sites share one spelling (goconst).
+	envObjectStoreAddr      = "OBJECT_STORE_ADDR"
+	envObjectStoreAccessKey = "OBJECT_STORE_ACCESS_KEY"
+	envObjectStoreSecretKey = "OBJECT_STORE_SECRET_KEY" //nolint:gosec // env-var NAME, not a secret value.
 )
+
+// objectStoreEnv returns the STATIC env-var triple wiring a container to the dev durable object
+// store (address + dev creds). One helper for every injection site (launcher blob offload, M78
+// record fixture sinks) so the names + values stay in lockstep. Values are reconcile-time
+// constants — NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom guard).
+func objectStoreEnv() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envObjectStoreAddr, Value: objectStoreAddr},
+		{Name: envObjectStoreAccessKey, Value: objectStoreDevAccessKey},
+		{Name: envObjectStoreSecretKey, Value: objectStoreDevSecretKey},
+	}
+}
 
 const (
 	// litellmGatewayURL is the in-cluster address of the LiteLLM model gateway.
@@ -798,8 +817,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// are injected as STATIC env (values known at reconcile time — NEVER valueFrom, the m5.7 Knative
 	// landmine / tier1 no-valueFrom guard). An agent with none gets the plain LiteLLM URL and no proxy
 	// env — byte-for-byte M2 behavior.
+	// Record mode (M78, ADR 0071 §1): a RECORD-CAPABLE agent (spec.record) is a NEW interposition
+	// reason for the launcher gateway — the capture rides the :2996 proxy (raw model I/O incl. SSE),
+	// which is conditionally interposed (ADR 0071 C2), so recording must force it on the same way a
+	// budget/quota/guardrail does. Enablement is per-DEPLOYMENT here; the per-RUN capture toggle rides
+	// the invoke (the BFF stamps X-Ctxmesh-Record when run.Record) and the BFF fails a recorded run
+	// CLOSED when the agent is NOT record-capable (no gateway to capture at). Non-record-capable agents
+	// are byte-for-byte unchanged (this reason is off, no RECORD_CAPABLE env).
+	recordCapable := deploy.Spec.Record
+
 	gatewayURL := litellmGatewayURL
-	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced {
+	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced || recordCapable {
 		gatewayURL = budgetProxyURL
 		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
 	}
@@ -834,6 +862,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		env = append(env, corev1.EnvVar{Name: envGuardrailPolicy, Value: gr.policyJSON})
 		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
 			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
+		}
+	}
+
+	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
+	// the launcher gateway's record-mode on (GatewayProxyEnabled + the per-run capture path). Its
+	// presence — combined with GATEWAY_UPSTREAM_URL forced above — is the interposition reason. The
+	// fixture is a DURABLE object-store blob (internal/objectstore, keyed fixtures/{runId}/…), so the
+	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO. Inject them
+	// here (env-present-guarded so a record-capable registry MEMBER — which already got them in the
+	// membership block below is not the concern; that block runs later, so guard defensively) — a
+	// record-capable non-member would otherwise have no store to write the fixture to. STATIC env,
+	// NEVER valueFrom (the m5.7 Knative landmine). All values are reconcile-time constants.
+	if recordCapable {
+		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
+		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
+			env = append(env, objectStoreEnv()...)
 		}
 	}
 
@@ -946,14 +990,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
 	}
-	_, sidecarTools := toolmanifest.Render(validBindings)
+	renderedManifest, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
-	// OBO egress (ADR 0030): the deduped route table for this agent's remote OBO tools —
-	// the real MCP URLs the injected sidecar fronts (kept out of the agent's manifest).
-	// Empty unless OBO egress is enabled AND the agent has ≥1 remote OBO tool.
+	// OBO egress (ADR 0030) + record mode (M78, ADR 0071 §1/C1): the route table the injected
+	// egress sidecar fronts — the real MCP URLs kept out of the agent's manifest.
+	//   - OBO egress on           → remote OBO servers only (EgressRoutes).
+	//   - record-capable (spec.record) → EVERY tool is fronted (RewriteAllForEgress derives the
+	//     route table from the rendered manifest) so ALL tool I/O passes the capture seam. This
+	//     REQUIRES the sidecar even when the agent has NO OBO/remote binding — the record variant
+	//     supersedes the OBO-only table (it is a superset: OBO tools keep their ServerName route +
+	//     OAuth injection). A non-record-capable agent is byte-for-byte unchanged (OBO-only table,
+	//     empty when OBO egress is off).
 	var egressRoutes []toolmanifest.Route
-	if r.OBOEgress.Enabled {
+	switch {
+	case recordCapable:
+		_, egressRoutes = toolmanifest.RewriteAllForEgress(renderedManifest, validBindings, egressSidecarBaseURL)
+	case r.OBOEgress.Enabled:
 		egressRoutes = toolmanifest.EgressRoutes(validBindings)
 	}
 
@@ -1215,13 +1268,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
 		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
 		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
-		// async payloads pass through capped.
-		env = append(
-			env,
-			corev1.EnvVar{Name: "OBJECT_STORE_ADDR", Value: objectStoreAddr},
-			corev1.EnvVar{Name: "OBJECT_STORE_ACCESS_KEY", Value: objectStoreDevAccessKey},
-			corev1.EnvVar{Name: "OBJECT_STORE_SECRET_KEY", Value: objectStoreDevSecretKey},
-		)
+		// async payloads pass through capped. Guard against double-injection: a
+		// record-capable agent (M78) may have already been given the same env by the
+		// record-mode block above — inject only when not already present (last-write
+		// semantics would otherwise leave a duplicate env entry).
+		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
+			env = append(env, objectStoreEnv()...)
+		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
 		// hoisted block below so a NON-member memory agent gets it too — Fable audit.)
@@ -1336,13 +1389,20 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		volumes = append(volumes, toolsVolume(deploy.Name))
 	}
 
-	// OBO egress (ADR 0030): inject the injecting egress sidecar when enabled AND the agent
-	// has ≥1 remote OBO tool. Its manifest endpoints were rewritten to 127.0.0.1:<port>/
-	// <server> (mcptoolbinding_controller); the sidecar verifies the run capability, resolves
-	// the invoking user's credential, and forwards to the real MCP server this pod fronts.
-	if r.OBOEgress.Enabled && len(egressRoutes) > 0 {
+	// OBO egress (ADR 0030) + record mode (M78, ADR 0071 §1/C1): inject the injecting egress
+	// sidecar when
+	//   - OBO egress is on AND the agent has ≥1 remote OBO tool (the manifest endpoints were
+	//     rewritten to 127.0.0.1:<port>/<server>; the sidecar verifies the run capability,
+	//     resolves the invoking user's credential, forwards to the real MCP server), OR
+	//   - the agent is RECORD-CAPABLE (spec.record) AND has ≥1 tool to front — the sidecar is the
+	//     TOOL capture seam, so it is injected EVEN WITH NO OBO/remote binding (egressRoutes was
+	//     built from RewriteAllForEgress in record mode ⇒ it fronts every tool). recordCapable
+	//     also injects RECORD_CAPABLE + the object-store env (fail-closed C2 sink).
+	// A non-record-capable agent with OBO egress off gets no sidecar — byte-for-byte unchanged.
+	injectSidecar := (r.OBOEgress.Enabled || recordCapable) && len(egressRoutes) > 0
+	if injectSidecar {
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership), egressRoutesJSON(egressRoutes)))
+		containers = append(containers, egressSidecarContainer(r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership), egressRoutesJSON(egressRoutes), recordCapable))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
@@ -1364,7 +1424,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// create/delete of a different workload KIND (handled by the per-model
 	// reconcilers), not a revision roll within the ksvc.
 	toolDigest := toolmanifest.StructuralDigest(sidecarTools, hasBindings)
-	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes); ed != "" {
+	if ed := egressDigest(r.OBOEgress.SidecarImage, agentEgressBoundary(deploy, membership), egressRoutes, recordCapable); ed != "" {
 		// The egress sidecar (image + routes — the real URLs now live in pod env, not the
 		// hot-path manifest) is pod-template state, so fold it into the tool component: adding/
 		// removing the sidecar or changing a route rolls a new revision. Inert when OBO is off

@@ -120,6 +120,59 @@ func TestCreateRun_AgentFailureIsFailed(t *testing.T) {
 	assert.NotEmpty(t, got.Error)
 }
 
+// recordCapableAgent is a ready agent marked spec.record=true (record-capable).
+func recordCapableAgent(name, namespace, url string) *agentsv1alpha1.AgentDeployment {
+	a := readyAgent(name, namespace, url)
+	a.Spec.Record = true
+	return a
+}
+
+// TestCreateRun_Record_FailsClosedOnNonRecordCapableAgent proves the C2 fail-closed gate (M78, ADR
+// 0071 §1): asking to record a run against an agent that is NOT record-capable (spec.record unset)
+// is REFUSED with a clear 400 — never a silently-record-nothing run.
+func TestCreateRun_Record_FailsClosedOnNonRecordCapableAgent(t *testing.T) {
+	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local") // NOT record-capable
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "t", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	raw, _ := json.Marshal(InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`), Record: true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "record on a non-record-capable agent must fail closed")
+	assert.Contains(t, rec.Body.String(), "record-capable", "the error must name the record-capability gap")
+}
+
+// TestCreateRun_Record_AcceptedOnRecordCapableAgent proves a record run against a record-capable
+// agent is accepted and the run carries Record=true (the per-run capture toggle propagates).
+func TestCreateRun_Record_AcceptedOnRecordCapableAgent(t *testing.T) {
+	agent := recordCapableAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`), Record: true})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.True(t, got.Record, "a recorded run must persist Record=true")
+	assert.Equal(t, run.StatusSucceeded, got.Status)
+}
+
+// TestCreateRun_NoRecord_UnaffectedByCapability proves a NON-record run is byte-for-byte unchanged
+// whether or not the agent is record-capable (record is strictly opt-in).
+func TestCreateRun_NoRecord_UnaffectedByCapability(t *testing.T) {
+	agent := recordCapableAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	inv := &fakeInvokeAdapter{traceID: "tr", resp: []byte(`{"output":"ok","consent_required":[]}`)}
+	s := newInvokeServer(t, newFakeFactory(c), inv)
+
+	created := createRun(t, s, InvokeRequest{Agent: "echo", Namespace: "prod", Input: json.RawMessage(`{}`)})
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.False(t, got.Record, "a run that did not opt in must not be recorded")
+}
+
 func TestRunEvents_SSE(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
@@ -300,24 +353,31 @@ func TestGetRun_NotFound(t *testing.T) {
 }
 
 // fakeStreamingInvokeAdapter implements BOTH InvokeAdapter and StreamingInvokeAdapter: InvokeStream
-// emits the canned tokens then returns the final envelope, so the run executor streams token events.
+// emits the canned tokens + step frames then returns the final envelope, so the run executor streams
+// token + step events (M78, ADR 0071 §4).
 type fakeStreamingInvokeAdapter struct {
 	traceID string
 	tokens  []string
-	final   []byte
-	err     error
+	// steps are canned `step` metadata JSON payloads streamed to onStep (M78) — the raw JSON the
+	// run store persists as EventStep and the console renders as live step-visibility.
+	steps []string
+	final []byte
+	err   error
 }
 
 func (f *fakeStreamingInvokeAdapter) Invoke(context.Context, string, []byte) ([]byte, string, error) {
 	return f.final, f.traceID, f.err
 }
 
-func (f *fakeStreamingInvokeAdapter) InvokeStream(_ context.Context, _ string, _ []byte, onToken func(string)) ([]byte, string, error) {
+func (f *fakeStreamingInvokeAdapter) InvokeStream(_ context.Context, _ string, _ []byte, onToken func(string), onStep func(string)) ([]byte, string, error) {
 	if f.err != nil {
 		return nil, f.traceID, f.err
 	}
 	for _, tok := range f.tokens {
 		onToken(tok)
+	}
+	for _, st := range f.steps {
+		onStep(st)
 	}
 	return f.final, f.traceID, nil
 }
@@ -325,9 +385,14 @@ func (f *fakeStreamingInvokeAdapter) InvokeStream(_ context.Context, _ string, _
 func TestCreateRun_StreamsTokens(t *testing.T) {
 	agent := readyAgent("echo", "prod", "http://echo.prod.svc.cluster.local")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	// The agent streams a model step frame + a tool step frame (M78, ADR 0071 §4). The BFF must
+	// republish each verbatim as an EventStep on the run stream (live step-visibility).
+	stepModel := `{"type":"step","step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}`
+	stepTool := `{"type":"step","step":1,"kind":"tool","tool":"echo_tool","tokens":{"prompt":0,"completion":0},"ref":null}`
 	inv := &fakeStreamingInvokeAdapter{
 		traceID: "t",
 		tokens:  []string{"Hel", "lo", " there"},
+		steps:   []string{stepModel, stepTool},
 		final:   []byte(`{"output":"Hello there","consent_required":[]}`),
 	}
 	s := newInvokeServer(t, newFakeFactory(c), inv)
@@ -337,7 +402,8 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Equal(t, run.StatusSucceeded, final.Status)
 	assert.Equal(t, "Hello there", final.Messages[0].Content)
 
-	// The event stream carried the token deltas as they arrived, then the message + state.
+	// The event stream carried the token deltas as they arrived, the step metadata frames, then
+	// the message + state.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+created.ID+"/events", nil)
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
@@ -346,6 +412,11 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Contains(t, body, "event: token")
 	assert.Contains(t, body, "Hel")
 	assert.Contains(t, body, "lo")
+	// The step frames were republished as EventStep, their Data the verbatim step-metadata JSON
+	// (JSON-escaped inside the run Event's `data` field on the wire).
+	assert.Contains(t, body, "event: step")
+	assert.Contains(t, body, `\"kind\":\"model\"`)
+	assert.Contains(t, body, `\"tool\":\"echo_tool\"`)
 	assert.Contains(t, body, "event: message")
 	assert.Contains(t, body, "event: state")
 	assert.Contains(t, body, string(run.StatusSucceeded))

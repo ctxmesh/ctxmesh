@@ -37,6 +37,7 @@ func main() {
 	root.AddCommand(newExpandCmd())
 	root.AddCommand(newDevCmd())
 	root.AddCommand(newEvalCmd())
+	root.AddCommand(newReplayServeCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

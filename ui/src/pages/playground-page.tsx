@@ -19,6 +19,7 @@ import { FormField } from "@/components/config/form-field";
 import {
   api,
   ApiError,
+  formatRunStep,
   openRunStream,
   type CreatedObject,
   type WorkflowNodeStatus,
@@ -53,8 +54,10 @@ type Approval = { runId: string; key: string; summary: string };
 
 type Run =
   | { kind: "idle" }
-  // running carries the run id (for cancel) + the response accumulated live from token events.
-  | { kind: "running"; runId: string; response: string }
+  // running carries the run id (for cancel) + the response accumulated live from token events +
+  // the latest live step label (M78: "what step is my agent on right now"), empty until the first
+  // `step` event.
+  | { kind: "running"; runId: string; response: string; step?: string }
   | {
       kind: "done";
       traceId: string;
@@ -205,6 +208,7 @@ export function PlaygroundPage() {
 
     setRun({ kind: "running", runId, response: "" });
     let acc = "";
+    let step = "";
     let finalized = false;
     const finalize = () => {
       if (finalized) return;
@@ -216,10 +220,18 @@ export function PlaygroundPage() {
       onEvent: (kind, data) => {
         if (kind === "token") {
           acc += data;
-          setRun({ kind: "running", runId, response: acc });
+          setRun({ kind: "running", runId, response: acc, step });
         } else if (kind === "message") {
           acc = data;
-          setRun({ kind: "running", runId, response: acc });
+          setRun({ kind: "running", runId, response: acc, step });
+        } else if (kind === "step") {
+          // Live step-visibility (M78, ADR 0071 §4): show "what step is my agent on right now".
+          // formatRunStep handles BOTH the new JSON metadata and the legacy plain-label Data.
+          const label = formatRunStep(data);
+          if (label) {
+            step = label;
+            setRun({ kind: "running", runId, response: acc, step });
+          }
         } else if (kind === "state" && data === "requires_action") {
           // requires_action is NOT terminal, so the stream stays open — stop it and finalize.
           finalize();
@@ -294,6 +306,7 @@ export function PlaygroundPage() {
     }
     setRun({ kind: "running", runId, response: "" });
     let acc = "";
+    let step = "";
     let finalized = false;
     const finalize = () => {
       if (finalized) return;
@@ -305,9 +318,16 @@ export function PlaygroundPage() {
       onEvent: (kind, data) => {
         if (kind === "token") {
           acc += data;
-          setRun({ kind: "running", runId, response: acc });
+          setRun({ kind: "running", runId, response: acc, step });
         } else if (kind === "message") {
           acc = data;
+        } else if (kind === "step") {
+          // Live step-visibility (M78, ADR 0071 §4) — same parse-with-fallback as the run path.
+          const label = formatRunStep(data);
+          if (label) {
+            step = label;
+            setRun({ kind: "running", runId, response: acc, step });
+          }
         } else if (kind === "state" && data === "requires_action") {
           finalize();
         }
@@ -717,10 +737,22 @@ export function PlaygroundPage() {
                 </>
               ) : run.kind === "running" ? (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground" data-testid="run-streaming">
-                      Streaming…
-                    </span>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="text-sm text-muted-foreground" data-testid="run-streaming">
+                        Streaming…
+                      </span>
+                      {/* Live step-visibility (M78, ADR 0071 §4): what step is the agent on now. */}
+                      {run.step && (
+                        <Badge
+                          variant="secondary"
+                          className="truncate font-mono text-[10px]"
+                          data-testid="run-step"
+                        >
+                          {run.step}
+                        </Badge>
+                      )}
+                    </div>
                     <Button
                       size="sm"
                       variant="outline"

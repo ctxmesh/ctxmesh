@@ -18,6 +18,7 @@
  */
 
 import { CAPABILITY_HEADER, currentCapability } from "./_capability.js";
+import { RECORD_HEADER, currentRecordRunId } from "./_record.js";
 import { PlaneConfig } from "./config.js";
 import { ConfigError, EndpointError, GuardrailBlockedError } from "./errors.js";
 
@@ -203,6 +204,13 @@ export class ModelClient {
     const capability = currentCapability();
     if (capability) {
       headers[CAPABILITY_HEADER] = capability;
+    }
+    // Relay the record-mode capture toggle (M78, ADR 0071 §1) — the SAME request-scoped signal the
+    // BFF stamps on a recorded run's /invoke. It lets the launcher gateway capture this call's model
+    // I/O into the run's replay fixture. Absent ⇒ a non-recorded run — omit it.
+    const recordRunId = currentRecordRunId();
+    if (recordRunId) {
+      headers[RECORD_HEADER] = recordRunId;
     }
     return headers;
   }

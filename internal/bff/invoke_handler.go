@@ -51,6 +51,13 @@ type InvokeRequest struct {
 	// thread (`mem:{ns}/{agent}:{conversationId}`). Empty → a single-shot run (the
 	// Playground default) — no thread, no memory scope.
 	ConversationID string `json:"conversationId,omitempty"`
+	// Record opts THIS run into record mode (M78, ADR 0071): the platform capture
+	// seams record the run's model + tool I/O into a portable replay fixture. It is a
+	// RUN-SCOPED opt-in (POST /api/runs {record:true}) — you record a specific run,
+	// not an agent. Honored only on the durable run-create path (handleCreateRun);
+	// the synchronous /invoke path ignores it (record mode targets a durable run so
+	// the fixture has a run id to key on). Default false ⇒ a normal run.
+	Record bool `json:"record,omitempty"`
 }
 
 // InvokeResponse is returned by POST /api/invoke: the run's traceId (the hand-off
