@@ -258,6 +258,14 @@ docker-build-launcher: ## Build the launcher image (launcher:latest) from Docker
 docker-build-egress-sidecar: ## Build the egress-sidecar image (egress-sidecar:latest) from Dockerfile.egress-sidecar (ADR 0030 §1).
 	$(CONTAINER_TOOL) build -t egress-sidecar:latest -f Dockerfile.egress-sidecar .
 
+# REPLAY_TAG is the version the replay-serve image is tagged AND stamped with. It must match the
+# CLI's devVersion (cmd/agent-engine) so `dev --replay`'s /replay/version parity check passes; the
+# default "m78-smoke" agrees with the CLI's built-in default out of the box (ADR 0071 §3a).
+REPLAY_TAG ?= m78-smoke
+.PHONY: docker-build-replay
+docker-build-replay: ## Build the replay-serve image (agent-engine-replay:$(REPLAY_TAG)) from Dockerfile.replay (ADR 0071 §3a).
+	$(CONTAINER_TOOL) build --build-arg REPLAY_VERSION=$(REPLAY_TAG) -t agent-engine-replay:$(REPLAY_TAG) -f Dockerfile.replay .
+
 .PHONY: docker-build-token-service
 docker-build-token-service: ## Build the token-service image (token-service:latest) from Dockerfile.token-service (ADR 0030 §1 central service).
 	$(CONTAINER_TOOL) build -t token-service:latest -f Dockerfile.token-service .
