@@ -29,6 +29,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -282,6 +283,155 @@ func TestMemoryBinding_StatelayerProxyURLInjected(t *testing.T) {
 		"the per-agent identity ServiceAccount is created")
 	require.Len(t, sa.OwnerReferences, 1, "the SA is owned")
 	assert.Equal(t, agentName, sa.OwnerReferences[0].Name, "the SA is owned by the AgentDeployment")
+}
+
+// statelayerTokenVolumeMounted reports whether the ksvc pod template carries the
+// audience-scoped PROJECTED state-layer proxy token volume — the dedicated auth path
+// that must remain UNAFFECTED by the m79.4 default-token hardening.
+func statelayerTokenVolumeMounted(ksvc *servingv1.Service) bool {
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		if v.Projected == nil {
+			continue
+		}
+		for _, src := range v.Projected.Sources {
+			if src.ServiceAccountToken != nil && src.ServiceAccountToken.Audience == statelayerPodAudience {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestMountServiceAccountToken_HardenedByDefault (m79.4, m52 C10): a proxy-attached
+// agent's per-agent identity SA has AutomountServiceAccountToken=false by DEFAULT
+// (spec.mountServiceAccountToken unset), stripping the unused default kube-API token
+// from the pod. The dedicated projected proxy-token volume is unaffected.
+func TestMountServiceAccountToken_HardenedByDefault(t *testing.T) {
+	const (
+		namespace = "default"
+		agentName = "msat-default-agent"
+		bindName  = "msat-default-binding"
+		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	mkAgent(t, agentName, namespace)
+	_ = mkMemoryBinding(t, bindName, namespace, agentName, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, agentName, namespace)
+
+	// The identity SA has automount explicitly disabled — the hardened default.
+	wantSA := agentIdentitySAName(agentName)
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: wantSA, Namespace: namespace}, &sa),
+		"the per-agent identity ServiceAccount is created")
+	require.NotNil(t, sa.AutomountServiceAccountToken,
+		"AutomountServiceAccountToken must be explicitly SET (not nil/API-default) so the default token is stripped")
+	assert.False(t, *sa.AutomountServiceAccountToken,
+		"default (spec.mountServiceAccountToken unset) ⇒ AutomountServiceAccountToken=false (hardened)")
+
+	// The DEDICATED projected proxy-token volume is unaffected — memory-auth still works.
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+	assert.True(t, statelayerTokenVolumeMounted(&ksvc),
+		"the audience-scoped projected proxy-token volume must remain mounted (memory-auth path unaffected)")
+	// And the ksvc PodSpec itself carries NO automount setting — the mechanism is the SA,
+	// NOT the Knative-restricted RevisionSpec.PodSpec (the m5.7 landmine class).
+	assert.Nil(t, ksvc.Spec.Template.Spec.AutomountServiceAccountToken,
+		"automount must NOT be set on the ksvc PodSpec (Knative strips/rejects it) — it lives on the SA")
+}
+
+// TestMountServiceAccountToken_OptIn (m79.4): with spec.mountServiceAccountToken=true,
+// the identity SA's AutomountServiceAccountToken is true — the escape hatch for an agent
+// that legitimately builds an in-cluster kube config. The projected proxy-token volume is
+// still mounted (the two token paths are independent).
+func TestMountServiceAccountToken_OptIn(t *testing.T) {
+	const (
+		namespace = "default"
+		agentName = "msat-optin-agent"
+		bindName  = "msat-optin-binding"
+		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	a := mkAgent(t, agentName, namespace)
+	a.Spec.MountServiceAccountToken = ptr.To(true)
+	require.NoError(t, k8sClient.Update(testCtx, a))
+	_ = mkMemoryBinding(t, bindName, namespace, agentName, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+	reconcileNN(t, r, agentName, namespace)
+
+	wantSA := agentIdentitySAName(agentName)
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: wantSA, Namespace: namespace}, &sa))
+	require.NotNil(t, sa.AutomountServiceAccountToken)
+	assert.True(t, *sa.AutomountServiceAccountToken,
+		"spec.mountServiceAccountToken=true ⇒ AutomountServiceAccountToken=true (opt-in escape hatch)")
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+	assert.True(t, statelayerTokenVolumeMounted(&ksvc),
+		"the projected proxy-token volume is independent of the default-token opt-in and stays mounted")
+}
+
+// TestMountServiceAccountToken_ToggleRollsRevision (m79.4): toggling
+// spec.mountServiceAccountToken changes the pod-template structural digest, so a NEW
+// Knative revision name is produced — the SA-automount change actually reaches a running
+// pod (the M4 silent-loss landmine: a pod-spec change that doesn't move the revision name
+// is dropped by the CreateOrUpdate name-guard). It also re-converges the identity SA.
+func TestMountServiceAccountToken_ToggleRollsRevision(t *testing.T) {
+	const (
+		namespace = "default"
+		agentName = "msat-toggle-agent"
+		bindName  = "msat-toggle-binding"
+		proxyURL  = "http://statelayer-proxy.agent-engine-system.svc:8080"
+	)
+	a := mkAgent(t, agentName, namespace)
+	_ = mkMemoryBinding(t, bindName, namespace, agentName, "")
+
+	r := newReconciler()
+	r.StatelayerProxyURL = proxyURL
+
+	// Reconcile hardened-default → capture the revision name + SA automount.
+	reconcileNN(t, r, agentName, namespace)
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+	revBefore := ksvc.Spec.Template.Name
+	require.NotEmpty(t, revBefore, "the revision has a stable structural name")
+
+	var saBefore corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentIdentitySAName(agentName), Namespace: namespace}, &saBefore))
+	require.NotNil(t, saBefore.AutomountServiceAccountToken)
+	assert.False(t, *saBefore.AutomountServiceAccountToken, "starts hardened (false)")
+
+	// Toggle the opt-in ON and re-reconcile.
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a), a))
+	a.Spec.MountServiceAccountToken = ptr.To(true)
+	require.NoError(t, k8sClient.Update(testCtx, a))
+	reconcileNN(t, r, agentName, namespace)
+
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentName, Namespace: namespace}, &ksvc))
+	revAfter := ksvc.Spec.Template.Name
+	assert.NotEqual(t, revBefore, revAfter,
+		"toggling spec.mountServiceAccountToken must roll a NEW revision (structural digest changed)")
+
+	var saAfter corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentIdentitySAName(agentName), Namespace: namespace}, &saAfter))
+	require.NotNil(t, saAfter.AutomountServiceAccountToken)
+	assert.True(t, *saAfter.AutomountServiceAccountToken,
+		"the identity SA re-converges to automount=true after the opt-in toggle")
+
+	// The projected proxy-token volume (memory-auth path) is unaffected across the toggle.
+	assert.True(t, statelayerTokenVolumeMounted(&ksvc),
+		"the projected proxy-token volume stays mounted across a default-token opt-in toggle")
 }
 
 // TestMemoryBinding_CustomAddr verifies that spec.backend.addr overrides the

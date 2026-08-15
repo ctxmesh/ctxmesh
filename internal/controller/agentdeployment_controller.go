@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1478,7 +1479,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	tenantDig := tenantDigest(tenantCtx, hasTenant)
 	// The proxy URL is injected for a memory binding (M51) OR tenant quota + token (M53);
 	// fold it into the digest so enabling/changing it rolls a new revision (M4 landmine).
-	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken)
+	// The default-token automount opt-in (m79.4) is a property of the SAME per-agent identity
+	// SA this component already tracks (the "|sa" tag), so it folds in here: toggling
+	// spec.mountServiceAccountToken flips the SA's AutomountServiceAccountToken, which must
+	// reach a running pod — so it rolls a new revision like every other pod-template change.
+	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken, mountAPIToken(deploy))
 	// Runtime config (M65): a spec.runtime add/remove/change injects/removes the
 	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
 	// folds into the combined digest like the other components.
@@ -1535,6 +1540,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 // 0052 §C6 RESOLUTION).
 func agentIdentitySAName(deployName string) string {
 	return "agent-" + deployName
+}
+
+// mountAPIToken reports whether the agent opts into auto-mounting the default kube-API
+// ServiceAccount token (m79.4, m52 C10). Default (nil/false) is HARDENED: the token is
+// stripped from the pod because the agent runtime never uses it (the state-layer proxy
+// authenticates with a dedicated projected token on a separate volume). true opts the
+// agent back in — only for one that legitimately builds an in-cluster kube config. It
+// feeds both ensureAgentIdentitySA (the SA-level AutomountServiceAccountToken) and the
+// structural digest (so toggling it rolls a new revision, the M4 landmine).
+func mountAPIToken(deploy *agentsv1alpha1.AgentDeployment) bool {
+	return deploy.Spec.MountServiceAccountToken != nil && *deploy.Spec.MountServiceAccountToken
 }
 
 // identitySAConflictError is a sentinel returned by ensureAgentIdentitySA when
@@ -1599,6 +1615,24 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 		} else {
 			delete(sa.Labels, registryIDLabel)
 		}
+		// Strip the unused default kube-API token from agent pods by default (m79.4, m52 C10).
+		//
+		// Setting it on THIS identity SA (not the ksvc PodSpec) is deliberate: Knative Serving
+		// restricts the RevisionSpec.PodSpec and has no automountServiceAccountToken feature flag,
+		// so setting it on the pod template would be stripped/rejected (the m5.7 landmine class).
+		// The SA-level setting removes ONLY the default auto-mounted token; the explicit projected
+		// proxy-token volume (declared on the pod spec) is UNAFFECTED.
+		//
+		// Default (hardened): false — the identity SA has zero RBAC and the runtime never reads
+		// the default token. Opt-in: true when spec.mountServiceAccountToken is set — for an agent
+		// that legitimately builds an in-cluster kube config. Reconciled here (idempotently) like
+		// the registry label so a toggle re-converges.
+		//
+		// COVERAGE: this only reaches agents that HAVE an identity SA (memory/proxy/OBO). A plain
+		// agent on the namespace's shared `default` SA is out of scope — toggling automount on a
+		// shared SA would affect every workload in the namespace; a universal identity SA is a
+		// separate follow-up.
+		sa.AutomountServiceAccountToken = ptr.To(mountAPIToken(deploy))
 		return ctrl.SetControllerReference(deploy, sa, r.Scheme)
 	}); err != nil {
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
@@ -2015,7 +2049,7 @@ func combinedBindingDigest(toolDigest, memDigest, regDigest, budgetDigest, promp
 // whose pod template changes (fixing the M4-landmine gap where enabling the proxy
 // on live agents would otherwise NOT roll — the pod would keep the old direct-Valkey
 // wiring). No spurious roll for agents that don't inject it.
-func statelayerProxyDigest(proxyURL string, injected bool) string {
+func statelayerProxyDigest(proxyURL string, injected, mountAPIToken bool) string {
 	if proxyURL == "" || !injected {
 		return ""
 	}
@@ -2024,7 +2058,14 @@ func statelayerProxyDigest(proxyURL string, injected bool) string {
 	// proxy-attached (same proxyURL, previously default SA) so the serviceAccountName
 	// pod-spec change actually lands — a change that didn't move the revision name would
 	// be silently dropped by the CreateOrUpdate name-guard (the M4 landmine).
-	h := sha256.Sum256([]byte(proxyURL + "|sa"))
+	//
+	// "|automount=<bool>" (m79.4): the identity SA's AutomountServiceAccountToken tracks
+	// spec.mountServiceAccountToken. It is part of the pod's effective spec (the kubelet
+	// mounts or omits the default token per the SA setting), so a toggle must roll a new
+	// revision too — otherwise an opt-in change wouldn't reach a running pod until an
+	// unrelated restart. Default false ⇒ "automount=false" (byte-different from the pre-m79.4
+	// digest, so live proxy agents roll ONCE onto the hardened SA — a real spec change).
+	h := sha256.Sum256([]byte(proxyURL + "|sa" + "|automount=" + strconv.FormatBool(mountAPIToken)))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
