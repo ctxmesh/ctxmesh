@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // ESNext + Bundler (m77.4): match tsconfig.esm.json so `make sdk-ts-lint`'s typecheck
+    // resolves the OTel-JS 2.x stack (which has no `exports` map, defeating strict NodeNext
+    // type-resolution). See the note in tsconfig.esm.json.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src", "test", "examples"]
+}

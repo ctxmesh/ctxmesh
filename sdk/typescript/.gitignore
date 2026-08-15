@@ -1,0 +1,7 @@
+# ctxmesh TS SDK build output + installed deps + tool caches — never committed.
+# The pinned pnpm-lock.yaml + .nvmrc ARE tracked (mirrors ui/ and sdk/python).
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.tsbuildinfo-*

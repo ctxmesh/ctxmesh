@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // module/resolution: ESNext + Bundler (m77.4). The OTel-JS 2.x packages ship the legacy
+    // `main`/`types` fields with NO `exports` map, which strict `NodeNext` type-resolution
+    // cannot follow (TS2307). `Bundler` resolution reads both the modern `exports` map and the
+    // legacy `types`/`main`, resolving the whole OTel stack cleanly, while the SDK's own
+    // imports already carry explicit `.js` extensions so the ESM emit is byte-identical. The
+    // CJS build (tsconfig.cjs.json) keeps classic Node10 resolution — the two together still
+    // emit the dual ESM+CJS library.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "./dist/esm",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo-esm"
+  },
+  "include": ["src"]
+}
