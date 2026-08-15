@@ -101,3 +101,100 @@ describe("TeamsPage (m64.11)", () => {
     await waitFor(() => expect(screen.getByText("No agent teams")).toBeInTheDocument());
   });
 });
+
+// ── I3 m76.6: inline detail panel (row-click) ──────────────────────────────
+describe("TeamsPage detail panel (I3 m76.6)", () => {
+  it("row-click opens the detail panel with roster members (name → agentRef · description)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          team({
+            name: "research",
+            supervisor: "planner",
+            roster: [
+              { name: "researcher", agentRef: "web-researcher", description: "searches the web" },
+              { name: "writer", agentRef: "doc-writer" },
+            ],
+            ready: true,
+          }),
+        ],
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("research");
+
+    // Panel not visible yet.
+    expect(screen.queryByTestId("team-detail")).toBeNull();
+
+    // Click the row to open the panel.
+    fireEvent.click(screen.getByText("research"));
+    expect(await screen.findByTestId("team-detail")).toBeInTheDocument();
+
+    // Member details: name → agentRef + description.
+    const member = screen.getByTestId("team-member-researcher");
+    expect(member).toHaveTextContent("researcher");
+    expect(member).toHaveTextContent("web-researcher");
+    expect(member).toHaveTextContent("searches the web");
+
+    // Member without description renders agentRef but no description text.
+    const writer = screen.getByTestId("team-member-writer");
+    expect(writer).toHaveTextContent("writer");
+    expect(writer).toHaveTextContent("doc-writer");
+  });
+
+  it("shows team-level readiness in the detail panel", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        items: [
+          team({ name: "broken", ready: false, reason: "MemberNotFound" }),
+        ],
+      },
+    }));
+
+    renderPage();
+    await screen.findByText("broken");
+
+    fireEvent.click(screen.getByText("broken"));
+    await screen.findByTestId("team-detail");
+
+    // The not-ready badge and reason are shown.
+    expect(screen.getByTestId("team-detail-notready-badge")).toHaveTextContent("MemberNotFound");
+  });
+
+  it("clicking the same row again closes the panel (toggle)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { items: [team({ name: "research" })] },
+    }));
+
+    renderPage();
+    // Wait for the table row to appear (inside the <table>).
+    const row = await screen.findByRole("row", { name: /research/ });
+
+    fireEvent.click(row);
+    expect(await screen.findByTestId("team-detail")).toBeInTheDocument();
+
+    // Click the row again to toggle the panel closed.
+    fireEvent.click(row);
+    await waitFor(() => expect(screen.queryByTestId("team-detail")).toBeNull());
+  });
+
+  it("Close button dismisses the detail panel", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { items: [team({ name: "research" })] },
+    }));
+
+    renderPage();
+    await screen.findByText("research");
+
+    fireEvent.click(screen.getByText("research"));
+    await screen.findByTestId("team-detail");
+
+    fireEvent.click(screen.getByTestId("team-detail-close"));
+    await waitFor(() => expect(screen.queryByTestId("team-detail")).toBeNull());
+  });
+});

@@ -719,6 +719,8 @@ export interface AuditListResponse {
 //   actor     — exact actor match
 //   action    — exact action match ("connect" | "grant.create" | …)
 //   kind      — exact resourceKind match ("Provider" | "MCPGrant" | …)
+//   from      — lower bound for occurred_at (RFC3339, inclusive)
+//   to        — upper bound for occurred_at (RFC3339, inclusive)
 //   limit     — page size (BFF defaults + caps)
 //   cursor    — opaque keyset continue token from a prior page's nextCursor
 export interface AuditListParams {
@@ -726,6 +728,8 @@ export interface AuditListParams {
   actor?: string;
   action?: string;
   kind?: string;
+  from?: string; // RFC3339
+  to?: string;   // RFC3339
   limit?: number;
   cursor?: string;
 }
@@ -1418,6 +1422,9 @@ export interface ForkAgentResponse {
   created: CreatedObject[];
   needsRebinding: string[];
   unresolvedRefs: string[];
+  // resolvedRefs lists tool names auto-connected during fork ref-closure (U9, m76.3).
+  // Non-empty = N tools were wired automatically via the M73 compose-connect flywheel.
+  resolvedRefs?: string[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
@@ -2806,6 +2813,8 @@ export const api = {
     if (params.actor) qs.set("actor", params.actor);
     if (params.action) qs.set("action", params.action);
     if (params.kind) qs.set("kind", params.kind);
+    if (params.from) qs.set("from", params.from);
+    if (params.to) qs.set("to", params.to);
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";

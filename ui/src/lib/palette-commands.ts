@@ -27,11 +27,11 @@ export interface BuildCommandsArgs {
   onLogout: () => void;
 }
 
-// The same visibility rule the app-shell Sidebar applies: a write-only surface is
-// shown only when the caller may perform its gating verb. Read-only surfaces have
-// no `requiresWrite` and are always shown.
+// The same visibility rule the app-shell Sidebar applies: a capability-gated surface
+// is shown only when the caller may perform its gating verb. Read-open surfaces have
+// no `requiresCapability` and are always shown.
 function isVisible(it: NavItem, can: BuildCommandsArgs["can"]): boolean {
-  return !it.requiresWrite || can(it.requiresWrite.resource, it.requiresWrite.verb);
+  return !it.requiresCapability || can(it.requiresCapability.resource, it.requiresCapability.verb);
 }
 
 // buildCommands assembles the grouped command list. Navigate commands mirror the

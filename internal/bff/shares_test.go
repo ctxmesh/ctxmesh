@@ -220,8 +220,8 @@ func TestCreateShare_RefusesNonDurableStore(t *testing.T) {
 	assert.Empty(t, list, "no share is created against a non-durable store")
 }
 
-// TestListShares_HidesToken proves the manage list returns the token-FREE DTO (no token, no hash) and
-// excludes revoked shares.
+// TestListShares_HidesToken proves the manage list returns the token-FREE DTO (no token, no hash).
+// V11: the list now INCLUDES revoked rows (badged by the UI for "what did I expose?").
 func TestListShares_HidesToken(t *testing.T) {
 	store := sharedrun.NewMemStore()
 	s := shareTestServer(t, store, &captureAuditStore{}, seededDurableRunStore(t), nil)
@@ -245,12 +245,12 @@ func TestListShares_HidesToken(t *testing.T) {
 	require.Len(t, list, 2)
 	for _, item := range list {
 		assert.NotEmpty(t, item.ID)
-		assert.False(t, item.Revoked)
 	}
 }
 
-// TestRevokeShare_Idempotent proves DELETE revokes (204), the share drops from the list, and a repeat
-// DELETE (and an unknown shareId) are still 204 — idempotent, no oracle on share existence.
+// TestRevokeShare_Idempotent proves DELETE revokes (204). V11: the revoked share still appears in the
+// manage list (badged as Revoked), NOT removed from the list. A repeat DELETE and an unknown shareId
+// are still 204 — idempotent, no oracle on share existence.
 func TestRevokeShare_Idempotent(t *testing.T) {
 	store := sharedrun.NewMemStore()
 	audit := &captureAuditStore{}
@@ -265,11 +265,12 @@ func TestRevokeShare_Idempotent(t *testing.T) {
 	rec := doShareRequest(t, s, http.MethodDelete, "/api/runs/run-share-1/shares/"+s1.ID, "")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// The share is gone from the manage list.
+	// V11: the revoked share is STILL in the manage list (badged as Revoked by the UI), not hidden.
 	listRec := doShareRequest(t, s, http.MethodGet, "/api/runs/run-share-1/shares", "")
 	var list []ShareSummary
 	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
-	assert.Empty(t, list, "a revoked share is excluded from the manage list")
+	require.Len(t, list, 1, "revoked share is included in the list (V11: honest lifecycle view)")
+	assert.True(t, list[0].Revoked, "the revoked share is flagged in the DTO")
 
 	// A repeat revoke + an unknown id are both idempotent 204s.
 	assert.Equal(t, http.StatusNoContent, doShareRequest(t, s, http.MethodDelete, "/api/runs/run-share-1/shares/"+s1.ID, "").Code)

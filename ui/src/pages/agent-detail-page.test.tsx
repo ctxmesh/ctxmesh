@@ -1285,6 +1285,88 @@ describe("AgentDetailPage — Runtime section (m65.9)", () => {
   });
 });
 
+// ── J6 m76.6: Runtime section P3 polish ──────────────────────────────────────
+// (a) outputSchemaSet=true with no schema body → shows "(content not returned)"
+// (b) Runtime card is placed after Spec, not after Bindings
+// (c) Tool-policy honesty qualifier is shown
+describe("AgentDetailPage — Runtime section J6 polish (m76.6)", () => {
+  it("J6(a) shows '(content not returned)' when outputSchemaSet is true but schema body is absent", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: { outputSchemaSet: true, outputSchema: undefined },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Badge is shown.
+    expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
+    // "(content not returned)" note is shown when the body is absent.
+    expect(screen.getByTestId("runtime-output-schema-not-returned")).toHaveTextContent(
+      "content not returned",
+    );
+    // No expand toggle since there's no body.
+    expect(screen.queryByTestId("runtime-schema-details")).toBeNull();
+  });
+
+  it("J6(a) does NOT show '(content not returned)' when schema body is present", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: {
+          outputSchemaSet: true,
+          outputSchema: JSON.stringify({ type: "object" }),
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("runtime-output-schema-badge")).toHaveTextContent("✓ set");
+    expect(screen.queryByTestId("runtime-output-schema-not-returned")).toBeNull();
+    // The expand toggle is present.
+    expect(screen.getByTestId("runtime-schema-details")).toBeInTheDocument();
+  });
+
+  it("J6(b) Runtime card appears before the status timeline (i.e. adjacent to Spec)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: { outputSchemaSet: true },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    const runtimeSection = screen.getByTestId("runtime-section");
+    const statusTimeline = screen.getByTestId("status-timeline");
+    // The runtime section must appear BEFORE the status timeline in the DOM.
+    expect(
+      runtimeSection.compareDocumentPosition(statusTimeline) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("J6(c) tool-policy note is shown alongside the Tool policy heading", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        runtime: {
+          toolPolicy: {
+            default: "allow",
+            overrides: [],
+          },
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("runtime-tool-policy-note")).toHaveTextContent("SDK-layer convention");
+  });
+});
+
 // ── m66.10: GuardrailPolicyRef on the agent detail header ────────────────────
 // Tests that spec.guardrailPolicyRef is surfaced as a ResourceLink in the header,
 // and that when the agent is NotReady due to a guardrail reason, the reason is
@@ -1362,6 +1444,28 @@ describe("AgentDetailPage — guardrailPolicyRef (m66.10)", () => {
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("agent-guardrail-policy-link")).toBeNull();
     expect(screen.queryByTestId("agent-guardrail-notready-reason")).toBeNull();
+  });
+});
+
+// ── K7 m76.6: guardrail + promptRef links use navRoute ────────────────────────
+// K7(a): both /guardrails and /prompts links use navRoute() not hardcoded strings.
+describe("AgentDetailPage — K7 navRoute links (m76.6)", () => {
+  it("K7(a) guardrail link uses navRoute('guardrails') — resolves to /guardrails", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, guardrailPolicyRef: "my-policy" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const link = screen.getByTestId("agent-guardrail-policy-link");
+    // navRoute("guardrails") returns "/guardrails" — confirm the link is correct.
+    expect(link).toHaveAttribute("href", "/guardrails");
+  });
+
+  it("K7(a) promptRef link uses navRoute('prompts') — resolves to /prompts", async () => {
+    installFetch({ detail: { ...DEFAULT_DETAIL, promptRef: "my-prompt-v2" } });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const link = screen.getByTestId("agent-promptref-link");
+    expect(link).toHaveAttribute("href", "/prompts");
+    expect(link).toHaveTextContent("my-prompt-v2");
   });
 });
 
@@ -1599,7 +1703,8 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
 
     fireEvent.click(screen.getByTestId("publish-agent-button"));
 
-    expect(await screen.findByRole("dialog", { name: /Publish billing as template/ })).toBeInTheDocument();
+    // U8: dialog is now titled "Share X as template" (renamed from "Publish").
+    expect(await screen.findByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-team")).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-org")).toBeInTheDocument();
     expect(screen.getByTestId("publish-template-option-public")).toBeInTheDocument();
@@ -1634,31 +1739,37 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog title is now "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
 
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
     await waitFor(() => {
       expect(calls.some((c) => c.url === "/api/templates" && c.method === "POST")).toBe(true);
     });
+    // U8: success toast now says "Shared as template".
     await waitFor(() => {
-      expect(screen.getByText("Published")).toBeInTheDocument();
+      expect(screen.getByText("Shared as template")).toBeInTheDocument();
     });
   });
 
-  it("shows honest 403 error when publish is forbidden", async () => {
+  it("shows honest 403 error inline when publish is forbidden (U8 — keep dialog open)", async () => {
     installFetchWithPublish({ publishStatus: 403 });
     renderAt();
     await screen.findByTestId("agent-detail-page");
 
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog title is now "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
     fireEvent.click(screen.getByTestId("publish-template-submit"));
 
+    // U8: error is shown inline (keeping the dialog open), not as a closing toast.
     await waitFor(() => {
-      expect(screen.getByText("Publish failed")).toBeInTheDocument();
+      expect(screen.getByTestId("publish-template-error")).toBeInTheDocument();
     });
-    expect(screen.getByText(/team-admin/)).toBeInTheDocument();
+    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(/team-admin/);
+    // The dialog stays open.
+    expect(screen.getByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
   });
 
   it("public publish requires confirm checkbox before submitting (blast-radius gate)", async () => {
@@ -1666,7 +1777,8 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     fireEvent.click(screen.getByTestId("publish-agent-button"));
-    await screen.findByRole("dialog", { name: /Publish billing as template/ });
+    // U8: dialog is now titled "Share billing as template".
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
 
     // Select public tier
     const publicOption = screen.getByTestId("publish-template-option-public");
@@ -1713,5 +1825,280 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     renderAt();
     await screen.findByTestId("agent-detail-page");
     expect(screen.queryByTestId("needs-rebinding-banner")).toBeNull();
+  });
+});
+
+// ── U5: needs-rebinding banner — actionable line items ────────────────────────
+describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", () => {
+  it("shows a 'Connect a model route' link when model route is missing (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "",
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("rebind-model-route-link")).toBeInTheDocument();
+    expect(screen.getByTestId("rebind-model-route-link")).toHaveTextContent("Connect a model route");
+  });
+
+  it("shows a Bindings tab link in the banner (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toHaveTextContent(/Bindings tab/i);
+  });
+
+  it("does not show 'Connect a model route' when model route is already set (U5)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "gpt4-prod",
+        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
+  });
+});
+
+// ── U7: publish state badge + unpublish ──────────────────────────────────────
+describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
+  function installFetchWithPublishAndUnpublish(opts: {
+    publishStatus?: number;
+    unpublishStatus?: number;
+  } = {}) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") {
+          const status = opts.publishStatus ?? 200;
+          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          return j({ version: "3", name: "billing", namespace: "prod" });
+        }
+        if (url.match(/\/api\/templates\/.*/) && method === "DELETE") {
+          const status = opts.unpublishStatus ?? 200;
+          return j({}, status < 400, status);
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("shows published badge in header after publish succeeds (U7)", async () => {
+    installFetchWithPublishAndUnpublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Publish the agent.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    // Badge should appear.
+    await waitFor(() => {
+      expect(screen.getByTestId("published-badge")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/team/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/v3/);
+  });
+
+  it("shows Unpublish button after publish and calls DELETE /api/templates on click (U7)", async () => {
+    const calls: { url: string; method: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        calls.push({ url, method });
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") return j({ version: "2" });
+        if (url.match(/\/api\/templates\//) && method === "DELETE") return j({});
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Publish first.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument());
+
+    // Now unpublish.
+    fireEvent.click(screen.getByTestId("unpublish-agent-button"));
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes("/api/templates/") && c.method === "DELETE")).toBe(true);
+    });
+    // Badge should disappear after unpublish.
+    await waitFor(() => {
+      expect(screen.queryByTestId("published-badge")).toBeNull();
+    });
+  });
+});
+
+// ── U8: dialog immutable snapshot copy + "Share as template" button ───────────
+describe("AgentDetailPage (m76.3 U8) — publish dialog snapshot copy + rename", () => {
+  it("dialog shows the immutable snapshot note (U8)", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = init?.method ?? "GET";
+      const j = (body: unknown, ok = true, status = 200) =>
+        Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+      if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+      if (url.startsWith("/api/capabilities"))
+        return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+      if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+      if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+      return j({}, false, 404);
+    }));
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    // U8: must say "immutable snapshot".
+    expect(screen.getByText(/immutable snapshot/i)).toBeInTheDocument();
+    // U8: submit button reads "Share as template", not "Publish as team".
+    expect(screen.getByTestId("publish-template-submit")).toHaveTextContent("Share as template");
+  });
+});
+
+// ── U12: fork lineage on detail page ─────────────────────────────────────────
+describe("AgentDetailPage (m76.3 U12) — fork lineage", () => {
+  it("shows fork lineage when fork-origin labels are present (U12)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        labels: {
+          "agents.ctxmesh.ai/fork-origin-namespace": "prod",
+          "agents.ctxmesh.ai/fork-origin-name": "support-agent",
+          "agents.ctxmesh.ai/fork-origin-version": "v2",
+        },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.getByTestId("fork-lineage")).toBeInTheDocument();
+    expect(screen.getByTestId("fork-lineage")).toHaveTextContent("prod/support-agent");
+    expect(screen.getByTestId("fork-lineage")).toHaveTextContent("v2");
+  });
+
+  it("does not show fork lineage when fork-origin labels are absent (U12)", async () => {
+    installFetch();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(screen.queryByTestId("fork-lineage")).toBeNull();
+  });
+});
+
+// ── P1-1: publish/share verb coherence — entry button text ────────────────────
+describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
+  function installFetchWithPublish(opts: { publishStatus?: number } = {}) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") {
+          const status = opts.publishStatus ?? 200;
+          return j({ version: "1" }, status < 400, status);
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("entry button reads 'Share as template' when not yet published", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const btn = screen.getByTestId("publish-agent-button");
+    expect(btn).toHaveTextContent("Share as template");
+  });
+
+  it("entry button reads 'Share new version' after publishing", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Trigger a publish so publishedState is set.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("published-badge")).toBeInTheDocument());
+
+    // Entry button should now say "Share new version".
+    expect(screen.getByTestId("publish-agent-button")).toHaveTextContent("Share new version");
+  });
+
+  it("state badge reads 'Published' (state) and Unpublish button reads 'Unpublish' (state)", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    await waitFor(() => expect(screen.getByTestId("published-badge")).toBeInTheDocument());
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("unpublish-agent-button")).toHaveTextContent("Unpublish");
   });
 });
