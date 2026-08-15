@@ -220,7 +220,11 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
+		// The run is unreadable here — route through failIngestion (which itself re-reads best-effort) so the
+		// run terminates `failed` AND the corpus-status projection is attempted, rather than a bare return that
+		// leaves the run `running` and the KB stuck `Ingesting` forever (an m68.14-class out-of-band failure).
 		s.log.Error(err, "ingestion: could not load the run", "run", runID)
+		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("loading the ingestion run: %v", err))
 		return
 	}
 
@@ -549,15 +553,27 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 // intact by this call (it was persisted per-document), so a resumable failure (429/402) keeps its progress.
 func (s *Server) failIngestion(runID string, reason ingestionReason, message string) {
 	outcome := IngestionOutcome{Reason: reason, Message: message}
-	var ns, kb string // captured for the corpus-status channel projection below (empty ⇒ spec unreadable, skip)
+	var ns, kb string // captured for the corpus-status channel projection below.
 	// Enrich the outcome with the counts we can cheaply read from the run's spec + cursor (best-effort — a fail
 	// path must not itself fail). The store CountAndSize is skipped here (the corpus may be mid-write).
 	if rn, err := s.runStore.Get(runID); err == nil {
+		// ns/kb come from the Run's own Namespace + Agent columns FIRST — the ingest-create path pins
+		// run.New(runID, ns, kbName, …) (knowledgebases.go), so they are populated INDEPENDENTLY of the
+		// IngestionSpec JSON. This is what makes the corpus-status projection robust to an unparseable /
+		// missing spec (the m68.14 stuck-Ingesting bug: an early spec-read failure skipped the projection).
+		ns, kb = rn.Namespace, rn.Agent
 		var spec IngestionSpec
 		if json.Unmarshal([]byte(rn.IngestionSpec), &spec) == nil {
 			outcome.Documents = len(spec.Documents)
 			outcome.EmbeddingModel = spec.EmbeddingRoute
-			ns, kb = spec.Namespace, spec.KnowledgeBase
+			// Prefer the spec's namespace/KB when present (they are authoritative), but the columns above
+			// already guarantee a value even when this branch is skipped.
+			if spec.Namespace != "" {
+				ns = spec.Namespace
+			}
+			if spec.KnowledgeBase != "" {
+				kb = spec.KnowledgeBase
+			}
 		}
 		if cur, cErr := parseIngestionCursor(rn.Cursor); cErr == nil {
 			outcome.Chunks = cur.Chunks
@@ -571,9 +587,12 @@ func (s *Server) failIngestion(runID string, reason ingestionReason, message str
 	}
 
 	// STATUS CHANNEL (ADR 0061 Fork 2): project the terminal FAILURE onto the corpus-status row so the KB
-	// controller reflects phase Failed / BudgetExceeded. LastIngestedAt is left nil — this run did not succeed, so
-	// recordCorpusStatus preserves the corpus's prior lastIngestedAt rather than clobbering it. A best-effort
-	// background context so a draining ctx does not skip the status write.
+	// controller reflects phase Failed / BudgetExceeded. ns/kb are resolved from the Run's own columns above, so
+	// this projection is reached even when the IngestionSpec is unparseable (the fix for the m68.14 stuck-
+	// Ingesting bug). LastIngestedAt is left nil — this run did not succeed, so recordCorpusStatus preserves the
+	// corpus's prior lastIngestedAt rather than clobbering it. A best-effort background context so a draining ctx
+	// does not skip the status write. (The guard remains as a last-resort belt-and-braces: a run with no
+	// namespace/KB at all has nowhere to project — the controller safety-net then un-sticks it off ingestionRunRef.)
 	if ns != "" && kb != "" {
 		s.recordCorpusStatus(context.Background(), runID, knowledge.CorpusStatus{
 			Namespace: ns, KnowledgeBase: kb,

@@ -52,6 +52,41 @@ const (
 	reasonKBInvalidSource    = "InvalidSource"
 )
 
+// KnowledgeBase.status.phase values the controller writes. Most phases arrive via the corpus-status channel
+// (the ingestion executor projects them); kbPhaseFailed is ALSO written directly by the terminal-failed
+// safety-net (reconcileStuckIngesting) when an out-of-band run failure left no corpus-status row. These match
+// the CRD's status.phase enum (knowledgebase_types.go).
+const (
+	kbPhaseFailed    = "Failed"
+	kbPhaseIngesting = "Ingesting"
+)
+
+// Ingestion Run terminal-status wire values (run.Status string values). The controller compares against these
+// literals via the narrow KnowledgeBaseIngestionRunReader so it need not import the run package (the run-store
+// adapter, wired in cmd/main.go, returns the raw run status string).
+const (
+	runStatusSucceeded = "succeeded"
+	runStatusFailed    = "failed"
+	runStatusCancelled = "cancelled"
+	runStatusExpired   = "expired"
+)
+
+// isTerminalNotSucceeded reports whether an ingestion run's status is a terminal state OTHER than succeeded
+// (failed/cancelled/expired) — the safety-net predicate: any such run left a KB stuck Ingesting with no
+// corpus-status row, and the honest fail-closed projection is phase Failed (see reconcileStuckIngesting).
+func isTerminalNotSucceeded(status string) bool {
+	switch status {
+	case runStatusFailed, runStatusCancelled, runStatusExpired:
+		return true
+	case runStatusSucceeded:
+		// A succeeded run's Ready/PartiallyIngested/BudgetExceeded nuance + counts live ONLY in the corpus-
+		// status row — the controller keeps polling for that row rather than projecting Ready without counts.
+		return false
+	default: // a non-terminal status (queued/running/waiting/requires_action) — the ingestion is in flight.
+		return false
+	}
+}
+
 // corpusStore is the narrow slice of the knowledge store the reconciler needs: the finalizer's DB-half GC
 // (DeleteCorpus — drops the knowledge_chunks partition + the corpus-status row) and the status projection
 // (GetCorpusStatus — the coarse ingestion outcome the executor wrote on cpDB). A narrow interface lets the
@@ -65,6 +100,21 @@ type corpusStore interface {
 // (DeletePrefix — purge every document under the KB's prefix). objectstore.ObjectStore satisfies it.
 type prefixDeleter interface {
 	DeletePrefix(ctx context.Context, prefix string) error
+}
+
+// KnowledgeBaseIngestionRunReader is the narrow, READ-ONLY slice of the run store the controller's terminal-
+// failed safety-net needs: look up an ingestion Run's terminal status by ID. It is backed by the SAME cpDB
+// run store the BFF/run-worker use (mirroring the M75 AlertPolicy approvalWaiting wiring) — a plain SELECT,
+// no new RBAC (ADR 0011 is respected: the CONTROLLER still writes KB.status; the run-worker gains nothing).
+//
+// It exists because the corpus-status channel (Fork 2) is only written by the executor's happy failure
+// sink; an OUT-OF-BAND terminal-failed (a lease-loss/reclaim that marks the run failed, a panic-recovery,
+// a bare returned error) writes NO corpus-status row, so a KB stuck at phase Ingesting would poll forever.
+// Reading the referenced ingestion Run's terminal status un-sticks it (the m68.14 catch-all).
+type KnowledgeBaseIngestionRunReader interface {
+	// IngestionRunStatus returns (status, found, err) for the run with the given id. found=false (nil error)
+	// when the run row is gone (an old run swept) — the safety-net then leaves phase untouched.
+	IngestionRunStatus(ctx context.Context, runID string) (status string, found bool, err error)
 }
 
 // ingestingRequeue is how long the reconciler waits before re-projecting KB.status while a corpus is Ingesting
@@ -95,6 +145,11 @@ type KnowledgeBaseReconciler struct {
 	// ObjectStore is the durable KB object store (from OBJECT_STORE_ADDR). nil ⇒ the finalizer skips the
 	// bucket-half GC (a dev deployment without an object store).
 	ObjectStore prefixDeleter
+	// IngestionRuns is the read-only run-store slice for the terminal-failed safety-net (ADR 0061 Fork 2):
+	// when a KB is stuck Ingesting but its ingestionRunRef run terminated out-of-band (no corpus-status row
+	// was written), the controller projects Failed. nil ⇒ the safety-net is disabled (a dev deployment
+	// without cpDB) and the corpus-status channel remains the sole projection source.
+	IngestionRuns KnowledgeBaseIngestionRunReader
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=knowledgebases,verbs=get;list;watch;create;update;patch;delete
@@ -241,8 +296,19 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 		return ctrl.Result{}, fmt.Errorf("reading corpus status for %s/%s: %w", kb.Namespace, kb.Name, err)
 	}
 	if !found {
-		// No terminal ingestion outcome yet. If the BFF flipped us to Ingesting, poll for the row.
-		if kb.Status.Phase == "Ingesting" {
+		// No terminal ingestion outcome on the corpus-status channel yet. If the BFF flipped us to Ingesting,
+		// the run may still be in flight — poll for the row. BUT first apply the terminal-failed SAFETY-NET: a
+		// run that failed OUT-OF-BAND (lease-loss/reclaim, panic-recovery, a bare returned error) writes NO
+		// corpus-status row, so polling here would spin forever with the KB stuck Ingesting (the m68.14 bug).
+		// Reconcile phase off the referenced ingestion Run's terminal status instead (ADR 0061 Fork 2).
+		if kb.Status.Phase == kbPhaseIngesting {
+			projected, sErr := r.reconcileStuckIngesting(ctx, kb)
+			if sErr != nil {
+				return ctrl.Result{}, sErr
+			}
+			if projected {
+				return ctrl.Result{}, nil // the run is terminal-failed → phase Failed written; stop polling.
+			}
 			return ctrl.Result{RequeueAfter: ingestingRequeue}, nil
 		}
 		return ctrl.Result{}, nil
@@ -283,6 +349,57 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 			"knowledgebase", kb.Name, "phase", cs.Phase, "chunks", cs.ChunkCount)
 	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileStuckIngesting is the terminal-failed SAFETY-NET (ADR 0061 Fork 2, the m68.14 catch-all). It is
+// called only when the KB is at phase Ingesting AND no corpus-status row exists — meaning the executor never
+// wrote the coarse status channel (an out-of-band terminal-failed: a lease-loss/reclaim, a panic-recovery, a
+// bare returned error). It reads the referenced ingestion Run's terminal status; if that run is terminal-
+// `failed`, it projects KB.status.phase=Failed so the KB does not poll Ingesting forever. It returns
+// projected=true only when it wrote Failed.
+//
+// The predicate is "terminal AND NOT succeeded" (failed / cancelled / expired), all → Failed:
+//   - `failed` is the direct m68.14 bug (out-of-band failure that skipped the corpus-status write).
+//   - `cancelled` / `expired` with no row are ALSO stuck-forever: the coarse phase vocabulary has nothing
+//     honest for "stopped midway with unknown counts", and Failed is the safe fail-closed terminal that stops
+//     the infinite poll. (The nuance — was it a user cancel vs a genuine error — lives on the run itself; the
+//     coarse channel is coarse by design, ADR 0061 Fork 2.)
+//   - `succeeded` without a corpus-status row is deliberately NOT projected Ready here: Ready needs the row's
+//     authoritative chunk/document counts (a Ready with zero chunks would be a worse lie than a transient
+//     Ingesting), and the success nuance (Ready vs PartiallyIngested vs BudgetExceeded) lives only in the row.
+//     The executor's success sink writes the row; the controller keeps polling until it appears.
+//
+// ADR 0011 is respected: the CONTROLLER writes KB.status (r.Status().Update — a conflict-checked update, so a
+// racing BFF Ingesting write bumps resourceVersion and this Update conflicts→requeues rather than clobbering
+// a fresh ingest). The run store is only READ. nil IngestionRuns (dev without cpDB) ⇒ the safety-net is
+// disabled and the corpus-status channel remains the sole projection source — poll as before.
+func (r *KnowledgeBaseReconciler) reconcileStuckIngesting(
+	ctx context.Context, kb *agentsv1beta1.KnowledgeBase,
+) (projected bool, err error) {
+	if r.IngestionRuns == nil || kb.Status.IngestionRunRef == "" {
+		return false, nil // no run store wired, or no run to consult → poll as before.
+	}
+	log := logf.FromContext(ctx)
+	status, found, err := r.IngestionRuns.IngestionRunStatus(ctx, kb.Status.IngestionRunRef)
+	if err != nil {
+		return false, fmt.Errorf("reading ingestion run %q status for %s/%s: %w",
+			kb.Status.IngestionRunRef, kb.Namespace, kb.Name, err)
+	}
+	if !found || !isTerminalNotSucceeded(status) {
+		// The run is gone, still running, or terminal-succeeded → leave phase to the corpus-status channel /
+		// poll (see the doc comment for why only terminal-not-succeeded un-sticks, and why succeeded does not).
+		return false, nil
+	}
+	// The referenced run terminated failed/cancelled/expired but no corpus-status row was written (an out-of-
+	// band terminal transition) → fail-closed to Failed so the KB stops polling Ingesting forever.
+	kb.Status.Phase = kbPhaseFailed
+	if uErr := r.Status().Update(ctx, kb); uErr != nil {
+		return false, fmt.Errorf("safety-net projecting Failed onto %s/%s: %w", kb.Namespace, kb.Name, uErr)
+	}
+	log.Info("KnowledgeBase un-stuck from Ingesting: referenced ingestion run terminated failed out-of-band "+
+		"(no corpus-status row) — projecting Failed (ADR 0061 Fork 2 safety-net)",
+		"knowledgebase", kb.Name, "ingestionRun", kb.Status.IngestionRunRef)
+	return true, nil
 }
 
 // setStatus writes the Validated condition + phase + observedGeneration, only when something

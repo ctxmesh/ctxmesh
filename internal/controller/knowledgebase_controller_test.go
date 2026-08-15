@@ -412,6 +412,29 @@ func (f *fakePrefixDeleter) DeletePrefix(_ context.Context, prefix string) error
 	return f.DeletePrefixErr
 }
 
+// fakeIngestionRunReader serves a canned ingestion-run terminal status for the terminal-failed safety-net
+// (M80, ADR 0061 Fork 2). It records the last runID looked up so a test can assert the controller consulted
+// the KB's ingestionRunRef.
+type fakeIngestionRunReader struct {
+	mu sync.Mutex
+
+	// Status is the canned run status returned by IngestionRunStatus.
+	Status string
+	// Found controls the found return value (false ⇒ the run row is gone / never existed).
+	Found bool
+	// Err, if non-nil, is returned by IngestionRunStatus.
+	Err error
+	// LastRunID records the last runID passed to IngestionRunStatus.
+	LastRunID string
+}
+
+func (f *fakeIngestionRunReader) IngestionRunStatus(_ context.Context, runID string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.LastRunID = runID
+	return f.Status, f.Found, f.Err
+}
+
 // newKBReconcilerWith builds a KnowledgeBaseReconciler with the given fake stores wired in.
 func newKBReconcilerWith(cs corpusStore, pd prefixDeleter) *KnowledgeBaseReconciler {
 	return &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: cs, ObjectStore: pd}
@@ -609,6 +632,108 @@ func TestKnowledgeBase_StatusProjection_IngestingRequeue(t *testing.T) {
 	require.NoError(t, err, "reconcile must not error during an Ingesting poll")
 	assert.Positive(t, result.RequeueAfter,
 		"reconcile must return RequeueAfter > 0 while status is Ingesting and no terminal row is found")
+}
+
+// TestKnowledgeBase_StuckIngesting_SafetyNetProjectsFailed (M80, ADR 0061 Fork 2): the controller safety-net.
+// When the KB is stuck at phase Ingesting, NO corpus-status row exists (an out-of-band ingestion failure that
+// never wrote the status channel), but the referenced ingestionRunRef run is terminal-`failed`, the reconcile
+// must project KB.status.phase=Failed (NOT keep polling Ingesting forever) — the m68.14 stuck-Ingesting bug.
+func TestKnowledgeBase_StuckIngesting_SafetyNetProjectsFailed(t *testing.T) {
+	const ns = "default"
+	const name = "kb-stuck-safetynet"
+
+	// GetCorpusStatus returns found=false — the executor never wrote a terminal row (the out-of-band failure).
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false}
+	// The referenced ingestion run terminated `failed`.
+	fakeRuns := &fakeIngestionRunReader{Status: "failed", Found: true}
+	r := &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: fakeKnowledge, IngestionRuns: fakeRuns}
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	// First reconcile: adds finalizer + validates.
+	reconcileKB(t, r, name, ns)
+
+	// Simulate the BFF setting phase=Ingesting AND the ingestionRunRef (the run the executor launched).
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.Phase = "Ingesting"
+	live.Status.IngestionRunRef = "ing-run-oob"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+
+	// Second reconcile: no corpus-status row + phase Ingesting + the referenced run is terminal-failed → the
+	// safety-net must project Failed and NOT requeue (the run is terminal; there is nothing left to poll).
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err, "the safety-net reconcile must not error")
+	assert.Zero(t, result.RequeueAfter,
+		"a terminal-failed run un-sticks the KB: the reconcile must stop polling Ingesting")
+
+	var after agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &after))
+	assert.Equal(t, "Failed", after.Status.Phase,
+		"the safety-net must project Failed when the referenced ingestion run terminated failed out-of-band")
+	assert.Equal(t, "ing-run-oob", fakeRuns.LastRunID,
+		"the safety-net must consult the KB's ingestionRunRef")
+}
+
+// TestKnowledgeBase_StuckIngesting_SafetyNetKeepsPollingWhenRunNotTerminal (M80): the safety-net must NOT
+// fire while the referenced run is still running (or terminal-succeeded, whose Ready needs the row's counts).
+// It keeps polling (RequeueAfter > 0) and leaves phase Ingesting — proving the catch-all is narrow.
+func TestKnowledgeBase_StuckIngesting_SafetyNetKeepsPollingWhenRunNotTerminal(t *testing.T) {
+	const ns = "default"
+	const name = "kb-stuck-still-running"
+
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false}
+	// The referenced run is still `running` — the ingestion is genuinely in flight, not stuck.
+	fakeRuns := &fakeIngestionRunReader{Status: "running", Found: true}
+	r := &KnowledgeBaseReconciler{Client: k8sClient, Knowledge: fakeKnowledge, IngestionRuns: fakeRuns}
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	live.Status.Phase = "Ingesting"
+	live.Status.IngestionRunRef = "ing-run-live"
+	require.NoError(t, k8sClient.Status().Update(testCtx, &live))
+
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err, "the safety-net reconcile must not error while the run is in flight")
+	assert.Positive(t, result.RequeueAfter,
+		"a still-running ingestion run must keep polling (the safety-net must not fire prematurely)")
+
+	var after agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &after))
+	assert.Equal(t, "Ingesting", after.Status.Phase,
+		"the safety-net must leave phase Ingesting while the referenced run is not terminal-failed")
 }
 
 // TestKnowledgeBase_FinalizerLifecycle_NilStores: the existing test (nil stores → skip GC → finalizer
