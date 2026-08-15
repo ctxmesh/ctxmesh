@@ -62,6 +62,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ctxmesh/agent-engine/internal/gateway/budget"
 )
 
 const (
@@ -103,6 +105,7 @@ type semanticJudgeConfig struct {
 	Policy     string `json:"policy,omitempty"`
 	Action     string `json:"action,omitempty"`
 	AppliesTo  string `json:"appliesTo,omitempty"`
+	FailMode   string `json:"failMode,omitempty"`
 }
 
 // parseSemanticJudge extracts the semanticJudge section from the raw GUARDRAIL_POLICY JSON (m66.8).
@@ -138,6 +141,12 @@ type semanticJudge struct {
 	policy     string          // the operator's classification prompt (natural language)
 	action     guardrailAction // block | auditOnly (redact is meaningless for a whole-message verdict)
 	scanPoint  guardrailScanPoint
+	// failClosed is the judge-specific failMode (K5): false (default, failMode=open) preserves the
+	// unconditional fail-OPEN contract — a judge error/timeout ALLOWS. true (failMode=closed) is a
+	// strict operator's conservative choice — a judge error/timeout BLOCKS instead. It is NOT the
+	// fail-closed guarantee (that is always the deterministic engine); it only makes a judge OUTAGE
+	// refuse rather than pass the residual content.
+	failClosed bool
 	// policyVersion is a stable hash of the judge policy (modelRoute + policy + instruction). It keys
 	// the cache so any policy change invalidates prior verdicts without a manual flush.
 	policyVersion string
@@ -181,10 +190,19 @@ func newSemanticJudge(policyJSON string, logf func(string, ...any)) (*semanticJu
 		policy:        system,
 		action:        action,
 		scanPoint:     scanPoint,
+		failClosed:    normalizeJudgeFailMode(cfg.FailMode), // CRD default: open (fail-open)
 		policyVersion: fmt.Sprintf("%x", ver[:]),
 		cache:         make(map[string]judgeVerdict),
 		timeout:       judgeTimeout,
 	}, nil
+}
+
+// normalizeJudgeFailMode maps the semanticJudge.failMode string to failClosed. The CRD enum is
+// open|closed with default "open"; only the explicit "closed" opts into blocking on a judge
+// error/timeout. A blank/unknown value stays fail-OPEN (the default and the safe default for the
+// judge — a flaky judge must never down all guarded traffic).
+func normalizeJudgeFailMode(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), "closed")
 }
 
 // normalizeJudgeAction maps the semanticJudge.action string to a guardrailAction. The CRD enum is
@@ -233,14 +251,21 @@ func (j *semanticJudge) store(key string, v judgeVerdict) {
 }
 
 // classify runs the cascaded judge over one piece of text at a scan point and returns a decision to
-// enforce, or ok=false when nothing should be enforced (SAFE verdict, judge error/timeout, cache-fed
-// SAFE, or judge inapplicable — all of which ALLOW). It is the residual step: callers invoke it only
-// after the deterministic scan did NOT block this content.
+// enforce, or ok=false when nothing should be enforced (SAFE verdict, cache-fed SAFE, or judge
+// inapplicable — all of which ALLOW; a judge error/timeout ALLOWS too under the default failMode=open,
+// or BLOCKS under failMode=closed). It is the residual step: callers invoke it only after the
+// deterministic scan did NOT block this content.
 //
-// Fail-OPEN contract: any judge error, timeout, or unparseable verdict returns ok=false (ALLOW) with
-// a caller-side log — the judge NEVER blocks on its own failure. A FLAGGED verdict returns a decision
-// carrying j.action (block ⇒ refuse, auditOnly ⇒ record) plus a PII-safe content hash (NEVER the raw
-// content).
+// Fail-mode contract (K5): by DEFAULT (failMode=open, j.failClosed=false) a judge error, timeout, or
+// unparseable verdict returns ok=false (ALLOW) with a caller-side log — the judge never blocks on its
+// own failure, exactly as before. Under failMode=closed (j.failClosed=true) a judge OUTAGE (transport
+// failure / non-200 / timeout — no completion received) instead returns a block decision; an
+// unparseable-but-received verdict still fails OPEN even when closed (the judge ran, it just could not
+// decide). Even closed, the judge is NOT the fail-closed guarantee — that is always the deterministic
+// engine; this only makes a judge OUTAGE refuse the residual content rather than pass it.
+//
+// A FLAGGED verdict returns a decision carrying j.action (block ⇒ refuse, auditOnly ⇒ record) plus a
+// PII-safe content hash (NEVER the raw content).
 //
 // The gatewayProxy is passed so the judge can issue its upstream call THROUGH the same client/auth
 // the primary forward() uses (gp.forwardJudge), targeting gp.upstream directly — loop-safe by
@@ -264,16 +289,21 @@ func (j *semanticJudge) classify(
 		return j.flaggedDecision(point, hash), true
 	}
 
-	flagged, err := j.ask(ctx, gp, r, text)
+	res, err := j.ask(ctx, gp, r, text)
 	if err != nil {
-		// FAIL OPEN: a judge error / timeout / unparseable verdict must not block. Do NOT cache an
-		// error (so a transient failure doesn't stick), log it, and allow.
+		// Do NOT cache an error (so a transient failure doesn't stick) and log it. K5: under failMode=closed
+		// a genuine judge OUTAGE (no completion received) BLOCKS instead of allowing; the default
+		// failMode=open — and every unparseable-but-received verdict — still fails OPEN.
+		if j.failClosed && res.outage {
+			gp.logf("launcher: gateway: semantic-judge outage at scan_point=%s (failMode=closed, call BLOCKED): %v", point, err)
+			return j.errorBlockDecision(point, hash), true
+		}
 		gp.logf("launcher: gateway: semantic-judge error at scan_point=%s (fail-open, call allowed): %v", point, err)
 		return guardrailDecision{}, false
 	}
 
-	j.store(key, judgeVerdict{flagged: flagged})
-	if !flagged {
+	j.store(key, judgeVerdict{flagged: res.flagged})
+	if !res.flagged {
 		return guardrailDecision{}, false // SAFE ⇒ allow.
 	}
 	return j.flaggedDecision(point, hash), true
@@ -292,12 +322,49 @@ func (j *semanticJudge) flaggedDecision(point guardrailScanPoint, hash string) g
 	}
 }
 
+// errorBlockDecision builds the PII-safe guardrail.decision for a failMode=closed judge OUTAGE (K5).
+// Unlike a FLAGGED verdict, no content was classified — the judge could not run — so this is always a
+// block regardless of j.action (auditOnly makes no sense when the judge never produced a verdict). It
+// carries the same detector label + content hash so the refusal is attributable to the judge, never
+// the raw content.
+func (j *semanticJudge) errorBlockDecision(point guardrailScanPoint, hash string) guardrailDecision {
+	return guardrailDecision{
+		blocked:     true,
+		detector:    judgeDetectorName,
+		action:      actionBlock,
+		scanPoint:   point,
+		contentHash: hash,
+	}
+}
+
+// judgeAskResult carries the outcome of one judge round-trip. flagged is the parsed verdict (valid
+// only when err == nil). outage is true when the judge did NOT receive a usable completion at all —
+// a transport failure, non-200 upstream status, or a timeout — as opposed to receiving a 200
+// completion whose verdict was merely unparseable. K5 uses outage to decide whether failMode=closed
+// should BLOCK (only a genuine judge OUTAGE blocks; an unparseable-but-received verdict stays
+// fail-open, since the judge did run and simply gave an ambiguous answer).
+type judgeAskResult struct {
+	flagged bool
+	outage  bool
+}
+
 // ask issues ONE judge chat-completion to the upstream LiteLLM (via gp.forwardJudge, targeting
-// gp.upstream directly with the caller's gateway auth) and parses the verdict. It returns
-// (flagged, nil) on a parseable SAFE/FLAGGED reply, or (_, error) on any transport failure, non-200
-// upstream status, unreadable body, or unparseable/absent verdict — every one of which the caller
-// treats as fail-open.
-func (j *semanticJudge) ask(ctx context.Context, gp *gatewayProxy, r *http.Request, text string) (bool, error) {
+// gp.upstream directly with the caller's gateway auth), BOOKS its spend to the tenant aggregate
+// (K4), and parses the verdict. It returns (result, nil) on a parseable SAFE/FLAGGED reply, or
+// (result, error) on any transport failure, non-200 upstream status, unreadable body, or
+// unparseable/absent verdict — every one of which the caller treats as fail-open by default
+// (failMode=open). result.outage distinguishes a judge OUTAGE (no completion received) from an
+// unparseable-but-received verdict, so failMode=closed blocks only on a true outage.
+//
+// K4 (tenant accounting): whenever a 200 completion is received, its usage-priced cost is booked to
+// gp.tenant.postCall — the SYSTEM-traffic judge call still spends the tenant's money, so it must hit
+// the tenant ledger whether the verdict was SAFE, a block, or unparseable (the tokens were spent
+// either way). It is EXEMPT from per-user + per-conversation budgets by construction (forwardJudge
+// never carries the identity headers those enforcers read). A judge outage with no completion has no
+// usage ⇒ nothing to book. Booking is nil-safe: no tenant budget ⇒ postCall is a no-op.
+func (j *semanticJudge) ask(
+	ctx context.Context, gp *gatewayProxy, r *http.Request, text string,
+) (judgeAskResult, error) {
 	reqBody, err := json.Marshal(judgeChatRequest{
 		Model: j.modelRoute,
 		Messages: []judgeChatMessage{
@@ -306,27 +373,42 @@ func (j *semanticJudge) ask(ctx context.Context, gp *gatewayProxy, r *http.Reque
 		},
 	})
 	if err != nil {
-		return false, fmt.Errorf("marshal judge request: %w", err)
+		// A marshal failure never left this process — no completion, no spend: treat as an outage.
+		return judgeAskResult{outage: true}, fmt.Errorf("marshal judge request: %w", err)
 	}
 
 	// Bound the judge round-trip with its own short timeout, independent of the caller's context, so a
-	// slow judge fails open quickly and never inherits a longer primary-call budget.
+	// slow judge fails open quickly and never inherits a longer primary-call budget. A timeout surfaces
+	// as a transport error below — an OUTAGE (no completion received).
 	jctx, cancel := context.WithTimeout(ctx, j.timeout)
 	defer cancel()
 
 	respBody, status, err := gp.forwardJudge(jctx, r, reqBody)
 	if err != nil {
-		return false, fmt.Errorf("judge upstream: %w", err)
+		return judgeAskResult{outage: true}, fmt.Errorf("judge upstream: %w", err)
 	}
 	if status != http.StatusOK {
-		return false, fmt.Errorf("judge upstream status %d", status)
+		// A non-200 costs the tenant nothing (matches the primary path, which books only on 200) and is
+		// an OUTAGE — no usable completion was produced.
+		return judgeAskResult{outage: true}, fmt.Errorf("judge upstream status %d", status)
 	}
+
+	// K4: a 200 completion WAS produced — book its usage-priced cost to the tenant aggregate before we
+	// even parse the verdict, since the tokens were spent regardless of the outcome. forwardJudge exposes
+	// no cost header, so PriceCall falls back to the deterministic usage table over respBody (nil-safe:
+	// no usage ⇒ $0 ⇒ no-op). This is the SAME pricer + moneyToFloat + gp.tenant.postCall pattern the
+	// primary post-call accounting uses (gateway.go), so judge spend accrues to the shared M47 ledger
+	// identically — and ONLY to the tenant (never per-user/per-conversation).
+	cost := budget.PriceCall("", respBody)
+	gp.tenant.postCall(ctx, moneyToFloat(cost.String()))
 
 	verdict, ok := parseJudgeVerdict(respBody)
 	if !ok {
-		return false, fmt.Errorf("judge verdict unparseable")
+		// A completion WAS received (already booked) but its verdict is ambiguous — NOT an outage. Stay
+		// fail-open even under failMode=closed: the judge ran and simply could not decide.
+		return judgeAskResult{outage: false}, fmt.Errorf("judge verdict unparseable")
 	}
-	return verdict, nil
+	return judgeAskResult{flagged: verdict}, nil
 }
 
 // judgeChatRequest / judgeChatMessage are the minimal OpenAI-style chat/completions request the judge

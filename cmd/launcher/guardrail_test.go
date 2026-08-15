@@ -682,18 +682,37 @@ type judgeMockGateway struct {
 	// primaryCompletion is the completion content the primary call returns (so an output-judge test can
 	// make the model emit content the judge then flags).
 	primaryCompletion string
+	// judgeUsageTokens / primaryUsageTokens set the usage.total_tokens each side reports, so a K4 test
+	// can assert the judge's OWN tokens (not just the primary call's) accrue to the tenant. 0 ⇒ the
+	// default of 1 token (keeps every pre-K4 test unchanged).
+	judgeUsageTokens   int
+	primaryUsageTokens int
 }
 
-// completionBody builds a minimal chat/completions response whose assistant content is s.
+// completionBody builds a minimal chat/completions response whose assistant content is s, reporting 1
+// usage token (the historical default the pre-K4 judge tests rely on).
 func completionBody(s string) string {
+	return completionBodyTokens(s, 1)
+}
+
+// completionBodyTokens is completionBody with an explicit usage.total_tokens, so a test can give the
+// judge and primary calls distinct token counts and prove which side's spend was booked.
+func completionBodyTokens(s string, totalTokens int) string {
 	return fmt.Sprintf(
-		`{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"total_tokens":1}}`, s,
+		`{"choices":[{"message":{"role":"assistant","content":%q}}],"usage":{"total_tokens":%d}}`,
+		s, totalTokens,
 	)
 }
 
 func newJudgeMockGateway(t *testing.T, verdict string) *judgeMockGateway {
 	t.Helper()
 	m := &judgeMockGateway{verdict: verdict, primaryCompletion: "MOCK_OK"}
+	tokensOrOne := func(n int) int {
+		if n <= 0 {
+			return 1
+		}
+		return n
+	}
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := readAllBody(r)
 		var parsed struct {
@@ -712,13 +731,13 @@ func newJudgeMockGateway(t *testing.T, verdict string) *judgeMockGateway {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(completionBody(m.verdict)))
+			_, _ = w.Write([]byte(completionBodyTokens(m.verdict, tokensOrOne(m.judgeUsageTokens))))
 			return
 		}
 		m.primaryCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(completionBody(m.primaryCompletion)))
+		_, _ = w.Write([]byte(completionBodyTokens(m.primaryCompletion, tokensOrOne(m.primaryUsageTokens))))
 	}))
 	t.Cleanup(m.server.Close)
 	return m
@@ -926,6 +945,187 @@ func TestNewSemanticJudge_EnabledButNoRoute(t *testing.T) {
 	j, err := newSemanticJudge(`{"semanticJudge":{"enabled":true,"policy":"x"}}`, func(string, ...any) {})
 	require.NoError(t, err, "an unroutable judge is left off, not a hard error")
 	assert.Nil(t, j, "enabled but no modelRoute ⇒ nil judge (fail-open)")
+}
+
+// TestNewSemanticJudge_FailMode covers the K5 judge-scoped failMode parse: default (unset) and
+// explicit "open" stay fail-OPEN (failClosed=false); "closed" opts into fail-closed. It is distinct
+// from the policy-level engine failMode, which is not read here.
+func TestNewSemanticJudge_FailMode(t *testing.T) {
+	build := func(judgeFailMode string) *semanticJudge {
+		fm := ""
+		if judgeFailMode != "" {
+			fm = fmt.Sprintf(`,"failMode":%q`, judgeFailMode)
+		}
+		// The POLICY-level failMode is deliberately "closed" here to prove the judge reads its OWN
+		// nested failMode, not the engine's.
+		pol := fmt.Sprintf(
+			`{"failMode":"closed","semanticJudge":{"enabled":true,"modelRoute":%q,"policy":"x"%s}}`,
+			judgeModelRoute, fm,
+		)
+		j, err := newSemanticJudge(pol, func(string, ...any) {})
+		require.NoError(t, err)
+		require.NotNil(t, j)
+		return j
+	}
+	assert.False(t, build("").failClosed, "unset judge failMode ⇒ fail-OPEN (default), despite engine failMode=closed")
+	assert.False(t, build("open").failClosed, "failMode=open ⇒ fail-OPEN")
+	assert.True(t, build("closed").failClosed, "failMode=closed ⇒ fail-CLOSED (judge-scoped opt-in)")
+}
+
+// ── m81.4 K4: the judge's own tokens are booked to the TENANT aggregate ──────────
+
+// judgeAccountingPolicy builds an input-scoped judge policy plus an explicit tenant that will
+// accrue judge spend, and returns the wired proxy + the fake tenant store so a test can read the
+// booked total. The tenant has a budget (hasBudget=true) so postCall actually accrues.
+func newTenantJudgeProxy(t *testing.T, upstreamURL, policyJSON string) (*gatewayProxy, *fakeTenantStore) {
+	t.Helper()
+	gp, _ := newGuardedProxy(t, upstreamURL, policyJSON)
+	fs := &fakeTenantStore{}
+	gp.tenant = &tenantQuota{id: "acme", budgetUSD: 1_000_000, hasBudget: true, store: fs, logf: noopLog}
+	return gp, fs
+}
+
+// TestGuardrailJudge_TenantAccounting_SafeVerdict: a SAFE judge verdict still SPENT tokens on its
+// classification call, so those tokens must accrue to the tenant aggregate (K4). The judge completion
+// carries a distinct token count so we can prove the judge's spend (not just the primary call) landed.
+func TestGuardrailJudge_TenantAccounting_SafeVerdict(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	// Judge completion = 7 tokens; primary completion = 3 tokens ⇒ both must be booked (10 total at
+	// $1e-6/token = $0.00001). If the judge were NOT booked, only the primary's 3 would show.
+	mock.judgeUsageTokens = 7
+	mock.primaryUsageTokens = 3
+	gp, fs := newTenantJudgeProxy(t, mock.server.URL, judgePolicy("block", "input"))
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	require.Equal(t, http.StatusOK, rr.Code, "SAFE ⇒ the guarded call proceeds")
+	require.Equal(t, int64(1), mock.judgeCalls.Load(), "the judge ran once")
+	require.Equal(t, int64(1), mock.primaryCalls.Load(), "the primary call ran once")
+	// 7 (judge) + 3 (primary) = 10 tokens × $0.000001 = $0.00001. The judge's 7 tokens MUST be included.
+	assert.InDelta(t, 0.00001, fs.added, 1e-12, "judge tokens (7) + primary (3) both accrue to the tenant")
+}
+
+// TestGuardrailJudge_TenantAccounting_Block: a FLAGGED+block INPUT judge blocks BEFORE the primary
+// call, so the primary never spends — yet the judge's OWN classification tokens were spent and MUST
+// still hit the tenant ledger (the tokens were spent to reach the block verdict).
+func TestGuardrailJudge_TenantAccounting_Block(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictFlagged)
+	mock.judgeUsageTokens = 5
+	gp, fs := newTenantJudgeProxy(t, mock.server.URL, judgePolicy("block", "input"))
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	require.Equal(t, guardrailBlockedStatus, rr.Code, "FLAGGED+block ⇒ 403")
+	require.Equal(t, int64(0), mock.primaryCalls.Load(), "an input block never reaches the primary upstream")
+	require.Equal(t, int64(1), mock.judgeCalls.Load(), "the judge ran once (its tokens were spent)")
+	// Only the judge's 5 tokens: $5e-6. Booked even though the call was blocked.
+	assert.InDelta(t, 0.000005, fs.added, 1e-12, "the judge's tokens accrue to the tenant even on a block")
+}
+
+// TestGuardrailJudge_TenantAccounting_NoTenant: with no tenant budget (gp.tenant nil), booking is a
+// nil-safe no-op — the judge path is byte-for-byte unchanged (no panic, call proceeds).
+func TestGuardrailJudge_TenantAccounting_NoTenant(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	mock.judgeUsageTokens = 9
+	gp, _ := newGuardedProxy(t, mock.server.URL, judgePolicy("block", "input")) // gp.tenant stays nil.
+	require.Nil(t, gp.tenant, "no tenant configured")
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "no-tenant judge booking is a nil-safe no-op — the call proceeds")
+	assert.Equal(t, int64(1), mock.judgeCalls.Load(), "the judge still ran")
+}
+
+// TestGuardrailJudge_TenantAccounting_ExemptFromUserAndConv: the judge's out-of-band call carries NONE
+// of the identity/budget headers, so its spend is exempt from the per-user + per-conversation
+// enforcers by construction — booking it to the TENANT does not change that. We assert the judge
+// request reaching upstream carried the gateway auth but not the conversation id / user headers.
+func TestGuardrailJudge_TenantAccounting_ExemptFromUserAndConv(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	gp, fs := newTenantJudgeProxy(t, mock.server.URL, judgePolicy("block", "input"))
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions",
+		strings.NewReader(`{"model":"r","messages":[{"role":"user","content":"classify me"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer gateway-token")
+	req.Header.Set(hdrConversationID, "conv-should-not-propagate")
+	rr := httptest.NewRecorder()
+	gp.handler().ServeHTTP(rr, req)
+
+	require.Equal(t, int64(1), mock.judgeCalls.Load(), "the judge ran")
+	assert.Positive(t, fs.added, "the judge's tokens DID accrue to the tenant aggregate")
+	mock.mu.Lock()
+	raw, auth := mock.lastJudgeReqRaw, mock.lastJudgeAuth
+	mock.mu.Unlock()
+	assert.Equal(t, "Bearer gateway-token", auth, "the judge carries the gateway auth (tenant traffic)")
+	assert.NotContains(t, raw, "conv-should-not-propagate",
+		"the judge's call carries no conversation id — exempt from per-user/per-conversation by construction")
+}
+
+// ── m81.4 K5: the judge-scoped failMode (block-on-judge-OUTAGE opt-in) ───────────
+
+// judgeFailModePolicy builds an input-scoped block judge with an explicit judge failMode.
+func judgeFailModePolicy(judgeFailMode string) string {
+	return fmt.Sprintf(
+		`{"failMode":"closed","semanticJudge":{"enabled":true,"modelRoute":%q,"policy":%q,`+
+			`"action":"block","appliesTo":"input","failMode":%q}}`,
+		judgeModelRoute, "Flag any content that is unsafe.", judgeFailMode,
+	)
+}
+
+// TestGuardrailJudge_FailClosed_OutageBlocks: with the judge's failMode=closed, a judge OUTAGE (a
+// non-200 upstream) BLOCKS the guarded call (403 semantic-judge) instead of allowing it — an
+// operator's conservative choice. Contrast TestGuardrailJudge_FailOpen_Error (default open) which
+// ALLOWS the same outage.
+func TestGuardrailJudge_FailClosed_OutageBlocks(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	mock.judgeReply = func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) }
+	gp, rec := newGuardedProxy(t, mock.server.URL, judgeFailModePolicy("closed"))
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	assert.Equal(t, guardrailBlockedStatus, rr.Code, "failMode=closed ⇒ a judge OUTAGE BLOCKS (403)")
+	assert.Equal(t, int64(0), mock.primaryCalls.Load(), "a fail-closed judge outage never reaches the primary upstream")
+	var body guardrailErrorBody
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	assert.Equal(t, judgeDetectorName, body.Error.Detector, "the refusal is attributed to the judge")
+	events := guardrailDecisionEvents(rec)
+	require.Len(t, events, 1, "a fail-closed judge outage emits one block decision")
+	assert.Equal(t, "true", events[0]["guardrail.blocked"])
+}
+
+// TestGuardrailJudge_FailModeDefault_OutageAllows: the DEFAULT judge failMode (explicit "open") on the
+// SAME outage ALLOWS the call — byte-for-byte the pre-K5 unconditional fail-open behavior.
+func TestGuardrailJudge_FailModeDefault_OutageAllows(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	mock.judgeReply = func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) }
+	gp, rec := newGuardedProxy(t, mock.server.URL, judgeFailModePolicy("open"))
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "failMode=open ⇒ a judge outage ALLOWS (default, unchanged)")
+	assert.Equal(t, int64(1), mock.primaryCalls.Load(), "the guarded call proceeds to the primary upstream")
+	assert.Empty(t, guardrailDecisionEvents(rec), "a fail-open judge emits no block decision")
+}
+
+// TestGuardrailJudge_FailClosed_UnparseableStillAllows: an unparseable-but-RECEIVED verdict is NOT an
+// outage (the judge ran, it just could not decide) — so even under failMode=closed it fails OPEN.
+// Only a genuine judge outage blocks under closed.
+func TestGuardrailJudge_FailClosed_UnparseableStillAllows(t *testing.T) {
+	mock := newJudgeMockGateway(t, judgeVerdictSafe)
+	mock.judgeReply = func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(completionBody("maybe? unsure"))) // 200 completion, ambiguous verdict.
+	}
+	gp, rec := newGuardedProxy(t, mock.server.URL, judgeFailModePolicy("closed"))
+
+	rr := doInvokeBody(gp, `{"model":"r","messages":[{"role":"user","content":"classify me"}]}`)
+
+	assert.Equal(t, http.StatusOK, rr.Code,
+		"an unparseable-but-received verdict is not an outage — it fails OPEN even under failMode=closed")
+	assert.Equal(t, int64(1), mock.primaryCalls.Load(), "the guarded call proceeds")
+	assert.Empty(t, guardrailDecisionEvents(rec), "no block decision on an ambiguous-but-received verdict")
 }
 
 func ruleNames(rules []guardrailRule) []string {
