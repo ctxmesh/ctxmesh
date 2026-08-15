@@ -294,7 +294,7 @@ func newUserQuotaGateway(t *testing.T, policy string) (*gatewayProxy, *runcap.Si
 		GuardrailPolicy: policy,
 	}
 	gp := newTestGatewayProxy(t, cfg)
-	require.NotNil(t, gp.user, "userRateLimit must build a per-user quota")
+	require.NotNil(t, gp.userQuota(), "userRateLimit must build a per-user quota")
 	require.NotNil(t, gp.capVerifier, "a provisioned capability key must build a verifier")
 
 	signer := runcap.NewSigner(priv, testCapAudience, nil)
@@ -362,7 +362,7 @@ func TestGatewayUserQuota_ValidCapability_InFlightOverMax429AndReleases(t *testi
 	assert.Equal(t, http.StatusOK, invokeWithCap(gp, capTok).Code, "2nd reuses the freed slot")
 
 	// Now hold a slot open by pre-acquiring directly, then a request through serve must be denied.
-	held, relHeld := gp.user.preCall(context.Background(), "u-carol", 0)
+	held, relHeld := gp.userQuota().preCall(context.Background(), "u-carol", 0)
 	require.Nil(t, held, "manual acquire of the single slot")
 	rr := invokeWithCap(gp, capTok)
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code, "the slot is held → 429")
@@ -394,7 +394,8 @@ func TestGatewayUserQuota_ForgedCapability_NotTrusted(t *testing.T) {
 	require.NoError(t, err)
 
 	// The verifier rejects the bad signature ⇒ userHash "" ⇒ fail-open, NOT trusted as u-attacker.
-	assert.Equal(t, "", gp.userHashFromRequest(mustReq(forgedTok)), "a forged capability must NOT yield a userHash")
+	assert.Equal(t, "", gp.userHashFromRequest(mustReq(forgedTok), gp.userQuota()),
+		"a forged capability must NOT yield a userHash")
 
 	// End to end: repeated calls with the forged token are NOT throttled (fail-open) — proving the forged
 	// identity never entered the per-user bucket (had it been trusted as u-attacker, the rpm-1 cap would 429).
@@ -468,7 +469,7 @@ func TestGatewayUserQuota_NoQuotaAddr_Disabled(t *testing.T) {
 		UpstreamURL: mock.server.URL, AgentName: "ag",
 		GuardrailPolicy: userLimitPolicy(1, "", 0), // rpm=1 but no QuotaAddr
 	})
-	assert.Nil(t, gp.user, "no TENANT_QUOTA_ADDR ⇒ per-user quota not built")
+	assert.Nil(t, gp.userQuota(), "no TENANT_QUOTA_ADDR ⇒ per-user quota not built")
 	for range 3 {
 		assert.Equal(t, http.StatusOK, invokeWithCap(gp, "").Code, "no store ⇒ per-user disabled, calls proceed")
 	}
@@ -482,6 +483,6 @@ func TestGatewayUserQuota_NoUserRateLimit_NoQuota(t *testing.T) {
 		UpstreamURL: mock.server.URL, AgentName: "ag", QuotaAddr: mr.Addr(),
 		GuardrailPolicy: `{"failMode":"closed"}`, // no userRateLimit
 	})
-	assert.Nil(t, gp.user, "no userRateLimit ⇒ no per-user quota")
+	assert.Nil(t, gp.userQuota(), "no userRateLimit ⇒ no per-user quota")
 	assert.Equal(t, http.StatusOK, invokeWithCap(gp, "").Code)
 }

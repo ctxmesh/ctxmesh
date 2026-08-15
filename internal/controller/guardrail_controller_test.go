@@ -77,10 +77,20 @@ func newGuardrailPolicy(name, namespace string, patterns ...string) *agentsv1bet
 	}
 }
 
-// TestReconcile_GuardrailValidRef proves the happy path (M66, ADR 0059 §8): a valid
-// guardrailPolicyRef → the ksvc has GUARDRAIL_POLICY + GATEWAY_UPSTREAM_URL, MODEL_GATEWAY_URL
-// points at the launcher proxy (forcing the guardrail engine on even without a budget), the
-// revision name carries the combined-digest suffix, and the agent is NOT held NotReady.
+// guardrailConfigMap fetches the per-agent guardrail ConfigMap (<agent>-guardrail).
+func guardrailConfigMap(t *testing.T, agentName, namespace string) (*corev1.ConfigMap, error) {
+	t.Helper()
+	var cm corev1.ConfigMap
+	err := k8sClient.Get(testCtx,
+		types.NamespacedName{Name: guardrailConfigMapName(agentName), Namespace: namespace}, &cm)
+	return &cm, err
+}
+
+// TestReconcile_GuardrailValidRef proves the K3 happy path (M66, ADR 0059 §8; K3, ADR 0059 Fork-2):
+// a valid guardrailPolicyRef → the resolved policy is delivered as a MOUNTED per-agent ConfigMap
+// (<agent>-guardrail) with GUARDRAIL_POLICY_FILE (static path env), the volume is mounted read-only,
+// MODEL_GATEWAY_URL points at the launcher proxy (forcing the guardrail engine on even without a
+// budget), the revision name carries the combined-digest suffix, and the agent is NOT held NotReady.
 func TestReconcile_GuardrailValidRef(t *testing.T) {
 	const (
 		name      = "guarded-agent"
@@ -107,21 +117,52 @@ func TestReconcile_GuardrailValidRef(t *testing.T) {
 
 	env, ksvc := ksvcEnvMap(t, name, namespace)
 
-	// GUARDRAIL_POLICY injected as a STATIC JSON env whose spec round-trips.
-	grEnv, ok := env[envGuardrailPolicy]
-	require.True(t, ok, "GUARDRAIL_POLICY must be injected for a valid guardrailPolicyRef")
-	require.Nil(t, grEnv.ValueFrom, "GUARDRAIL_POLICY must be static (Knative rejects valueFrom)")
+	// K3: the policy is delivered by MOUNTED FILE, not the GUARDRAIL_POLICY env. The pre-K3 env must
+	// NOT be present; GUARDRAIL_POLICY_FILE (a static path) IS.
+	_, hadEnvPolicy := env["GUARDRAIL_POLICY"]
+	assert.False(t, hadEnvPolicy, "K3: the resolved policy must NOT ride the GUARDRAIL_POLICY env")
+	fileEnv, ok := env[envGuardrailPolicyFile]
+	require.True(t, ok, "GUARDRAIL_POLICY_FILE must be injected for a valid guardrailPolicyRef")
+	require.Nil(t, fileEnv.ValueFrom, "GUARDRAIL_POLICY_FILE must be static (Knative rejects valueFrom)")
+	assert.Equal(t, guardrailMountPath+"/"+guardrailConfigMapKey, fileEnv.Value,
+		"the file env points at the mounted policy file")
+
+	// The per-agent guardrail ConfigMap exists, is owner-ref'd, and its policy.json round-trips the spec.
+	cm, err := guardrailConfigMap(t, name, namespace)
+	require.NoError(t, err, "the per-agent guardrail ConfigMap must be created")
+	require.Len(t, cm.OwnerReferences, 1, "the guardrail ConfigMap must be owned by the AgentDeployment (GC)")
+	assert.Equal(t, "AgentDeployment", cm.OwnerReferences[0].Kind)
+	assert.Equal(t, name, cm.OwnerReferences[0].Name)
 	var gotSpec agentsv1beta1.GuardrailPolicySpec
-	require.NoError(t, json.Unmarshal([]byte(grEnv.Value), &gotSpec))
-	require.Len(t, gotSpec.PatternDenylist, 2, "the injected policy carries both denylist rules")
+	require.NoError(t, json.Unmarshal([]byte(cm.Data[guardrailConfigMapKey]), &gotSpec))
+	require.Len(t, gotSpec.PatternDenylist, 2, "the mounted policy carries both denylist rules")
+
+	// The volume + read-only mount are wired on the ksvc pod template.
+	var foundVol bool
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		if v.Name == guardrailVolumeName && v.ConfigMap != nil && v.ConfigMap.Name == guardrailConfigMapName(name) {
+			foundVol = true
+		}
+	}
+	assert.True(t, foundVol, "the guardrail ConfigMap volume must be on the pod template")
+	var foundMount bool
+	for _, m := range ksvc.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == guardrailVolumeName {
+			foundMount = true
+			assert.True(t, m.ReadOnly, "the guardrail mount must be read-only")
+			assert.Equal(t, guardrailMountPath, m.MountPath)
+		}
+	}
+	assert.True(t, foundMount, "the guardrail volume must be mounted into the user container")
 
 	// The proxy is forced on: MODEL_GATEWAY_URL → localhost proxy, real LiteLLM as GATEWAY_UPSTREAM_URL.
+	// This is the interposition trigger — preserved, now keyed on the mounted file's presence.
 	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"].Value,
 		"a guarded agent must route MODEL_GATEWAY_URL through the launcher proxy")
 	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"].Value,
 		"the real LiteLLM address travels as GATEWAY_UPSTREAM_URL")
 
-	// The revision name carries the combined-digest suffix (proving the revision will roll).
+	// The revision name still carries the combined-digest suffix (presence of the ref folds in).
 	assert.Contains(t, ksvc.Spec.Template.Name, "-h",
 		"revision name must carry the combined digest suffix when a guardrail policy is referenced")
 
@@ -214,14 +255,16 @@ func TestReconcile_GuardrailInvalidRefFailsClosed(t *testing.T) {
 		"no serving ksvc must exist for a guarded agent with an invalid policy (fail-closed)")
 }
 
-// TestReconcile_GuardrailDigestRoll proves that editing the referenced GuardrailPolicy rolls
-// the referencing agent's Knative revision (M66, ADR 0059 §8): the revision name (which encodes
-// the guardrail digest via combinedBindingDigest) must change when the policy spec changes —
-// compliance tightening propagates.
-func TestReconcile_GuardrailDigestRoll(t *testing.T) {
+// TestReconcile_GuardrailPolicyEditNoRoll proves the K3 core invariant (ADR 0059 Fork-2), the
+// REVERSE of the M66 behavior: editing an already-referenced GuardrailPolicy's CONTENT must NOT
+// roll the referencing agent's Knative revision — the revision name (which encodes the guardrail
+// PRESENCE, not the content, via combinedBindingDigest) stays the SAME. Instead the controller
+// UPDATES the mounted <agent>-guardrail ConfigMap in place, so the launcher reloads live (fsnotify)
+// without a restart. This is the whole point of runtime-reloadable guardrails.
+func TestReconcile_GuardrailPolicyEditNoRoll(t *testing.T) {
 	const (
-		name      = "roll-guarded-agent"
-		policyN   = "roll-policy"
+		name      = "noroll-guarded-agent"
+		policyN   = "noroll-policy"
 		namespace = "default"
 	)
 
@@ -243,9 +286,13 @@ func TestReconcile_GuardrailDigestRoll(t *testing.T) {
 	reconcileNN(t, newReconciler(), name, namespace)
 	_, ksvcA := ksvcEnvMap(t, name, namespace)
 	revA := ksvcA.Spec.Template.Name
-	require.Contains(t, revA, "-h", "first revision must carry the combined digest suffix")
+	require.Contains(t, revA, "-h", "first revision must carry the combined digest suffix (guardrail present)")
 
-	// Edit the policy (add a second denylist rule) → the resolved-policy hash changes.
+	cmA, err := guardrailConfigMap(t, name, namespace)
+	require.NoError(t, err)
+	require.Contains(t, cmA.Data[guardrailConfigMapKey], "ignore.*instructions", "the mounted CM has the original pattern")
+
+	// Edit the policy (add a second denylist rule) → the CONTENT changes.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(policy), policy))
 	policy.Spec.PatternDenylist = append(policy.Spec.PatternDenylist, agentsv1beta1.PatternRule{
 		Name: "extra", Pattern: "(?i)secret", Action: "block",
@@ -257,9 +304,17 @@ func TestReconcile_GuardrailDigestRoll(t *testing.T) {
 	_, ksvcB := ksvcEnvMap(t, name, namespace)
 	revB := ksvcB.Spec.Template.Name
 
-	assert.NotEqual(t, revA, revB,
-		"editing the referenced GuardrailPolicy must roll the referencing agent's revision")
-	assert.Contains(t, revB, "-h", "updated revision must still carry the combined digest suffix")
+	// K3: the revision name is UNCHANGED — a policy-only edit does NOT roll (no restart).
+	assert.Equal(t, revA, revB,
+		"editing the referenced GuardrailPolicy content must NOT roll the revision (K3: runtime reload)")
+
+	// But the mounted ConfigMap IS updated in place — the launcher's watch picks up the new content.
+	cmB, err := guardrailConfigMap(t, name, namespace)
+	require.NoError(t, err)
+	assert.Contains(t, cmB.Data[guardrailConfigMapKey], "(?i)secret",
+		"the mounted guardrail ConfigMap must be updated in place with the edited policy")
+	assert.Equal(t, guardrailConfigMapName(name), cmB.Name,
+		"the guardrail ConfigMap name is STABLE across a policy edit (no content-addressing)")
 }
 
 // TestReconcile_GuardedAgentGetsBFFURL proves the m66.15 fix: a guarded (guardrailPolicyRef set,

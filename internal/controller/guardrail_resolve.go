@@ -24,7 +24,10 @@ import (
 	"fmt"
 	"regexp"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -44,11 +47,41 @@ const (
 	reasonGuardrailPolicyInvalid = "GuardrailPolicyInvalid"
 )
 
-// envGuardrailPolicy is the STATIC env var carrying the resolved GuardrailPolicy spec
-// (serialized to JSON) into the launcher, which forces its :2996 model proxy on and
-// runs the in-path guardrail engine (m66.3). NEVER valueFrom — the m5.7 Knative ksvc
-// landmine (the webhook rejects valueFrom in a ksvc pod template).
-const envGuardrailPolicy = "GUARDRAIL_POLICY"
+// Pre-K3 note: the resolved GuardrailPolicy JSON used to ride the GUARDRAIL_POLICY env directly.
+// K3 (ADR 0059 Fork-2) supersedes it with the MOUNTED file below (the launcher WATCHES it), so the
+// controller no longer injects that env — a policy edit reloads without a revision roll. The
+// integration test asserts the env's ABSENCE using the string literal directly.
+
+const (
+	// envGuardrailPolicyFile is the STATIC env var carrying the in-container PATH to the mounted
+	// guardrail-policy file (K3). Its presence forces the launcher's :2996 model proxy on and is
+	// the source the launcher reads + fsnotify-watches. NEVER valueFrom — the m5.7 Knative ksvc
+	// landmine (the webhook rejects valueFrom in a ksvc pod template); the VALUE is a static path.
+	envGuardrailPolicyFile = "GUARDRAIL_POLICY_FILE"
+
+	// guardrailConfigMapSuffix names the per-agent, STABLE-named ConfigMap that materialises the
+	// resolved GuardrailPolicy JSON (<agent>-guardrail). STABLE (not content-addressed like the
+	// prompt CM) is the point of K3: a policy edit UPDATES this same ConfigMap IN PLACE, so the
+	// mounted file changes and the launcher reloads — the revision name never changes, so no roll.
+	guardrailConfigMapSuffix = "-guardrail"
+
+	// guardrailConfigMapKey is the data key inside the <agent>-guardrail ConfigMap.
+	guardrailConfigMapKey = "policy.json"
+
+	// guardrailMountPath is where the resolved policy file is mounted in the user container. The
+	// launcher reads GUARDRAIL_POLICY_FILE (this path + key) and watches the directory (fsnotify).
+	guardrailMountPath = "/etc/agent/guardrail"
+
+	// guardrailVolumeName is the pod volume name for the mounted guardrail ConfigMap.
+	guardrailVolumeName = "agent-guardrail"
+)
+
+// guardrailConfigMapName returns the STABLE per-agent guardrail ConfigMap name (<agent>-guardrail).
+// Stable-named on purpose (K3): editing the referenced GuardrailPolicy updates THIS ConfigMap in
+// place rather than minting a new one, so the mounted file changes without rolling the revision.
+func guardrailConfigMapName(agentName string) string {
+	return agentName + guardrailConfigMapSuffix
+}
 
 // guardrailResolveError wraps a control-plane fail-closed guardrail failure (M66,
 // ADR 0059 §8): a dangling ref (GuardrailPolicy not found) or an invalid ref (an RE2
@@ -177,6 +210,72 @@ func firstUncompilablePattern(spec *agentsv1beta1.GuardrailPolicySpec) (string, 
 		}
 	}
 	return "", "", nil
+}
+
+// reconcileGuardrailConfigMap materialises the resolved GuardrailPolicy JSON into the per-agent,
+// STABLE-named <agent>-guardrail ConfigMap (owner-ref'd so it GCs with the AgentDeployment, mirroring
+// ensureAgentIdentitySA / the prompt CM) and returns the volume + mount + static env the user
+// container needs (K3, ADR 0059 Fork-2). It is a no-op returning zero values when the agent has no
+// (resolved) guardrail policy.
+//
+// STABLE name (NOT content-addressed): a GuardrailPolicy edit re-reconciles the agent (the existing
+// watch), which UPDATES this same ConfigMap in place. The mounted file changes and the launcher
+// reloads (fsnotify) WITHOUT a revision roll — the reverse of the M4 landmine, and the whole point of
+// K3. The policy is delivered as a mounted file (not env) so it can be WATCHED; the env carries only
+// the static FILE PATH (no valueFrom — the m5.7 Knative ksvc landmine).
+func (r *AgentDeploymentReconciler) reconcileGuardrailConfigMap(
+	ctx context.Context,
+	deploy *agentsv1alpha1.AgentDeployment,
+	gr resolvedGuardrail,
+) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
+	if !gr.referenced {
+		return nil, nil, nil, nil
+	}
+
+	cmName := guardrailConfigMapName(deploy.Name)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: deploy.Namespace},
+	}
+	if _, err = ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data[guardrailConfigMapKey] = gr.policyJSON
+		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("upserting guardrail ConfigMap: %w", err)
+	}
+
+	v := corev1.Volume{
+		Name: guardrailVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cmName},
+			},
+		},
+	}
+	m := corev1.VolumeMount{Name: guardrailVolumeName, MountPath: guardrailMountPath, ReadOnly: true}
+	e := []corev1.EnvVar{
+		{Name: envGuardrailPolicyFile, Value: guardrailMountPath + "/" + guardrailConfigMapKey},
+	}
+	return &v, &m, e, nil
+}
+
+// guardrailPresenceDigest is the PRESENCE-ONLY guardrail component of combinedBindingDigest
+// (K3, ADR 0059 Fork-2). It returns a fixed non-empty 8-hex token when the agent references a
+// (resolved) GuardrailPolicy and "" when it does not — so ADDING or REMOVING the ref rolls the
+// revision (a structural pod change: the mounted volume + GUARDRAIL_POLICY_FILE env + the
+// gateway repoint appear/disappear), while EDITING an already-referenced policy's CONTENT keeps
+// the SAME token → the SAME revision name → NO roll. The content now rides the watched, mounted
+// ConfigMap, so a policy edit reloads live rather than rolling a new revision (the point of K3).
+func guardrailPresenceDigest(referenced bool) string {
+	if !referenced {
+		return ""
+	}
+	// A stable, arbitrary token (the sha256 of a fixed marker, truncated to 8 hex). Its VALUE never
+	// changes; only its presence/absence toggles the roll — exactly the presence semantics we want.
+	h := sha256.Sum256([]byte("guardrail:referenced"))
+	return fmt.Sprintf("%x", h[:])[:8]
 }
 
 // guardrailPolicyHash is the canonical policy hash surfaced on GuardrailPolicy.status
