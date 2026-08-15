@@ -201,6 +201,21 @@ func (s *Server) createWorkflowInstanceRun(
 	workflowRef string, spec agentsv1beta1.WorkflowSpec, input json.RawMessage,
 	namespace, conversationID string, requireApproval bool,
 ) {
+	// CREATE-TIME GUARD (m83.1, m52.L8): a workflow instance advances ONE node per claim and then SUSPENDS
+	// to `waiting`; the NEXT advance happens only when the transactional wake re-queues the run and a
+	// run-worker RE-CLAIMS it (run_worker.go executeClaimedRun → executeWorkflow). In in-process mode
+	// (!runWorkerDispatch — no durable store + worker pool) there is NO pool to re-claim the woken run, so a
+	// workflow stalls after its first node and never reaches `succeeded`. Since every workflow needs at least
+	// a launch advance + a collect advance, this stall is UNCONDITIONAL here. Fail-fast at create (422) with a
+	// clear typed error rather than minting a run that silently stalls — the request is well-formed but this
+	// mode cannot serve it (matching the inline-invalid-spec 422 precedent above).
+	if !s.runWorkerDispatch {
+		writeError(w, http.StatusUnprocessableEntity,
+			"workflow execution requires worker-dispatch (a durable run store + RUN_WORKER_DISPATCH); "+
+				"this server is running in in-process mode and cannot complete a multi-node workflow")
+		return
+	}
+
 	// Snapshot the resolved WorkflowSpec to JSON (the executor drives this pinned snapshot, not a live
 	// CR — a live CR edit after instance creation must not change the running graph; an inline plan is
 	// pinned identically so the plan a human approved is exactly the plan that runs).
