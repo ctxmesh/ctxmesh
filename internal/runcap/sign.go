@@ -96,6 +96,44 @@ func (s *Signer) Mint(req MintRequest) (string, error) {
 	return signingInput + "." + b64(sig), nil
 }
 
+// MintApprovalVoucher returns a signed APPROVAL VOUCHER (ADR 0074 §3) — a short-lived, un-forgeable
+// proof that a human approved `toolName` for run `runID`. It is a distinct token TYPE from a run
+// capability (RFC 8725 §3.11 explicit typing: header typ=typVoucher, plus the voucherAudience) so a
+// runcap can never be redeemed as a voucher nor a voucher as a runcap, even though BOTH are signed by
+// the SAME platform key (no new key material — ADR 0074 §6). The BFF mints it on approval-grant; the
+// SDK relays it; the egress sidecar verifies it (VerifyVoucher) with no control-plane lookup.
+//
+// It refuses to mint an incomplete voucher (no run or tool): a voucher with no subject would approve
+// nothing — or, worse, everything — and must never be forged into existence. TTL is short (~the run
+// timeout) so an approval cannot be replayed long after it was granted.
+func (s *Signer) MintApprovalVoucher(runID, toolName string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(toolName) == "" {
+		return "", fmt.Errorf("runcap: refuse to mint an approval voucher without a run id and tool name")
+	}
+	if ttl <= 0 {
+		return "", fmt.Errorf("runcap: approval voucher TTL must be positive")
+	}
+	now := s.now()
+	claims := voucherClaims{
+		Aud:  voucherAudience,
+		Run:  runID,
+		Tool: toolName,
+		Iat:  now.Unix(),
+		Exp:  now.Add(ttl).Unix(),
+	}
+	headerJSON, err := json.Marshal(jwtHeader{Alg: algEdDSA, Typ: typVoucher})
+	if err != nil {
+		return "", fmt.Errorf("runcap: marshal voucher header: %w", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		return "", fmt.Errorf("runcap: marshal voucher claims: %w", err)
+	}
+	signingInput := b64(headerJSON) + "." + b64(claimsJSON)
+	sig := ed25519.Sign(s.priv, []byte(signingInput))
+	return signingInput + "." + b64(sig), nil
+}
+
 // Verifier returns a Verifier over this signer's PUBLIC key (derived from the private key) and the same
 // audience. It lets the minting side (the BFF) also VERIFY a relayed capability — e.g. to authorize the
 // sub-run spawn edge (M64, ADR 0057): the launcher relays the supervisor's capability, and the BFF
@@ -193,4 +231,89 @@ func (v *Verifier) Verify(token string) (Capability, error) {
 		out.Agent = claims.Act.Sub
 	}
 	return out, nil
+}
+
+// VerifyVoucher checks an APPROVAL VOUCHER (ADR 0074 §3) and returns its claims, or a distinct error.
+// It is a SEPARATE path from Verify — never a dispatch on the token's content — so a run capability
+// can never be redeemed as a voucher (its typ is typJWT, not typVoucher, so it is rejected at the
+// header). Like Verify, it fails CLOSED: any anomaly is a rejection, never a pass. Concretely it:
+//  1. requires a 3-segment EdDSA JWT and HARDCODES alg==EdDSA AND typ==typVoucher (the explicit-type
+//     discriminator ⇒ no algorithm confusion, no runcap↔voucher confusion);
+//  2. verifies the Ed25519 signature over the signing input BEFORE trusting any claim;
+//  3. enforces the voucher audience, required claims (run + tool), and the iat/exp window (with skew);
+//  4. BINDS the voucher to THIS call: its run MUST equal wantRun (the verified run capability's run)
+//     and its tool MUST equal wantTool (the wire params.name). A voucher for another run or another
+//     tool is rejected — the whole point of the binding.
+//
+// wantRun is the run capability's VERIFIED run id (never a header the agent supplied); wantTool is the
+// wire tool name the sidecar extracted (params.name). Both are trusted inputs from the caller, not the
+// token, so the binding cannot be forged by the presenter.
+func (v *Verifier) VerifyVoucher(token, wantRun, wantTool string) (ApprovalVoucher, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+
+	headerBytes, err := b64d(parts[0])
+	if err != nil {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+	var header jwtHeader
+	if jErr := json.Unmarshal(headerBytes, &header); jErr != nil {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+	// Hardcoded algorithm + EXPLICIT TYPE: exactly EdDSA and exactly the voucher type. A run
+	// capability (typ==typJWT) lands here and is rejected BEFORE its signature is even checked, so a
+	// runcap can never masquerade as a voucher; `alg:none` / HS/ES confusion are equally impossible.
+	if header.Alg != algEdDSA || header.Typ != typVoucher {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+
+	sig, err := b64d(parts[2])
+	if err != nil {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+	if len(v.pub) != ed25519.PublicKeySize || !ed25519.Verify(v.pub, []byte(parts[0]+"."+parts[1]), sig) {
+		return ApprovalVoucher{}, ErrVoucherBadSignature
+	}
+
+	// Signature verified — now the claims can be trusted.
+	claimsBytes, err := b64d(parts[1])
+	if err != nil {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+	var claims voucherClaims
+	if jErr := json.Unmarshal(claimsBytes, &claims); jErr != nil {
+		return ApprovalVoucher{}, ErrVoucherMalformed
+	}
+
+	if claims.Aud != voucherAudience {
+		return ApprovalVoucher{}, ErrVoucherWrongAudience
+	}
+	if strings.TrimSpace(claims.Run) == "" || strings.TrimSpace(claims.Tool) == "" {
+		return ApprovalVoucher{}, ErrVoucherIncomplete
+	}
+	now := v.now()
+	if claims.Exp == 0 || now.After(time.Unix(claims.Exp, 0).Add(clockSkew)) {
+		return ApprovalVoucher{}, ErrVoucherExpired
+	}
+	if claims.Iat != 0 && now.Add(clockSkew).Before(time.Unix(claims.Iat, 0)) {
+		return ApprovalVoucher{}, ErrVoucherExpired
+	}
+	// The binding checks: this voucher must be FOR this run and this tool. A constant-time compare is
+	// unnecessary (these are not secrets — the voucher's unforgeability is the signature), but the
+	// equality must be exact.
+	if claims.Run != wantRun {
+		return ApprovalVoucher{}, ErrVoucherRunMismatch
+	}
+	if claims.Tool != wantTool {
+		return ApprovalVoucher{}, ErrVoucherToolMismatch
+	}
+
+	return ApprovalVoucher{
+		RunID:     claims.Run,
+		ToolName:  claims.Tool,
+		IssuedAt:  time.Unix(claims.Iat, 0),
+		ExpiresAt: time.Unix(claims.Exp, 0),
+	}, nil
 }
