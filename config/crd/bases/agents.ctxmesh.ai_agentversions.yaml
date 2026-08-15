@@ -618,6 +618,15 @@ spec:
                               "required" forces at least one tool call, or a specific tool name forces
                               exactly that tool.
                             type: string
+                          maxToolCallsPerRun:
+                            description: |-
+                              maxToolCallsPerRun caps the total number of tool calls a single run may
+                              forward through the egress sidecar (an anti-DoS fan-out ceiling). 0 means
+                              unlimited (the default). Enforced fail-closed at the sidecar: once a run
+                              exceeds this, further tool calls are denied with a terminal 403.
+                            format: int32
+                            minimum: 0
+                            type: integer
                           overrides:
                             description: |-
                               overrides is the per-tool-name policy list. Items are keyed on name and
@@ -1374,6 +1383,15 @@ spec:
                               "required" forces at least one tool call, or a specific tool name forces
                               exactly that tool.
                             type: string
+                          maxToolCallsPerRun:
+                            description: |-
+                              maxToolCallsPerRun caps the total number of tool calls a single run may
+                              forward through the egress sidecar (an anti-DoS fan-out ceiling). 0 means
+                              unlimited (the default). Enforced fail-closed at the sidecar: once a run
+                              exceeds this, further tool calls are denied with a terminal 403.
+                            format: int32
+                            minimum: 0
+                            type: integer
                           overrides:
                             description: |-
                               overrides is the per-tool-name policy list. Items are keyed on name and
