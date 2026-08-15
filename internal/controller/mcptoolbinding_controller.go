@@ -225,6 +225,25 @@ func (r *MCPToolBindingReconciler) syncAgent(
 		return ctrl.Result{}, err
 	}
 
+	// Tool-call governance (M82.3, ADR 0074 §2): apply the SAME in-pod structural policy the
+	// AgentDeployment reconciler applies to the pod template, so the advertised manifest (tools.json)
+	// and the injected containers stay in lockstep — a denied (or require-approval) in-pod tool is not
+	// deployed AND not advertised. Resolve the agent's spec.runtime.toolPolicy; if the agent is gone or
+	// has no policy the set is unchanged (permissive). This drop is non-erroring here: the authoritative
+	// require-approval REJECTION is the AgentDeployment's Ready=False (no pod), so no reader of this
+	// manifest exists; the binding reconciler only reflects that reality. OBO/remote bindings pass
+	// through verbatim (wire-enforced at the sidecar, m82.2).
+	var tp resolvedToolPolicy
+	var agent agentsv1alpha1.AgentDeployment
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr == nil {
+		if tp, err = resolveToolPolicy(&agent); err != nil {
+			return ctrl.Result{}, fmt.Errorf("resolving tool policy for agent %s/%s: %w", namespace, agentName, err)
+		}
+	} else if !apierrors.IsNotFound(getErr) {
+		return ctrl.Result{}, fmt.Errorf("getting AgentDeployment %s/%s for tool policy: %w", namespace, agentName, getErr)
+	}
+	valid = dropUngovernableInPodTools(valid, tp)
+
 	// ── Manifest render (valid bindings only) ────────────────────────────────
 	manifest, _ := toolmanifest.Render(valid)
 	// Tool-call governance (M82, ADR 0074 §1): front-all-tools is now the ONLY manifest mode —

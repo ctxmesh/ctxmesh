@@ -20,13 +20,26 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
+)
+
+// The normalized tool-policy rules (matches the CRD enum, lower-cased). These are the SAME rule
+// strings the egress sidecar's ToolPolicy.RuleFor returns (internal/egress/policy.go) — the
+// controller resolves the effective rule for an in-pod tool with identical semantics so structural
+// non-deployment (here) and wire enforcement (the sidecar) never disagree on what a tool's rule is.
+const (
+	toolRuleAllow           = "allow"
+	toolRuleDeny            = "deny"
+	toolRuleRequireApproval = "require-approval"
 )
 
 // Tool-call governance (M82, ADR 0074 §1): the SAME resolved spec.runtime.toolPolicy the SDK
@@ -75,7 +88,71 @@ type resolvedToolPolicy struct {
 	// policyJSON is the ToolPolicySpec serialized to JSON, mounted for the sidecar. Empty when not
 	// referenced.
 	policyJSON string
+	// spec is the resolved ToolPolicySpec (nil when not referenced). It backs ruleFor so the
+	// controller can decide the STRUCTURAL treatment of an in-pod tool (deny ⇒ non-deployment;
+	// require-approval ⇒ reject) with the SAME first-match-wins semantics the sidecar uses on the
+	// wire (M82.3, ADR 0074 §2).
+	spec *agentsv1alpha1.ToolPolicySpec
 }
+
+// ruleFor returns the effective rule for a tool name: the first matching override's rule, else the
+// policy default (empty default ⇒ "allow"). This MIRRORS internal/egress/policy.go's
+// ToolPolicy.RuleFor byte-for-byte (first match wins, empty ⇒ allow) so the structural decision the
+// controller makes for an in-pod tool (M82.3) and the wire decision the sidecar makes for an
+// OBO/remote tool (M82.2) are judged against the SAME policy. The toolName argument is the catalog/
+// wire tool name (SidecarTool.ToolName = binding.ToolName = the sidecar's params.name key), so a
+// per-tool override keyed on that name matches identically in both places. A nil/not-referenced
+// policy ⇒ allow (permissive, pre-M82 behaviour).
+func (rp resolvedToolPolicy) ruleFor(toolName string) string {
+	if !rp.referenced || rp.spec == nil {
+		return toolRuleAllow
+	}
+	for i := range rp.spec.Overrides {
+		if rp.spec.Overrides[i].Name == toolName {
+			return normalizeToolRule(rp.spec.Overrides[i].Rule)
+		}
+	}
+	return normalizeToolRule(rp.spec.Default)
+}
+
+// normalizeToolRule maps an empty rule to the CRD default ("allow") and lower-cases for a stable
+// comparison (mirrors egress/policy.go's normalizeRule). The CRD enum already bounds valid input, so
+// an unrecognized value is returned verbatim (defensive only; it compares non-allow ⇒ fail-safe).
+func normalizeToolRule(rule string) string {
+	r := strings.ToLower(strings.TrimSpace(rule))
+	if r == "" {
+		return toolRuleAllow
+	}
+	return r
+}
+
+// inPodRequireApprovalError is raised when spec.runtime.toolPolicy's effective rule for an IN-POD
+// (sidecar-mode) tool is `require-approval` (M82.3, ADR 0074 §2). An in-pod tool binds a deterministic
+// localhost port in the shared pod netns, so it CANNOT be gated by the m82.4 approval-voucher (there
+// is no wire chokepoint in front of a localhost-bypassable call, and no platform tool-shim) — a
+// half-governed pod would silently let the require-approval tool through. Rather than deploy that,
+// buildPodTemplate returns this typed error BEFORE any workload write; Reconcile intercepts it, sets
+// Ready=False, and STOPS cleanly (no requeue on user input), exactly like guardrailResolveError. The
+// fix is a spec edit (drop the rule, or make the tool remote/OBO where require-approval IS enforceable).
+type inPodRequireApprovalError struct {
+	reason string
+	msg    string
+}
+
+func (e *inPodRequireApprovalError) Error() string { return e.msg }
+
+// asInPodRequireApprovalError extracts an *inPodRequireApprovalError from an error chain.
+func asInPodRequireApprovalError(err error) (*inPodRequireApprovalError, bool) {
+	var ie *inPodRequireApprovalError
+	if errors.As(err, &ie) {
+		return ie, true
+	}
+	return nil, false
+}
+
+// reasonInPodToolRequireApprovalUnsupported is the Ready=False reason set when an in-pod tool carries
+// an effective require-approval rule (ADR 0074 §2 — deny-only-governable in-pod).
+const reasonInPodToolRequireApprovalUnsupported = "InPodToolRequireApprovalUnsupported"
 
 // resolveToolPolicy resolves the agent's spec.runtime.toolPolicy (M82, ADR 0074 §1). Unlike the
 // guardrail path this has NO fail-closed validation surface (the CRD's enum + CEL already bound the
@@ -91,7 +168,7 @@ func resolveToolPolicy(deploy *agentsv1alpha1.AgentDeployment) (resolvedToolPoli
 	if err != nil {
 		return resolvedToolPolicy{}, fmt.Errorf("marshaling spec.runtime.toolPolicy: %w", err)
 	}
-	return resolvedToolPolicy{referenced: true, policyJSON: string(b)}, nil
+	return resolvedToolPolicy{referenced: true, policyJSON: string(b), spec: rt.ToolPolicy}, nil
 }
 
 // reconcileToolPolicyConfigMap materialises the resolved toolPolicy JSON into the per-agent,
@@ -152,4 +229,90 @@ func (r *AgentDeploymentReconciler) reconcileToolPolicyConfigMap(
 func toolPolicyPresenceDigest() string {
 	h := sha256.Sum256([]byte("toolpolicy:referenced"))
 	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// filterInPodToolsByPolicy applies the STRUCTURAL in-pod tool-call governance (M82.3, ADR 0074 §2)
+// to a binding set BEFORE toolmanifest.Render is called. It returns the bindings that should be
+// rendered — every OBO/remote binding verbatim (their deny/require-approval is the m82.2 WIRE
+// enforcement, since they are genuinely fronted by the sidecar) plus every sidecar-mode binding whose
+// effective rule is NOT deny. A denied in-pod binding is DROPPED here, so Render produces neither its
+// manifest entry, its sidecar container, nor (via RewriteAllForEgress on the same rendered manifest)
+// its egress route: the tool is GONE — no container, not reachable, not advertised. That is stronger
+// than any wire check, which a localhost hop would bypass.
+//
+// Filtering BEFORE Render is what keeps the port↔manifest↔container mapping consistent (the footgun):
+// Render assigns localhost ports 3001, 3002… in binding-name order over the slice it is GIVEN, and
+// the caller derives BOTH the manifest endpoints and the sidecar container ports from that one Render
+// output — so a denied MIDDLE tool simply isn't in the slice and the survivors renumber together,
+// manifest and container in lockstep. There is no post-Render re-map to get wrong.
+//
+// A sidecar-mode binding whose effective rule is require-approval is INVALID: an in-pod tool can't do
+// the m82.4 approval-voucher (no wire chokepoint in front of a localhost-bypassable call, no platform
+// tool-shim), so half-governing it is worse than refusing. It returns an *inPodRequireApprovalError,
+// which Reconcile surfaces as Ready=False (naming the tool) and STOPS — no pod is deployed.
+//
+// A pure-allow / policy-less agent (rp not referenced, or every in-pod tool effectively allow) keeps
+// EVERY binding, so Render's output is byte-for-byte identical to pre-M82.3. OBO/remote bindings are
+// never inspected here.
+func filterInPodToolsByPolicy(bindings []toolmanifest.Binding, rp resolvedToolPolicy) ([]toolmanifest.Binding, error) {
+	if !rp.referenced {
+		return bindings, nil
+	}
+	kept := make([]toolmanifest.Binding, 0, len(bindings))
+	for _, b := range bindings {
+		if b.Mode != toolmanifest.ModeSidecar {
+			// OBO/remote: wire-enforced at the sidecar (m82.2), never structurally filtered here.
+			kept = append(kept, b)
+			continue
+		}
+		switch rp.ruleFor(b.ToolName) {
+		case toolRuleDeny:
+			// Structural non-deployment: drop the binding so it is rendered nowhere.
+			continue
+		case toolRuleRequireApproval:
+			return nil, &inPodRequireApprovalError{
+				reason: reasonInPodToolRequireApprovalUnsupported,
+				msg: fmt.Sprintf(
+					"in-pod (sidecar-mode) tool %q has toolPolicy rule require-approval, which is unsupported: "+
+						"a sidecar tool binds a localhost port in the shared pod netns and cannot be gated by the "+
+						"approval voucher. Use rule allow or deny for in-pod tools, or make the tool remote/OBO.",
+					b.ToolName),
+			}
+		default: // allow (or an unrecognized rule, which is not deny → deploy)
+			kept = append(kept, b)
+		}
+	}
+	return kept, nil
+}
+
+// dropUngovernableInPodTools is the NON-erroring sibling of filterInPodToolsByPolicy used by the
+// MCPToolBinding reconciler when it renders the advertised <agent>-tools manifest (tools.json). The
+// two reconcilers MUST derive the manifest from the SAME post-policy binding set or the SDK-facing
+// manifest drifts from the pod template the AgentDeployment reconciler injects (the drift the M82
+// front-all comment warns about). It drops EVERY in-pod tool that is NOT effectively allow — both
+// deny (structural non-deployment) AND require-approval (which makes the AgentDeployment go
+// Ready=False, so no pod exists to read this manifest anyway): an in-pod tool the pod won't or can't
+// run must never be advertised. Unlike the AgentDeployment path this NEVER errors — the binding
+// reconciler only reflects the pod-template reality; the authoritative require-approval REJECTION is
+// the AgentDeployment's Ready=False. OBO/remote bindings pass through verbatim (wire-enforced). A
+// not-referenced policy keeps every binding (byte-for-byte pre-M82.3).
+func dropUngovernableInPodTools(bindings []toolmanifest.Binding, rp resolvedToolPolicy) []toolmanifest.Binding {
+	if !rp.referenced {
+		return bindings
+	}
+	kept := make([]toolmanifest.Binding, 0, len(bindings))
+	for _, b := range bindings {
+		if b.Mode != toolmanifest.ModeSidecar {
+			kept = append(kept, b)
+			continue
+		}
+		switch rp.ruleFor(b.ToolName) {
+		case toolRuleDeny, toolRuleRequireApproval:
+			// Not advertised: no container will run it (deny) / the pod won't exist (require-approval).
+			continue
+		default: // allow (or an unrecognized rule, which is not deny/require-approval → deployable)
+			kept = append(kept, b)
+		}
+	}
+	return kept
 }
