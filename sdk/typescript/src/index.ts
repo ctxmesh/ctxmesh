@@ -4,7 +4,8 @@
  * Foundation surface (M77.1): the launcher-plane configuration and the typed error
  * hierarchy. M77.2 adds the data-plane clients (memory/knowledge/feedback/model) and
  * the Client facade. Tools+MCP (M77.3), tracing + request-scope/capability + approvals
- * (M77.4), serve() + the managed tool-calling loop (M77.5).
+ * (M77.4), serve() + the managed tool-calling loop (M77.5), and the BFF
+ * RunsClient (M77.6).
  */
 
 export {
@@ -80,3 +81,13 @@ export {
   envelope,
 } from "./serve.js";
 export type { InvokeRequest, Handler, HandlerResult, ServeOptions } from "./serve.js";
+
+// ── M77.6: the BFF RunsClient (caller-authenticated /api/runs — NOT the in-pod plane) ──
+
+export { RunsClient, Run } from "./runs.js";
+export type {
+  RunEvent,
+  RunsClientOptions,
+  CreateRunOptions,
+  RunOptions,
+} from "./runs.js";

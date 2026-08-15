@@ -282,6 +282,10 @@ docker-build-example: ## Build the echo-agent example image (echo-agent:latest) 
 docker-build-base-python: ## Build the Python base image (base-python:latest) — launcher + OpenInference/OTel auto-instrumentation.
 	$(CONTAINER_TOOL) build -t base-python:latest -f images/base-python/Dockerfile .
 
+.PHONY: docker-build-base-node
+docker-build-base-node: ## Build the Node 22 base image (base-node:latest) — launcher (PID 1) + the vendored ctxmesh TS SDK (ADR 0070 §3).
+	$(CONTAINER_TOOL) build -t base-node:latest -f images/base-node/Dockerfile .
+
 .PHONY: docker-build-langchain-example
 docker-build-langchain-example: docker-build-base-python ## Build the LangChain example agent image (langchain-agent:latest); depends on base-python:latest.
 	$(CONTAINER_TOOL) build -t langchain-agent:latest -f examples/langchain-agent/Dockerfile .

@@ -37,6 +37,24 @@ ui/dist/**
 !sdk/python/src/
 !sdk/python/src/**
 
+# Re-include the ctxmesh TypeScript SDK source so images/base-node/Dockerfile can
+# `pnpm install --frozen-lockfile && pnpm build && pnpm pack` it during the base-node
+# image build (m77.6, ADR 0070 §3). Everything the in-image build+pack needs — the
+# manifest+lockfile, all tsconfigs, the .nvmrc, the build script, src, the README (in
+# package.json "files"), and the lint/test configs pnpm may touch. node_modules/ and
+# dist/ are deliberately NOT re-included — they are produced INSIDE the image.
+!sdk/typescript/package.json
+!sdk/typescript/pnpm-lock.yaml
+!sdk/typescript/tsconfig*.json
+!sdk/typescript/.nvmrc
+!sdk/typescript/README.md
+!sdk/typescript/eslint.config.js
+!sdk/typescript/vitest.config.ts
+!sdk/typescript/scripts/
+!sdk/typescript/scripts/**
+!sdk/typescript/src/
+!sdk/typescript/src/**
+
 # Re-include LangChain example agent assets (m3.4: langchain-agent)
 !examples/langchain-agent/requirements.txt
 !examples/langchain-agent/agent.py
