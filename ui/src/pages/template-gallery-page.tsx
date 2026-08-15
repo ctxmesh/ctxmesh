@@ -4,9 +4,11 @@ import {
   BookOpen,
   Building2,
   Check,
+  Download,
   GitFork,
   Globe,
   Link2,
+  Loader2,
   Lock,
   RefreshCw,
   Search,
@@ -23,6 +25,7 @@ import {
   ErrorState,
   ForbiddenInline,
   SkeletonCard,
+  useFocusTrap,
   useToast,
 } from "@/components/kit";
 import {
@@ -32,6 +35,8 @@ import {
   type McpServerSummary,
   type TemplateEntry,
 } from "@/lib/api";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_AGENTS } from "@/lib/nav";
 
 // TemplateGalleryPage (m74.6) — the unified gallery surface: two tabs covering
 // agent templates (recipes ∪ published agents, GET /api/templates) and MCP
@@ -104,10 +109,14 @@ type TemplateState =
 interface TemplateCardProps {
   entry: TemplateEntry;
   onFork: (entry: TemplateEntry) => void;
-  forking: boolean;
+  // forkingKey is the unique key of the entry currently being forked (or null if none).
+  // This enables a per-entry "Forking…" spinner (U12) instead of a global disable.
+  forkingKey: string | null;
+  // canFork gates the Fork button for viewers who lack agent-create rights (U10).
+  canFork: boolean;
 }
 
-function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
+function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps) {
   const provenance = entry.provenance;
   const originLabel =
     provenance === "builtin" || provenance === undefined
@@ -120,6 +129,20 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
     provenance && provenance !== "builtin" && provenance.version
       ? provenance.version
       : null;
+
+  // U12: compute the unique key for this entry to check per-entry spinner state.
+  const entryKey =
+    provenance && provenance !== "builtin" && provenance.originNamespace
+      ? `${provenance.originNamespace}/${provenance.originName ?? entry.name}`
+      : `recipe/${entry.name}`;
+  const isThisEntryForking = forkingKey === entryKey;
+  // Block other entries while one is in flight (still a global disable for safety).
+  const isAnyForking = forkingKey !== null;
+
+  // U12: recipe uses Download icon + "Install" verb; published uses GitFork + "Fork" verb.
+  const isRecipe = entry.source === "recipe";
+  const ActionIcon = isRecipe ? Download : GitFork;
+  const actionLabel = isRecipe ? "Install" : "Fork";
 
   return (
     <li
@@ -139,11 +162,11 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
               {entry.kind}
             </Badge>
             <Badge
-              variant={entry.source === "recipe" ? "secondary" : "outline"}
+              variant={isRecipe ? "secondary" : "outline"}
               className="text-[10px]"
               data-testid={`template-source-${entry.name}`}
             >
-              {entry.source === "recipe" ? "built-in" : "published"}
+              {isRecipe ? "built-in" : "published"}
             </Badge>
             <VisibilityBadge visibility={entry.visibility} />
           </div>
@@ -158,26 +181,118 @@ function TemplateCard({ entry, onFork, forking }: TemplateCardProps) {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => onFork(entry)}
-            disabled={forking}
-            data-testid={`fork-template-${entry.name}`}
-          >
-            <GitFork className="mr-1.5 h-3.5 w-3.5" />
-            {entry.source === "recipe" ? "Install" : "Fork"}
-          </Button>
+          {/* U10: display-gate the Fork button for viewers without create rights */}
+          {canFork ? (
+            <Button
+              size="sm"
+              onClick={() => onFork(entry)}
+              disabled={isAnyForking}
+              title={isAnyForking && !isThisEntryForking ? "Another fork is in progress" : undefined}
+              data-testid={`fork-template-${entry.name}`}
+            >
+              {isThisEntryForking ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  {isRecipe ? "Installing…" : "Forking…"}
+                </>
+              ) : (
+                <>
+                  <ActionIcon className="mr-1.5 h-3.5 w-3.5" />
+                  {actionLabel}
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled
+              title="You need agent-create rights to fork"
+              data-testid={`fork-template-${entry.name}`}
+            >
+              <ActionIcon className="mr-1.5 h-3.5 w-3.5" />
+              {actionLabel}
+            </Button>
+          )}
         </div>
       </div>
     </li>
   );
 }
 
+// ── Rename-on-fork dialog (U11) ───────────────────────────────────────────────
+// When forking hits a 409 (name collision with a different origin), offer the user
+// a prompt to retry with a different name.
+interface RenamePromptProps {
+  defaultName: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}
+
+function RenameOnForkDialog({ defaultName, onConfirm, onCancel }: RenamePromptProps) {
+  const [name, setName] = React.useState(defaultName + "-copy");
+  const panelRef = useFocusTrap<HTMLDivElement>({ active: true, onEscape: onCancel });
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Rename fork"
+    >
+      <div
+        className="absolute inset-0 bg-foreground/40 backdrop-blur-[2px]"
+        onClick={onCancel}
+        aria-hidden="true"
+      />
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className="relative w-full max-w-sm rounded-lg border bg-card p-6 shadow-overlay outline-none"
+        data-testid="rename-fork-dialog"
+      >
+        <h2 className="text-base font-semibold">Name already taken</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          An agent named &ldquo;{defaultName}&rdquo; already exists in your namespace with a
+          different origin. Choose a different name for your fork.
+        </p>
+        <div className="mt-3">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="New name for your fork"
+            data-testid="rename-fork-input"
+            autoFocus
+          />
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+          <Button
+            onClick={() => onConfirm(name.trim())}
+            disabled={!name.trim()}
+            data-testid="rename-fork-confirm"
+          >
+            Fork as {name.trim() || "…"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TemplatesTab() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { can } = useCapabilities();
+  // U10: display-gate the Fork button for viewers lacking agent-create rights.
+  const canFork = can(RES_AGENTS, "create");
   const [state, setState] = React.useState<TemplateState>({ kind: "loading" });
+  // U12: forkingEntry tracks the unique key of the entry currently in flight for per-entry spinner.
   const [forkingEntry, setForkingEntry] = React.useState<string | null>(null);
+  // U11: rename-on-fork dialog state — shown when a 409 collision is detected.
+  const [renameDialog, setRenameDialog] = React.useState<{
+    entry: TemplateEntry;
+    defaultName: string;
+  } | null>(null);
 
   const load = React.useCallback((signal?: AbortSignal) => {
     setState({ kind: "loading" });
@@ -206,15 +321,8 @@ function TemplatesTab() {
     return () => c.abort();
   }, [load]);
 
-  async function handleFork(entry: TemplateEntry) {
-    // Recipe: pre-fill the create-agent flow via ?recipe=<name>. CreateAgentPage fetches
-    // the recipe list and finds the spec by name — avoids a fragile ?spec= blob in the URL
-    // that URL-length limits or encoding differences could corrupt (m74 P1-2 fix).
-    if (entry.source === "recipe") {
-      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}`);
-      return;
-    }
-
+  // doFork is called with an optional `localName` override (U11 rename-on-fork).
+  async function doFork(entry: TemplateEntry, localName?: string) {
     // Published agent: POST fork.
     const prov = entry.provenance;
     if (!prov || prov === "builtin" || !prov.originNamespace) {
@@ -226,10 +334,15 @@ function TemplatesTab() {
       return;
     }
 
+    // U12: unique key uses origin ns to avoid same-name collision from different namespaces.
     const key = `${prov.originNamespace}/${prov.originName ?? entry.name}`;
     setForkingEntry(key);
     try {
-      const res = await api.forkAgent(prov.originNamespace, prov.originName ?? entry.name);
+      const res = await api.forkAgent(
+        prov.originNamespace,
+        prov.originName ?? entry.name,
+        localName,
+      );
 
       // Navigate to the FORK's own coordinates, not the origin's.
       // res.agent carries the fork's namespace + name (the caller's namespace).
@@ -237,15 +350,18 @@ function TemplatesTab() {
       const forkName = res.agent?.name ?? entry.name;
 
       if (res.status === "already-forked") {
+        // U11: link to the existing fork rather than a generic message.
         toast({
           variant: "info",
           title: "Already forked",
-          description: `You already have a fork of ${entry.name} in your namespace.`,
+          description: `You already have a fork of ${entry.name}. Opening it now.`,
         });
         navigate(`/agents/${encodeURIComponent(forkNs)}/${encodeURIComponent(forkName)}`);
         return;
       }
 
+      // U9: celebrate resolved refs (tools auto-connected via compose-connect).
+      const resolvedCount = res.resolvedRefs?.length ?? 0;
       const hasDangling =
         (res.needsRebinding?.length ?? 0) > 0 ||
         (res.unresolvedRefs?.length ?? 0) > 0;
@@ -255,10 +371,21 @@ function TemplatesTab() {
           ...(res.needsRebinding ?? []),
           ...(res.unresolvedRefs ?? []),
         ].join(", ");
+        const resolvedNote =
+          resolvedCount > 0
+            ? ` (${resolvedCount} tool${resolvedCount > 1 ? "s" : ""} connected automatically)`
+            : "";
         toast({
           variant: "info",
           title: "Forked — needs attention",
-          description: `${entry.name} was forked but has dangling references: ${items}. Open the agent to fix them.`,
+          description: `${entry.name} was forked${resolvedNote} but has dangling references: ${items}. Open the agent to fix them.`,
+        });
+      } else if (resolvedCount > 0) {
+        // U9: the "compounding moment" toast — all tools connected automatically.
+        toast({
+          variant: "success",
+          title: "Forked",
+          description: `${entry.name} is now in your namespace — ${resolvedCount} tool${resolvedCount > 1 ? "s" : ""} connected automatically.`,
         });
       } else {
         toast({
@@ -271,17 +398,31 @@ function TemplatesTab() {
     } catch (err) {
       const isNotFound = err instanceof ApiError && err.isNotFound;
       const isConflict = err instanceof ApiError && err.status === 409;
-      const msg = isNotFound
-        ? `${entry.name} is no longer discoverable.`
-        : isConflict
-        ? `An agent with the name "${entry.name}" already exists in your namespace with a different origin.`
-        : err instanceof Error
-        ? err.message
-        : "fork failed";
-      toast({ variant: "error", title: "Fork failed", description: msg });
+      if (isConflict) {
+        // U11: 409 — offer rename-on-fork instead of a dead-end error.
+        setRenameDialog({ entry, defaultName: entry.name });
+      } else {
+        const msg = isNotFound
+          ? `${entry.name} is no longer discoverable.`
+          : err instanceof Error
+          ? err.message
+          : "fork failed";
+        toast({ variant: "error", title: "Fork failed", description: msg });
+      }
     } finally {
       setForkingEntry(null);
     }
+  }
+
+  async function handleFork(entry: TemplateEntry) {
+    // Recipe: pre-fill the create-agent flow via ?recipe=<name>. CreateAgentPage fetches
+    // the recipe list and finds the spec by name — avoids a fragile ?spec= blob in the URL
+    // that URL-length limits or encoding differences could corrupt (m74 P1-2 fix).
+    if (entry.source === "recipe") {
+      navigate(`/agents/new?recipe=${encodeURIComponent(entry.name)}`);
+      return;
+    }
+    await doFork(entry);
   }
 
   return (
@@ -329,15 +470,39 @@ function TemplatesTab() {
 
       {state.kind === "ready" && state.entries.length > 0 && (
         <ul className="space-y-2" data-testid="template-list">
-          {state.entries.map((e) => (
-            <TemplateCard
-              key={`${e.source}/${e.name}`}
-              entry={e}
-              onFork={handleFork}
-              forking={forkingEntry !== null}
-            />
-          ))}
+          {state.entries.map((e) => {
+            // U12: include origin namespace in the key to avoid React key collision for
+            // same-named templates published from different namespaces.
+            const prov = e.provenance;
+            const originNs =
+              prov && prov !== "builtin" && prov.originNamespace
+                ? prov.originNamespace
+                : "builtin";
+            const cardKey = `${e.source}/${originNs}/${e.name}`;
+            return (
+              <TemplateCard
+                key={cardKey}
+                entry={e}
+                onFork={handleFork}
+                forkingKey={forkingEntry}
+                canFork={canFork}
+              />
+            );
+          })}
         </ul>
+      )}
+
+      {/* U11: rename-on-fork dialog — shown on 409 collision */}
+      {renameDialog && (
+        <RenameOnForkDialog
+          defaultName={renameDialog.defaultName}
+          onConfirm={(newName) => {
+            const entry = renameDialog.entry;
+            setRenameDialog(null);
+            void doFork(entry, newName);
+          }}
+          onCancel={() => setRenameDialog(null)}
+        />
       )}
     </div>
   );

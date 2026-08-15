@@ -88,10 +88,12 @@ type forkRefSpec struct {
 }
 
 // closeForkRefs runs the ADR 0068 §5 ref-closure over the source-spec of a just-forked agent in
-// callerNS/localName. It returns (needsRebinding, unresolvedRefs) — both non-nil (JSON [] not
-// null). It NEVER errors: a source-spec that does not parse, or any per-class read hiccup,
-// degrades to a conservative flag / skip and logs, because the agent already exists.
-func (s *Server) closeForkRefs(r *http.Request, caller client.Client, sourceSpec, callerNS, localName string) ([]string, []string) {
+// callerNS/localName. It returns (needsRebinding, unresolvedRefs, resolvedRefs) — all non-nil
+// (JSON [] not null). resolvedRefs lists tool names that were auto-materialized via the M73
+// compose-connect flywheel (U9, m76.3). It NEVER errors: a source-spec that does not parse, or
+// any per-class read hiccup, degrades to a conservative flag / skip and logs, because the agent
+// already exists.
+func (s *Server) closeForkRefs(r *http.Request, caller client.Client, sourceSpec, callerNS, localName string) ([]string, []string, []string) {
 	needsRebinding := []string{}
 	unresolvedRefs := []string{}
 
@@ -102,7 +104,7 @@ func (s *Server) closeForkRefs(r *http.Request, caller client.Client, sourceSpec
 		// already gated the spec) and log rather than fail the fork.
 		s.log.Error(err, "fork ref-closure: source-spec did not parse; skipping ref-closure",
 			"namespace", callerNS, "name", localName)
-		return needsRebinding, unresolvedRefs
+		return needsRebinding, unresolvedRefs, []string{}
 	}
 
 	ctx := r.Context()
@@ -116,7 +118,10 @@ func (s *Server) closeForkRefs(r *http.Request, caller client.Client, sourceSpec
 
 	// 2. tools[] — each absent-in-target tool is best-effort materialized from a discoverable
 	// published MCP server (compose M73 connect), else flagged for rebinding.
-	needsRebinding = append(needsRebinding, s.closeToolRefs(r, caller, spec.Tools, callerNS)...)
+	// flagged lists tools that needed closure but could not be auto-wired;
+	// resolved lists tools that were auto-materialized (the U9 flywheel moment).
+	flaggedTools, resolvedTools := s.closeToolRefs(r, caller, spec.Tools, callerNS)
+	needsRebinding = append(needsRebinding, flaggedTools...)
 
 	// 3. promptRef — a by-name PromptVersion in the target ns (Postgres store).
 	if spec.PromptRef != "" {
@@ -132,7 +137,9 @@ func (s *Server) closeForkRefs(r *http.Request, caller client.Client, sourceSpec
 		}
 	}
 
-	return needsRebinding, unresolvedRefs
+	// resolvedTools carries the tools auto-wired via compose-connect (U9 flywheel moment).
+	// Return it directly — no separate resolvedRefs accumulation needed.
+	return needsRebinding, unresolvedRefs, resolvedTools
 }
 
 // modelRouteName returns the source-spec's model.route (the ModelRoute name), or "".
@@ -224,11 +231,14 @@ func (s *Server) targetHasPromptVersion(ctx context.Context, ns, name string) bo
 // already resolvable in the target ns, it best-effort composes M73 connect to materialize a
 // discoverable published MCP server that offers the tool (the flywheel compounding); a tool with
 // no cleanly-determinable published origin is flagged "tool: <name>" — an honest flag beats a
-// wrong materialize. Returns the needsRebinding entries for the flagged tools (never nil-panics).
-func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []string, callerNS string) []string {
-	flagged := []string{}
+// wrong materialize. Returns (flagged, resolved): flagged lists the needsRebinding entries for
+// tools that could not be auto-wired; resolved lists tool names that were auto-materialized via
+// compose-connect (the U9 flywheel moment — the UI celebrates these). Never nil-panics.
+func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []string, callerNS string) (flagged []string, resolved []string) {
+	flagged = []string{}
+	resolved = []string{}
 	if len(tools) == 0 {
-		return flagged
+		return flagged, resolved
 	}
 	ctx := r.Context()
 
@@ -266,9 +276,12 @@ func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []st
 			s.log.Error(mErr, "fork ref-closure: compose-connect for published tool failed; flagging",
 				"tool", tool, "originNamespace", origin.namespace, "originName", origin.name)
 			flagged = append(flagged, "tool: "+tool)
+			continue
 		}
+		// Auto-materialize succeeded — record it in resolved so the UI can celebrate.
+		resolved = append(resolved, tool)
 	}
-	return flagged
+	return flagged, resolved
 }
 
 // publishedOrigin is the (namespace, name) of a published MCP server that offers a given tool.

@@ -1418,6 +1418,9 @@ export interface ForkAgentResponse {
   created: CreatedObject[];
   needsRebinding: string[];
   unresolvedRefs: string[];
+  // resolvedRefs lists tool names auto-connected during fork ref-closure (U9, m76.3).
+  // Non-empty = N tools were wired automatically via the M73 compose-connect flywheel.
+  resolvedRefs?: string[];
 }
 
 // --- Tool catalog (GET /api/tools, m14.6) -----------------------------------
