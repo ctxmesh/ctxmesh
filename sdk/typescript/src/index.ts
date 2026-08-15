@@ -2,8 +2,9 @@
  * ctxmesh — the agent-engine TypeScript SDK (parity with the Python `ctxmesh`).
  *
  * Foundation surface (M77.1): the launcher-plane configuration and the typed error
- * hierarchy. The data-plane clients (memory/knowledge/tools+MCP/feedback/model),
- * tracing, `serve()` + the managed loop land in M77.2–M77.6.
+ * hierarchy. M77.2 adds the data-plane clients (memory/knowledge/feedback/model) and
+ * the Client facade. Tools+MCP (M77.3), tracing (M77.4), serve/managed-loop (M77.5)
+ * land in subsequent tasks.
  */
 
 export {
@@ -28,3 +29,19 @@ export {
   GuardrailBlockedError,
   ApprovalRequiredError,
 } from "./errors.js";
+
+// ── M77.2: data-plane clients + facade ────────────────────────────────────────
+
+export { CAPABILITY_HEADER, currentCapability } from "./_capability.js";
+
+export { MemoryClient } from "./memory.js";
+export { KnowledgeClient } from "./knowledge.js";
+export type { KnowledgeResult } from "./knowledge.js";
+export { FeedbackClient } from "./feedback.js";
+export { ModelClient, ChatResponse } from "./model.js";
+export type { ToolCall, ChatUsage } from "./model.js";
+
+export { Client } from "./client.js";
+
+// The `agent` module: `agent.fromEnv()` / `agent.fromConfig()` — the primary entry points.
+export * as agent from "./agent.js";
