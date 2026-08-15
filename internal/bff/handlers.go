@@ -25,6 +25,8 @@ import (
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
 // PromQL the dashboard cost/usage view runs through the Prometheus adapter. The
@@ -386,7 +388,23 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 // server-side). If the Prometheus adapter is not wired, the metric series come
 // back empty ([]) and only the Langfuse rollup renders — a partial dashboard is
 // better than a hard failure.
+//
+// Caller-scoped SSAR on `costrollups` (same persona gate as forecast/chargeback).
+// Cluster-wide (empty namespace) — cost data is tenant-scoped, not namespace-scoped.
+// A denial is 403, never a leaked or empty response.
 func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
+	// (empty namespace) — mirrors handleCostForecast exactly.
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+		s.writeAuthzError(w, err, "read the cost view")
+		return
+	}
+
 	ctx := r.Context()
 
 	summary, err := s.adapters.Langfuse.CostUsage(ctx)
@@ -436,6 +454,10 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // agent (m16.5). It groups a bounded window of recent Langfuse traces by their
 // `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
 //
+// Caller-scoped SSAR on `costrollups` (same persona gate as forecast/chargeback/cost).
+// Cluster-wide (empty namespace) — mirrors handleCostForecast exactly.
+// A denial is 403, never a leaked or empty response.
+//
 // Supported query params:
 //
 //	?by=agent   the grouping axis; REQUIRED and "agent" is the ONLY supported
@@ -451,6 +473,18 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // Degrades honestly: Langfuse not wired → 501 (registered by server.go seam).
 // Upstream failure → 502. Bad param (unsupported by, bad cursor) → 400.
 func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+
+	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
+	// (empty namespace) — mirrors handleCostForecast exactly.
+	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+		s.writeAuthzError(w, err, "read the cost breakdown")
+		return
+	}
+
 	qs := r.URL.Query()
 
 	// ?by is required and the only supported value is "agent".

@@ -368,6 +368,27 @@ spec:
                     required:
                     - enabled
                     type: object
+                  mountServiceAccountToken:
+                    description: |-
+                      mountServiceAccountToken opts THIS agent into auto-mounting the default kube-API
+                      ServiceAccount token at /var/run/secrets/kubernetes.io/serviceaccount/ (m79.4, m52 C10).
+
+                      SECURE BY DEFAULT: nil/false ⇒ the token is NOT mounted. The agent runtime does not use
+                      the default kube-API token (the state-layer proxy is authed by a dedicated audience-scoped
+                      PROJECTED token, a separate volume), so the auto-mounted default token is unused attack
+                      surface co-resident with user (semi-trusted) code. The controller sets
+                      AutomountServiceAccountToken=false on the agent's per-agent identity ServiceAccount
+                      (agent-<name>) to strip it.
+
+                      Set true ONLY for an agent that legitimately builds an in-cluster kube config (talks to
+                      the kube API from inside the pod) — then the default token is auto-mounted again.
+
+                      COVERAGE: this hardening applies only to agents that HAVE a per-agent identity SA (memory /
+                      proxy / on-behalf-of agents). A plain agent running the namespace's shared `default` SA is
+                      out of scope — the controller must not toggle automount on a shared SA, as that would
+                      affect every workload in the namespace. Broadening to a universal identity SA is a separate
+                      follow-up.
+                    type: boolean
                   port:
                     default: 8080
                     description: |-
@@ -1094,6 +1115,27 @@ spec:
                     required:
                     - enabled
                     type: object
+                  mountServiceAccountToken:
+                    description: |-
+                      mountServiceAccountToken opts THIS agent into auto-mounting the default kube-API
+                      ServiceAccount token at /var/run/secrets/kubernetes.io/serviceaccount/ (m79.4, m52 C10).
+
+                      SECURE BY DEFAULT: nil/false ⇒ the token is NOT mounted. The agent runtime does not use
+                      the default kube-API token (the state-layer proxy is authed by a dedicated audience-scoped
+                      PROJECTED token, a separate volume), so the auto-mounted default token is unused attack
+                      surface co-resident with user (semi-trusted) code. The controller sets
+                      AutomountServiceAccountToken=false on the agent's per-agent identity ServiceAccount
+                      (agent-<name>) to strip it.
+
+                      Set true ONLY for an agent that legitimately builds an in-cluster kube config (talks to
+                      the kube API from inside the pod) — then the default token is auto-mounted again.
+
+                      COVERAGE: this hardening applies only to agents that HAVE a per-agent identity SA (memory /
+                      proxy / on-behalf-of agents). A plain agent running the namespace's shared `default` SA is
+                      out of scope — the controller must not toggle automount on a shared SA, as that would
+                      affect every workload in the namespace. Broadening to a universal identity SA is a separate
+                      follow-up.
+                    type: boolean
                   port:
                     default: 8080
                     description: |-

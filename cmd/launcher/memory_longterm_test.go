@@ -19,11 +19,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/ctxmesh/agent-engine/internal/runcap"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -136,4 +138,53 @@ func TestLongTerm_PerUserWithoutVerifierIs400(t *testing.T) {
 	ts := fakeTokenService(t, nil)
 	rec := post(t, ltProxyTo(ts.URL, scopeAgentUser), "/memory/agent/search", `{"query":"q"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "per-user needs a verified user identity")
+}
+
+// TestLongTerm_DoesNotForwardRuncapUpstream pins the ADR 0072 invariant (m79.3): the LTM proxy
+// VERIFIES the inbound run capability but NEVER forwards (or otherwise leaks) the raw token to the
+// token-service — postToTokenService builds a fresh upstream request carrying only Content-Type. It
+// is one of the two guardrails that make DEFERRING the "distinct LTM audience" idea (C9) safe: with
+// the token dropped at the verifier, there is no lower-value path that could replay it downstream.
+// If this ever regresses (the LTM proxy starts forwarding the runcap), C9's reopen trigger fires.
+func TestLongTerm_DoesNotForwardRuncapUpstream(t *testing.T) {
+	const audience = "ctxmesh-test-aud"
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	token, err := runcap.NewSigner(priv, audience, nil).Mint(runcap.MintRequest{
+		User: "user-hash-abc", Agent: "asst", RunID: "run-1", TTL: time.Minute,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, token)
+
+	// A token-service that captures the FULL upstream request (all headers + raw body).
+	var gotHeaders http.Header
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := ltProxyTo(srv.URL, scopeAgentUser)
+	p.verifier = runcap.NewVerifier(pub, audience, nil)
+
+	mux := http.NewServeMux()
+	p.register(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/memory/agent/search", bytes.NewReader([]byte(`{"query":"q","topK":3}`)))
+	req.Header.Set(runcap.HeaderName, token)
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "the runcap must verify (per-user search succeeds)")
+
+	// The raw token must appear in NONE of the upstream headers or body, and the runcap header
+	// specifically must be absent upstream — the verifier consumes it, the proxy does not relay it.
+	assert.Empty(t, gotHeaders.Get(runcap.HeaderName), "the runcap header must not be forwarded to the token-service")
+	for k, vals := range gotHeaders {
+		for _, v := range vals {
+			assert.NotContainsf(t, v, token, "runcap token leaked into upstream header %s", k)
+		}
+	}
+	assert.NotContains(t, string(gotBody), token, "runcap token leaked into the upstream body")
 }

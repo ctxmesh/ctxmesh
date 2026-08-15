@@ -23,8 +23,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // --- parseAgentTag round-trip tests ------------------------------------------
@@ -255,26 +257,51 @@ func TestCostBreakdownUpstreamErrorSurfaces(t *testing.T) {
 
 // --- GET /api/cost/breakdown handler tests -----------------------------------
 
+// newPermissiveCostServer builds a BFF Server with a permissive (always-allow)
+// SSAR authorizer and a caller-client factory, wired with the given adapters.
+// Use this for handler tests that need to reach past the costrollups gate into
+// the data/error paths (param validation, adapter errors, response shape).
+func newPermissiveCostServer(t *testing.T, a Adapters) *Server {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      a,
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+	s.authorizer = &recordingAuthorizer{} // always allows
+	return s
+}
+
+// serveWithToken issues GET <url> with a bearer token so callerClient succeeds.
+func serveWithToken(t *testing.T, s *Server, url string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
 // TestHandlerCostBreakdownRequiresByAgent: missing or non-"agent" `by` → 400.
 func TestHandlerCostBreakdownRequiresByAgent(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
 
 	// Missing ?by entirely → 400.
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown", nil))
+	w := serveWithToken(t, s, "/api/cost/breakdown")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	body := w.Body.String()
-	assert.Contains(t, body, "by")
+	assert.Contains(t, w.Body.String(), "by")
 
 	// ?by=model (unsupported) → 400 with the unsupported value in the message.
-	w2 := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=model", nil))
+	w2 := serveWithToken(t, s, "/api/cost/breakdown?by=model")
 	assert.Equal(t, http.StatusBadRequest, w2.Code)
 	assert.Contains(t, w2.Body.String(), "model")
 
 	// ?by=agent → 200.
-	w3 := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	w3 := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
 	assert.Equal(t, http.StatusOK, w3.Code)
 }
 
@@ -288,9 +315,8 @@ func TestHandlerCostBreakdownLangfuseAbsent501(t *testing.T) {
 
 // TestHandlerCostBreakdownUpstream502: adapter error → 502.
 func TestHandlerCostBreakdownUpstream502(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: assert.AnError}})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: assert.AnError}})
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 }
 
@@ -298,9 +324,8 @@ func TestHandlerCostBreakdownUpstream502(t *testing.T) {
 // is slow/circuit-broken) → a CALM 200 with empty agents + a notice, NOT a red 502
 // (m23.6 — the whole reason wiring Langfuse must not flash red errors).
 func TestHandlerCostBreakdownDegradesCalmly(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: ErrUpstreamUnavailable}})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: ErrUpstreamUnavailable}})
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
 	require.Equal(t, http.StatusOK, w.Code, "a transient upstream stall must degrade calmly, not 502")
 
 	var resp CostBreakdownResponse
@@ -328,9 +353,8 @@ func TestHandlerRunsDegradesCalmly(t *testing.T) {
 // TestHandlerCostDegradesCalmly: ErrUpstreamUnavailable on the cost rollup → 200
 // with an empty summary + notice, not 502.
 func TestHandlerCostDegradesCalmly(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{err: ErrUpstreamUnavailable}})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{err: ErrUpstreamUnavailable}})
+	w := serveWithToken(t, s, "/api/cost")
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostResponse
@@ -341,9 +365,8 @@ func TestHandlerCostDegradesCalmly(t *testing.T) {
 
 // TestHandlerCostBreakdownEmpty200: empty breakdown → {agents:[], ...} 200.
 func TestHandlerCostBreakdownEmpty200(t *testing.T) {
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostBreakdownResponse
@@ -365,9 +388,8 @@ func TestHandlerCostBreakdownBadCursor400(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	s := serverWithAdapters(t, Adapters{Langfuse: a})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent&cursor=notanint", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: a})
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&cursor=notanint")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -380,9 +402,8 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 		Total:      CostSummary{TotalCostUSD: 1.5, TotalTokens: 300, Observations: 2, ByModel: []MetricPoint{}},
 		NextCursor: "",
 	}
-	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}})
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/cost/breakdown?by=agent", nil))
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}})
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostBreakdownResponse

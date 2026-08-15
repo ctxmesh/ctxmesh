@@ -178,7 +178,7 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	tenantD := tenantDigest(tenantContext{id: "acme", budgetUSD: "100.00", rpm: 600}, true)
 	require.NotEmpty(t, tenantD)
 
-	proxyD := statelayerProxyDigest("http://statelayer-proxy.svc:8080", true)
+	proxyD := statelayerProxyDigest("http://statelayer-proxy.svc:8080", true, false)
 	require.NotEmpty(t, proxyD)
 
 	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
@@ -263,9 +263,16 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	tenantD2 := tenantDigest(tenantContext{id: "acme", rpm: 1200}, true)
 	require.NotEqual(t, tenantD1, tenantD2, "precondition: a cap change flips the tenant digest")
 
-	proxyD1 := statelayerProxyDigest("http://proxy-a:8080", true)
-	proxyD2 := statelayerProxyDigest("http://proxy-b:8080", true)
+	proxyD1 := statelayerProxyDigest("http://proxy-a:8080", true, false)
+	proxyD2 := statelayerProxyDigest("http://proxy-b:8080", true, false)
 	require.NotEqual(t, proxyD1, proxyD2, "precondition: a proxy-URL change flips the proxy digest")
+
+	// m79.4: toggling the default-token automount opt-in flips the proxy digest (same SA the
+	// component tracks), so a spec.mountServiceAccountToken change rolls a new revision.
+	proxyMountOff := statelayerProxyDigest("http://proxy-a:8080", true, false)
+	proxyMountOn := statelayerProxyDigest("http://proxy-a:8080", true, true)
+	require.NotEqual(t, proxyMountOff, proxyMountOn,
+		"precondition: an automount (default kube-API token) toggle flips the proxy digest (m79.4)")
 
 	runtimeD1 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 3}})
 	runtimeD2 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 5}})
@@ -326,7 +333,7 @@ func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 
 	tenantD := tenantDigest(tenantContext{id: "acme", rpm: 600}, true)
 
-	proxyD := statelayerProxyDigest("http://proxy:8080", true)
+	proxyD := statelayerProxyDigest("http://proxy:8080", true, false)
 
 	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
 
