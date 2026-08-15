@@ -591,6 +591,109 @@ func TestKnowledgeBase_StatusProjection(t *testing.T) {
 		"reconcile must project IngestionRunID onto KB.status.ingestionRunRef")
 }
 
+// perUserKBSpec is validKBSpec with perUser + a per-user storage soft cap set (m80.4).
+func perUserKBSpec(softCap int64) agentsv1beta1.KnowledgeBaseSpec {
+	spec := validKBSpec()
+	spec.PerUser = true
+	spec.UserStorageSoftCap = softCap
+	return spec
+}
+
+// TestKnowledgeBase_UserStorageSoftCap_ExceededCondition (m80.4, ADR 0061 Fork 3): a perUser KB with a
+// configured userStorageSoftCap whose corpus-status per-subject aggregation shows a user OVER the cap must
+// get UserStorageSoftCapExceeded=True (WARN-only, ingestion never blocked); a within-cap corpus gets False.
+func TestKnowledgeBase_UserStorageSoftCap_ExceededCondition(t *testing.T) {
+	const ns = "default"
+	const name = "kb-peruser-softcap"
+
+	// alice is over the 1000-byte cap; bob is within it.
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: name, Phase: "Ready", DocumentCount: 3, ChunkCount: 9,
+			SizeBytes: 1700, IngestionRunID: "run-pu",
+			SizePerSubject: map[string]int64{"u-alice": 1500, "u-bob": 200},
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       perUserKBSpec(1000),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	cond := apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded)
+	require.NotNil(t, cond, "a perUser KB with a soft cap must carry the UserStorageSoftCapExceeded condition")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status,
+		"a user over the per-user soft cap must set UserStorageSoftCapExceeded=True")
+	assert.Contains(t, cond.Message, "u-alice", "the condition must name the over-cap user")
+
+	// Now bring alice back within the cap → the condition must flip to False (WARN cleared).
+	fakeKnowledge.mu.Lock()
+	fakeKnowledge.GetStatusResult.SizePerSubject = map[string]int64{"u-alice": 300, "u-bob": 200}
+	fakeKnowledge.mu.Unlock()
+
+	reconcileKB(t, r, name, ns)
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	cond = apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status,
+		"once all users are within the cap the condition must flip to False")
+}
+
+// TestKnowledgeBase_OrgWide_NoUserStorageCondition (m80.4): an ORG-WIDE KB (perUser=false) must NOT grow a
+// UserStorageSoftCapExceeded condition even if the corpus-status carries per-subject data — the !perUser
+// path is byte-for-byte unchanged (no per-user accounting condition).
+func TestKnowledgeBase_OrgWide_NoUserStorageCondition(t *testing.T) {
+	const ns = "default"
+	const name = "kb-orgwide-nocond"
+
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Namespace: ns, KnowledgeBase: name, Phase: "Ready", DocumentCount: 1, ChunkCount: 3,
+			SizeBytes: 500, IngestionRunID: "run-org",
+			// Even if some stray per-subject data were present, an org-wide KB must ignore it.
+			SizePerSubject: map[string]int64{"u-stray": 9999},
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(), // perUser=false, no soft cap
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	assert.Nil(t, apimeta.FindStatusCondition(live.Status.Conditions, conditionKBUserStorageSoftCapExceeded),
+		"an org-wide KB must never carry the per-user storage condition (byte-for-byte unchanged)")
+}
+
 // TestKnowledgeBase_StatusProjection_IngestingRequeue: when GetCorpusStatus returns found=false AND
 // the KB.status.Phase is already "Ingesting" (set by the BFF endpoint), the reconcile must return a
 // RequeueAfter > 0 (so the controller polls for the terminal row to appear).

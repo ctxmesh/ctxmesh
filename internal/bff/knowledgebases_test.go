@@ -434,6 +434,8 @@ func TestResolveKBSources_ObjectStorePrefixEmpty_ReturnsError(t *testing.T) {
 // --- ingest trigger endpoint (m68.6) ----------------------------------------
 
 // postIngest sends POST /api/knowledgebases/{name}/ingest and returns (status, body).
+//
+//nolint:unparam // ns is part of the helper's contract; all current callers happen to use kbNS.
 func postIngest(t *testing.T, s *Server, kbName, ns string) (int, []byte) {
 	t.Helper()
 	rawURL := "/api/knowledgebases/" + kbName + "/ingest"
@@ -554,6 +556,8 @@ func getKB(t *testing.T, s *Server, name, ns string) (int, []byte) {
 }
 
 // searchKB sends POST /api/knowledgebases/{name}/search and returns (status, body).
+//
+//nolint:unparam // ns is part of the helper's contract; all current callers happen to use kbNS.
 func searchKB(t *testing.T, s *Server, name, ns string, reqBody []byte) (int, []byte) {
 	t.Helper()
 	rawURL := "/api/knowledgebases/" + name + "/search"

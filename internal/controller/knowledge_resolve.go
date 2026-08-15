@@ -38,6 +38,11 @@ type kbRosterEntry struct {
 	Name           string `json:"name"`
 	Namespace      string `json:"namespace"`
 	EmbeddingRoute string `json:"embeddingRoute"`
+	// PerUser marks a corpus whose retrieval must be scoped to the invoking user's subject hash
+	// (ADR 0061 Fork 3). omitempty so an org-wide KB serialises byte-identically to the pre-m80.4
+	// roster — no structural-digest churn / fleet-wide roll on upgrade; only a pod referencing a
+	// per-user KB carries the flag (and its behaviour genuinely changed, so a roll there is correct).
+	PerUser bool `json:"perUser,omitempty"`
 }
 
 // kbResolveResult captures the outcome of resolving spec.knowledgeBases[].
@@ -94,6 +99,7 @@ func resolveKnowledgeBases(
 			Name:           ref.Name,
 			Namespace:      ns,
 			EmbeddingRoute: kb.Spec.EmbeddingRoute,
+			PerUser:        kb.Spec.PerUser,
 		})
 	}
 

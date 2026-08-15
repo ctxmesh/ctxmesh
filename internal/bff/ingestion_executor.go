@@ -53,6 +53,11 @@ type IngestionDoc struct {
 	Key         string `json:"key"`
 	Filename    string `json:"filename,omitempty"`
 	ContentType string `json:"contentType,omitempty"`
+	// Subject is the per-user corpus owner's server-derived subject hash for a PER-USER KB (recovered from
+	// the document's object key at ingest-create, ADR 0061 Fork 3), or "" for an org-wide corpus. The executor
+	// stamps it onto every chunk this document produces so a user retrieves only their own chunks. It is pinned
+	// here at create so a live-edited KB / re-derivation cannot retroactively re-attribute an in-flight ingest.
+	Subject string `json:"subject,omitempty"`
 }
 
 // IngestionSpec is the resolved ingestion parameters pinned onto the run (run.IngestionSpec JSON) at
@@ -449,7 +454,7 @@ func (s *Server) embedAndUpsertChunks(
 			records = append(records, knowledge.Chunk{
 				Namespace:      spec.Namespace,
 				KnowledgeBase:  spec.KnowledgeBase,
-				Subject:        "", // org-wide — v1 gates per-user ingestion off (ADR 0061 Fork 3).
+				Subject:        doc.Subject, // "" = org-wide; the per-user owner's hash for a perUser KB (ADR 0061 Fork 3).
 				DocumentRef:    doc.Key,
 				ChunkIndex:     ch.Index,
 				StartOffset:    ch.StartOffset,
@@ -549,6 +554,18 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 		chunkCount, sizeBytes = cnt, sz
 	}
 
+	// Per-user storage accounting (ADR 0061 Fork 3, m80.4): aggregate this corpus's bytes per subject so the KB
+	// controller can reflect a UserStorageSoftCapExceeded condition. Org-wide corpora yield an empty map (org-wide
+	// subject "" is excluded), so the !perUser projection carries no per-user data and is unchanged. Best-effort:
+	// a lookup failure is non-fatal (the chunks are durable; the controller re-reconciles from the next run).
+	var sizePerSubject map[string]int64
+	if perUser, err := s.knowledgeStore.SizePerSubject(ctx, spec.Namespace, spec.KnowledgeBase); err != nil {
+		s.log.Error(err, "ingestion: SizePerSubject failed; per-user accounting skipped this run",
+			"run", runID, "kb", spec.KnowledgeBase)
+	} else if len(perUser) > 0 {
+		sizePerSubject = perUser
+	}
+
 	outcome := IngestionOutcome{
 		Reason:         ingestionSucceeded,
 		Documents:      len(spec.Documents),
@@ -576,6 +593,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 		Namespace: spec.Namespace, KnowledgeBase: spec.KnowledgeBase, Phase: phase,
 		DocumentCount: len(spec.Documents), ChunkCount: chunkCount, SizeBytes: sizeBytes,
 		Partial: cursor.Partial, IngestionRunID: runID, LastIngestedAt: &now,
+		SizePerSubject: sizePerSubject,
 	})
 
 	outcomeJSON, err := json.Marshal(outcome)
@@ -677,6 +695,11 @@ func (s *Server) recordCorpusStatus(ctx context.Context, runID string, st knowle
 	if st.LastIngestedAt == nil {
 		if prior, found, err := s.knowledgeStore.GetCorpusStatus(ctx, st.Namespace, st.KnowledgeBase); err == nil && found {
 			st.LastIngestedAt = prior.LastIngestedAt // preserve the last-good timestamp across a failed run.
+			if st.SizePerSubject == nil {
+				// Preserve the last-good per-user accounting across a failed run (the chunks are still durable),
+				// so a failed re-ingest does not erase a corpus's per-user soft-cap state (m80.4).
+				st.SizePerSubject = prior.SizePerSubject
+			}
 		}
 	}
 	if err := s.knowledgeStore.UpsertCorpusStatus(ctx, st); err != nil {
