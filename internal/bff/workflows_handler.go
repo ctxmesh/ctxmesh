@@ -46,12 +46,16 @@ package bff
 // its terminal answer; the caller feeds that plan to POST /api/workflows/runs (with requireApproval to gate
 // it behind a human). No new "planner runtime" is needed — the inline-spec endpoint + the plan-approval gate
 // ARE the mechanism; the deterministic executor runs the model-authored graph under the same
-// identity/governance as any workflow. NOTE (m67.7): a served WorkflowSpec JSON-Schema ARTIFACT (a
-// GET .../spec-schema the planner could set verbatim as its outputSchema) is NOT shipped here — the accurate
-// source is the generated CRD openAPIV3Schema (config/crd/bases/...workflows.yaml, which uses
-// x-kubernetes- extensions, not pure JSON Schema) and there is no struct→JSON-Schema dependency in the
-// module, so a faithful runtime artifact is not cheap and a hand-authored one would drift from the type.
-// Deferred as a small follow-on; the pattern works today by pinning the schema at the planner author's side.
+// identity/governance as any workflow. The served WorkflowSpec JSON-Schema ARTIFACT (m83.2) IS now shipped:
+// GET /api/workflows/spec-schema returns a pure JSON-Schema a planner sets VERBATIM as its
+// spec.runtime.outputSchema so the model emits a WorkflowSpec this endpoint accepts. It is DERIVED from the
+// generated CRD openAPIV3Schema (config/crd/bases/...workflows.yaml) — its `properties.spec` sub-schema IS
+// WorkflowSpec (controller-gen from the struct) — by recursively stripping every `x-kubernetes-*` extension
+// (list-type / list-map-keys / preserve-unknown-fields / …) to leave draft-2020-12 JSON-Schema. The
+// transform (internal/bff.GenerateWorkflowSpecSchema) is run by `make gen-workflow-schema` into the committed
+// workflow_spec_schema.json (go:embed'd here) and a tier0 DRIFT test regenerates it in-memory and asserts a
+// byte-equal match, so a WorkflowSpec change that isn't regenerated fails tier0 (the helm-verify analog). No
+// new module dependency and no hand-authored schema to drift from the type.
 //
 // ── Node-endpoint resolution + pinning at CREATE (m67.13, ADR 0011/0060) ──────────────────────────────────
 //
@@ -67,6 +71,7 @@ package bff
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -141,6 +146,13 @@ func (s *Server) resolveWorkflowNodeEndpoints(
 // present (the workflow executor re-invokes node agents via the run-worker path, and the creation
 // step resolves the Workflow CRD through the caller-scoped client, ADR 0011).
 func (s *Server) registerWorkflowRunRoutes(authed *http.ServeMux) {
+	// The WorkflowSpec JSON-Schema artifact (m83.2, ADR 0060 §6) is a STATIC, non-sensitive, Go-embedded
+	// document — it needs no Invoke adapter and no caller-scoped client, so it is ALWAYS served (unlike the
+	// run endpoints below, which need the caller-scoped execution path). It is registered on the SAME authed
+	// mux (`api.Handle("/api/", s.requireAuth(authed))`) as its siblings, matching the /api/recipes
+	// static-artifact convention: consistent auth surface, no special-casing.
+	authed.HandleFunc("GET /api/workflows/spec-schema", s.handleWorkflowSpecSchema)
+
 	if s.adapters.Invoke != nil && s.callerClients != nil {
 		authed.HandleFunc("POST /api/workflows/{name}/runs", s.handleCreateWorkflowRun)
 		// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
@@ -151,6 +163,27 @@ func (s *Server) registerWorkflowRunRoutes(authed *http.ServeMux) {
 	}
 	authed.Handle("POST /api/workflows/{name}/runs", notImplemented("workflow runs"))
 	authed.Handle("POST /api/workflows/runs", notImplemented("workflow runs"))
+}
+
+// workflowSpecSchemaJSON is the pure JSON-Schema for a WorkflowSpec, DERIVED from the generated Workflow
+// CRD by `make gen-workflow-schema` (internal/bff.GenerateWorkflowSpecSchema strips the x-kubernetes-*
+// extensions). A tier0 drift test asserts this committed file byte-equals a fresh regeneration, so it can
+// never silently drift from the WorkflowSpec type.
+//
+//go:embed workflow_spec_schema.json
+var workflowSpecSchemaJSON []byte
+
+// handleWorkflowSpecSchema serves GET /api/workflows/spec-schema (m83.2, ADR 0060 §6): the WorkflowSpec
+// JSON-Schema a PLANNER agent sets verbatim as its spec.runtime.outputSchema (M65) so the LLM emits a valid
+// WorkflowSpec the caller can POST to /api/workflows/runs. The body is the embedded, drift-checked artifact
+// served with Content-Type: application/json — a stable, cacheable, static document.
+func (s *Server) handleWorkflowSpecSchema(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// The artifact is immutable for a given build; let clients cache it. It changes only when the binary
+	// (hence the embedded schema) is rebuilt after a WorkflowSpec change.
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(workflowSpecSchemaJSON)
 }
 
 // handleCreateWorkflowRun serves POST /api/workflows/{name}/runs (m67.4).
