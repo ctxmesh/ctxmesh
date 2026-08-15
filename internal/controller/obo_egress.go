@@ -74,7 +74,14 @@ type OBOEgressConfig struct {
 // out of the agent's own manifest). POD_NAMESPACE (the grant source ns) is the agent's own
 // namespace, set as a LITERAL (not the downward-API fieldRef, which Knative Serving forbids —
 // `kubernetes.podspec-fieldref` is off by default; the controller knows the namespace anyway).
-func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string) corev1.Container {
+//
+// recordCapable (M78, ADR 0071 §1/C1) marks the sidecar as a record-mode TOOL capture seam.
+// When true it injects RECORD_CAPABLE=true — which forces the sidecar to build its fixture
+// recorder and FAIL CLOSED (C2) if OBJECT_STORE_ADDR is unset — plus the durable object-store
+// address + dev creds so it has a sink to Put the TOOL-channel fixture to. All STATIC env
+// (reconcile-time constants), NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom
+// guard). false ⇒ no record env, the OBO sidecar is byte-for-byte unchanged.
+func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string, recordCapable bool) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
 		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
@@ -94,6 +101,13 @@ func egressSidecarContainer(cfg OBOEgressConfig, namespace, agentIdentity, bound
 	}
 	if cfg.TokenServiceURL != "" {
 		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
+	}
+	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink + flip on capture.
+	// RECORD_CAPABLE=true forces the C2 fail-closed at startup if OBJECT_STORE_ADDR is unset —
+	// STATIC env (reconcile-time constants), never valueFrom.
+	if recordCapable {
+		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
+		env = append(env, objectStoreEnv()...)
 	}
 	return corev1.Container{
 		Name:  egressSidecarContainerName,
@@ -133,21 +147,23 @@ func egressRoutesJSON(routes []toolmanifest.Route) string {
 	return string(b)
 }
 
-// egressDigest folds the injected egress sidecar (image + routes) into the pod-template
-// structural digest, so adding/removing the sidecar OR changing a route (the real URL now
-// lives in the sidecar env, not the hot-path manifest) rolls a new revision. Empty when no
-// OBO route is present (the pod template is unchanged).
-func egressDigest(image, boundary string, routes []toolmanifest.Route) string {
+// egressDigest folds the injected egress sidecar (image + routes + record flag) into the
+// pod-template structural digest, so adding/removing the sidecar, changing a route (the real
+// URL now lives in the sidecar env, not the hot-path manifest), OR toggling record mode
+// (which adds RECORD_CAPABLE + object-store env to the sidecar) rolls a new revision. Empty
+// when no route is present (the pod template is unchanged).
+func egressDigest(image, boundary string, routes []toolmanifest.Route, recordCapable bool) string {
 	if len(routes) == 0 {
 		return ""
 	}
 	type shape struct {
-		Image      string               `json:"image"`
-		ListenAddr string               `json:"listenAddr"`
-		Boundary   string               `json:"boundary"`
-		Routes     []toolmanifest.Route `json:"routes"`
+		Image         string               `json:"image"`
+		ListenAddr    string               `json:"listenAddr"`
+		Boundary      string               `json:"boundary"`
+		RecordCapable bool                 `json:"recordCapable"`
+		Routes        []toolmanifest.Route `json:"routes"`
 	}
-	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, Routes: routes})
+	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, RecordCapable: recordCapable, Routes: routes})
 	if err != nil {
 		return "invalid"
 	}
