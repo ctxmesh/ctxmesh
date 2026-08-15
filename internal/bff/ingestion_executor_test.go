@@ -389,3 +389,37 @@ func TestExecuteIngestion_DegradesWhenUnwired(t *testing.T) {
 	oc := loadOutcome(t, s, "ing-7")
 	assert.Equal(t, ingestionFailed, oc.Reason)
 }
+
+// TestExecuteIngestion_UnreadableSpecStillProjectsFailed (M80, ADR 0061 Fork 2): the executor fix. When the
+// pinned IngestionSpec JSON is UNPARSEABLE (an early failure that used to skip the corpus-status projection —
+// the m68.14 stuck-Ingesting bug), the executor must STILL project phase Failed onto the corpus-status row,
+// resolving ns/kb from the Run's own Namespace + Agent columns (pinned at create, independent of the spec).
+func TestExecuteIngestion_UnreadableSpecStillProjectsFailed(t *testing.T) {
+	s, ks, _ := newIngestionTestServer(t, newMockEmbedder())
+
+	const ns, kb = "team-a", "docs"
+	// Build the ingestion run with the ns/kb pinned on the Run's columns (run.New(id, ns, kbName, …), exactly
+	// as the ingest-create path does) but a DELIBERATELY CORRUPT IngestionSpec so json.Unmarshal fails.
+	rn := run.New("ing-badspec", ns, kb, nil, "", time.Now())
+	rn.IngestionRef = kb
+	rn.IngestionSpec = "{not valid json" // unparseable
+	require.NoError(t, s.runStore.Create(rn))
+
+	s.executeIngestion(context.Background(), "ing-badspec")
+
+	got, err := s.runStore.Get("ing-badspec")
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusFailed, got.Status, "an unreadable spec must terminate the run failed")
+	oc := loadOutcome(t, s, "ing-badspec")
+	assert.Equal(t, ingestionFailed, oc.Reason)
+
+	// THE FIX: despite the unparseable spec, the corpus-status row is projected (ns/kb came from the Run's
+	// columns) so the KB controller reflects Failed — the run does NOT leave the KB stuck Ingesting.
+	cs, found, err := ks.GetCorpusStatus(context.Background(), ns, kb)
+	require.NoError(t, err)
+	require.True(t, found, "the executor must project a corpus-status row even when the IngestionSpec is unreadable")
+	assert.Equal(t, kbPhaseFailed, cs.Phase,
+		"the projected corpus-status phase must be Failed (the m68.14 stuck-Ingesting fix)")
+	assert.Equal(t, "ing-badspec", cs.IngestionRunID,
+		"the projected row must carry the ingestion run id")
+}
