@@ -184,7 +184,28 @@ func (s *Server) handleUploadKBDocument(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// --- build the object key ---------------------------------------------------
-	key := objectstore.KnowledgeKey(ns, kbName, filename)
+	// Per-user KB (spec.perUser, ADR 0061 Fork 3): nest the uploading caller's server-derived subject
+	// hash as a path segment so (a) the off-request ingestion executor can recover WHOSE bytes these are
+	// (SubjectFromKey at ingest-create) and (b) two users uploading the same filename never collide on one
+	// object key. The subject is the UN-FORGEABLE userGrantHash of the caller's SelfSubjectReview identity
+	// (ADR 0045) — the SAME derivation the run capability's User claim uses, so a user's ingested chunks are
+	// stamped with the exact subject their knowledge_search scopes by. A non-perUser KB is byte-for-byte
+	// unchanged (org-wide key, no subject segment).
+	var key string
+	if kb.Spec.PerUser {
+		username, uErr := callerUsername(r.Context(), caller)
+		if uErr != nil {
+			// Per-user attribution is fail-CLOSED: without a trusted caller identity we cannot stamp the
+			// correct subject, and stamping the wrong (or empty) one would misattribute another user's corpus.
+			s.log.Error(uErr, "upload: resolving caller identity for per-user KB failed", "ns", ns, "kb", kbName)
+			writeError(w, http.StatusForbidden,
+				"per-user KnowledgeBase upload requires a resolvable caller identity (the API server returned none)")
+			return
+		}
+		key = objectstore.KnowledgeKeyForSubject(ns, kbName, userGrantHash(username), filename)
+	} else {
+		key = objectstore.KnowledgeKey(ns, kbName, filename)
+	}
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -453,13 +474,33 @@ func (s *Server) handleIngestKB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pin the ingestion spec: the resolved doc keys + content types + the corpus's embedding route + chunking.
+	// For a PER-USER KB (ADR 0061 Fork 3) recover each document's owner subject from its object key (the subject
+	// is nested as a path segment at upload — KnowledgeKeyForSubject) and pin it per-document, so the off-request
+	// executor stamps the correct owner on that document's chunks. A perUser doc whose key carries NO subject
+	// segment is fail-CLOSED skipped: it predates per-user attribution (or was written org-wide) and must not be
+	// silently ingested as some default subject. A non-perUser KB pins Subject "" (org-wide, unchanged).
 	docs := make([]IngestionDoc, 0, len(infos))
+	var skippedUnattributed int
 	for _, info := range infos {
+		subject := ""
+		if kb.Spec.PerUser {
+			subject = objectstore.SubjectFromKey(ns, kbName, info.Key)
+			if subject == "" {
+				// No recoverable owner on a per-user corpus → do not misattribute; skip this document.
+				skippedUnattributed++
+				continue
+			}
+		}
 		docs = append(docs, IngestionDoc{
 			Key:         info.Key,
 			Filename:    info.Key, // the key's basename drives extraction dispatch when ContentType is generic
 			ContentType: info.ContentType,
+			Subject:     subject,
 		})
+	}
+	if skippedUnattributed > 0 {
+		s.log.Info("ingest: skipped per-user documents with no recoverable owner subject in their key",
+			"ns", ns, "kb", kbName, "skipped", skippedUnattributed)
 	}
 	spec := IngestionSpec{
 		Namespace:      ns,
@@ -779,11 +820,29 @@ func (s *Server) handleSearchKB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// For a PER-USER KB (ADR 0061 Fork 3), scope the console test-query to the CALLER'S OWN subject hash so a
+	// user's test-query retrieves only their own chunks — the exact same server-derived userGrantHash the agent
+	// retrieval path scopes by, and the same hash the upload path stamped. Fail-CLOSED: if the caller identity
+	// cannot be resolved we refuse rather than search under "" (which would leak org-wide/other-user chunks).
+	// An org-wide KB keeps subject "" (unchanged).
+	subject := ""
+	if kb.Spec.PerUser {
+		username, uErr := callerUsername(r.Context(), caller)
+		if uErr != nil {
+			s.log.Error(uErr, "search: resolving caller identity for per-user KB failed", "ns", ns, "kb", kbName)
+			writeError(w, http.StatusForbidden,
+				"per-user KnowledgeBase search requires a resolvable caller identity (the API server returned none)")
+			return
+		}
+		subject = userGrantHash(username)
+	}
+
 	// Build the token-service search request, using the KB's embeddingRoute as the embedding model.
 	// This mirrors the knowledgeSearchRequest shape in internal/credplane/knowledge.go.
 	tsReq := struct {
 		Namespace      string  `json:"namespace"`
 		KnowledgeBase  string  `json:"knowledgeBase"`
+		Subject        string  `json:"subject,omitempty"`
 		Query          string  `json:"query"`
 		TopK           int     `json:"topK,omitempty"`
 		Threshold      float64 `json:"threshold,omitempty"`
@@ -791,6 +850,7 @@ func (s *Server) handleSearchKB(w http.ResponseWriter, r *http.Request) {
 	}{
 		Namespace:      ns,
 		KnowledgeBase:  kbName,
+		Subject:        subject,
 		Query:          req.Query,
 		TopK:           req.TopK,
 		Threshold:      req.Threshold,

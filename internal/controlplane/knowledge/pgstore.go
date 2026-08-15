@@ -206,18 +206,27 @@ func (s *pgStore) UpsertCorpusStatus(ctx context.Context, st CorpusStatus) error
 	if strings.TrimSpace(st.KnowledgeBase) == "" {
 		return fmt.Errorf("knowledge: UpsertCorpusStatus: knowledgeBase is required")
 	}
+	// Per-user storage aggregation (m80.4): a jsonb {subject → bytes} map, empty for org-wide corpora.
+	perSubject := st.SizePerSubject
+	if perSubject == nil {
+		perSubject = map[string]int64{}
+	}
+	perSubjectJSON, mErr := json.Marshal(perSubject)
+	if mErr != nil {
+		return fmt.Errorf("knowledge: marshal size per subject: %w", mErr)
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO knowledge_corpus_status
 			(namespace, knowledge_base, phase, document_count, chunk_count, size_bytes, partial,
-			 ingestion_run_id, last_ingested_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+			 ingestion_run_id, last_ingested_at, size_per_subject, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		ON CONFLICT (namespace, knowledge_base) DO UPDATE SET
 			phase = EXCLUDED.phase, document_count = EXCLUDED.document_count, chunk_count = EXCLUDED.chunk_count,
 			size_bytes = EXCLUDED.size_bytes, partial = EXCLUDED.partial,
 			ingestion_run_id = EXCLUDED.ingestion_run_id, last_ingested_at = EXCLUDED.last_ingested_at,
-			updated_at = now()`,
+			size_per_subject = EXCLUDED.size_per_subject, updated_at = now()`,
 		st.Namespace, st.KnowledgeBase, st.Phase, st.DocumentCount, st.ChunkCount, st.SizeBytes, st.Partial,
-		st.IngestionRunID, st.LastIngestedAt)
+		st.IngestionRunID, st.LastIngestedAt, perSubjectJSON)
 	if err != nil {
 		return fmt.Errorf("knowledge: upsert corpus status %q: %w", st.KnowledgeBase, err)
 	}
@@ -227,15 +236,16 @@ func (s *pgStore) UpsertCorpusStatus(ctx context.Context, st CorpusStatus) error
 // GetCorpusStatus reads the corpus-status row. found=false (zero status, nil error) when no ingestion has run.
 func (s *pgStore) GetCorpusStatus(ctx context.Context, namespace, knowledgeBase string) (CorpusStatus, bool, error) {
 	var (
-		st      CorpusStatus
-		lastIng sql.NullTime
+		st             CorpusStatus
+		lastIng        sql.NullTime
+		perSubjectJSON []byte
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT namespace, knowledge_base, phase, document_count, chunk_count, size_bytes, partial,
-			ingestion_run_id, last_ingested_at, updated_at
+			ingestion_run_id, last_ingested_at, size_per_subject, updated_at
 		FROM knowledge_corpus_status WHERE namespace = $1 AND knowledge_base = $2`,
 		namespace, knowledgeBase).Scan(&st.Namespace, &st.KnowledgeBase, &st.Phase, &st.DocumentCount,
-		&st.ChunkCount, &st.SizeBytes, &st.Partial, &st.IngestionRunID, &lastIng, &st.UpdatedAt)
+		&st.ChunkCount, &st.SizeBytes, &st.Partial, &st.IngestionRunID, &lastIng, &perSubjectJSON, &st.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return CorpusStatus{}, false, nil
 	}
@@ -245,6 +255,15 @@ func (s *pgStore) GetCorpusStatus(ctx context.Context, namespace, knowledgeBase 
 	if lastIng.Valid {
 		t := lastIng.Time.UTC()
 		st.LastIngestedAt = &t
+	}
+	if len(perSubjectJSON) > 0 {
+		var perSubject map[string]int64
+		if err := json.Unmarshal(perSubjectJSON, &perSubject); err != nil {
+			return CorpusStatus{}, false, fmt.Errorf("knowledge: unmarshal size per subject %q: %w", knowledgeBase, err)
+		}
+		if len(perSubject) > 0 {
+			st.SizePerSubject = perSubject
+		}
 	}
 	st.UpdatedAt = st.UpdatedAt.UTC()
 	return st, true, nil
@@ -265,6 +284,38 @@ func (s *pgStore) CountAndSize(ctx context.Context, namespace, knowledgeBase str
 		return 0, 0, fmt.Errorf("knowledge: count and size: %w", err)
 	}
 	return count, size.Int64, nil
+}
+
+// SizePerSubject returns the approximate per-user storage of a corpus grouped by subject (ADR 0061 Fork 3,
+// m80.4). Org-wide chunks (subject = ”) are excluded, so an org-wide corpus yields an empty map; a per-user
+// corpus yields {subjectHash → bytes}. Uses the (namespace, knowledge_base, subject, embedding_model) filter
+// index. sum(octet_length(content)) mirrors CountAndSize's per-corpus size so the two accountings agree.
+func (s *pgStore) SizePerSubject(ctx context.Context, namespace, knowledgeBase string) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT subject, coalesce(sum(octet_length(content)), 0)
+		FROM knowledge_chunks
+		WHERE namespace = $1 AND knowledge_base = $2 AND subject <> ''
+		GROUP BY subject`,
+		namespace, knowledgeBase)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: size per subject: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int64{}
+	for rows.Next() {
+		var (
+			subject string
+			size    int64
+		)
+		if err := rows.Scan(&subject, &size); err != nil {
+			return nil, fmt.Errorf("knowledge: scan size per subject: %w", err)
+		}
+		out[subject] = size
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("knowledge: size per subject rows: %w", err)
+	}
+	return out, nil
 }
 
 // scanChunkRow scans a Search row (18 columns incl. the score) into a Chunk. Embedding stays nil — reads do not

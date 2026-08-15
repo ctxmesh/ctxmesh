@@ -93,17 +93,64 @@ type ObjectStore interface {
 	DeletePrefix(ctx context.Context, prefix string) error
 }
 
-// KnowledgeKey returns the durable object-store key for a named document in a
-// KB. The document name is sanitized: any path separators and ".." components
-// are stripped so a hostile filename cannot traverse outside the KB's prefix.
+// KnowledgeKey returns the durable object-store key for a named document in an
+// ORG-WIDE KB. The document name is sanitized: any path separators and ".."
+// components are stripped so a hostile filename cannot traverse outside the KB's
+// prefix.
 //
 // Format: knowledge/{namespace}/{kb}/{sanitized-document-name}
 func KnowledgeKey(namespace, kb, documentName string) string {
 	return path.Join(knowledgeKeyPrefix, namespace, kb, sanitizeName(documentName))
 }
 
+// KnowledgeKeyForSubject returns the durable object-store key for a named document in a
+// PER-USER KB, nesting the uploading caller's server-derived subject hash as a path
+// segment (m80.4, ADR 0061 Fork 3). This is the transport that carries the subject from
+// the caller-scoped upload endpoint (which knows the caller) to the off-request ingestion
+// executor (which does not re-derive it): SubjectFromKey recovers it at ingest-create.
+//
+// The subject-in-key layout (over S3 user-metadata) is deliberate: (1) user metadata is not
+// portably returned by List on real S3 (ListObjectsV2 omits it), whereas the key always is;
+// (2) a per-user KB where two users upload the same filename must NOT collide on one object
+// key (which would let one user overwrite another's document + attribution) — the subject
+// segment makes each user's namespace physically distinct. The subject is sanitized as a
+// single path segment; a caller CANNOT influence it (it is the un-forgeable userGrantHash,
+// never client-supplied). Org-wide keys (KnowledgeKey) are byte-for-byte unchanged.
+//
+// Format: knowledge/{namespace}/{kb}/{sanitized-subject}/{sanitized-document-name}
+func KnowledgeKeyForSubject(namespace, kb, subject, documentName string) string {
+	return path.Join(knowledgeKeyPrefix, namespace, kb, sanitizeName(subject), sanitizeName(documentName))
+}
+
+// SubjectFromKey recovers the per-user subject a KnowledgeKeyForSubject key nests under, or
+// "" for an org-wide (KnowledgeKey) key. It parses the key against the KB's prefix: a key with
+// EXACTLY one extra path segment before the filename is org-wide (subject ""); a key with TWO
+// extra segments carries the subject as the first of them. Any deeper nesting is rejected (""),
+// so a malformed key can never be misattributed. The caller (ingest-create) is responsible for
+// fail-closed handling when it expected a subject and got "".
+//
+// This is the inverse of the two key builders and never trusts caller input beyond the
+// structural shape; the subject it returns is only ever a value the server itself stamped.
+func SubjectFromKey(namespace, kb, key string) string {
+	prefix := KnowledgePrefix(namespace, kb)
+	rest, ok := strings.CutPrefix(key, prefix)
+	if !ok {
+		return "" // not under this KB's prefix — nothing to recover.
+	}
+	segs := strings.Split(rest, "/")
+	// segs == [filename]            → org-wide (no subject segment).
+	// segs == [subject, filename]   → per-user (subject is the leading segment).
+	if len(segs) == 2 && segs[0] != "" && segs[1] != "" {
+		return segs[0]
+	}
+	return ""
+}
+
 // KnowledgePrefix returns the object-store key prefix for ALL documents in a
-// KB. The prefix is suitable as an argument to List or DeletePrefix.
+// KB (org-wide AND every per-user subtree — the subject segment nests UNDER this
+// prefix, so a single prefix List/DeletePrefix covers both layouts; the finalizer
+// GC and source resolution need no per-layout branch). The prefix is suitable as
+// an argument to List or DeletePrefix.
 //
 // Format: knowledge/{namespace}/{kb}/
 func KnowledgePrefix(namespace, kb string) string {

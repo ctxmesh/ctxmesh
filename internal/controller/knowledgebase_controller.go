@@ -50,6 +50,15 @@ const (
 	reasonKBInvalidEmbedding = "InvalidEmbeddingRoute"
 	reasonKBInvalidChunking  = "InvalidChunking"
 	reasonKBInvalidSource    = "InvalidSource"
+
+	// conditionKBUserStorageSoftCapExceeded is the WARN-only per-user storage soft-cap condition (ADR 0061
+	// Fork 3, m80.4). True when at least one user's ingested bytes in a perUser corpus exceed
+	// spec.userStorageSoftCap; False otherwise. It never blocks ingestion — it mirrors the tenant
+	// corpusBytesSoftCap signal (the ingestion-blocking cap is the tenant hard cap, m80.3).
+	conditionKBUserStorageSoftCapExceeded = "UserStorageSoftCapExceeded"
+
+	reasonKBUserStorageWithinCap   = "WithinCap"
+	reasonKBUserStorageSoftCapOver = "UserOverSoftCap"
 )
 
 // KnowledgeBase.status.phase values the controller writes. Most phases arrive via the corpus-status channel
@@ -341,6 +350,10 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 			changed = true
 		}
 	}
+	// Per-user storage soft-cap condition (ADR 0061 Fork 3, m80.4) — WARN-only, never blocks.
+	if reconcileUserStorageSoftCap(kb, cs) {
+		changed = true
+	}
 	if changed {
 		if err := r.Status().Update(ctx, kb); err != nil {
 			return ctrl.Result{}, fmt.Errorf("projecting corpus status onto %s/%s: %w", kb.Namespace, kb.Name, err)
@@ -349,6 +362,50 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 			"knowledgebase", kb.Name, "phase", cs.Phase, "chunks", cs.ChunkCount)
 	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileUserStorageSoftCap reflects the WARN-only per-user storage soft-cap condition
+// (UserStorageSoftCapExceeded) from the corpus-status per-subject aggregation (ADR 0061 Fork 3, m80.4). It
+// mutates kb.Status.Conditions in place and returns whether anything changed (the caller folds that into its
+// change-guarded Status().Update). It NEVER blocks ingestion — it is a visible signal only, mirroring the
+// tenant corpusBytesSoftCap.
+//
+// Scope discipline (the byte-for-byte-unchanged invariant): the condition is touched ONLY for a perUser corpus
+// with a configured cap (spec.userStorageSoftCap > 0). An org-wide corpus, or a perUser corpus with no cap,
+// never grows this condition — so the !perUser path is unchanged. Once set, the condition transitions
+// True↔False as usage crosses the cap; it is not removed (SetStatusCondition has no delete), which is correct:
+// a KB that ever had a cap keeps reporting its within/over state.
+func reconcileUserStorageSoftCap(kb *agentsv1beta1.KnowledgeBase, cs knowledge.CorpusStatus) bool {
+	softCap := kb.Spec.UserStorageSoftCap
+	if !kb.Spec.PerUser || softCap <= 0 {
+		// No per-user accounting to enforce. Leave the condition untouched (org-wide / uncapped KBs are
+		// byte-for-byte unchanged — they never carry this condition).
+		return false
+	}
+	// Find the worst offender: the user with the most bytes over the cap (deterministic message).
+	var overSubject string
+	var overBytes int64
+	for subject, bytes := range cs.SizePerSubject {
+		if bytes > softCap && bytes > overBytes {
+			overSubject, overBytes = subject, bytes
+		}
+	}
+	status := metav1.ConditionFalse
+	reason := reasonKBUserStorageWithinCap
+	message := fmt.Sprintf("all users are within the per-user storage soft cap (%d bytes)", softCap)
+	if overSubject != "" {
+		status = metav1.ConditionTrue
+		reason = reasonKBUserStorageSoftCapOver
+		message = fmt.Sprintf("user %q holds %d bytes, exceeding the per-user storage soft cap (%d bytes) — "+
+			"WARN only, ingestion is not blocked", overSubject, overBytes, softCap)
+	}
+	return apimeta.SetStatusCondition(&kb.Status.Conditions, metav1.Condition{
+		Type:               conditionKBUserStorageSoftCapExceeded,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: kb.Generation,
+	})
 }
 
 // reconcileStuckIngesting is the terminal-failed SAFETY-NET (ADR 0061 Fork 2, the m68.14 catch-all). It is

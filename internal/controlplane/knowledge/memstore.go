@@ -215,6 +215,9 @@ func (s *memStore) UpsertCorpusStatus(_ context.Context, st CorpusStatus) error 
 		t := st.LastIngestedAt.UTC()
 		stored.LastIngestedAt = &t
 	}
+	// Deep-copy the per-user map so a later caller mutation cannot alias the stored row (pg parity: pg
+	// round-trips through jsonb). An empty/nil map is stored as nil (org-wide corpus carries none).
+	stored.SizePerSubject = cloneSizeMap(st.SizePerSubject)
 	s.status[corpusKey(st.Namespace, st.KnowledgeBase)] = stored
 	return nil
 }
@@ -227,12 +230,37 @@ func (s *memStore) GetCorpusStatus(_ context.Context, namespace, knowledgeBase s
 	if !ok {
 		return CorpusStatus{}, false, nil
 	}
-	out := st // copy; deep-copy the pointer so a caller mutation cannot alias the stored row
+	out := st // copy; deep-copy the pointer + map so a caller mutation cannot alias the stored row
 	if st.LastIngestedAt != nil {
 		t := *st.LastIngestedAt
 		out.LastIngestedAt = &t
 	}
+	out.SizePerSubject = cloneSizeMap(st.SizePerSubject)
 	return out, true, nil
+}
+
+func (s *memStore) SizePerSubject(_ context.Context, namespace, knowledgeBase string) (map[string]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := map[string]int64{}
+	for _, c := range s.rows {
+		if c.Namespace == namespace && c.KnowledgeBase == knowledgeBase && c.Subject != "" {
+			out[c.Subject] += int64(len(c.Content))
+		}
+	}
+	return out, nil
+}
+
+// cloneSizeMap returns a copy of a subject→bytes map, or nil for an empty/nil input (org-wide corpora
+// carry no per-user rows, so the stored value stays nil — pg parity with a '{}' jsonb read back as empty).
+func cloneSizeMap(m map[string]int64) map[string]int64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(m))
+	maps.Copy(out, m)
+	return out
 }
 
 func (s *memStore) CountAndSize(_ context.Context, namespace, knowledgeBase string) (int, int64, error) {
