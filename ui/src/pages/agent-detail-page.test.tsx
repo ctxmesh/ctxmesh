@@ -2035,3 +2035,70 @@ describe("AgentDetailPage (m76.3 U12) — fork lineage", () => {
     expect(screen.queryByTestId("fork-lineage")).toBeNull();
   });
 });
+
+// ── P1-1: publish/share verb coherence — entry button text ────────────────────
+describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
+  function installFetchWithPublish(opts: { publishStatus?: number } = {}) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") {
+          const status = opts.publishStatus ?? 200;
+          return j({ version: "1" }, status < 400, status);
+        }
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("entry button reads 'Share as template' when not yet published", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const btn = screen.getByTestId("publish-agent-button");
+    expect(btn).toHaveTextContent("Share as template");
+  });
+
+  it("entry button reads 'Share new version' after publishing", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // Trigger a publish so publishedState is set.
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("published-badge")).toBeInTheDocument());
+
+    // Entry button should now say "Share new version".
+    expect(screen.getByTestId("publish-agent-button")).toHaveTextContent("Share new version");
+  });
+
+  it("state badge reads 'Published' (state) and Unpublish button reads 'Unpublish' (state)", async () => {
+    installFetchWithPublish();
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+
+    await waitFor(() => expect(screen.getByTestId("published-badge")).toBeInTheDocument());
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("unpublish-agent-button")).toHaveTextContent("Unpublish");
+  });
+});

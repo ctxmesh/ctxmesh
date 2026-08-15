@@ -231,7 +231,7 @@ export function App() {
             {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single
                 discovery surface, which renders its own inline McpCatalogTab). The old
                 standalone mcp-catalog-page was deleted as dead code. */}
-            <Route path="tools/mcp-catalog" element={<Navigate to="/gallery" replace />} />
+            <Route path="tools/mcp-catalog" element={<Navigate to="/gallery?tab=mcp" replace />} />
             {/* m74.6: Template Gallery — agent templates (recipes ∪ published) + MCP catalog in tabs */}
             <Route path="gallery" element={<TemplateGalleryPage />} />
             {/* m15.12: ModelRoute CRUD surfaces */}

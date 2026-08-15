@@ -414,13 +414,28 @@ describe("McpServersPage post-connect row highlight (m76.2 T11)", () => {
 // ── m76.1: empty state cross-link to Gallery ─────────────────────────────────
 // (pins the affordance so m76.2 doesn't re-add it and duplicate the element)
 describe("McpServersPage empty state Gallery cross-link (m76.1)", () => {
-  it("shows a 'discover shared servers' link to /gallery in the empty state", async () => {
+  it("shows a 'discover shared servers' link to /gallery?tab=mcp in the empty state", async () => {
     recordingFetch({ servers: [] });
     renderPage();
 
     const link = await screen.findByTestId("gallery-discover-link");
     expect(link).toBeInTheDocument();
-    expect(link).toHaveAttribute("href", "/gallery");
+    expect(link).toHaveAttribute("href", "/gallery?tab=mcp");
     expect(link).toHaveTextContent("discover shared servers");
+  });
+});
+
+// ── P1-1: MCP share dialog submit button reads "Share" (not "Publish as …") ──
+
+describe("McpServersPage — P1-1 share verb coherence (submit button)", () => {
+  it("BYO submit button reads 'Share' when not busy", async () => {
+    recordingFetch({ servers: [{ ...defaultRow, visibility: "team", credentialSource: "byo-oauth" }] });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId(`share-mcp-${defaultRow.name}`));
+    await screen.findByTestId("share-dialog");
+
+    // In BYO mode (default), the submit button must say "Share" not "Publish as team".
+    expect(screen.getByTestId("share-submit")).toHaveTextContent("Share");
   });
 });

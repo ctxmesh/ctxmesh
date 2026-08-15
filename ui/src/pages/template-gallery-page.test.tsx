@@ -887,3 +887,47 @@ describe("TemplateGalleryPage (m76.3 U12) — per-entry spinner, key, verb/icon"
     expect(screen.getByTestId(`fork-template-${defaultPublished.name}`)).toBeDisabled();
   });
 });
+
+// ── P1-3: ?tab= deep-link opens the correct tab ───────────────────────────────
+
+function renderPageAt(path: string, onLocation?: (loc: string, state?: unknown) => void) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <ToastProvider>
+        {onLocation && (
+          <Routes>
+            <Route path="*" element={<LocationSpy onLocation={onLocation} />} />
+          </Routes>
+        )}
+        <TemplateGalleryPage />
+      </ToastProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe("TemplateGalleryPage — P1-3 ?tab= deep-link (m76 close)", () => {
+  it("?tab=mcp opens the Shared-servers (MCP) tab", () => {
+    makeFetch();
+    renderPageAt("/gallery?tab=mcp");
+
+    // The MCP tab should be active (aria-selected=true).
+    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("no ?tab= param defaults to the Agent Templates tab", () => {
+    makeFetch();
+    renderPageAt("/gallery");
+
+    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("?tab=templates opens the Agent Templates tab explicitly", () => {
+    makeFetch();
+    renderPageAt("/gallery?tab=templates");
+
+    expect(screen.getByTestId("gallery-tab-templates")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("gallery-tab-mcp")).toHaveAttribute("aria-selected", "false");
+  });
+});

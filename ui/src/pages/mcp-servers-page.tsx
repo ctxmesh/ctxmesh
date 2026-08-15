@@ -143,7 +143,7 @@ export function McpServersPage() {
           description={
             <>
               Add your own MCP server, or{" "}
-              <Link to="/gallery" className="underline underline-offset-2 hover:text-foreground" data-testid="gallery-discover-link">
+              <Link to="/gallery?tab=mcp" className="underline underline-offset-2 hover:text-foreground" data-testid="gallery-discover-link">
                 discover shared servers
               </Link>{" "}
               in the Gallery and connect one to your namespace.
@@ -581,10 +581,10 @@ function ShareDialog({
           >
             {busy
               ? mode === "byo"
-                ? "Publishing…"
+                ? "Sharing…"
                 : "Setting…"
               : mode === "byo"
-              ? `Publish as ${selected}`
+              ? "Share"
               : "Set org credential"}
           </Button>
         </div>
