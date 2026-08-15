@@ -170,6 +170,14 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 			execCtx = contextWithRunCapability(execCtx, token)
 		}
 	}
+	// Record mode (M78, ADR 0071 §1): when this run opted into record capture, carry its id on the
+	// exec context so the invoke adapter stamps X-Ctxmesh-Record: <runId> — the SDK relays it on each
+	// model call and the launcher gateway captures the run's model I/O into a fixture. The C2
+	// enablement gate (agent must be record-capable) was enforced at create time. Non-recorded ⇒ no
+	// header, byte-for-byte unchanged.
+	if rn.Record {
+		execCtx = contextWithRecord(execCtx, rn.ID)
+	}
 
 	// Renew the lease periodically while executing. If the lease is lost (a slow heartbeat let a
 	// peer reclaim us) the heartbeat loop stops — the run continues here, and the idempotency key

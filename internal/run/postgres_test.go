@@ -146,6 +146,28 @@ func TestPostgresStore_RoundTripsOutputSchema(t *testing.T) {
 	assert.Equal(t, "", got2.OutputSchema, "absent output_schema must load as empty string")
 }
 
+// TestPostgresStore_RoundTripsRecord proves the M78 record column (ADR 0071) persists + reloads, and
+// that a run created without the opt-in loads as false — the record trigger survives the durable
+// store so the run-worker / launcher-config path (m78.2/m78.3) can read it off a reloaded run.
+func TestPostgresStore_RoundTripsRecord(t *testing.T) {
+	s := openPGStore(t)
+
+	// Run opted into record mode.
+	rec := New("record-run", "ns", "agent-x", nil, "", t0)
+	rec.Record = true
+	require.NoError(t, s.Create(rec))
+	got, err := s.Get("record-run")
+	require.NoError(t, err)
+	assert.True(t, got.Record, "Record=true must survive a Postgres round-trip")
+
+	// Run not opted in loads as false (the default).
+	plain := New("plain-run", "ns", "agent-x", nil, "", t0)
+	require.NoError(t, s.Create(plain))
+	got2, err := s.Get("plain-run")
+	require.NoError(t, err)
+	assert.False(t, got2.Record, "a non-recorded run must load as Record=false")
+}
+
 // TestPostgresStore_RoundTripsSpawnLineage proves the M64 spawn-lineage columns (parent/root/depth)
 // persist + reload, and that the deterministic sub-run id gives idempotent Create (a reclaimed
 // supervisor re-issuing the same delegate_to collapses to one sub-run, not two).

@@ -227,7 +227,15 @@ func (r *MCPToolBindingReconciler) syncAgent(
 
 	// ── Manifest render (valid bindings only) ────────────────────────────────
 	manifest, _ := toolmanifest.Render(valid)
-	if r.OBOEgress.Enabled {
+	// Record mode (M78, ADR 0071 §1/C1) supersedes OBO-only rewrite: a RECORD-CAPABLE agent
+	// (spec.record) fronts EVERY tool through the egress sidecar so ALL tool I/O passes the
+	// capture seam — RewriteAllForEgress rewrites all endpoints (OBO tools keep their ServerName
+	// route). Otherwise, when OBO egress is on, only remote OBO endpoints are rewritten. A
+	// non-record-capable agent with OBO off keeps the verbatim manifest (byte-for-byte).
+	switch {
+	case r.recordCapable(ctx, namespace, agentName):
+		manifest, _ = toolmanifest.RewriteAllForEgress(manifest, valid, egressSidecarBaseURL)
+	case r.OBOEgress.Enabled:
 		// OBO egress (ADR 0030): redirect remote tool endpoints through the per-pod
 		// egress sidecar so the agent never holds the real MCP URL or the credential.
 		manifest, _ = toolmanifest.RewriteRemoteForEgress(manifest, valid, egressSidecarBaseURL)
@@ -242,6 +250,21 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	r.pushToReadyPods(ctx, namespace, agentName, manifest)
 
 	return ctrl.Result{}, nil
+}
+
+// recordCapable reports whether the agent is RECORD-CAPABLE (spec.record, M78 ADR 0071 §1/C1) —
+// the gate for fronting EVERY tool through the egress sidecar so all tool I/O is captured. It reads
+// the AgentDeployment; a missing agent (a binding created before its agent) or a read error is
+// treated as NOT record-capable (best-effort — the AgentDeployment reconciler is the single writer
+// of the pod template and re-converges the manifest on the next event, so a transient miss here
+// self-heals rather than fronting nothing). This keeps the binding controller in sync with the
+// deployment controller's own recordCapable gate (both read spec.record).
+func (r *MCPToolBindingReconciler) recordCapable(ctx context.Context, namespace, agentName string) bool {
+	var agent agentsv1alpha1.AgentDeployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); err != nil {
+		return false
+	}
+	return agent.Spec.Record
 }
 
 // writeBindingStatuses sets the Ready condition on each of the agent's bindings

@@ -251,6 +251,28 @@ func TestInvokeAdapterAttachesConversationHeader(t *testing.T) {
 	assert.Empty(t, gotConv, "no conversation id on the context ⇒ no header (single-shot run)")
 }
 
+// TestInvokeAdapterAttachesRecordHeader proves the adapter stamps the per-run record-mode capture
+// toggle (M78, ADR 0071 §1) as X-Ctxmesh-Record: <runId> when the run is being recorded, and
+// attaches NO header for a normal (non-recorded) run.
+func TestInvokeAdapterAttachesRecordHeader(t *testing.T) {
+	var gotRecord string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRecord = r.Header.Get(hdrRecord)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithRecord(context.Background(), "run-rec-1"), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "run-rec-1", gotRecord, "the adapter stamps X-Ctxmesh-Record from the context for a recorded run")
+
+	gotRecord = ""
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, gotRecord, "no record id on the context ⇒ no header (non-recorded run)")
+}
+
 // TestInvokeAdapterAttachesSpawnHeaders proves the adapter forwards a run's spawn-tree position
 // (M64) as X-Ctxmesh-Spawn-Root/Depth when present, and attaches none for a plain (non-spawn) run.
 func TestInvokeAdapterAttachesSpawnHeaders(t *testing.T) {
@@ -583,6 +605,61 @@ func TestHTTPInvokeAdapterInjectsTraceparentAndReturnsTraceID(t *testing.T) {
 	assert.Len(t, traceID, 32, "trace id is 16 bytes / 32 hex chars")
 	assert.Contains(t, gotTraceparent, traceID, "the returned traceId is what was injected as traceparent")
 	assert.True(t, len(gotTraceparent) > 0 && gotTraceparent[:3] == "00-", "W3C traceparent version 00")
+}
+
+// TestHTTPInvokeStreamParsesTokenAndStepFrames proves InvokeStream forwards each SSE `token`
+// frame to onToken and each `step` metadata frame's RAW JSON payload verbatim to onStep (M78,
+// ADR 0071 §4 — live step-visibility), then returns the terminal `done` envelope. The adapter
+// does not re-parse the step shape — the exact bytes the agent streamed reach onStep.
+func TestHTTPInvokeStreamParsesTokenAndStepFrames(t *testing.T) {
+	stepModel := `{"type":"step","step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}`
+	stepTool := `{"type":"step","step":1,"kind":"tool","tool":"echo_tool","tokens":{"prompt":0,"completion":0},"ref":{"channel":"tool","index":0}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// A model token, the two step frames, another token, then the terminal done envelope.
+		_, _ = w.Write([]byte("data: {\"type\":\"token\",\"text\":\"Hel\"}\n\n"))
+		_, _ = w.Write([]byte("data: " + stepModel + "\n\n"))
+		_, _ = w.Write([]byte("data: " + stepTool + "\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"token\",\"text\":\"lo\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"done\",\"output\":\"Hello\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+	sa, ok := a.(StreamingInvokeAdapter)
+	require.True(t, ok, "the http invoke adapter implements StreamingInvokeAdapter")
+
+	var tokens, steps []string
+	final, traceID, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{"input":"hi"}`),
+		func(text string) { tokens = append(tokens, text) },
+		func(stepJSON string) { steps = append(steps, stepJSON) },
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"Hel", "lo"}, tokens, "each token frame's text reached onToken")
+	// onStep received each step frame's raw JSON payload VERBATIM (the BFF does not re-parse it).
+	require.Equal(t, []string{stepModel, stepTool}, steps)
+	assert.Contains(t, string(final), "Hello", "the terminal done envelope is returned")
+	assert.NotEmpty(t, traceID)
+}
+
+// TestHTTPInvokeStreamToleratesNilOnStep proves a streaming caller that passes a nil onStep (a
+// path that does not want step events) does not panic when the agent streams `step` frames.
+func TestHTTPInvokeStreamToleratesNilOnStep(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"step\",\"step\":1,\"kind\":\"model\",\"ref\":null}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"done\",\"output\":\"ok\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+	sa := a.(StreamingInvokeAdapter)
+	final, _, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{}`), nil, nil)
+	require.NoError(t, err)
+	assert.Contains(t, string(final), "ok")
 }
 
 // TestHTTPInvokeAdapterSurfacesNon2xx proves a non-2xx agent response is returned

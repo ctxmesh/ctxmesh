@@ -203,7 +203,7 @@ func TestResolveDevFlags(t *testing.T) {
 func TestBuildDevPlan_RouteDefaulting(t *testing.T) {
 	t.Run("uses agent.yaml route when set", func(t *testing.T) {
 		dy := &devYAML{Name: "a", Image: "img:1", Model: &modelYAML{Route: "gpt4"}}
-		plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock})
+		plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -217,7 +217,7 @@ func TestBuildDevPlan_RouteDefaulting(t *testing.T) {
 
 	t.Run("defaults route when absent", func(t *testing.T) {
 		dy := &devYAML{Name: "a", Image: "img:1"}
-		plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock})
+		plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestBuildDevPlan_RouteDefaulting(t *testing.T) {
 
 	t.Run("invoke URL reflects port", func(t *testing.T) {
 		dy := &devYAML{Name: "a", Image: "img:1"}
-		plan, err := buildDevPlan(dy, devFlags{Port: 9191, Provider: providerMock})
+		plan, err := buildDevPlan(dy, devFlags{Port: 9191, Provider: providerMock}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -291,7 +291,7 @@ func TestRenderGatewayConfig_Real_RequiresModel(t *testing.T) {
 
 func TestRenderCompose_FullContract(t *testing.T) {
 	dy := &devYAML{Name: "echo", Image: "echo-agent:latest", Model: &modelYAML{Route: "gpt4"}}
-	plan, err := buildDevPlan(dy, devFlags{Port: 8085, Provider: providerMock})
+	plan, err := buildDevPlan(dy, devFlags{Port: 8085, Provider: providerMock}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestRenderCompose_FullContract(t *testing.T) {
 
 func TestRenderCompose_MockModeHasNoProviderKeyEnv(t *testing.T) {
 	dy := &devYAML{Name: "echo", Image: "echo:latest"}
-	plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock})
+	plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestRenderCompose_RealModeInjectsKeyIntoGatewayOnly(t *testing.T) {
 	dy := &devYAML{Name: "echo", Image: "echo:latest"}
 	plan, err := buildDevPlan(dy, devFlags{
 		Port: 8080, Provider: providerReal, RealModel: "openai/gpt-4o-mini", RealAPIKey: "sk-x",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -378,6 +378,91 @@ func TestRenderCompose_RealModeInjectsKeyIntoGatewayOnly(t *testing.T) {
 	if strings.Contains(agentBlock, "DEV_PROVIDER_KEY") {
 		t.Errorf("provider key must not be on the agent service:\n%s", agentBlock)
 	}
+}
+
+// ── renderCompose (replay mode) ────────────────────────────────────────────────
+
+// TestRenderCompose_ReplaySwapsGatewayAndRewritesTools proves that in replay mode renderCompose
+// swaps the LiteLLM gateway service for the replay-serve mock UNDER THE SAME `gateway` service
+// name + internal port (so MODEL_GATEWAY_URL is unchanged), and the discovery manifest points the
+// fixture's tools at the replay mock's /mcp channel (ADR 0071 §3a).
+func TestRenderCompose_ReplaySwapsGatewayAndRewritesTools(t *testing.T) {
+	dy := &devYAML{Name: "planner", Image: "planner:latest"}
+	plan, err := buildDevPlan(dy, devFlags{Port: 8080, Provider: providerMock, ReplayFixture: "/some/fixture.json"},
+		[]string{"search", "send_email"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	compose := plan.ComposeYAML
+
+	// Valid YAML.
+	var parsed map[string]any
+	if uErr := yaml.Unmarshal([]byte(compose), &parsed); uErr != nil {
+		t.Fatalf("rendered replay compose is not valid YAML: %v\n%s", uErr, compose)
+	}
+
+	// The gateway service is swapped for the replay image + replay-serve command; the LiteLLM
+	// image is GONE.
+	if !strings.Contains(compose, "agent-engine-replay:") {
+		t.Errorf("replay compose should use the replay image:\n%s", compose)
+	}
+	if strings.Contains(compose, litellmImage) {
+		t.Errorf("replay compose must NOT keep the LiteLLM gateway image:\n%s", compose)
+	}
+	if !strings.Contains(compose, `"replay-serve"`) {
+		t.Errorf("replay compose should run the replay-serve command:\n%s", compose)
+	}
+	if !strings.Contains(compose, replayFixtureMountPath) {
+		t.Errorf("replay compose should mount the fixture at %s:\n%s", replayFixtureMountPath, compose)
+	}
+
+	// The model channel is UNCHANGED — the agent still points at http://gateway:4000/v1.
+	if !strings.Contains(compose, `MODEL_GATEWAY_URL: "http://gateway:4000/v1"`) {
+		t.Errorf("replay compose must keep MODEL_GATEWAY_URL on the same gateway host:\n%s", compose)
+	}
+
+	// The agent must not restart (a restart must surface as index-overflow, not double-consume).
+	agentStart := strings.Index(compose, "  agent:")
+	gatewayStart := strings.Index(compose, "  gateway:")
+	agentBlock := compose[agentStart:gatewayStart]
+	if !strings.Contains(agentBlock, `restart: "no"`) {
+		t.Errorf("agent must be restart: \"no\" in replay mode:\n%s", agentBlock)
+	}
+
+	// The discovery manifest lists the fixture's tools pointing at the replay /mcp channel.
+	if !strings.Contains(plan.ToolsJSON, replayToolEndpoint()) {
+		t.Errorf("tools.json should point tools at the replay /mcp endpoint %q:\n%s",
+			replayToolEndpoint(), plan.ToolsJSON)
+	}
+	for _, name := range []string{"search", "send_email"} {
+		if !strings.Contains(plan.ToolsJSON, `"`+name+`"`) {
+			t.Errorf("tools.json should advertise recorded tool %q:\n%s", name, plan.ToolsJSON)
+		}
+	}
+}
+
+// TestRenderReplayToolsJSON_DedupesAndEmpty proves the replay manifest render dedupes tool names
+// and yields the empty manifest for a fixture with no tools.
+func TestRenderReplayToolsJSON_DedupesAndEmpty(t *testing.T) {
+	if got := renderReplayToolsJSON(nil); !strings.Contains(got, `"tools":[]`) {
+		t.Errorf("no tools should render the empty manifest, got %q", got)
+	}
+	got := renderReplayToolsJSON([]string{"search", "search", "  ", "fetch"})
+	if strings.Count(got, `"name":"search"`) != 1 {
+		t.Errorf("duplicate tool names should be deduped:\n%s", got)
+	}
+	if !strings.Contains(got, `"name":"fetch"`) {
+		t.Errorf("expected 'fetch' in the manifest:\n%s", got)
+	}
+}
+
+// TestResolveDevFlags_ReplayRejectsRealProvider proves --replay + --provider real is rejected.
+func TestResolveDevFlags_ReplayRejectsRealProvider(t *testing.T) {
+	_, err := resolveDevFlags(devFlagValues{
+		port: 8080, provider: "real", replay: "/tmp/fixture.json",
+		realModel: "openai/gpt-4o-mini", keyEnv: "X",
+	})
+	assertValidationErr(t, err)
 }
 
 // ── composeEnv ────────────────────────────────────────────────────────────────

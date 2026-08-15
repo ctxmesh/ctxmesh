@@ -111,6 +111,9 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS spawn_depth   integer NOT NULL DEFAULT
 -- Output schema (M65, ADR 0058): the agent's spec.runtime.outputSchema pinned at create time.
 -- NULL / absent ⇒ no schema (backward-compat: old rows load as "").
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS output_schema text;
+-- Record mode (M78, ADR 0071 §1/§2): a run-scoped opt-in into record/replay capture. Default false
+-- ⇒ a normal (non-recorded) run, so old rows load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS record boolean NOT NULL DEFAULT false;
 -- Workflow instance + wait record (M67, ADR 0060): a workflow instance run pins its WorkflowRef +
 -- resolved SpecSnapshot + per-node Cursor; a waiting run parks on wait_on children under wait_mode.
 -- wait_on is a JSON array of child ids (stored as text/JSON, matching the messages/requires_action
@@ -198,16 +201,16 @@ func (p *pgStore) Create(r *Run) error {
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		 parent_run_id, root_run_id, spawn_depth, output_schema,
+		 parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
 		 node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,1,$33,$34)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,1,$34,$35)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
-		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema),
+		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema), r.Record,
 		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo, r.HandoffSourceRunID,
 		nodeEndpoints, r.IngestionRef, r.IngestionSpec, r.Outcome, r.ExportRef, r.ExportSpec, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
@@ -272,7 +275,7 @@ func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
 	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
-		parent_run_id, root_run_id, spawn_depth, output_schema,
+		parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
 		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec, version, created_at, updated_at
 		FROM runs WHERE id=$1`
@@ -294,7 +297,7 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 	err := q.QueryRowContext(ctx, sel, id).Scan(
 		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
-		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema,
+		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema, &r.Record,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
 		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &r.ExportRef, &r.ExportSpec, &version, &created, &updated)
 	switch {

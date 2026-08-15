@@ -23,11 +23,14 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ctxmesh/agent-engine/internal/toolmanifest"
 )
 
 // ── Substrate choice (documented) ─────────────────────────────────────────────
@@ -86,7 +89,31 @@ const (
 	// projectName is the Compose project name — namespaces all containers/networks
 	// so `dev` never collides with the user's other stacks and teardown is scoped.
 	projectName = "agent-engine-dev"
+
+	// replayFixtureMountPath is where `dev --replay` bind-mounts the operator's local
+	// fixture (file or dir) INSIDE the swapped gateway container. replay-serve loads
+	// the fixture from here.
+	replayFixtureMountPath = "/fixture"
+
+	// replayReportHostPort is the host port the swapped gateway (replay-serve) publishes
+	// its internal :4000 on in replay mode, so the CLI on the host can GET
+	// /replay/report and /replay/version after the agent run (ADR 0071 §3a). It is a
+	// high, uncommon port to avoid clashing with the agent's published /invoke port.
+	replayReportHostPort = 4010
 )
+
+// devVersion is the CLI version, mirrored to the replay image tag + checked against the
+// replay-serve container's reported version at startup (ADR 0071 §3a parity gate). Overridable at
+// build time via -ldflags "-X main.devVersion=<v>"; "m78-smoke" locally so the default
+// Dockerfile.replay build + the CLI agree out of the box.
+var devVersion = "m78-smoke"
+
+// replayImageRef is the replay-serve image `dev --replay` swaps the gateway for (built by
+// Dockerfile.replay; the established per-binary image pattern — Dockerfile.{launcher,bff,
+// egress-sidecar,…}). Tagged to the CLI's own version (devVersion) so a stale image is caught at
+// startup by the /replay/version parity check (ADR 0071 §3a). No existing image ships the
+// agent-engine CLI, so this is a new but pattern-consistent image.
+func replayImageRef() string { return "agent-engine-replay:" + devVersion }
 
 // providerMode selects the gateway backend.
 type providerMode string
@@ -113,6 +140,13 @@ type devFlags struct {
 	// RealModel is the upstream model id for the real provider (e.g.
 	// "openai/gpt-4o-mini"). Required with --provider real.
 	RealModel string
+	// ReplayFixture is the path to a recorded fixture (a single merged fixture JSON
+	// file OR a directory of partial *.json blobs) to replay. When set, `dev` runs in
+	// REPLAY mode (ADR 0071 §3a): the gateway service is swapped for the both-channel
+	// replay mock (replay-serve) and the agent's tool endpoints are rewritten to hit
+	// its /mcp channel, so both the model + tool channels come from the fixture — fully
+	// deterministic, zero cluster deps. Mutually exclusive with --provider real.
+	ReplayFixture string
 }
 
 // devPlan is the fully-resolved plan for a dev run: the parsed agent, the
@@ -129,14 +163,23 @@ type devPlan struct {
 	HostPort int
 	// Provider is the resolved gateway mode.
 	Provider providerMode
+	// Replay, when non-empty, is the container path the replay-serve mock loads the
+	// fixture from (the fixture is bind-mounted into the swapped gateway service). Its
+	// presence flips renderCompose into REPLAY mode (ADR 0071 §3a).
+	Replay string
 	// ComposeYAML is the rendered docker-compose.yaml content.
 	ComposeYAML string
 	// GatewayConfigYAML is the rendered LiteLLM config.yaml (the mock or real route).
 	GatewayConfigYAML string
-	// ToolsJSON is the tools.json served by the discovery sidecar (empty manifest
-	// in dev — the discovery contract is present so agents that read :2999 work).
+	// ToolsJSON is the tools.json served by the discovery sidecar. In normal dev it is
+	// the empty manifest; in replay mode it lists the fixture's recorded tools with
+	// endpoints pointing at the replay mock's /mcp channel (so the agent's tool calls
+	// are served from the fixture).
 	ToolsJSON string
 }
+
+// IsReplay reports whether this plan runs in replay mode (ADR 0071 §3a).
+func (p *devPlan) IsReplay() bool { return p.Replay != "" }
 
 // InvokeURL is the local /invoke endpoint the agent answers on.
 func (p *devPlan) InvokeURL() string {
@@ -174,26 +217,42 @@ func parseDevYAML(raw []byte) (*devYAML, error) {
 // buildDevPlan turns a parsed agent.yaml + resolved flags into a devPlan. Pure:
 // no filesystem, no Docker. It resolves the route, renders the gateway config
 // (mock or real) and the Compose file, and returns the plan.
-func buildDevPlan(dy *devYAML, flags devFlags) (*devPlan, error) {
+//
+// replayToolNames is the set of tool names recorded in the fixture (empty unless
+// flags.ReplayFixture is set). In replay mode the plan renders tools.json to list
+// these tools with endpoints pointing at the replay mock's /mcp channel, so the
+// discovery sidecar advertises exactly the fixture's tools and the agent's tool
+// calls are served from the recording (ADR 0071 §3a). The caller (dev.go) loads
+// the fixture and passes the names, keeping buildDevPlan pure.
+func buildDevPlan(dy *devYAML, flags devFlags, replayToolNames []string) (*devPlan, error) {
 	route := defaultRoute
 	if dy.Model != nil && strings.TrimSpace(dy.Model.Route) != "" {
 		route = strings.TrimSpace(dy.Model.Route)
 	}
 
-	gatewayCfg, err := renderGatewayConfig(route, flags)
-	if err != nil {
-		return nil, err
+	plan := &devPlan{
+		AgentName: dy.Name,
+		Image:     dy.Image,
+		Route:     route,
+		HostPort:  flags.Port,
+		Provider:  flags.Provider,
+		ToolsJSON: emptyToolsJSON,
 	}
 
-	plan := &devPlan{
-		AgentName:         dy.Name,
-		Image:             dy.Image,
-		Route:             route,
-		HostPort:          flags.Port,
-		Provider:          flags.Provider,
-		GatewayConfigYAML: gatewayCfg,
-		ToolsJSON:         emptyToolsJSON,
+	if flags.ReplayFixture != "" {
+		// Replay mode: the gateway is swapped for replay-serve (both channels from the
+		// fixture); no LiteLLM config is rendered, and tools.json lists the fixture's
+		// tools pointing at the replay mock's /mcp channel.
+		plan.Replay = replayFixtureMountPath
+		plan.ToolsJSON = renderReplayToolsJSON(replayToolNames)
+	} else {
+		gatewayCfg, err := renderGatewayConfig(route, flags)
+		if err != nil {
+			return nil, err
+		}
+		plan.GatewayConfigYAML = gatewayCfg
 	}
+
 	plan.ComposeYAML = renderCompose(plan)
 	return plan, nil
 }
@@ -202,6 +261,44 @@ func buildDevPlan(dy *devYAML, flags devFlags) (*devPlan, error) {
 // reads :2999 gets a valid (empty) manifest — the discovery contract is present
 // locally exactly as it is in-cluster before any ToolBinding is reconciled.
 const emptyToolsJSON = `{"version":"0","tools":[]}` + "\n"
+
+// replayToolEndpoint is the MCP endpoint the discovery sidecar advertises for a replayed tool: the
+// swapped `gateway` service's /mcp channel (the model channel stays on the same host at /v1, per
+// ADR 0071 §3a "keep the model channel on the existing gateway hostname"). Reachable over the
+// compose network by service name — never loopback, so no Linux-CI host-gateway trap.
+func replayToolEndpoint() string {
+	return fmt.Sprintf("http://gateway:%d/mcp", gatewayInternalPort)
+}
+
+// renderReplayToolsJSON renders the discovery sidecar's tools.json for replay mode: one remote,
+// streamable-http tool per recorded tool name, all pointing at the replay mock's /mcp endpoint.
+// The version is content-addressed via the toolmanifest normalizer so identical tool sets render
+// identically (deterministic golden output). An empty name list renders the empty manifest (a
+// fixture with no tool interactions).
+func renderReplayToolsJSON(names []string) string {
+	seen := map[string]bool{}
+	tools := make([]toolmanifest.Tool, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		tools = append(tools, toolmanifest.Tool{
+			Name:      n,
+			Mode:      "remote",
+			Endpoint:  replayToolEndpoint(),
+			Transport: toolmanifest.Transport,
+		})
+	}
+	m := toolmanifest.Normalize(toolmanifest.Manifest{Tools: tools})
+	b, err := json.Marshal(m)
+	if err != nil {
+		// Tools carry only strings — Marshal cannot fail; fall back to the empty manifest.
+		return emptyToolsJSON
+	}
+	return string(b) + "\n"
+}
 
 // renderGatewayConfig renders the LiteLLM config.yaml for the gateway service.
 //
@@ -290,21 +387,25 @@ func renderCompose(p *devPlan) string {
 	b.WriteString("      - discovery\n")
 	b.WriteString("    restart: \"no\"\n")
 
-	// ── gateway (mock or real LiteLLM) ─────────────────────────────────────────
-	b.WriteString("  gateway:\n")
-	fmt.Fprintf(&b, "    image: %s\n", litellmImage)
-	b.WriteString("    command: [\"--config\", \"/etc/litellm/config.yaml\", \"--port\", \"4000\"]\n")
-	b.WriteString("    volumes:\n")
-	b.WriteString("      - ./gateway-config.yaml:/etc/litellm/config.yaml:ro\n")
-	if p.Provider == providerReal {
-		// The real key is injected from the host env into the gateway container
-		// ONLY (never the agent), matching the in-cluster invariant that provider
-		// keys live only on the gateway pod. Compose reads DEV_PROVIDER_KEY from the
-		// host environment at `up` time.
-		b.WriteString("    environment:\n")
-		b.WriteString("      DEV_PROVIDER_KEY: ${DEV_PROVIDER_KEY:?set DEV_PROVIDER_KEY for --provider real}\n")
+	// ── gateway (mock/real LiteLLM — or the replay mock in --replay mode) ────────
+	if p.IsReplay() {
+		renderReplayGatewayService(&b, p)
+	} else {
+		b.WriteString("  gateway:\n")
+		fmt.Fprintf(&b, "    image: %s\n", litellmImage)
+		b.WriteString("    command: [\"--config\", \"/etc/litellm/config.yaml\", \"--port\", \"4000\"]\n")
+		b.WriteString("    volumes:\n")
+		b.WriteString("      - ./gateway-config.yaml:/etc/litellm/config.yaml:ro\n")
+		if p.Provider == providerReal {
+			// The real key is injected from the host env into the gateway container
+			// ONLY (never the agent), matching the in-cluster invariant that provider
+			// keys live only on the gateway pod. Compose reads DEV_PROVIDER_KEY from the
+			// host environment at `up` time.
+			b.WriteString("    environment:\n")
+			b.WriteString("      DEV_PROVIDER_KEY: ${DEV_PROVIDER_KEY:?set DEV_PROVIDER_KEY for --provider real}\n")
+		}
+		b.WriteString("    restart: \"no\"\n")
 	}
-	b.WriteString("    restart: \"no\"\n")
 
 	// ── memory (Valkey) ────────────────────────────────────────────────────────
 	b.WriteString("  memory:\n")
@@ -328,6 +429,24 @@ func renderCompose(p *devPlan) string {
 // Makefile docker-build-discovery target). `dev` requires it to be built locally
 // (documented in the command help + the preflight in dev.go).
 const discoveryImageRef = "dev.local/agent-discovery:0.1.0"
+
+// renderReplayGatewayService renders the swapped `gateway` service for replay mode (ADR 0071
+// §3a): the replay-serve container under the SAME service name + internal port 4000, so the
+// agent's MODEL_GATEWAY_URL (http://gateway:4000/v1) is unchanged and its tool endpoints resolve
+// to http://gateway:4000/mcp — BOTH channels served from the fixture by one process. The fixture
+// (file or dir) is bind-mounted at /fixture (replayFixtureMountPath) from the work dir, where
+// writePlanAssets stages it. restart: "no" so a replay-serve crash surfaces rather than looping.
+func renderReplayGatewayService(b *strings.Builder, _ *devPlan) {
+	b.WriteString("  gateway:\n")
+	fmt.Fprintf(b, "    image: %s\n", replayImageRef())
+	fmt.Fprintf(b, "    command: [\"replay-serve\", %q, \"--port\", \"%d\"]\n",
+		replayFixtureMountPath, gatewayInternalPort)
+	// Publish :4000 so the host CLI can GET /replay/report + /replay/version after the run.
+	fmt.Fprintf(b, "    ports:\n      - \"%d:%d\"\n", replayReportHostPort, gatewayInternalPort)
+	b.WriteString("    volumes:\n")
+	fmt.Fprintf(b, "      - ./fixture:%s:ro\n", replayFixtureMountPath)
+	b.WriteString("    restart: \"no\"\n")
+}
 
 // writeSortedEnv writes an "environment:" map as sorted "KEY: \"value\"" lines
 // (deterministic output for golden tests).

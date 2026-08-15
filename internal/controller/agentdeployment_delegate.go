@@ -90,7 +90,7 @@ func delegateEnv(team *agentsv1beta1.AgentTeam) []corev1.EnvVar {
 	rosterJSON, _ := json.Marshal(roster) // a []map[string]string never fails to marshal
 
 	return []corev1.EnvVar{
-		{Name: "DELEGATE_ENABLED", Value: "true"},
+		{Name: "DELEGATE_ENABLED", Value: gatewaySyncValue},
 		{Name: "DELEGATE_ROSTER", Value: string(rosterJSON)},
 		{Name: "SPAWN_MAX_FANOUT", Value: strconv.Itoa(fanOut)},
 		{Name: "SPAWN_MAX_DEPTH", Value: strconv.Itoa(depth)},

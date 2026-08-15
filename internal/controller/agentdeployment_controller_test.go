@@ -514,6 +514,106 @@ func TestReconcile_BudgetInjection(t *testing.T) {
 	}
 }
 
+// TestReconcile_RecordCapableInjection proves the M78 record-mode interposition reason (ADR 0071
+// §1): a record-capable agent (spec.record=true) — with NO budget/quota/guardrail — still gets the
+// launcher gateway forced on (MODEL_GATEWAY_URL → the in-pod proxy, real LiteLLM as
+// GATEWAY_UPSTREAM_URL), plus RECORD_CAPABLE=true and the durable object-store env (the fixture
+// sink). All static (no valueFrom, the Knative landmine).
+func TestReconcile_RecordCapableInjection(t *testing.T) {
+	const (
+		name      = "record-agent"
+		namespace = "default"
+	)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image:  "ghcr.io/ctxmesh/example-agent:latest",
+			Record: true,
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	require.GreaterOrEqual(t, len(ksvc.Spec.Template.Spec.Containers), 1)
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+
+	envMap := make(map[string]corev1.EnvVar, len(userContainer.Env))
+	for _, e := range userContainer.Env {
+		envMap[e.Name] = e
+	}
+
+	// The gateway is forced on by the record-mode reason — with NO budget/quota/guardrail set.
+	assert.Equal(t, "http://localhost:2996", envMap["MODEL_GATEWAY_URL"].Value,
+		"a record-capable agent must route its LLM calls THROUGH the gateway so it can be captured")
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["GATEWAY_UPSTREAM_URL"].Value, "the real LiteLLM address travels as GATEWAY_UPSTREAM_URL")
+
+	// The record-mode env flips the launcher's record capture on.
+	require.Contains(t, envMap, "RECORD_CAPABLE")
+	assert.Equal(t, "true", envMap["RECORD_CAPABLE"].Value)
+
+	// The durable object store (the fixture sink) is injected for a record-capable agent even when it
+	// is not a registry member.
+	require.Contains(t, envMap, "OBJECT_STORE_ADDR")
+	assert.NotEmpty(t, envMap["OBJECT_STORE_ADDR"].Value)
+
+	// Exactly ONE OBJECT_STORE_ADDR env entry (no double-injection with the membership block).
+	count := 0
+	for _, e := range userContainer.Env {
+		if e.Name == "OBJECT_STORE_ADDR" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "OBJECT_STORE_ADDR must be injected exactly once")
+
+	// Knative no-valueFrom guard: every user-container env var must be static.
+	for _, e := range userContainer.Env {
+		assert.Nil(t, e.ValueFrom,
+			"ksvc container env %q must be a static value, not valueFrom", e.Name)
+	}
+}
+
+// TestReconcile_NonRecordAgentUnchanged proves a NON-record agent (spec.record unset) with no other
+// gateway reason keeps MODEL_GATEWAY_URL pointed straight at LiteLLM and gets no RECORD_CAPABLE env.
+func TestReconcile_NonRecordAgentUnchanged(t *testing.T) {
+	const (
+		name      = "plain-agent"
+		namespace = "default"
+	)
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	reconcileNN(t, newReconciler(), name, namespace)
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	userContainer := ksvc.Spec.Template.Spec.Containers[0]
+	envMap := make(map[string]corev1.EnvVar, len(userContainer.Env))
+	for _, e := range userContainer.Env {
+		envMap[e.Name] = e
+	}
+
+	assert.Equal(t, "http://agent-engine-gateway.agent-engine-system.svc:4000",
+		envMap["MODEL_GATEWAY_URL"].Value, "a plain agent talks to LiteLLM directly")
+	_, hasGwUpstream := envMap["GATEWAY_UPSTREAM_URL"]
+	assert.False(t, hasGwUpstream, "no gateway reason ⇒ no GATEWAY_UPSTREAM_URL")
+	_, hasRecord := envMap["RECORD_CAPABLE"]
+	assert.False(t, hasRecord, "a non-record agent gets no RECORD_CAPABLE env")
+}
+
 // TestReconcile_BudgetPlusMemoryAgentNameOnce guards the inject-once contract:
 // a budgeted agent that ALSO has a MemoryBinding must get AGENT_NAME exactly once
 // (both the M8 budget path and the M5 memory path inject it — a duplicate

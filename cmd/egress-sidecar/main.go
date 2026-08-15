@@ -117,6 +117,22 @@ func run(log logr.Logger) error {
 		return err
 	}
 
+	// Record mode (M78, ADR 0071 §1/C1): a RECORD-CAPABLE sidecar (RECORD_CAPABLE=true, injected by
+	// the controller for a spec.record agent) is the TOOL capture seam — it fronts every tool and
+	// captures each recorded call's I/O into the run's replay fixture. Build the recorder here; it
+	// FAILS CLOSED (C2) when OBJECT_STORE_ADDR is unset (no fixture sink) — a hard startup error, so
+	// a record-capable sidecar never fronts all tools while silently capturing nothing. A
+	// non-record-capable sidecar gets a nil recorder ⇒ the capture path is a no-op (byte-for-byte
+	// the pre-M78 OBO behavior). The agent identity (EGRESS_AGENT, "ns/name") is fixture provenance.
+	var recorder *egress.ToolRecorder
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RECORD_CAPABLE")), "true") {
+		rec, rerr := egress.NewToolRecorder(expectedAgent, func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) })
+		if rerr != nil {
+			return fmt.Errorf("egress-sidecar: record mode requested but not usable: %w", rerr)
+		}
+		recorder = rec
+	}
+
 	proxy := egress.NewProxy(egress.ProxyConfig{
 		Verifier:         runcap.NewVerifier(pub, audience, nil),
 		Resolver:         resolver,
@@ -125,6 +141,7 @@ func run(log logr.Logger) error {
 		ExpectedBoundary: expectedBoundary,
 		Routes:           routes,
 		Log:              log,
+		Recorder:         recorder,
 	})
 
 	mux := http.NewServeMux()

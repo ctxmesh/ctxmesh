@@ -43,6 +43,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/bff"
+	"github.com/ctxmesh/agent-engine/internal/replay"
 )
 
 // devReadyTimeout bounds how long `dev` waits for /invoke to first answer
@@ -69,6 +70,7 @@ type devFlagValues struct {
 	ui        bool
 	uiPort    int
 	uiDist    string
+	replay    string
 }
 
 // newDevCmd builds the cobra `dev` command.
@@ -108,6 +110,11 @@ Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := runDev(cmd.Context(), fv, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+				// A replay verdict maps to a dedicated exit code (0/1/2, ADR 0071 §3a) —
+				// the report has already been rendered to stdout, so just exit with the code.
+				if re, ok := isReplayExitError(err); ok {
+					os.Exit(re.code)
+				}
 				var xe *expandError
 				if isExpandError(err, &xe) {
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Error:", xe.err)
@@ -132,6 +139,10 @@ Exit codes: 0 = ok; 1 = validation error; 2 = file or parse error.`,
 	cmd.Flags().IntVar(&fv.uiPort, "ui-port", 8888, "host port for the console UI when --ui is set")
 	cmd.Flags().StringVar(&fv.uiDist, "ui-dist", "ui/dist",
 		"directory of the built SPA (dist/) to serve with --ui; run `make build-ui` first")
+	cmd.Flags().StringVar(&fv.replay, "replay", "",
+		"replay a recorded fixture (a merged fixture JSON file OR a dir of partial *.json blobs): "+
+			"swaps the gateway for the both-channel replay mock so model + tool I/O come from the recording "+
+			"(deterministic, zero cluster deps); exit 0 pass / 1 agent-error / 2 structural divergence (ADR 0071)")
 
 	return cmd
 }
@@ -146,11 +157,25 @@ func resolveDevFlags(fv devFlagValues) (devFlags, error) {
 
 	mode := providerMode(strings.ToLower(strings.TrimSpace(fv.provider)))
 	flags := devFlags{
-		File:        fv.file,
-		Port:        fv.port,
-		Provider:    mode,
-		RealBaseURL: strings.TrimSpace(fv.realBase),
-		RealModel:   strings.TrimSpace(fv.realModel),
+		File:          fv.file,
+		Port:          fv.port,
+		Provider:      mode,
+		RealBaseURL:   strings.TrimSpace(fv.realBase),
+		RealModel:     strings.TrimSpace(fv.realModel),
+		ReplayFixture: strings.TrimSpace(fv.replay),
+	}
+
+	// Replay mode swaps the gateway for the fixture-driven mock, so a real upstream is
+	// meaningless (both channels come from the recording). Reject the combination early.
+	if flags.ReplayFixture != "" {
+		if mode == providerReal {
+			return devFlags{}, validationErr(
+				"--replay cannot be combined with --provider real (replay serves the recorded model + tool I/O)")
+		}
+		if _, err := os.Stat(flags.ReplayFixture); err != nil {
+			return devFlags{}, parseErr("--replay fixture path %q not readable: %v", flags.ReplayFixture, err)
+		}
+		return flags, nil
 	}
 
 	switch mode {
@@ -188,6 +213,10 @@ func runDev(ctx context.Context, fv devFlagValues, out, errOut io.Writer) error 
 		return validationErr("--ui cannot be combined with --no-wait (the UI needs the run to stay up)")
 	}
 
+	if flags.ReplayFixture != "" && fv.noWait {
+		return validationErr("--replay cannot be combined with --no-wait (replay runs the agent to completion, then reports)")
+	}
+
 	raw, err := os.ReadFile(flags.File)
 	if err != nil {
 		return parseErr("reading %q: %v", flags.File, err)
@@ -196,7 +225,22 @@ func runDev(ctx context.Context, fv devFlagValues, out, errOut io.Writer) error 
 	if err != nil {
 		return err
 	}
-	plan, err := buildDevPlan(dy, flags)
+
+	// Replay mode: load + merge the fixture up front so we can (a) list its recorded
+	// tool names in the discovery manifest and (b) render the divergence report from
+	// the same fixture after the run (ADR 0071 §3a). The fixture is validated on load
+	// (schema version + the C4 no-credential invariant).
+	var fixture *replay.Fixture
+	var replayToolNames []string
+	if flags.ReplayFixture != "" {
+		fixture, err = replay.LoadFixturePath(flags.ReplayFixture)
+		if err != nil {
+			return parseErr("%v", err)
+		}
+		replayToolNames = fixtureToolNames(fixture)
+	}
+
+	plan, err := buildDevPlan(dy, flags, replayToolNames)
 	if err != nil {
 		return err
 	}
@@ -208,6 +252,18 @@ func runDev(ctx context.Context, fv devFlagValues, out, errOut io.Writer) error 
 	workDir, cleanupDir, err := writePlanAssets(plan)
 	if err != nil {
 		return err
+	}
+
+	// Replay mode diverges from the interactive loop: stage the fixture into the work
+	// dir (bind-mounted into the swapped gateway) and run the agent to completion,
+	// collecting the divergence report + mapping the exit code (ADR 0071 §3a).
+	if flags.ReplayFixture != "" {
+		if err := stageReplayFixture(flags.ReplayFixture, workDir); err != nil {
+			cleanupDir()
+			return err
+		}
+		defer cleanupDir()
+		return runReplay(ctx, fixture, workDir, out, errOut)
 	}
 	// In --no-wait mode the stack is left running for the caller to manage, so the
 	// rendered assets (the compose file `down` needs) must persist; otherwise the

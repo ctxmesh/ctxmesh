@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as capMod from "../src/_capability.js";
+import * as recordMod from "../src/_record.js";
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { Tool, ToolsClient, DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "../src/tools.js";
 import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "./plane.js";
@@ -443,6 +444,32 @@ describe("ToolsClient.call — full MCP session", () => {
     const mcpReqs = plane.discovery.requests.filter((r) => r.path === "/mcp/");
     for (const req of mcpReqs) {
       expect(req.headers["x-ctxmesh-run-capability"]).toBe("cap-tool-token");
+    }
+  });
+
+  it("relays X-Ctxmesh-Record on MCP tool calls when the run is being recorded (M78)", async () => {
+    // A recorded run relays the record toggle on every tool-call egress so the egress sidecar
+    // captures the tool I/O into the run's replay fixture (TOOL channel).
+    vi.spyOn(recordMod, "currentRecordRunId").mockReturnValue("run-tool-rec");
+
+    const client = new ToolsClient(plane.config);
+    await client.call(DiscoveryStub.CATALOG_NAME, { text: "y" });
+
+    const mcpReqs = plane.discovery.requests.filter((r) => r.path === "/mcp/");
+    expect(mcpReqs.length).toBeGreaterThan(0);
+    for (const req of mcpReqs) {
+      expect(req.headers["x-ctxmesh-record"]).toBe("run-tool-rec");
+    }
+  });
+
+  it("does NOT relay X-Ctxmesh-Record for a non-recorded run (M78)", async () => {
+    // Default (no recordScope active) ⇒ undefined ⇒ no capture header ⇒ the sidecar captures nothing.
+    const client = new ToolsClient(plane.config);
+    await client.call(DiscoveryStub.CATALOG_NAME, { text: "y" });
+
+    const mcpReqs = plane.discovery.requests.filter((r) => r.path === "/mcp/");
+    for (const req of mcpReqs) {
+      expect(req.headers["x-ctxmesh-record"]).toBeUndefined();
     }
   });
 });

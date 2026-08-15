@@ -149,6 +149,28 @@ def test_chat_omits_run_capability_when_not_in_scope(gateway_stub: GatewayStub):
     assert req.headers.get("authorization", "").startswith("Bearer ")
 
 
+def test_chat_attaches_record_header_when_in_scope(gateway_stub: GatewayStub):
+    # Record mode (M78, ADR 0071 §1): a recorded run's model call relays X-Ctxmesh-Record so the
+    # launcher gateway captures the model I/O into the run's fixture.
+    from ctxmesh._record import RECORD_HEADER, record_scope
+
+    client = _client(gateway_stub)
+    with record_scope({RECORD_HEADER: "run-rec-1"}):
+        client.model.chat("m", [{"role": "user", "content": "q"}])
+    req = gateway_stub.requests[-1]
+    assert req.headers.get(RECORD_HEADER.lower()) == "run-rec-1"
+
+
+def test_chat_omits_record_header_when_not_recorded(gateway_stub: GatewayStub):
+    from ctxmesh._record import RECORD_HEADER
+
+    client = _client(gateway_stub)
+    # No record_scope active ⇒ a non-recorded run: no capture header.
+    client.model.chat("m", [{"role": "user", "content": "q"}])
+    req = gateway_stub.requests[-1]
+    assert RECORD_HEADER.lower() not in req.headers
+
+
 # ── the empty-response raise (m14.3 review C1) ─────────────────────────────────
 #
 # The m14.3 SDK fix made a tool_calls turn (content:null + tool_calls) NOT raise.
