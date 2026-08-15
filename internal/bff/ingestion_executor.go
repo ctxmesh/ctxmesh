@@ -129,7 +129,7 @@ func ingestionReasonToPhase(reason ingestionReason) string {
 	switch reason {
 	case ingestionBudgetExceeded:
 		return kbPhaseBudgetExceeded
-	case ingestionFailed:
+	case ingestionFailed, ingestionStorageQuotaExceeded:
 		return kbPhaseFailed
 	default:
 		return kbPhaseFailed
@@ -146,6 +146,11 @@ const (
 	// `failed` but the outcome is coded BudgetExceeded so the reconcile sets phase BudgetExceeded (resumable —
 	// the cursor is preserved; a later re-ingest continues). ADR 0061 Fork 2.
 	ingestionBudgetExceeded ingestionReason = "BudgetExceeded"
+	// ingestionStorageQuotaExceeded — the tenant is at/over its corpus storage HARD cap (m80.3, ADR 0061
+	// governance #7 hard enforcement). The run fails FAST (phase Failed) BEFORE any source document is fetched,
+	// so a run cannot grow a corpus that is already at the cap. The at-cap state is the controller's PROJECTED
+	// flag read from the namespace→tenant mirror (ADR 0011 — the run-worker does not aggregate cross-namespace).
+	ingestionStorageQuotaExceeded ingestionReason = "StorageQuotaExceeded"
 )
 
 // IngestionOutcome is the executor-written terminal outcome, persisted in run.Outcome (JSON). It is the SEAM the
@@ -236,6 +241,28 @@ func (s *Server) executeIngestion(ctx context.Context, runID string) {
 	if strings.TrimSpace(spec.KnowledgeBase) == "" {
 		s.failIngestion(runID, ingestionFailed, "ingestion spec has no knowledgeBase")
 		return
+	}
+
+	// Storage HARD-cap gate (m80.3, ADR 0061 governance #7 hard enforcement). Fail the run FAST — BEFORE
+	// fetching any source document / embedding anything — when the tenant is already at its corpus hard cap,
+	// so an ingestion cannot grow a corpus that is at the limit. The at-cap state is the Tenant controller's
+	// PROJECTED flag read from the namespace→tenant mirror (ADR 0011: the controller owns the cross-namespace
+	// corpus aggregation; the run-worker holds NO Tenant/agent-CRD cross-namespace RBAC and does NOT aggregate).
+	// Bounded eventual consistency (the guardrail, not a security boundary): a run that started just before a
+	// reconcile flipped the flag can still complete — the cap is re-enforced on the NEXT upload/ingest. Route
+	// the terminal through failIngestion so it projects phase Failed (the m80.1 corpus-status path). Fail-OPEN
+	// on a store error / unknown namespace: never wedge ingestion for a namespace the mirror hasn't converged.
+	if s.namespaceTenantStore != nil {
+		exceeded, _, capErr := s.namespaceTenantStore.StorageHardCapExceededFor(ctx, spec.Namespace)
+		if capErr != nil {
+			s.log.Error(capErr, "ingestion: storage hard-cap lookup failed; allowing (fail-open)",
+				"run", runID, "ns", spec.Namespace, "kb", spec.KnowledgeBase)
+		} else if exceeded {
+			s.failIngestion(runID, ingestionStorageQuotaExceeded, fmt.Sprintf(
+				"tenant storage hard cap reached for namespace %q — the corpus is at or over its configured "+
+					"limit; delete documents or raise the tenant's storage.corpusBytesHardCap before re-ingesting", spec.Namespace))
+			return
+		}
 	}
 
 	cursor, err := parseIngestionCursor(rn.Cursor)

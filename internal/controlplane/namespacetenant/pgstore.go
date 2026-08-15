@@ -129,3 +129,37 @@ func (s *pgStore) TenantOf(ctx context.Context, namespace string) (string, bool,
 	}
 	return tenant, true, nil
 }
+
+// SetStorageHardCapExceeded projects the tenant's at-hard-cap flag onto every row it owns (m80.3).
+// A single scoped UPDATE keeps all of the tenant's namespaces in sync; a change-guard (WHERE the
+// value differs) avoids a no-op write on every reconcile. A tenant with no rows is a clean no-op.
+// SetMembers' upsert leaves this column alone on ON CONFLICT (it defaults false on a fresh row),
+// so membership convergence never resets a projected flag — this method is its sole writer.
+func (s *pgStore) SetStorageHardCapExceeded(ctx context.Context, tenant string, exceeded bool) error {
+	if tenant == "" {
+		return fmt.Errorf("namespacetenant: tenant is required")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE namespace_tenants SET storage_hard_cap_exceeded = $2, updated_at = now()
+		 WHERE tenant = $1 AND storage_hard_cap_exceeded <> $2`,
+		tenant, exceeded); err != nil {
+		return fmt.Errorf("namespacetenant: set storage hard-cap for %q: %w", tenant, err)
+	}
+	return nil
+}
+
+// StorageHardCapExceededFor resolves namespace → tenant → projected flag in one primary-key lookup.
+// A missing row returns (false, false, nil) — fail-OPEN: an unknown namespace (outside any tenant,
+// or a mirror not yet converged) is never blocked by the hard-cap guard.
+func (s *pgStore) StorageHardCapExceededFor(ctx context.Context, namespace string) (bool, bool, error) {
+	var exceeded bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT storage_hard_cap_exceeded FROM namespace_tenants WHERE namespace = $1`, namespace).Scan(&exceeded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("namespacetenant: storage hard-cap for %q: %w", namespace, err)
+	}
+	return exceeded, true, nil
+}

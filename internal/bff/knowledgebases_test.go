@@ -54,6 +54,7 @@ import (
 
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/knowledge"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
@@ -127,6 +128,72 @@ func TestUploadKBDocument_HappyPath(t *testing.T) {
 	stored, _ := io.ReadAll(rc)
 	_ = rc.Close()
 	assert.Equal(t, content, stored)
+}
+
+// TestUploadKBDocument_StorageHardCapRejects413 proves an upload to a tenant AT its storage hard cap is
+// rejected with HTTP 413 + the typed storage_quota_exceeded code, and NOTHING is written to the store
+// (m80.3). The at-cap state is the controller's PROJECTED flag read from the namespace→tenant mirror.
+func TestUploadKBDocument_StorageHardCapRejects413(t *testing.T) {
+	docStore := objectstore.NewMemObjectStore()
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).Build()
+
+	nsStore := namespacetenant.NewMemStore()
+	require.NoError(t, nsStore.SetMembers(context.Background(), "tenant-atcap", []string{kbNS}))
+	require.NoError(t, nsStore.SetStorageHardCapExceeded(context.Background(), "tenant-atcap", true))
+
+	s := NewServer(Options{
+		CallerClients:        newFakeFactory(fc),
+		Scheme:               sc,
+		Auth:                 AllowAll{},
+		Log:                  logr.Discard(),
+		DocStore:             docStore,
+		NamespaceTenantStore: nsStore,
+	})
+
+	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", []byte("blocked content"))
+	require.Equal(t, http.StatusRequestEntityTooLarge, code, "an at-cap upload must be 413; body: %s", string(body))
+
+	var resp errorBody
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Equal(t, errCodeStorageQuotaExceeded, resp.Code, "the 413 must carry the typed storage_quota_exceeded code")
+
+	// The rejected upload wrote nothing to the store.
+	_, err := docStore.Get(context.Background(), objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md"))
+	require.Error(t, err, "a rejected upload must not have persisted the object")
+}
+
+// TestUploadKBDocument_StorageHardCapUnsetAllows proves the hard-cap gate is inert when the tenant is NOT
+// at the cap (the unset/under-cap default) — the upload proceeds byte-for-byte as before (201).
+func TestUploadKBDocument_StorageHardCapUnsetAllows(t *testing.T) {
+	docStore := objectstore.NewMemObjectStore()
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	sc := testScheme(t)
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(kb).Build()
+
+	nsStore := namespacetenant.NewMemStore()
+	// The tenant owns the namespace but is under cap (no SetStorageHardCapExceeded call).
+	require.NoError(t, nsStore.SetMembers(context.Background(), "tenant-undercap", []string{kbNS}))
+
+	s := NewServer(Options{
+		CallerClients:        newFakeFactory(fc),
+		Scheme:               sc,
+		Auth:                 AllowAll{},
+		Log:                  logr.Discard(),
+		DocStore:             docStore,
+		NamespaceTenantStore: nsStore,
+	})
+
+	content := []byte("allowed content")
+	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", content)
+	require.Equal(t, http.StatusCreated, code, "an under-cap upload must succeed (201); body: %s", string(body))
+
+	stored, err := docStore.Get(context.Background(), objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md"))
+	require.NoError(t, err)
+	got, _ := io.ReadAll(stored)
+	_ = stored.Close()
+	assert.Equal(t, content, got)
 }
 
 func TestUploadKBDocument_UnknownKB_Returns404(t *testing.T) {
