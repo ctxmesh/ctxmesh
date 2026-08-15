@@ -2201,3 +2201,249 @@ def test_resilience_helpers_unit():
     cb.record_failure("t")
     cb.record_failure("t")  # 2 consecutive → open
     assert cb.allow("t") is False  # open, cooling down → short-circuit
+
+
+# ── knowledge auto-inject (ADR 0061 governance #5, M10) ─────────────────────────
+#
+# A KB whose binding set autoInject prepends an ephemeral <retrieved_context> block (with
+# citations) to the system prompt each turn, RAG-style; a KB WITHOUT the flag stays TOOL-ONLY
+# (byte-for-byte unchanged). Mirrors _inject_agent_memory. Retrieval is best-effort (swallowed)
+# and NEVER persisted to session history.
+
+
+class _FakeKnowledge:
+    """A stand-in for client.knowledge with a scriptable search(): either return canned hits or
+    raise, so we can exercise the happy path and the best-effort swallow without a live plane."""
+
+    def __init__(self, results=None, raises: bool = False):
+        self._results = results or []
+        self._raises = raises
+        self.calls: list = []
+
+    def search(self, query, knowledge_base=None, top_k=10, threshold=0.0):
+        self.calls.append(
+            {
+                "query": query,
+                "knowledge_base": knowledge_base,
+                "top_k": top_k,
+                "threshold": threshold,
+            }
+        )
+        if self._raises:
+            raise RuntimeError("boom — retrieval hiccup")
+        return self._results
+
+
+class _FakeClient:
+    """Minimal client carrying just a .knowledge — enough for the _inject_knowledge unit."""
+
+    def __init__(self, knowledge):
+        self.knowledge = knowledge
+
+
+def _kb_config(names, top_k=5, threshold=0.5) -> ManagedConfig:
+    return ManagedConfig(
+        system_prompt="SYS",
+        model_route="m",
+        knowledge_auto_inject=list(names),
+        knowledge_top_k=top_k,
+        knowledge_threshold=threshold,
+    )
+
+
+def test_inject_knowledge_prepends_block_with_citations():
+    """An auto-inject KB prepends an ephemeral <retrieved_context> block with per-chunk
+    [source: <documentRef>#<chunkIndex>] citations — the knowledge-vs-memory difference."""
+    from ctxmesh.managed import _inject_knowledge
+
+    hits = [
+        {"content": "Paris is the capital of France.", "documentRef": "geo.md", "chunkIndex": 3},
+        {"content": "The Seine flows through it.", "documentRef": "geo.md", "chunkIndex": 4},
+    ]
+    client = _FakeClient(_FakeKnowledge(results=hits))
+    q = "capital of France?"
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": q}]
+
+    _inject_knowledge(client, messages, q, _kb_config(["geo-kb"], top_k=7, threshold=0.6))
+
+    sys = messages[0]["content"]
+    assert sys.startswith("SYS\n\n<retrieved_context>\n"), "block is APPENDED to the system prompt"
+    assert sys.endswith("</retrieved_context>")
+    assert "- Paris is the capital of France. [source: geo.md#3]" in sys
+    assert "- The Seine flows through it. [source: geo.md#4]" in sys
+    # The user message is untouched — only messages[0] mutated.
+    assert messages[1] == {"role": "user", "content": "capital of France?"}
+    # The retrieval was scoped to the KB with the config knobs threaded through.
+    assert client.knowledge.calls == [
+        {"query": "capital of France?", "knowledge_base": "geo-kb", "top_k": 7, "threshold": 0.6}
+    ]
+
+
+def test_inject_knowledge_no_citation_when_no_document_ref():
+    """A hit without a documentRef surfaces its content but no dangling [source: …] tag."""
+    from ctxmesh.managed import _inject_knowledge
+
+    client = _FakeClient(_FakeKnowledge(results=[{"content": "orphan chunk", "chunkIndex": 0}]))
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "q"}]
+    _inject_knowledge(client, messages, "q", _kb_config(["kb"]))
+    # The chunk line itself carries no dangling [source: …] tag (the header explains the format).
+    assert "- orphan chunk\n" in messages[0]["content"] + "\n"
+    assert "- orphan chunk [source:" not in messages[0]["content"]
+
+
+def test_inject_knowledge_best_effort_swallows_retrieval_failure():
+    """A retrieval error is swallowed — the block is not added and the system prompt is unchanged
+    (the turn proceeds), exactly like _inject_agent_memory."""
+    from ctxmesh.managed import _inject_knowledge
+
+    client = _FakeClient(_FakeKnowledge(raises=True))
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "q"}]
+    _inject_knowledge(client, messages, "q", _kb_config(["kb"]))
+    assert messages[0]["content"] == "SYS", "a retrieval hiccup must never mutate the prompt"
+
+
+def test_inject_knowledge_no_hits_leaves_prompt_unchanged():
+    """No hits ⇒ no block (an empty <retrieved_context> would be noise)."""
+    from ctxmesh.managed import _inject_knowledge
+
+    client = _FakeClient(_FakeKnowledge(results=[]))
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "q"}]
+    _inject_knowledge(client, messages, "q", _kb_config(["kb"]))
+    assert messages[0]["content"] == "SYS"
+
+
+def test_inject_knowledge_searches_every_auto_inject_kb():
+    """Multiple auto-inject KBs are each searched; their chunks concatenate into one block."""
+    from ctxmesh.managed import _inject_knowledge
+
+    class _MultiKB:
+        def __init__(self):
+            self.searched = []
+
+        def search(self, query, knowledge_base=None, top_k=10, threshold=0.0):
+            self.searched.append(knowledge_base)
+            return [
+                {
+                    "content": f"hit from {knowledge_base}",
+                    "documentRef": knowledge_base,
+                    "chunkIndex": 1,
+                }
+            ]
+
+    kb = _MultiKB()
+    client = _FakeClient(kb)
+    messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "q"}]
+    _inject_knowledge(client, messages, "q", _kb_config(["kb-a", "kb-b"]))
+    assert kb.searched == ["kb-a", "kb-b"]
+    assert "hit from kb-a [source: kb-a#1]" in messages[0]["content"]
+    assert "hit from kb-b [source: kb-b#1]" in messages[0]["content"]
+
+
+def test_managed_loop_knowledge_auto_inject_is_ephemeral_not_persisted(gateway_stub, monkeypatch):
+    """END TO END: with an auto-inject KB the loop prepends <retrieved_context> to the SYSTEM
+    prompt the gateway sees, but the STORED conversation history carries NO <retrieved_context> —
+    proving the injected context is ephemeral (RAG), never written to the session memory plane."""
+    monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
+
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        # Script the KB retrieval — no live launcher /knowledge/search needed.
+        client.knowledge.search = lambda query, knowledge_base=None, top_k=10, threshold=0.0: [
+            {"content": "Company PTO is 25 days.", "documentRef": "hr.md", "chunkIndex": 2}
+        ]
+        config = ManagedConfig(
+            system_prompt="sys",
+            model_route="m",
+            knowledge_auto_inject=["hr-kb"],
+        )
+        headers = {"X-Conversation-Id": "chat-k"}
+
+        run_managed_loop(client, config, "how much PTO?", headers=headers)
+
+        # The gateway's turn-1 SYSTEM message carries the injected, cited block.
+        sent = json.loads(gateway_stub.requests[0].body)["messages"]
+        system_msg = sent[0]
+        assert system_msg["role"] == "system"
+        assert "<retrieved_context>" in system_msg["content"]
+        assert "Company PTO is 25 days. [source: hr.md#2]" in system_msg["content"]
+
+        # The STORED history is the clean user↔assistant exchange — NO <retrieved_context>.
+        stored = mem.store["chat-k"]
+        assert stored == [
+            {"role": "user", "content": "how much PTO?"},
+            {"role": "assistant", "content": "the answer is 42"},
+        ]
+        assert all("<retrieved_context>" not in m["content"] for m in stored), (
+            "the ephemeral RAG block must NEVER be persisted to session history"
+        )
+
+
+def test_managed_loop_no_auto_inject_kb_is_byte_for_byte_unchanged(gateway_stub, monkeypatch):
+    """A run with NO auto-inject KBs (the default) never touches client.knowledge and sends the
+    plain [system, user] messages — tool-only knowledge is byte-for-byte unchanged."""
+    monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
+
+    called = {"search": False}
+
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+
+        def _boom(*a, **k):
+            called["search"] = True
+            raise AssertionError("client.knowledge.search must NOT be called without auto-inject")
+
+        client.knowledge.search = _boom
+        config = ManagedConfig(system_prompt="sys", model_route="m")  # knowledge_auto_inject empty
+        run_managed_loop(client, config, "hi", headers={"X-Conversation-Id": "c"})
+
+        assert called["search"] is False
+        sent = json.loads(gateway_stub.requests[0].body)["messages"]
+        assert [m["role"] for m in sent] == ["system", "user"]
+        assert sent[0]["content"] == "sys", "no injection ⇒ system prompt is verbatim"
+
+
+def test_from_env_derives_knowledge_auto_inject_from_roster(monkeypatch):
+    """from_env reads the KNOWLEDGE_BASES roster and populates knowledge_auto_inject with ONLY the
+    entries flagged autoInject; a KB without the flag is omitted (tool-only). The top_k/threshold
+    knobs come from env with defaults."""
+    monkeypatch.setenv("MODEL_ROUTE", "gpt-x")
+    monkeypatch.setenv(
+        "KNOWLEDGE_BASES",
+        json.dumps(
+            [
+                {"name": "auto-kb", "namespace": "ns", "embeddingRoute": "e", "autoInject": True},
+                {"name": "tool-kb", "namespace": "ns", "embeddingRoute": "e"},
+            ]
+        ),
+    )
+    monkeypatch.setenv("KNOWLEDGE_TOP_K", "8")
+    monkeypatch.setenv("KNOWLEDGE_THRESHOLD", "0.4")
+
+    cfg = ManagedConfig.from_env()
+    assert cfg.knowledge_auto_inject == ["auto-kb"], "only autoInject entries are auto-injected"
+    assert cfg.knowledge_top_k == 8
+    assert cfg.knowledge_threshold == 0.4
+
+
+def test_from_env_no_roster_means_no_auto_inject(monkeypatch):
+    """No KNOWLEDGE_BASES roster ⇒ knowledge_auto_inject is empty and the knobs default — a
+    knowledge-free agent's config is unchanged."""
+    monkeypatch.delenv("KNOWLEDGE_BASES", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_TOP_K", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_THRESHOLD", raising=False)
+    monkeypatch.setenv("MODEL_ROUTE", "m")
+
+    cfg = ManagedConfig.from_env()
+    assert cfg.knowledge_auto_inject == []
+    assert cfg.knowledge_top_k == 5
+    assert cfg.knowledge_threshold == 0.5

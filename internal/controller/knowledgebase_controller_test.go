@@ -291,6 +291,64 @@ func TestKnowledgeBinding_ResolvesEnvVars(t *testing.T) {
 		"embeddingRoute must be resolved from the KnowledgeBase CR")
 }
 
+// TestKnowledgeBinding_AutoInjectFlowsIntoRoster (m80.5, ADR 0061 governance #5 / M10): the
+// per-BINDING autoInject flag on a KnowledgeBaseRef threads into the KNOWLEDGE_BASES roster JSON so
+// the in-pod SDK knows which KBs to auto-inject. A ref WITHOUT autoInject omits the field (omitempty),
+// keeping the roster byte-compatible for the tool-only case.
+func TestKnowledgeBinding_AutoInjectFlowsIntoRoster(t *testing.T) {
+	const ns = "default"
+	const autoKB = "auto-kb"
+	const toolKB = "tool-kb"
+	const agentName = "kb-autoinject-agent"
+
+	// Two KnowledgeBases, both resolvable.
+	for _, name := range []string{autoKB, toolKB} {
+		mkKnowledgeBase(t, name, ns, agentsv1beta1.KnowledgeBaseSpec{
+			EmbeddingRoute: "text-embedding-3-small",
+			Source:         agentsv1beta1.KnowledgeBaseSource{Type: "upload"},
+			Chunking:       agentsv1beta1.ChunkingConfig{Size: 512, Overlap: 64, Splitter: "recursive"},
+		})
+		reconcileKB(t, newKBReconciler(), name, ns)
+	}
+
+	// The agent auto-injects one KB and leaves the other tool-only — a per-binding choice.
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: ns},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/echo-agent:latest", ExecutionModel: "serving", Port: 8080,
+			KnowledgeBases: []agentsv1alpha1.KnowledgeBaseRef{
+				{Name: autoKB, AutoInject: true},
+				{Name: toolKB}, // AutoInject unset ⇒ tool-only
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+
+	reconcileNN(t, newReconciler(), agentName, ns)
+
+	envMap := envByName(getKsvc(t, agentName, ns).Spec.Template.Spec.Containers[0].Env)
+	rosterJSON, hasRoster := envMap["KNOWLEDGE_BASES"]
+	require.True(t, hasRoster, "KNOWLEDGE_BASES env must be set")
+
+	var roster []kbRosterEntry
+	require.NoError(t, json.Unmarshal([]byte(rosterJSON), &roster))
+	require.Len(t, roster, 2)
+
+	byName := map[string]kbRosterEntry{}
+	for _, e := range roster {
+		byName[e.Name] = e
+	}
+	assert.True(t, byName[autoKB].AutoInject, "the auto-inject binding must carry autoInject=true in the roster")
+	assert.False(t, byName[toolKB].AutoInject, "the tool-only binding must NOT carry autoInject")
+
+	// omitempty proof: the tool-only entry serialises WITHOUT the autoInject key (byte-compatible with
+	// the pre-M10 roster — no structural-digest churn for a no-auto-inject fleet).
+	assert.NotContains(t, rosterJSON, `"name":"`+toolKB+`","namespace":"`+ns+`","embeddingRoute":"text-embedding-3-small","autoInject"`,
+		"a tool-only roster entry must omit the autoInject field")
+	assert.Contains(t, rosterJSON, `"autoInject":true`, "the auto-inject entry must stamp autoInject:true")
+}
+
 // TestKnowledgeBinding_DanglingRef_SetsCondition: when a spec.knowledgeBases[] ref points to a
 // non-existent KnowledgeBase, the controller sets a KnowledgeBasesResolved=False condition and
 // does NOT inject KNOWLEDGE_BASE_ENABLED (all refs dangling → proxy stays off).
