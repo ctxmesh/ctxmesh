@@ -684,8 +684,10 @@ func (gp *gatewayProxy) writeGuardrailStreamingUnsupported(w http.ResponseWriter
 //     restores the SCRUBBED bytes onto r.Body so forward() streams the redacted request.
 //   - clean / auditOnly: restores the exact buffered bytes onto r.Body.
 //
-// It is called ONLY when gp.guardrail != nil; with no policy this whole path is
-// skipped and the body is never buffered (byte-for-byte-unchanged invariant).
+// It is called ONLY when pol.engine != nil; with no policy this whole path is
+// skipped and the body is never buffered (byte-for-byte-unchanged invariant). The engine +
+// judge come from the per-request bundle snapshot (pol) so a concurrent K3 reload cannot split
+// the scan across two policies.
 //
 // Fail-closed cases (all BLOCK, never a silent pass):
 //   - stream:true in the request body when a policy is active ⇒ streaming is incompatible
@@ -694,7 +696,9 @@ func (gp *gatewayProxy) writeGuardrailStreamingUnsupported(w http.ResponseWriter
 //   - body read error ⇒ can't obtain the content to scan.
 //   - unparseable request JSON ⇒ can't locate the messages to scan (scanRequest).
 //   - a redaction that cannot be re-serialised ⇒ never forward the raw content.
-func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.Span, r *http.Request) (refused bool) {
+func (gp *gatewayProxy) applyRequestGuardrail(
+	w http.ResponseWriter, span trace.Span, r *http.Request, pol *guardrailBundle,
+) (refused bool) {
 	// Buffer the body with a limit of maxGatewayReqBody + 1 sentinel byte: if the read
 	// yields MORE than the cap, the body is oversize and we fail closed rather than
 	// truncate-and-forward.
@@ -730,7 +734,7 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 		return true
 	}
 
-	res, forwardBody := gp.guardrail.scanRequest(buffered)
+	res, forwardBody := pol.engine.scanRequest(buffered)
 
 	// Restore the (possibly scrubbed) body for forward() BEFORE any decision so the
 	// clean/auditOnly/redact paths stream the right bytes upstream. On redact this is the
@@ -774,8 +778,8 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 	// (loop-safe), and fails OPEN on its own error — so a flaky judge never blocks. A FLAGGED+block
 	// verdict refuses the call with the typed guardrail_blocked (detector "semantic-judge") BEFORE
 	// forwarding; auditOnly/SAFE/judge-error proceed. nil judge ⇒ this is a no-op.
-	if gp.judge != nil {
-		if dec, blocked := gp.judgeRequest(r.Context(), span, r, forwardBody); blocked {
+	if pol.judge != nil {
+		if dec, blocked := gp.judgeRequest(r.Context(), span, r, forwardBody, pol.judge); blocked {
 			gp.writeGuardrailBlocked(w, span, dec)
 			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=%s (semantic-judge FLAGGED; call refused)",
 				dec.detector, dec.scanPoint)
@@ -801,16 +805,17 @@ func (gp *gatewayProxy) applyRequestGuardrail(w http.ResponseWriter, span trace.
 // An unparseable / non-JSON response is relayed unchanged (a completion is the model's own
 // output on the way OUT — failing every non-JSON stream closed would be wrong; the request
 // path, which inspects untrusted input BEFORE it runs, is the one that fails closed).
-// Called ONLY when gp.guardrail != nil and there are output rules; never for a nil engine.
+// Called ONLY when pol.engine != nil; the engine + judge come from the per-request bundle
+// snapshot (pol) so a concurrent K3 reload cannot split the scan across two policies.
 func (gp *gatewayProxy) applyOutputGuardrail(
-	ctx context.Context, span trace.Span, r *http.Request, body []byte,
+	ctx context.Context, span trace.Span, r *http.Request, body []byte, pol *guardrailBundle,
 ) (out []byte, blocked bool) {
 	// The deterministic output scan runs first (block > redact > auditOnly). Skip it only when there
 	// are no output rules — but STILL fall through to the judge, which may apply to output even with no
 	// deterministic output rules configured.
 	relayBody := body
-	if len(gp.guardrail.output) > 0 {
-		res, scrubbed := gp.guardrail.scanOutput(body)
+	if len(pol.engine.output) > 0 {
+		res, scrubbed := pol.engine.scanOutput(body)
 		relayBody = scrubbed
 		for _, dec := range res.decisions {
 			emitGuardrailDecision(span, dec)
@@ -835,8 +840,8 @@ func (gp *gatewayProxy) applyOutputGuardrail(
 	// (possibly scrubbed) completion, calls the REAL upstream (loop-safe), and fails OPEN on its own
 	// error. A FLAGGED+block verdict SUBSTITUTES the guardrail_blocked body for the completion — the
 	// client never sees the flagged output — exactly as a deterministic output block does.
-	if gp.judge != nil {
-		if dec, blk := gp.judgeOutput(ctx, span, r, relayBody); blk {
+	if pol.judge != nil {
+		if dec, blk := gp.judgeOutput(ctx, span, r, relayBody, pol.judge); blk {
 			gp.markOutputBlockSpan(span, dec)
 			gp.logf("launcher: gateway: guardrail BLOCK detector=%s scan_point=output "+
 				"(semantic-judge FLAGGED; completion withheld)", dec.detector)
