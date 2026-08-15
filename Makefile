@@ -44,6 +44,17 @@ SDK_VENV_STAMP = $(SDK_VENV)/.deps-installed
 UI_DIR ?= ui
 UI_NODE ?= ./hack/ui-node.sh
 
+# TypeScript SDK toolchain (sdk/typescript — the ctxmesh TS SDK, m77.1). A shipped
+# LIBRARY vendored into the base-node agent image (ADR 0070), NOT part of the ui/
+# pnpm workspace — its own lockfile, its own bootstrap. PINNED to the same Node
+# story as ui/ (Node 22 via sdk/typescript/.nvmrc, pnpm 9.15.0). hack/sdk-ts.sh
+# (the sibling of hack/ui-node.sh) bootstraps the whole chain deterministically on
+# a CLEAN host + in CI, then runs the requested pnpm script. eslint + tsc + vitest
+# below are wired into `make lint`/`make test` so the harness tier0 gates the TS SDK
+# too (Go + Python + UI + the TS SDK).
+SDK_TS_DIR ?= sdk/typescript
+SDK_TS_NODE ?= ./hack/sdk-ts.sh
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -93,7 +104,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet py-test ui-test ## Run unit tests (Go + Python SDK + UI vitest). Envtest suites are tagged 'integration' and run via test-integration.
+test: manifests generate fmt vet py-test ui-test sdk-ts-build sdk-ts-test ## Run unit tests (Go + Python SDK + UI vitest + TS SDK build+vitest). Envtest suites are tagged 'integration' and run via test-integration.
 	go test ./... -coverprofile cover.out
 
 .PHONY: test-integration
@@ -108,7 +119,7 @@ test-conformance: ## Run the credential-store backend conformance suite (ADR 003
 # (ADR 0004); this repo's pyramid stops at envtest (test-integration).
 
 .PHONY: lint
-lint: golangci-lint py-lint ui-lint ## Run linters (Go golangci-lint + Python ruff + UI eslint + tsc)
+lint: golangci-lint py-lint ui-lint sdk-ts-lint ## Run linters (Go golangci-lint + Python ruff + UI eslint + tsc + TS SDK eslint + tsc)
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
@@ -179,6 +190,36 @@ ui-versions: ## Print the pinned node+pnpm the UI toolchain resolves (from .nvmr
 .PHONY: ui-clean
 ui-clean: ## Remove UI build output and installed node_modules.
 	rm -rf "$(UI_DIR)/dist" "$(UI_DIR)/node_modules"
+
+##@ TypeScript SDK (sdk/typescript — ctxmesh TS SDK; nvm + pnpm, m77.1)
+
+.PHONY: sdk-ts-deps
+sdk-ts-deps: ## Bootstrap the TS SDK toolchain on a clean host (nvm+node from .nvmrc, pnpm, frozen install).
+	$(SDK_TS_NODE) install
+
+.PHONY: sdk-ts-lint
+sdk-ts-lint: ## Lint the TS SDK (eslint) + typecheck (tsc --noEmit). Bootstraps the toolchain first. Wired into `make lint` (tier0).
+	$(SDK_TS_NODE) install
+	$(SDK_TS_NODE) run lint
+	$(SDK_TS_NODE) run typecheck
+
+.PHONY: sdk-ts-build
+sdk-ts-build: ## Build the TS SDK library to dist/ (tsc -b → ESM + CJS + declarations). Bootstraps the toolchain first. Wired into `make test` (tier0).
+	$(SDK_TS_NODE) install
+	$(SDK_TS_NODE) run build
+
+.PHONY: sdk-ts-test
+sdk-ts-test: ## Run the TS SDK unit tests (vitest run). Bootstraps the toolchain first. Wired into `make test` (tier0).
+	$(SDK_TS_NODE) install
+	$(SDK_TS_NODE) run test
+
+.PHONY: sdk-ts-versions
+sdk-ts-versions: ## Print the pinned node+pnpm the TS SDK toolchain resolves (from .nvmrc).
+	$(SDK_TS_NODE) print-versions
+
+.PHONY: sdk-ts-clean
+sdk-ts-clean: ## Remove TS SDK build output and installed node_modules.
+	rm -rf "$(SDK_TS_DIR)/dist" "$(SDK_TS_DIR)/node_modules"
 
 .PHONY: build-bff
 build-bff: fmt vet ## Build the BFF binary (bin/bff) — serves the static UI + /api behind M11 auth.
