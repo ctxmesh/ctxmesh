@@ -324,7 +324,7 @@ func TestWorkflowExecutor_PlanApprovalGate_PausesBeforeNode1(t *testing.T) {
 		assert.NotEqual(t, wfID, r.ParentRunID, "no node sub-run may be launched while the plan is unapproved")
 	}
 	// The console banner event fired.
-	_, found := wfHasEventPrefix(drainEvents(t, s, wfID), run.EventStep, "plan-approval-required")
+	_, found := wfHasEventPrefix(drainEvents(t, s, wfID), "plan-approval-required")
 	assert.True(t, found, "a plan-approval-required event is emitted for the console")
 }
 
@@ -994,6 +994,157 @@ func TestWorkflowExecutor_AlreadyRunning_OpeningTransitionIsNoOp(t *testing.T) {
 	drive(t, s, wfID)
 	fin := getRun(t, s, wfID)
 	require.Equal(t, run.StatusSucceeded, fin.Status, "the workflow succeeds end-to-end — m67.3 behavior unchanged")
+}
+
+// ── m83.3: error-routing edges (onError, route-only v1) ─────────────────────────────────────────────────────
+//
+// A plain node whose sub-run FAILS after exhausting its retry budget ROUTES to its onError handler step and the
+// workflow CONTINUES, instead of fail-fasting. Retries take precedence (retry first; route only on exhaustion).
+// No onError ⇒ fail-fast exactly as today (the regression guard is the existing TestWorkflowExecutor_FailFast).
+
+// onErrorSpec: a guarded node `work` (with `retries`) that routes to `handler` on failure; handler is terminal.
+func onErrorSpec(retries int32) agentsv1beta1.WorkflowSpec {
+	work := stepNode("work", "work-agent")
+	work.Retries = retries
+	work.OnError = "handler"
+	handler := stepNode("handler", "handler-agent") // terminal
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{work, handler},
+	}
+}
+
+// TestWorkflowExecutor_OnError_RoutesToHandler: a plain node whose sub-run FAILS (retries:0, so the first
+// failure exhausts the budget) with onError:handler ROUTES to the handler and runs it, then the workflow
+// completes SUCCEEDED (not failed) with the handler's output.
+func TestWorkflowExecutor_OnError_RoutesToHandler(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(0), `{}`)
+
+	// Advance 1: node "work" launches.
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	assert.Equal(t, "work-agent", work.Agent, "the guarded node launches first")
+
+	// work FAILS (no retry budget) → the executor ROUTES to the handler on the next advance.
+	failNode(t, s, work.ID, "work blew up")
+	drive(t, s, wfID)
+	handler := inFlightChild(t, s, wfID)
+	assert.Equal(t, "handler-agent", handler.Agent, "a failed node with onError routes to the handler (does not fail-fast)")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the workflow continues, parking on the handler")
+
+	// The error-routed event fired (the console surfaces the catch), NOT a node-completed for the failed node.
+	events := drainEvents(t, s, wfID)
+	_, routed := wfHasEventPrefix(events, "node-error-routed:work:handler:")
+	assert.True(t, routed, "a node-error-routed event is emitted for the console when onError catches")
+
+	// Handler completes → the workflow SUCCEEDS with the handler's output (the error was handled).
+	completeNode(t, s, handler.ID, "recovered-by-handler")
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "a handled error completes the workflow succeeded, not failed")
+	require.Len(t, fin.Messages, 1)
+	assert.Equal(t, "recovered-by-handler", fin.Messages[0].Content, "the terminal output is the handler's output")
+}
+
+// TestWorkflowExecutor_OnError_RetriesTakePrecedence: a node with retries:2 + onError fails on every attempt →
+// it retries 2 times FIRST (attempt 0 + retry:1 + retry:2), and only AFTER the budget is spent does it route
+// to the handler — proving retries take precedence over onError.
+func TestWorkflowExecutor_OnError_RetriesTakePrecedence(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(2), `{}`)
+
+	// Attempt 0 (original launch, index "0") — fails.
+	drive(t, s, wfID)
+	a0 := run.SpawnRunID(wfID, "work", "0")
+	require.Contains(t, childrenOf(t, s, wfID), a0, "attempt 0 is the original launch")
+	failNode(t, s, a0, "fail-0")
+
+	// Attempt 1 (retry:1) — the failure had retry budget, so it retried BEFORE routing.
+	drive(t, s, wfID)
+	a1 := run.SpawnRunID(wfID, "work", "retry:1")
+	require.Contains(t, childrenOf(t, s, wfID), a1, "retries take precedence: attempt 1 (retry:1) launched, not the handler")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "still retrying — not yet routed")
+	failNode(t, s, a1, "fail-1")
+
+	// Attempt 2 (retry:2) — fails.
+	drive(t, s, wfID)
+	a2 := run.SpawnRunID(wfID, "work", "retry:2")
+	require.Contains(t, childrenOf(t, s, wfID), a2, "attempt 2 (retry:2) launched — still exhausting the budget before routing")
+	failNode(t, s, a2, "fail-2")
+
+	// Budget spent (2 retries used) → NOW it routes to the handler (not fail-fast).
+	drive(t, s, wfID)
+	handler := inFlightChild(t, s, wfID)
+	assert.Equal(t, "handler-agent", handler.Agent, "only after retries are exhausted does onError route to the handler")
+
+	completeNode(t, s, handler.ID, "handled")
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "after retries + handler the workflow succeeds")
+	assert.Equal(t, "handled", fin.Messages[0].Content)
+	// 3 work attempts (0, retry:1, retry:2) + 1 handler = 4 child sub-runs.
+	assert.Len(t, childrenOf(t, s, wfID), 4, "3 work attempts + 1 handler ran")
+}
+
+// TestWorkflowExecutor_NoOnError_FailFastUnchanged: the SAME failing guarded node with NO onError fail-fasts
+// (workflow failed) — byte-for-byte the pre-m83.3 behavior. This is the additive-change proof (a spec with no
+// onError behaves exactly as today).
+func TestWorkflowExecutor_NoOnError_FailFastUnchanged(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := onErrorSpec(0)
+	spec.Steps[0].OnError = "" // drop the handler edge → the old fail-fast path.
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "work blew up")
+	drive(t, s, wfID)
+
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "with NO onError a failed node fail-fasts the workflow (unchanged)")
+	assert.Contains(t, fin.Error, "work blew up", "the workflow surfaces the node's error, as before")
+	// Only the workflow run + the failed work node exist; the handler never launched.
+	assert.Len(t, childrenOf(t, s, wfID), 1, "no handler launched on the fail-fast path")
+}
+
+// TestWorkflowExecutor_OnError_IdempotentReroute: re-driving the routing advance (a reclaimed executor that
+// crashed after routing but before persisting the handler launch) re-derives cleanly — the handler launches
+// ONCE (deterministic id), no double-launch and no re-fail. The crash-safety guard for the onError transition.
+func TestWorkflowExecutor_OnError_IdempotentReroute(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(0), `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "boom")
+
+	// Advance: routes to the handler + parks on it.
+	drive(t, s, wfID)
+	handlerID := run.SpawnRunID(wfID, "handler", "0")
+	require.Contains(t, childrenOf(t, s, wfID), handlerID, "the handler launched with its deterministic id")
+
+	// Simulate a spurious re-drive (a worker that died mid-advance is re-scheduled): wake waiting→queued, drive
+	// again. The handler child is NOT yet terminal → the advance re-launches the handler, which must reuse the
+	// existing sub-run (deterministic id) and re-suspend — not double-launch, not re-fail the workflow.
+	_, err := s.runStore.Update(wfID, func(r *run.Run) error { return r.Transition(run.StatusQueued, time.Now()) })
+	require.NoError(t, err)
+	drive(t, s, wfID)
+
+	kids := childrenOf(t, s, wfID)
+	handlerCount := 0
+	for id := range kids {
+		if id == handlerID {
+			handlerCount++
+		}
+	}
+	assert.Equal(t, 1, handlerCount, "the reclaimed re-drive reused the existing handler sub-run (no double-launch)")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the run re-suspends on the same handler (no re-fail)")
+
+	// The handler still completes the workflow normally.
+	completeNode(t, s, handlerID, "done")
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusSucceeded, getRun(t, s, wfID).Status, "the workflow completes after the idempotent reroute")
 }
 
 // itoa is a tiny int→string for building loop:<n> ids in tests without importing strconv at call sites.

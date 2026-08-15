@@ -180,6 +180,12 @@
             "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
             "type": "string"
           },
+          "onError": {
+            "description": "onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry\nbudget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /\nTemporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any\nnode. Not supported on map/loop nodes.",
+            "maxLength": 63,
+            "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
+            "type": "string"
+          },
           "outputSchema": {
             "description": "outputSchema is the node's expected typed output as a JSON Schema (stored verbatim, preserve-unknown;\nthe M65 pattern). It is REQUIRED whenever this node's output is referenced by another step's\n`when` / `input` / `map.over` — CEL over a typed object, not free text (the ADR 0060 load-bearing\nrule). Optional for a terminal/unreferenced node.",
             "type": "object"

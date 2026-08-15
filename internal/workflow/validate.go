@@ -165,6 +165,15 @@ func (r *Result) checkStep(s *agentsv1beta1.WorkflowStep, names map[string]bool)
 	for bi := range s.Branches {
 		edgeRef(fmt.Sprintf("branches[%d].to", bi), s.Branches[bi].To)
 	}
+	// onError is a real edge: its handler target must name an existing step (like next/default/to). It is a
+	// ROUTE-ONLY error handler for PLAIN nodes — map/loop nodes keep their fail-fast behavior, so onError on a
+	// map/loop node is rejected (m83.3). A `next`/`branches` graph can already cycle (validate does no cycle
+	// analysis — see the package/checkBudget notes); the onError edge is bounded at runtime by the SAME per-root
+	// spawn budget (reserveNodeSpawn) that backstops every other edge, so no separate static cycle guard is added.
+	edgeRef("onError", s.OnError)
+	if s.OnError != "" && (s.Map != nil || s.Loop != nil) {
+		r.add(fmt.Errorf("step %q sets onError on a map/loop node; onError is route-only on plain (sequential/conditional) nodes (m83.3)", s.Name))
+	}
 	if s.Map != nil {
 		edgeRef("map.do", s.Map.Do)
 		edgeRef("map.join", s.Map.Join)

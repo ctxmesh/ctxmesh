@@ -9341,6 +9341,15 @@ spec:
                       maxLength: 63
                       pattern: ^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$
                       type: string
+                    onError:
+                      description: |-
+                        onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry
+                        budget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /
+                        Temporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any
+                        node. Not supported on map/loop nodes.
+                      maxLength: 63
+                      pattern: ^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$
+                      type: string
                     outputSchema:
                       description: |-
                         outputSchema is the node's expected typed output as a JSON Schema (stored verbatim, preserve-unknown;

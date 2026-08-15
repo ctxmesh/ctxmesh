@@ -161,6 +161,15 @@ type WorkflowStep struct {
 	// +optional
 	Default string `json:"default,omitempty"`
 
+	// onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry
+	// budget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /
+	// Temporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any
+	// node. Not supported on map/loop nodes.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
+	// +optional
+	OnError string `json:"onError,omitempty"`
+
 	// mapNode makes this a map/fan-out node (defined here; executed v1b). Set instead of next/branches.
 	// +optional
 	Map *WorkflowMap `json:"map,omitempty"`

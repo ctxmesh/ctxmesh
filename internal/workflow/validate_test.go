@@ -216,6 +216,85 @@ func TestValidate_DuplicateAndBounds(t *testing.T) {
 	}
 }
 
+// TestValidate_OnError — onError is a real handler edge (m83.3, route-only v1): a valid onError names an
+// existing step on a PLAIN node; a dangling onError target is a dangling-edge error; onError on a map or a
+// loop node is rejected (route-only-on-plain-nodes). An onError that forms a cycle validates (the graph does
+// no static cycle analysis — the runtime per-root spawn budget backstops every edge, onError included), same
+// as a `next`/`branches` cycle already does today.
+func TestValidate_OnError(t *testing.T) {
+	// (a) A valid plain-node onError → an existing handler step: validates.
+	valid := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "work", AgentRef: "worker", Next: "", OnError: "handler"},
+			{Name: "handler", AgentRef: "handler-agent", Next: ""},
+		},
+	}
+	if err := Validate(valid); err != nil {
+		t.Fatalf("a plain node routing onError to an existing step must validate; got: %v", err)
+	}
+
+	// (b) A dangling onError target is a dangling-edge error (mirrors next/default/to).
+	dangling := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "work", AgentRef: "worker", OnError: "ghost"}, // "ghost" does not exist
+		},
+	}
+	err := Validate(dangling)
+	if err == nil {
+		t.Fatal("a dangling onError target must be a validation error")
+	}
+	if !strings.Contains(err.Error(), "ghost") || !strings.Contains(err.Error(), "dangling") {
+		t.Errorf("error should name the dangling onError target; got: %v", err)
+	}
+
+	// (c) onError on a MAP node is rejected (route-only on plain nodes).
+	onMap := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{
+				Name: "fan", AgentRef: "fan-agent", OnError: "handler",
+				Map: &agentsv1beta1.WorkflowMap{Over: `["a"]`, As: "i", Parallelism: 1, Do: "handler"},
+			},
+			{Name: "handler", AgentRef: "handler-agent", Next: ""},
+		},
+	}
+	if err := Validate(onMap); err == nil {
+		t.Fatal("onError on a map node must be rejected (route-only on plain nodes)")
+	} else if !strings.Contains(err.Error(), "onError") || !strings.Contains(err.Error(), "map/loop") {
+		t.Errorf("error should explain onError is not allowed on map/loop nodes; got: %v", err)
+	}
+
+	// (d) onError on a LOOP node is rejected too.
+	onLoop := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{
+				Name: "poll", AgentRef: "poll-agent", OnError: "handler",
+				Loop: &agentsv1beta1.WorkflowLoop{Until: "true", MaxIterations: 1, Do: "handler"},
+			},
+			{Name: "handler", AgentRef: "handler-agent", Next: ""},
+		},
+	}
+	if err := Validate(onLoop); err == nil {
+		t.Fatal("onError on a loop node must be rejected (route-only on plain nodes)")
+	}
+
+	// (e) An onError CYCLE validates — the graph does no static cycle analysis (the runtime spawn budget is the
+	// backstop for every edge, onError included), exactly as a next/branches cycle already validates today.
+	cycle := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "support",
+		Steps: []agentsv1beta1.WorkflowStep{
+			{Name: "a", AgentRef: "agent-a", OnError: "b"},
+			{Name: "b", AgentRef: "agent-b", OnError: "a"},
+		},
+	}
+	if err := Validate(cycle); err != nil {
+		t.Fatalf("an onError cycle must validate (no static cycle analysis; runtime budget backstops it); got: %v", err)
+	}
+}
+
 // TestValidate_NoSteps — an empty graph is an error.
 func TestValidate_NoSteps(t *testing.T) {
 	if err := Validate(agentsv1beta1.WorkflowSpec{RegistryRef: "support"}); err == nil {

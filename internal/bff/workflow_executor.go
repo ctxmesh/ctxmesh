@@ -311,15 +311,61 @@ func (s *Server) resumePlainNode(
 			return nil, false, true
 		}
 		if child.Status != run.StatusSucceeded {
-			if s.retryNode(runID, rn, cursor, cur, prog, child) {
+			if s.retryNode(runID, rn, cursor, cur, prog) {
 				return nil, false, true // re-launched a retry attempt + re-suspended.
 			}
-			return nil, false, true // retries exhausted → fail-fasted.
+			// Retries exhausted. An onError handler ROUTES the workflow to that handler step instead of
+			// fail-fasting (AWS Step Functions Catch / Temporal); no onError ⇒ fail-fast exactly as before.
+			if cur.OnError != "" {
+				return s.routeOnError(runID, spec, cursor, cur, child)
+			}
+			s.failExhaustedNode(runID, cur, prog, child)
+			return nil, false, true // retries exhausted, no handler → fail-fasted.
 		}
 		s.recordNodeSuccess(runID, cursor.Current, prog, decodeNodeOutput(child), prog.ChildID)
 	}
 
 	return s.advanceFrom(runID, spec, cursor, cur)
+}
+
+// routeOnError transfers control from a plain node whose sub-run FAILED (retries exhausted) to its onError
+// handler step, so the workflow CONTINUES instead of fail-fasting (m83.3, route-only v1). It records the
+// guarded node as `done` (its output is null — v1 injects NO $error binding; the handler runs like any node
+// over the workflow input + prior node outputs) and returns the handler as the next node. This reuses the
+// SAME advance machinery: recording the node done + clearing Current is exactly what a normal advance does, so
+// the transition is as crash-safe as any other — a reclaim after routing re-derives cleanly (the node is
+// `done`, none in flight) and re-enters at the handler via nodeSuccessor→cursor, never double-launching or
+// re-failing. onError names an existing step (a validation invariant, defended here via stepIndex).
+func (s *Server) routeOnError(
+	runID string, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor,
+	cur *agentsv1beta1.WorkflowStep, failed *run.Run,
+) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
+	idx := stepIndex(spec, cur.OnError)
+	if idx < 0 {
+		// A dangling onError target cannot occur for a validated spec; defend it honestly rather than panic.
+		s.failWorkflow(runID, fmt.Sprintf("workflow node %q references unknown onError handler %q", cur.Name, cur.OnError))
+		return nil, false, true
+	}
+	prog := cursor.Nodes[cur.Name]
+	// Record the guarded node `done` with a null output (no $error binding in v1) — the same checkpoint a
+	// normal completion makes, so advanceFrom leaves the cursor crash-safe (node done, Current cleared next).
+	// Emit node-error-routed (NOT node-completed): the node failed, then routed to its handler.
+	markNodeDone(prog, json.RawMessage(`null`))
+	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("node-error-routed:%s:%s:%s", cur.Name, cur.OnError, failed.ID))
+	cursor.Current = ""
+	return &spec.Steps[idx], false, false
+}
+
+// failExhaustedNode fail-fasts the workflow after a plain node's retries are exhausted and it has NO onError
+// handler — the original fail-fast behavior (unchanged), factored out of retryNode so the caller chooses
+// route-vs-fail-fast. It cancels surviving siblings and fails the workflow with the node's error.
+func (s *Server) failExhaustedNode(runID string, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run) {
+	reason := failed.Error
+	if reason == "" {
+		reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
+	}
+	s.cancelCascade(runID)
+	s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
 }
 
 // advanceFrom computes the successor of a just-completed node and returns it (or done). It clears Current +
@@ -378,10 +424,17 @@ func (s *Server) defensiveResuspend(runID, nodeName string, childIDs []string) {
 	}
 }
 
-// recordNodeSuccess marks a node done with its decoded output + emits the node-completed event.
-func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, output json.RawMessage, childID string) {
+// markNodeDone records a node's cursor state as done(output) WITHOUT emitting any event — the pure
+// checkpoint. recordNodeSuccess wraps it with the node-completed event; the onError route wraps it with its
+// own node-error-routed event (a failed node did not "complete", so it must not emit node-completed).
+func markNodeDone(prog *nodeProgress, output json.RawMessage) {
 	prog.Output = output
 	prog.State = cursorDone
+}
+
+// recordNodeSuccess marks a node done with its decoded output + emits the node-completed event.
+func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, output json.RawMessage, childID string) {
+	markNodeDone(prog, output)
 	// Emit node-completed with the child run id so the SSE stream surfaces per-node completion (m67.4).
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "node-completed:"+nodeName+":"+childID)
 }
@@ -389,21 +442,16 @@ func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, o
 // retryNode re-launches a plain node's FAILED sub-run as a fresh attempt when the node has retry budget left
 // (Attempts < node.Retries), using iterationIndex "retry:<attempt>" (a NEW sub-run — a retry is a new attempt,
 // never a re-read of the failed run) and re-suspends on it. Returns true when it retried; false when retries
-// are exhausted (having ALREADY fail-fasted the workflow). Retries default off (0) → the first failure is
-// fail-fast (Attempts starts at 0 = the original launch).
+// are EXHAUSTED — the caller (resumePlainNode) then chooses route-on-error vs fail-fast (retries take
+// precedence: a node routes/fail-fasts only after its budget is spent). retryNode NO LONGER fail-fasts on
+// exhaustion; failExhaustedNode / routeOnError own that decision. Retries default off (0) → the first failure
+// is a route/fail-fast (Attempts starts at 0 = the original launch).
 func (s *Server) retryNode(
 	runID string, rn *run.Run, cursor *workflowCursor,
-	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run,
+	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) (retried bool) {
 	if prog.Attempts >= int(cur.Retries) {
-		// Retries exhausted (or none configured) → fail-fast + cancel any siblings.
-		reason := failed.Error
-		if reason == "" {
-			reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
-		}
-		s.cancelCascade(runID)
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
-		return false
+		return false // retries exhausted (or none configured) → the caller routes-on-error or fail-fasts.
 	}
 
 	attempt := prog.Attempts + 1 // the next attempt (1-based for retries; attempt 0 was the original).
