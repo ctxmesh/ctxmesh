@@ -395,6 +395,16 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if ge, ok := asGuardrailResolveError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ge.reason, ge.msg)
 	}
+	// In-pod tool-call governance FAIL-CLOSED (m82.3, ADR 0074 §2): a sidecar-mode (in-pod) tool with
+	// an effective require-approval rule is surfaced from buildPodTemplate as an *inPodRequireApprovalError
+	// BEFORE any workload write (no half-governed pod — the ksvc CreateOrUpdate is never reached, so the
+	// OLD revision keeps serving). require-approval is not enforceable on an in-pod tool (it binds a
+	// localhost port in the shared netns, uncapturable by the approval voucher). Report Ready=False and
+	// STOP cleanly (no requeue on user input); a spec fix (drop the rule, or make the tool remote/OBO)
+	// re-reconciles via the watch.
+	if ie, ok := asInPodRequireApprovalError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, ie.reason, ie.msg)
+	}
 	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
 	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
 	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
@@ -1017,6 +1027,31 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
 	}
+
+	// Tool-call governance (M82.3, ADR 0074 §2): resolve spec.runtime.toolPolicy up front, because for
+	// IN-POD (sidecar-mode) tools the enforcement is STRUCTURAL — a wire check at the egress sidecar is
+	// THEATER (a sidecar tool binds a deterministic localhost port in the SHARED pod netns, so a
+	// prompt-injected/custom loop just hits 127.0.0.1:<port> directly, around the sidecar). So a denied
+	// in-pod tool must simply NOT be deployed. resolveToolPolicy never fails on user input (the CRD
+	// enum bounds the shape); it only errors on a marshal bug.
+	tp, terr := resolveToolPolicy(deploy)
+	if terr != nil {
+		return podTemplate{}, terr
+	}
+	// Apply the in-pod structural policy to the bindings BEFORE Render, so the manifest, the sidecar
+	// container list, AND the egress route table are all derived from the SAME post-filter binding set
+	// (Render assigns localhost ports in binding-name order; filtering here keeps the port↔manifest↔
+	// container mapping inherently consistent — a denied middle tool cannot mis-map the survivors,
+	// since both the manifest endpoint and the container port come from one Render over the same
+	// slice). An OBO/remote tool is NOT touched here — its deny/require-approval is the m82.2 wire
+	// enforcement (it is genuinely fronted). If an in-pod tool carries an effective require-approval
+	// rule, this returns an *inPodRequireApprovalError → Reconcile sets Ready=False (no half-governed
+	// pod). A pure-allow / policy-less agent keeps every binding — byte-for-byte unchanged.
+	validBindings, err = filterInPodToolsByPolicy(validBindings, tp)
+	if err != nil {
+		return podTemplate{}, err
+	}
+
 	renderedManifest, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
 
@@ -1048,10 +1083,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	var toolPolicyMount *corev1.VolumeMount
 	var toolPolicyEnv []corev1.EnvVar
 	if len(egressRoutes) > 0 {
-		tp, terr := resolveToolPolicy(deploy)
-		if terr != nil {
-			return podTemplate{}, terr
-		}
+		// tp was resolved above (it drives the in-pod structural filter); here it materialises the
+		// controller-owned <agent>-toolpolicy ConfigMap for the sidecar's OBO/remote wire enforcement.
 		toolPolicyVol, toolPolicyMount, toolPolicyEnv, err = r.reconcileToolPolicyConfigMap(ctx, deploy, tp)
 		if err != nil {
 			return podTemplate{}, err
