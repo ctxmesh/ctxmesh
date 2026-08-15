@@ -147,12 +147,19 @@ type gatewayConfig struct {
 	PodTokenPath string
 
 	// GuardrailPolicy (M66, ADR 0059 §8): the resolved GuardrailPolicy spec serialized to
-	// JSON (GUARDRAIL_POLICY env), injected by the controller when spec.guardrailPolicyRef
-	// resolves. Its presence FORCES the proxy on so the in-path guardrail engine (m66.3)
-	// can inspect model input/output — even for a guardrailed-but-unbudgeted agent. Empty ⇒
-	// no guardrail (the m66.2 controller fails a dangling/invalid ref closed, so this env is
-	// only ever set for a VALIDATED policy).
+	// JSON (GUARDRAIL_POLICY env). PRE-K3 delivery path — still honored for a policy passed
+	// directly by env (unit tests, any un-migrated path). Its presence FORCES the proxy on so
+	// the in-path guardrail engine (m66.3) can inspect model input/output. Empty ⇒ no guardrail
+	// by env (the m66.2 controller fails a dangling/invalid ref closed, so this is only ever
+	// set for a VALIDATED policy).
 	GuardrailPolicy string
+	// GuardrailPolicyFile (K3, ADR 0059 Fork-2): the path to the mounted, read-only ConfigMap
+	// file carrying the resolved GuardrailPolicy JSON (GUARDRAIL_POLICY_FILE env). This is the
+	// K3 delivery path: the launcher reads it at startup AND watches it (fsnotify), so a
+	// GuardrailPolicy edit propagates WITHOUT a revision roll. Its presence FORCES the proxy on
+	// (GatewayProxyEnabled) exactly as the env did — the interposition trigger now keys on the
+	// mounted file, not the digest. Empty ⇒ no file wired (the pre-K3 env path applies).
+	GuardrailPolicyFile string
 	// BFFInternalURL is the BFF's cluster-internal URL (BFF_INTERNAL_URL env), used by the
 	// durable guardrail block audit (m66.9): the launcher POSTs a PII-safe compliance record
 	// to POST /api/internal/guardrail-event best-effort, async. Empty ⇒ the durable POST is
@@ -178,13 +185,16 @@ const defaultPodTokenPath = "/var/run/secrets/statelayer-proxy/token"
 // True iff an upstream gateway URL was injected AND there is a reason to interpose
 // the proxy: at least one budget cap, a tenant quota, OR a guardrail policy (M66,
 // ADR 0059 §8 — a guarded agent must route its LLM calls THROUGH the proxy so the
-// in-path guardrail engine can inspect them). With none of these the controller does
-// not inject GATEWAY_UPSTREAM_URL, so the agent's MODEL_GATEWAY_URL keeps pointing
-// straight at LiteLLM.
+// in-path guardrail engine can inspect them). The guardrail reason fires on EITHER the
+// pre-K3 GUARDRAIL_POLICY env OR the K3 mounted GUARDRAIL_POLICY_FILE (the interposition
+// trigger now keys on the mounted file's presence, not the structural digest). With none
+// of these the controller does not inject GATEWAY_UPSTREAM_URL, so the agent's
+// MODEL_GATEWAY_URL keeps pointing straight at LiteLLM.
 func (c Config) GatewayProxyEnabled() bool {
 	g := c.Gateway
 	return g.UpstreamURL != "" &&
-		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" || g.GuardrailPolicy != "" || g.RecordCapable)
+		(g.ConvCapUSD != "" || g.AgentCapUSD != "" || g.TenantID != "" ||
+			g.GuardrailPolicy != "" || g.GuardrailPolicyFile != "" || g.RecordCapable)
 }
 
 // loadGatewayConfig parses the outbound-gateway-proxy configuration from env.
@@ -221,23 +231,24 @@ func loadGatewayConfig(lookup func(string) string, agentName string) (gatewayCon
 	}
 
 	return gatewayConfig{
-		UpstreamURL:        strings.TrimRight(upstream, "/"),
-		Port:               port,
-		AgentName:          agentName,
-		AgentNamespace:     strings.TrimSpace(lookup("POD_NAMESPACE")),
-		ConvCapUSD:         strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
-		AgentCapUSD:        strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
-		SoftPct:            softPct,
-		TenantID:           strings.TrimSpace(lookup("TENANT_ID")),
-		TenantBudgetUSD:    strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
-		TenantRPM:          positiveIntEnv(lookup, "TENANT_RPM"),
-		TenantMaxInFlight:  positiveIntEnv(lookup, "TENANT_MAX_CONCURRENT"),
-		QuotaAddr:          strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
-		StatelayerProxyURL: strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
-		PodTokenPath:       strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
-		GuardrailPolicy:    strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
-		BFFInternalURL:     strings.TrimRight(strings.TrimSpace(lookup("BFF_INTERNAL_URL")), "/"),
-		RecordCapable:      strings.EqualFold(strings.TrimSpace(lookup("RECORD_CAPABLE")), "true"),
+		UpstreamURL:         strings.TrimRight(upstream, "/"),
+		Port:                port,
+		AgentName:           agentName,
+		AgentNamespace:      strings.TrimSpace(lookup("POD_NAMESPACE")),
+		ConvCapUSD:          strings.TrimSpace(lookup("BUDGET_PER_CONVERSATION_USD")),
+		AgentCapUSD:         strings.TrimSpace(lookup("BUDGET_PER_AGENT_USD")),
+		SoftPct:             softPct,
+		TenantID:            strings.TrimSpace(lookup("TENANT_ID")),
+		TenantBudgetUSD:     strings.TrimSpace(lookup("TENANT_BUDGET_USD")),
+		TenantRPM:           positiveIntEnv(lookup, "TENANT_RPM"),
+		TenantMaxInFlight:   positiveIntEnv(lookup, "TENANT_MAX_CONCURRENT"),
+		QuotaAddr:           strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
+		StatelayerProxyURL:  strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
+		PodTokenPath:        strings.TrimSpace(lookup("STATELAYER_TOKEN_PATH")),
+		GuardrailPolicy:     strings.TrimSpace(lookup("GUARDRAIL_POLICY")),
+		GuardrailPolicyFile: strings.TrimSpace(lookup("GUARDRAIL_POLICY_FILE")),
+		BFFInternalURL:      strings.TrimRight(strings.TrimSpace(lookup("BFF_INTERNAL_URL")), "/"),
+		RecordCapable:       strings.EqualFold(strings.TrimSpace(lookup("RECORD_CAPABLE")), "true"),
 	}, nil
 }
 
@@ -297,18 +308,20 @@ type gatewayProxy struct {
 	// tenant enforces the M47 tenant model quota (rate + aggregate budget) against
 	// the shared Valkey. nil ⇒ untenanted or no tenant model caps.
 	tenant *tenantQuota
-	// guardrail is the in-path content-governance engine (M66, ADR 0059 §8), built
-	// from GUARDRAIL_POLICY. nil ⇒ no policy: the request path is byte-for-byte
-	// unchanged (no request-body buffering, forward() streams r.Body as pre-M66).
-	guardrail *guardrailEngine
-	// user enforces the per-END-USER (OBO) model quota (M66, ADR 0059 §8), built from the
-	// guardrail policy's userRateLimit. nil ⇒ no userRateLimit ⇒ per-user enforcement is
-	// off. The invoking user's hashed id is resolved PER CALL from the verified capability.
-	user *userQuota
+	// policy holds the three POLICY-DERIVED, RUNTIME-RELOADABLE pieces — the guardrail
+	// engine, the fenced LLM-judge, and the per-user quota — behind an RWMutex so a
+	// GuardrailPolicy edit can atomically swap the whole bundle WITHOUT a revision roll
+	// (K3, ADR 0059 Fork-2). The request path reads them via the accessor methods
+	// (guardrailEngine()/semanticJudge()/userQuota()), which take the read lock; the
+	// fsnotify watcher (guardrail_reload.go) swaps the bundle under the write lock. Every
+	// piece is derived from the SAME policy JSON, so they always move together.
+	policy guardrailHolder
 	// capVerifier verifies the inbound run capability to resolve the invoking user's hashed
 	// id (m66.7). Built from the same MCP_CAPABILITY_PUBLIC_KEY / MCP_CAPABILITY_AUDIENCE the
 	// OBO egress path uses. nil ⇒ no key provisioned: per-user enforcement fails OPEN (skipped)
 	// even when a userRateLimit is set — a missing verifier is treated like a missing capability.
+	// It depends ONLY on process env (the OBO key), never on the policy, so it is NOT reloaded —
+	// it is built once at construction and read directly.
 	capVerifier *runcap.Verifier
 	// control reads a run's CONTROL verb from the pod-authed state-layer proxy (m70.8, the real-kill
 	// cancel channel). Set ONLY when the launcher runs the state-layer-proxy path (STATELAYER_PROXY_URL):
@@ -316,11 +329,6 @@ type gatewayProxy struct {
 	// legacy mode or when unconfigured ⇒ the cancel-check is a NO-OP (the model-call path is unchanged) —
 	// the real kill is an ACCELERATOR layered onto the durable status-flip cancel, never a hard dependency.
 	control controlStore
-	// judge is the OPTIONAL fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5) — a cascaded, cached,
-	// loop-safe semantic-classification layer built from the guardrail policy's semanticJudge section.
-	// nil ⇒ semanticJudge disabled/absent ⇒ zero judge calls. It NEVER underpins the fail-closed
-	// guarantee: it augments the deterministic engine and fails OPEN on its own error/timeout.
-	judge *semanticJudge
 	// bffInternalURL is BFF_INTERNAL_URL (process-level, from gatewayConfig). Used by the durable
 	// guardrail block audit (m66.9, ADR 0059 §9): the launcher POSTs a PII-safe compliance record
 	// to the BFF's ingest endpoint best-effort, async. Empty ⇒ the durable POST is skipped; the
@@ -351,6 +359,13 @@ func buildGatewayServer(cfg Config, tracer trace.Tracer) *http.Server {
 		fmt.Fprintf(os.Stderr, "launcher: gateway proxy disabled: %v\n", err)
 		return nil
 	}
+	// Runtime-reloadable GuardrailPolicy (K3, ADR 0059 Fork-2): when the controller mounted the
+	// policy as a ConfigMap file, watch it so an edit propagates to THIS running agent without a
+	// revision roll. The watcher runs for the process lifetime (it exits when the launcher exits);
+	// a watcher-init failure is logged and the initial policy stays active (fixed, not reloadable).
+	if cfg.Gateway.GuardrailPolicyFile != "" {
+		go gp.watchGuardrailPolicy(cfg.Gateway.GuardrailPolicyFile, nil)
+	}
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
 		Handler: gp.handler(),
@@ -367,16 +382,6 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		return nil, fmt.Errorf("gateway: invalid GATEWAY_UPSTREAM_URL %q", cfg.UpstreamURL)
 	}
 
-	// Build the in-path guardrail engine from the injected policy (M66, ADR 0059 §8).
-	// FAIL-CLOSED: a policy that does not parse or whose patterns don't compile is a
-	// hard construction error, not a silent bypass — the controller already validated
-	// it (m66.2), so this is defence-in-depth. Empty GUARDRAIL_POLICY ⇒ nil engine ⇒
-	// the request path stays byte-for-byte unchanged.
-	guardrail, err := newGuardrailEngine(cfg.GuardrailPolicy)
-	if err != nil {
-		return nil, fmt.Errorf("gateway: %w", err)
-	}
-
 	gp := &gatewayProxy{
 		cfg:            cfg,
 		upstream:       u,
@@ -384,7 +389,6 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		estimator:      budget.NewEstimator(),
 		client:         &http.Client{Timeout: gatewayRequestTimeout},
 		tracer:         tracer,
-		guardrail:      guardrail,
 		bffInternalURL: cfg.BFFInternalURL,
 		logf:           logf,
 	}
@@ -438,24 +442,33 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		gp.control = newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
 	}
 
-	// Per-END-USER (OBO) model quota (M66, ADR 0059 §8): built from the guardrail policy's
-	// userRateLimit + a run-capability verifier. A parse error is fail-closed (defence-in-depth,
-	// mirroring the engine load). buildUserQuota returns nil when there is no userRateLimit.
-	uq, verifier, err := buildUserQuota(cfg, logf)
-	if err != nil {
-		return nil, err
-	}
-	gp.user = uq
-	gp.capVerifier = verifier
+	// The run-capability verifier resolves the invoking user's hashed id (per-user quota,
+	// m66.7) AND the trusted run id (real-kill cancel, m70.8). It depends ONLY on the OBO
+	// capability key (process env), never on the guardrail policy, so it is built ONCE here and
+	// is NOT part of the reloadable bundle — a policy edit must not disturb the real-kill path.
+	gp.capVerifier = buildCapVerifier(logf)
 
-	// Fenced LLM-judge (M66 m66.8, ADR 0059 §8 Fork-5): OPTIONAL semantic augmentation, off by default.
-	// A parse error is fail-closed (defence-in-depth, mirroring the engine load); an enabled-but-
-	// unroutable judge is left OFF (fail-open) inside newSemanticJudge. nil ⇒ no judge, zero overhead.
-	judge, err := newSemanticJudge(cfg.GuardrailPolicy, logf)
+	// Guardrail policy (M66 / K3): the INITIAL policy comes from the mounted file when the
+	// controller wired one (GUARDRAIL_POLICY_FILE), else from the GUARDRAIL_POLICY env
+	// (byte-compatible pre-K3 fallback — used by unit tests and any un-migrated path). Build the
+	// three policy-derived pieces (engine + judge + per-user quota) into the swappable bundle.
+	// FAIL-CLOSED at startup: a malformed/uncompilable policy is a HARD construction error, exactly
+	// as pre-K3 — the controller already validated it (m66.2), so this is defence-in-depth and the
+	// non-reload path keeps its fail-closed load. The RELOAD path (guardrail_reload.go) is
+	// keep-last-good on a bad edit; only startup fails hard.
+	initialPolicy := cfg.GuardrailPolicy
+	if cfg.GuardrailPolicyFile != "" {
+		fileJSON, ferr := readGuardrailPolicyFile(cfg.GuardrailPolicyFile)
+		if ferr != nil {
+			return nil, fmt.Errorf("gateway: reading GUARDRAIL_POLICY_FILE %q: %w", cfg.GuardrailPolicyFile, ferr)
+		}
+		initialPolicy = fileJSON
+	}
+	bundle, err := buildGuardrailBundle(initialPolicy, cfg, logf)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
-	gp.judge = judge
+	gp.policy.store(bundle)
 
 	// Record mode (M78, ADR 0071 §1): build the per-run model recorder for a RECORD-CAPABLE agent.
 	// FAIL-CLOSED (C2): record was requested (RECORD_CAPABLE=true) but the durable object store is
@@ -472,20 +485,24 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	return gp, nil
 }
 
-// buildUserQuota constructs the per-user (OBO) quota enforcer and the run-capability verifier from
-// the guardrail policy's userRateLimit (M66, ADR 0059 §8). It returns (nil, nil, nil) when there is
-// no userRateLimit — per-user enforcement is simply off. A malformed policy is a hard error (the load
-// path is fail-closed, matching newGuardrailEngine). The per-user quota shares the tenant quota's
+// buildUserQuota constructs the per-user (OBO) quota enforcer from the guardrail policy's
+// userRateLimit (M66, ADR 0059 §8). It returns (nil, nil) when there is no userRateLimit —
+// per-user enforcement is simply off. A malformed policy is a hard error (the load path is
+// fail-closed, matching newGuardrailEngine). The per-user quota shares the tenant quota's
 // Valkey (TENANT_QUOTA_ADDR); with no direct Valkey addr (or the state-layer-proxy-only path) the
 // per-user store cannot be built, so enforcement stays OFF (fail-open) with a loud log — a missing
 // accumulator must never block model calls.
-func buildUserQuota(cfg gatewayConfig, logf func(string, ...any)) (*userQuota, *runcap.Verifier, error) {
-	limit, err := parseUserRateLimit(cfg.GuardrailPolicy)
+//
+// It takes the policy JSON as a parameter (not cfg.GuardrailPolicy) so the K3 RELOAD path can
+// rebuild the per-user quota from the freshly-mounted policy. The run-capability verifier is built
+// separately (buildCapVerifier) because it depends only on process env, not the policy.
+func buildUserQuota(policyJSON string, cfg gatewayConfig, logf func(string, ...any)) (*userQuota, error) {
+	limit, err := parseUserRateLimit(policyJSON)
 	if err != nil {
-		return nil, nil, fmt.Errorf("gateway: %w", err)
+		return nil, fmt.Errorf("gateway: %w", err)
 	}
 	if limit == nil {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	uq := &userQuota{rpm: limit.RequestsPerMinute, maxConcurrent: limit.MaxInFlight, logf: logf}
@@ -500,25 +517,29 @@ func buildUserQuota(cfg gatewayConfig, logf func(string, ...any)) (*userQuota, *
 	// token and has no per-user notion, so it is not usable here.)
 	if cfg.QuotaAddr == "" {
 		logf("launcher: gateway: userRateLimit configured but no TENANT_QUOTA_ADDR — per-user limits NOT enforced")
-		return nil, nil, nil
+		return nil, nil
 	}
 	uq.store = newRedisUserStore(cfg.QuotaAddr)
+	return uq, nil
+}
 
-	// The verifier resolves the invoking user's hashed id from the run capability. Reuse the OBO
-	// capability public key + audience the controller already provisions for the egress path. Without a
-	// key we cannot TRUST any user id: per-user enforcement fails OPEN (skipped) — never fail-closed,
-	// which would break every guarded call whose capability didn't propagate (ADR 0059 §8).
-	var verifier *runcap.Verifier
-	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
-		if pub, derr := runcap.DecodePublicKey(pubB64); derr == nil {
-			verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		} else {
-			logf("launcher: gateway: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user limits fail OPEN (skipped)", derr)
-		}
-	} else {
-		logf("launcher: gateway: userRateLimit set but MCP_CAPABILITY_PUBLIC_KEY unset — per-user limits fail OPEN (skipped)")
+// buildCapVerifier builds the run-capability verifier from the OBO capability public key +
+// audience the controller provisions for the egress path (m66.7 per-user quota, m70.8 real-kill).
+// It depends ONLY on process env, NEVER on the guardrail policy, so it is built ONCE at
+// construction and is not part of the reloadable bundle. Without a key we cannot TRUST any user/run
+// id: the per-user quota and the cancel-check both fail OPEN (skipped) rather than fail-closed,
+// which would break every guarded call whose capability didn't propagate (ADR 0059 §8).
+func buildCapVerifier(logf func(string, ...any)) *runcap.Verifier {
+	pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"))
+	if pubB64 == "" {
+		return nil
 	}
-	return uq, verifier, nil
+	pub, derr := runcap.DecodePublicKey(pubB64)
+	if derr != nil {
+		logf("launcher: gateway: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user limits / cancel fail OPEN (skipped)", derr)
+		return nil
+	}
+	return runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
 }
 
 // handler returns the HTTP handler for the proxy listener.
@@ -556,6 +577,12 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	ctx, span := gp.tracer.Start(r.Context(), "gateway.call", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 
+	// Snapshot the reloadable guardrail bundle ONCE per request (K3): the engine, judge, and
+	// per-user quota are all read from this single consistent bundle, so a concurrent policy
+	// reload can never split a request across an old+new policy (an atomic swap replaces the
+	// whole bundle; this request finishes on whichever bundle it snapshotted).
+	pol := gp.policy.load()
+
 	caps := gp.capsFor(r)
 	route := gp.routeFromRequest(r)
 
@@ -592,11 +619,11 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// a missing/forged/unverifiable capability yields "" ⇒ per-user enforcement is SKIPPED (fail-open, ADR
 	// 0059 §8) — the call is still bounded by gateway auth + the guardrail content pipeline + the tenant
 	// quota. releaseUser frees the per-user concurrency slot on finish (noop when none was taken / userHash "").
-	userHash := gp.userHashFromRequest(r)
+	userHash := gp.userHashFromRequest(r, pol.user)
 	if userHash != "" {
 		span.SetAttributes(attribute.String("user.quota.subject", userHash))
 	}
-	userDeny, releaseUser := gp.user.preCall(ctx, userHash, moneyToFloat(est.String()))
+	userDeny, releaseUser := pol.user.preCall(ctx, userHash, moneyToFloat(est.String()))
 	if userDeny != nil {
 		gp.writeUserDeny(w, span, userDeny)
 		return
@@ -609,8 +636,8 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// block/redact/auditOnly rules, refuses a block hit with a typed guardrail_blocked
 	// BEFORE forwarding, and forwards the SCRUBBED body on a redact hit. With no policy
 	// (guardrail nil) this is skipped entirely and the body streams unchanged.
-	if gp.guardrail != nil {
-		if refused := gp.applyRequestGuardrail(w, span, r); refused {
+	if pol.engine != nil {
+		if refused := gp.applyRequestGuardrail(w, span, r, pol); refused {
 			return
 		}
 	}
@@ -688,8 +715,8 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// relayBody == body (the response is relayed verbatim).
 	relayBody := body
 	outputBlocked := false
-	if gp.guardrail != nil {
-		relayBody, outputBlocked = gp.applyOutputGuardrail(ctx, span, r, body)
+	if pol.engine != nil {
+		relayBody, outputBlocked = gp.applyOutputGuardrail(ctx, span, r, body, pol)
 	}
 
 	// Relay the (possibly substituted/redacted) response. An output block overrides the
@@ -739,7 +766,9 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	gp.tenant.postCall(ctx, moneyToFloat(actual.String()))
 	// M66: accrue the invoking user's monthly spend (nil-safe; only when a per-user budget is set AND the
 	// capability resolved a userHash — a missing/forged capability booked no user, so nothing accrues).
-	gp.user.postCall(ctx, userHash, moneyToFloat(actual.String()))
+	// Uses the SAME per-request bundle snapshot as the pre-call so the pre/post pair is symmetric even
+	// across a concurrent reload.
+	pol.user.postCall(ctx, userHash, moneyToFloat(actual.String()))
 
 	if !caps.Enforced() {
 		return
@@ -832,8 +861,8 @@ func (gp *gatewayProxy) writeTenantDeny(w http.ResponseWriter, span trace.Span, 
 // Rate-limiting is availability plumbing: a missing/unverifiable identity must NOT fail the model call
 // (that would break every guarded call whose capability didn't propagate). The call stays bounded by the
 // gateway auth + the guardrail content pipeline + the tenant quota.
-func (gp *gatewayProxy) userHashFromRequest(r *http.Request) string {
-	if gp.user == nil || gp.capVerifier == nil {
+func (gp *gatewayProxy) userHashFromRequest(r *http.Request, user *userQuota) string {
+	if user == nil || gp.capVerifier == nil {
 		return ""
 	}
 	token := strings.TrimSpace(r.Header.Get(runcap.HeaderName))
