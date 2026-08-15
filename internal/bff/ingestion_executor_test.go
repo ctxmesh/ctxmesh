@@ -96,7 +96,13 @@ var _ credplane.Embedder = (*mockEmbedder)(nil)
 // given embedder — the full ingestion pipeline wired with no external dependency.
 func newIngestionTestServer(t *testing.T, embedder credplane.Embedder) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
 	t.Helper()
-	ks := knowledge.NewMemStore()
+	return newIngestionTestServerWithStore(t, embedder, knowledge.NewMemStore())
+}
+
+// newIngestionTestServerWithStore is newIngestionTestServer with a caller-supplied knowledge.Store — used by the
+// m80.2 bounded-buffering proof to wrap the mem store in an Upsert-batch-size recorder.
+func newIngestionTestServerWithStore(t *testing.T, embedder credplane.Embedder, ks knowledge.Store) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
+	t.Helper()
 	os := objectstore.NewMemObjectStore()
 	s := NewServer(Options{
 		Auth:           AllowAll{},

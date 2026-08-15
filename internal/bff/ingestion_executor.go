@@ -338,38 +338,53 @@ func (s *Server) ingestOneDocument(
 		return ingestDocDone, false
 	}
 
-	// (c) Batch-embed the chunk texts in sub-batches, building knowledge.Chunk records.
-	records, result, halted := s.embedChunks(ctx, runID, spec, doc, chunks)
+	// (c) Embed + upsert the chunk texts in bounded sub-batches. embedAndUpsertChunks STREAMS each sub-batch
+	// (embed → build records → upsert → release) so the executor's peak heap is O(one document + ONE embed-batch),
+	// never O(all chunks of the document) — the m80.2 bounded-buffering fix. It returns the number of chunks
+	// upserted for this document (correctness is unchanged: the same records land under the same content-hash-
+	// idempotent Upsert; only the buffering window shrank).
+	upserted, result, halted := s.embedAndUpsertChunks(ctx, runID, spec, doc, chunks)
 	if halted || result == ingestReclaimable {
 		return result, halted
 	}
 
-	// (d) Upsert (content-hash idempotent) then sweep this document's PRIOR-run chunks (a shrunk/re-ingested doc
-	// must not leave stale chunks serving wrong text — the correctness half of re-ingest, ADR 0061 Fork 2).
-	if len(records) > 0 {
-		if uErr := s.knowledgeStore.Upsert(ctx, records); uErr != nil {
-			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
-			return 0, true
-		}
-	}
+	// (d) Sweep this document's PRIOR-run chunks (a shrunk/re-ingested doc must not leave stale chunks serving
+	// wrong text — the correctness half of re-ingest, ADR 0061 Fork 2). This runs AFTER every current-run batch
+	// has upserted; SweepOrphans deletes only ingestion_run_id <> runID, so the batches just written survive.
 	if _, sErr := s.knowledgeStore.SweepOrphans(ctx, spec.Namespace, spec.KnowledgeBase, doc.Key, runID); sErr != nil {
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for document %q: %v", doc.Key, sErr))
 		return 0, true
 	}
 
-	cursor.Chunks += len(records)
-	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("ingestion-document:%s:%d", doc.Key, len(records)))
+	cursor.Chunks += upserted
+	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("ingestion-document:%s:%d", doc.Key, upserted))
 	return ingestDocDone, false
 }
 
-// embedChunks batch-embeds a document's chunk texts (sub-batched) and assembles knowledge.Chunk records with
-// full provenance. It handles the budget/rate branch per sub-batch: on 429 it backs off + retries in-executor
-// (up to embedRateRetries) and returns ingestReclaimable when still failing; on 402 it fail-softs the run to
-// BudgetExceeded (returning halted=true); a non-budget embed error after retries fails the run fast.
-func (s *Server) embedChunks(
+// embedAndUpsertChunks embeds a document's chunk texts in bounded sub-batches and upserts EACH sub-batch as it is
+// embedded, so the executor never holds more than ONE embed-batch's worth of vectors in memory at a time (the
+// m80.2 bounded-buffering fix). Peak transient heap is O(embedSubBatch × vector-dim), independent of the
+// document's total chunk count — a 25 MiB doc that chunks into tens of thousands of vectors no longer materialises
+// them all at once. It returns the number of chunks upserted for the document.
+//
+// Correctness is UNCHANGED versus the prior accumulate-then-upsert form: every record is built identically (same
+// provenance, same content) and lands under the same content-hash-idempotent Upsert. Splitting the doc's chunks
+// across several Upsert calls within ONE run is safe — the caller's SweepOrphans deletes only
+// ingestion_run_id <> runID, so batches written earlier in the same run are never swept by the sweep that follows.
+//
+// It handles the budget/rate branch per sub-batch: on 429 it backs off + retries in-executor (up to
+// embedRateRetries) and returns ingestReclaimable when still failing; on 402 it fail-softs the run to
+// BudgetExceeded (returning halted=true); a non-budget embed error (or an Upsert error) after retries fails the
+// run fast. A resumable stop (429) after some batches already upserted is safe: those chunks carry this run's id,
+// so a later resume re-embeds the whole document (the cursor marks a doc done only after the WHOLE doc completes)
+// and the content-hash-idempotent Upsert overwrites them in place — never a duplicate row.
+func (s *Server) embedAndUpsertChunks(
 	ctx context.Context, runID string, spec IngestionSpec, doc IngestionDoc, chunks []ingest.TextChunk,
-) (records []knowledge.Chunk, result docOutcome, halted bool) {
+) (upserted int, result docOutcome, halted bool) {
 	now := time.Now()
+	// One reusable per-batch buffer, sized to the largest sub-batch (embedSubBatch, or the whole doc when smaller).
+	// Reused across sub-batches so the record slice is allocated once, not per batch — peak heap stays O(one batch).
+	records := make([]knowledge.Chunk, 0, min(embedSubBatch, len(chunks)))
 	for start := 0; start < len(chunks); start += embedSubBatch {
 		end := min(start+embedSubBatch, len(chunks))
 		batch := chunks[start:end]
@@ -385,23 +400,24 @@ func (s *Server) embedChunks(
 				// BUDGET exhausted → fail-soft, resumable (the cursor is preserved). ADR 0061 Fork 2.
 				s.failIngestion(runID, ingestionBudgetExceeded,
 					fmt.Sprintf("tenant budget exceeded while embedding document %q: %v", doc.Key, err))
-				return nil, 0, true
+				return 0, 0, true
 			case 429:
 				// RATE-limited after in-executor retries → leave reclaimable (the cursor preserves progress).
-				return nil, ingestReclaimable, false
+				return 0, ingestReclaimable, false
 			default:
 				// A genuine embed error → fail-fast.
 				s.failIngestion(runID, ingestionFailed,
 					fmt.Sprintf("embedding document %q: %v", doc.Key, err))
-				return nil, 0, true
+				return 0, 0, true
 			}
 		}
 		if len(vecs) != len(batch) {
 			s.failIngestion(runID, ingestionFailed,
 				fmt.Sprintf("embedding document %q: got %d vectors for %d chunks", doc.Key, len(vecs), len(batch)))
-			return nil, 0, true
+			return 0, 0, true
 		}
 
+		records = records[:0] // reuse the backing array; only this batch's records are live at once.
 		for i, ch := range batch {
 			records = append(records, knowledge.Chunk{
 				Namespace:      spec.Namespace,
@@ -421,8 +437,16 @@ func (s *Server) embedChunks(
 				UpdatedAt:      now,
 			})
 		}
+
+		// Upsert THIS sub-batch immediately (content-hash idempotent) rather than accumulating every batch first —
+		// the buffering bound. A failure fails the run fast; the cursor is preserved so a resume re-drives the doc.
+		if uErr := s.knowledgeStore.Upsert(ctx, records); uErr != nil {
+			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
+			return 0, 0, true
+		}
+		upserted += len(records)
 	}
-	return records, ingestDocDone, false
+	return upserted, ingestDocDone, false
 }
 
 // embedBatchWithRetry calls EmbedBatch, retrying on 429 (rate) with a linear back-off up to embedRateRetries.

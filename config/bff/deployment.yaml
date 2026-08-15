@@ -160,12 +160,34 @@ spec:
           resources:
             requests:
               cpu: 10m
-              memory: 128Mi
+              # 192Mi request: the BFF's steady base footprint (~100Mi: Go runtime + the
+              # static SPA + controller-runtime caller caches + adapters) plus headroom for a
+              # single in-flight ingestion's document buffer, so the scheduler reserves enough
+              # that a normal ingestion never runs against a too-tight request. It stays well
+              # under the limit so bursts are absorbed, not the baseline reservation.
+              memory: 192Mi
             limits:
               cpu: 500m
-              # M68 (ADR 0061): the BFF now runs the ingestion executor (chunk buffering +
-              # batch embedding), which OOMed the prior 128Mi limit during ingestion (m52.M5,
-              # caught by the m68.14 live tier). Bumped to a sane control-plane BFF ceiling.
+              # 512Mi limit — right-sized for the ingestion executor (ADR 0061), NOT picked
+              # blindly. The m68.14 OOM (even 512Mi OOMed on 3 tiny docs) was the M3 artifact
+              # (c0bf933: the MinIO lazy reader's context was cancelled on Get return, so every
+              # ingestion spun/failed on doc 1); that is FIXED. Post-fix + m80.2, the peak is
+              # BOUNDED and independent of corpus/doc-chunk count:
+              #   base BFF                                        ~100Mi
+              # + one document transient (data ≤25Mi upload cap + extracted text ~25Mi +
+              #   the []rune + []TextChunk of one doc)            ~150-180Mi (freed per doc)
+              # + one embed sub-batch (128 chunks × 1536-dim ×
+              #   4B ≈ 0.8Mi vectors + records)                   ~1-2Mi  (was O(all doc chunks)
+              #                                                    pre-m80.2 — up to ~120Mi for a
+              #                                                    25Mi doc; m80.2 streams
+              #                                                    embed→upsert per sub-batch)
+              # + GC/heap-fragmentation headroom (~1.5×)          → ~430Mi
+              # rounded up to the 512Mi power-of-two ceiling. Because the executor no longer
+              # buffers a whole document's (or the corpus's) vectors, this ceiling does not have
+              # to grow with corpus size — it is bounded by the 25Mi per-document upload cap.
+              # (Live in-cluster re-verify under the shipped limit is BFF-OIDC-auth-gated =
+              # user-only; the code-level proof is the m80.2 bounded-buffering heap test +
+              # this bounded-peak analysis.)
               memory: 512Mi
           volumeMounts: []
       volumes: []
