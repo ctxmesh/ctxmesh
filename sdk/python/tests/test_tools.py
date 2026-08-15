@@ -431,3 +431,26 @@ def test_handoff_posts_and_relays_capability(client, monkeypatch):
     assert captured["expect"] == (200,)
     assert captured["body"] == {"targetAgent": "billing", "message": "refund needed"}
     assert captured["headers"][CAPABILITY_HEADER] == "cap-token", "the capability is relayed (OBO)"
+
+
+# ── record-mode relay on tool-call egress (M78, ADR 0071 §1/C1) ────────────────
+
+
+def test_mcp_headers_relays_record_when_recorded():
+    """A recorded run relays X-Ctxmesh-Record on every MCP tool-call egress so the egress sidecar
+    captures the tool I/O into the run's replay fixture (TOOL channel)."""
+    from ctxmesh._record import RECORD_HEADER, record_scope
+    from ctxmesh.tools import _mcp_headers
+
+    with record_scope({RECORD_HEADER: "run-tool-rec"}):
+        headers = _mcp_headers(session_id=None)
+    assert headers[RECORD_HEADER] == "run-tool-rec"
+
+
+def test_mcp_headers_omits_record_when_not_recorded():
+    """A non-recorded run relays NO X-Ctxmesh-Record header ⇒ the sidecar captures nothing."""
+    from ctxmesh._record import RECORD_HEADER
+    from ctxmesh.tools import _mcp_headers
+
+    headers = _mcp_headers(session_id=None)  # no record_scope active
+    assert RECORD_HEADER not in headers

@@ -23,9 +23,11 @@ limitations under the License.
 package egress
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -35,6 +37,24 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
+
+// maxRecordBody bounds how much of a tool request/response the record seam buffers into a fixture,
+// so a pathological payload can never balloon a sidecar's memory. A tool call's JSON-RPC message +
+// result are small; beyond the cap the capture is skipped for that direction (never a failed
+// forward — capture is best-effort). Generous vs a normal tool payload.
+const maxRecordBody = 8 << 20 // 8 MiB
+
+// toolCapture is the per-request record-mode state stashed in the request context (captureCtxKey)
+// by ServeHTTP and read by the ReverseProxy's ModifyResponse hook. It carries the VERIFIED run id
+// the fixture is keyed on (never the relayed header value), the pre-injection request body, and the
+// parsed JSON-RPC matchers — so ModifyResponse can capture the verbatim upstream response and hand
+// the whole interaction to the recorder. nil / absent ⇒ this call is not being recorded.
+type toolCapture struct {
+	runID    string
+	callID   string
+	toolName string
+	reqBody  []byte
+}
 
 // ProxyConfig configures a Proxy.
 type ProxyConfig struct {
@@ -62,6 +82,11 @@ type ProxyConfig struct {
 	Transport http.RoundTripper
 	// Log is the structured logger.
 	Log logr.Logger
+	// Recorder, when non-nil, is the M78 record-mode TOOL capture (ADR 0071 §1/C1): every tool
+	// call of a RECORDED run (the SDK relays X-Ctxmesh-Record) is captured pre-injection (request
+	// body) + verbatim (upstream response) into the run's replay fixture. nil ⇒ record mode off,
+	// the capture path is a no-op (zero overhead, the forward is byte-for-byte unchanged).
+	Recorder *ToolRecorder
 }
 
 // Proxy is the sidecar HTTP handler.
@@ -71,8 +96,9 @@ type Proxy struct {
 }
 
 type (
-	targetCtxKey struct{}
-	credCtxKey   struct{}
+	targetCtxKey  struct{}
+	credCtxKey    struct{}
+	captureCtxKey struct{}
 )
 
 // NewProxy builds a Proxy. The single ReverseProxy reads the per-request upstream + injected
@@ -97,12 +123,53 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		// Stream responses immediately — MCP streamable-http replies as SSE.
 		FlushInterval: -1,
 		Transport:     cfg.Transport,
+		// Record mode (M78, ADR 0071 §1/C1): capture the VERBATIM upstream response bytes for a
+		// recorded tool call. The response carries NO credential (the OBO bearer is a REQUEST header,
+		// injected by Rewrite; the upstream never echoes it back), so C4 holds. We buffer the body,
+		// hand a copy to the recorder, and restore an identical reader so the agent sees byte-for-
+		// byte the same response incl. SSE/streamable-http framing. nil-recorder / non-recorded call
+		// ⇒ this hook is a no-op (nil capture in the context). Best-effort: a read error skips
+		// capture, never fails the forward.
+		ModifyResponse: p.captureResponse,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			cfg.Log.Error(err, "egress: upstream forward failed")
 			writeError(w, http.StatusBadGateway, "upstream_unreachable", "could not reach the MCP server")
 		},
 	}
 	return p
+}
+
+// captureResponse is the ReverseProxy ModifyResponse hook that records a recorded tool call's
+// VERBATIM upstream response (M78, ADR 0071 §1/C1). It reads the per-request toolCapture from the
+// context (nil ⇒ not a recorded call, no-op), buffers the response body (capped, best-effort),
+// restores an identical body reader so the agent receives byte-for-byte the same response, and
+// hands the whole interaction (pre-injection request + verbatim response) to the recorder keyed on
+// the VERIFIED run id. It never returns an error — a record-path failure must not fail the forward.
+func (p *Proxy) captureResponse(resp *http.Response) error {
+	cap, _ := resp.Request.Context().Value(captureCtxKey{}).(*toolCapture)
+	if cap == nil || p.cfg.Recorder == nil {
+		return nil
+	}
+	body := resp.Body
+	if body == nil {
+		p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, nil)
+		return nil
+	}
+	buffered, err := io.ReadAll(io.LimitReader(body, maxRecordBody+1))
+	_ = body.Close()
+	if err != nil || int64(len(buffered)) > maxRecordBody {
+		// Could not fully buffer the response (read error or over the cap) — restore what we read so
+		// the forward still streams, and skip capture for this call rather than store a truncated
+		// response (a partial fixture would mis-replay). The request/response are never mutated.
+		resp.Body = io.NopCloser(bytes.NewReader(buffered))
+		p.cfg.Log.Info("egress: record: response body not fully buffered — skipping tool capture",
+			"run", cap.runID, "tool", cap.toolName)
+		return nil
+	}
+	// Restore an identical reader so the agent sees the response verbatim.
+	resp.Body = io.NopCloser(bytes.NewReader(buffered))
+	p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, buffered)
+	return nil
 }
 
 // ServeHTTP resolves the route, verifies the capability, resolves the credential, and
@@ -167,13 +234,102 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Record mode (M78, ADR 0071 §1/C1): buffer the request body PRE-INJECTION ──
+	// This is the C4-safe capture point: we buffer the agent-visible request BODY here, BEFORE
+	// reverse.ServeHTTP injects the OBO bearer (Rewrite sets the Authorization header on the
+	// OUTBOUND request; the body is untouched). So the captured request carries no credential by
+	// construction. Gated per-run by the X-Ctxmesh-Record header the SDK relays on a recorded
+	// call; keyed on the VERIFIED runCap.RunID (never the relayed value) so a forged header cannot
+	// mis-key another run's fixture. recorder nil / header absent ⇒ no buffering, zero overhead.
+	var capture *toolCapture
+	if p.cfg.Recorder != nil && r.Header.Get(RecordHeaderName) != "" && runCap.RunID != "" {
+		capture = p.bufferRequestForRecord(r, runCap.RunID)
+	}
+
 	// Forward to the real upstream: rewrite the path to strip the /<server> prefix, then let
 	// the ReverseProxy inject the credential + strip the capability (see Rewrite).
 	forwardURL := *route.Target()
 	r.URL.Path = remainder
 	ctx := context.WithValue(r.Context(), targetCtxKey{}, &forwardURL)
 	ctx = context.WithValue(ctx, credCtxKey{}, cred.Value)
+	if capture != nil {
+		ctx = context.WithValue(ctx, captureCtxKey{}, capture)
+	}
 	p.reverse.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// bufferRequestForRecord drains + restores the request body so the record seam captures the
+// agent-visible request bytes (pre-injection, C4-safe) while the forward still streams the exact
+// bytes. It also best-effort parses the JSON-RPC tools/call message for the replay matchers
+// (call id + tool name). Returns the capture state to stash in the forward context; nil on a body
+// read error (capture is skipped rather than failing the tool call).
+func (p *Proxy) bufferRequestForRecord(r *http.Request, runID string) *toolCapture {
+	var buffered []byte
+	if r.Body != nil {
+		b, err := io.ReadAll(io.LimitReader(r.Body, maxRecordBody+1))
+		_ = r.Body.Close()
+		if err != nil || int64(len(b)) > maxRecordBody {
+			// Restore what we read so the forward still streams, and skip capture (never fail the
+			// call on a record-path read error / oversize body).
+			r.Body = io.NopCloser(bytes.NewReader(b))
+			p.cfg.Log.Info("egress: record: request body not fully buffered — skipping tool capture", "run", runID)
+			return nil
+		}
+		buffered = b
+		r.Body = io.NopCloser(bytes.NewReader(b))
+	}
+	callID, toolName := parseToolCall(buffered)
+	return &toolCapture{runID: runID, callID: callID, toolName: toolName, reqBody: buffered}
+}
+
+// parseToolCall best-effort extracts the JSON-RPC tool-call id + tool name from an MCP
+// tools/call request body for the replay matchers (ADR 0071 §2: primary CallID, fallback
+// ToolName+ArgsHash). The body is a JSON-RPC message:
+//
+//	{"jsonrpc":"2.0","id":<n|str>,"method":"tools/call","params":{"name":"<tool>","arguments":{…}}}
+//
+// callID is the JSON-RPC id rendered as a string (numbers → their decimal form); toolName is
+// params.name. Both degrade to "" on a non-tools/call or unparseable body — replay then falls back
+// to name+args-hash / captured-order matching. It NEVER fails the call (the argsBody stored is the
+// verbatim request regardless).
+func parseToolCall(body []byte) (callID, toolName string) {
+	if len(body) == 0 {
+		return "", ""
+	}
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return "", ""
+	}
+	if msg.Method != "tools/call" {
+		// A handshake / tools-list / notification, not a tool call — no matcher keys.
+		return "", ""
+	}
+	return jsonRPCID(msg.ID), msg.Params.Name
+}
+
+// jsonRPCID renders a JSON-RPC id (a JSON number or string) to the stable string form the fixture
+// stores as CallID. A string id is unquoted; a numeric id becomes its decimal string; null/absent
+// yields "". Best-effort — a shape it cannot render yields "".
+func jsonRPCID(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(trimmed, &s) == nil {
+		return s
+	}
+	var n json.Number
+	if json.Unmarshal(trimmed, &n) == nil {
+		return n.String()
+	}
+	return ""
 }
 
 // errorBody is the sidecar's structured error surface — a machine-readable code + a short

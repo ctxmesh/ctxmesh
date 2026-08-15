@@ -43,7 +43,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -69,12 +69,41 @@ func TestEgressSidecarContainer(t *testing.T) {
 	// No delegation env unless a token-service URL is configured.
 	_, hasDelegate := envValue(c, "TOKEN_SERVICE_URL")
 	assert.False(t, hasDelegate)
+	// No record env for a non-record-capable sidecar (byte-for-byte the pre-M78 OBO sidecar).
+	_, hasRecord := envValue(c, "RECORD_CAPABLE")
+	assert.False(t, hasRecord)
+	_, hasStore := envValue(c, "OBJECT_STORE_ADDR")
+	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]")
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false)
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
+}
+
+// TestEgressSidecarContainer_RecordMode: a RECORD-CAPABLE sidecar (M78, ADR 0071 §1/C1) gets
+// RECORD_CAPABLE=true + the durable object-store env (the fixture sink → C2 fail-closed at startup
+// if absent), all STATIC (never valueFrom, the m5.7 Knative landmine).
+func TestEgressSidecarContainer_RecordMode(t *testing.T) {
+	cfg := OBOEgressConfig{
+		SidecarImage:           "egress-sidecar:test",
+		CapabilityPublicKeyB64: "PUBKEY",
+		CapabilityAudience:     "aud",
+		CredentialNamespace:    "ae-credentials",
+	}
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true)
+
+	rec, ok := envValue(c, "RECORD_CAPABLE")
+	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
+	assert.Equal(t, "true", rec.Value)
+
+	for _, name := range []string{"OBJECT_STORE_ADDR", "OBJECT_STORE_ACCESS_KEY", "OBJECT_STORE_SECRET_KEY"} {
+		e, present := envValue(c, name)
+		require.True(t, present, "record-capable sidecar carries %s (the fixture sink)", name)
+		assert.NotEmpty(t, e.Value, name)
+		assert.Nil(t, e.ValueFrom, "%s must be a static value (Knative rejects valueFrom)", name)
+	}
 }
 
 func TestEgressRoutesJSON(t *testing.T) {
@@ -87,14 +116,16 @@ func TestEgressRoutesJSON(t *testing.T) {
 
 func TestEgressDigest(t *testing.T) {
 	routes := []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://a", OAuth: true}}
-	assert.Empty(t, egressDigest("img", "r:squad-a", nil), "no routes ⇒ no digest (pod template unchanged)")
+	assert.Empty(t, egressDigest("img", "r:squad-a", nil, false), "no routes ⇒ no digest (pod template unchanged)")
 
-	base := egressDigest("img", "r:squad-a", routes)
+	base := egressDigest("img", "r:squad-a", routes, false)
 	assert.NotEmpty(t, base)
 	// A route URL change (the real URL lives in the sidecar env now) rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}))
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}, false))
 	// A sidecar image change rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes))
+	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes, false))
 	// A boundary (registry membership) change rolls the pod — the EGRESS_BOUNDARY env must land.
-	assert.NotEqual(t, base, egressDigest("img", "r:squad-b", routes))
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-b", routes, false))
+	// Toggling record mode rolls the pod — the RECORD_CAPABLE + object-store env must land.
+	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", routes, true))
 }
