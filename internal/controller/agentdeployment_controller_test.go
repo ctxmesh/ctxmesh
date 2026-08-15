@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -896,4 +898,90 @@ func TestReconcile_NoRuntimeNoInjection(t *testing.T) {
 	revName := ksvc.Spec.Template.Name
 	assert.NotContains(t, revName, "-h",
 		"bare agent (no runtime, no bindings) must NOT have a combined digest suffix")
+}
+
+// TestReconcile_IdentitySAConflict_ReadyFalse proves the m79.1 fix (m52 C11): when
+// the per-agent identity ServiceAccount (agent-<name>) already exists and is owned by
+// a DIFFERENT controller, the reconcile must fail LOUD and stop cleanly — not wedge
+// in an endless requeue loop. The expected outcome is:
+//   - Reconcile returns (ctrl.Result{}, nil) — no error propagated, no requeue.
+//   - Ready condition is False with reason IdentitySAConflict and a message naming
+//     the conflicting SA and its current owner.
+//   - No Knative Service is created (the workload write never happened).
+func TestReconcile_IdentitySAConflict_ReadyFalse(t *testing.T) {
+	const (
+		name      = "sa-conflict-agent"
+		namespace = "default"
+	)
+
+	// Pre-create the agent-<name> SA owned by a foreign controller.  We use a
+	// synthetic owner UID / kind that will never match an AgentDeployment so
+	// SetControllerReference inside ensureAgentIdentitySA always sees a conflict.
+	foreignUID := types.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	isController := true
+	conflictingSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      agentIdentitySAName(name), // "agent-sa-conflict-agent"
+			Namespace: namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "apps/v1",
+					Kind:       "Deployment",
+					Name:       "some-other-controller",
+					UID:        foreignUID,
+					Controller: &isController,
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, conflictingSA))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, conflictingSA) })
+
+	// Create the AgentDeployment. The reconciler must use a non-empty
+	// StatelayerProxyURL + a MemoryBinding so ensureAgentIdentitySA is actually
+	// reached (injectPodToken = true when StatelayerProxyURL != "" && hasMemoryBinding).
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest",
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+
+	// Wire a MemoryBinding so hasMemoryBinding is true (triggers injectPodToken).
+	_ = mkMemoryBinding(t, "mem-conflict-test", namespace, name, "valkey:6379")
+
+	// The reconciler needs StatelayerProxyURL set to flip injectPodToken.
+	r := &AgentDeploymentReconciler{
+		Client:             k8sClient,
+		Scheme:             k8sClient.Scheme(),
+		Registry:           NewPostgresRegistryReader(testRegStore),
+		StatelayerProxyURL: "http://statelayer-proxy.agent-engine-system.svc:8080",
+	}
+
+	// reconcileNN asserts Reconcile returns nil error — the conflict must NOT
+	// propagate as a hard error (which would hot-loop via controller-runtime retry).
+	result := reconcileNN(t, r, name, namespace)
+	assert.Equal(t, ctrl.Result{}, result, "conflict must yield an empty Result (no explicit requeue)")
+
+	// Ready must be False with the IdentitySAConflict reason.
+	var updated agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
+	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)
+	require.NotNil(t, cond, "Ready condition must be set after SA conflict")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status,
+		"Ready must be False when identity SA is owned by a foreign controller")
+	assert.Equal(t, reasonIdentitySAConflict, cond.Reason,
+		"reason must be IdentitySAConflict (not a generic infra error)")
+	assert.Contains(t, cond.Message, agentIdentitySAName(name),
+		"conflict message must name the conflicting ServiceAccount")
+
+	// No Knative Service must have been created (the workload write was never reached).
+	var ksvc servingv1.Service
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ksvc)
+	assert.True(t, apierrors.IsNotFound(err),
+		"no serving ksvc must be created when the identity SA is in conflict")
 }

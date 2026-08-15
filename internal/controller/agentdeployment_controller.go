@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -54,6 +56,13 @@ import (
 // into AgentDeployment.status.conditions. Kept as a named constant to satisfy
 // the goconst linter and to make the value easy to grep.
 const conditionReady = "Ready"
+
+// reasonIdentitySAConflict is set on the AgentDeployment Ready condition when
+// the per-agent identity ServiceAccount (agent-<name>) already exists and is
+// owned by a different controller. The reconcile stops cleanly (no requeue /
+// no hot-loop) — the conflict must be resolved by a human before the agent can
+// run. Mirrors the promptResolveError / guardrailResolveError pattern.
+const reasonIdentitySAConflict = "IdentitySAConflict"
 
 // executionModel values (mirror the CRD enum on AgentDeployment.spec.executionModel).
 const (
@@ -384,6 +393,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// on user input). A GuardrailPolicy create/fix re-reconciles via the watch below.
 	if ge, ok := asGuardrailResolveError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ge.reason, ge.msg)
+	}
+	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
+	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
+	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
+	// no requeue). The user must delete or rename the conflicting SA; a re-watch
+	// will re-reconcile once the SA is gone.
+	if ce, ok := asIdentitySAConflictError(err); ok {
+		return r.setReadyFalse(ctx, &deploy, reasonIdentitySAConflict, ce.Error())
 	}
 	return result, err
 }
@@ -1520,6 +1537,33 @@ func agentIdentitySAName(deployName string) string {
 	return "agent-" + deployName
 }
 
+// identitySAConflictError is a sentinel returned by ensureAgentIdentitySA when
+// the per-agent identity SA (agent-<name>) already exists and is owned by a
+// DIFFERENT controller. The reconcile must stop cleanly (no requeue / no
+// hot-loop): Reconcile intercepts this type, sets Ready=False
+// (reasonIdentitySAConflict), and returns nil so the controller does not
+// back-off-requeue. Mirrors the promptResolveError / guardrailResolveError
+// pattern — a human must resolve the naming collision before the agent can run.
+type identitySAConflictError struct {
+	saName    string
+	ownerKind string
+	ownerName string
+}
+
+func (e *identitySAConflictError) Error() string {
+	return fmt.Sprintf("ServiceAccount %q is already owned by %s %q; delete or rename it to resolve the conflict",
+		e.saName, e.ownerKind, e.ownerName)
+}
+
+// asIdentitySAConflictError extracts an *identitySAConflictError from err (supports wrapping).
+func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
+	var ce *identitySAConflictError
+	if errors.As(err, &ce) {
+		return ce, true
+	}
+	return nil, false
+}
+
 // ensureAgentIdentitySA reconciles the per-agent identity ServiceAccount the pod runs
 // as when it presents a projected token to the state-layer proxy (ADR 0052 §C6
 // RESOLUTION). saName == "" (a non-proxy agent) is a no-op: the pod keeps the namespace
@@ -1533,6 +1577,11 @@ func agentIdentitySAName(deployName string) string {
 // boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
 // §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
 // registry), so a stale boundary can never linger.
+//
+// If the SA already exists and is owned by a DIFFERENT controller,
+// SetControllerReference returns a *controllerutil.AlreadyOwnedError.
+// ensureAgentIdentitySA wraps it as an *identitySAConflictError so the caller
+// (Reconcile) can surface Ready=False and stop cleanly — no hot-loop.
 func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
 	if saName == "" {
 		return nil
@@ -1554,6 +1603,17 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 	}); err != nil {
 		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
 			return nil // namespace going away — nothing to own; not an error
+		}
+		// A foreign controller already owns this SA: surface it as a clear,
+		// actionable conflict rather than propagating an opaque error that
+		// would wedge the reconcile in an endless requeue loop.
+		var alreadyOwned *controllerutil.AlreadyOwnedError
+		if errors.As(err, &alreadyOwned) {
+			return &identitySAConflictError{
+				saName:    saName,
+				ownerKind: alreadyOwned.Owner.Kind,
+				ownerName: alreadyOwned.Owner.Name,
+			}
 		}
 		return fmt.Errorf("reconciling agent identity ServiceAccount %s: %w", saName, err)
 	}
