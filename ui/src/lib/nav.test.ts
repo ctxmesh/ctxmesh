@@ -68,6 +68,30 @@ describe("nav consolidation (m23.7)", () => {
   });
 });
 
+// m76.1 taxonomy: the standalone MCP Catalog nav item is retired (it duplicated the
+// Gallery's MCP tab). The Gallery is the single discovery surface; MCP Servers is the
+// owned list; Tool catalog is the bind-time picker.
+describe("catalog taxonomy (m76.1)", () => {
+  it("mcp-catalog nav item is removed (route retired — /tools/mcp-catalog redirects to /gallery)", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "mcp-catalog")).toBeUndefined();
+  });
+
+  it("gallery nav item exists as the single discovery surface", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "gallery")).toBeDefined();
+    expect(navRoute("gallery")).toBe("/gallery");
+  });
+
+  it("mcp-servers nav item stays (owned list, not discovery)", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "mcp-servers")).toBeDefined();
+    expect(navRoute("mcp-servers")).toBe("/tools/mcp-servers");
+  });
+
+  it("tool-catalog nav item stays (bind-time picker, not discovery)", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "tool-catalog")).toBeDefined();
+    expect(navRoute("tool-catalog")).toBe("/tools/catalog");
+  });
+});
+
 // The first-run checklist (m54.4) derives its routes from the nav IA, so a nav
 // route change can't leave a stale hardcoded checklist path.
 describe("first-run checklist derives from nav (m54.4)", () => {

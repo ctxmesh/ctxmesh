@@ -328,3 +328,17 @@ describe("McpServersPage publish + badges (m73.7)", () => {
     expect(screen.getByTestId("publish-current-visibility")).toHaveTextContent("Currently: team");
   });
 });
+
+// m76.1: empty state cross-link to Gallery (T9 overlap noted — this test pins the
+// affordance so m76.2 doesn't re-add it and duplicate the element).
+describe("McpServersPage empty state Gallery cross-link (m76.1)", () => {
+  it("shows a 'discover shared servers' link to /gallery in the empty state", async () => {
+    recordingFetch({ servers: [] });
+    renderPage();
+
+    const link = await screen.findByTestId("gallery-discover-link");
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/gallery");
+    expect(link).toHaveTextContent("discover shared servers");
+  });
+});

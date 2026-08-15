@@ -157,6 +157,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// ── Taxonomy contract (m76.1) ─────────────────────────────────────────────────
+describe("TemplateGalleryPage — taxonomy (m76.1)", () => {
+  it("Gallery MCP tab is labeled 'Shared servers', not 'MCP Servers'", () => {
+    makeFetch();
+    renderPage();
+    const mcpTab = screen.getByTestId("gallery-tab-mcp");
+    expect(mcpTab).toHaveTextContent("Shared servers");
+    expect(mcpTab).not.toHaveTextContent("MCP Servers");
+  });
+});
+
 // ── Template tab ─────────────────────────────────────────────────────────────
 describe("TemplateGalleryPage — templates tab", () => {
   it("renders the template gallery header and two tabs", async () => {
