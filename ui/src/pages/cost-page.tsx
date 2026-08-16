@@ -4,6 +4,7 @@ import { Coins, Download } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select } from "@/components/ui/select";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import {
   api,
@@ -11,14 +12,25 @@ import {
   type AgentCostItem,
   type CostForecastResponse,
   type CostSummary,
+  type TenantSummary,
 } from "@/lib/api";
 
 // CostPage — the cost drill-down surface (m16.10).
 //
-// Backend: GET /api/cost/breakdown?by=agent&limit=&cursor=
+// Backend: GET /api/cost/breakdown?by=agent&tenant=&limit=&cursor=
 //   Returns { agents: AgentCostItem[], total: CostSummary, nextCursor }.
 //   The figures are a RECENT-WINDOW rollup (≤200 recent traces) — NOT
 //   all-time spend. The UI makes this explicit via a caveat note.
+//
+// Tenant scoping (ADR 0077, m86): the breakdown + forecast are tenant-scoped —
+//   ?tenant= is REQUIRED (a missing tenant is a 400). The page self-serves that
+//   choice with an in-page tenant picker (below) driven by GET /api/tenants:
+//     • on load with no ?tenant=, if tenants exist we default to the FIRST one
+//       (the page is immediately useful, no dead-end);
+//     • the picker writes the selection back into ?tenant= so the view is
+//       linkable / refreshable, and re-fetches breakdown + forecast;
+//     • ONLY when there are genuinely zero tenants do we show the calm empty
+//       state — and even then we never fire a guaranteed-400 tenant-less call.
 //
 // 501-calm / 502-error discipline:
 //   • 501 (Langfuse not configured): costBreakdown() returns null → calm
@@ -159,9 +171,59 @@ function ForecastCard({
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; agents: AgentCostItem[]; total: CostSummary; nextCursor: string }
+  | { kind: "no-tenant" } // ADR 0077 — breakdown requires ?tenant=; none selected yet
   | { kind: "unavailable" } // 501 — Langfuse not configured
   | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
+
+// TenantsState is the tenant PICKER's own load state (ADR 0077, m86) — kept
+// distinct from the breakdown's LoadState. `forbidden` is a first-class outcome:
+// a viewer who can't list tenants (403) shouldn't see a broken-looking picker.
+type TenantsState =
+  | { kind: "loading" }
+  | { kind: "ready"; tenants: TenantSummary[] }
+  | { kind: "forbidden" }
+  | { kind: "error"; message: string };
+
+// TenantPicker — the in-page dropdown that drives the cost view's tenant. It
+// reuses the shell's Select primitive (matching the Workspace switcher) rather
+// than inventing a new control. A tenant is a DIFFERENT concept from a namespace
+// (cluster-scoped quota grouping vs a single namespace), so this is its own
+// picker, not the namespace one.
+function TenantPicker({
+  tenant,
+  tenants,
+  onChange,
+}: {
+  tenant: string;
+  tenants: TenantSummary[];
+  onChange: (name: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label
+        htmlFor="cost-tenant-picker"
+        className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"
+      >
+        Tenant
+      </label>
+      <Select
+        id="cost-tenant-picker"
+        aria-label="Tenant"
+        data-testid="cost-tenant-picker"
+        value={tenant}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-8 w-44 text-xs"
+      >
+        {tenants.map((t) => (
+          <option key={t.name} value={t.name}>
+            {t.name}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
+}
 
 // emptyCostSummary is the zero-value CostSummary used while loading.
 const emptyCostSummary: CostSummary = {
@@ -173,15 +235,72 @@ const emptyCostSummary: CostSummary = {
 
 export function CostPage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  // ?tenant= drives the forecast card (cost-rollup store); absent = no forecast shown.
+  // ?tenant= drives the whole tenant-scoped view (breakdown + forecast). The
+  // in-page picker writes it back here so the view stays linkable/refreshable.
   const tenant = searchParams.get("tenant") ?? "";
+
+  // The tenant picker's options (ADR 0077, m86). Fetched once via GET /api/tenants.
+  const [tenantsState, setTenantsState] = useState<TenantsState>({ kind: "loading" });
 
   // Forecast state: null = 501 (store not enabled) or no tenant given; undefined = not yet loaded.
   const [forecast, setForecast] = useState<CostForecastResponse | null | undefined>(
     undefined,
   );
+
+  // setTenant drives the view by writing the selection into ?tenant= (replace, not
+  // push — flipping the tenant isn't a distinct history step). Pagination resets to
+  // page 0 for the new tenant.
+  const setTenant = useCallback(
+    (name: string) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (name) next.set("tenant", name);
+          else next.delete("tenant");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  // Load the tenant list once for the picker. Best-effort: a 403 (viewer can't list
+  // tenants) is an honest "forbidden", distinct from an authentically empty list.
+  useEffect(() => {
+    const controller = new AbortController();
+    setTenantsState({ kind: "loading" });
+    api
+      .listTenants(controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setTenantsState({ kind: "ready", tenants: res.items ?? [] });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        if (err instanceof ApiError && err.isForbidden) {
+          setTenantsState({ kind: "forbidden" });
+          return;
+        }
+        setTenantsState({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't load tenants",
+        });
+      });
+    return () => controller.abort();
+  }, []);
+
+  // Default-to-first: when the page lands with no ?tenant= and tenants exist, pick
+  // the first so the page is immediately useful instead of dead-ending. Genuinely
+  // zero tenants keeps the calm empty state (handled in render, below).
+  useEffect(() => {
+    if (tenant) return;
+    if (tenantsState.kind === "ready" && tenantsState.tenants.length > 0) {
+      setTenant(tenantsState.tenants[0].name);
+    }
+  }, [tenant, tenantsState, setTenant]);
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
@@ -190,14 +309,30 @@ export function CostPage() {
   const abortRef = useRef<AbortController | null>(null);
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
+  // Switching tenant resets pagination — a cursor from one tenant is meaningless
+  // for another. Reset to page 0 whenever the tenant changes.
+  useEffect(() => {
+    setPageStack([""]);
+  }, [tenant]);
+
   const load = useCallback(() => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // ADR 0077: the breakdown is tenant-scoped and REQUIRES ?tenant= (a missing
+    // tenant is a 400). Don't fire a guaranteed-400 call — render a calm "pick a
+    // tenant" state instead, mirroring the forecast card's silent-hide.
+    if (!tenant) {
+      setLoadState({ kind: "no-tenant" });
+      return;
+    }
+
     setLoadState({ kind: "loading" });
 
     api
       .costBreakdown(
+        tenant,
         { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
         controller.signal,
       )
@@ -231,7 +366,7 @@ export function CostPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor]);
+  }, [cursor, tenant]);
 
   useEffect(() => {
     load();
@@ -331,16 +466,50 @@ export function CostPage() {
     },
   ];
 
+  const tenants = tenantsState.kind === "ready" ? tenantsState.tenants : [];
+
+  // The page header — title + subtitle + (when there is a tenant to switch
+  // between) the in-page tenant picker. Shared across every state so the picker
+  // is always reachable, not just on the happy path.
+  const header = (
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
+        <p className="text-sm text-muted-foreground">
+          Per-agent cost breakdown from recent activity.
+        </p>
+      </div>
+      {tenants.length > 0 && (
+        <TenantPicker tenant={tenant} tenants={tenants} onChange={setTenant} />
+      )}
+    </div>
+  );
+
+  // No-tenant calm state — ONLY reached when there are genuinely zero tenants (a
+  // fresh cluster). With tenants present the default-to-first effect selects one,
+  // so this is never a dead-end. A can't-list-tenants 403 also lands here, since
+  // without the list we cannot self-serve a selection.
+  if (loadState.kind === "no-tenant") {
+    return (
+      <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
+        {header}
+        <div
+          className="flex h-40 items-center justify-center rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          data-testid="cost-no-tenant"
+        >
+          {tenantsState.kind === "forbidden"
+            ? "Cost is per-tenant. You don't have permission to list tenants — ask an operator for access to view cost."
+            : "Cost is per-tenant, and this cluster has no tenants yet. An operator creates a Tenant to enable cost tracking."}
+        </div>
+      </div>
+    );
+  }
+
   // 501 calm state — Langfuse not configured.
   if (loadState.kind === "unavailable") {
     return (
       <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
-          <p className="text-sm text-muted-foreground">
-            Per-agent cost breakdown from recent activity.
-          </p>
-        </div>
+        {header}
         <div
           className="flex h-40 items-center justify-center rounded-lg border bg-card text-sm text-muted-foreground"
           data-testid="cost-unavailable"
@@ -357,12 +526,7 @@ export function CostPage() {
   if (loadState.kind === "degraded") {
     return (
       <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
-          <p className="text-sm text-muted-foreground">
-            Per-agent cost breakdown from recent activity.
-          </p>
-        </div>
+        {header}
         <div
           className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
           data-testid="cost-degraded"
@@ -378,14 +542,19 @@ export function CostPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
-        <p className="text-sm text-muted-foreground">
-          Per-agent cost breakdown.{" "}
-          <span className="font-medium text-foreground">
-            Costs reflect a recent window of activity, not all-time spend.
-          </span>
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
+          <p className="text-sm text-muted-foreground">
+            Per-agent cost breakdown.{" "}
+            <span className="font-medium text-foreground">
+              Costs reflect a recent window of activity, not all-time spend.
+            </span>
+          </p>
+        </div>
+        {tenants.length > 0 && (
+          <TenantPicker tenant={tenant} tenants={tenants} onChange={setTenant} />
+        )}
       </div>
 
       {loadState.kind === "ready" && (

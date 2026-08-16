@@ -22,11 +22,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 )
 
 // --- parseAgentTag round-trip tests ------------------------------------------
@@ -257,13 +263,34 @@ func TestCostBreakdownUpstreamErrorSurfaces(t *testing.T) {
 
 // --- GET /api/cost/breakdown handler tests -----------------------------------
 
+// costTestTenant is the default tenant used by the cost handler tests. Its
+// spec.namespaces owns the namespaces the existing fixtures tag their agents
+// with (default, other, ns) so the ADR 0077 breakdown filter keeps them — the
+// dedicated isolation tests (below) use their own narrowly-scoped tenants.
+const costTestTenant = "acme"
+
+// costTestTenantObject returns the default Tenant CR the cost handler tests seed
+// into the fake caller client so the ADR 0077 breakdown filter resolves.
+func costTestTenantObject() *agentsv1alpha1.Tenant {
+	return &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: costTestTenant},
+		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"default", "other", "ns"}},
+	}
+}
+
 // newPermissiveCostServer builds a BFF Server with a permissive (always-allow)
 // SSAR authorizer and a caller-client factory, wired with the given adapters.
 // Use this for handler tests that need to reach past the costrollups gate into
 // the data/error paths (param validation, adapter errors, response shape).
+//
+// It seeds the default costTestTenant CR into the fake caller client and wires a
+// rollup store (ADR 0077 — /api/cost + /api/cost/breakdown are tenant-scoped and
+// require the store + a resolvable Tenant), so the standard `?tenant=acme` request
+// reaches 200.
 func newPermissiveCostServer(t *testing.T, a Adapters) *Server {
 	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(costTestTenantObject()).Build()
 	s := NewServer(Options{
 		CallerClients: newFakeFactory(c),
 		Scheme:        testScheme(t),
@@ -273,6 +300,7 @@ func newPermissiveCostServer(t *testing.T, a Adapters) *Server {
 		Log:           logr.Discard(),
 	})
 	s.authorizer = &recordingAuthorizer{} // always allows
+	s.rollupStore = costrollup.NewMemStore()
 	return s
 }
 
@@ -287,21 +315,23 @@ func serveWithToken(t *testing.T, s *Server, url string) *httptest.ResponseRecor
 }
 
 // TestHandlerCostBreakdownRequiresByAgent: missing or non-"agent" `by` → 400.
+// The `by` check is AFTER the ?tenant= check (ADR 0077), so all requests here
+// carry ?tenant= to isolate the `by`-param contract.
 func TestHandlerCostBreakdownRequiresByAgent(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
 
 	// Missing ?by entirely → 400.
-	w := serveWithToken(t, s, "/api/cost/breakdown")
+	w := serveWithToken(t, s, "/api/cost/breakdown?tenant="+costTestTenant)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "by")
 
 	// ?by=model (unsupported) → 400 with the unsupported value in the message.
-	w2 := serveWithToken(t, s, "/api/cost/breakdown?by=model")
+	w2 := serveWithToken(t, s, "/api/cost/breakdown?by=model&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusBadRequest, w2.Code)
 	assert.Contains(t, w2.Body.String(), "model")
 
 	// ?by=agent → 200.
-	w3 := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	w3 := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusOK, w3.Code)
 }
 
@@ -316,7 +346,7 @@ func TestHandlerCostBreakdownLangfuseAbsent501(t *testing.T) {
 // TestHandlerCostBreakdownUpstream502: adapter error → 502.
 func TestHandlerCostBreakdownUpstream502(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: assert.AnError}})
-	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 }
 
@@ -325,7 +355,7 @@ func TestHandlerCostBreakdownUpstream502(t *testing.T) {
 // (m23.6 — the whole reason wiring Langfuse must not flash red errors).
 func TestHandlerCostBreakdownDegradesCalmly(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdownErr: ErrUpstreamUnavailable}})
-	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, w.Code, "a transient upstream stall must degrade calmly, not 502")
 
 	var resp CostBreakdownResponse
@@ -350,23 +380,28 @@ func TestHandlerRunsDegradesCalmly(t *testing.T) {
 	assert.NotEmpty(t, resp.Notice)
 }
 
-// TestHandlerCostDegradesCalmly: ErrUpstreamUnavailable on the cost rollup → 200
-// with an empty summary + notice, not 502.
-func TestHandlerCostDegradesCalmly(t *testing.T) {
+// TestHandlerCostEmptyStore200: the summary now reads the durable tenant rollup
+// (ADR 0077), not Langfuse — so a Langfuse stall no longer affects it. With an
+// empty rollup store for the tenant, /api/cost returns 200 with a zeroed summary
+// and a non-nil (empty) ByModel — an honest empty view, never a 502. This is the
+// tenant-scoped successor to the old Langfuse "degrade calmly" cost path.
+func TestHandlerCostEmptyStore200(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{err: ErrUpstreamUnavailable}})
-	w := serveWithToken(t, s, "/api/cost")
+	w := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.NotNil(t, resp.Summary.ByModel)
-	assert.NotEmpty(t, resp.Notice)
+	assert.NotNil(t, resp.Summary.ByModel, "ByModel must be [] not null (ADR 0077: intentionally empty)")
+	assert.Empty(t, resp.Summary.ByModel, "the durable rollup carries no per-model detail (ADR 0077)")
+	assert.Equal(t, 0.0, resp.Summary.TotalCostUSD, "no rollup rows ⇒ zero MTD spend")
+	assert.Equal(t, int64(0), resp.Summary.TotalTokens)
 }
 
 // TestHandlerCostBreakdownEmpty200: empty breakdown → {agents:[], ...} 200.
 func TestHandlerCostBreakdownEmpty200(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
-	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostBreakdownResponse
@@ -389,7 +424,7 @@ func TestHandlerCostBreakdownBadCursor400(t *testing.T) {
 	require.NoError(t, err)
 
 	s := newPermissiveCostServer(t, Adapters{Langfuse: a})
-	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&cursor=notanint")
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&cursor=notanint&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -403,7 +438,9 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 		NextCursor: "",
 	}
 	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}})
-	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	// The seeded agent is in namespace "default", which costTestTenant owns — the
+	// ADR 0077 filter keeps it.
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp CostBreakdownResponse
@@ -414,4 +451,154 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 	assert.InDelta(t, 1.5, resp.Agents[0].TotalCostUSD, 1e-9)
 	assert.Equal(t, int64(300), resp.Agents[0].TotalTokens)
 	assert.Equal(t, 2, resp.Agents[0].RunCount)
+}
+
+// --- ADR 0077 tenant-isolation tests (the m86.1 security proof) --------------
+//
+// These prove the cross-tenant leak (m52.Q4) is closed: /api/cost + /api/cost/
+// breakdown require ?tenant= and return ONLY the requested tenant's spend —
+// never cluster-wide, never another tenant's.
+
+// tenantCR is a small Tenant-fixture builder for the isolation tests.
+func tenantCR(name string, namespaces ...string) *agentsv1alpha1.Tenant {
+	return &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       agentsv1alpha1.TenantSpec{Namespaces: namespaces},
+	}
+}
+
+// newIsolationCostServer builds a permissive (always-allow SSAR) cost server
+// seeded with the given Tenant CRs and rollup store, wired with the given
+// adapters — the fixture backbone for the tenant-isolation proofs.
+func newIsolationCostServer(t *testing.T, a Adapters, store costrollup.Store, tenants ...*agentsv1alpha1.Tenant) *Server {
+	t.Helper()
+	objs := make([]client.Object, 0, len(tenants))
+	for _, tnt := range tenants {
+		objs = append(objs, tnt)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := NewServer(Options{
+		CallerClients: newFakeFactory(c),
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		Adapters:      a,
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+	s.authorizer = &recordingAuthorizer{} // always allows — isolation is by tenant, not SSAR
+	s.rollupStore = store
+	return s
+}
+
+// TestHandlerCostRequiresTenant: /api/cost without ?tenant= → 400 (ADR 0077).
+func TestHandlerCostRequiresTenant(t *testing.T) {
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, costrollup.NewMemStore())
+	w := serveWithToken(t, s, "/api/cost")
+	assert.Equal(t, http.StatusBadRequest, w.Code, "missing ?tenant= ⇒ 400")
+	assert.Contains(t, w.Body.String(), "tenant")
+}
+
+// TestHandlerCostNilStoreIs501: /api/cost requires the durable rollup store
+// (ADR 0077) — nil store ⇒ 501 even with ?tenant= present.
+func TestHandlerCostNilStoreIs501(t *testing.T) {
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, nil)
+	w := serveWithToken(t, s, "/api/cost?tenant=x")
+	assert.Equal(t, http.StatusNotImplemented, w.Code, "no rollup store ⇒ 501")
+}
+
+// TestHandlerCostTenantIsolatesSummary is the core summary-isolation proof: two
+// tenants (X, Y) each have their own MTD rollup; /api/cost?tenant=X returns X's
+// total (not the cluster-wide sum, not Y's), and ?tenant=Y returns Y's.
+func TestHandlerCostTenantIsolatesSummary(t *testing.T) {
+	store := costrollup.NewMemStore()
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	// Seed each tenant's MTD-cumulative rollup for the current month. The handler
+	// reads the LAST (most recent) row as the MTD total.
+	seedRollup(t, store, "tenant-x", monthStart, 12.50, 1250)
+	seedRollup(t, store, "tenant-y", monthStart, 99.00, 9900)
+
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, store,
+		tenantCR("tenant-x", "ns-x"), tenantCR("tenant-y", "ns-y"))
+
+	// Tenant X sees ONLY X's spend.
+	wx := serveWithToken(t, s, "/api/cost?tenant=tenant-x")
+	require.Equal(t, http.StatusOK, wx.Code)
+	var rx CostResponse
+	require.NoError(t, json.NewDecoder(wx.Body).Decode(&rx))
+	assert.InDelta(t, 12.50, rx.Summary.TotalCostUSD, 1e-9, "tenant X sees X's total, not the cluster sum")
+	assert.Equal(t, int64(1250), rx.Summary.TotalTokens)
+	assert.NotNil(t, rx.Summary.ByModel)
+	assert.Empty(t, rx.Summary.ByModel, "ADR 0077: the durable rollup carries no per-model detail")
+
+	// Tenant Y sees ONLY Y's spend — cross-tenant isolation.
+	wy := serveWithToken(t, s, "/api/cost?tenant=tenant-y")
+	require.Equal(t, http.StatusOK, wy.Code)
+	var ry CostResponse
+	require.NoError(t, json.NewDecoder(wy.Body).Decode(&ry))
+	assert.InDelta(t, 99.00, ry.Summary.TotalCostUSD, 1e-9, "tenant Y sees Y's total, not X's")
+	assert.Equal(t, int64(9900), ry.Summary.TotalTokens)
+}
+
+// TestHandlerCostBreakdownRequiresTenant: /api/cost/breakdown without ?tenant= →
+// 400 (ADR 0077), checked BEFORE the `by` param.
+func TestHandlerCostBreakdownRequiresTenant(t *testing.T) {
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, costrollup.NewMemStore())
+	// Even with a valid ?by=agent, a missing ?tenant= is a 400.
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	assert.Equal(t, http.StatusBadRequest, w.Code, "missing ?tenant= ⇒ 400")
+	assert.Contains(t, w.Body.String(), "tenant")
+}
+
+// TestHandlerCostBreakdownFiltersByTenantNamespaces is the core breakdown-
+// isolation proof: Langfuse returns agents across THREE namespaces, but tenant X
+// owns only a SUBSET — the response keeps ONLY the agents in X's namespaces, and
+// resp.Total is recomputed over the kept rows (not the cluster-wide total).
+func TestHandlerCostBreakdownFiltersByTenantNamespaces(t *testing.T) {
+	// Langfuse (cluster-wide) returns three agents in three distinct namespaces.
+	br := &CostBreakdownResponse{
+		Agents: []AgentCostItem{
+			{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: 1.00, TotalTokens: 100, RunCount: 1},
+			{AgentNs: "ns-b", AgentName: "beta", TotalCostUSD: 2.00, TotalTokens: 200, RunCount: 2},
+			{AgentNs: "ns-c", AgentName: "gamma", TotalCostUSD: 4.00, TotalTokens: 400, RunCount: 4},
+		},
+		// The pre-filter cluster-wide total (must NOT leak into resp.Total).
+		Total:      CostSummary{TotalCostUSD: 7.00, TotalTokens: 700, Observations: 7, ByModel: []MetricPoint{}},
+		NextCursor: "",
+	}
+	// Tenant X owns ns-a and ns-c only (NOT ns-b).
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}}, costrollup.NewMemStore(),
+		tenantCR("tenant-x", "ns-a", "ns-c"))
+
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant=tenant-x")
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp CostBreakdownResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+
+	// Only alpha (ns-a) + gamma (ns-c) survive; beta (ns-b) is excluded even though
+	// Langfuse returned it — the tenant-isolation filter.
+	require.Len(t, resp.Agents, 2, "beta (ns-b ∉ tenant X) must be filtered out")
+	gotNs := []string{resp.Agents[0].AgentNs, resp.Agents[1].AgentNs}
+	assert.ElementsMatch(t, []string{"ns-a", "ns-c"}, gotNs)
+	assert.NotContains(t, gotNs, "ns-b", "an agent outside the tenant's namespaces must never appear")
+
+	// resp.Total is recomputed over the KEPT rows (1.00 + 4.00 = 5.00), NOT the
+	// cluster-wide 7.00 — the leak is closed.
+	assert.InDelta(t, 5.00, resp.Total.TotalCostUSD, 1e-9, "total must sum only the kept agents, not the cluster total")
+	assert.Equal(t, int64(500), resp.Total.TotalTokens, "tokens must sum only the kept agents (100+400)")
+}
+
+// TestHandlerCostBreakdownUnknownTenantIs404: ?tenant=X where no Tenant CR X
+// exists → 404 (the Get fails) — a non-existent tenant leaks nothing.
+func TestHandlerCostBreakdownUnknownTenantIs404(t *testing.T) {
+	br := &CostBreakdownResponse{
+		Agents:     []AgentCostItem{{AgentNs: "ns-a", AgentName: "alpha", TotalCostUSD: 1.0, TotalTokens: 100, RunCount: 1}},
+		Total:      CostSummary{TotalCostUSD: 1.0, TotalTokens: 100, ByModel: []MetricPoint{}},
+		NextCursor: "",
+	}
+	// No Tenant CRs seeded.
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}}, costrollup.NewMemStore())
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant=ghost")
+	assert.Equal(t, http.StatusNotFound, w.Code, "an unknown tenant ⇒ 404, never a cluster-wide leak")
 }

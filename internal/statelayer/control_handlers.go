@@ -18,7 +18,6 @@ package statelayer
 
 import (
 	"context"
-	"errors"
 	"net/http"
 )
 
@@ -34,12 +33,13 @@ type controlResponse struct {
 const maxControlRunID = 256
 
 // handleControlGet serves GET /control/{runID} — the run's CONTROL verb, for the launcher gateway's
-// real-kill poll (m70.8). It is POD-AUTHENTICATED exactly like the quota/dedup endpoints: the agent pod
-// presents its projected SA token and the proxy verifies it (authenticatePod) BEFORE any read. This is a
+// real-kill poll (m70.8). It is AGENT-AUTHENTICATED exactly like the quota/dedup endpoints
+// (authenticateAgentNamespace, m79.2/C7): the agent pod presents its projected SA token and the proxy
+// verifies it is a real AGENT identity BEFORE any read — a verified-but-non-agent SA is 403'd (m52.C12,
+// closing the auth-only gap where any pod in a tenant namespace could read /control). This is a
 // NON-SECRET, run-scoped read (the verb is "cancel" or empty), so — unlike the quota endpoints — it does
 // NOT resolve a tenant: the agent supplies its OWN run id (from its verified capability) and reads only
-// that run's marker. The auth gate is what matters (an unauthenticated caller is rejected); the run id is
-// opaque and namespaces nothing sensitive.
+// that run's marker. The authorization gate is what matters; the run id is opaque and namespaces nothing.
 func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
 	defer cancel()
@@ -48,15 +48,13 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusServiceUnavailable, "control is not configured on this proxy")
 		return
 	}
-	// Pod-auth FIRST — reject an unauthenticated caller before touching Valkey. Reuse the EXACT pod-token
-	// auth the quota/dedup handlers use (authenticatePod → TokenReview); do not weaken it. We only need
-	// authentication (is this a real pod?), not the namespace, so the returned ns is discarded.
-	if _, err := s.authenticatePod(ctx, bearerToken(r)); err != nil {
-		if errors.Is(err, ErrTokenRejected) {
-			writeJSONError(w, http.StatusUnauthorized, "invalid pod token")
-		} else {
-			writeJSONError(w, http.StatusServiceUnavailable, "pod authentication unavailable")
-		}
+	// Agent-auth FIRST — reject an unauthenticated OR non-agent caller before touching Valkey. Mirror the
+	// quota/dedup endpoints (authenticateAgentNamespace, m79.2/C7): a verified-but-non-agent SA (e.g. the
+	// namespace `default`) is 403'd, not let in — closing the C12 gap where any pod in a tenant namespace
+	// could read /control. Only the AUTHORIZATION gate matters (is this a real agent?), not the namespace
+	// — the agent supplies its own run id — so the returned ns is discarded.
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
 		return
 	}
 
