@@ -159,6 +159,7 @@ function ForecastCard({
 type LoadState =
   | { kind: "loading" }
   | { kind: "ready"; agents: AgentCostItem[]; total: CostSummary; nextCursor: string }
+  | { kind: "no-tenant" } // ADR 0077 — breakdown requires ?tenant=; none selected yet
   | { kind: "unavailable" } // 501 — Langfuse not configured
   | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
@@ -194,10 +195,20 @@ export function CostPage() {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // ADR 0077: the breakdown is tenant-scoped and REQUIRES ?tenant= (a missing
+    // tenant is a 400). Don't fire a guaranteed-400 call — render a calm "pick a
+    // tenant" state instead, mirroring the forecast card's silent-hide.
+    if (!tenant) {
+      setLoadState({ kind: "no-tenant" });
+      return;
+    }
+
     setLoadState({ kind: "loading" });
 
     api
       .costBreakdown(
+        tenant,
         { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
         controller.signal,
       )
@@ -231,7 +242,7 @@ export function CostPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor]);
+  }, [cursor, tenant]);
 
   useEffect(() => {
     load();
@@ -330,6 +341,28 @@ export function CostPage() {
       ),
     },
   ];
+
+  // No-tenant calm state — the tenant-scoped cost views (ADR 0077) need a tenant.
+  // Open the page from a tenant (which appends ?tenant=) to see its cost breakdown.
+  if (loadState.kind === "no-tenant") {
+    return (
+      <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
+          <p className="text-sm text-muted-foreground">
+            Per-agent cost breakdown from recent activity.
+          </p>
+        </div>
+        <div
+          className="flex h-40 items-center justify-center rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          data-testid="cost-no-tenant"
+        >
+          Cost is per-tenant. Open a tenant from the Tenants page to see its cost
+          breakdown here.
+        </div>
+      </div>
+    );
+  }
 
   // 501 calm state — Langfuse not configured.
   if (loadState.kind === "unavailable") {

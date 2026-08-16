@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
 
@@ -397,33 +399,42 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
-	// (empty namespace) — mirrors handleCostForecast exactly.
+	// ADR 0077: the cost SUMMARY is the durable, TENANT-SCOPED spend (not a cluster-wide Langfuse
+	// aggregate) — it requires the rollup store + ?tenant=, mirroring forecast/chargeback. This closes
+	// the m52.Q4 cross-tenant leak: the shared `costrollups` SSAR gate authorized reading ANY tenant's
+	// spend, and the old Langfuse aggregate had no tenant dimension.
+	if s.rollupStore == nil {
+		writeError(w, http.StatusNotImplemented,
+			"the cost view requires the control-plane store (CONTROLPLANE_DSN); it is not enabled")
+		return
+	}
+	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "missing required query param: tenant")
+		return
+	}
+	// Persona gate (never per-row): one SSAR on `costrollups`.
 	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
 		s.writeAuthzError(w, err, "read the cost view")
 		return
 	}
 
 	ctx := r.Context()
-
-	summary, err := s.adapters.Langfuse.CostUsage(ctx)
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	rollups, err := s.rollupStore.Range(ctx, "tenant", tenant, monthStart, now)
 	if err != nil {
-		if errors.Is(err, ErrUpstreamUnavailable) {
-			// Trace store transiently unavailable — calm 200 with an empty rollup +
-			// notice rather than a red 502 (honest degrade).
-			s.log.Info("cost view degraded: trace store temporarily unavailable")
-			writeJSON(w, http.StatusOK, CostResponse{
-				Summary: CostSummary{ByModel: []MetricPoint{}},
-				Latency: []MetricPoint{},
-				Scale:   []MetricPoint{},
-				Notice:  noticeObservabilityDegraded,
-			})
-			return
-		}
-		s.log.Error(err, "fetch cost usage failed")
-		writeError(w, http.StatusBadGateway, "failed to fetch cost usage")
+		s.log.Error(err, "cost view: rollup range read failed", "tenant", tenant)
+		writeError(w, http.StatusInternalServerError, "failed to read the cost rollup")
 		return
+	}
+	// Range returns day-ASC; the last row is the current MTD cumulative spend + tokens. ByModel +
+	// Observations are intentionally omitted (ADR 0077): the durable rollup carries total+tokens, and
+	// Langfuse by-model is cluster-wide (no tenant dimension) — per-model-per-tenant is future work.
+	summary := CostSummary{ByModel: []MetricPoint{}}
+	if n := len(rollups); n > 0 {
+		summary.TotalCostUSD = rollups[n-1].SpendUSD
+		summary.TotalTokens = rollups[n-1].Tokens
 	}
 
 	latency := []MetricPoint{}
@@ -475,6 +486,13 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
+		return
+	}
+	// ADR 0077: tenant-scope the per-agent breakdown — require ?tenant= (closes the m52.Q4
+	// cross-tenant leak; the Langfuse breakdown is otherwise cluster-wide).
+	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	if tenant == "" {
+		writeError(w, http.StatusBadRequest, "missing required query param: tenant")
 		return
 	}
 
@@ -536,6 +554,30 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if resp.Agents == nil {
 		resp.Agents = []AgentCostItem{}
 	}
+	// ADR 0077: keep only agents whose namespace belongs to the requested tenant (one Tenant GET;
+	// Tenant.spec.namespaces is the membership set) + recompute the page total over the kept rows —
+	// the tenant-isolation filter over the cluster-wide Langfuse breakdown. NB pagination is over the
+	// pre-filter list; a tenant's agent set is bounded (one page in practice — documented, ADR 0077).
+	var tnt agentsv1alpha1.Tenant
+	if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
+		s.writeGetError(w, err, "tenant")
+		return
+	}
+	nsSet := make(map[string]struct{}, len(tnt.Spec.Namespaces))
+	for _, ns := range tnt.Spec.Namespaces {
+		nsSet[ns] = struct{}{}
+	}
+	kept := make([]AgentCostItem, 0, len(resp.Agents))
+	total := CostSummary{ByModel: []MetricPoint{}}
+	for _, a := range resp.Agents {
+		if _, in := nsSet[a.AgentNs]; in {
+			kept = append(kept, a)
+			total.TotalCostUSD += a.TotalCostUSD
+			total.TotalTokens += a.TotalTokens
+		}
+	}
+	resp.Agents = kept
+	resp.Total = total
 	writeJSON(w, http.StatusOK, resp)
 }
 
