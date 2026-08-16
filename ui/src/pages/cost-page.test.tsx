@@ -39,8 +39,12 @@ function summary(over: Partial<CostSummary> = {}): CostSummary {
   };
 }
 
-// installFetch stubs global fetch for the breakdown endpoint.
-// The responder receives parsed URLSearchParams for assertion.
+// installFetch stubs global fetch for the breakdown endpoint. The responder
+// receives parsed URLSearchParams for assertion. Since the default render now
+// supplies ?tenant= (ADR 0077), the page ALSO fires /api/cost/forecast; these
+// breakdown-focused tests route the forecast to a calm 501 (→ null → the forecast
+// card stays hidden) so they exercise only the breakdown table. The dedicated
+// forecast-card tests below use installMultiFetch instead.
 function installFetch(
   handler: (qs: URLSearchParams) => { ok: boolean; status?: number; body?: unknown },
 ) {
@@ -50,6 +54,16 @@ function installFetch(
     vi.fn((input: string | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       captured.push(url);
+      // The forecast endpoint is secondary here — degrade it to 501 (calm null) so
+      // only the breakdown table is under test.
+      if (url.includes("/api/cost/forecast")) {
+        return Promise.resolve({
+          ok: false,
+          status: 501,
+          json: async () => ({ error: "no store" }),
+          text: async () => JSON.stringify({ error: "no store" }),
+        } as Response);
+      }
       const qs = new URLSearchParams(url.split("?")[1] ?? "");
       const r = handler(qs);
       return Promise.resolve({
@@ -68,9 +82,14 @@ function installFetch(
   return captured;
 }
 
-function renderPage() {
+// renderPage renders the CostPage at /cost. As of ADR 0077 the breakdown is
+// tenant-scoped and requires ?tenant=, so the default render supplies a tenant
+// (the realistic path where a tenant was picked). The no-tenant gate has its own
+// test below.
+function renderPage(tenant = "acme") {
+  const entry = tenant ? `/cost?tenant=${encodeURIComponent(tenant)}` : "/cost";
   return render(
-    <MemoryRouter initialEntries={["/cost"]}>
+    <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/cost" element={<CostPage />} />
         <Route
@@ -406,16 +425,32 @@ describe("CostPage — error and 501 states (m16.10)", () => {
 // ── Query params ──────────────────────────────────────────────────────────────
 
 describe("CostPage — query params sent to API (m16.10)", () => {
-  it("sends by=agent on initial load", async () => {
+  it("sends by=agent AND the current tenant on initial load (ADR 0077)", async () => {
     const captured = installFetch(() => ({
       ok: true,
       body: { agents: [], total: summary(), nextCursor: "" },
     }));
 
-    renderPage();
+    renderPage("acme");
     await screen.findByTestId("cost-page");
 
-    expect(captured.some((u) => u.includes("by=agent"))).toBe(true);
+    // The breakdown is tenant-scoped: the URL must carry the current tenant.
+    expect(
+      captured.some((u) => u.includes("by=agent") && u.includes("tenant=acme")),
+    ).toBe(true);
+  });
+
+  it("does NOT call the breakdown API when no tenant is selected (ADR 0077 gate)", async () => {
+    const captured = installFetch(() => ({
+      ok: true,
+      body: { agents: [], total: summary(), nextCursor: "" },
+    }));
+
+    renderPage(""); // no ?tenant=
+
+    await screen.findByTestId("cost-no-tenant");
+    // A tenant-less breakdown would be a guaranteed 400 — the page must not fire it.
+    expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(false);
   });
 });
 
@@ -488,16 +523,18 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
     expect(card.textContent).toContain("Month forecast");
   });
 
-  it("does NOT render the forecast card when ?tenant= is absent", async () => {
+  it("does NOT render the forecast card when ?tenant= is absent (shows the no-tenant gate)", async () => {
     installFetch(() => ({
       ok: true,
       body: { agents: [], total: summary(), nextCursor: "" },
     }));
 
-    renderPage(); // no ?tenant=
+    renderPage(""); // no ?tenant=
 
-    await screen.findByTestId("cost-page");
+    // ADR 0077: no tenant ⇒ the calm "pick a tenant" gate, no breakdown, no forecast.
+    await screen.findByTestId("cost-no-tenant");
     expect(screen.queryByTestId("cost-forecast-card")).toBeNull();
+    expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
   });
 
   it("does NOT render the forecast card when the store returns 501", async () => {

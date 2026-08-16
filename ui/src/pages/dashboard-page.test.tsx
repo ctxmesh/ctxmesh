@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { DashboardPage } from "@/pages/dashboard-page";
 
-// A URL-routed fetch mock: the dashboard fans out to /api/topology, /api/cost,
-// /api/runs (and /api/traces/{id} once a run is selected). Each returns canned,
-// deterministic data — no live cluster/Langfuse/Prometheus (tier0 determinism).
+// A URL-routed fetch mock: the dashboard fans out to /api/topology, /api/runs
+// (and /api/traces/{id} once a run is selected). It no longer fetches /api/cost —
+// cost is tenant-scoped (ADR 0077) and the tenant-less dashboard points to the
+// /cost page instead. Each route returns canned, deterministic data — no live
+// cluster/Langfuse/Prometheus (tier0 determinism).
 function routeFetch(routes: Record<string, unknown>) {
   vi.stubGlobal(
     "fetch",
@@ -79,17 +81,6 @@ const topology = {
   ],
 };
 
-const cost = {
-  summary: {
-    totalCostUSD: 1.75,
-    totalTokens: 1500,
-    observations: 3,
-    byModel: [{ label: "gpt-4o", value: 1.75 }],
-  },
-  latency: [{ label: "billing-agent", value: 120 }],
-  scale: [{ label: "billing-agent", value: 3 }],
-};
-
 const runs = {
   runs: [
     {
@@ -130,10 +121,9 @@ afterEach(() => {
 });
 
 describe("DashboardPage (render proof)", () => {
-  it("renders topology, cost, and recent runs from mocked BFF data", async () => {
+  it("renders topology, the cost pointer, and recent runs from mocked BFF data", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -142,11 +132,13 @@ describe("DashboardPage (render proof)", () => {
     // Topology renders as a scale-first SUMMARY card (m22.6/U5) — counts +
     // health rollup, not a node-per-agent graph.
     expect(await screen.findByTestId("topology-summary")).toBeInTheDocument();
-    // Cost renders in the by-model breakdown card + the headline stat row.
-    expect(screen.getByText("Cost by model")).toBeInTheDocument();
-    expect(screen.getByText("gpt-4o")).toBeInTheDocument();
-    // Stat row surfaces tokens, latency, and fleet size (all m35, uniquely-labelled).
-    expect(screen.getByText("Tokens")).toBeInTheDocument();
+    // Cost is tenant-scoped (ADR 0077): the dashboard shows a per-tenant pointer to
+    // the /cost page, NOT a by-model chart or a tenant-less number.
+    expect(screen.getByTestId("cost-stat-pointer")).toBeInTheDocument();
+    expect(screen.getByTestId("cost-pointer-card")).toBeInTheDocument();
+    expect(screen.queryByText("Cost by model")).toBeNull();
+    // Stat row surfaces run volume, latency, and fleet size (all m35). "Recent runs"
+    // is also the section heading below, so assert on the uniquely-labelled stats.
     expect(screen.getByText("Avg latency")).toBeInTheDocument();
     expect(screen.getByText("Active agents")).toBeInTheDocument();
     // Recent runs rendered the traced run.
@@ -154,22 +146,22 @@ describe("DashboardPage (render proof)", () => {
     expect(screen.getByText("t-abc")).toBeInTheDocument();
   });
 
-  it("degrades cost + runs CALMLY (not an error) when Langfuse is not configured (501)", async () => {
+  it("degrades runs CALMLY (not an error) when Langfuse is not configured (501)", async () => {
     // m20.6: a 501 (adapter not wired) is not a failure — the dashboard shows a
-    // calm "not configured" state, never a red "Failed to load …" (the user's
-    // "Failed to load cost: … not implemented yet" complaint).
+    // calm "not configured" state, never a red "Failed to load …". Cost is no longer
+    // fetched here (tenant-scoped, ADR 0077), so only runs can degrade to 501.
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string | URL) => {
         const path = (
           typeof input === "string" ? input : input.toString()
         ).split("?")[0];
-        if (path === "/api/cost" || path === "/api/runs") {
+        if (path === "/api/runs") {
           return Promise.resolve({
             ok: false,
             status: 501,
             json: async () => ({
-              error: "Langfuse cost adapter is not implemented yet",
+              error: "Langfuse runs adapter is not implemented yet",
             }),
           } as Response);
         }
@@ -188,17 +180,16 @@ describe("DashboardPage (render proof)", () => {
     );
     renderDashboard();
 
-    expect(await screen.findByTestId("cost-unavailable")).toBeInTheDocument();
-    expect(screen.getByTestId("runs-unavailable")).toBeInTheDocument();
+    expect(await screen.findByTestId("runs-unavailable")).toBeInTheDocument();
+    // The cost pointer is always present (it does not depend on a fetch).
+    expect(screen.getByTestId("cost-pointer-card")).toBeInTheDocument();
     // NOT a destructive error.
-    expect(screen.queryByText(/Failed to load cost/)).toBeNull();
     expect(screen.queryByText(/Failed to load runs/)).toBeNull();
   });
 
   it("links the dashboard topology to the full interactive /topology view (m20.7)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -212,7 +203,6 @@ describe("DashboardPage (render proof)", () => {
   it("does NOT render any Langfuse embedded iframe (m16.11: iframe demoted)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -232,17 +222,17 @@ describe("DashboardPage (render proof)", () => {
     expect(screen.queryByText("Langfuse deep-view")).toBeNull();
   });
 
-  it("cost card links to the native /cost page (m16.11)", async () => {
+  it("cost pointer card links to the native /cost page (m16.11, ADR 0077)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
     renderDashboard();
 
-    // Wait for cost data to render (the by-model breakdown card).
-    await screen.findByText("Cost by model");
+    // The cost pointer card renders immediately (no fetch dependency, ADR 0077).
+    const card = await screen.findByTestId("cost-pointer-card");
+    expect(card).toBeInTheDocument();
 
     // The "View cost details" link leads to the native /cost page.
     const costLink = screen.getByTestId("view-cost-details");
@@ -253,7 +243,6 @@ describe("DashboardPage (render proof)", () => {
   it("recent runs list has a View-all-runs link to /runs (m16.11)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -271,7 +260,6 @@ describe("DashboardPage (render proof)", () => {
   it("recent run rows link to /traces/:id (m16.11)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -287,7 +275,6 @@ describe("DashboardPage (render proof)", () => {
 
   it("shows an error state when the topology fetch fails (e.g. RBAC 403)", async () => {
     routeFetch({
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     }); // topology 404s
@@ -302,7 +289,6 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
   it("renders the first-run checklist when setup is incomplete (no providers)", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": { providers: [] },
     });
@@ -375,7 +361,6 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
   it("does NOT render the CTA when providers exist", async () => {
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
       "/api/providers": providersConnected,
     });
@@ -390,7 +375,6 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
     // /api/providers 404s (kill-switch or error) → not treated as 'empty'.
     routeFetch({
       "/api/topology": topology,
-      "/api/cost": cost,
       "/api/runs": runs,
     });
     renderDashboard();
@@ -402,30 +386,6 @@ describe("DashboardPage — first-run provider CTA (the aha entry point)", () =>
   });
 });
 
-describe("CostPanel bar chart", () => {
-  it("shows an empty-series hint (no bars) when there is no per-model cost yet", async () => {
-    // m35: cost totals live in the stat row; this card is the by-model breakdown. With an
-    // empty byModel (e.g. historical runs not yet priced), it shows a calm hint and no bars
-    // — no Prometheus scale/latency card exists anymore (it was never wired).
-    const costNoModels = {
-      summary: {
-        totalCostUSD: 1,
-        totalTokens: 10,
-        observations: 1,
-        byModel: [],
-      },
-      latency: [],
-      scale: [],
-    };
-    routeFetch({
-      "/api/topology": topology,
-      "/api/cost": costNoModels,
-      "/api/runs": runs,
-      "/api/providers": providersConnected,
-    });
-    renderDashboard();
-    await screen.findByText(/No cost data in the recent window/);
-    const chart = screen.getByText("Cost by model").closest("div");
-    expect(within(chart as HTMLElement).queryByRole("progressbar")).toBeNull();
-  });
-});
+// The former "CostPanel bar chart" describe was removed with the CostPanel
+// component itself (ADR 0077): the durable per-tenant rollup carries no per-model
+// detail, so the dashboard's cost-by-model chart no longer exists.
