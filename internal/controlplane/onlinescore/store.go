@@ -48,6 +48,22 @@ type JudgeStats struct {
 	SumVal float64
 }
 
+// OnlineConfig is the per-(namespace, agentName) online-scoring policy the CONTROLLER resolves from the
+// agent's AgentDeployment.spec.evalSuiteRef → EvalSuite.spec.online and writes to cpDB (m84.3, ADR 0062
+// Fork 2 / ADR 0011). The BFF online-scoring worker READS it (cpDB, no agent-CRD RBAC) to enable/tune the
+// per-agent judge, replacing its process-wide "judge OFF" default. Enabled=false (or a missing row) ⇒ the
+// judge is OFF for that agent — the fail-safe: the worker never runs the judge without an explicit policy.
+type OnlineConfig struct {
+	Namespace       string
+	AgentName       string
+	Enabled         bool
+	SampleRate      float64
+	MaxScoredPerDay int
+	Window          time.Duration
+	MinSamples      int
+	UpdatedAt       time.Time
+}
+
 // Aggregate is the per-(namespace, agentName, agentVersion, windowStart) online score record.
 // WindowStart is always truncated to the hour boundary.
 type Aggregate struct {
@@ -76,4 +92,18 @@ type Store interface {
 	// ListAggregates returns aggregates for (namespace, agentName) sorted by WindowStart DESC.
 	// limit <= 0 returns all aggregates.
 	ListAggregates(ctx context.Context, namespace, agentName string, limit int) ([]Aggregate, error)
+
+	// UpsertOnlineConfig writes (or updates) the per-(Namespace, AgentName) online-scoring config row.
+	// The CONTROLLER calls this from its reconcile (it holds evalsuites RBAC, ADR 0011); the BFF worker
+	// only reads. Returns controlplane.ErrInvalid when Namespace or AgentName is empty.
+	UpsertOnlineConfig(ctx context.Context, cfg OnlineConfig) error
+
+	// GetOnlineConfig returns the online-scoring config for (namespace, agentName). found is false (with a
+	// nil error) when no row exists — the worker's judge-OFF fail-safe (a missing row ⇒ judge OFF).
+	GetOnlineConfig(ctx context.Context, namespace, agentName string) (cfg OnlineConfig, found bool, err error)
+
+	// DeleteOnlineConfig removes the per-(namespace, agentName) config row. The CONTROLLER calls this to
+	// clear the policy when an agent has no evalSuiteRef or no `.online` block (judge OFF, the fail-safe).
+	// Deleting a non-existent row is a no-op (idempotent).
+	DeleteOnlineConfig(ctx context.Context, namespace, agentName string) error
 }

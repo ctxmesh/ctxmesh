@@ -1032,3 +1032,76 @@ func TestPostgresStore_GetByTraceID(t *testing.T) {
 	require.NoError(t, err, "a trace-id miss is (nil, nil), never an error")
 	assert.Nil(t, none)
 }
+
+// TestPostgresStore_CountRunOutcomes proves the M84 runFailureRate data source (ADR 0063 D2) against
+// REAL Postgres: CountRunOutcomes(ns, agent, since) returns (failed, total) over runs CREATED at or after
+// `since`, scoped to (namespace, agent). It exercises the exact column names + the FILTER (WHERE status=
+// 'failed') aggregate the eval reads — real-SQL coverage a memstore cannot give. Seeded so the
+// AlertPolicy runFailureRate condition FIRES above the threshold and does NOT fire below it.
+func TestPostgresStore_CountRunOutcomes(t *testing.T) {
+	s := openPGStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	window := 5 * time.Minute
+	since := base.Add(-window) // the condition's [now-window, now]
+
+	// mkTerminal creates a run for (ns, agent) with a specific created_at and drives it to a terminal
+	// status (failed or succeeded). created_at is set at Create and never mutated, so it pins the window.
+	mkTerminal := func(id, ns, agent string, createdAt time.Time, terminal Status) {
+		t.Helper()
+		r := New(id, ns, agent, nil, "", createdAt)
+		require.NoError(t, s.Create(r))
+		_, err := s.Update(id, func(x *Run) error {
+			if err := x.Transition(StatusRunning, createdAt); err != nil {
+				return err
+			}
+			return x.Transition(terminal, createdAt.Add(time.Second))
+		})
+		require.NoError(t, err)
+	}
+
+	// ns-a / agent-a IN-WINDOW: 3 failed + 2 succeeded = 5 total → rate 0.60.
+	mkTerminal("co-a1", "ns-a", "agent-a", base.Add(-1*time.Minute), StatusFailed)
+	mkTerminal("co-a2", "ns-a", "agent-a", base.Add(-2*time.Minute), StatusFailed)
+	mkTerminal("co-a3", "ns-a", "agent-a", base.Add(-3*time.Minute), StatusFailed)
+	mkTerminal("co-a4", "ns-a", "agent-a", base.Add(-4*time.Minute), StatusSucceeded)
+	mkTerminal("co-a5", "ns-a", "agent-a", base.Add(-30*time.Second), StatusSucceeded)
+
+	// A queued (non-terminal) in-window run counts toward total but not failed.
+	require.NoError(t, s.Create(New("co-a6", "ns-a", "agent-a", nil, "", base.Add(-90*time.Second))))
+
+	// OUT-OF-WINDOW (created before `since`): a failed run that must NOT be counted.
+	mkTerminal("co-old", "ns-a", "agent-a", since.Add(-10*time.Minute), StatusFailed)
+
+	// A DIFFERENT agent in the same ns → excluded from an agent-a count.
+	mkTerminal("co-b1", "ns-a", "agent-b", base.Add(-1*time.Minute), StatusFailed)
+
+	// A DIFFERENT namespace → excluded from an ns-a count.
+	mkTerminal("co-x1", "ns-x", "agent-a", base.Add(-1*time.Minute), StatusFailed)
+
+	// agent-a in ns-a: 3 failed / 6 total in the window (5 terminal + 1 queued; the out-of-window failed
+	// and the other-agent/other-ns rows excluded).
+	failed, total, err := s.CountRunOutcomes(ctx, "ns-a", "agent-a", since)
+	require.NoError(t, err)
+	assert.Equal(t, 3, failed, "only in-window failed runs for (ns-a, agent-a)")
+	assert.Equal(t, 6, total, "all in-window runs for (ns-a, agent-a) regardless of status")
+
+	// rate = 3/6 = 0.50: FIRES above a 0.4 threshold, does NOT fire above a 0.6 threshold (matching the
+	// AlertPolicy runFailureRate semantics the controller evaluates).
+	rate := float64(failed) / float64(total)
+	assert.Greater(t, rate, 0.4, "0.50 > 0.4 → the condition fires")
+	assert.LessOrEqual(t, rate, 0.6, "0.50 <= 0.6 → the condition does not fire above 0.6")
+
+	// agent-b: 1 failed / 1 total.
+	fb, tb, err := s.CountRunOutcomes(ctx, "ns-a", "agent-b", since)
+	require.NoError(t, err)
+	assert.Equal(t, 1, fb)
+	assert.Equal(t, 1, tb)
+
+	// An agent with no runs in the window → (0, 0), which the eval treats as abstain (no divide-by-zero).
+	fz, tz, err := s.CountRunOutcomes(ctx, "ns-a", "agent-none", since)
+	require.NoError(t, err)
+	assert.Equal(t, 0, fz)
+	assert.Equal(t, 0, tz)
+}

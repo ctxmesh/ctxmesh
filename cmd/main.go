@@ -62,6 +62,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/promql"
 	"github.com/ctxmesh/agent-engine/internal/run"
 	// +kubebuilder:scaffold:imports
 )
@@ -350,6 +351,10 @@ func main() {
 		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
 		// deferred, so this is guard-side only).
 		OnlineScore: onlinescore.NewPostgresStore(cpDB),
+		// Online-scoring config writer (m84.3, ADR 0062 Fork 2 / ADR 0011): the controller resolves each
+		// agent's evalSuiteRef → EvalSuite.spec.online and UPSERTS/CLEARS the per-(ns, agent) config row the
+		// BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA). Same cpDB store; nil-safe.
+		OnlineConfig: onlinescore.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
@@ -485,6 +490,34 @@ func main() {
 		approvalRuns = approvalRunLister{store: lister}
 	}
 
+	// AlertPolicy runFailureRate condition (M84, ADR 0063 D2): counts failed/total runs per (namespace, agent)
+	// over the condition's window, off the SAME SHARED cpDB run store (a read-only COUNT wiring, no new RBAC).
+	// The durable pgStore satisfies CountRunOutcomes directly (Store's mem twin does not implement it — a dev
+	// deployment without cpDB simply abstains). Nil-safe: if the shared store failed to build, runFailureRate
+	// eval is disabled (RunOutcomes stays nil).
+	var runOutcomes controller.RunOutcomeCounter
+	if counter, ok := ctrlRunStore.(controller.RunOutcomeCounter); ok && ctrlRunStore != nil {
+		runOutcomes = counter
+	}
+
+	// AlertPolicy errorRate + p95Latency conditions (M84, ADR 0076): read Knative queue-proxy per-revision
+	// request metrics through the shared internal/promql instant client. The endpoint comes from
+	// PROMETHEUS_URL (+ optional PROMETHEUS_TOKEN), mirroring the BFF's Prometheus adapter. UNSET or
+	// unbuildable ⇒ the client stays nil and both SLO conditions ABSTAIN (a clear status reason, never a
+	// false alert). This is HTTP to Prometheus — no new K8s RBAC (ADR 0076).
+	var promMetrics controller.PromQLQuerier
+	if promURL := os.Getenv("PROMETHEUS_URL"); promURL != "" {
+		pc, perr := promql.New(promql.Config{
+			BaseURL:     promURL,
+			BearerToken: os.Getenv("PROMETHEUS_TOKEN"),
+		})
+		if perr != nil {
+			setupLog.Error(perr, "PROMETHEUS_URL set but promql client build failed — errorRate/p95Latency will abstain")
+		} else {
+			promMetrics = pc
+		}
+	}
+
 	// AlertPolicy reconciler (M70, ADR 0063 D2): evaluates each policy condition, fires once per
 	// false→true transition (dedup in .status), and PERSISTS fired alerts to the durable alerts ledger
 	// + audit_log (m70.4). Stores are the manager's existing cpDB (mirrors the regression detector +
@@ -493,13 +526,15 @@ func main() {
 	// the M75 approvalWaiting condition (ADR 0069 §3): the run store lists plan_approval-waiting runs
 	// and ConsoleURL prefixes the notification's deep-link to the AUTHENTICATED console approval view.
 	if err := (&controller.AlertPolicyReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Alerts:     alertstore.NewPostgresStore(cpDB),
-		Rollups:    costrollup.NewPostgresStore(cpDB),
-		Audit:      auditlog.NewPostgresStore(cpDB),
-		Runs:       approvalRuns,
-		ConsoleURL: os.Getenv("CONSOLE_URL"),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Alerts:      alertstore.NewPostgresStore(cpDB),
+		Rollups:     costrollup.NewPostgresStore(cpDB),
+		Audit:       auditlog.NewPostgresStore(cpDB),
+		Runs:        approvalRuns,
+		RunOutcomes: runOutcomes,
+		PromMetrics: promMetrics,
+		ConsoleURL:  os.Getenv("CONSOLE_URL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")
 		os.Exit(1)

@@ -158,6 +158,18 @@ prometheus:
     # the self-signed metrics cert on a vanilla cluster; set false + provide cert-manager TLS
     # (a CA + serverName) for production so Prometheus actually verifies the manager's cert.
     insecureSkipVerify: true
+  # PodMonitor for Knative queue-proxy per-revision request metrics (M84, ADR 0076) — feeds the
+  # AlertPolicy errorRate + p95Latency SLO conditions. OFF by default: it needs the Prometheus Operator
+  # CRDs AND a Knative install that EXPORTS request metrics in a Prometheus-scrapeable form (enable that
+  # in the knative-serving config-observability ConfigMap, which this chart does NOT own). Absent metrics
+  # ⇒ the SLO conditions abstain (never a false alert).
+  podMonitor:
+    queueProxy:
+      enabled: false
+      # The queue-proxy sidecar's Prometheus metrics port name (Knative default: http-usermetric).
+      port: http-usermetric
+      # Scrape interval for the queue-proxy request metrics.
+      interval: 15s
 networkPolicy:
   # Install the NetworkPolicy that restricts /metrics ingress to namespaces
   # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).

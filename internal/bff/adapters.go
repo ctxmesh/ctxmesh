@@ -168,6 +168,14 @@ type LangfuseAdapter interface {
 	// all-time historical cost. A malformed cursor returns ErrBadParam (→ 400).
 	// Upstream failure returns an error (→ 502). Agents is non-nil on success.
 	CostBreakdown(ctx context.Context, limit int, cursor string) (CostBreakdownResponse, error)
+
+	// CreateScore writes a per-trace numeric score to the Langfuse scores API
+	// (POST /api/public/scores). It is BEST-EFFORT observability sugar: a
+	// caller must log-and-swallow any error rather than failing the surrounding
+	// operation. name is a short label (e.g. "online-judge"), value is clamped
+	// to [0,1] by the caller before passing, comment is optional (pass "" to
+	// omit). A non-2xx response is returned as an error.
+	CreateScore(ctx context.Context, traceID, name string, value float64, comment string) error
 }
 
 // ErrTraceNotFound is returned by LangfuseAdapter.TraceDetail when the backend
