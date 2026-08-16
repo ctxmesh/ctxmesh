@@ -352,6 +352,39 @@ func TestBuildChildEnv(t *testing.T) {
 		assertEnvContains(t, got, "Y=2")
 		assertEnvNotContains(t, got, "AGENT_PORT=9999")
 	})
+
+	// audit P1-4: platform credentials are scrubbed from the untrusted agent child's env, while the
+	// agent's own vars (spec.env + the SDK markers) and non-secret platform config pass through.
+	t.Run("scrubs platform credentials", func(t *testing.T) {
+		t.Parallel()
+		env := []string{
+			"OBJECT_STORE_ACCESS_KEY=minio-access",
+			"OBJECT_STORE_SECRET_KEY=minio-secret",
+			"LANGFUSE_SCORES_PUBLIC_KEY=pk-abc",
+			"LANGFUSE_SCORES_SECRET_KEY=sk-abc",
+			"LANGFUSE_OTLP_AUTH=Basic Zm9vOmJhcg==",
+			"STATELAYER_TOKEN_PATH=/var/run/secrets/statelayer/token",
+			// kept: the agent's own vars + SDK markers + non-secret platform config
+			"MY_APP_API_KEY=user-owned", // user spec.env — must survive (their app needs it)
+			"AGENT_NAME=echo",
+			"MEMORY_PORT=2998",
+			"LANGFUSE_HOST=http://langfuse:3000",
+		}
+		got := buildChildEnv(cfg, env)
+		// The full original KEY=value entries must be gone (assertEnvNotContains is an exact match), so the
+		// credential is not readable by the untrusted child.
+		for _, scrubbed := range []string{
+			"OBJECT_STORE_ACCESS_KEY=minio-access", "OBJECT_STORE_SECRET_KEY=minio-secret",
+			"LANGFUSE_SCORES_PUBLIC_KEY=pk-abc", "LANGFUSE_SCORES_SECRET_KEY=sk-abc",
+			"LANGFUSE_OTLP_AUTH=Basic Zm9vOmJhcg==", "STATELAYER_TOKEN_PATH=/var/run/secrets/statelayer/token",
+		} {
+			assertEnvNotContains(t, got, scrubbed)
+		}
+		assertEnvContains(t, got, "MY_APP_API_KEY=user-owned")
+		assertEnvContains(t, got, "AGENT_NAME=echo")
+		assertEnvContains(t, got, "MEMORY_PORT=2998")
+		assertEnvContains(t, got, "LANGFUSE_HOST=http://langfuse:3000")
+	})
 }
 
 func assertEnvContains(t *testing.T, env []string, kv string) {
