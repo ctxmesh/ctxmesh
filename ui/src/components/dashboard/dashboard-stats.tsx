@@ -1,21 +1,18 @@
 import type { ComponentType } from "react";
-import { Activity, Boxes, Coins, Gauge, ListChecks } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Boxes, Coins, Gauge, ListChecks } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import {
-  formatCompact,
-  formatLatency,
-  formatUSD,
-  latencyStats,
-} from "@/lib/format";
-import type { CostResponse, RunSummary, TopologyResponse } from "@/lib/api";
+import { formatLatency, latencyStats } from "@/lib/format";
+import type { RunSummary, TopologyResponse } from "@/lib/api";
 
-// DashboardStats is the headline metric row: the five numbers an operator wants at a
-// glance — spend, tokens, run volume, latency, fleet size — sourced from the data that is
-// actually available (Langfuse cost rollup + the runs list + live topology), NOT the
-// unwired Prometheus latency/scale that used to leave the cards blank. Each stat renders a
-// muted placeholder until its own source loads (the three feeds resolve independently).
+// DashboardStats is the headline metric row: run volume, latency, and fleet size —
+// sourced from the data available WITHOUT a tenant (the runs list + live topology). Spend
+// and tokens are now TENANT-SCOPED (ADR 0077) and cannot be shown on the tenant-less
+// dashboard, so those two cards are a calm "per-tenant → Cost page" pointer rather than a
+// number. Each live stat renders a muted placeholder until its own source loads (the feeds
+// resolve independently).
 
 interface StatCardProps {
   label: string;
@@ -51,12 +48,35 @@ function StatCard({ label, value, sub, icon: Icon, loading }: StatCardProps) {
   );
 }
 
+// CostPointerCard replaces the Cost + Tokens numeric stat cards: spend is now
+// per-tenant (ADR 0077) and the dashboard has no tenant, so this card points to
+// the /cost page rather than showing a tenant-less (or fabricated) number.
+function CostPointerCard() {
+  return (
+    <Card data-testid="cost-stat-pointer">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Cost
+          </p>
+          <Coins className="h-4 w-4 shrink-0 text-muted-foreground" />
+        </div>
+        <p className="mt-2 text-sm text-muted-foreground">Per tenant</p>
+        <Link
+          to="/cost"
+          className="mt-0.5 inline-block text-xs text-primary underline-offset-4 hover:underline"
+        >
+          View on Cost page
+        </Link>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function DashboardStats({
-  cost,
   runs,
   topology,
 }: {
-  cost?: CostResponse;
   runs?: RunSummary[];
   topology?: TopologyResponse;
 }) {
@@ -65,21 +85,8 @@ export function DashboardStats({
   const readyAgents = agents.filter((n) => n.health === "ready").length;
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-      <StatCard
-        label="Cost"
-        icon={Coins}
-        loading={!cost}
-        value={cost ? formatUSD(cost.summary.totalCostUSD) : ""}
-        sub="last 30 days"
-      />
-      <StatCard
-        label="Tokens"
-        icon={Activity}
-        loading={!cost}
-        value={cost ? formatCompact(cost.summary.totalTokens) : ""}
-        sub={cost ? `${formatCompact(cost.summary.observations)} observations` : ""}
-      />
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <CostPointerCard />
       <StatCard
         label="Recent runs"
         icon={ListChecks}

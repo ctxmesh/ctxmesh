@@ -2805,7 +2805,16 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },
-  cost: (signal?: AbortSignal) => getJSON<CostResponse>("/api/cost", signal),
+  // cost reads the TENANT-SCOPED cost summary (ADR 0077) from GET /api/cost?tenant=.
+  // As of m86.1 this endpoint is tenant-scoped: TotalCostUSD/TotalTokens come from
+  // the durable per-tenant rollup (the same source forecast reads), and byModel is
+  // intentionally EMPTY (the durable rollup carries no per-model detail). ?tenant=
+  // is REQUIRED — a missing tenant is a 400 — so callers must supply one.
+  cost: (tenant: string, signal?: AbortSignal) =>
+    getJSON<CostResponse>(
+      `/api/cost?tenant=${encodeURIComponent(tenant)}`,
+      signal,
+    ),
   runs: (signal?: AbortSignal) => getJSON<RunListResponse>("/api/runs", signal),
 
   // runsFiltered reads one paginated window of runs from the global /api/runs
@@ -4124,19 +4133,23 @@ export const api = {
     return (await res.json()) as FeedbackResponse;
   },
 
-  // costBreakdown reads the per-agent cost rollup (m16.10) from
-  // GET /api/cost/breakdown?by=agent&limit=&cursor=. The data reflects a
-  // RECENT WINDOW of traces (≤200), NOT all-time spend. Returns null on 501
-  // (Langfuse not configured) as the calm sentinel — callers render
-  // "unavailable", NOT an error. Throws ApiError on 502 (Langfuse configured
-  // but upstream fetch FAILED) — a real, likely-transient error the UI should
-  // surface. This mirrors the 501-calm / 502-error discipline (ADR 0012).
+  // costBreakdown reads the TENANT-SCOPED per-agent cost rollup (m16.10, ADR 0077)
+  // from GET /api/cost/breakdown?by=agent&tenant=&limit=&cursor=. The data reflects
+  // a RECENT WINDOW of traces (≤200), NOT all-time spend, and is filtered to the
+  // agents in the tenant's namespaces (ADR 0077). ?tenant= is REQUIRED — a missing
+  // tenant is a 400 — so callers must supply one. Returns null on 501 (Langfuse not
+  // configured) as the calm sentinel — callers render "unavailable", NOT an error.
+  // Throws ApiError on 502 (Langfuse configured but upstream fetch FAILED) — a real,
+  // likely-transient error the UI should surface. This mirrors the 501-calm /
+  // 502-error discipline (ADR 0012).
   costBreakdown: async (
+    tenant: string,
     params: CostBreakdownParams = {},
     signal?: AbortSignal,
   ): Promise<CostBreakdownResponse | null> => {
     const qs = new URLSearchParams();
     qs.set("by", "agent");
+    qs.set("tenant", tenant);
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const res = await apiFetch(`/api/cost/breakdown?${qs.toString()}`, {

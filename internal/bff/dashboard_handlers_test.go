@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 )
 
 // fakeLangfuseAdapter is an in-memory LangfuseAdapter for the handler-wiring
@@ -205,35 +207,47 @@ func TestRunsRouteServesLangfuseData(t *testing.T) {
 	assert.Equal(t, "t1", body.Runs[0].TraceID)
 }
 
-func TestCostRouteFoldsLangfuseAndPrometheus(t *testing.T) {
+// TestCostRouteFoldsRollupAndPrometheus: the summary total now comes from the
+// durable TENANT rollup (ADR 0077), folded with the Prometheus latency/scale
+// series. The rollup MTD row supplies TotalCostUSD/TotalTokens; ByModel is
+// intentionally empty (the durable rollup carries no per-model detail).
+func TestCostRouteFoldsRollupAndPrometheus(t *testing.T) {
 	s := newPermissiveCostServer(t, Adapters{
-		Langfuse: fakeLangfuseAdapter{cost: CostSummary{
-			TotalCostUSD: 1.75, TotalTokens: 1500, Observations: 3,
-			ByModel: []MetricPoint{{Label: "chat", Value: 1.75}},
-		}},
+		Langfuse:   fakeLangfuseAdapter{},
 		Prometheus: fakePrometheusAdapter{points: []MetricPoint{{Label: "echo", Value: 42}}},
 	})
-	rec := serveWithToken(t, s, "/api/cost")
+	// Seed the tenant's MTD rollup (the summary source of truth).
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	seedRollup(t, s.rollupStore, costTestTenant, monthStart, 1.75, 1500)
+
+	rec := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body CostResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.InDelta(t, 1.75, body.Summary.TotalCostUSD, 1e-9)
+	assert.Equal(t, int64(1500), body.Summary.TotalTokens)
+	assert.NotNil(t, body.Summary.ByModel)
+	assert.Empty(t, body.Summary.ByModel, "ADR 0077: durable rollup carries no per-model detail")
 	require.Len(t, body.Latency, 1)
 	require.Len(t, body.Scale, 1)
 	assert.Equal(t, "echo", body.Latency[0].Label)
 }
 
 func TestCostRouteWithoutPrometheusHasEmptySeries(t *testing.T) {
-	// Langfuse wired, Prometheus nil → cost still renders; metric series are [].
-	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{
-		cost: CostSummary{TotalCostUSD: 1.0, ByModel: []MetricPoint{}},
-	}})
-	rec := serveWithToken(t, s, "/api/cost")
+	// Rollup wired, Prometheus nil → cost still renders; metric series are [].
+	s := newPermissiveCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	seedRollup(t, s.rollupStore, costTestTenant, monthStart, 1.0, 100)
+
+	rec := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body CostResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.InDelta(t, 1.0, body.Summary.TotalCostUSD, 1e-9)
 	assert.NotNil(t, body.Latency)
 	assert.NotNil(t, body.Scale)
 	assert.Empty(t, body.Latency)
@@ -366,9 +380,15 @@ func TestHandleRunsBadLimitReturns400(t *testing.T) {
 // newCostLangfuseServer builds a BFF Server wired with BOTH a caller-scoped
 // factory AND a Langfuse adapter (required to register the real /api/cost and
 // /api/cost/breakdown routes), plus the given authorizer for SSAR control.
+//
+// It also seeds the default costTestTenant CR + a rollup store (ADR 0077 —
+// /api/cost + /api/cost/breakdown are tenant-scoped and need the store + a
+// resolvable Tenant) so the persona-gate tests below reach the data layer with
+// ?tenant=acme and observe a 200 on the granted path.
 func newCostLangfuseServer(t *testing.T, auth authz.Authorizer) *Server {
 	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(costTestTenantObject()).Build()
 	s := NewServer(Options{
 		CallerClients: newFakeFactory(c),
 		Scheme:        testScheme(t),
@@ -378,6 +398,7 @@ func newCostLangfuseServer(t *testing.T, auth authz.Authorizer) *Server {
 		Log:           logr.Discard(),
 	})
 	s.authorizer = auth
+	s.rollupStore = costrollup.NewMemStore()
 	return s
 }
 
@@ -385,7 +406,7 @@ func newCostLangfuseServer(t *testing.T, auth authz.Authorizer) *Server {
 // and never receives cost data — mirrors TestCostForecast_PersonaDeniedIs403.
 func TestHandleCost_PersonaDeniedIs403(t *testing.T) {
 	s := newCostLangfuseServer(t, &recordingAuthorizer{err: authz.ErrForbidden})
-	rec := serveWithToken(t, s, "/api/cost")
+	rec := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "no costrollups persona ⇒ 403, never a data leak")
 }
 
@@ -393,7 +414,7 @@ func TestHandleCost_PersonaDeniedIs403(t *testing.T) {
 // and receives 200 — happy path preserved.
 func TestHandleCost_GrantedCallerGets200(t *testing.T) {
 	s := newCostLangfuseServer(t, &recordingAuthorizer{})
-	rec := serveWithToken(t, s, "/api/cost")
+	rec := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	assert.Equal(t, http.StatusOK, rec.Code, "granted caller ⇒ 200 (happy path preserved)")
 }
 
@@ -402,7 +423,7 @@ func TestHandleCost_GrantedCallerGets200(t *testing.T) {
 func TestHandleCost_GatesOnListCostRollups(t *testing.T) {
 	auth := &recordingAuthorizer{}
 	s := newCostLangfuseServer(t, auth)
-	rec := serveWithToken(t, s, "/api/cost")
+	rec := serveWithToken(t, s, "/api/cost?tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, authz.VerbList, auth.last.Verb)
 	assert.Equal(t, resourceCostRollups, auth.last.Resource, "SSAR resource must be costrollups")
@@ -413,7 +434,7 @@ func TestHandleCost_GatesOnListCostRollups(t *testing.T) {
 // with 403 — mirrors TestCostForecast_PersonaDeniedIs403.
 func TestHandleCostBreakdown_PersonaDeniedIs403(t *testing.T) {
 	s := newCostLangfuseServer(t, &recordingAuthorizer{err: authz.ErrForbidden})
-	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "no costrollups persona ⇒ 403, never a data leak")
 }
 
@@ -421,7 +442,7 @@ func TestHandleCostBreakdown_PersonaDeniedIs403(t *testing.T) {
 // data layer and receives 200 — happy path preserved.
 func TestHandleCostBreakdown_GrantedCallerGets200(t *testing.T) {
 	s := newCostLangfuseServer(t, &recordingAuthorizer{})
-	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	assert.Equal(t, http.StatusOK, rec.Code, "granted caller ⇒ 200 (happy path preserved)")
 }
 
@@ -430,7 +451,7 @@ func TestHandleCostBreakdown_GrantedCallerGets200(t *testing.T) {
 func TestHandleCostBreakdown_GatesOnListCostRollups(t *testing.T) {
 	auth := &recordingAuthorizer{}
 	s := newCostLangfuseServer(t, auth)
-	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	rec := serveWithToken(t, s, "/api/cost/breakdown?by=agent&tenant="+costTestTenant)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, authz.VerbList, auth.last.Verb)
 	assert.Equal(t, resourceCostRollups, auth.last.Resource, "SSAR resource must be costrollups")

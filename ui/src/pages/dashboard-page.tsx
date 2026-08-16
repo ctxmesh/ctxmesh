@@ -5,7 +5,6 @@ import { CheckCircle2, Circle, Coins, Network, RefreshCw } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TopologySummary } from "@/components/dashboard/topology-summary";
-import { CostPanel } from "@/components/dashboard/cost-panel";
 import { DashboardStats } from "@/components/dashboard/dashboard-stats";
 import { RecentRuns } from "@/components/dashboard/recent-runs";
 import { useNamespace } from "@/lib/namespace";
@@ -13,18 +12,22 @@ import { FIRST_RUN_CHECKLIST } from "@/lib/nav";
 import {
   api,
   ApiError,
-  type CostResponse,
   type ProviderListResponse,
   type RunListResponse,
   type TopologyResponse,
 } from "@/lib/api";
 
-// DashboardPage — the operator's landing surface (m12.5). It composes three
+// DashboardPage — the operator's landing surface (m12.5). It composes the
 // native, on-theme views over the Go BFF (creds server-side):
 //   1. Live topology  — a React Flow graph from /api/topology
-//   2. Cost / usage   — native cards + charts from /api/cost; links to /cost
-//   3. Recent runs    — from /api/runs (Langfuse), each links to /traces/:id;
+//   2. Recent runs    — from /api/runs (Langfuse), each links to /traces/:id;
 //                       "View all runs" links to /runs
+// Cost is now TENANT-SCOPED (ADR 0077): /api/cost requires a ?tenant=, and the
+// dashboard has no tenant context — so the landing page no longer fetches cost
+// (a tenant-less call is a guaranteed 400). It shows a calm "cost is per-tenant"
+// pointer to the /cost page, where a tenant is selected. This also retired the
+// dashboard's "cost by model" panel — the durable per-tenant rollup carries no
+// per-model detail (ADR 0077 consequence; restoration carded on the backlog).
 // The Langfuse embedded iframe (formerly section 4) was demoted in m16.11.
 // The ONE sanctioned Langfuse door is the forensics link-out on /traces/:id.
 
@@ -55,7 +58,6 @@ export function DashboardPage() {
   const [topology, setTopology] = useState<Loadable<TopologyResponse>>({
     kind: "loading",
   });
-  const [cost, setCost] = useState<Loadable<CostResponse>>({ kind: "loading" });
   const [runs, setRuns] = useState<Loadable<RunListResponse>>({
     kind: "loading",
   });
@@ -68,7 +70,6 @@ export function DashboardPage() {
   });
   const load = useCallback((signal?: AbortSignal) => {
     setTopology({ kind: "loading" });
-    setCost({ kind: "loading" });
     setRuns({ kind: "loading" });
     setProviders({ kind: "loading" });
 
@@ -85,17 +86,6 @@ export function DashboardPage() {
       .catch((err: unknown) => {
         if (signal?.aborted) return;
         setTopology({ kind: "error", message: messageOf(err) });
-      });
-    api
-      .cost(signal)
-      .then((data) => setCost({ kind: "ready", data }))
-      .catch((err: unknown) => {
-        if (signal?.aborted) return;
-        setCost(
-          isNotConfigured(err)
-            ? { kind: "unavailable" }
-            : { kind: "error", message: messageOf(err) },
-        );
       });
     api
       .runs(signal)
@@ -118,9 +108,7 @@ export function DashboardPage() {
   }, [load]);
 
   const loading =
-    topology.kind === "loading" ||
-    cost.kind === "loading" ||
-    runs.kind === "loading";
+    topology.kind === "loading" || runs.kind === "loading";
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -128,8 +116,8 @@ export function DashboardPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
           <p className="text-sm text-muted-foreground">
-            Cost, latency, and traced runs across your agents — live over the
-            BFF (creds server-side).
+            Live topology and traced runs across your agents — over the BFF
+            (creds server-side). Per-tenant cost lives on the Cost page.
           </p>
         </div>
         <Button
@@ -143,12 +131,12 @@ export function DashboardPage() {
         </Button>
       </div>
 
-      {/* Headline metrics (m35 redesign): spend, tokens, run volume, latency, fleet —
-          sourced from the Langfuse cost rollup + the runs list + live topology (the old
-          Prometheus latency/scale was never wired, so those cards were always blank). Each
-          stat degrades to a placeholder until its own feed loads. */}
+      {/* Headline metrics (m35 redesign): run volume, latency, fleet — sourced from the
+          runs list + live topology. Spend/tokens are now TENANT-SCOPED (ADR 0077) and no
+          longer live here (the dashboard has no tenant context); the stat cards for cost
+          show a "per-tenant — see Cost page" pointer instead. Each stat degrades to a
+          placeholder until its own feed loads. */}
       <DashboardStats
-        cost={cost.kind === "ready" ? cost.data : undefined}
         runs={runs.kind === "ready" ? runs.data.runs : undefined}
         topology={topology.kind === "ready" ? topology.data : undefined}
       />
@@ -232,38 +220,35 @@ export function DashboardPage() {
           );
         })()}
 
-      {/* Cost-by-model + live topology, side by side. The headline totals moved to the
-          stat row above; this row answers "where did the spend go" and "how is the fleet".
-          Live topology is a scale-first SUMMARY (m22.6/U5) — the full interactive graph is
-          the /topology page. */}
+      {/* Cost pointer + live topology, side by side. Cost is now TENANT-SCOPED (ADR 0077)
+          and has no home on the tenant-less dashboard — this card points to the /cost page
+          where a tenant is selected (it replaced the old "cost by model" panel, whose
+          per-model data the durable rollup no longer carries). Live topology is a
+          scale-first SUMMARY (m22.6/U5) — the full interactive graph is the /topology page. */}
       <div className="grid gap-4 lg:grid-cols-2">
-        {cost.kind === "loading" && (
-          <Card className="h-full">
-            <CardContent className="py-10 text-center text-sm text-muted-foreground">
-              Loading cost…
-            </CardContent>
-          </Card>
-        )}
-        {cost.kind === "unavailable" && (
-          <Card className="h-full">
-            <CardContent
-              className="py-10 text-center text-sm text-muted-foreground"
-              data-testid="cost-unavailable"
-            >
-              Cost &amp; usage isn&apos;t configured — connect an observability
-              backend (Langfuse) to see spend here. Everything else works
-              without it.
-            </CardContent>
-          </Card>
-        )}
-        {cost.kind === "error" && (
-          <Card className="h-full">
-            <CardContent className="py-10 text-center text-sm text-destructive">
-              Failed to load cost: {cost.message}
-            </CardContent>
-          </Card>
-        )}
-        {cost.kind === "ready" && <CostPanel cost={cost.data} />}
+        <Card className="h-full" data-testid="cost-pointer-card">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Coins className="h-4 w-4 text-primary" />
+              Cost &amp; usage
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex min-h-[14rem] flex-col items-center justify-center gap-3 rounded-md border p-4 text-center">
+              <p className="text-sm text-muted-foreground">
+                Cost is tracked per tenant. Open the Cost page to see spend,
+                per-agent breakdown, and month forecast — pick a tenant there.
+              </p>
+              <Link
+                to="/cost"
+                data-testid="view-cost-details"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                View cost details
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
 
         <Card className="h-full">
           <CardHeader>
@@ -300,22 +285,6 @@ export function DashboardPage() {
           </CardContent>
         </Card>
       </div>
-
-      {cost.kind === "ready" && (
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Coins className="h-3.5 w-3.5" />
-            Full cost breakdown and historical trends on the Cost page.
-          </div>
-          <Link
-            to="/cost"
-            data-testid="view-cost-details"
-            className={buttonVariants({ variant: "outline", size: "sm" })}
-          >
-            View cost details
-          </Link>
-        </div>
-      )}
 
       {/* 3. Recent runs — each row navigates to /traces/:id (native trace
           explorer, m16.7); "View all runs" links to /runs (m16.8).

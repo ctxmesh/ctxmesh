@@ -33,7 +33,13 @@ func newControlProxy(t *testing.T, byToken map[string]string, auth PodAuthentica
 	t.Helper()
 	mr := miniredis.RunT(t)
 	if auth == nil {
-		auth = fakePodAuth{byToken: byToken}
+		// m52.C12: /control now requires an AGENT identity (authenticateAgentNamespace), so every default
+		// token authenticates as a per-agent SA (agent-<token>) — mirroring the m79.2 quota/dedup tests.
+		sa := make(map[string]string, len(byToken))
+		for tok := range byToken {
+			sa[tok] = "agent-" + tok
+		}
+		auth = fakePodAuth{byToken: byToken, saByToken: sa}
 	}
 	s, err := NewServer(Options{
 		Store:            NewRedisStore(mr.Addr(), "", ""),
@@ -64,13 +70,24 @@ func TestControlGet_AbsentKeyIsEmptyVerb(t *testing.T) {
 	assert.JSONEq(t, `{"control":""}`, rec.Body.String())
 }
 
-// The auth boundary: an UNauthenticated caller is REJECTED before any read — the same pod-auth the
-// quota/dedup endpoints use, not weakened. A rejected token → 401; auth-infra down → 503; no control
-// store configured → 503.
+// The auth boundary: an UNauthenticated OR non-agent caller is REJECTED before any read — the same
+// AGENT-auth the quota/dedup endpoints use (m79.2/C12), not weakened. A rejected token → 401; a
+// verified-but-non-agent SA → 403; auth-infra down → 503; no control store configured → 503.
 func TestControlGet_AuthBoundary(t *testing.T) {
 	t.Run("rejected pod token → 401", func(t *testing.T) {
 		s, _ := newControlProxy(t, map[string]string{"good": "team-alpha-ns"}, nil)
 		assert.Equal(t, http.StatusUnauthorized, do(t, s, "GET", "/control/r", "bad-token", "", nil).Code)
+	})
+
+	// m52.C12: a token that authenticates but whose SA is NOT an agent identity (e.g. the namespace
+	// `default` SA) is 403'd — closing the gap where any pod in a tenant namespace could read /control.
+	t.Run("verified non-agent SA → 403", func(t *testing.T) {
+		auth := fakePodAuth{
+			byToken:   map[string]string{"nonagent-tok": "team-alpha-ns"},
+			saByToken: map[string]string{"nonagent-tok": "default"}, // NOT agent-<name>
+		}
+		s, _ := newControlProxy(t, nil, auth)
+		assert.Equal(t, http.StatusForbidden, do(t, s, "GET", "/control/r", "nonagent-tok", "", nil).Code)
 	})
 
 	t.Run("missing token → 401", func(t *testing.T) {
