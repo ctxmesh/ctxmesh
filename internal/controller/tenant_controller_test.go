@@ -347,6 +347,109 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "toggling isolation off must remove the NetworkPolicy")
 }
 
+// TestTenant_NetworkIsolationSecureDefault (m89.3, ADR 0073): a tenant created with networkIsolation
+// ABSENT is served as true (CRD default) → isolated from birth, condition NetworkIsolated=Isolated.
+func TestTenant_NetworkIsolationSecureDefault(t *testing.T) {
+	makeNamespace(t, "tnt-sd-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "sdco"},
+		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-sd-ns"}}, // networkIsolation ABSENT
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+
+	// The API server applied the +kubebuilder:default=true → served as true.
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "sdco"}, tenant))
+	require.NotNil(t, tenant.Spec.NetworkIsolation, "the CRD default must fill the absent field")
+	assert.True(t, *tenant.Spec.NetworkIsolation, "a field-absent tenant is served as isolated (secure default)")
+
+	reconcileTenant(t, "sdco")
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "tnt-sd-ns", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{}),
+		"a secure-default tenant isolates from birth (NetworkPolicy present)")
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "sdco"}, tenant))
+	cond := meta.FindStatusCondition(tenant.Status.Conditions, "NetworkIsolated")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "Isolated", cond.Reason)
+}
+
+// TestTenant_NetworkIsolationPeerTenants (m89.3): peerTenants opens a named east-west allow rule.
+func TestTenant_NetworkIsolationPeerTenants(t *testing.T) {
+	makeNamespace(t, "tnt-peer-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "peerco"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces:       []string{"tnt-peer-ns"},
+			NetworkIsolation: ptr.To(true),
+			PeerTenants:      []string{"friend-a", "friend-b"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "peerco")
+
+	var np networkingv1.NetworkPolicy
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "tnt-peer-ns", Name: tenantNetworkPolicyName}, &np))
+	// An ingress rule must allow namespaces whose tenant label is IN {friend-a, friend-b}.
+	foundPeer := false
+	for _, rule := range np.Spec.Ingress {
+		for _, peer := range rule.From {
+			if peer.NamespaceSelector == nil {
+				continue
+			}
+			for _, req := range peer.NamespaceSelector.MatchExpressions {
+				if req.Key == tenantLabel && req.Operator == metav1.LabelSelectorOpIn &&
+					len(req.Values) == 2 && req.Values[0] == "friend-a" && req.Values[1] == "friend-b" {
+					foundPeer = true
+				}
+			}
+		}
+	}
+	assert.True(t, foundPeer, "peerTenants must render an ingress allow rule (tenantLabel In peers)")
+}
+
+// TestTenant_NetworkIsolationGrandfathered (m89.3, ADR 0073): an explicit-false tenant carrying the
+// grandfather annotation reports NetworkIsolated=Grandfathered with no policy; converging to true
+// isolates it AND clears the annotation.
+func TestTenant_NetworkIsolationGrandfathered(t *testing.T) {
+	makeNamespace(t, "tnt-gf-ns")
+	tenant := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "gfco",
+			Annotations: map[string]string{networkIsolationGrandfatheredAnnotation: "true"},
+		},
+		Spec: agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-gf-ns"}, NetworkIsolation: ptr.To(false)},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tenant))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
+	reconcileTenant(t, "gfco")
+
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "gfco"}, tenant))
+	cond := meta.FindStatusCondition(tenant.Status.Conditions, "NetworkIsolated")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "Grandfathered", cond.Reason, "an explicit-false tenant WITH the annotation is Grandfathered, not Disabled")
+	assert.True(t, apierrors.IsNotFound(k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "tnt-gf-ns", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{})),
+		"a grandfathered (explicit-false) tenant stamps no policy")
+
+	// Converge: set isolation true → isolates + clears the grandfather annotation.
+	tenant.Spec.NetworkIsolation = ptr.To(true)
+	require.NoError(t, k8sClient.Update(testCtx, tenant))
+	reconcileTenant(t, "gfco")
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "tnt-gf-ns", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{}),
+		"converging to true isolates the tenant")
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "gfco"}, tenant))
+	_, stillGrandfathered := tenant.Annotations[networkIsolationGrandfatheredAnnotation]
+	assert.False(t, stillGrandfathered, "the grandfather annotation must be CLEARED once the tenant converges to isolated")
+	cond = meta.FindStatusCondition(tenant.Status.Conditions, "NetworkIsolated")
+	require.NotNil(t, cond)
+	assert.Equal(t, "Isolated", cond.Reason)
+}
+
 // A namespace already owned by another tenant is skipped (fail-safe) and surfaced
 // as a NamespaceConflict warning — never double-stamped.
 func TestTenant_NamespaceUniqueness(t *testing.T) {
