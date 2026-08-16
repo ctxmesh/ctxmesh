@@ -18,6 +18,12 @@
 # recipes/*.yaml via //go:embed, so the .yaml files must be in the build context or the build fails.
 !internal/bff/recipes/**
 
+# Re-include the embedded WorkflowSpec JSON-Schema (m83.2, L6): internal/bff/workflows_handler.go
+# embeds workflow_spec_schema.json via //go:embed, so it must be in the build context or the bff
+# image build fails ("pattern workflow_spec_schema.json: no matching files found"). Host `go build`
+# (tier0) + helm-verify don't build the image, so this only surfaces in the docker build.
+!internal/bff/workflow_spec_schema.json
+
 # Re-include the Vite SPA source so Dockerfile.bff can build the static UI
 # (m12.8a: the BFF image = build-time Node build of ui/ + Go binary, NO Node
 # runtime). Deps + build output are produced INSIDE the image from the committed
