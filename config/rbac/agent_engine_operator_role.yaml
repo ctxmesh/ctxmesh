@@ -43,6 +43,11 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
+  # alertpolicies is an agent-scoped policy CRD (M70, ADR 0063 D2) — the structural analog of
+  # guardrailpolicies, so it mirrors it across the personas. It ALSO backs the fired-alert feed:
+  # GET /api/alerts gates on a caller-scoped SSAR on `alertpolicies` (resourceAlerts). Omitting it
+  # fail-closes /api/alerts for the persona — the operator was locked out of the Alerts surface (Q10).
+  - alertpolicies
   - tenants
   # auditlogs is a store-backed VIRTUAL resource (ADR 0056, M63): GET /api/audit gates on a
   # caller-scoped SelfSubjectAccessReview on this name, so this grant IS the audit-read policy.
@@ -52,8 +57,10 @@ rules:
   # costrollups is a store-backed VIRTUAL resource (M70, ADR 0063 D1): GET /api/cost/forecast +
   # /api/cost/chargeback gate on a caller-scoped SSAR on this name — this grant IS the cost-read
   # policy for the durable per-tenant spend ledger. Operator ONLY (per-tenant spend/billing spans
-  # tenants). NB: the older Langfuse-backed /api/cost + /api/cost/breakdown are currently ungated —
-  # gating them on this same resource is a tracked consistency follow-up.
+  # tenants) — like auditlogs above, developer/viewer deliberately do NOT get it (confirmed the
+  # intended posture by live-verify 2026-08-16: dev/viewer 403 on Cost is by design, m52.Q4). The
+  # older Langfuse-backed /api/cost + /api/cost/breakdown are now ALSO gated on this same resource
+  # (handleCost/handleCostBreakdown), so the whole cost-view family shares one costrollups posture.
   - costrollups
   verbs:
   - '*'
@@ -72,6 +79,7 @@ rules:
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status
+  - alertpolicies/status
   verbs:
   - get
   - list
