@@ -1,0 +1,47 @@
+# Prometheus PodMonitor for Knative queue-proxy per-revision request metrics (M84, ADR 0076).
+#
+# The errorRate + p95Latency AlertPolicy SLO conditions read Knative queue-proxy per-revision request
+# metrics (revision_app_request_count / revision_app_request_latencies_bucket) via Prometheus. This
+# PodMonitor scrapes those metrics off every agent pod's queue-proxy container across all namespaces
+# (the queue-proxy is the client-facing edge — the right SLI vantage, ADR 0076).
+#
+# PREREQUISITE (NOT platform-managed — see note below): Knative Serving must be told to EXPORT request
+# metrics. The Knative install (a platform prerequisite, NOT owned by this chart) owns the
+# `config-observability` ConfigMap in the knative-serving namespace. To feed this PodMonitor, that
+# ConfigMap must enable Prometheus-scrapeable request metrics, e.g. (Knative <= ~1.17, OpenCensus/Prometheus
+# exporter):
+#     metrics.request-metrics-backend-destination: prometheus
+#     metrics.request-metrics-reporting-period-seconds: "5"
+# Newer Knative (>= ~1.18, this dev cluster runs v1.22.1) exports request metrics via OTLP by default
+# (config-observability: request-metrics-protocol). To make them Prometheus-scrapeable there, set
+# request-metrics-protocol to `prometheus`. This PodMonitor does NOT mutate that foreign ConfigMap; if
+# request metrics are not exported, the SLO conditions ABSTAIN (empty Prometheus result ⇒ a clear status
+# reason, never a false alert — ADR 0076 "Degrade gracefully").
+#
+# This PodMonitor is NOT part of config/default (it needs the Prometheus Operator CRDs + a running Knative);
+# it is applied on a monitored cluster, and the Helm chart offers it value-gated
+# (prometheus.podMonitor.queueProxy.enabled, OFF by default) — mirroring the controller-manager
+# ServiceMonitor. It touches NO agent-CRD RBAC (monitoring infra, not controller RBAC — ADR 0076).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/component: knative-queue-proxy-metrics
+  name: knative-queue-proxy
+  namespace: system
+spec:
+  # Scrape the queue-proxy across ALL namespaces (agents live in per-tenant namespaces).
+  namespaceSelector:
+    any: true
+  # Every Knative revision pod carries the serving.knative.dev/revision label; the metrics live on the
+  # queue-proxy sidecar's metrics port.
+  selector:
+    matchExpressions:
+      - key: serving.knative.dev/revision
+        operator: Exists
+  podMetricsEndpoints:
+    - port: http-usermetric
+      path: /metrics
+      interval: 15s

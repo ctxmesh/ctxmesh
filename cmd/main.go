@@ -62,6 +62,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
+	"github.com/ctxmesh/agent-engine/internal/promql"
 	"github.com/ctxmesh/agent-engine/internal/run"
 	// +kubebuilder:scaffold:imports
 )
@@ -499,6 +500,24 @@ func main() {
 		runOutcomes = counter
 	}
 
+	// AlertPolicy errorRate + p95Latency conditions (M84, ADR 0076): read Knative queue-proxy per-revision
+	// request metrics through the shared internal/promql instant client. The endpoint comes from
+	// PROMETHEUS_URL (+ optional PROMETHEUS_TOKEN), mirroring the BFF's Prometheus adapter. UNSET or
+	// unbuildable ⇒ the client stays nil and both SLO conditions ABSTAIN (a clear status reason, never a
+	// false alert). This is HTTP to Prometheus — no new K8s RBAC (ADR 0076).
+	var promMetrics controller.PromQLQuerier
+	if promURL := os.Getenv("PROMETHEUS_URL"); promURL != "" {
+		pc, perr := promql.New(promql.Config{
+			BaseURL:     promURL,
+			BearerToken: os.Getenv("PROMETHEUS_TOKEN"),
+		})
+		if perr != nil {
+			setupLog.Error(perr, "PROMETHEUS_URL set but promql client build failed — errorRate/p95Latency will abstain")
+		} else {
+			promMetrics = pc
+		}
+	}
+
 	// AlertPolicy reconciler (M70, ADR 0063 D2): evaluates each policy condition, fires once per
 	// false→true transition (dedup in .status), and PERSISTS fired alerts to the durable alerts ledger
 	// + audit_log (m70.4). Stores are the manager's existing cpDB (mirrors the regression detector +
@@ -514,6 +533,7 @@ func main() {
 		Audit:       auditlog.NewPostgresStore(cpDB),
 		Runs:        approvalRuns,
 		RunOutcomes: runOutcomes,
+		PromMetrics: promMetrics,
 		ConsoleURL:  os.Getenv("CONSOLE_URL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")

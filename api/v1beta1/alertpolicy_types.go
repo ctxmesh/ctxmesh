@@ -59,6 +59,20 @@ type AlertCondition struct {
 	//   approvalWaiting            — ignored (event-driven, per-RUN; the condition merely opts the
 	//                                selected agents into HITL approval-waiting notifications — a run
 	//                                pausing on plan_approval fires a per-run alert, ADR 0069 §3)
+	//
+	// SLO taxonomy — PINNED, do NOT redefine (M84, ADR 0076):
+	//   errorRate  is the 5xx fraction (server errors ÷ all responses) at the Knative edge, aggregated
+	//              PER AGENT across its revisions, measured over `window`. 4xx responses — INCLUDING the
+	//              typed guardrail / approval-required / tool-denial denials, which are 4xx on the outbound
+	//              model hop, not inbound 5xx — are NOT availability errors and are excluded by construction.
+	//              errorRate is FOREVER a plain 5xx fraction over `window`; multi-window burn-rate is a
+	//              future ADDITIVE `burnRate` condition type, never a mutation of this semantic.
+	//   p95Latency is the p95 request latency in MILLISECONDS at the Knative edge (queue-proxy), per agent.
+	//              It measures total response duration; a streaming-TTFB variant is a future condition, not
+	//              a redefinition of this one.
+	//   Both read Knative queue-proxy per-revision request metrics via Prometheus; when Prometheus is not
+	//   wired (or the metrics are absent) they ABSTAIN — a clear status reason, never a false alert.
+	//
 	// Stored as a string to carry rates/ms/USD uniformly without lossy float conversion.
 	// +optional
 	Threshold string `json:"threshold,omitempty"`

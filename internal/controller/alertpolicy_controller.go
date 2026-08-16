@@ -121,6 +121,14 @@ type AlertPolicyReconciler struct {
 	// COUNT-only read interface — no run mutation, and not the whole run store, reaches the reconciler.
 	RunOutcomes RunOutcomeCounter
 
+	// PromMetrics is the instant-query read into Prometheus (the shared internal/promql client), used ONLY
+	// by the errorRate + p95Latency SLO conditions (M84, ADR 0076) to read Knative queue-proxy per-revision
+	// request metrics. nil ⇒ errorRate/p95Latency abstain with a clear status reason ("Knative request
+	// metrics not available / Prometheus not wired"), never a false alert. Wired in cmd/main.go from
+	// PROMETHEUS_URL (abstains when unset). It is a NARROW instant-query-only interface — the reconciler can
+	// never do anything but read a vector, and all PromQL composition is pinned in alertpolicy_slo.go.
+	PromMetrics PromQLQuerier
+
 	// ConsoleURL is the browser-reachable console origin (from CONSOLE_URL, mirroring the BFF). It is
 	// the prefix for the approval-waiting notification's deep-link to the AUTHENTICATED console approval
 	// view. Empty ⇒ the payload carries a relative path (still a pointer, never a capability). This is a
@@ -302,13 +310,15 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 	case condTypeRunFailureRate:
 		return r.evalRunFailureRate(ctx, ap, cond, agents)
 
-	case condTypeErrorRate, condTypeP95Latency:
-		// Recognized-but-abstain: these need Prometheus request metrics that are not wired yet (m52
-		// Theme Q; runFailureRate — which HAS a cpDB-native source — was split out above in m84). Log
-		// once at V(1) and treat as not firing — NEVER error, so the rest of the policy still evaluates.
-		log.V(1).Info("alert condition type not yet evaluated — no data source (m52 Theme Q)",
-			"alertpolicy", ap.Name, "condition", cond.Name, "type", cond.Type)
-		return false, ""
+	case condTypeErrorRate:
+		// Knative queue-proxy per-revision 5xx-fraction over the window (M84, ADR 0076). Abstains when
+		// PromMetrics is nil (Prometheus not wired) — see evalErrorRate / alertpolicy_slo.go.
+		return r.evalErrorRate(ctx, ap, cond, agents)
+
+	case condTypeP95Latency:
+		// Knative queue-proxy per-revision p95 edge latency (ms) over the window (M84, ADR 0076). Abstains
+		// when PromMetrics is nil (Prometheus not wired) — see evalP95Latency / alertpolicy_slo.go.
+		return r.evalP95Latency(ctx, ap, cond, agents)
 
 	case condTypeApprovalWaiting:
 		// Handled on the separate per-run pass (evaluateApprovalWaiting) — abstain on the aggregate
