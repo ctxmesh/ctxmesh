@@ -408,6 +408,48 @@ func TestOnlineScorer_ResolverErrorFallsBackToDefaults(t *testing.T) {
 	assert.Zero(t, agg.Judge.Count, "fell back to the process default (judge OFF)")
 }
 
+// Test (m84.3): the worker reads the per-agent judge policy from a cpDB config ROW (the CONTROLLER-written
+// online_score_config, read via the real dbOnlineConfigResolver over a mem store) — NOT from the agent CRDs
+// (ADR 0011). An enabled row flips the judge ON for that agent even though the process cfg is judge OFF; a
+// MISSING row ⇒ judge OFF (the fail-safe). This is the end-to-end cpDB read path the BFF worker uses in prod.
+func TestOnlineScorer_ReadsJudgePolicyFromCpDBConfigRow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	runs := runsFor("v1", 5, 100)
+	lf := onlineScorerFake{recent: runs, filtered: map[string][]RunSummary{"default/foo": runs}}
+
+	// The config store is the SAME cpDB store the worker writes aggregates to (no agent-CRD access).
+	cfgStore := onlinescore.NewMemStore()
+	s := NewServer(Options{
+		Auth:           AllowAll{},
+		Adapters:       Adapters{Langfuse: lf},
+		OnlineStore:    cfgStore,
+		OnlineResolver: NewDBOnlineConfigResolver(cfgStore), // reads the cpDB row — the real prod read path
+		Version:        "test",
+		Log:            logr.Discard(),
+	})
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	windowStart := now.Add(-defaultOnlineScorerWindow)
+
+	// (1) No config row yet ⇒ judge OFF for this agent (the fail-safe), even with a generous process cap.
+	require.NoError(t, s.scoreOnce(ctx, OnlineScorerConfig{MaxScoredPerDay: 100}, now))
+	agg, err := cfgStore.GetAggregate(ctx, "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	assert.Equal(t, 5, agg.Operational.Total, "operational always scores (no judge needed)")
+	assert.Zero(t, agg.Judge.Count, "missing config row ⇒ judge OFF (the fail-safe)")
+
+	// (2) The controller publishes an ENABLED row → the worker reads it and judges this agent.
+	require.NoError(t, cfgStore.UpsertOnlineConfig(ctx, onlinescore.OnlineConfig{
+		Namespace: "default", AgentName: "foo", Enabled: true, SampleRate: 1.0, MaxScoredPerDay: 5,
+	}))
+	require.NoError(t, s.scoreOnce(ctx, OnlineScorerConfig{}, now)) // process cfg judge OFF — the row flips it ON
+	agg, err = cfgStore.GetAggregate(ctx, "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	assert.Positive(t, agg.Judge.Count, "an enabled cpDB config row turns the judge ON for this agent")
+	assert.LessOrEqual(t, agg.Judge.Count, 5, "the row's per-day cap still bounds the judge writes")
+}
+
 // Test: a per-agent Window override re-scopes the window (mergeOnto + resolveWindow). A 24h per-agent
 // window scores over the last 24h, so runs stamped 2h ago (outside the process-default 1h window's server
 // filter) are still discovered by the version filter — here we assert the merged config carries the

@@ -31,15 +31,21 @@ func memKey(namespace, agentName, agentVersion string, windowStart time.Time) st
 	return namespace + "\x00" + agentName + "\x00" + agentVersion + "\x00" + windowStart.Truncate(time.Hour).Format(time.RFC3339)
 }
 
+// configKey builds the map key for a per-(namespace, agentName) online-scoring config row.
+func configKey(namespace, agentName string) string {
+	return namespace + "\x00" + agentName
+}
+
 // memStore is the in-memory implementation of Store, used in tests and as a development twin.
 type memStore struct {
-	mu   sync.RWMutex
-	data map[string]Aggregate
+	mu     sync.RWMutex
+	data   map[string]Aggregate
+	config map[string]OnlineConfig
 }
 
 // NewMemStore returns an in-memory Store (thread-safe; data is lost when the process exits).
 func NewMemStore() Store {
-	return &memStore{data: make(map[string]Aggregate)}
+	return &memStore{data: make(map[string]Aggregate), config: make(map[string]OnlineConfig)}
 }
 
 func (s *memStore) UpsertAggregate(_ context.Context, a Aggregate) error {
@@ -96,4 +102,32 @@ func (s *memStore) ListAggregates(_ context.Context, namespace, agentName string
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *memStore) UpsertOnlineConfig(_ context.Context, cfg OnlineConfig) error {
+	if cfg.Namespace == "" || cfg.AgentName == "" {
+		return fmt.Errorf("onlinescore: %w: namespace and agentName are required", controlplane.ErrInvalid)
+	}
+	cfg.UpdatedAt = time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config[configKey(cfg.Namespace, cfg.AgentName)] = cfg
+	return nil
+}
+
+func (s *memStore) GetOnlineConfig(_ context.Context, namespace, agentName string) (OnlineConfig, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg, ok := s.config[configKey(namespace, agentName)]
+	if !ok {
+		return OnlineConfig{}, false, nil
+	}
+	return cfg, true, nil
+}
+
+func (s *memStore) DeleteOnlineConfig(_ context.Context, namespace, agentName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.config, configKey(namespace, agentName))
+	return nil
 }

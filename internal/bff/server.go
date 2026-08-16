@@ -167,11 +167,12 @@ type Server struct {
 	// Always non-nil (constructed in NewServer) so the worker never nil-derefs it.
 	judgeCounters *judgeCounter
 
-	// onlineResolver resolves the PER-AGENT online-scoring policy from the agent's EvalSuite.online block
-	// (ADR 0062 Fork 2, m69.6). nil ⇒ the online-scoring worker uses its process-wide config for every
-	// agent (m69.5 back-compat); a real k8sOnlineConfigResolver (a read-only client over AgentDeployment +
-	// EvalSuite) is wired in cmd/bff/main.go when the worker is enabled. A resolve error falls back to the
-	// process defaults for that agent — never a fabricated verdict.
+	// onlineResolver resolves the PER-AGENT online-scoring policy for the worker's judge (ADR 0062 Fork 2;
+	// m84.3 completes m69.6). nil ⇒ the online-scoring worker uses its process-wide config for every agent
+	// (m69.5 back-compat); a real dbOnlineConfigResolver — reading the per-(ns, agent) config row the
+	// CONTROLLER publishes to cpDB (ADR 0011: the BFF SA holds NO agent-CRD RBAC) — is wired in
+	// cmd/bff/main.go. A resolve error falls back to the process defaults for that agent — never a
+	// fabricated verdict; a missing/disabled row ⇒ judge OFF (the fail-safe).
 	onlineResolver OnlineConfigResolver
 
 	// agentMemoryStore is the control-plane pgvector store for `agent`/long-term memory (ADR 0045) —
@@ -501,10 +502,10 @@ type Options struct {
 	// which the online-scoring worker (m69.5) writes directly (governance #8). Optional — nil ⇒ the
 	// online-scoring worker does not start (an honest no-op). Constructed in cmd/bff/main.go from cpDB.
 	OnlineStore onlinescore.Store
-	// OnlineResolver resolves the per-agent online-scoring policy from the EvalSuite.online block (ADR 0062
-	// Fork 2, m69.6). Optional — nil ⇒ the worker uses its process-wide config for every agent (m69.5).
-	// Constructed in cmd/bff/main.go (a read-only client over AgentDeployment + EvalSuite) only when the
-	// online-scoring worker is enabled.
+	// OnlineResolver resolves the per-agent online-scoring policy for the worker's judge (ADR 0062 Fork 2;
+	// m84.3 completes m69.6). Optional — nil ⇒ the worker uses its process-wide config for every agent
+	// (m69.5). Constructed in cmd/bff/main.go as a dbOnlineConfigResolver over the cpDB config row the
+	// CONTROLLER publishes (ADR 0011: no agent-CRD RBAC on the BFF SA).
 	OnlineResolver OnlineConfigResolver
 	// RollupStore is the control-plane Postgres store for the durable cost-rollup ledger (M70, ADR 0063 D1),
 	// which the cost-rollup worker (m70.2) writes directly (governance #8). Optional — nil ⇒ the worker is
