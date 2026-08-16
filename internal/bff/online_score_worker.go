@@ -507,6 +507,10 @@ func p95(xs []float64) float64 {
 	return sorted[idx]
 }
 
+// onlineJudgeScoreName is the Langfuse score name the online-scoring worker stamps on each
+// sampled trace it judges. It is a stable, searchable label in the Langfuse UI (m84.4).
+const onlineJudgeScoreName = "online-judge"
+
 // computeJudge runs the SAMPLED + capped judge over the window's runs and returns the accumulated
 // JudgeStats. A trace is judged iff hashFraction(traceID) < SampleRate AND the per-agent per-day cap has
 // budget left. When the judge is disabled (SampleRate==0 or MaxScoredPerDay==0) it returns a zero
@@ -515,14 +519,16 @@ func p95(xs []float64) float64 {
 // sampling + cap + accumulation mechanism, with the mock as the pluggable impl (eval's mock-first
 // discipline).
 //
-// TODO(m69.5): write-back to Langfuse needs a LangfuseAdapter.CreateScore seam (absent today). For now
-// the judge component lands ONLY in the aggregate (JudgeStats) — the load-bearing output; the Langfuse
-// per-trace score write-back is observability sugar deferred until the adapter grows a CreateScore method.
+// Each sampled judge score is ALSO written back to Langfuse as a per-trace score via
+// LangfuseAdapter.CreateScore (m84.4). This is BEST-EFFORT observability sugar: a CreateScore
+// failure is logged and swallowed — it NEVER fails the tick, blocks, or corrupts the cpDB
+// aggregate (the aggregate is the load-bearing output; Langfuse write-back is observability only).
 func (s *Server) computeJudge(ctx context.Context, cfg OnlineScorerConfig, tgt scoreTarget, runs []RunSummary, dayKey string) onlinescore.JudgeStats {
 	var judge onlinescore.JudgeStats
 	if !cfg.judgeEnabled() {
 		return judge
 	}
+	lf := s.adapters.Langfuse
 	scorer := eval.NewMockScorer("online-judge")
 	agentKey := tgt.agentKey()
 	for _, r := range runs {
@@ -538,8 +544,19 @@ func (s *Server) computeJudge(ctx context.Context, cfg OnlineScorerConfig, tgt s
 			// A scorer error is not a verdict — skip this trace (do not fabricate a score).
 			continue
 		}
+		clamped := clampUnit(score)
 		judge.Count++
-		judge.SumVal += clampUnit(score)
+		judge.SumVal += clamped
+
+		// BEST-EFFORT per-trace write-back to Langfuse (m84.4 observability sugar).
+		// A failure here is logged and swallowed — the aggregate above is the load-bearing
+		// output and must never be affected by a Langfuse write-back error.
+		if lf != nil {
+			if csErr := lf.CreateScore(ctx, r.TraceID, onlineJudgeScoreName, clamped, ""); csErr != nil {
+				s.log.Error(csErr, "online-scoring worker: CreateScore write-back failed (best-effort, ignored)",
+					"traceID", r.TraceID, "agent", tgt.agentRef())
+			}
+		}
 	}
 	return judge
 }

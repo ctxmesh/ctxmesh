@@ -32,10 +32,10 @@ import (
 )
 
 // onlineScorerFake is a purpose-built LangfuseAdapter for the online-scoring worker tests: it drives
-// RecentRuns (discovery), FilteredRuns (per-agent window), TraceScores, and TraceDetail from canned
-// per-key data so a tick can be asserted end to end with no HTTP and no live Langfuse. It embeds
-// fakeLangfuseAdapter only to inherit the methods the worker does NOT exercise (TraceURL / CostUsage /
-// RunsForAgent / CostBreakdown), overriding the four the worker calls.
+// RecentRuns (discovery), FilteredRuns (per-agent window), TraceScores, TraceDetail, and CreateScore
+// from canned per-key data so a tick can be asserted end to end with no HTTP and no live Langfuse. It
+// embeds fakeLangfuseAdapter only to inherit the methods the worker does NOT exercise (TraceURL /
+// CostUsage / RunsForAgent / CostBreakdown), overriding the five the worker calls.
 type onlineScorerFake struct {
 	fakeLangfuseAdapter
 	// recent is the discovery batch RecentRuns returns.
@@ -48,6 +48,28 @@ type onlineScorerFake struct {
 	details map[string]TraceDetail
 	// recentErr, when set, is returned by RecentRuns (discovery-failure path).
 	recentErr error
+	// createScoreCalls is a shared pointer to a slice that records every CreateScore invocation
+	// (traceID, name, value) for assertions. Using a pointer lets the value-receiver method
+	// append without losing the record when the fake is copied into the interface.
+	createScoreCalls *[]createScoreCall
+	// createScoreErr, when set, is returned by CreateScore (best-effort error path).
+	createScoreErr error
+}
+
+// createScoreCall records one CreateScore invocation so tests can assert call count + args.
+type createScoreCall struct {
+	traceID string
+	name    string
+	value   float64
+}
+
+// CreateScore records the call and returns the seeded createScoreErr. Uses the shared
+// pointer so calls made through the interface (by value) are still captured.
+func (f onlineScorerFake) CreateScore(_ context.Context, traceID, name string, value float64, _ string) error {
+	if f.createScoreCalls != nil {
+		*f.createScoreCalls = append(*f.createScoreCalls, createScoreCall{traceID: traceID, name: name, value: value})
+	}
+	return f.createScoreErr
 }
 
 func (f onlineScorerFake) RecentRuns(_ context.Context, _ int) ([]RunSummary, error) {
@@ -482,4 +504,113 @@ func TestOnlineScorer_UpsertGuard(t *testing.T) {
 	store := onlinescore.NewMemStore()
 	err := store.UpsertAggregate(context.Background(), onlinescore.Aggregate{})
 	require.ErrorIs(t, err, controlplane.ErrInvalid)
+}
+
+// --- m84.4: CreateScore write-back tests -------------------------------------
+
+// TestOnlineScorer_CreateScoreCalledPerSampledTrace proves the worker calls CreateScore
+// exactly once per SAMPLED judge trace (m84.4). With SampleRate=1 and n runs, exactly n
+// CreateScore calls are expected — one per run, in trace order.
+func TestOnlineScorer_CreateScoreCalledPerSampledTrace(t *testing.T) {
+	t.Parallel()
+
+	const n = 4
+	runs := runsFor("v1", n, 100)
+	calls := &[]createScoreCall{}
+	lf := onlineScorerFake{
+		recent:           runs,
+		filtered:         map[string][]RunSummary{"default/foo": runs},
+		createScoreCalls: calls,
+	}
+	s, _ := newOnlineScorerServer(t, lf)
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	// SampleRate=1 ⇒ every run is sampled; cap is generous so no run is skipped.
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{SampleRate: 1.0, MaxScoredPerDay: 100}, now))
+
+	require.Len(t, *calls, n, "CreateScore must be called once per sampled judge trace")
+	for _, c := range *calls {
+		assert.Equal(t, onlineJudgeScoreName, c.name, "score name must be the online-judge constant")
+		assert.GreaterOrEqual(t, c.value, 0.0, "value must be in [0,1]")
+		assert.LessOrEqual(t, c.value, 1.0)
+	}
+	// Each call uses a distinct traceID — no duplicates.
+	seen := make(map[string]bool, n)
+	for _, c := range *calls {
+		assert.False(t, seen[c.traceID], "duplicate CreateScore call for traceID %q", c.traceID)
+		seen[c.traceID] = true
+	}
+}
+
+// TestOnlineScorer_CreateScoreNotCalledWhenJudgeOff proves CreateScore is never called
+// when the judge is OFF (SampleRate=0 or MaxScoredPerDay=0).
+func TestOnlineScorer_CreateScoreNotCalledWhenJudgeOff(t *testing.T) {
+	t.Parallel()
+
+	runs := runsFor("v1", 5, 100)
+	calls := &[]createScoreCall{}
+	lf := onlineScorerFake{
+		recent:           runs,
+		filtered:         map[string][]RunSummary{"default/foo": runs},
+		createScoreCalls: calls,
+	}
+	s, _ := newOnlineScorerServer(t, lf)
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	// SampleRate=0 ⇒ judge OFF ⇒ zero CreateScore calls.
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{SampleRate: 0, MaxScoredPerDay: 100}, now))
+	assert.Empty(t, *calls, "CreateScore must not be called when judge is OFF (SampleRate=0)")
+
+	// MaxScoredPerDay=0 ⇒ judge OFF even if SampleRate>0.
+	*calls = nil
+	require.NoError(t, s.scoreOnce(context.Background(), OnlineScorerConfig{SampleRate: 1.0, MaxScoredPerDay: 0}, now))
+	assert.Empty(t, *calls, "CreateScore must not be called when MaxScoredPerDay=0 (judge OFF)")
+}
+
+// TestOnlineScorer_CreateScoreErrorSwallowed proves that a CreateScore failure is BEST-EFFORT:
+// the tick still completes successfully, the cpDB aggregate is written identically to the case
+// where CreateScore succeeds, and the error is NOT propagated. This is the core best-effort
+// guarantee: Langfuse write-back failures never corrupt or block the aggregate.
+func TestOnlineScorer_CreateScoreErrorSwallowed(t *testing.T) {
+	t.Parallel()
+
+	const n = 3
+	runs := runsFor("v1", n, 150)
+	// The fake returns an error for every CreateScore call.
+	lfErr := onlineScorerFake{
+		recent:         runs,
+		filtered:       map[string][]RunSummary{"default/foo": runs},
+		createScoreErr: errors.New("langfuse scores API unavailable"),
+	}
+	// A control fake with no error to compare the aggregate against.
+	lfOK := onlineScorerFake{
+		recent:   runs,
+		filtered: map[string][]RunSummary{"default/foo": runs},
+	}
+
+	now := time.Date(2026, 8, 10, 12, 30, 0, 0, time.UTC)
+	windowStart := now.Add(-defaultOnlineScorerWindow)
+	cfg := OnlineScorerConfig{SampleRate: 1.0, MaxScoredPerDay: 100}
+
+	// Error path: tick must complete without error.
+	sErr, storeErr := newOnlineScorerServer(t, lfErr)
+	require.NoError(t, sErr.scoreOnce(context.Background(), cfg, now),
+		"a CreateScore error must be swallowed — the tick must not fail")
+
+	// Control path: tick with no CreateScore error.
+	sOK, storeOK := newOnlineScorerServer(t, lfOK)
+	require.NoError(t, sOK.scoreOnce(context.Background(), cfg, now))
+
+	// Both aggregates must be identical — the error path must not alter the aggregate.
+	aggErr, err := storeErr.GetAggregate(context.Background(), "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+	aggOK, err := storeOK.GetAggregate(context.Background(), "default", "foo", "v1", windowStart)
+	require.NoError(t, err)
+
+	assert.Equal(t, aggOK.Operational.Total, aggErr.Operational.Total,
+		"Operational.Total must be identical regardless of CreateScore error")
+	assert.Equal(t, aggOK.Judge.Count, aggErr.Judge.Count,
+		"Judge.Count must be identical regardless of CreateScore error (aggregate is the load-bearing output)")
+	assert.InDelta(t, aggOK.Judge.SumVal, aggErr.Judge.SumVal, 1e-9,
+		"Judge.SumVal must be identical regardless of CreateScore error")
 }
