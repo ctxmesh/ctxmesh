@@ -180,6 +180,17 @@ func (r *Result) checkStep(s *agentsv1beta1.WorkflowStep, names map[string]bool)
 		if s.Map.Parallelism < 1 {
 			r.add(fmt.Errorf("step %q map.parallelism must be >= 1; got %d", s.Name, s.Map.Parallelism))
 		}
+		// completion is enum-bounded by the CRD (all|any, default all); defend it here too so a
+		// snapshot/direct-apply that bypassed the CRD enum can't drive an unknown wake mode (m83.4, ADR
+		// 0075 §1). Empty = the CRD default (all). completion:any is compatible with a `join`: the winning
+		// item's output is fed forward as a single-element list, which a join step consumes exactly like an
+		// all-collect list — so no extra any+join restriction is needed.
+		switch s.Map.Completion {
+		case "", "all", "any":
+			// ok.
+		default:
+			r.add(fmt.Errorf("step %q map.completion must be one of all|any; got %q", s.Name, s.Map.Completion))
+		}
 	}
 	if s.Loop != nil {
 		edgeRef("loop.do", s.Loop.Do)

@@ -307,6 +307,13 @@ func mkWaitingParent(t *testing.T, s Store, children []string, mode WaitMode) {
 // completeChild is the terminal-transition apply used across the wake tests.
 func completeChild(r *Run) error { return r.Transition(StatusSucceeded, t0.Add(time.Minute)) }
 
+// failChild / cancelChild are the outcome-aware terminal applies for the ADR 0075 wake-mode tests.
+func failChild(r *Run) error {
+	r.Error = "boom"
+	return r.Transition(StatusFailed, t0.Add(time.Minute))
+}
+func cancelChild(r *Run) error { return r.Transition(StatusCancelled, t0.Add(time.Minute)) }
+
 // TestMemStore_TransactionalWake_AllMode proves the all-mode wake: the parent stays waiting until
 // the LAST child completes, then flips to queued in that same completion call.
 func TestMemStore_TransactionalWake_AllMode(t *testing.T) {
@@ -344,6 +351,61 @@ func TestMemStore_TransactionalWake_AnyMode(t *testing.T) {
 	assert.Equal(t, StatusQueued, woke.Status)
 	p, _ := s.Get("p")
 	assert.Equal(t, StatusQueued, p.Status)
+}
+
+// TestMemStore_Wake_AllFailFast proves the outcome-aware fail-fast mode (ADR 0075 §1): a NON-succeeded
+// terminal child wakes the parent immediately (before the fan-out is fully terminal), while an all-success
+// path behaves exactly like WaitAll (wakes only on the last child).
+func TestMemStore_Wake_AllFailFast(t *testing.T) {
+	// (a) First child FAILS with a sibling still running → early wake.
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAllFailFast)
+	_, woke, err := s.CompleteAndWake("c1", failChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "fail-fast: a failed child wakes the parent even with a sibling still running")
+	assert.Equal(t, StatusQueued, woke.Status)
+
+	// (b) A cancelled child (a non-success terminal) also triggers the early wake.
+	s2 := NewMemStore()
+	mkWaitingParent(t, s2, []string{"c1", "c2"}, WaitAllFailFast)
+	_, woke, err = s2.CompleteAndWake("c1", cancelChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "fail-fast: a cancelled child (non-success terminal) wakes the parent early")
+
+	// (c) All-success path = the old WaitAll join: only the last child wakes.
+	s3 := NewMemStore()
+	mkWaitingParent(t, s3, []string{"c1", "c2"}, WaitAllFailFast)
+	_, woke, err = s3.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	assert.Nil(t, woke, "fail-fast all-success: one of two succeeded does NOT wake early")
+	_, woke, err = s3.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "fail-fast all-success: the last child wakes the parent (the join)")
+}
+
+// TestMemStore_Wake_AnySuccess proves the outcome-aware any-success mode (ADR 0075 §1): the FIRST succeeded
+// child wakes the parent; a failed child only advances toward exhaustion; the LAST child (all failed) wakes
+// on exhaustion.
+func TestMemStore_Wake_AnySuccess(t *testing.T) {
+	// (a) First success wins immediately.
+	s := NewMemStore()
+	mkWaitingParent(t, s, []string{"c1", "c2"}, WaitAnySuccess)
+	_, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "any-success: the first succeeding child wakes the parent")
+	assert.Equal(t, StatusQueued, woke.Status)
+
+	// (b) A failed child does NOT wake while a sibling is still running; the last failure (exhaustion) does.
+	s2 := NewMemStore()
+	mkWaitingParent(t, s2, []string{"c1", "c2"}, WaitAnySuccess)
+	_, woke, err = s2.CompleteAndWake("c1", failChild)
+	require.NoError(t, err)
+	assert.Nil(t, woke, "any-success: a failed child with a sibling still running does NOT wake")
+	p, _ := s2.Get("p")
+	assert.Equal(t, []string{"c2"}, p.WaitOn, "the failed child is removed from the wait set")
+	_, woke, err = s2.CompleteAndWake("c2", failChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "any-success: the last child (all failed = exhaustion) wakes the parent")
 }
 
 // TestMemStore_Wake_Idempotent proves a reclaimed/duplicated child completion does not re-queue an

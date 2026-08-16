@@ -580,7 +580,7 @@ func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply 
 		case gErr != nil:
 			return nil, nil, gErr
 		case parent.Status == StatusWaiting:
-			met, removed := parent.satisfyChild(childID)
+			met, removed := parent.satisfyChild(childID, child.Status)
 			if removed {
 				pOld := parent.Status
 				if met {
@@ -673,29 +673,26 @@ func (p *pgStore) sweepOne(ctx context.Context, id string) (bool, error) {
 	return requeued, nil
 }
 
-// waitMet reports whether a waiting run's condition is met by its children's persisted statuses.
-// all → every WaitOn child is terminal (a missing child counts as satisfied — it can never wake us);
-// any → at least one is terminal. Read on the pool (advisory); the caller re-checks under the lock.
+// waitMet is the Postgres sweep adapter: it reads the run's WaitOn children's persisted statuses (a
+// MISSING child row → StatusCancelled, per waitSatisfied's contract — a non-success terminal, never a
+// success) and defers the decision to the SINGLE predicate waitSatisfied. There is NO second copy of the
+// mode logic here — the hot path (satisfyChild) and the sweep must agree, and a property test pins it.
+// Read on the pool (advisory); the caller re-checks under the row lock.
 func (p *pgStore) waitMet(ctx context.Context, r *Run) (bool, error) {
-	terminal := 0
-	for _, cid := range r.WaitOn {
+	statuses := make([]Status, len(r.WaitOn))
+	for i, cid := range r.WaitOn {
 		var status string
 		err := p.db.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=$1`, cid).Scan(&status)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			terminal++ // missing child → satisfied
+			statuses[i] = StatusCancelled // a missing child ⇒ cancelled-equivalent (never a success)
 		case err != nil:
 			return false, fmt.Errorf("run: sweep child status: %w", err)
 		default:
-			if Status(status).IsTerminal() {
-				terminal++
-			}
+			statuses[i] = Status(status)
 		}
 	}
-	if r.WaitMode == WaitAny {
-		return terminal > 0, nil
-	}
-	return terminal == len(r.WaitOn), nil
+	return waitSatisfied(r.WaitMode, statuses), nil
 }
 
 // lockRunsOrdered acquires FOR UPDATE row locks on the given run ids in a single statement, ordered

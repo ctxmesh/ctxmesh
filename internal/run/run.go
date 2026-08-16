@@ -338,7 +338,13 @@ type Run struct {
 	Outcome string `json:"-"`
 }
 
-// WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3).
+// WaitMode is how a `waiting` run's WaitOn set is satisfied (ADR 0060 §3, extended in ADR 0075).
+//
+// ONE-WAY DOOR (ADR 0075 §1 / Consequences): the persisted string of each mode is pinned FOREVER, and
+// so are the two semantic invariants baked into waitSatisfied below — (1) `cancelled` is a NON-SUCCESS
+// terminal (it counts toward exhaustion / triggers fail-fast, never toward success), and (2) a MISSING
+// child row is treated as `StatusCancelled` (a non-success terminal, never a success). Changing the
+// meaning of an already-persisted mode value later is the trap; these are fixed now.
 type WaitMode string
 
 const (
@@ -346,7 +352,67 @@ const (
 	WaitAll WaitMode = "all"
 	// WaitAny — the wait is met when AT LEAST ONE child in WaitOn has gone terminal (an any-of).
 	WaitAny WaitMode = "any"
+	// WaitAllFailFast — outcome-aware "all" (ADR 0075 §1, L5 map fail-fast): the wait is met the moment
+	// ANY child ends NON-SUCCEEDED (failed/cancelled/expired — a doomed fan-out we can cut short) OR every
+	// child has gone terminal (the all-success join). Persisted; do NOT change its meaning.
+	WaitAllFailFast WaitMode = "all-fail-fast"
+	// WaitAnySuccess — outcome-aware "any" (ADR 0075 §1, L4 any-of): the wait is met the moment ANY child
+	// SUCCEEDS (the first winner) OR every child has gone terminal (exhaustion — all failed/cancelled).
+	// Persisted; do NOT change its meaning.
+	WaitAnySuccess WaitMode = "any-success"
 )
+
+// waitSatisfied is THE satisfaction predicate — the SINGLE source of truth for whether a `waiting`
+// run's wait is met, evaluated over its WaitOn children's persisted statuses (ADR 0075 §1). Both the
+// event-driven hot path (satisfyChild) and the sweep reconcilers (waitMet / waitMetLocked) funnel
+// through it so there is exactly one copy of the logic.
+//
+// statuses is one entry per WaitOn child = that child's persisted Status. A MISSING child row MUST be
+// passed as StatusCancelled by the caller — a non-success terminal, NEVER a success (a vanished child
+// can never wake us; under any-success it counts as exhaustion, never a win). This is a pinned contract
+// (ADR 0075 §3 / the one-way door on WaitMode above).
+//
+//	all            : ∀ terminal                                          (existing — join)
+//	any            : ∃ terminal                                          (existing — any-of)
+//	all-fail-fast  : (∃ terminal ∧ status ≠ succeeded) ∨ ∀ terminal      (L5 — map fail-fast)
+//	any-success    : (∃ succeeded) ∨ ∀ terminal                          (L4 — first success, else exhausted)
+//
+// Every rule is a MONOTONE predicate over ABSORBING (terminal) states (ADR 0075's load-bearing
+// invariant): terminal never un-happens, so once met, always met — early wake, duplicate completion,
+// and sweep re-evaluation collapse to "at worst a late/spurious KICK, never a wrong one".
+//
+// An UNKNOWN mode DELIBERATELY degrades to `all`-semantics (the default branch) — NOT a panic. This is
+// the intentional mixed-version / rollback story (ADR 0075 §1): an OLD binary that sees a NEW persisted
+// mode string falls back to a late-but-never-wrong all-terminal wake; the resume path recomputes the
+// real outcome from the children.
+func waitSatisfied(mode WaitMode, statuses []Status) bool {
+	allTerminal := true
+	anyTerminal := false
+	anySucceeded := false
+	anyNonSuccessTerminal := false
+	for _, st := range statuses {
+		if st.IsTerminal() {
+			anyTerminal = true
+			if st == StatusSucceeded {
+				anySucceeded = true
+			} else {
+				anyNonSuccessTerminal = true // failed / cancelled / expired (incl. a missing child ⇒ cancelled)
+			}
+		} else {
+			allTerminal = false
+		}
+	}
+	switch mode {
+	case WaitAny:
+		return anyTerminal
+	case WaitAllFailFast:
+		return anyNonSuccessTerminal || allTerminal
+	case WaitAnySuccess:
+		return anySucceeded || allTerminal
+	default: // WaitAll — AND the intentional unknown-mode degradation (ADR 0075 §1, mixed-version safe).
+		return allTerminal
+	}
+}
 
 // ActionKind classifies what a requires_action run is waiting on.
 type ActionKind string
@@ -427,7 +493,10 @@ func (r *Run) suspendToWaiting(waitOn []string, mode WaitMode, now time.Time) er
 	if len(waitOn) == 0 {
 		return fmt.Errorf("run %s: suspend requires at least one child to wait on", r.ID)
 	}
-	if mode != WaitAll && mode != WaitAny {
+	switch mode {
+	case WaitAll, WaitAny, WaitAllFailFast, WaitAnySuccess:
+		// ok — a known, outcome-aware or outcome-agnostic mode.
+	default:
 		return fmt.Errorf("run %s: invalid wait mode %q", r.ID, mode)
 	}
 	if err := r.Transition(StatusWaiting, now); err != nil {
@@ -442,11 +511,18 @@ func (r *Run) suspendToWaiting(waitOn []string, mode WaitMode, now time.Time) er
 	return nil
 }
 
-// satisfyChild removes childID from the wait set and reports whether the wait is NOW met (given the
-// mode): all → the set is empty; any → a child was removed (at least one is satisfied). It returns
-// removed=false when childID was not in the set (an already-satisfied / duplicate completion) so
-// the wake is idempotent — a reclaimed child completion cannot re-fire a wake or corrupt the set.
-func (r *Run) satisfyChild(childID string) (met, removed bool) {
+// satisfyChild removes childID from the wait set and reports whether the wait is NOW met — the O(1)
+// incremental hot-path counterpart of waitSatisfied (ADR 0075 §1). childStatus is the child's FULL
+// terminal Status (the caller passes the just-committed terminal state): `cancelled` matters, so this
+// takes the whole Status, not a succeeded/failed bool. It returns removed=false when childID was not in
+// the set (an already-satisfied / duplicate completion) so the wake is idempotent — a reclaimed child
+// completion cannot re-fire a wake or corrupt the set.
+//
+// The `met` it returns for each mode is EXACTLY what waitSatisfied would return over the children's
+// final statuses — a property test pins the two equivalent. Because every rule is monotone over
+// absorbing terminal states, an early-fire here (fail-fast / first-success) directly WITNESSES the
+// predicate: the completing child's own outcome is the reason, so the fire can never be premature.
+func (r *Run) satisfyChild(childID string, childStatus Status) (met, removed bool) {
 	idx := -1
 	for i, id := range r.WaitOn {
 		if id == childID {
@@ -460,8 +536,16 @@ func (r *Run) satisfyChild(childID string) (met, removed bool) {
 	r.WaitOn = append(r.WaitOn[:idx], r.WaitOn[idx+1:]...)
 	switch r.WaitMode {
 	case WaitAny:
-		return true, true // one satisfied child meets an any-wait
-	default: // WaitAll
+		return true, true // one terminal child meets an any-wait (outcome-agnostic)
+	case WaitAllFailFast:
+		// A non-succeeded terminal child is a doomed fan-out → wake NOW (its outcome witnesses the ∃
+		// clause). Otherwise met iff every child is now terminal (the all-success join drained the set).
+		return childStatus != StatusSucceeded || len(r.WaitOn) == 0, true
+	case WaitAnySuccess:
+		// A succeeded child is the first winner → wake NOW. A failed/cancelled child only advances
+		// toward exhaustion: met iff it was the LAST child (the set is now empty ⇒ ∀ terminal, all-failed).
+		return childStatus == StatusSucceeded || len(r.WaitOn) == 0, true
+	default: // WaitAll — AND the intentional unknown-mode degradation (mixed-version safe, ADR 0075 §1).
 		return len(r.WaitOn) == 0, true
 	}
 }

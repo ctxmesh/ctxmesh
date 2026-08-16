@@ -77,6 +77,17 @@ type WorkflowMap struct {
 	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
 	// +optional
 	Join string `json:"join,omitempty"`
+
+	// completion is the outcome-aware wake mode for the fan-out (ADR 0075 §1). `all` (the default) is a
+	// fail-fast join: it collects EVERY item's output on full success but cancels the surviving siblings
+	// and fails the map the moment the FIRST item fails/cancels (same OUTCOME as before — fail on any
+	// failure, collect all on success — only earlier + with sibling-cancel). `any` returns the FIRST
+	// SUCCESSFUL item's output as the map's output (cancelling the still-running siblings), and fails the
+	// map only if EVERY item fails/cancels (exhaustion).
+	// +kubebuilder:validation:Enum=all;any
+	// +kubebuilder:default=all
+	// +optional
+	Completion string `json:"completion,omitempty"`
 }
 
 // WorkflowLoop is a loop node: repeat step `do` until the CEL predicate `until` is true, capped at
