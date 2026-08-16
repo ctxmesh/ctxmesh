@@ -699,6 +699,76 @@ describe("runManagedLoop — conversation memory", () => {
       await fx.stop();
     }
   });
+
+  // Handoff input filter (m83.6): X-Ctxmesh-Include-History: false makes B SKIP replaying the prior
+  // thread on the transfer turn (it starts from A's summary), while still persisting the turn.
+  it("skips replaying history on a handoff transfer turn with include-history=false", async () => {
+    const fx = await makeFixture({ withMemory: true, plainContent: "the answer is 42" });
+    try {
+      const config = new ManagedConfig({ systemPrompt: "sys", modelRoute: "m" });
+      // Seed A's prior raw conversation.
+      fx.memory!.store.set("chat-x", [
+        { role: "user", content: "hello, I have a billing problem" },
+        { role: "assistant", content: "let me get a specialist" },
+      ]);
+
+      // B's transfer turn: a SUMMARY message + the skip header.
+      await runManagedLoop(fx.client, config, "SUMMARY: user wants a refund", {
+        headers: { "x-conversation-id": "chat-x", "x-ctxmesh-include-history": "false" },
+      });
+
+      const turn = fx.gateway.requests[fx.gateway.requests.length - 1]!["messages"] as Array<
+        Record<string, unknown>
+      >;
+      // Only [system, user(=summary)] — the prior thread is NOT replayed on the transfer turn.
+      expect(turn.map((m) => m["role"])).toEqual(["system", "user"]);
+      expect(turn[turn.length - 1]!["content"]).toBe("SUMMARY: user wants a refund");
+      // B stays memory-wired: the transfer turn WAS persisted (2 seeded + 2 new = 4).
+      expect(fx.memory!.store.get("chat-x")!.length).toBe(4);
+
+      // A subsequent turn (no header) replays the full thread — the skip is one-turn only.
+      await runManagedLoop(fx.client, config, "any update?", {
+        headers: { "x-conversation-id": "chat-x" },
+      });
+      const next = fx.gateway.requests[fx.gateway.requests.length - 1]!["messages"] as Array<
+        Record<string, unknown>
+      >;
+      expect(next.slice(1).map((m) => m["role"])).toEqual([
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+      ]);
+    } finally {
+      await fx.stop();
+    }
+  });
+
+  // Default-unchanged (m83.6): a default handoff / normal turn (no header) replays the full history.
+  it("replays the full history when include-history is absent (default unchanged)", async () => {
+    const fx = await makeFixture({ withMemory: true, plainContent: "the answer is 42" });
+    try {
+      const config = new ManagedConfig({ systemPrompt: "sys", modelRoute: "m" });
+      fx.memory!.store.set("chat-y", [
+        { role: "user", content: "prior question" },
+        { role: "assistant", content: "prior answer" },
+      ]);
+      await runManagedLoop(fx.client, config, "new turn", {
+        headers: { "x-conversation-id": "chat-y" },
+      });
+      const turn = fx.gateway.requests[fx.gateway.requests.length - 1]!["messages"] as Array<
+        Record<string, unknown>
+      >;
+      expect(turn.slice(1)).toEqual([
+        { role: "user", content: "prior question" },
+        { role: "assistant", content: "prior answer" },
+        { role: "user", content: "new turn" },
+      ]);
+    } finally {
+      await fx.stop();
+    }
+  });
 });
 
 // ── ManagedConfig.fromEnv ────────────────────────────────────────────────────────

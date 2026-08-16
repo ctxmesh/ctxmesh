@@ -176,7 +176,18 @@ def _handoff_tool() -> Tool:
                 "type": "string",
                 "description": (
                     "An optional handoff note for the receiving agent (why you are transferring, "
-                    "what is needed next). The full conversation history transfers automatically."
+                    "what is needed next). By default the full conversation history transfers "
+                    "automatically; set include_history=false to hand off with THIS message as a "
+                    "SUMMARY instead (the receiving agent then starts from your summary rather "
+                    "than replaying the whole thread — use it for long conversations)."
+                ),
+            },
+            "include_history": {
+                "type": "boolean",
+                "description": (
+                    "Whether the receiving agent replays the full conversation history on the "
+                    "transfer turn (default true). Set false to hand off with `message` as a "
+                    "summary and skip the full-history replay — cheaper for a long conversation."
                 ),
             },
         },
@@ -453,7 +464,9 @@ class ToolsClient:
             return data
         return {"ok": False, "error": "malformed delegate response"}
 
-    def handoff(self, target_agent: str, message: str = "") -> Dict[str, Any]:
+    def handoff(
+        self, target_agent: str, message: str = "", include_history: bool = True
+    ) -> Dict[str, Any]:
         """Hand the conversation off to a roster member via the launcher-local endpoint (M67).
 
         This is a TRANSFER, not a delegation: the launcher fail-fast validates roster membership +
@@ -463,8 +476,14 @@ class ToolsClient:
         to consume — the target continues with the end user. Returns ``{"ok": bool, "runId": str,
         "sourceRun": str, "handedOffTo": str, "error": str}``. A refusal (a non-member target, a
         missing capability) comes back as ``ok=false`` (an outcome the loop records), never a raise.
+
+        *include_history* (m83.6) defaults True (the target replays the full conversation history on
+        the transfer turn — today's behavior). Pass False to hand off with *message* as a SUMMARY:
+        the target skips the full-history replay on that first turn and starts from the summary.
         """
-        body = json.dumps({"targetAgent": target_agent, "message": message}).encode()
+        body = json.dumps(
+            {"targetAgent": target_agent, "message": message, "includeHistory": include_history}
+        ).encode()
         headers = {"Content-Type": "application/json"}
         capability = current_capability()
         if capability:

@@ -297,6 +297,16 @@ type Run struct {
 	// Empty ⇒ this run was not created by a handoff (a normal invoke/create). Non-secret (a run id).
 	HandoffSourceRunID string `json:"-"`
 
+	// HandoffSkipHistoryReplay (m83.6) is B's ONE-TURN handoff INPUT FILTER: true ⇒ this run was created
+	// by a `handoff_to include_history=false`, so the run-worker stamps X-Ctxmesh-Include-History: false
+	// on B's FIRST /invoke and the SDK managed loop skips replaying the prior conversation history on
+	// that transfer turn (A handed off with a SUMMARY). It applies to B's TRANSFER TURN ONLY — subsequent
+	// user turns to B are ordinary invokes with no header (replay normally); B stays memory-wired on the
+	// SAME conversation. Default false ⇒ B replays the full history (ADR 0060 §5 default, unchanged), so
+	// old rows + a default handoff load byte-for-byte as today. Non-secret (a boolean), json:"-" (the
+	// store persists it as its own column — it is a worker signal, not part of the API DTO).
+	HandoffSkipHistoryReplay bool `json:"-"`
+
 	// --- Ingestion job (M68, ADR 0061 Fork 2): set when this run INGESTS a KnowledgeBase corpus. An ingestion
 	// run is a Run with an IngestionRef (the KB name) + a pinned IngestionSpec (the resolved source + embedding
 	// route + chunking + the snapshotted document object-keys), routed to executeIngestion by the typed marker
