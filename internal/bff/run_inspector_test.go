@@ -317,6 +317,7 @@ func TestTraceDetailRouteServesFlatSpans(t *testing.T) {
 			},
 		},
 	}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/t1/detail", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -336,6 +337,7 @@ func TestTraceDetailRouteSpansAreNonNullJSON(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{
 		detail: TraceDetail{Rollup: TraceRollup{TraceID: "t1"}, Spans: nil},
 	}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/t1/detail", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -359,6 +361,7 @@ func TestTraceDetailRouteServes404WhenTraceNotFound(t *testing.T) {
 
 func TestTraceDetailRouteServes502OnUpstreamError(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{detailErr: assert.AnError}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/t1/detail", nil))
 	assert.Equal(t, http.StatusBadGateway, rec.Code, "an upstream failure is a 502, never a 500")
@@ -372,6 +375,7 @@ func TestTraceDetailIsDistinctFromEmbedURLRoute(t *testing.T) {
 	}})
 
 	// /api/traces/{id} → the embed-URL DTO (unchanged m12.5 behavior).
+	seedRunForTrace(t, s, "abc")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/traces/abc", nil))
 	require.Equal(t, http.StatusOK, rec.Code)

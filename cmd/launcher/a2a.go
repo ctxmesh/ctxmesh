@@ -80,6 +80,15 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
 
+// refuseRedirect is the CheckRedirect policy for the launcher's identity-relaying outbound clients (audit
+// P2): NEVER follow a redirect. Go's default policy follows up to 10 hops, so a callee returning a 3xx to an
+// off-allowlist host would be followed — re-sending relayed identity (the run capability) to an
+// attacker-influenced host and bypassing the egress chokepoint. Runtime targets are internal cluster
+// services; a redirect is never legitimate, so refuse it.
+func refuseRedirect(_ *http.Request, _ []*http.Request) error {
+	return errors.New("redirect refused: runtime clients do not follow redirects (egress-allowlist integrity)")
+}
+
 const (
 	// defaultA2APort is the localhost port the outbound A2A listener binds when
 	// A2A_PORT is unset. The launcher-local ports are :2998 memory, :2999 the
@@ -333,6 +342,12 @@ func newA2AServer(cfg a2aConfig, tracer trace.Tracer, prop propagation.TextMapPr
 		// is the primary bound, Timeout is belt-and-braces.
 		client: &http.Client{
 			Timeout: a2aRequestTimeout,
+			// NEVER follow redirects (audit P2): this client relays the invoking user's run capability
+			// (runcap.HeaderName, below) on A2A hops. Go's default policy would follow a callee's 3xx to
+			// an off-allowlist host — re-sending that capability to an attacker-influenced target and
+			// bypassing the egress chokepoint. A2A targets are internal cluster agents (clusterHost); a
+			// redirect is never legitimate here, so refuse it.
+			CheckRedirect: refuseRedirect,
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{Timeout: a2aDialTimeout}).DialContext,
 				// A dead / cross-registry TLS-less peer must not hang the

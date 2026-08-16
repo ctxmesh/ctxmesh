@@ -369,20 +369,47 @@ func shouldSpan(path string) bool {
 	}
 }
 
-// buildChildEnv returns the environment slice for the child process.
-// All current env vars are inherited; AGENT_PORT is replaced with the
-// upstream port so the child listens on the internal port, not the proxy port.
+// platformSecretEnv are launcher-held platform credentials (+ the pod-token path) that the spawned agent —
+// UNTRUSTED user code — must NEVER inherit (audit P1-4). The launcher needs these to do blob offload,
+// feedback submission, telemetry export, and pod-identity auth to the state-layer proxy; the agent reaches
+// all of those through the launcher's LOCAL proxies and needs none of them. buildChildEnv drops them before
+// exec so a credential dropped into these slots is not readable by user code, and the child cannot read the
+// pod's projected ServiceAccount token to impersonate the pod.
+//
+// This is a curated DENYLIST, not an allowlist: the agent legitimately needs an open-ended environment (its
+// own spec.env + standard OS vars + the SDK's MEMORY_PORT/FEEDBACK_PORT/AGENT_* markers), so a strict
+// allowlist would break user apps. Any NEW platform SECRET injected into the launcher container MUST be added
+// here. Verified against the SDK (sdk/): it reads none of these directly (memory/feedback go through the
+// launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). Moving these
+// creds off literal env to secretKeyRef mounts is the complementary, deferred hardening (brain m52.B1b).
+var platformSecretEnv = map[string]bool{
+	"OBJECT_STORE_ACCESS_KEY":    true, // dev MinIO credential (launcher-only: blob offload)
+	"OBJECT_STORE_SECRET_KEY":    true, // dev MinIO credential
+	"LANGFUSE_SCORES_PUBLIC_KEY": true, // Langfuse scores keypair (launcher-only: feedback submission)
+	"LANGFUSE_SCORES_SECRET_KEY": true, // Langfuse scores secret
+	"LANGFUSE_OTLP_AUTH":         true, // OTLP Basic-auth header (telemetry export)
+	// path to the pod's projected SA token — pod-identity is the launcher's, not the child's:
+	"STATELAYER_TOKEN_PATH": true,
+}
+
+// buildChildEnv returns the environment slice for the spawned agent (child) process. Every var is inherited
+// EXCEPT the platform credentials in platformSecretEnv, which are scrubbed so untrusted user code cannot read
+// them (audit P1-4). AGENT_PORT is replaced with the upstream port so the child listens on the internal port,
+// not the proxy port.
 func buildChildEnv(cfg Config, environ []string) []string {
 	upstreamVal := "AGENT_PORT=" + strconv.Itoa(cfg.UpstreamPort)
 	out := make([]string, 0, len(environ)+1)
 	found := false
 	for _, kv := range environ {
+		if name, _, _ := strings.Cut(kv, "="); platformSecretEnv[name] {
+			continue // scrub platform credentials from untrusted agent code (audit P1-4)
+		}
 		if strings.HasPrefix(kv, "AGENT_PORT=") {
 			out = append(out, upstreamVal)
 			found = true
-		} else {
-			out = append(out, kv)
+			continue
 		}
+		out = append(out, kv)
 	}
 	if !found {
 		out = append(out, upstreamVal)
