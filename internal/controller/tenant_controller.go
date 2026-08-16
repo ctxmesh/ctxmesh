@@ -50,8 +50,14 @@ const (
 	tenantFinalizer = "agents.ctxmesh.ai/tenant-cleanup"
 	// tenantQuotaName is the fixed name of the ResourceQuota stamped per namespace.
 	tenantQuotaName = "tenant-quota"
-	// tenantNetworkPolicyName is the fixed name of the cross-tenant-deny NetworkPolicy (opt-in).
+	// tenantNetworkPolicyName is the fixed name of the cross-tenant-deny NetworkPolicy.
 	tenantNetworkPolicyName = "tenant-isolation"
+
+	// networkIsolationGrandfatheredAnnotation marks a tenant that was OPEN (networkIsolation absent/false)
+	// at the ADR-0073 secure-default upgrade and backfilled to explicit `false` so it keeps its old
+	// behavior — distinguishing it from a deliberate `false` opt-out. The controller clears it once the
+	// tenant converges to isolated.
+	networkIsolationGrandfatheredAnnotation = "agents.ctxmesh.ai/network-isolation-grandfathered"
 )
 
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
@@ -144,6 +150,18 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	totalBytes, err := r.aggregateCorpusBytes(ctx, owned)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("aggregating corpus bytes: %w", err)
+	}
+
+	// ADR 0073 convergence: once a grandfathered tenant becomes isolated (networkIsolation nil/true), the
+	// grandfather annotation has served its purpose — clear it so the migration dashboard shrinks. A
+	// metadata Update (refreshes resourceVersion in place) before the status write below.
+	if isolated := tenant.Spec.NetworkIsolation == nil || *tenant.Spec.NetworkIsolation; isolated {
+		if _, ok := tenant.Annotations[networkIsolationGrandfatheredAnnotation]; ok {
+			delete(tenant.Annotations, networkIsolationGrandfatheredAnnotation)
+			if err := r.Update(ctx, &tenant); err != nil {
+				return ctrl.Result{}, fmt.Errorf("clearing grandfather annotation: %w", err)
+			}
+		}
 	}
 
 	return ctrl.Result{}, r.updateStatus(ctx, &tenant, owned, contested, totalBytes)
@@ -260,10 +278,25 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1a
 // sever /invoke (an m5.7-class landmine — proven live in m47.8, not envtest which has no CNI).
 func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1alpha1.Tenant, ns string) error {
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: tenantNetworkPolicyName, Namespace: ns}}
-	if !tenant.Spec.NetworkIsolation {
+	// ADR 0073 secure-default: networkIsolation is a *bool with +kubebuilder:default=true, so a
+	// field-absent (nil) tenant is served as TRUE (isolate). Only an EXPLICIT false — a deliberate,
+	// grandfathered opt-out — removes the policy. (A nil here is defensive; the API default fills it.)
+	if tenant.Spec.NetworkIsolation != nil && !*tenant.Spec.NetworkIsolation {
 		return client.IgnoreNotFound(r.Delete(ctx, np))
 	}
 	sameTenant := &metav1.LabelSelector{MatchLabels: map[string]string{tenantLabel: tenant.Name}}
+	// ADR 0073: peerTenants opens named east-west — allow ingress from + egress to any member namespace
+	// whose tenant label is in the allowlist. Empty ⇒ strict isolation (same-tenant + platform only).
+	var peerPeers []networkingv1.NetworkPolicyPeer
+	if len(tenant.Spec.PeerTenants) > 0 {
+		peerPeers = []networkingv1.NetworkPolicyPeer{{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: tenantLabel, Operator: metav1.LabelSelectorOpIn, Values: tenant.Spec.PeerTenants},
+				},
+			},
+		}}
+	}
 	platformNS := func(name string) networkingv1.NetworkPolicyPeer {
 		return networkingv1.NetworkPolicyPeer{
 			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{namespaceNameLabel: name}},
@@ -278,7 +311,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 			PodSelector: metav1.LabelSelector{}, // every pod in the member namespace
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
-				{From: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: sameTenant}}}, // intra-tenant
+				{From: append([]networkingv1.NetworkPolicyPeer{{NamespaceSelector: sameTenant}}, peerPeers...)}, // intra-tenant + peerTenants
 				{From: []networkingv1.NetworkPolicyPeer{ // the knative/kourier data plane
 					platformNS(knativeServingNamespace),
 					platformNS(kourierSystemNamespace),
@@ -313,12 +346,12 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
 					},
 				},
-				{ // intra-tenant A2A + the knative data plane it egresses through
-					To: []networkingv1.NetworkPolicyPeer{
+				{ // intra-tenant A2A (+ peerTenants east-west) + the knative data plane it egresses through
+					To: append([]networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: sameTenant},
 						platformNS(knativeServingNamespace),
 						platformNS(kourierSystemNamespace),
-					},
+					}, peerPeers...),
 				},
 			},
 		}
@@ -514,6 +547,32 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 		}
 	} else {
 		meta.RemoveStatusCondition(&tenant.Status.Conditions, "StorageHardCapExceeded")
+	}
+
+	// ADR 0073: surface the network-isolation state as a condition — the secure default (nil ⇒ true) is
+	// Isolated; an explicit `false` is either Grandfathered (backfilled at the upgrade, converge by
+	// setting true) or a deliberate Disabled opt-out. The printcolumn/queryable condition is the migration
+	// dashboard ("how many tenants remain grandfathered?", reported at each milestone close).
+	isolated := tenant.Spec.NetworkIsolation == nil || *tenant.Spec.NetworkIsolation
+	switch {
+	case isolated:
+		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+			Type: "NetworkIsolated", Status: metav1.ConditionTrue, Reason: "Isolated",
+			Message:            "cross-tenant traffic is denied (secure default, ADR 0073); peerTenants opens named east-west",
+			ObservedGeneration: tenant.Generation,
+		})
+	case tenant.Annotations[networkIsolationGrandfatheredAnnotation] == "true":
+		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+			Type: "NetworkIsolated", Status: metav1.ConditionFalse, Reason: "Grandfathered",
+			Message:            "network isolation OFF — grandfathered at the secure-default upgrade (ADR 0073); set networkIsolation:true (add peerTenants for legitimate east-west) to converge",
+			ObservedGeneration: tenant.Generation,
+		})
+	default:
+		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+			Type: "NetworkIsolated", Status: metav1.ConditionFalse, Reason: "Disabled",
+			Message:            "network isolation is explicitly disabled (networkIsolation:false)",
+			ObservedGeneration: tenant.Generation,
+		})
 	}
 
 	// Project the at-hard-cap state into the membership mirror so enforcement reads it ADR-0011-clean
