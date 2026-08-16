@@ -3,10 +3,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { CostPage } from "@/pages/cost-page";
-import type { AgentCostItem, CostForecastResponse, CostSummary } from "@/lib/api";
+import type {
+  AgentCostItem,
+  CostForecastResponse,
+  CostSummary,
+  TenantSummary,
+} from "@/lib/api";
 
-// CostPage (m16.10 + M70 ADR 0063 D3) — cost drill-down, per-agent breakdown,
-// forecast card, and chargeback download.
+// CostPage (m16.10 + M70 ADR 0063 D3 + m86 ADR 0077) — cost drill-down,
+// per-agent breakdown, forecast card, chargeback download, and the in-page
+// tenant picker.
 //
 // Coverage:
 //   • summary card renders total cost / tokens from the window summary
@@ -17,6 +23,10 @@ import type { AgentCostItem, CostForecastResponse, CostSummary } from "@/lib/api
 //   • cursor pagination: nextCursor drives the next page (hasNext = nextCursor !== "")
 //   • 502 surfaces as a visible error (NOT a calm state)
 //   • 501 degrades calmly to cost-unavailable (NOT an error toast)
+//   • the tenant picker (m86 ADR 0077): lists tenants, defaults to the first
+//     when ?tenant= is absent, and selecting one drives ?tenant= + the fetch
+//   • the calm no-tenant state holds ONLY when zero tenants exist (never a
+//     guaranteed-400 tenant-less breakdown call)
 
 function item(over: Partial<AgentCostItem> = {}): AgentCostItem {
   return {
@@ -28,6 +38,15 @@ function item(over: Partial<AgentCostItem> = {}): AgentCostItem {
     ...over,
   };
 }
+
+// tenant builds a minimal TenantSummary for the picker's /api/tenants stub.
+function tenant(name: string): TenantSummary {
+  return { name, namespaces: [], memberNamespaces: 0, ready: true };
+}
+
+// DEFAULT_TENANTS is the tenant list served to the picker in the breakdown-focused
+// tests. "acme" is first so default-to-first (no ?tenant=) selects it.
+const DEFAULT_TENANTS: TenantSummary[] = [tenant("acme"), tenant("globex")];
 
 function summary(over: Partial<CostSummary> = {}): CostSummary {
   return {
@@ -45,8 +64,13 @@ function summary(over: Partial<CostSummary> = {}): CostSummary {
 // breakdown-focused tests route the forecast to a calm 501 (→ null → the forecast
 // card stays hidden) so they exercise only the breakdown table. The dedicated
 // forecast-card tests below use installMultiFetch instead.
+//
+// The picker's GET /api/tenants (m86) is served with `tenants` (default
+// DEFAULT_TENANTS) so the picker renders; pass [] to exercise the zero-tenant
+// calm state.
 function installFetch(
   handler: (qs: URLSearchParams) => { ok: boolean; status?: number; body?: unknown },
+  tenants: TenantSummary[] = DEFAULT_TENANTS,
 ) {
   const captured: string[] = [];
   vi.stubGlobal(
@@ -54,6 +78,15 @@ function installFetch(
     vi.fn((input: string | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       captured.push(url);
+      // The tenant list feeds the in-page picker (m86, ADR 0077).
+      if (url.includes("/api/tenants")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: tenants }),
+          text: async () => JSON.stringify({ items: tenants }),
+        } as Response);
+      }
       // The forecast endpoint is secondary here — degrade it to 501 (calm null) so
       // only the breakdown table is under test.
       if (url.includes("/api/cost/forecast")) {
@@ -440,17 +473,78 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     ).toBe(true);
   });
 
-  it("does NOT call the breakdown API when no tenant is selected (ADR 0077 gate)", async () => {
-    const captured = installFetch(() => ({
-      ok: true,
-      body: { agents: [], total: summary(), nextCursor: "" },
-    }));
+  it("does NOT call the breakdown API when there are zero tenants (ADR 0077 gate)", async () => {
+    // With genuinely NO tenants there is nothing to default to → the calm
+    // no-tenant state, and a tenant-less breakdown would be a guaranteed 400.
+    const captured = installFetch(
+      () => ({ ok: true, body: { agents: [], total: summary(), nextCursor: "" } }),
+      [], // zero tenants
+    );
 
     renderPage(""); // no ?tenant=
 
     await screen.findByTestId("cost-no-tenant");
-    // A tenant-less breakdown would be a guaranteed 400 — the page must not fire it.
     expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(false);
+  });
+});
+
+// ── Tenant picker (m86, ADR 0077) ─────────────────────────────────────────────
+
+describe("CostPage — tenant picker (m86, ADR 0077)", () => {
+  it("lists the tenants in the picker", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: { agents: [item()], total: summary(), nextCursor: "" },
+    }));
+
+    renderPage(""); // no ?tenant= → default-to-first
+
+    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
+    // Both tenants appear as options.
+    const optionValues = Array.from(picker.options).map((o) => o.value);
+    expect(optionValues).toEqual(["acme", "globex"]);
+  });
+
+  it("defaults to the FIRST tenant when ?tenant= is absent and tenants exist", async () => {
+    const captured = installFetch(() => ({
+      ok: true,
+      body: { agents: [item()], total: summary(), nextCursor: "" },
+    }));
+
+    renderPage(""); // no ?tenant=
+
+    // The page self-serves: it selects "acme" (first) and fetches its breakdown.
+    await waitFor(() =>
+      expect(
+        captured.some((u) => u.includes("/api/cost/breakdown") && u.includes("tenant=acme")),
+      ).toBe(true),
+    );
+    // The picker reflects the chosen tenant, not a dead-end empty state.
+    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
+    expect(picker.value).toBe("acme");
+    expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
+  });
+
+  it("selecting a tenant drives ?tenant= and re-fetches for that tenant", async () => {
+    const captured = installFetch(() => ({
+      ok: true,
+      body: { agents: [item()], total: summary(), nextCursor: "" },
+    }));
+
+    renderPage("acme"); // start on acme
+
+    const picker = (await screen.findByTestId("cost-tenant-picker")) as HTMLSelectElement;
+    await waitFor(() => expect(picker.value).toBe("acme"));
+
+    // Switch to globex → the breakdown re-fetches scoped to globex.
+    fireEvent.change(picker, { target: { value: "globex" } });
+
+    await waitFor(() =>
+      expect(
+        captured.some((u) => u.includes("/api/cost/breakdown") && u.includes("tenant=globex")),
+      ).toBe(true),
+    );
+    expect(picker.value).toBe("globex");
   });
 });
 
@@ -480,6 +574,15 @@ function installMultiFetch(opts: {
     "fetch",
     vi.fn((input: string | URL) => {
       const url = typeof input === "string" ? input : input.toString();
+      // The tenant list feeds the in-page picker (m86, ADR 0077).
+      if (url.includes("/api/tenants")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: DEFAULT_TENANTS }),
+          text: async () => JSON.stringify({ items: DEFAULT_TENANTS }),
+        } as Response);
+      }
       const isForecast = url.includes("/api/cost/forecast");
       const r: { ok: boolean; status?: number; body?: unknown } = isForecast
         ? (opts.forecast ?? { ok: true, body: forecastResponse() })
@@ -523,15 +626,15 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
     expect(card.textContent).toContain("Month forecast");
   });
 
-  it("does NOT render the forecast card when ?tenant= is absent (shows the no-tenant gate)", async () => {
-    installFetch(() => ({
-      ok: true,
-      body: { agents: [], total: summary(), nextCursor: "" },
-    }));
+  it("does NOT render the forecast card when there are zero tenants (the no-tenant gate)", async () => {
+    installFetch(
+      () => ({ ok: true, body: { agents: [], total: summary(), nextCursor: "" } }),
+      [], // zero tenants → nothing to default to
+    );
 
     renderPage(""); // no ?tenant=
 
-    // ADR 0077: no tenant ⇒ the calm "pick a tenant" gate, no breakdown, no forecast.
+    // ADR 0077: no tenant to scope to ⇒ the calm gate, no breakdown, no forecast.
     await screen.findByTestId("cost-no-tenant");
     expect(screen.queryByTestId("cost-forecast-card")).toBeNull();
     expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();

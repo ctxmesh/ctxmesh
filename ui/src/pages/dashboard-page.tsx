@@ -116,8 +116,8 @@ export function DashboardPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
           <p className="text-sm text-muted-foreground">
-            Cost, latency, and traced runs across your agents — live over the
-            BFF (creds server-side).
+            Live topology and traced runs across your agents — over the BFF
+            (creds server-side). Per-tenant cost lives on the Cost page.
           </p>
         </div>
         <Button
@@ -236,8 +236,8 @@ export function DashboardPage() {
           <CardContent>
             <div className="flex min-h-[14rem] flex-col items-center justify-center gap-3 rounded-md border p-4 text-center">
               <p className="text-sm text-muted-foreground">
-                Cost is tracked per tenant. Open the Cost page and pick a tenant
-                to see its spend, per-agent breakdown, and month forecast.
+                Cost is tracked per tenant. Open the Cost page to see spend,
+                per-agent breakdown, and month forecast — pick a tenant there.
               </p>
               <Link
                 to="/cost"
