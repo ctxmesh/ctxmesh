@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -290,7 +291,7 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "isoco"},
 		Spec: agentsv1alpha1.TenantSpec{
 			Namespaces:       []string{"tnt-iso-ns"},
-			NetworkIsolation: true,
+			NetworkIsolation: ptr.To(true),
 			Quota:            &agentsv1alpha1.TenantComputeQuota{Pods: 5},
 		},
 	}
@@ -339,7 +340,7 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 
 	// Toggle isolation off → the policy is pruned.
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "isoco"}, tenant))
-	tenant.Spec.NetworkIsolation = false
+	tenant.Spec.NetworkIsolation = ptr.To(false)
 	require.NoError(t, k8sClient.Update(testCtx, tenant))
 	reconcileTenant(t, "isoco")
 	err := k8sClient.Get(testCtx, types.NamespacedName{Namespace: "tnt-iso-ns", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{})

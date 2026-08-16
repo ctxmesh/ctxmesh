@@ -260,7 +260,10 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1a
 // sever /invoke (an m5.7-class landmine — proven live in m47.8, not envtest which has no CNI).
 func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1alpha1.Tenant, ns string) error {
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: tenantNetworkPolicyName, Namespace: ns}}
-	if !tenant.Spec.NetworkIsolation {
+	// ADR 0073 secure-default: networkIsolation is a *bool with +kubebuilder:default=true, so a
+	// field-absent (nil) tenant is served as TRUE (isolate). Only an EXPLICIT false — a deliberate,
+	// grandfathered opt-out — removes the policy. (A nil here is defensive; the API default fills it.)
+	if tenant.Spec.NetworkIsolation != nil && !*tenant.Spec.NetworkIsolation {
 		return client.IgnoreNotFound(r.Delete(ctx, np))
 	}
 	sameTenant := &metav1.LabelSelector{MatchLabels: map[string]string{tenantLabel: tenant.Name}}
