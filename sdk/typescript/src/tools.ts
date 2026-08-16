@@ -229,7 +229,17 @@ function buildHandoffTool(): Tool {
         type: "string",
         description:
           "An optional handoff note for the receiving agent (why you are transferring, " +
-          "what is needed next). The full conversation history transfers automatically.",
+          "what is needed next). By default the full conversation history transfers " +
+          "automatically; set include_history=false to hand off with THIS message as a " +
+          "SUMMARY instead (the receiving agent then starts from your summary rather than " +
+          "replaying the whole thread — use it for long conversations).",
+      },
+      include_history: {
+        type: "boolean",
+        description:
+          "Whether the receiving agent replays the full conversation history on the transfer " +
+          "turn (default true). Set false to hand off with `message` as a summary and skip the " +
+          "full-history replay — cheaper for a long conversation.",
       },
     },
     required: ["target_agent"],
@@ -564,9 +574,13 @@ export class ToolsClient {
   async handoff(
     targetAgent: string,
     message = "",
+    includeHistory = true,
   ): Promise<Record<string, unknown>> {
     const url = `${this.config.delegateBaseUrl}/handoff`;
-    const body = JSON.stringify({ targetAgent, message });
+    // include_history (m83.6) defaults true (the target replays the full conversation history on the
+    // transfer turn — today's behavior). false ⇒ hand off with `message` as a summary; the target
+    // skips the full-history replay on that first turn.
+    const body = JSON.stringify({ targetAgent, message, includeHistory });
     const headers = mcpHeaders(undefined);
     headers["Content-Type"] = "application/json";
 

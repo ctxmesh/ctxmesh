@@ -273,6 +273,36 @@ func TestInvokeAdapterAttachesRecordHeader(t *testing.T) {
 	assert.Empty(t, gotRecord, "no record id on the context ⇒ no header (non-recorded run)")
 }
 
+// TestInvokeAdapterAttachesIncludeHistoryHeader proves the adapter stamps the handoff INPUT FILTER
+// (m83.6) as X-Ctxmesh-Include-History: false ONLY on a handoff target's transfer turn (the context
+// carries skip=true), and attaches NO header otherwise (a normal run / a default handoff replays).
+func TestInvokeAdapterAttachesIncludeHistoryHeader(t *testing.T) {
+	var gotHdr string
+	var present bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHdr = r.Header.Get(hdrIncludeHistory)
+		_, present = r.Header[http.CanonicalHeaderKey(hdrIncludeHistory)]
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	adapter := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()})
+
+	_, _, err := adapter.Invoke(contextWithSkipHistoryReplay(context.Background(), true), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "false", gotHdr, "skip=true ⇒ the adapter stamps X-Ctxmesh-Include-History: false (B skips replay)")
+
+	gotHdr, present = "", true
+	_, _, err = adapter.Invoke(context.Background(), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.False(t, present, "no skip signal ⇒ no header (default handoff / normal run replays as today)")
+
+	// An explicit skip=false is also the default — no header (the run-worker only sets the ctx when true).
+	present = true
+	_, _, err = adapter.Invoke(contextWithSkipHistoryReplay(context.Background(), false), srv.URL, []byte(`{}`))
+	require.NoError(t, err)
+	assert.False(t, present, "skip=false ⇒ no header (replay as today)")
+}
+
 // TestInvokeAdapterAttachesSpawnHeaders proves the adapter forwards a run's spawn-tree position
 // (M64) as X-Ctxmesh-Spawn-Root/Depth when present, and attaches none for a plain (non-spawn) run.
 func TestInvokeAdapterAttachesSpawnHeaders(t *testing.T) {

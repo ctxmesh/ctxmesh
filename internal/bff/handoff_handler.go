@@ -61,6 +61,14 @@ type HandoffRunRequest struct {
 	// only the conversation history. The full prior conversation is threaded to B via the SAME
 	// conversationId (a memory-wired B replays the thread — ADR 0060 §5 "v1 passes B the full history").
 	Message string `json:"message,omitempty"`
+	// IncludeHistory (m83.6) is the handoff INPUT FILTER: true (or absent) ⇒ B replays the full
+	// conversation history on the transfer turn (the ADR 0060 §5 default, byte-for-byte unchanged);
+	// false ⇒ A handed off with Message as a SUMMARY, so B's FIRST invoke carries
+	// X-Ctxmesh-Include-History: false and B skips the full-history replay on that transfer turn only
+	// (B stays memory-wired on the SAME conversation — the active-agent pointer + next-turn routing are
+	// unchanged; only this turn's read-side replay is skipped). A pointer so an absent field (an old
+	// launcher/SDK) defaults to true — the transfer is unchanged unless the author explicitly opts out.
+	IncludeHistory *bool `json:"includeHistory,omitempty"`
 }
 
 // HandoffRunResponse returns the (possibly pre-existing) transferred run id for B + its status, and the
@@ -170,6 +178,12 @@ func (s *Server) handleHandoffRun(w http.ResponseWriter, r *http.Request) {
 	b.Boundary = parent.Boundary             // the SAME trust boundary (no escalation; B mints against B)
 	b.TraceID = parent.TraceID               // one trace across the transfer so the console links A→B
 	b.HandoffSourceRunID = parent.ID         // the A→B backlink (B has no ParentRunID by design)
+	// Handoff input filter (m83.6): an EXPLICIT include_history=false records the one-turn skip on B, so
+	// the run-worker stamps X-Ctxmesh-Include-History: false on B's first /invoke and B starts from A's
+	// SUMMARY (the Message) instead of replaying the full thread. Absent/true ⇒ false here (replay as
+	// today, byte-for-byte unchanged). Idempotent-safe: a retried create resolves to the same B id, and
+	// this flag is deterministic from the request.
+	b.HandoffSkipHistoryReplay = req.IncludeHistory != nil && !*req.IncludeHistory
 	// NOTE: NO ParentRunID, NO RootRunID, NO SpawnDepth — B is a fresh ROOT run, not a child of A.
 	if err := s.runStore.Create(b); err != nil {
 		// A concurrent identical handoff (or a retry) won the race. Still idempotent — provided B

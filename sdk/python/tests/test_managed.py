@@ -494,6 +494,73 @@ def test_managed_loop_bounds_replayed_history_window(gateway_stub):
         ]
 
 
+def test_managed_loop_handoff_include_history_false_skips_replay(gateway_stub):
+    """Handoff input filter (m83.6): on a transfer turn with X-Ctxmesh-Include-History: false, B
+    does NOT replay the prior conversation history — it starts from A's handoff message (the
+    summary). B stays memory-wired: the turn is STILL persisted, so a later turn replays it."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        # Seed a prior thread (A's raw conversation with the user).
+        mem.store["chat-x"] = [
+            {"role": "user", "content": "hello, I have a billing problem"},
+            {"role": "assistant", "content": "let me get a specialist"},
+        ]
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+
+        # B's TRANSFER TURN: the handoff message is a SUMMARY, and X-Ctxmesh-Include-History: false
+        # tells B to skip replaying the prior raw thread.
+        headers = {"X-Conversation-Id": "chat-x", "X-Ctxmesh-Include-History": "false"}
+        run_managed_loop(client, config, "SUMMARY: user wants a refund", headers=headers)
+
+        msgs = json.loads(gateway_stub.requests[-1].body)["messages"]
+        # Only [system, user(=summary)] — the prior thread is NOT replayed on the transfer turn.
+        assert [m["role"] for m in msgs] == ["system", "user"]
+        assert msgs[-1]["content"] == "SUMMARY: user wants a refund"
+        # B is still memory-wired: the transfer turn WAS persisted onto the shared conversation.
+        assert mem.store["chat-x"][-2:] == [
+            {"role": "user", "content": "SUMMARY: user wants a refund"},
+            {"role": "assistant", "content": "the answer is 42"},
+        ]
+
+        # A SUBSEQUENT user turn to B (no header) replays normally now.
+        run_managed_loop(client, config, "any update?", headers={"X-Conversation-Id": "chat-x"})
+        followup = json.loads(gateway_stub.requests[-1].body)["messages"]
+        roles = [m["role"] for m in followup[1:]]
+        # The next turn replays the full thread (incl. the persisted transfer turn) — one-turn skip.
+        assert roles == ["user", "assistant", "user", "assistant", "user"]
+
+
+def test_managed_loop_handoff_include_history_true_replays(gateway_stub):
+    """A default handoff (include_history absent, or "true") replays the full history exactly as
+    before — the m83.6 default-unchanged guarantee at the loop layer."""
+    with MemoryStub() as mem, _EmptyDiscovery() as disc:
+        mem.store["chat-y"] = [
+            {"role": "user", "content": "prior question"},
+            {"role": "assistant", "content": "prior answer"},
+        ]
+        plane = PlaneConfig.for_test(
+            memory_base_url=mem.base_url,
+            discovery_base_url=disc.base_url,
+            model_gateway_url=gateway_stub.base_url,
+        )
+        client = agent.from_config(plane)
+        config = ManagedConfig(system_prompt="sys", model_route="m")
+
+        # No X-Ctxmesh-Include-History header (a default handoff / a normal turn) → replay as today.
+        run_managed_loop(client, config, "new turn", headers={"X-Conversation-Id": "chat-y"})
+        msgs = json.loads(gateway_stub.requests[-1].body)["messages"]
+        assert msgs[1:] == [
+            {"role": "user", "content": "prior question"},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "new turn"},
+        ], "absent header ⇒ full-history replay, byte-for-byte unchanged"
+
+
 # ── _tool_schema: discovered inputSchema verbatim, else permissive fallback ─────
 
 # A schema requiring a real parameter — the whole point of m14.6b: the model must
@@ -993,8 +1060,10 @@ class _HandoffTools:
         self._result = result
         self.calls = []
 
-    def handoff(self, target_agent, message=""):
-        self.calls.append({"target_agent": target_agent, "message": message})
+    def handoff(self, target_agent, message="", include_history=True):
+        self.calls.append(
+            {"target_agent": target_agent, "message": message, "include_history": include_history}
+        )
         return self._result
 
 
@@ -1004,14 +1073,18 @@ class _HandoffClient:
         self.tools = _HandoffTools(result)
 
 
-def _handoff_call(target_agent="billing", message="please take over"):
-    """An OpenAI handoff_to tool-call object (the shape the model emits)."""
+def _handoff_call(target_agent="billing", message="please take over", include_history=None):
+    """An OpenAI handoff_to tool-call object (the shape the model emits). include_history is only
+    included in the arguments when explicitly passed (mirrors the model omitting an optional)."""
+    args = {"target_agent": target_agent, "message": message}
+    if include_history is not None:
+        args["include_history"] = include_history
     return {
         "id": "call-h1",
         "type": "function",
         "function": {
             "name": "handoff_to",
-            "arguments": json.dumps({"target_agent": target_agent, "message": message}),
+            "arguments": json.dumps(args),
         },
     }
 
@@ -1026,7 +1099,35 @@ def test_dispatch_handoff_records_the_transfer():
     )
     out = _dispatch_handoff(client, _handoff_call("billing", "refund"))
     assert out == {"ok": "true", "targetAgent": "billing", "runId": "hand-1", "sourceRun": "A-1"}
-    assert client.tools.calls == [{"target_agent": "billing", "message": "refund"}]
+    # include_history defaults True (replay B's full history — today's behavior, unchanged).
+    assert client.tools.calls == [
+        {"target_agent": "billing", "message": "refund", "include_history": True}
+    ]
+
+
+def test_dispatch_handoff_relays_include_history_false():
+    """include_history=false (m83.6): the dispatch relays it to the launcher so B skips the
+    transfer-turn history replay and starts from the handoff message as a SUMMARY."""
+    from ctxmesh.managed import _dispatch_handoff
+
+    client = _HandoffClient({"ok": True, "runId": "hand-2"})
+    out = _dispatch_handoff(
+        client, _handoff_call("billing", "here is a summary…", include_history=False)
+    )
+    assert out["ok"] == "true"
+    assert client.tools.calls == [
+        {"target_agent": "billing", "message": "here is a summary…", "include_history": False}
+    ]
+
+
+def test_dispatch_handoff_include_history_defaults_true_when_absent():
+    """A model that omits include_history keeps the default (replay B's full history) — the
+    default-unchanged guarantee at the dispatch layer."""
+    from ctxmesh.managed import _dispatch_handoff
+
+    client = _HandoffClient({"ok": True, "runId": "hand-3"})
+    _dispatch_handoff(client, _handoff_call("billing", "note"))  # no include_history in args
+    assert client.tools.calls[0]["include_history"] is True
 
 
 def test_dispatch_handoff_refusal_is_recorded():

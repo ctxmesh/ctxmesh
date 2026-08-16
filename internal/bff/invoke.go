@@ -153,6 +153,36 @@ func recordRunIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// hdrIncludeHistory is the HANDOFF INPUT FILTER (m83.6). The BFF stamps it — with the literal value
+// "false" — ONLY on the TRANSFER TURN /invoke of a handoff target B created by a `handoff_to
+// include_history=false` (run.HandoffSkipHistoryReplay). The launcher forwards it verbatim to the
+// user container (its /invoke reverse-proxy passes inbound headers through); the SDK managed loop
+// reads it and, on this one turn, SKIPS replaying the prior conversation history — B starts from A's
+// handoff SUMMARY (the Message) instead of the full raw thread. It is a ONE-TURN signal: only B's
+// first invoke carries it; every subsequent user turn replays normally. Absent ⇒ replay as today
+// (the default include_history=true — byte-for-byte unchanged).
+const hdrIncludeHistory = "X-Ctxmesh-Include-History"
+
+// skipHistoryCtxKey carries the handoff "skip the transfer-turn history replay" signal from the
+// run-worker to the adapter (like the record id + conversation id), so the pure-HTTP adapter stamps
+// X-Ctxmesh-Include-History: false without the worker reaching into the request. False ⇒ no header
+// (the default — B replays the full history).
+type skipHistoryCtxKey struct{}
+
+// contextWithSkipHistoryReplay returns ctx carrying the handoff one-turn "skip history replay" signal
+// for the adapter to stamp as X-Ctxmesh-Include-History: false on the outbound /invoke. Pass false for
+// an ordinary run / a default handoff (no header — replay as today).
+func contextWithSkipHistoryReplay(ctx context.Context, skip bool) context.Context {
+	return context.WithValue(ctx, skipHistoryCtxKey{}, skip)
+}
+
+// skipHistoryReplayFromContext reports whether this run's /invoke should carry
+// X-Ctxmesh-Include-History: false (a handoff target's transfer turn). False ⇒ replay as today.
+func skipHistoryReplayFromContext(ctx context.Context) bool {
+	skip, _ := ctx.Value(skipHistoryCtxKey{}).(bool)
+	return skip
+}
+
 // Spawn-context headers (M64, ADR 0057): the run-worker stamps a run's spawn-tree position onto its
 // /invoke so a SUPERVISOR's launcher can bound its delegations — the tree ROOT (the shared spawn-counter
 // key) and this run's DEPTH (the child's depth = this+1 vs maxSpawnDepth). The launcher reads them in the
@@ -279,6 +309,12 @@ func (a *httpInvokeAdapter) Invoke(ctx context.Context, endpoint string, body []
 	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
 		req.Header.Set(hdrRecord, recRunID)
 	}
+	// Handoff input filter (m83.6): stamp X-Ctxmesh-Include-History: false ONLY on a handoff target's
+	// TRANSFER TURN (run.HandoffSkipHistoryReplay), so the SDK skips replaying the prior thread and B
+	// starts from A's summary. Only when present; an ordinary run / a default handoff carries nothing.
+	if skipHistoryReplayFromContext(ctx) {
+		req.Header.Set(hdrIncludeHistory, "false")
+	}
 	// Approval voucher (ADR 0074 §3, m82.4): stamp it when a resumed run had a require-approval tool
 	// GRANTED. The SDK relays it on that tool's egress retry; the sidecar verifies+forwards. Only when
 	// present (a resumed, human-approved run); a normal run carries nothing.
@@ -360,6 +396,12 @@ func (a *httpInvokeAdapter) InvokeStream(
 	// launcher gateway captures the model I/O (incl. SSE bytes verbatim) into the run's fixture.
 	if recRunID := recordRunIDFromContext(ctx); recRunID != "" {
 		req.Header.Set(hdrRecord, recRunID)
+	}
+	// Handoff input filter (m83.6): same as the non-streaming Invoke path — stamp
+	// X-Ctxmesh-Include-History: false only on a handoff target's transfer turn so the SDK skips the
+	// full-history replay and B starts from A's summary. Absent on an ordinary run / default handoff.
+	if skipHistoryReplayFromContext(ctx) {
+		req.Header.Set(hdrIncludeHistory, "false")
 	}
 	// Approval voucher (ADR 0074 §3, m82.4): same as the non-streaming Invoke path — stamp it when a
 	// resumed run had a require-approval tool granted, so the SDK can relay it on the tool retry.
