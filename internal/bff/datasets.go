@@ -119,9 +119,11 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 		agentNs = ns
 	}
 
-	// Build the agent's Langfuse identity tag ("<ns>/<name>" — the RunFilter.Agent value; the adapter turns it
-	// into tags=agent:<ns>/<name>). This is the SAME grammar the /api/runs?agent= filter uses.
-	agentTag := agentNs + "/" + strings.TrimSpace(req.AgentName)
+	// Build the agent's Langfuse identity filter ("<ns>/<name>" — the RunFilter.Agent value; buildRunsQuery turns
+	// it into tags=agent:<ns>/<name>). Via the SHARED agentFilterValue so the export and the /api/runs?agent=
+	// browser use ONE grammar and select the SAME traces for an agent (m52.N8 — never hand-concatenate this join,
+	// which can drift from buildRunsQuery's split).
+	agentTag := agentFilterValue(agentNs, req.AgentName)
 
 	// Pin the export spec (the snapshot the off-request executor drives).
 	spec := ExportSpec{
