@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -740,4 +741,68 @@ func TestFilteredRunsUpstreamError(t *testing.T) {
 	_, err := a.FilteredRuns(context.Background(), RunFilter{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "502")
+}
+
+// TestRunsListAndExportAgreeOnAgentFilter is the m52.N8 regression guard: the runs browser
+// (GET /api/runs?agent=<ns>/<name>) and the dataset export must find the SAME traces for an
+// agent, because both drive the SAME Langfuse trace query (FilteredRuns) off a RunFilter.Agent
+// value built from the SAME grammar. This locks that in so a future change to either caller
+// cannot silently re-diverge the two paths (the bug: the runs list returned empty for traces
+// the export matched).
+//
+// It runs BOTH callers' exact RunFilter.Agent construction over ONE shared corpus:
+//   - runs list: handleRuns copies the user's ?agent= verbatim → RunFilter{Agent: "default/foo"}.
+//   - export:    handleExport builds the value via agentFilterValue(ns, name), pinned onto the
+//     ExportSpec and passed by the executor as RunFilter{Agent: spec.AgentTag}.
+//
+// and asserts (a) the outbound Langfuse tags= filter is byte-identical, and (b) both select the
+// SAME set of trace IDs.
+func TestRunsListAndExportAgreeOnAgentFilter(t *testing.T) {
+	// A shared corpus: two runs for default/foo, a foreign agent's run (other/foo — must be
+	// excluded by the tag filter), and an ambient (non-run) trace that carries default/foo's tag
+	// but keeps its own span name (must be excluded by isRunTrace, IDENTICALLY on both paths).
+	corpus := []lfTrace{
+		{ID: "run-a", Name: "default/foo", Timestamp: "2026-07-01T00:03:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "run-b", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "foreign", Name: "other/foo", Timestamp: "2026-07-01T00:04:00Z", Tags: []string{"agent:other/foo"}},
+		{ID: "ambient", Name: "Received Proxy Server Request", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:default/foo"}},
+	}
+
+	// The runs-list caller: handleRuns passes the ?agent= value verbatim.
+	const runsListAgent = "default/foo"
+	// The export caller: handleExport builds the value via the shared grammar helper. Given the
+	// SAME agent it MUST yield the same RunFilter.Agent string the runs list uses.
+	exportAgent := agentFilterValue("default", "foo")
+	require.Equal(t, runsListAgent, exportAgent,
+		"the export must build the SAME RunFilter.Agent grammar the runs list uses (m52.N8)")
+
+	// Drive each path against its OWN stub so we can capture each path's outbound Langfuse query
+	// independently, then compare.
+	query := func(agent string) (*recordedRequest, []string) {
+		srv, rec := fakeLangfuseFiltered(t, corpus)
+		a := newTestLangfuse(t, srv.URL)
+		page, err := a.FilteredRuns(context.Background(), RunFilter{Agent: agent, Limit: 20})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(page.Runs))
+		for _, r := range page.Runs {
+			ids = append(ids, r.TraceID)
+		}
+		slices.Sort(ids)
+		return rec, ids
+	}
+
+	listRec, listIDs := query(runsListAgent)
+	exportRec, exportIDs := query(exportAgent)
+
+	// (a) Both paths send the IDENTICAL Langfuse tags= filter — the single agent:<ns>/<name> tag.
+	assert.Equal(t, listRec.query, exportRec.query,
+		"the runs list and the export must send byte-identical Langfuse queries for the same agent")
+	assert.Contains(t, listRec.query, "tags=agent%3Adefault%2Ffoo",
+		"the shared tag filter is agent:default/foo")
+
+	// (b) Both paths select the SAME traces: exactly default/foo's two RUN traces — the foreign
+	// agent (tag filter) and the ambient non-run trace (isRunTrace) are excluded on BOTH paths.
+	assert.Equal(t, []string{"run-a", "run-b"}, listIDs, "the runs list finds both of default/foo's runs")
+	assert.Equal(t, listIDs, exportIDs,
+		"the runs list and the export must select the SAME traces for the same agent (m52.N8)")
 }

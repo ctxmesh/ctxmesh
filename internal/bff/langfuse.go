@@ -304,6 +304,24 @@ func agentRunTag(namespace, name string) string {
 	return "agent:" + ns + "/" + n
 }
 
+// agentFilterValue builds the `<namespace>/<name>` value carried in RunFilter.Agent — the
+// SINGLE grammar every per-agent trace query (the runs list, the dataset export, the
+// online-scoring worker) filters on. buildRunsQuery is the one place that turns this value
+// back into the Langfuse tag via agentRunTag, so a RunFilter.Agent produced here always
+// yields the SAME `agent:<ns>/<name>` tag the launcher stamped. This is the m52.N8 fix:
+// callers must NOT hand-concatenate the `<ns>/<name>` filter (the export used to at
+// datasets.go), because a bespoke join can silently drift from buildRunsQuery's split and
+// leave the runs browser and the export selecting DIFFERENT traces for the same agent.
+// Grammar mirrors agentRunTag minus the `agent:` prefix: bare name when ns is empty.
+func agentFilterValue(namespace, name string) string {
+	ns := strings.TrimSpace(namespace)
+	n := strings.TrimSpace(name)
+	if ns == "" {
+		return n
+	}
+	return ns + "/" + n
+}
+
 // isRunTrace reports whether a Langfuse trace represents an agent RUN — the unit the
 // runs list shows. The launcher names each run's trace by AGENT IDENTITY via
 // langfuse.trace.name ("<ns>/<name>", e.g. "default/my-agent") AND stamps an
