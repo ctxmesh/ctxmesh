@@ -73,6 +73,38 @@ func TestHandoff_HappyPath(t *testing.T) {
 	assert.Equal(t, "http://billing.team-ns.svc.cluster.local", fc.gotHandoffBody.TargetEndpoint,
 		"roster ksvc URL resolved")
 	assert.Equal(t, "refund needed", fc.gotHandoffBody.Message)
+	assert.Nil(t, fc.gotHandoffBody.IncludeHistory,
+		"a handoff with no include_history relays nil ⇒ the BFF defaults to replay (unchanged)")
+}
+
+// TestHandoff_RelaysIncludeHistory — the m83.6 input filter: the SDK's include_history rides verbatim
+// through the launcher into the BFF handoff body (a *bool: nil when absent, an explicit false when the
+// author opted to hand off with a summary). The launcher does not interpret it — it just relays.
+func TestHandoff_RelaysIncludeHistory(t *testing.T) {
+	falseVal := false
+	trueVal := true
+	for _, tc := range []struct {
+		name string
+		in   *bool
+	}{
+		{"explicit-false-skips-replay", &falseVal},
+		{"explicit-true-replays", &trueVal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeSpawnClient{handoffRes: handoffResult{RunID: "hand-1"}}
+			ds := newHandoffDelegate(t, fc, []string{"billing"})
+
+			resp := callHandoff(t, ds, "cap", handoffRequest{
+				TargetAgent:    "billing",
+				Message:        "summary of the thread so far",
+				IncludeHistory: tc.in,
+			})
+
+			assert.True(t, resp.OK)
+			require.NotNil(t, fc.gotHandoffBody.IncludeHistory, "include_history relayed to the BFF")
+			assert.Equal(t, *tc.in, *fc.gotHandoffBody.IncludeHistory, "relayed verbatim")
+		})
+	}
 }
 
 // TestHandoff_NonMemberTargetRefused — a target NOT in the roster is refused fail-fast at the launcher,

@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "JSON-Schema for a ctxmesh WorkflowSpec (ADR 0060), derived from the generated Workflow CRD with Kubernetes structural extensions stripped. A planner agent sets this verbatim as its spec.runtime.outputSchema so the model emits a WorkflowSpec that POST /api/workflows/runs accepts.",
+  "properties": {
+    "budget": {
+      "description": "budget bounds the workflow's total node launches (reuses the AgentTeam SpawnBudget shape). A nil\nblock resolves to all defaults in the controller / registry.",
+      "properties": {
+        "maxFanOut": {
+          "default": 4,
+          "description": "maxFanOut is the maximum number of sub-runs a single supervisor step may start. Defaults to 4.",
+          "format": "int32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxSpawnDepth": {
+          "default": 3,
+          "description": "maxSpawnDepth is the maximum depth of the spawn tree (supervisor -> sub-agent -> ...), distinct\nfrom A2A hop depth. Defaults to 3.",
+          "format": "int32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxTotalSpawns": {
+          "default": 20,
+          "description": "maxTotalSpawns is the maximum number of sub-runs across the whole spawn tree of one root run.\nDefaults to 20.",
+          "format": "int32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "inputSchema": {
+      "description": "inputSchema is the workflow's typed input as a JSON Schema (stored verbatim, preserve-unknown; the\nM65 pattern). It types the `input` CEL variable. Optional (an untyped workflow input is a dynamic\nmap).",
+      "type": "object"
+    },
+    "registryRef": {
+      "description": "registryRef is the name of the AgentRegistry (same namespace) that is this workflow's trust boundary\n(like AgentTeam): every step's agentRef MUST be a member of it. Sub-runs inherit it as their\nBoundary. The registry is REFERENCED, never generated.",
+      "maxLength": 63,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+      "type": "string"
+    },
+    "steps": {
+      "description": "steps are the graph nodes. At least one; names are unique (listMapKey). The first step is the\ndefault start (a determinable start is a validation rule).",
+      "items": {
+        "description": "WorkflowStep is one node of the graph: an invocation of a standing AgentDeployment (agentRef) with CEL\ninput bindings, a typed output contract, and exactly one control-flow construct (next | branches | map |\nloop). A node = a real agent sub-run at execution time (ADR 0060), so M65 structured outputs + M66\nguardrails apply per-node with no new code.",
+        "properties": {
+          "agentRef": {
+            "description": "agentRef is the name of a standing AgentDeployment (same namespace) this node invokes as a sub-run.\nIt MUST be a member of the workflow's registryRef (the trust boundary, like AgentTeam).",
+            "maxLength": 63,
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+            "type": "string"
+          },
+          "branches": {
+            "description": "branches are ordered conditional edges (the first matching `when` wins); `default` is the\nfallthrough. Set instead of `next` for a conditional node.",
+            "items": {
+              "description": "WorkflowBranch is one ordered conditional edge of a step: when the CEL predicate `when` evaluates true\n(over `input` + prior steps' outputs), control transfers to step `to`. Branches are evaluated in order;\nthe step's `default` is the fallthrough when none match.",
+              "properties": {
+                "to": {
+                  "description": "to is the name of the step to run when `when` is true. It MUST reference an existing step.",
+                  "maxLength": 63,
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+                  "type": "string"
+                },
+                "when": {
+                  "description": "when is a CEL boolean predicate over `input` (the workflow input) and `steps.<name>.output` for\nprior steps. It is compiled + type-checked by the controller (ADR 0060). A step whose output is\nreferenced here MUST pin an outputSchema (the load-bearing rule).",
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "to",
+                "when"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "default": {
+            "description": "default is the fallthrough step when no branch's `when` matches. Only meaningful with `branches`;\n\"\" = terminal on fallthrough. It MUST reference an existing step when set.",
+            "maxLength": 63,
+            "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
+            "type": "string"
+          },
+          "input": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "input maps each node-input key to a CEL expression over `input` (the workflow input) + prior steps'\noutputs (e.g. \"steps.classify.output.topic\"). Explicit data flow — there is no implicit\nprevious-feeds-next. Each value is compiled by the controller; a referenced step must pin an\noutputSchema.",
+            "type": "object"
+          },
+          "loop": {
+            "description": "loop makes this a loop node (defined here; executed v1b). Set instead of next/branches.",
+            "properties": {
+              "do": {
+                "description": "do is the step run each iteration. It MUST reference an existing step.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+                "type": "string"
+              },
+              "maxIterations": {
+                "description": "maxIterations caps the loop (required, > 0) so the workflow cannot loop forever. The spawn budget\nbackstops the total.",
+                "format": "int32",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "until": {
+                "description": "until is a CEL boolean predicate over `input` + prior/iteration outputs. When true the loop exits.",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "do",
+              "maxIterations",
+              "until"
+            ],
+            "type": "object"
+          },
+          "map": {
+            "description": "mapNode makes this a map/fan-out node (defined here; executed v1b). Set instead of next/branches.",
+            "properties": {
+              "as": {
+                "description": "as is the loop-variable name each list element is bound to for the `do` step's input bindings.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+                "type": "string"
+              },
+              "completion": {
+                "default": "all",
+                "description": "completion is the outcome-aware wake mode for the fan-out (ADR 0075 §1). `all` (the default) is a\nfail-fast join: it collects EVERY item's output on full success but cancels the surviving siblings\nand fails the map the moment the FIRST item fails/cancels (same OUTCOME as before — fail on any\nfailure, collect all on success — only earlier + with sibling-cancel). `any` returns the FIRST\nSUCCESSFUL item's output as the map's output (cancelling the still-running siblings), and fails the\nmap only if EVERY item fails/cancels (exhaustion).",
+                "enum": [
+                  "all",
+                  "any"
+                ],
+                "type": "string"
+              },
+              "do": {
+                "description": "do is the step run per list element. It MUST reference an existing step.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+                "type": "string"
+              },
+              "join": {
+                "description": "join is an optional reduction step that consumes the collected `do` outputs. When set it MUST\nreference an existing step.",
+                "maxLength": 63,
+                "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
+                "type": "string"
+              },
+              "over": {
+                "description": "over is a CEL expression yielding the list to fan out over (typically `steps.<name>.output.items`).",
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "parallelism": {
+                "default": 1,
+                "description": "parallelism bounds how many `do` invocations run concurrently. Minimum 1 (bounded fan-out; the\nspawn budget backstops the total). Defaults to 1.",
+                "format": "int32",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "as",
+              "do",
+              "over"
+            ],
+            "type": "object"
+          },
+          "name": {
+            "description": "name is the step's identifier, unique within the workflow (listMapKey). CEL references it as\n`steps.<name>.output`.",
+            "maxLength": 63,
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([a-z0-9\\-]*[a-z0-9])?$",
+            "type": "string"
+          },
+          "next": {
+            "description": "next is the unconditional next step (\"\" = terminal). Exactly one of next / branches / map / loop is\nset on a step (validated by the controller, not by admission).",
+            "maxLength": 63,
+            "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
+            "type": "string"
+          },
+          "onError": {
+            "description": "onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry\nbudget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /\nTemporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any\nnode. Not supported on map/loop nodes.",
+            "maxLength": 63,
+            "pattern": "^([a-z0-9]([a-z0-9\\-]*[a-z0-9])?)?$",
+            "type": "string"
+          },
+          "outputSchema": {
+            "description": "outputSchema is the node's expected typed output as a JSON Schema (stored verbatim, preserve-unknown;\nthe M65 pattern). It is REQUIRED whenever this node's output is referenced by another step's\n`when` / `input` / `map.over` — CEL over a typed object, not free text (the ADR 0060 load-bearing\nrule). Optional for a terminal/unreferenced node.",
+            "type": "object"
+          },
+          "retries": {
+            "default": 0,
+            "description": "retries is the per-node retry count (a retry = a new iteration index at execution time; executed in\nv1b). Defaults to 0.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agentRef",
+          "name"
+        ],
+        "type": "object"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "registryRef",
+    "steps"
+  ],
+  "title": "WorkflowSpec",
+  "type": "object"
+}

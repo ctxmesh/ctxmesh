@@ -579,6 +579,230 @@ func TestPostgresStore_ConcurrentWake(t *testing.T) {
 	}
 }
 
+// countTerminalStateEvents returns how many `state` events on the run carry a TERMINAL status in data.
+func countTerminalStateEvents(t *testing.T, s *pgStore, runID string) int {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT data FROM run_events WHERE run_id=$1 AND kind=$2`, runID, string(EventState))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var data string
+		require.NoError(t, rows.Scan(&data))
+		if Status(data).IsTerminal() {
+			n++
+		}
+	}
+	require.NoError(t, rows.Err())
+	return n
+}
+
+// TestPostgresStore_FailFast_RacingDoubleFailure is ADR 0075 §Top-failure-mode #1: two children of a
+// waiting all-fail-fast parent BOTH complete as FAILED concurrently. Exactly ONE flips the parent
+// waiting→queued (the early fail-fast wake); the second failure lands terminal-write-only (no double-wake).
+// The parent's wait record is clean and each child ends with exactly one terminal state-event. This covers
+// both interleavings — the second commit may find the parent still `waiting` (its own satisfyChild is a
+// no-op because the first already drained... no: fail-fast removes only itself) OR already `queued`/`running`.
+func TestPostgresStore_FailFast_RacingDoubleFailure(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAllFailFast)
+
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		wakes int
+	)
+	wg.Add(2)
+	for _, cid := range []string{"c1", "c2"} {
+		go func() {
+			defer wg.Done()
+			_, woke, err := s.CompleteAndWake(cid, failChild)
+			assert.NoError(t, err)
+			if woke != nil {
+				mu.Lock()
+				wakes++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, 1, wakes, "fail-fast: the parent is woken EXACTLY once across the two racing failures")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "parent early-woke to queued on the first failure")
+	assert.Empty(t, p.WaitOn, "wait record cleared on resume — no stale child ids")
+	for _, cid := range []string{"c1", "c2"} {
+		c, _ := s.Get(cid)
+		assert.Equal(t, StatusFailed, c.Status, "both children landed terminal")
+		assert.Equal(t, 1, countTerminalStateEvents(t, s, cid), "each child has exactly one terminal state-event")
+	}
+	// The parent has exactly one terminal-region wake: running→waiting→queued gives one `queued` state event.
+	var queuedEvents int
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT count(*) FROM run_events WHERE run_id='p' AND kind=$1 AND data=$2`, string(EventState), string(StatusQueued))
+	require.NoError(t, err)
+	require.True(t, rows.Next())
+	require.NoError(t, rows.Scan(&queuedEvents))
+	_ = rows.Close()
+	assert.Equal(t, 1, queuedEvents, "parent re-queued exactly once (no double-wake event)")
+}
+
+// TestPostgresStore_FailFast_SecondFailAfterParentRunning is the interleaving where the parent is ALREADY
+// running (re-claimed after the first fail-fast wake) when the SECOND child's failure commits. The second
+// completion must be a terminal-write-only no-op: it neither re-queues nor corrupts the running parent.
+func TestPostgresStore_FailFast_SecondFailAfterParentRunning(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAllFailFast)
+
+	// c1 fails → parent early-wakes to queued.
+	_, woke, err := s.CompleteAndWake("c1", failChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "first failure wakes the fail-fast parent")
+
+	// The pool re-claims the parent → running.
+	claimed, err := s.ClaimQueued("w", time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, "p", claimed.ID)
+	require.Equal(t, StatusRunning, claimed.Status)
+
+	// c2 fails while the parent is RUNNING: a legal terminal write on the child, no wake of the parent.
+	child, woke, err := s.CompleteAndWake("c2", failChild)
+	require.NoError(t, err)
+	assert.Equal(t, StatusFailed, child.Status, "the second child still lands terminal")
+	assert.Nil(t, woke, "no re-wake of the already-running parent")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusRunning, p.Status, "the running parent is untouched by the second failure")
+}
+
+// TestPostgresStore_CancelVsSuccess_BothOrders is ADR 0075 §Top-failure-mode #2: a sibling SUCCEEDS
+// concurrently with a CANCEL of the same child. The child must end with exactly ONE terminal state + one
+// terminal state-event (no double-count); the loser is a no-op on the already-terminal child (the
+// cancel-cascade / user-cancel path). Both orders are exercised by running the race many times.
+func TestPostgresStore_CancelVsSuccess_BothOrders(t *testing.T) {
+	s := openPGStore(t)
+	const iters = 30
+	for i := range iters {
+		require.NoError(t, s.Create(New("c", "ns", "worker", nil, "", t0)))
+		_, err := s.Update("c", func(r *Run) error { return r.Transition(StatusRunning, t0) })
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// One goroutine completes it succeeded (via CompleteAndWake — the normal completion path); the other
+		// cancels it via a plain Update (the cancel-cascade path). Exactly one wins the terminal transition.
+		go func() {
+			defer wg.Done()
+			_, _, _ = s.CompleteAndWake("c", completeChild)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = s.Update("c", func(r *Run) error {
+				if r.Status.IsTerminal() {
+					return nil // raced to terminal — the cancel-cascade no-ops on an already-terminal child.
+				}
+				return r.Transition(StatusCancelled, t0.Add(time.Minute))
+			})
+		}()
+		wg.Wait()
+
+		c, _ := s.Get("c")
+		require.True(t, c.Status.IsTerminal(), "child ended terminal")
+		require.Contains(t, []Status{StatusSucceeded, StatusCancelled}, c.Status)
+		assert.Equal(t, 1, countTerminalStateEvents(t, s, "c"), "iter %d: exactly one terminal state-event (no double-count)", i)
+
+		// clean up for the next iteration.
+		_, err = s.db.ExecContext(context.Background(), `DELETE FROM run_events WHERE run_id='c'`)
+		require.NoError(t, err)
+		_, err = s.db.ExecContext(context.Background(), `DELETE FROM runs WHERE id='c'`)
+		require.NoError(t, err)
+	}
+}
+
+// TestPostgresStore_AnySuccess_FirstSuccessWakes is ADR 0075 §Top-failure-mode #4 (first success): the FIRST
+// child to SUCCEED wakes an any-success parent immediately, even with siblings still running.
+func TestPostgresStore_AnySuccess_FirstSuccessWakes(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2", "c3"}, WaitAnySuccess)
+
+	_, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "any-success: the first succeeding child wakes the parent")
+	assert.Equal(t, StatusQueued, woke.Status)
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status)
+	assert.Empty(t, p.WaitOn, "wait record cleared on the first-success wake")
+	// The siblings are still running (the store does not cancel them — the executor's cancelCascade does).
+	for _, cid := range []string{"c2", "c3"} {
+		c, _ := s.Get(cid)
+		assert.Equal(t, StatusRunning, c.Status)
+	}
+}
+
+// TestPostgresStore_AnySuccess_FailedChildDoesNotWakeEarly proves an any-success parent does NOT wake on a
+// FAILED child while others are still running — a failure only advances toward exhaustion.
+func TestPostgresStore_AnySuccess_FailedChildDoesNotWakeEarly(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAnySuccess)
+
+	_, woke, err := s.CompleteAndWake("c1", failChild)
+	require.NoError(t, err)
+	assert.Nil(t, woke, "any-success: a failed child (with a sibling still running) does NOT wake")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusWaiting, p.Status, "parent stays waiting until a success or full exhaustion")
+	assert.Equal(t, []string{"c2"}, p.WaitOn, "the failed child was removed from the wait set")
+}
+
+// TestPostgresStore_AnySuccess_AllFailViaSweep is ADR 0075 §Top-failure-mode #3: the LAST child of an
+// any-success parent is terminated via a plain Update (a cancel-cascade / crash window — NO CompleteAndWake
+// event), so the exhaustion wake never fires on the event path. SweepWaiting MUST re-queue the parent on
+// exhaustion so the join fails rather than hangs.
+func TestPostgresStore_AnySuccess_AllFailViaSweep(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAnySuccess)
+
+	// c1 fails via the normal wake path — parent stays waiting (no success, not yet exhausted).
+	_, woke, err := s.CompleteAndWake("c1", failChild)
+	require.NoError(t, err)
+	require.Nil(t, woke)
+
+	// c2 is cancelled via a PLAIN Update (the sweep-only path — no CompleteAndWake, so no exhaustion event).
+	_, err = s.Update("c2", func(r *Run) error { return r.Transition(StatusCancelled, t0.Add(time.Minute)) })
+	require.NoError(t, err)
+	p, _ := s.Get("p")
+	require.Equal(t, StatusWaiting, p.Status, "parent orphaned in waiting — the event path never saw exhaustion")
+
+	// The sweep is the completeness backstop: it re-queues the parent on all-failed exhaustion.
+	swoke, err := s.SweepWaiting()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"p"}, swoke, "the sweep re-queues the exhausted any-success parent")
+	p, _ = s.Get("p")
+	assert.Equal(t, StatusQueued, p.Status, "parent re-queued on exhaustion → the executor derives all-failed → fails the join")
+}
+
+// TestPostgresStore_FailFast_AllSuccessUnchanged proves the additive guarantee (ADR 0075 hard constraint): a
+// fail-fast map whose items ALL succeed behaves exactly like the old all-mode join — the parent wakes only on
+// the LAST child, with every child collected. This is the "existing all map is unchanged" proof at the store
+// layer (the executor collects all outputs; nothing early-wakes when no item fails).
+func TestPostgresStore_FailFast_AllSuccessUnchanged(t *testing.T) {
+	s := openPGStore(t)
+	pgMkWaitingParent(t, s, []string{"c1", "c2"}, WaitAllFailFast)
+
+	// First success: parent stays waiting (all-success path is identical to the old all-mode join).
+	_, woke, err := s.CompleteAndWake("c1", completeChild)
+	require.NoError(t, err)
+	assert.Nil(t, woke, "fail-fast all-success: one of two done does NOT wake (no early fire without a failure)")
+	p, _ := s.Get("p")
+	assert.Equal(t, StatusWaiting, p.Status)
+	assert.Equal(t, []string{"c2"}, p.WaitOn)
+
+	// Last success: parent flips to queued on the final child — the join.
+	_, woke, err = s.CompleteAndWake("c2", completeChild)
+	require.NoError(t, err)
+	require.NotNil(t, woke, "the last success wakes the fail-fast parent (the join)")
+	assert.Equal(t, StatusQueued, woke.Status)
+}
+
 // TestPostgresStore_RoundTripsWorkflowFields proves the M67 workflow-instance columns persist/reload.
 func TestPostgresStore_RoundTripsWorkflowFields(t *testing.T) {
 	s := openPGStore(t)

@@ -77,6 +77,17 @@ type WorkflowMap struct {
 	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
 	// +optional
 	Join string `json:"join,omitempty"`
+
+	// completion is the outcome-aware wake mode for the fan-out (ADR 0075 §1). `all` (the default) is a
+	// fail-fast join: it collects EVERY item's output on full success but cancels the surviving siblings
+	// and fails the map the moment the FIRST item fails/cancels (same OUTCOME as before — fail on any
+	// failure, collect all on success — only earlier + with sibling-cancel). `any` returns the FIRST
+	// SUCCESSFUL item's output as the map's output (cancelling the still-running siblings), and fails the
+	// map only if EVERY item fails/cancels (exhaustion).
+	// +kubebuilder:validation:Enum=all;any
+	// +kubebuilder:default=all
+	// +optional
+	Completion string `json:"completion,omitempty"`
 }
 
 // WorkflowLoop is a loop node: repeat step `do` until the CEL predicate `until` is true, capped at
@@ -160,6 +171,15 @@ type WorkflowStep struct {
 	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
 	// +optional
 	Default string `json:"default,omitempty"`
+
+	// onError names a handler step this node routes to if its sub-run FAILS after exhausting its retry
+	// budget — the workflow continues at the handler instead of fail-fasting (AWS Step Functions Catch /
+	// Temporal). Empty ⇒ fail-fast (the default). The handler must be an existing step; it runs like any
+	// node. Not supported on map/loop nodes.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([a-z0-9\-]*[a-z0-9])?)?$`
+	// +optional
+	OnError string `json:"onError,omitempty"`
 
 	// mapNode makes this a map/fan-out node (defined here; executed v1b). Set instead of next/branches.
 	// +optional

@@ -608,7 +608,12 @@ describe("ToolsClient.handoff", () => {
     const req = plane.delegate.requests[0];
     expect(req?.method).toBe("POST");
     expect(req?.path).toBe("/handoff");
-    expect(req?.json()).toMatchObject({ targetAgent: "billing", message: "refund needed" });
+    // includeHistory defaults true (replay B's full history — today's behavior, m83.6).
+    expect(req?.json()).toMatchObject({
+      targetAgent: "billing",
+      message: "refund needed",
+      includeHistory: true,
+    });
   });
 
   it("uses empty string for message when not provided", async () => {
@@ -617,6 +622,18 @@ describe("ToolsClient.handoff", () => {
 
     const req = plane.delegate.requests[0];
     expect((req?.json() as { message: string }).message).toBe("");
+  });
+
+  it("relays includeHistory=false so B skips the transfer-turn history replay (m83.6)", async () => {
+    const client = new ToolsClient(plane.config);
+    await client.handoff("billing", "here is a summary…", false);
+
+    const req = plane.delegate.requests[0];
+    expect(req?.json()).toMatchObject({
+      targetAgent: "billing",
+      message: "here is a summary…",
+      includeHistory: false,
+    });
   });
 
   it("relays X-Ctxmesh-Run-Capability when set", async () => {
@@ -718,6 +735,10 @@ describe("ToolsClient.list — synthetic tools", () => {
     const htSchema = ht.inputSchema!;
     expect((htSchema["properties"] as Record<string, unknown>)["target_agent"]).toMatchObject({
       enum: ["researcher", "coder"],
+    });
+    // include_history (m83.6) is exposed to the model as an optional boolean (default true).
+    expect((htSchema["properties"] as Record<string, unknown>)["include_history"]).toMatchObject({
+      type: "boolean",
     });
     expect(htSchema["required"]).toEqual(["target_agent"]);
   });

@@ -396,6 +396,8 @@ def test_handoff_tool_present_when_enabled(client, discovery_stub: DiscoveryStub
     assert ht.endpoint.endswith(":2994/handoff")
     assert ht.input_schema["properties"]["target_agent"]["enum"] == ["billing", "research"]
     assert ht.input_schema["required"] == ["target_agent"], "only target_agent is required"
+    # include_history (m83.6) is exposed to the model as an optional boolean (default true).
+    assert ht.input_schema["properties"]["include_history"]["type"] == "boolean"
     assert "billing: handles billing" in ht.description
 
 
@@ -429,8 +431,37 @@ def test_handoff_posts_and_relays_capability(client, monkeypatch):
     assert captured["method"] == "POST"
     assert captured["url"].endswith(":2994/handoff")
     assert captured["expect"] == (200,)
-    assert captured["body"] == {"targetAgent": "billing", "message": "refund needed"}
+    # include_history defaults True (replay B's full history — today's behavior, m83.6).
+    assert captured["body"] == {
+        "targetAgent": "billing",
+        "message": "refund needed",
+        "includeHistory": True,
+    }
     assert captured["headers"][CAPABILITY_HEADER] == "cap-token", "the capability is relayed (OBO)"
+
+
+def test_handoff_relays_include_history_false(client, monkeypatch):
+    """handoff(include_history=False) (m83.6) posts includeHistory=false so the BFF records the
+    transfer-turn history skip and B starts from `message` as a SUMMARY."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "runId": "hand-9"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(body=json.loads(body))
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: None)
+
+    client.tools.handoff(target_agent="billing", message="summary…", include_history=False)
+    assert captured["body"] == {
+        "targetAgent": "billing",
+        "message": "summary…",
+        "includeHistory": False,
+    }
 
 
 # ── record-mode relay on tool-call egress (M78, ADR 0071 §1/C1) ────────────────

@@ -48,6 +48,11 @@ type handoffRequest struct {
 	TargetAgent string `json:"targetAgent"`
 	// Message is the handoff prompt A passes to B (B's first user turn). Optional.
 	Message string `json:"message,omitempty"`
+	// IncludeHistory (m83.6) is the handoff INPUT FILTER: true (or absent) ⇒ B replays the full
+	// conversation history on the transfer turn (today's behavior); false ⇒ A handed off with the
+	// Message as a SUMMARY, so B skips the full-history replay on that first turn. A pointer so an
+	// SDK that omits it (an old client) is treated as the true default — relayed verbatim to the BFF.
+	IncludeHistory *bool `json:"includeHistory,omitempty"`
 }
 
 // handoffResponse is what the SDK gets — the transfer outcome. ok=false + error is an honest refusal
@@ -68,6 +73,10 @@ type bffHandoffBody struct {
 	TargetAgent    string `json:"targetAgent"`
 	TargetEndpoint string `json:"targetEndpoint"`
 	Message        string `json:"message,omitempty"`
+	// IncludeHistory (m83.6) relays the handoff input filter to the BFF: nil/true ⇒ B replays the
+	// full history (default, unchanged); false ⇒ B skips the transfer-turn replay (A's Message is a
+	// summary). A pointer so "absent" is distinct from an explicit false — the BFF defaults nil→true.
+	IncludeHistory *bool `json:"includeHistory,omitempty"`
 }
 
 // handoffResult is the BFF's terminal outcome of a handoff (the transferred run B + the terminated A).
@@ -150,6 +159,7 @@ func (s *delegateServer) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		TargetAgent:    req.TargetAgent,
 		TargetEndpoint: s.targetURL(req.TargetAgent),
 		Message:        req.Message,
+		IncludeHistory: req.IncludeHistory, // m83.6: relay the input filter (nil ⇒ BFF defaults to true)
 	})
 	if err != nil {
 		writeHandoff(w, handoffResponse{OK: false, Error: "handoff failed: " + err.Error()})

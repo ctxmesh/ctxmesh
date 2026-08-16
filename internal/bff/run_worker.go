@@ -179,6 +179,16 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 		execCtx = contextWithRecord(execCtx, rn.ID)
 	}
 
+	// Handoff input filter (m83.6): a target run B created by a `handoff_to include_history=false`
+	// carries HandoffSkipHistoryReplay — stamp X-Ctxmesh-Include-History: false on its /invoke so the
+	// SDK managed loop skips replaying the prior conversation history on this TRANSFER TURN (B starts
+	// from A's summary, the handoff message). It applies only to B's first invoke — this flag lives on
+	// B's run, and every subsequent user turn to B is a SEPARATE run with the flag unset (replays
+	// normally). A default handoff / an ordinary run has it false ⇒ no header, replay unchanged.
+	if rn.HandoffSkipHistoryReplay {
+		execCtx = contextWithSkipHistoryReplay(execCtx, true)
+	}
+
 	// Renew the lease periodically while executing. If the lease is lost (a slow heartbeat let a
 	// peer reclaim us) the heartbeat loop stops — the run continues here, and the idempotency key
 	// bounds any duplicate downstream effect (at-least-once, the honest lease guarantee).
