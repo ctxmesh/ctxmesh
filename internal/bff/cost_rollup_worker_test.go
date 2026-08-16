@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ctxmesh/agent-engine/internal/controlplane"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
 )
 
@@ -212,4 +214,138 @@ func TestExtractTenantID(t *testing.T) {
 		got := extractTenantID(tc.key, suffix)
 		assert.Equal(t, tc.wantID, got, tc.wantDesc)
 	}
+}
+
+// TestExtractScopeID_AgentSlash verifies the per-agent scope-id parse is ROBUST to the '/' in the
+// "{ns}/{name}" identity — the id is the exact segment between the "agent:" prefix and the ":spend:{month}"
+// suffix, not a naive ':'-split (which the '/' does not break, but a fixed-length slice is what guarantees
+// it). ':' cannot appear in a k8s ns/name, so ":spend:" is an unambiguous delimiter.
+func TestExtractScopeID_AgentSlash(t *testing.T) {
+	t.Parallel()
+
+	suffix := ":spend:2026-08"
+	cases := []struct {
+		key      string
+		wantID   string
+		wantDesc string
+	}{
+		{"agent:default/foo:spend:2026-08", "default/foo", "ns/name identity with a slash"},
+		{"agent:kube-system/my-agent:spend:2026-08", "kube-system/my-agent", "hyphenated ns and name"},
+		{"agent:solo:spend:2026-08", "solo", "bare name (no namespace)"},
+		{"agent::spend:2026-08", "", "empty id returns empty"},
+		{"agent::2026-08", "", "key too short (no room for id segment)"},
+	}
+	for _, tc := range cases {
+		got := extractScopeID(tc.key, agentSpendKeyPrefix, suffix)
+		assert.Equal(t, tc.wantID, got, tc.wantDesc)
+	}
+}
+
+// TestCostRollupWorker_AgentRows verifies that one tick upserts the expected per-agent rows by reading the
+// agent spend keys a miniredis seeds for the current month (matching the launcher's format, including the
+// '/' in the scope id), ignores non-spend + wrong-month keys, and coexists with the tenant snapshot.
+func TestCostRollupWorker_AgentRows(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+	now := time.Date(2026, 8, 10, 15, 0, 0, 0, time.UTC)
+	month := now.Format("2006-01")
+
+	// Seed per-agent spend keys in the launcher's on-the-wire format:
+	// "agent:{ns}/{name}:spend:{YYYY-MM}" → a float string (IncrByFloat).
+	require.NoError(t, mr.Set(fmt.Sprintf("agent:default/foo:spend:%s", month), "3.50"))
+	require.NoError(t, mr.Set(fmt.Sprintf("agent:prod/billing-agent:spend:%s", month), "0.25"))
+	// A tenant key coexists — the agent SCAN must not pick it up, and the tenant SCAN must not pick agents up.
+	require.NoError(t, mr.Set(fmt.Sprintf("tenant:acme:spend:%s", month), "9.00"))
+	// A wrong-month agent key — must be ignored (out of the current-month window).
+	require.NoError(t, mr.Set("agent:default/foo:spend:2025-01", "999.00"))
+
+	store := &fakeRollupStore{}
+	s := newCostRollupServer(t, store)
+
+	cfg := CostRollupConfig{ValKeyAddr: mr.Addr()}
+	s.rollupOnce(context.Background(), cfg, now)
+
+	today := now.UTC().Truncate(24 * time.Hour)
+
+	foo, ok := store.findByScope("agent", "default/foo")
+	require.True(t, ok, "agent 'default/foo' row must be upserted")
+	assert.Equal(t, "agent", foo.ScopeType)
+	assert.Equal(t, "default/foo", foo.ScopeID, "scope id preserves the '/' in {ns}/{name}")
+	assert.InDelta(t, 3.50, foo.SpendUSD, 1e-9, "foo spend decoded from the launcher's float key")
+	assert.Equal(t, int64(0), foo.Tokens, "Valkey keys carry no token count; tokens default to 0")
+	assert.Equal(t, today, foo.Day.UTC().Truncate(24*time.Hour), "Day must be today (UTC)")
+
+	billing, ok := store.findByScope("agent", "prod/billing-agent")
+	require.True(t, ok, "agent 'prod/billing-agent' row must be upserted")
+	assert.InDelta(t, 0.25, billing.SpendUSD, 1e-9, "billing-agent spend decoded correctly")
+
+	// The tenant key is still snapshotted as a tenant row (both scopes in one tick).
+	acme, ok := store.findByScope("tenant", "acme")
+	require.True(t, ok, "tenant 'acme' row must still be upserted alongside the agents")
+	assert.InDelta(t, 9.00, acme.SpendUSD, 1e-9)
+
+	// Exactly 3 rows: 2 agents + 1 tenant; the wrong-month agent key must be ignored.
+	rows := store.allRows()
+	assert.Len(t, rows, 3, "2 agent rows + 1 tenant row; the wrong-month key must be ignored")
+}
+
+// TestCostRollupWorker_AgentRows_RealPostgres is the tier1 round-trip: seed a per-agent Valkey spend key,
+// run one tick against the REAL Postgres cost-rollup store (through the full controlplane.OpenDB migration
+// chain), and read the durable {scope_type:"agent", scope_id:"ns/name", day, spend} row back via
+// Range(...,"agent","ns/name",...). Gated on CONTROLPLANE_TEST_DSN — skipped in CI without a DB.
+func TestCostRollupWorker_AgentRows_RealPostgres(t *testing.T) {
+	dsn := os.Getenv("CONTROLPLANE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CONTROLPLANE_TEST_DSN unset — skipping real-Postgres per-agent rollup round-trip")
+	}
+	db, err := controlplane.OpenDB(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`TRUNCATE cost_rollups`)
+	require.NoError(t, err)
+	store := costrollup.NewPostgresStore(db)
+
+	mr := miniredis.RunT(t)
+	now := time.Date(2026, 8, 12, 9, 0, 0, 0, time.UTC)
+	month := now.Format("2006-01")
+	// A per-agent key with a '/' in the scope id, in the launcher's on-the-wire format.
+	require.NoError(t, mr.Set(fmt.Sprintf("agent:default/foo:spend:%s", month), "4.20"))
+
+	s := newCostRollupServer(t, store)
+	s.rollupOnce(context.Background(), CostRollupConfig{ValKeyAddr: mr.Addr()}, now)
+
+	today := now.UTC().Truncate(24 * time.Hour)
+	rows, err := store.Range(context.Background(), "agent", "default/foo", today, today)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the worker must have written exactly one durable per-agent row")
+	assert.Equal(t, "agent", rows[0].ScopeType)
+	assert.Equal(t, "default/foo", rows[0].ScopeID, "scope id preserves the '/' through the durable store")
+	assert.InDelta(t, 4.20, rows[0].SpendUSD, 1e-9)
+	assert.Equal(t, today, rows[0].Day.UTC().Truncate(24*time.Hour))
+}
+
+// TestCostRollupWorker_AgentUpsertIdempotent verifies ticking twice for the same day with an updated
+// per-agent spend produces exactly one row per agent (the second tick overwrites, does not duplicate).
+func TestCostRollupWorker_AgentUpsertIdempotent(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	month := now.Format("2006-01")
+	key := fmt.Sprintf("agent:default/foo:spend:%s", month)
+
+	require.NoError(t, mr.Set(key, "1.00"))
+	store := &fakeRollupStore{}
+	s := newCostRollupServer(t, store)
+	cfg := CostRollupConfig{ValKeyAddr: mr.Addr()}
+
+	s.rollupOnce(context.Background(), cfg, now)
+	require.NoError(t, mr.Set(key, "2.50")) // MTD grows; the second tick (same day) must overwrite the first.
+	s.rollupOnce(context.Background(), cfg, now)
+
+	row, ok := store.findByScope("agent", "default/foo")
+	require.True(t, ok)
+	assert.InDelta(t, 2.50, row.SpendUSD, 1e-9, "second tick must overwrite the first (idempotent upsert)")
+	assert.Len(t, store.allRows(), 1, "idempotent upsert must produce exactly 1 agent row")
 }

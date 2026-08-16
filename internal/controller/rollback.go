@@ -418,11 +418,17 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 	}
 
 	// Record the rollback on status (a separate status subresource write). Re-fetch to avoid
-	// clobbering the just-updated object's resourceVersion.
+	// clobbering the just-updated object's resourceVersion, and layer the record as a MERGE
+	// PATCH off that base. The re-fetch above went through r.Get, which — in production — reads
+	// the informer CACHE and so can return the STALE (pre-annotation-clear) resourceVersion; a
+	// resourceVersion-carrying Status().Update would then 409 against the apiserver and drop the
+	// record. A status merge-patch does not carry/require the resourceVersion, so it applies
+	// regardless of cache staleness (m52.N7). base captures the pre-mutation object for the diff.
 	var withStatus agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &withStatus); err != nil {
 		return fmt.Errorf("re-fetching for rollback status: %w", err)
 	}
+	base := withStatus.DeepCopy()
 	rb := withStatus.Status.Rollback
 	if rb == nil {
 		rb = &agentsv1alpha1.RollbackStatus{}
@@ -452,7 +458,7 @@ func (r *AgentDeploymentReconciler) actuateRollback(
 		Message:            fmt.Sprintf("reverted serving spec to AgentVersion %q (from %q)", av.Name, fromVersion),
 		ObservedGeneration: withStatus.Generation,
 	})
-	if err := r.Status().Update(ctx, &withStatus); err != nil {
+	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording rollback status: %w", err)
 	}
 	log.Info("Rolled back serving spec", "to", av.Name, "from", fromVersion)
@@ -487,11 +493,19 @@ func (r *AgentDeploymentReconciler) refuseRollback(
 		}
 	}
 
-	// Record the refusal condition (status subresource) on a fresh object.
+	// Record the refusal condition (status subresource) as a MERGE PATCH off a freshly-fetched
+	// base. The annotation-clear Update above wrote to the apiserver and bumped the
+	// resourceVersion, but this re-fetch goes through r.Get, which — in production — reads the
+	// informer CACHE and can return the STALE (pre-Update) resourceVersion. A
+	// resourceVersion-carrying Status().Update would then 409 against the apiserver, and because
+	// the annotation is ALREADY cleared the requeue never re-enters refuseRollback, so the
+	// refusal reason would be LOST PERMANENTLY. A status merge-patch does not carry/require the
+	// resourceVersion, so the refusal reason persists regardless of cache staleness (m52.N7).
 	var withStatus agentsv1alpha1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &withStatus); err != nil {
 		return fmt.Errorf("re-fetching for refused rollback status: %w", err)
 	}
+	base := withStatus.DeepCopy()
 	apimeta.SetStatusCondition(&withStatus.Status.Conditions, metav1.Condition{
 		Type:               conditionRolledBack,
 		Status:             metav1.ConditionFalse,
@@ -499,7 +513,7 @@ func (r *AgentDeploymentReconciler) refuseRollback(
 		Message:            message,
 		ObservedGeneration: withStatus.Generation,
 	})
-	if err := r.Status().Update(ctx, &withStatus); err != nil {
+	if err := r.Status().Patch(ctx, &withStatus, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("recording refused rollback status: %w", err)
 	}
 	return nil

@@ -149,3 +149,68 @@ func (s *pgStore) ListAggregates(ctx context.Context, namespace, agentName strin
 	}
 	return out, nil
 }
+
+// UpsertOnlineConfig inserts or updates the per-(namespace, agent_name) online-scoring config row
+// (m84.3). window is stored as whole seconds. Mirrors UpsertAggregate's INSERT-ON-CONFLICT style so the
+// controller's write is idempotent across reconciles.
+func (s *pgStore) UpsertOnlineConfig(ctx context.Context, cfg OnlineConfig) error {
+	if cfg.Namespace == "" || cfg.AgentName == "" {
+		return fmt.Errorf("onlinescore: %w: namespace and agentName are required", controlplane.ErrInvalid)
+	}
+	_, err := s.db.ExecContext(
+		ctx, `
+		INSERT INTO online_score_config
+			(namespace, agent_name, enabled, sample_rate, max_scored_per_day, window_seconds, min_samples, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		ON CONFLICT (namespace, agent_name) DO UPDATE SET
+			enabled            = EXCLUDED.enabled,
+			sample_rate        = EXCLUDED.sample_rate,
+			max_scored_per_day = EXCLUDED.max_scored_per_day,
+			window_seconds     = EXCLUDED.window_seconds,
+			min_samples        = EXCLUDED.min_samples,
+			updated_at         = now()`,
+		cfg.Namespace, cfg.AgentName, cfg.Enabled, cfg.SampleRate, cfg.MaxScoredPerDay,
+		int64(cfg.Window/time.Second), cfg.MinSamples,
+	)
+	if err != nil {
+		return fmt.Errorf("onlinescore: upsert config: %w", err)
+	}
+	return nil
+}
+
+// GetOnlineConfig retrieves the per-(namespace, agent_name) online-scoring config. A missing row returns
+// (zero, false, nil) — the worker's judge-OFF fail-safe (no explicit policy ⇒ judge OFF for that agent).
+func (s *pgStore) GetOnlineConfig(ctx context.Context, namespace, agentName string) (OnlineConfig, bool, error) {
+	var (
+		cfg        OnlineConfig
+		windowSecs int64
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT namespace, agent_name, enabled, sample_rate, max_scored_per_day, window_seconds, min_samples, updated_at
+		FROM online_score_config
+		WHERE namespace = $1 AND agent_name = $2`,
+		namespace, agentName).
+		Scan(&cfg.Namespace, &cfg.AgentName, &cfg.Enabled, &cfg.SampleRate,
+			&cfg.MaxScoredPerDay, &windowSecs, &cfg.MinSamples, &cfg.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OnlineConfig{}, false, nil
+	}
+	if err != nil {
+		return OnlineConfig{}, false, fmt.Errorf("onlinescore: get config: %w", err)
+	}
+	cfg.Window = time.Duration(windowSecs) * time.Second
+	cfg.UpdatedAt = cfg.UpdatedAt.UTC()
+	return cfg, true, nil
+}
+
+// DeleteOnlineConfig removes the per-(namespace, agent_name) config row. Deleting a non-existent row is a
+// no-op (idempotent) — the controller calls this to clear the policy (judge OFF) with no evalSuiteRef/online.
+func (s *pgStore) DeleteOnlineConfig(ctx context.Context, namespace, agentName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM online_score_config WHERE namespace = $1 AND agent_name = $2`,
+		namespace, agentName)
+	if err != nil {
+		return fmt.Errorf("onlinescore: delete config: %w", err)
+	}
+	return nil
+}

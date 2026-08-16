@@ -304,6 +304,24 @@ func agentRunTag(namespace, name string) string {
 	return "agent:" + ns + "/" + n
 }
 
+// agentFilterValue builds the `<namespace>/<name>` value carried in RunFilter.Agent — the
+// SINGLE grammar every per-agent trace query (the runs list, the dataset export, the
+// online-scoring worker) filters on. buildRunsQuery is the one place that turns this value
+// back into the Langfuse tag via agentRunTag, so a RunFilter.Agent produced here always
+// yields the SAME `agent:<ns>/<name>` tag the launcher stamped. This is the m52.N8 fix:
+// callers must NOT hand-concatenate the `<ns>/<name>` filter (the export used to at
+// datasets.go), because a bespoke join can silently drift from buildRunsQuery's split and
+// leave the runs browser and the export selecting DIFFERENT traces for the same agent.
+// Grammar mirrors agentRunTag minus the `agent:` prefix: bare name when ns is empty.
+func agentFilterValue(namespace, name string) string {
+	ns := strings.TrimSpace(namespace)
+	n := strings.TrimSpace(name)
+	if ns == "" {
+		return n
+	}
+	return ns + "/" + n
+}
+
 // isRunTrace reports whether a Langfuse trace represents an agent RUN — the unit the
 // runs list shows. The launcher names each run's trace by AGENT IDENTITY via
 // langfuse.trace.name ("<ns>/<name>", e.g. "default/my-agent") AND stamps an
@@ -1235,6 +1253,73 @@ func (a *langfuseAdapter) TraceScores(ctx context.Context, traceID string) ([]Fe
 		})
 	}
 	return scores, nil
+}
+
+// lfCreateScoreRequest is the JSON body for POST /api/public/scores.
+// dataType is always "NUMERIC" for online-judge writes; comment is omitted when empty.
+// Field names match the Langfuse public scores API contract (confirmed against lfScore
+// which reads the same fields back via GET /api/public/scores).
+type lfCreateScoreRequest struct {
+	TraceID  string  `json:"traceId"`
+	Name     string  `json:"name"`
+	Value    float64 `json:"value"`
+	DataType string  `json:"dataType"`
+	Comment  string  `json:"comment,omitempty"`
+}
+
+// CreateScore POSTs a numeric score to the Langfuse public scores API
+// (POST /api/public/scores). It is BEST-EFFORT observability sugar for
+// the online-scoring worker's per-trace judge write-back (m84.4). A
+// non-2xx response is returned as an error; the caller is responsible
+// for logging and swallowing the error so it never blocks the aggregate.
+func (a *langfuseAdapter) CreateScore(ctx context.Context, traceID, name string, value float64, comment string) error {
+	if strings.TrimSpace(traceID) == "" {
+		return fmt.Errorf("langfuse: CreateScore: empty traceID")
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("langfuse: CreateScore: empty name")
+	}
+
+	body := lfCreateScoreRequest{
+		TraceID:  traceID,
+		Name:     name,
+		Value:    value,
+		DataType: scoreDataTypeNumeric,
+		Comment:  comment,
+	}
+	return a.postJSON(ctx, "/api/public/scores", body)
+}
+
+// postJSON performs an authenticated POST against the Langfuse public API with a
+// JSON-encoded body. It treats any non-2xx response as an error (snippet-bounded).
+// The public-API credentials are sent as HTTP Basic auth from this process only —
+// they never leave the BFF.
+func (a *langfuseAdapter) postJSON(ctx context.Context, apiPath string, body any) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("langfuse: encode body for %s: %w", apiPath, err)
+	}
+
+	u := a.baseURL + apiPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(encoded)))
+	if err != nil {
+		return fmt.Errorf("langfuse: build request for %s: %w", apiPath, err)
+	}
+	req.SetBasicAuth(a.publicKey, a.secretKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("langfuse: request failed for %s: %w", apiPath, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("langfuse: %s returned %d: %s", apiPath, resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	return nil
 }
 
 // getJSON performs an authenticated GET against the Langfuse public API and

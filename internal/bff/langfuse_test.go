@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -740,4 +741,170 @@ func TestFilteredRunsUpstreamError(t *testing.T) {
 	_, err := a.FilteredRuns(context.Background(), RunFilter{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "502")
+}
+
+// TestRunsListAndExportAgreeOnAgentFilter is the m52.N8 regression guard: the runs browser
+// (GET /api/runs?agent=<ns>/<name>) and the dataset export must find the SAME traces for an
+// agent, because both drive the SAME Langfuse trace query (FilteredRuns) off a RunFilter.Agent
+// value built from the SAME grammar. This locks that in so a future change to either caller
+// cannot silently re-diverge the two paths (the bug: the runs list returned empty for traces
+// the export matched).
+//
+// It runs BOTH callers' exact RunFilter.Agent construction over ONE shared corpus:
+//   - runs list: handleRuns copies the user's ?agent= verbatim → RunFilter{Agent: "default/foo"}.
+//   - export:    handleExport builds the value via agentFilterValue(ns, name), pinned onto the
+//     ExportSpec and passed by the executor as RunFilter{Agent: spec.AgentTag}.
+//
+// and asserts (a) the outbound Langfuse tags= filter is byte-identical, and (b) both select the
+// SAME set of trace IDs.
+func TestRunsListAndExportAgreeOnAgentFilter(t *testing.T) {
+	// A shared corpus: two runs for default/foo, a foreign agent's run (other/foo — must be
+	// excluded by the tag filter), and an ambient (non-run) trace that carries default/foo's tag
+	// but keeps its own span name (must be excluded by isRunTrace, IDENTICALLY on both paths).
+	corpus := []lfTrace{
+		{ID: "run-a", Name: "default/foo", Timestamp: "2026-07-01T00:03:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "run-b", Name: "agent.invoke", Timestamp: "2026-07-01T00:02:00Z", Tags: []string{"agent:default/foo"}},
+		{ID: "foreign", Name: "other/foo", Timestamp: "2026-07-01T00:04:00Z", Tags: []string{"agent:other/foo"}},
+		{ID: "ambient", Name: "Received Proxy Server Request", Timestamp: "2026-07-01T00:01:00Z", Tags: []string{"agent:default/foo"}},
+	}
+
+	// The runs-list caller: handleRuns passes the ?agent= value verbatim.
+	const runsListAgent = "default/foo"
+	// The export caller: handleExport builds the value via the shared grammar helper. Given the
+	// SAME agent it MUST yield the same RunFilter.Agent string the runs list uses.
+	exportAgent := agentFilterValue("default", "foo")
+	require.Equal(t, runsListAgent, exportAgent,
+		"the export must build the SAME RunFilter.Agent grammar the runs list uses (m52.N8)")
+
+	// Drive each path against its OWN stub so we can capture each path's outbound Langfuse query
+	// independently, then compare.
+	query := func(agent string) (*recordedRequest, []string) {
+		srv, rec := fakeLangfuseFiltered(t, corpus)
+		a := newTestLangfuse(t, srv.URL)
+		page, err := a.FilteredRuns(context.Background(), RunFilter{Agent: agent, Limit: 20})
+		require.NoError(t, err)
+		ids := make([]string, 0, len(page.Runs))
+		for _, r := range page.Runs {
+			ids = append(ids, r.TraceID)
+		}
+		slices.Sort(ids)
+		return rec, ids
+	}
+
+	listRec, listIDs := query(runsListAgent)
+	exportRec, exportIDs := query(exportAgent)
+
+	// (a) Both paths send the IDENTICAL Langfuse tags= filter — the single agent:<ns>/<name> tag.
+	assert.Equal(t, listRec.query, exportRec.query,
+		"the runs list and the export must send byte-identical Langfuse queries for the same agent")
+	assert.Contains(t, listRec.query, "tags=agent%3Adefault%2Ffoo",
+		"the shared tag filter is agent:default/foo")
+
+	// (b) Both paths select the SAME traces: exactly default/foo's two RUN traces — the foreign
+	// agent (tag filter) and the ambient non-run trace (isRunTrace) are excluded on BOTH paths.
+	assert.Equal(t, []string{"run-a", "run-b"}, listIDs, "the runs list finds both of default/foo's runs")
+	assert.Equal(t, listIDs, exportIDs,
+		"the runs list and the export must select the SAME traces for the same agent (m52.N8)")
+}
+
+// --- m84.4: CreateScore adapter tests ----------------------------------------
+
+// TestLangfuseCreateScore_POSTsCorrectRequest proves the adapter POSTs to
+// /api/public/scores with the right method, path, body fields, and Basic auth.
+// This mirrors the pattern of adapter-level tests above (fakeLangfuse stub,
+// httptest server asserting the request).
+func TestLangfuseCreateScore_POSTsCorrectRequest(t *testing.T) {
+	var (
+		capturedMethod  string
+		capturedPath    string
+		capturedBody    map[string]any
+		capturedUser    string
+		capturedPass    string
+		capturedHadAuth bool
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		capturedUser, capturedPass, capturedHadAuth = r.BasicAuth()
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newTestLangfuse(t, srv.URL)
+	err := a.CreateScore(context.Background(), "trace-abc", "online-judge", 0.75, "test comment")
+	require.NoError(t, err)
+
+	// Method + path.
+	assert.Equal(t, http.MethodPost, capturedMethod, "CreateScore must use POST")
+	assert.Equal(t, "/api/public/scores", capturedPath, "CreateScore must POST to /api/public/scores")
+
+	// Basic auth — server-side creds, never leaked.
+	assert.True(t, capturedHadAuth, "public-API creds must be sent as Basic auth")
+	assert.Equal(t, "pk-test", capturedUser)
+	assert.Equal(t, "sk-secret", capturedPass)
+
+	// Body fields (the Langfuse scores API contract).
+	assert.Equal(t, "trace-abc", capturedBody["traceId"], "traceId field in body")
+	assert.Equal(t, "online-judge", capturedBody["name"], "name field in body")
+	assert.InDelta(t, 0.75, capturedBody["value"], 1e-9, "value field in body")
+	assert.Equal(t, "NUMERIC", capturedBody["dataType"], "dataType must be NUMERIC")
+	assert.Equal(t, "test comment", capturedBody["comment"], "comment field in body when non-empty")
+}
+
+// TestLangfuseCreateScore_EmptyCommentOmitted proves that an empty comment is omitted
+// from the JSON body (omitempty), so the Langfuse API does not receive a spurious empty
+// comment field that would overwrite any existing comment.
+func TestLangfuseCreateScore_EmptyCommentOmitted(t *testing.T) {
+	var capturedBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newTestLangfuse(t, srv.URL)
+	err := a.CreateScore(context.Background(), "trace-xyz", "online-judge", 0.5, "")
+	require.NoError(t, err)
+	_, hasComment := capturedBody["comment"]
+	assert.False(t, hasComment, "an empty comment must be omitted from the JSON body (omitempty)")
+}
+
+// TestLangfuseCreateScore_Non2xxIsError proves a non-2xx response from the Langfuse
+// scores API is returned as an error — the adapter does not swallow HTTP errors.
+func TestLangfuseCreateScore_Non2xxIsError(t *testing.T) {
+	for _, code := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusInternalServerError} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "upstream error", code)
+			}))
+			t.Cleanup(srv.Close)
+
+			a := newTestLangfuse(t, srv.URL)
+			err := a.CreateScore(context.Background(), "trace-1", "online-judge", 0.5, "")
+			require.Error(t, err, "a %d response must be returned as an error", code)
+		})
+	}
+}
+
+// TestLangfuseCreateScore_EmptyTraceIDErrors proves empty traceID is rejected early
+// (before any HTTP call) as a programming error.
+func TestLangfuseCreateScore_EmptyTraceIDErrors(t *testing.T) {
+	// A server that should never be reached.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("server should not be called with an empty traceID")
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newTestLangfuse(t, srv.URL)
+	err := a.CreateScore(context.Background(), "  ", "online-judge", 0.5, "")
+	require.Error(t, err, "empty traceID must error without hitting the server")
 }

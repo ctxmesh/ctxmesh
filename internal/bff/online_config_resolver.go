@@ -19,99 +19,59 @@ package bff
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 )
 
-// k8sOnlineConfigResolver reads the per-agent online-scoring policy from the cluster (ADR 0062 Fork 2,
-// m69.6): AgentDeployment.spec.evalSuiteRef → EvalSuite.spec.online. It is backed by a read-only
-// controller-runtime client.Reader (the manager's cached client in production, a fake in tests). This is
-// the online-scoring worker's ONLY k8s read — a narrow, off-request control-plane read (governance #8),
-// NOT the caller-scoped CRD path (ADR 0011); its RBAC is an explicit get/list on agentdeployments +
-// evalsuites added to the BFF SA role for exactly this worker.
-type k8sOnlineConfigResolver struct {
-	reader client.Reader
+// onlineConfigReader is the narrow slice of the online-score store the resolver reads: the per-(namespace,
+// agent) online-scoring config row the CONTROLLER publishes (m84.3). The BFF worker NEVER reads the agent
+// CRDs itself — that would re-introduce the ADR-0011 violation the m69.6 revert removed; instead the
+// controller (which legitimately holds evalsuites RBAC) resolves EvalSuite.spec.online → cpDB, and the
+// worker reads that cpDB row here.
+type onlineConfigReader interface {
+	GetOnlineConfig(ctx context.Context, namespace, agentName string) (onlinescore.OnlineConfig, bool, error)
 }
 
-// NewK8sOnlineConfigResolver builds the real resolver over a read-only client.Reader (the manager's
-// cached client or a direct reader in cmd/bff/main.go). Returns the OnlineConfigResolver seam the worker
-// depends on.
-func NewK8sOnlineConfigResolver(reader client.Reader) OnlineConfigResolver {
-	return &k8sOnlineConfigResolver{reader: reader}
+// dbOnlineConfigResolver resolves the per-agent online-scoring policy from the CONTROL-PLANE DB (m84.3, ADR
+// 0062 Fork 2 / ADR 0011). It implements OnlineConfigResolver by reading the per-(namespace, agent) config
+// row the controller wrote (evalSuiteRef → EvalSuite.spec.online → cpDB). This is the ADR-0011-safe path:
+// the BFF worker holds NO agent-CRD RBAC and reads only cpDB (which it already reaches). A missing row, or a
+// row with enabled=false, ⇒ (nil, nil): the worker falls back to its process-wide defaults (judge OFF) — the
+// fail-safe.
+type dbOnlineConfigResolver struct {
+	store onlineConfigReader
 }
 
-// ResolveOnline implements OnlineConfigResolver: it looks up the AgentDeployment's evalSuiteRef, reads the
-// referenced EvalSuite's online block, and parses it into a ResolvedOnlineConfig.
+// NewDBOnlineConfigResolver builds the cpDB-backed resolver over the online-score store. Returns the
+// OnlineConfigResolver seam the worker depends on. Wired in cmd/bff/main.go from the SAME cpDB store the
+// worker uses to write aggregates — no new dependency, no agent-CRD RBAC.
+func NewDBOnlineConfigResolver(store onlineConfigReader) OnlineConfigResolver {
+	return &dbOnlineConfigResolver{store: store}
+}
+
+// ResolveOnline implements OnlineConfigResolver: it reads the per-(namespace, agent) config row from cpDB.
 //
-//   - agent not found / no evalSuiteRef ⇒ (nil, nil): no policy, worker uses process defaults.
-//   - EvalSuite not found ⇒ (nil, nil): a dangling ref is not a hard failure — the worker degrades to
-//     defaults (the eval-gate controller separately surfaces the dangling ref on the AgentDeployment).
-//   - EvalSuite has no online block ⇒ (nil, nil): defaults.
-//   - a genuine API read error (not a NotFound) ⇒ (nil, err): the worker logs it and falls back to
-//     defaults for this agent — never a fabricated verdict.
-//
-// Parsing is lenient (mirrors the worker's "bad config ⇒ default, never a panic" discipline): a malformed
-// sampleRate or window parses to 0 (the worker then applies its floor), never an error.
-func (r *k8sOnlineConfigResolver) ResolveOnline(ctx context.Context, namespace, agentName string) (*ResolvedOnlineConfig, error) {
-	var deploy agentsv1alpha1.AgentDeployment
-	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &deploy); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil // agent gone (a trace outlived its AgentDeployment) — no policy, defaults.
-		}
-		return nil, fmt.Errorf("reading AgentDeployment %q/%q: %w", namespace, agentName, err)
+//   - no row (never published) ⇒ (nil, nil): no policy, worker uses process defaults (judge OFF).
+//   - a row with enabled=false ⇒ (nil, nil): the controller explicitly cleared the policy (no evalSuiteRef
+//     or no `.online` block) — judge OFF, the fail-safe.
+//   - an enabled row ⇒ the parsed ResolvedOnlineConfig (sampleRate/maxScoredPerDay/window/minSamples).
+//   - a genuine store read error ⇒ (nil, err): the worker logs it and falls back to defaults for this agent
+//     (never a fabricated verdict), exactly as the resolver contract requires.
+func (r *dbOnlineConfigResolver) ResolveOnline(ctx context.Context, namespace, agentName string) (*ResolvedOnlineConfig, error) {
+	if r.store == nil {
+		return nil, nil // no store wired — process defaults (judge OFF).
 	}
-	ref := deploy.Spec.EvalSuiteRef
-	if ref == "" {
-		return nil, nil // no gate/policy — process defaults.
-	}
-
-	var suite agentsv1alpha1.EvalSuite
-	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref}, &suite); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil // dangling evalSuiteRef — degrade to defaults, not a hard error.
-		}
-		return nil, fmt.Errorf("reading EvalSuite %q/%q: %w", namespace, ref, err)
-	}
-	online := suite.Spec.Online
-	if online == nil {
-		return nil, nil // suite exists but no online policy — process defaults.
-	}
-
-	return &ResolvedOnlineConfig{
-		SampleRate:      parseSampleRate(online.SampleRate),
-		MaxScoredPerDay: int(online.MaxScoredPerDay),
-		Window:          parseWindow(online.Window),
-		MinSamples:      int(online.MinSamples),
-	}, nil
-}
-
-// parseSampleRate parses the CRD's decimal-string sampleRate to a float. Empty or malformed ⇒ 0 (judge
-// OFF) — the worker's withDefaults/clamp then keeps it in [0,1]. Never an error (bad config degrades).
-func parseSampleRate(s string) float64 {
-	if s == "" {
-		return 0
-	}
-	v, err := strconv.ParseFloat(s, 64)
+	cfg, found, err := r.store.GetOnlineConfig(ctx, namespace, agentName)
 	if err != nil {
-		return 0
+		return nil, fmt.Errorf("reading online-score config for %q/%q: %w", namespace, agentName, err)
 	}
-	return v
-}
-
-// parseWindow parses the CRD's Go-duration-string window. Empty or malformed ⇒ 0, so the worker applies
-// its platform-default window (1h). Never an error (bad config degrades to the default).
-func parseWindow(s string) time.Duration {
-	if s == "" {
-		return 0
+	if !found || !cfg.Enabled {
+		return nil, nil // no policy / explicitly disabled — process defaults (judge OFF), the fail-safe.
 	}
-	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return 0
-	}
-	return d
+	return &ResolvedOnlineConfig{
+		SampleRate:      cfg.SampleRate,
+		MaxScoredPerDay: cfg.MaxScoredPerDay,
+		Window:          cfg.Window,
+		MinSamples:      cfg.MinSamples,
+	}, nil
 }

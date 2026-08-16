@@ -143,6 +143,12 @@ func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, _ int, _ string) (
 	return CostBreakdownResponse{Agents: []AgentCostItem{}, Total: CostSummary{ByModel: []MetricPoint{}}}, nil
 }
 
+// CreateScore is a no-op stub (m84.4) — the fake does not capture or assert calls;
+// handler tests that need to assert CreateScore calls use onlineScorerFake instead.
+func (f fakeLangfuseAdapter) CreateScore(_ context.Context, _, _ string, _ float64, _ string) error {
+	return nil
+}
+
 // fakePrometheusAdapter is an in-memory PrometheusAdapter for handler tests.
 type fakePrometheusAdapter struct {
 	points []MetricPoint

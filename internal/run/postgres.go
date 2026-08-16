@@ -919,6 +919,26 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]
 	return out, nil
 }
 
+// CountRunOutcomes returns (failed, total) run counts for one (namespace, agent) over runs CREATED at or
+// after `since` (M84, AlertPolicy runFailureRate condition, ADR 0063 D2). It is the cpDB-native data
+// source the reconciler evaluates the runFailureRate SLO from: rate = failed/total over the condition's
+// window. `failed` counts terminal-FAILED runs (status='failed'); `total` counts every run created in the
+// window (all statuses — the denominator is "runs attempted in the window", so an in-flight or succeeded
+// run is part of the base rate). Read-only; it never mutates a run. A query/scan error is returned so the
+// caller (the reconciler) can log + abstain — a bad read must never wedge the reconcile or fabricate a rate.
+func (p *pgStore) CountRunOutcomes(ctx context.Context, namespace, agent string, since time.Time) (failed, total int, err error) {
+	const q = `SELECT
+			count(*) FILTER (WHERE status = $4),
+			count(*)
+		FROM runs
+		WHERE namespace = $1 AND agent = $2 AND created_at >= $3`
+	if scanErr := p.db.QueryRowContext(ctx, q, namespace, agent, since.UTC(), string(StatusFailed)).
+		Scan(&failed, &total); scanErr != nil {
+		return 0, 0, fmt.Errorf("run: count run outcomes: %w", scanErr)
+	}
+	return failed, total, nil
+}
+
 func (p *pgStore) AppendEvent(id string, kind EventKind, data string) error {
 	ctx := context.Background()
 	tx, err := p.db.BeginTx(ctx, nil)

@@ -331,16 +331,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// Valkey monthly-spend keys into the durable cost_rollups ledger.
 	rollupStore := costrollup.NewPostgresStore(cpDB)
 
-	// Per-agent online-config resolver (M69, ADR 0062 Fork 2, m69.6): a READ-ONLY client over
-	// AgentDeployment + EvalSuite that the online-scoring worker consults for each agent's EvalSuite.online
-	// The online-scoring worker uses PROCESS-WIDE DEFAULTS for every agent (judge OFF — no per-agent
-	// SampleRate/MaxScoredPerDay, hence zero ungoverned judge spend; the operational + feedback components
-	// need no agent reads). The BFF deliberately does NOT read AgentDeployment/EvalSuite via its own SA:
-	// ADR 0011 keeps the BFF's SA at `rules: []` (the confused-deputy blast-radius stance; the m67.13
-	// precedent pins caller-scoped instead of granting the BFF agent-CRD RBAC). Per-agent online config
-	// (which enables the judge per agent) belongs on the CONTROLLER (it HAS agent-CRD RBAC): the eval-gate
-	// controller resolves EvalSuite.online → cpDB → the worker reads it — a follow-up carded to m52 Theme N.
-	var onlineResolver bff.OnlineConfigResolver // nil ⇒ defaults (ADR 0011 — see above)
+	// Per-agent online-config resolver (M69, ADR 0062 Fork 2; m84.3 completes m69.6): the online-scoring
+	// worker consults it per agent to enable/tune the judge from that agent's EvalSuite.online policy. The
+	// policy is resolved by the CONTROLLER (which legitimately holds evalsuites RBAC) into a per-(ns, agent)
+	// cpDB row; the worker READS that row here (cpDB — the SAME store it writes aggregates to). The BFF
+	// deliberately does NOT read AgentDeployment/EvalSuite via its own SA: ADR 0011 keeps the BFF's SA at
+	// `rules: []` (the confused-deputy blast-radius stance; m69.6 REVERTED a BFF-SA agent-CRD ClusterRole
+	// that broke this). A missing/disabled row ⇒ (nil, nil): the worker falls back to its process defaults
+	// (judge OFF) — the fail-safe. Wired from the SAME cpDB store as onlineStore: no new dep, no agent-CRD RBAC.
+	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
 
 	srv := bff.NewServer(bff.Options{
 		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),

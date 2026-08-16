@@ -18,160 +18,125 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/onlinescore"
 )
 
-// resolverScheme builds a scheme knowing AgentDeployment + EvalSuite so the fake client can read them.
-func resolverScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
-	return scheme
+// fakeConfigReader is a canned onlineConfigReader for the cpDB-backed resolver tests: it returns a fixed
+// (config, found) or an error, driving each ResolveOnline branch with no live cpDB.
+type fakeConfigReader struct {
+	cfg   onlinescore.OnlineConfig
+	found bool
+	err   error
 }
 
-// The resolver tests exercise one fixed (namespace, agent, suite) — the resolver reads (namespace,
-// agentName) → evalSuiteRef → suite, all in the same namespace. What VARIES across tests is the
-// evalSuiteRef + the online block, not the identities, so those are constants.
-const (
-	resolverNs    = "default"
-	resolverAgent = "foo"
-	resolverSuite = "suite-a"
-)
-
-// mkAgent builds an AgentDeployment (resolverNs/resolverAgent) with the given evalSuiteRef.
-func mkAgent(evalSuiteRef string) *agentsv1alpha1.AgentDeployment {
-	a := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: resolverNs, Name: resolverAgent}}
-	a.Spec.EvalSuiteRef = evalSuiteRef
-	return a
+func (f fakeConfigReader) GetOnlineConfig(context.Context, string, string) (onlinescore.OnlineConfig, bool, error) {
+	return f.cfg, f.found, f.err
 }
 
-// mkSuite builds an EvalSuite (resolverNs/resolverSuite) with the given optional online block.
-func mkSuite(online *agentsv1alpha1.OnlineScoringSpec) *agentsv1alpha1.EvalSuite {
-	s := &agentsv1alpha1.EvalSuite{ObjectMeta: metav1.ObjectMeta{Namespace: resolverNs, Name: resolverSuite}}
-	s.Spec.Dataset = agentsv1alpha1.DatasetRef{Ref: "ds"}
-	s.Spec.Scorers = []agentsv1alpha1.ScorerSpec{{Name: "m", Type: "mock", Weight: 1}}
-	s.Spec.Threshold = "0.8"
-	s.Spec.Online = online
-	return s
-}
-
-func newResolver(t *testing.T, objs ...client.Object) OnlineConfigResolver {
-	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(resolverScheme(t)).WithObjects(objs...).Build()
-	return NewK8sOnlineConfigResolver(c)
-}
-
-// Test: an AgentDeployment → EvalSuite(online) resolves to the parsed config.
-func TestResolveOnline_ParsedConfig(t *testing.T) {
+// Test: an ENABLED cpDB config row resolves to the parsed policy (the controller published it).
+func TestDBResolveOnline_EnabledRow(t *testing.T) {
 	t.Parallel()
 
-	online := &agentsv1alpha1.OnlineScoringSpec{
-		SampleRate:      "0.05",
-		MaxScoredPerDay: 25,
-		Window:          "24h",
-		MinSamples:      10,
-	}
-	r := newResolver(t,
-		mkAgent("suite-a"),
-		mkSuite(online),
-	)
+	r := NewDBOnlineConfigResolver(fakeConfigReader{
+		cfg: onlinescore.OnlineConfig{
+			Namespace:       "default",
+			AgentName:       "foo",
+			Enabled:         true,
+			SampleRate:      0.05,
+			MaxScoredPerDay: 25,
+			Window:          24 * time.Hour,
+			MinSamples:      10,
+		},
+		found: true,
+	})
 
 	got, err := r.ResolveOnline(context.Background(), "default", "foo")
 	require.NoError(t, err)
-	require.NotNil(t, got, "an agent with an online-block EvalSuite resolves to a config")
+	require.NotNil(t, got, "an enabled config row resolves to a policy")
 	assert.InDelta(t, 0.05, got.SampleRate, 1e-9)
 	assert.Equal(t, 25, got.MaxScoredPerDay)
 	assert.Equal(t, 24*time.Hour, got.Window)
 	assert.Equal(t, 10, got.MinSamples)
 }
 
-// Test: an agent with NO evalSuiteRef ⇒ (nil, nil) — no policy, worker uses defaults.
-func TestResolveOnline_NoEvalSuiteRef(t *testing.T) {
+// Test: NO row (never published) ⇒ (nil, nil) — the worker uses process defaults (judge OFF).
+func TestDBResolveOnline_NoRow(t *testing.T) {
 	t.Parallel()
 
-	r := newResolver(t, mkAgent(""))
+	r := NewDBOnlineConfigResolver(fakeConfigReader{found: false})
 	got, err := r.ResolveOnline(context.Background(), "default", "foo")
 	require.NoError(t, err)
-	assert.Nil(t, got, "no evalSuiteRef ⇒ (nil, nil): process defaults")
+	assert.Nil(t, got, "no row ⇒ (nil, nil): process defaults (judge OFF)")
 }
 
-// Test: an EvalSuite with NO online block ⇒ (nil, nil).
-func TestResolveOnline_NoOnlineBlock(t *testing.T) {
+// Test: a DISABLED row (enabled=false — the controller cleared the policy) ⇒ (nil, nil), judge OFF.
+func TestDBResolveOnline_DisabledRow(t *testing.T) {
 	t.Parallel()
 
-	r := newResolver(t,
-		mkAgent("suite-a"),
-		mkSuite(nil), // no online block
-	)
+	r := NewDBOnlineConfigResolver(fakeConfigReader{
+		cfg:   onlinescore.OnlineConfig{Namespace: "default", AgentName: "foo", Enabled: false, SampleRate: 1.0, MaxScoredPerDay: 5},
+		found: true,
+	})
 	got, err := r.ResolveOnline(context.Background(), "default", "foo")
 	require.NoError(t, err)
-	assert.Nil(t, got, "EvalSuite without an online block ⇒ (nil, nil): process defaults")
+	assert.Nil(t, got, "an explicitly disabled row ⇒ (nil, nil): judge OFF (the fail-safe)")
 }
 
-// Test: a dangling evalSuiteRef (suite not found) ⇒ (nil, nil), NOT an error — degrade to defaults.
-func TestResolveOnline_DanglingSuiteRef(t *testing.T) {
+// Test: a store read error ⇒ (nil, err) — the worker logs it and falls back to defaults (never fabricates).
+func TestDBResolveOnline_StoreError(t *testing.T) {
 	t.Parallel()
 
-	r := newResolver(t, mkAgent("missing-suite"))
+	r := NewDBOnlineConfigResolver(fakeConfigReader{err: errors.New("cpDB down")})
 	got, err := r.ResolveOnline(context.Background(), "default", "foo")
-	require.NoError(t, err, "a dangling evalSuiteRef degrades to defaults, not a hard error")
+	require.Error(t, err, "a store read error surfaces so the worker falls back to defaults for this agent")
 	assert.Nil(t, got)
 }
 
-// Test: the agent itself not found ⇒ (nil, nil) — a trace can outlive its AgentDeployment.
-func TestResolveOnline_AgentNotFound(t *testing.T) {
+// Test: a nil store ⇒ (nil, nil) — defensive (the resolver never nil-derefs).
+func TestDBResolveOnline_NilStore(t *testing.T) {
 	t.Parallel()
 
-	r := newResolver(t) // no objects
-	got, err := r.ResolveOnline(context.Background(), "default", "ghost")
-	require.NoError(t, err, "an absent agent ⇒ (nil, nil), not an error")
+	r := NewDBOnlineConfigResolver(nil)
+	got, err := r.ResolveOnline(context.Background(), "default", "foo")
+	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
-// Test: bad sampleRate / window strings parse to zero (not an error) — the worker then applies its floors.
-func TestResolveOnline_BadStringsParseToZero(t *testing.T) {
+// Test: the resolver reads what the store round-trips (mem-store integration — the worker's real read path).
+func TestDBResolveOnline_MemStoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	online := &agentsv1alpha1.OnlineScoringSpec{
-		SampleRate:      "not-a-number",
-		MaxScoredPerDay: 5,
-		Window:          "banana",
-		MinSamples:      3,
-	}
-	r := newResolver(t,
-		mkAgent("suite-a"),
-		mkSuite(online),
-	)
+	store := onlinescore.NewMemStore()
+	ctx := context.Background()
+	require.NoError(t, store.UpsertOnlineConfig(ctx, onlinescore.OnlineConfig{
+		Namespace:       "default",
+		AgentName:       "foo",
+		Enabled:         true,
+		SampleRate:      0.5,
+		MaxScoredPerDay: 3,
+		Window:          2 * time.Hour,
+		MinSamples:      4,
+	}))
 
-	got, err := r.ResolveOnline(context.Background(), "default", "foo")
-	require.NoError(t, err, "malformed strings degrade to zero, never an error")
+	r := NewDBOnlineConfigResolver(store)
+	got, err := r.ResolveOnline(ctx, "default", "foo")
+	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Zero(t, got.SampleRate, "unparseable sampleRate ⇒ 0 (judge OFF)")
-	assert.Equal(t, time.Duration(0), got.Window, "unparseable window ⇒ 0 (worker applies its default)")
-	assert.Equal(t, 5, got.MaxScoredPerDay, "the direct int fields are unaffected")
-	assert.Equal(t, 3, got.MinSamples)
-}
+	assert.InDelta(t, 0.5, got.SampleRate, 1e-9)
+	assert.Equal(t, 3, got.MaxScoredPerDay)
+	assert.Equal(t, 2*time.Hour, got.Window)
+	assert.Equal(t, 4, got.MinSamples)
 
-// Test: parseSampleRate / parseWindow unit contracts (empty + valid + invalid).
-func TestParseHelpers(t *testing.T) {
-	t.Parallel()
-
-	assert.Zero(t, parseSampleRate(""), "empty ⇒ 0")
-	assert.InDelta(t, 0.5, parseSampleRate("0.5"), 1e-9)
-	assert.Zero(t, parseSampleRate("xyz"), "malformed ⇒ 0")
-
-	assert.Equal(t, time.Duration(0), parseWindow(""), "empty ⇒ 0")
-	assert.Equal(t, time.Hour, parseWindow("1h"))
-	assert.Equal(t, time.Duration(0), parseWindow("nope"), "malformed ⇒ 0")
-	assert.Equal(t, time.Duration(0), parseWindow("-5m"), "non-positive ⇒ 0")
+	// A cleared row ⇒ (nil, nil): the worker defaults to judge OFF.
+	require.NoError(t, store.DeleteOnlineConfig(ctx, "default", "foo"))
+	got, err = r.ResolveOnline(ctx, "default", "foo")
+	require.NoError(t, err)
+	assert.Nil(t, got, "after the controller clears the row, the resolver returns no policy (judge OFF)")
 }

@@ -297,6 +297,14 @@ type AgentDeploymentReconciler struct {
 	// serving version) still applies. This is GUARD-side only — it is never used to
 	// auto-trigger a rollback (the auto-trigger is deferred, PRD §17.4).
 	OnlineScore onlineScoreReader
+
+	// OnlineConfig publishes each agent's online-scoring policy to cpDB (m84.3, ADR 0062 Fork 2 / ADR 0011):
+	// the controller resolves spec.evalSuiteRef → EvalSuite.spec.online and UPSERTS/DELETES the per-(ns,
+	// agent) config row that the BFF online-scoring worker READS (cpDB, no agent-CRD RBAC on the BFF SA).
+	// This is the ADR-0011-safe replacement for the reverted BFF-SA agent-CRD ClusterRole — the CONTROLLER
+	// writes (it has evalsuites RBAC), the worker reads. nil (dev without cpDB, or envtests not exercising
+	// it) ⇒ the publish step is a no-op (the worker safely defaults to judge-OFF on a missing row).
+	OnlineConfig onlineConfigWriter
 }
 
 // registryReader returns the configured RegistryReader. REQUIRED post-retirement
@@ -355,6 +363,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if model == "" {
 		model = execModelServing
 	}
+
+	// ── Step 1c: Publish the online-scoring policy to cpDB (m84.3, ADR 0062 Fork 2 / ADR 0011) ─
+	// Resolve spec.evalSuiteRef → EvalSuite.spec.online and UPSERT/CLEAR the per-(ns, agent) config row
+	// the BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA — the controller already
+	// holds evalsuites RBAC). This is the ADR-0011-safe replacement for the reverted BFF-SA ClusterRole:
+	// the CONTROLLER writes, the worker reads. It is a cpDB side-effect (never a k8s mutation) — idempotent
+	// and it does NOT gate the deploy: a cpDB blip is logged, never a reconcile error. No-op when unwired.
+	r.reconcileOnlineScoreConfig(ctx, &deploy)
 
 	// ── Step 2: Spec hash → AgentVersion ─────────────────────────────────────
 	hash, err := specHash(deploy.Spec)
