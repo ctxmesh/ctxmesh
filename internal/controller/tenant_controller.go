@@ -58,6 +58,10 @@ const (
 	// behavior — distinguishing it from a deliberate `false` opt-out. The controller clears it once the
 	// tenant converges to isolated.
 	networkIsolationGrandfatheredAnnotation = "agents.ctxmesh.ai/network-isolation-grandfathered"
+
+	// conditionNetworkIsolated is the Tenant status condition type reporting the network-isolation posture
+	// (Isolated / Grandfathered / Disabled) of the tenant's cross-tenant-deny NetworkPolicy (ADR 0073).
+	conditionNetworkIsolated = "NetworkIsolated"
 )
 
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
@@ -557,19 +561,19 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 	switch {
 	case isolated:
 		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
-			Type: "NetworkIsolated", Status: metav1.ConditionTrue, Reason: "Isolated",
+			Type: conditionNetworkIsolated, Status: metav1.ConditionTrue, Reason: "Isolated",
 			Message:            "cross-tenant traffic is denied (secure default, ADR 0073); peerTenants opens named east-west",
 			ObservedGeneration: tenant.Generation,
 		})
 	case tenant.Annotations[networkIsolationGrandfatheredAnnotation] == "true":
 		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
-			Type: "NetworkIsolated", Status: metav1.ConditionFalse, Reason: "Grandfathered",
+			Type: conditionNetworkIsolated, Status: metav1.ConditionFalse, Reason: "Grandfathered",
 			Message:            "network isolation OFF — grandfathered at the secure-default upgrade (ADR 0073); set networkIsolation:true (add peerTenants for legitimate east-west) to converge",
 			ObservedGeneration: tenant.Generation,
 		})
 	default:
 		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
-			Type: "NetworkIsolated", Status: metav1.ConditionFalse, Reason: "Disabled",
+			Type: conditionNetworkIsolated, Status: metav1.ConditionFalse, Reason: "Disabled",
 			Message:            "network isolation is explicitly disabled (networkIsolation:false)",
 			ObservedGeneration: tenant.Generation,
 		})

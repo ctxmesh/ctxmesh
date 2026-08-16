@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
@@ -338,6 +340,10 @@ func parseTopologyExpandLimit(raw string) int {
 // Upstream failure → 502. Bad param (malformed from/to, unknown status, bad
 // cursor) → 400 teaching error. Never a fabricated 200.
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
 	qs := r.URL.Query()
 
 	limit := defaultRunLimit
@@ -358,6 +364,31 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		Q:      strings.TrimSpace(qs.Get("q")),
 		Limit:  limit,
 		Cursor: strings.TrimSpace(qs.Get("cursor")),
+	}
+
+	// Caller-scoped authz (ADR 0011): the trace store is NOT tenant-aware, so a bare bearer must never get
+	// cluster-wide runs. Scope the list to the agents the caller can read through their OWN RBAC:
+	//   - ?agent=ns/name → authorize that one agent (clean 403/404), then the store filters to it;
+	//   - the global list → build the caller's visible-agent allow-set and drop any row whose agent is not
+	//     in it (and any untagged/ambient row). A namespace-scoped caller passes ?namespace= (mirrors
+	//     handleListAgents; a cluster-wide list needs cluster-wide RBAC).
+	var allow map[string]bool
+	if f.Agent != "" {
+		if !s.authorizeAgentKey(w, r, caller, f.Agent) {
+			return
+		}
+	} else {
+		var lErr error
+		allow, lErr = s.callerVisibleAgentKeys(r.Context(), caller, strings.TrimSpace(qs.Get("namespace")))
+		if lErr != nil {
+			if status, msg, isRBAC := classifyReadError(lErr); isRBAC {
+				writeError(w, status, msg)
+				return
+			}
+			s.log.Error(lErr, "runs list: caller agent-visibility check failed")
+			writeError(w, http.StatusInternalServerError, "failed to authorize runs list")
+			return
+		}
 	}
 
 	page, err := s.adapters.Langfuse.FilteredRuns(r.Context(), f)
@@ -382,7 +413,84 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if page.Runs == nil {
 		page.Runs = []RunSummary{}
 	}
+	// Scope the global list to the caller's visible agents (the per-agent path already proved access via
+	// authorizeAgentKey). Filters only the fetched window — like the q filter — so pagination advances by
+	// the store cursor, not the filtered count.
+	if allow != nil {
+		page.Runs = filterRunsToVisibleAgents(page.Runs, allow)
+	}
 	writeJSON(w, http.StatusOK, RunListResponse{Runs: page.Runs, NextCursor: page.NextCursor})
+}
+
+// authorizeAgentKey proves the caller can read the AgentDeployment named by a "namespace/name" agent key
+// through their OWN RBAC (ADR 0011). It writes the error response and returns false on a bad key (400), a
+// denial (403/401), or a missing agent (404); true when the caller may read it.
+func (s *Server) authorizeAgentKey(w http.ResponseWriter, r *http.Request, caller client.Client, key string) bool {
+	ns, name := splitAgentKey(key)
+	if ns == "" || name == "" {
+		writeError(w, http.StatusBadRequest, "agent filter must be namespace/name")
+		return false
+	}
+	var ad agentsv1alpha1.AgentDeployment
+	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return false
+		}
+		if apierrors.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return false
+		}
+		s.log.Error(err, "runs list: authorize agent failed", "agent", key)
+		writeError(w, http.StatusInternalServerError, "failed to authorize agent")
+		return false
+	}
+	return true
+}
+
+// callerVisibleAgentKeys lists the AgentDeployments the caller can read (their RBAC scopes the result,
+// ADR 0011) and returns the set of "namespace/name" keys used to scope the global runs list. An optional
+// namespace narrows the list — a namespace-scoped caller who lacks cluster-wide list must pass it (mirrors
+// handleListAgents).
+func (s *Server) callerVisibleAgentKeys(ctx context.Context, caller client.Client, namespace string) (map[string]bool, error) {
+	var opts []client.ListOption
+	if namespace != "" {
+		opts = append(opts, client.InNamespace(namespace))
+	}
+	list, err := listAgentDeployments(ctx, caller, opts...)
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool, len(list.Items))
+	for i := range list.Items {
+		keys[list.Items[i].Namespace+"/"+list.Items[i].Name] = true
+	}
+	return keys, nil
+}
+
+// splitAgentKey parses a "namespace/name" agent key on the LAST slash (so a name containing a slash still
+// parses; matches parseAgentTag). A key with no slash yields an empty namespace.
+func splitAgentKey(key string) (ns, name string) {
+	if i := strings.LastIndex(key, "/"); i >= 0 {
+		return key[:i], key[i+1:]
+	}
+	return "", key
+}
+
+// filterRunsToVisibleAgents keeps only the rows whose originating agent is in the caller's visible-agent
+// set, dropping ambient/untagged rows (no AgentNs/AgentName) that cannot be authorized. Returns a fresh
+// slice (never nil) so the JSON stays [].
+func filterRunsToVisibleAgents(rows []RunSummary, allow map[string]bool) []RunSummary {
+	out := make([]RunSummary, 0, len(rows))
+	for _, row := range rows {
+		if row.AgentNs == "" || row.AgentName == "" {
+			continue
+		}
+		if allow[row.AgentNs+"/"+row.AgentName] {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // handleCost serves GET /api/cost — the dashboard's cost/usage view. It folds
@@ -613,9 +721,19 @@ func (s *Server) handleTraceLink(w http.ResponseWriter, r *http.Request) {
 // other Langfuse upstream failure → 502 (never a 500). Only registered when the
 // Langfuse adapter is wired (nil → the route seam serves 501, like the others).
 func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing trace id")
+		return
+	}
+	// Caller-scoped authz (ADR 0011): a trace carries the full span I/O (prompts + model answers), so a
+	// trace id must not be a cross-tenant read oracle. Resolve trace→run→agent and prove the caller can
+	// read that agent through their OWN RBAC before serving. 403 on denial; 404 when no run maps the trace.
+	if _, ok := s.authorizeRunAccess(w, r, caller, id, true); !ok {
 		return
 	}
 	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
@@ -655,9 +773,18 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 //   - Empty scores             → {scores:[]} 200 (no scores is a valid state, not an
 //     error — new traces have no scores yet).
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
 	traceID := strings.TrimSpace(r.URL.Query().Get("traceId"))
 	if traceID == "" {
 		writeError(w, http.StatusBadRequest, "missing required query param: traceId")
+		return
+	}
+	// Caller-scoped authz (ADR 0011): scores hang off a trace, so gate them the same as the trace detail —
+	// resolve trace→run→agent and prove the caller can read that agent through their own RBAC.
+	if _, ok := s.authorizeRunAccess(w, r, caller, traceID, true); !ok {
 		return
 	}
 

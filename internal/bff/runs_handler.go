@@ -177,11 +177,19 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 // a run that is already terminal returns 409 (nothing to cancel). The executing worker/goroutine
 // observes the terminal status via the store and its own writes are no-ops on a terminal run.
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	updated, err := s.runStore.Update(id, func(x *run.Run) error {
+	// Caller-scoped authz (ADR 0011) BEFORE the mutation: cancel is an integrity/DoS-relevant write, so a
+	// run id alone must not let any bearer cancel another tenant's run. Prove agent access first; use the
+	// RESOLVED run.ID (never the raw path value) for the store update + cancel marker.
+	rn, ok := s.authorizeRunAccess(w, r, caller, id, true)
+	if !ok {
+		return
+	}
+	updated, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
 		if x.Status.IsTerminal() {
 			return fmt.Errorf("run already %s", x.Status)
 		}
@@ -200,8 +208,8 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	// — polling the pod-authed proxy — aborts the in-flight model call at call-boundary granularity instead
 	// of waiting for the worker to observe the terminal status. Best-effort: a nil publisher (no
 	// STATELAYER_ADDR) or a Valkey blip degrades to today's soft cancel, never an error on the cancel path.
-	s.publishCancelMarker(r.Context(), id)
-	writeJSON(w, http.StatusOK, CreateRunResponse{ID: id, Status: string(updated.Status)})
+	s.publishCancelMarker(r.Context(), rn.ID)
+	writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
 }
 
 // handleCreateRun serves POST /api/runs — create a durable run and start it. It is CALLER-SCOPED
@@ -453,16 +461,18 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	}
 }
 
-// handleGetRun serves GET /api/runs/{id} — the run's current status + result. Authenticated; the
-// run object carries no secret material (the invoking user's identity is the capability, not stored).
+// handleGetRun serves GET /api/runs/{id} — the run's current status + result (its Input + Messages).
+// CALLER-SCOPED (ADR 0011): the run's Input/Messages are the user's prompt + the model's answer, so a run
+// id must never be a cross-tenant read oracle. authorizeRunAccess proves the caller can read the run's
+// agent through their OWN RBAC before we serve it — presence of a bearer alone is NOT sufficient.
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
-	rn, err := s.runStore.Get(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
+	rn, ok := s.authorizeRunAccess(w, r, caller, id, true) // 403 on denial, 404 on missing run/agent (no oracle)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, runToDTO(rn))
@@ -640,7 +650,8 @@ func nodesFromCursor(cursorJSON, specSnapshot string) ([]WorkflowNodeStatus, str
 // missed events, then streams live until the run is terminal (the stream closes) or the client
 // disconnects. Each frame is `id:<seq>`, `event:<kind>`, `data:<json event>`.
 func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -649,7 +660,14 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	events, cancel, err := s.runStore.Subscribe(id, lastEventID(r))
+	// Caller-scoped authz (ADR 0011) BEFORE we hijack the response for SSE: the event stream carries the
+	// run's token/message events, so a run id must not be a cross-tenant read oracle. Prove agent access
+	// first (a clean 403/404 JSON error), then subscribe on the RESOLVED run.ID.
+	rn, ok := s.authorizeRunAccess(w, r, caller, id, true)
+	if !ok {
+		return
+	}
+	events, cancel, err := s.runStore.Subscribe(rn.ID, lastEventID(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
