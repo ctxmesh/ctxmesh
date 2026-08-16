@@ -669,7 +669,7 @@ func TestWorkflowExecutor_Map_FanOutAndJoin(t *testing.T) {
 		assert.Equal(t, run.StatusQueued, kids[id].Status)
 	}
 	assert.Equal(t, []string{ids[0], ids[1], ids[2]}, getRun(t, s, wfID).WaitOn, "the run waits on all 3 in order")
-	assert.Equal(t, run.WaitAll, getRun(t, s, wfID).WaitMode, "WaitAll = the join (all-complete collect)")
+	assert.Equal(t, run.WaitAllFailFast, getRun(t, s, wfID).WaitMode, "completion:all → fail-fast join (collect all on success, early-wake on first failure) — ADR 0075")
 
 	// Complete the 3 items OUT OF ORDER to prove the collect is ordered by item index, not completion order.
 	assert.Nil(t, completeChildRun(t, s, ids[1], `{"v":"B"}`), "a non-final map child does not wake the parent")
@@ -692,13 +692,14 @@ func TestWorkflowExecutor_Map_FanOutAndJoin(t *testing.T) {
 	assert.Equal(t, "C", parts[2].(map[string]any)["v"], "collected[2] is item 2's output")
 }
 
-// TestWorkflowExecutor_Map_FailFast: one map item fails → the workflow fails once the fan-out is terminal, the
-// join never runs, and a still-non-terminal sibling is cancelled by the fail-fast cascade.
+// TestWorkflowExecutor_Map_FailFast: one map item fails → the workflow fails, the join never runs, and a
+// still-non-terminal sibling is cancelled by the fail-fast cascade.
 //
-// WAKE-SEMANTICS NOTE (documented, not a weakening): the m67.2 store wakes a WaitAll parent only when EVERY
-// child in its wait set is terminal — there is no first-failure wake at the store layer. So a map learns of a
-// failure when its full fan-out resolves, then fail-fasts (a failed item is never collected; the join never
-// runs). The cancel-cascade cancels any workflow child STILL non-terminal at that point — proven here by
+// WAKE-SEMANTICS NOTE (ADR 0075 §1 — completion:all now suspends WaitAllFailFast): the store now EARLY-WAKES
+// the map parent the moment the FIRST item fails (item 1 here), without waiting for the whole fan-out. On
+// resume the executor still re-reads every terminal child and fail-fasts on the failed one (a failed item is
+// never collected; the join never runs) — so the OUTCOME is identical to the old all-terminal behavior, only
+// earlier. The cancel-cascade cancels any workflow child STILL non-terminal at that point — proven here by
 // injecting a running sibling (as a parallel node would be) that the cascade cancels.
 func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	s := newWorkflowServer(t)
@@ -717,10 +718,11 @@ func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	sibling.Status = run.StatusRunning
 	require.NoError(t, s.runStore.Create(sibling))
 
-	// Item 0 succeeds; item 1 FAILS; item 2 succeeds — the fan-out is now all-terminal, so the parent wakes.
+	// Item 0 succeeds (parent stays waiting); item 1 FAILS → the fail-fast store EARLY-WAKES the parent (it no
+	// longer waits for item 2). Item 2's later completion then finds the parent no longer waiting → a no-op.
 	require.Nil(t, completeChildRun(t, s, ids[0], `{"v":"A"}`))
-	failNode(t, s, ids[1], "worker exploded on item b")
-	completeChildRun(t, s, ids[2], `{"v":"C"}`) // completes the WaitAll → wakes the parent.
+	failNode(t, s, ids[1], "worker exploded on item b") // first failure early-wakes the fail-fast parent.
+	completeChildRun(t, s, ids[2], `{"v":"C"}`)         // parent already queued → this completion is a no-op wake.
 	drive(t, s, wfID)
 
 	fin := getRun(t, s, wfID)
@@ -728,6 +730,88 @@ func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	assert.Contains(t, fin.Error, "worker exploded on item b")
 	assert.Empty(t, fin.Messages, "the join never runs on a failed map (no collected list)")
 	assert.Equal(t, run.StatusCancelled, getRun(t, s, "sub-sibling").Status, "the non-terminal sibling is cancelled by the cascade")
+}
+
+// TestWorkflowExecutor_Map_FailFast_EarlyWakeCancelsRunningSibling proves the fail-fast SIBLING-CANCEL fires
+// BEFORE the surviving item finishes (ADR 0075 §2): item 0 fails while item 1 is STILL RUNNING → the store
+// early-wakes the parent, the executor cancel-cascades the running item, the join never runs.
+func TestWorkflowExecutor_Map_FailFast_EarlyWakeCancelsRunningSibling(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapWorkflowSpec(), `{"items":["a","b"]}`)
+	drive(t, s, wfID)
+	ids := []string{run.SpawnRunID(wfID, "fan", "map:0"), run.SpawnRunID(wfID, "fan", "map:1")}
+
+	// Item 0 FAILS while item 1 is still in flight (never completed) → fail-fast early-wakes the parent.
+	failNode(t, s, ids[0], "item a exploded")
+	assert.Equal(t, run.StatusQueued, getRun(t, s, wfID).Status, "the first failure early-wakes the fail-fast map (item 1 still in flight)")
+	assert.False(t, getRun(t, s, ids[1]).Status.IsTerminal(), "item 1 is still non-terminal (in flight) at wake time")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "the fail-fast map fails on the first item failure")
+	assert.Contains(t, fin.Error, "item a exploded")
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[1]).Status, "the still-running sibling is cancelled before it could finish")
+}
+
+// mapAnyWorkflowSpec is the map spec with completion:any (WaitAnySuccess) + a join over the collected list.
+func mapAnyWorkflowSpec() agentsv1beta1.WorkflowSpec {
+	spec := mapWorkflowSpec()
+	spec.Steps[0].Map.Completion = "any" // the "fan" node
+	return spec
+}
+
+// TestWorkflowExecutor_Map_AnySuccess_FirstWins: completion:any → the FIRST successful item is the map's
+// output (a single-element list fed to the join), the still-running siblings are cancelled, and the map
+// succeeds even though other items never completed.
+func TestWorkflowExecutor_Map_AnySuccess_FirstWins(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapAnyWorkflowSpec(), `{"items":["a","b","c"]}`)
+	drive(t, s, wfID)
+	require.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status)
+	assert.Equal(t, run.WaitAnySuccess, getRun(t, s, wfID).WaitMode, "completion:any → WaitAnySuccess")
+	ids := []string{
+		run.SpawnRunID(wfID, "fan", "map:0"),
+		run.SpawnRunID(wfID, "fan", "map:1"),
+		run.SpawnRunID(wfID, "fan", "map:2"),
+	}
+
+	// Item 1 SUCCEEDS first (items 0 and 2 still running) → any-success early-wakes the parent.
+	woke := completeChildRun(t, s, ids[1], `{"v":"WINNER"}`)
+	require.NotNil(t, woke, "the first successful item wakes the any-success map")
+	assert.Equal(t, run.StatusQueued, woke.Status)
+
+	drive(t, s, wfID)
+	// The surviving items are cancelled; the join runs over the single-element winning list.
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[0]).Status, "sibling item 0 cancelled after the first success")
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[2]).Status, "sibling item 2 cancelled after the first success")
+	joinChild := inFlightChild(t, s, wfID)
+	require.Equal(t, "join-agent", joinChild.Agent, "the join runs on the any-success winner")
+	var joinInput map[string]any
+	require.NoError(t, json.Unmarshal(joinChild.Input, &joinInput))
+	parts, ok := joinInput["parts"].([]any)
+	require.True(t, ok, "join.input.parts is the (single-element) collected list")
+	require.Len(t, parts, 1, "any-success feeds the join a single-element list: [winner]")
+	assert.Equal(t, "WINNER", parts[0].(map[string]any)["v"], "the collected element is the first successful item's output")
+}
+
+// TestWorkflowExecutor_Map_AnySuccess_AllFail: completion:any where EVERY item fails → exhaustion → the map
+// fails (no successful item), the join never runs.
+func TestWorkflowExecutor_Map_AnySuccess_AllFail(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapAnyWorkflowSpec(), `{"items":["a","b"]}`)
+	drive(t, s, wfID)
+	ids := []string{run.SpawnRunID(wfID, "fan", "map:0"), run.SpawnRunID(wfID, "fan", "map:1")}
+
+	failNode(t, s, ids[0], "a exploded") // no success yet + a sibling still running → no wake.
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "a failed item does not wake any-success while a sibling runs")
+	failNode(t, s, ids[1], "b exploded") // the LAST failure = exhaustion → wakes the parent.
+	assert.Equal(t, run.StatusQueued, getRun(t, s, wfID).Status, "exhaustion (all failed) wakes the any-success parent")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "an any-success map with all items failed → the map fails")
+	assert.Contains(t, fin.Error, "all")
+	assert.Empty(t, fin.Messages, "the join never runs on an exhausted any-success map")
 }
 
 // TestWorkflowExecutor_Map_IdempotentRelaunch: re-driving a map launch (a reclaimed executor) reuses the

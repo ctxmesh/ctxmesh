@@ -246,7 +246,7 @@ func (m *memStore) CompleteAndWake(childID string, apply func(*Run) error) (*Run
 	if child.ParentRunID != "" {
 		if pe, ok := m.entries[child.ParentRunID]; ok && pe.run.Status == StatusWaiting {
 			parent := cloneRun(pe.run)
-			met, removed := parent.satisfyChild(childID)
+			met, removed := parent.satisfyChild(childID, child.Status)
 			if removed {
 				pOld := parent.Status
 				if met {
@@ -289,21 +289,20 @@ func (m *memStore) SweepWaiting() ([]string, error) {
 	return woke, nil
 }
 
-// waitMetLocked reports whether a waiting run's condition is met by its children's CURRENT statuses.
-// Caller holds m.mu. all → every WaitOn child is terminal (or gone); any → at least one is.
+// waitMetLocked is the mem-store sweep adapter: it gathers the run's WaitOn children's CURRENT persisted
+// statuses (a MISSING child row → StatusCancelled, per waitSatisfied's contract — a non-success terminal,
+// never a success) and defers the decision to the SINGLE predicate waitSatisfied. No second copy of the
+// mode logic lives here. Caller holds m.mu.
 func (m *memStore) waitMetLocked(r *Run) bool {
-	terminalCount := 0
-	for _, cid := range r.WaitOn {
-		ce, ok := m.entries[cid]
-		// A missing child cannot be waited on further — treat it as satisfied (it will never wake us).
-		if !ok || ce.run.Status.IsTerminal() {
-			terminalCount++
+	statuses := make([]Status, len(r.WaitOn))
+	for i, cid := range r.WaitOn {
+		if ce, ok := m.entries[cid]; ok {
+			statuses[i] = ce.run.Status
+		} else {
+			statuses[i] = StatusCancelled // a missing child ⇒ cancelled-equivalent (never a success)
 		}
 	}
-	if r.WaitMode == WaitAny {
-		return terminalCount > 0
-	}
-	return terminalCount == len(r.WaitOn) // WaitAll
+	return waitSatisfied(r.WaitMode, statuses)
 }
 
 func (m *memStore) Create(r *Run) error {
