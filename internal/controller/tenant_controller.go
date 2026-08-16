@@ -64,6 +64,23 @@ const (
 	conditionNetworkIsolated = "NetworkIsolated"
 )
 
+// protectedSystemNamespaces are namespaces a Tenant must NEVER claim or stamp (audit P1-3, 2026-08-16):
+// stamping the tenant's default-deny NetworkPolicy (or ResourceQuota) on any of them would break cluster
+// DNS / the control plane / the platform itself — a `Tenant{spec.namespaces:[kube-system]}` would fence the
+// cluster's own plumbing. resolveOwnership routes any requested namespace in this set to `denied` (never
+// `owned`, so it is never stamped) and surfaces a `ProtectedNamespaceRefused` status condition. This is the
+// cheap, always-on guardrail; the complementary spoofable-namespace-label ValidatingWebhook (so only the
+// Tenant controller can set the tenant label) is the bigger half, carded to m52.
+var protectedSystemNamespaces = map[string]bool{
+	kubeSystemNamespace:        true, // cluster DNS (CoreDNS) + control-plane comms — a default-deny here is a cluster outage
+	"kube-public":              true,
+	"kube-node-lease":          true,
+	agentEngineSystemNamespace: true, // the platform: controllers, BFF, state-layer, model gateway
+	kourierSystemNamespace:     true, // Knative ingress
+	"knative-serving":          true, // Knative control plane (agent data plane depends on it)
+	langfuseNamespace:          true, // telemetry plane
+}
+
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
 // (1 ns ∈ ≤1 tenant) and caps their compute via a ResourceQuota stamped on each
 // member namespace. It labels every stamped resource + namespace with tenantLabel
@@ -126,9 +143,15 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Resolve which requested namespaces this tenant actually OWNS: a namespace
 	// claimed by another tenant is skipped (fail-safe — never double-stamp).
-	owned, contested, err := r.resolveOwnership(ctx, &tenant)
+	owned, contested, denied, err := r.resolveOwnership(ctx, &tenant)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolving ownership: %w", err)
+	}
+	if len(denied) > 0 {
+		// A protected system/platform namespace was requested — refuse it loudly (audit P1-3). It is
+		// already excluded from `owned` (never stamped); log so the operator misconfig is visible beyond
+		// the status condition.
+		logf.FromContext(ctx).Info("tenant: refused protected system namespaces (never stamped)", "tenant", tenant.Name, "denied", denied)
 	}
 
 	for _, ns := range owned {
@@ -168,17 +191,17 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 
-	return ctrl.Result{}, r.updateStatus(ctx, &tenant, owned, contested, totalBytes)
+	return ctrl.Result{}, r.updateStatus(ctx, &tenant, owned, contested, denied, totalBytes)
 }
 
 // resolveOwnership splits the tenant's requested namespaces into the ones it owns
 // and the ones another tenant already claims (contested, skipped).
-func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv1alpha1.Tenant) (owned, contested []string, err error) {
+func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv1alpha1.Tenant) (owned, contested, denied []string, err error) {
 	// Which OTHER tenants merely LIST each namespace in spec (a spec-only claim, not yet
 	// stamped). This alone must NOT contest a namespace another tenant already OWNS.
 	var all agentsv1alpha1.TenantList
 	if err := r.List(ctx, &all); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	listedByOther := map[string]bool{}
 	for i := range all.Items {
@@ -196,6 +219,13 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 			continue
 		}
 		seen[ns] = true
+		// System-namespace denylist (audit P1-3): a protected system/platform namespace is NEVER claimed
+		// or stamped — stamping a default-deny NetworkPolicy on it would break the cluster/platform. Route
+		// it to `denied` (a status condition) BEFORE any ownership logic, regardless of labels/listers.
+		if protectedSystemNamespaces[ns] {
+			denied = append(denied, ns)
+			continue
+		}
 		// The STAMPED owner (the tenantLabel on the namespace) is AUTHORITATIVE (audit
 		// FUNC-5): a spec-only claim by a second tenant never contests a namespace THIS
 		// tenant already owns — the old "any other lister ⇒ contested" made the incumbent
@@ -204,7 +234,7 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 		// to stamp wins; neither stamps until the operator resolves the overlap).
 		labelOwner, lErr := r.namespaceTenantLabel(ctx, ns)
 		if lErr != nil {
-			return nil, nil, lErr
+			return nil, nil, nil, lErr
 		}
 		switch {
 		case labelOwner == tenant.Name:
@@ -219,7 +249,8 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 	}
 	slices.Sort(owned)
 	slices.Sort(contested)
-	return owned, contested, nil
+	slices.Sort(denied)
+	return owned, contested, denied, nil
 }
 
 // namespaceTenantLabel returns the tenant that has STAMPED its ownership label
@@ -481,7 +512,7 @@ func (r *TenantReconciler) aggregateCorpusBytes(ctx context.Context, owned []str
 
 // updateStatus writes memberNamespaces + the Ready / NamespaceConflict / StorageSoftCapExceeded
 // conditions and updates the corpus-bytes gauge + totalCorpusBytes status field.
-func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alpha1.Tenant, owned, contested []string, totalCorpusBytes int64) error {
+func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alpha1.Tenant, owned, contested, denied []string, totalCorpusBytes int64) error {
 	tenant.Status.MemberNamespaces = int32(len(owned))
 	tenant.Status.TotalCorpusBytes = totalCorpusBytes
 
@@ -505,6 +536,21 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 		})
 	} else {
 		meta.RemoveStatusCondition(&tenant.Status.Conditions, "NamespaceConflict")
+	}
+
+	// Protected-namespace refusal (audit P1-3): a requested system/platform namespace was refused (never
+	// stamped) so the tenant cannot fence the cluster's own plumbing. A distinct condition from
+	// NamespaceConflict — the cause is a protected namespace, not another tenant's claim.
+	if len(denied) > 0 {
+		meta.SetStatusCondition(&tenant.Status.Conditions, metav1.Condition{
+			Type:               "ProtectedNamespaceRefused",
+			Status:             metav1.ConditionTrue,
+			Reason:             "SystemNamespaceDenylisted",
+			Message:            fmt.Sprintf("refused to claim protected system/platform namespaces (never stamped): %v", denied),
+			ObservedGeneration: tenant.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&tenant.Status.Conditions, "ProtectedNamespaceRefused")
 	}
 
 	// Storage soft-cap check (ADR 0061 governance #7, M68 m68.12).
