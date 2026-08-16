@@ -26,17 +26,17 @@ import (
 )
 
 // Cost-rollup worker (ADR 0063 D1, M70). A PERIODIC off-request reconciler goroutine — modelled on
-// StartOnlineScorer / sweepWaitingLoop — that snapshots the ephemeral Valkey per-tenant monthly-spend
-// keys into the durable cost_rollups ledger once per tick (default ~1h). Valkey spend evaporates on a
-// Valkey restart; this makes the tenant spend series durable + queryable for forecast/chargeback.
+// StartOnlineScorer / sweepWaitingLoop — that snapshots the ephemeral Valkey per-tenant AND per-agent
+// monthly-spend keys into the durable cost_rollups ledger once per tick (default ~1h). Valkey spend
+// evaporates on a Valkey restart; this makes the spend series durable + queryable for forecast/chargeback.
 //
-// Tenant scope only in v1. Per-AGENT spend is NOT snapshotted here: per-agent spend is booked into an
-// in-process accountant (ephemeral per pod, not a Valkey key), and the only cluster-wide per-agent cost
-// source — the Langfuse CostBreakdown — is a recent-N-traces rolling aggregate with no date range, so it
-// can't produce a clean per-day / month-to-date figure to key a durable daily row on. A durable per-agent
-// daily rollup is deferred until a date-ranged per-agent cost source exists (m52.Q1 follow-up); the
-// cost_rollups schema already carries scope_type='agent' for when it lands. Meanwhile per-agent chargeback
-// reads live from Langfuse (m70.9).
+// Both scopes now mirror the SAME Valkey pattern (m84.6). The launcher books every post-call model spend
+// onto TWO keys with the SAME delta: the per-tenant aggregate `tenant:{id}:spend:{YYYY-MM}` (M47) and the
+// per-agent breakdown `agent:{ns}/{name}:spend:{YYYY-MM}` (cmd/launcher/agent_spend.go). This worker SCANs
+// each set for the current month and upserts one durable row per scope (scope_type 'tenant' / 'agent',
+// month-to-date cumulative spend as of today). The earlier per-agent gap — that the only cluster-wide
+// per-agent cost source, the Langfuse CostBreakdown, is a recent-N-traces rolling aggregate with no date
+// range — is closed by keying per-agent spend on its own dated Valkey key, exactly like the tenant key.
 //
 // ADR 0011 governance: this worker reads Valkey and writes cpDB — no agent-CRD reads, no new RBAC, nothing
 // under config/. It is a trusted off-request worker (governance #8) exactly like the online-scoring worker.
@@ -95,10 +95,11 @@ func (s *Server) costRollupLoop(ctx context.Context, cfg CostRollupConfig) {
 }
 
 // rollupOnce is one reconciler tick, factored out so tests can drive it deterministically with a fixed
-// `now`. It snapshots for `today` (UTC): SCANs the Valkey per-tenant spend keys for the current month and
-// upserts one {scope_type:"tenant", ...} row per tenant (the month-to-date cumulative spend as of today).
-// Degrades gracefully when its source is absent (empty ValKeyAddr or a nil rollupStore). Errors on an
-// individual tenant are logged and skipped so one bad key never aborts the snapshot. Never panics.
+// `now`. It snapshots for `today` (UTC): SCANs the Valkey per-tenant AND per-agent spend keys for the
+// current month and upserts one {scope_type:"tenant"|"agent", ...} row per scope (the month-to-date
+// cumulative spend as of today). Degrades gracefully when its source is absent (empty ValKeyAddr or a nil
+// rollupStore). Errors on an individual scope are logged and skipped so one bad key never aborts the
+// snapshot. Never panics.
 func (s *Server) rollupOnce(ctx context.Context, cfg CostRollupConfig, now time.Time) {
 	if s.rollupStore == nil {
 		return // nowhere to write — honest no-op
@@ -109,11 +110,25 @@ func (s *Server) rollupOnce(ctx context.Context, cfg CostRollupConfig, now time.
 	}
 	today := now.UTC().Truncate(24 * time.Hour)
 	s.snapshotTenants(ctx, cfg.ValKeyAddr, today)
+	s.snapshotAgents(ctx, cfg.ValKeyAddr, today)
 }
 
 // spendKeyPrefix is the prefix for the per-tenant monthly spend key the launcher writes
 // (cmd/launcher/tenant_quota.go): "tenant:{id}:spend:{YYYY-MM}".
 const spendKeyPrefix = "tenant:"
+
+// agentSpendKeyPrefix is the prefix for the per-AGENT monthly spend key the launcher writes
+// (cmd/launcher/agent_spend.go): "agent:{ns}/{name}:spend:{YYYY-MM}". The scope id "{ns}/{name}" carries
+// a '/', but a ':' cannot appear in a k8s namespace or name, so the ":spend:" suffix is still an
+// unambiguous delimiter — the id is exactly the segment between this prefix and the suffix.
+const agentSpendKeyPrefix = "agent:"
+
+// cost_rollups scope_type discriminators — the durable ledger's two scopes (matches the schema's
+// scope_type column, ADR 0063 D1).
+const (
+	scopeTypeTenant = "tenant"
+	scopeTypeAgent  = "agent"
+)
 
 // spendKeySuffix builds the suffix pattern for the current month so SCAN is bounded to this month's keys.
 func spendKeySuffix(now time.Time) string {
@@ -151,7 +166,7 @@ func (s *Server) snapshotTenants(ctx context.Context, addr string, today time.Ti
 				continue
 			}
 			if uErr := s.rollupStore.Upsert(ctx, costrollup.Rollup{
-				ScopeType: "tenant",
+				ScopeType: scopeTypeTenant,
 				ScopeID:   tenantID,
 				Day:       today,
 				SpendUSD:  spend,
@@ -170,14 +185,73 @@ func (s *Server) snapshotTenants(ctx context.Context, addr string, today time.Ti
 // extractTenantID parses the tenant id from a spend key of the form
 // "tenant:{id}:spend:{YYYY-MM}". Returns "" when the key does not match the expected format.
 func extractTenantID(key, suffix string) string {
-	// key = "tenant:" + tenantID + suffix
-	// e.g.  "tenant:acme:spend:2026-01"
-	if len(key) <= len(spendKeyPrefix)+len(suffix) {
+	return extractScopeID(key, spendKeyPrefix, suffix)
+}
+
+// extractScopeID parses the scope id — the segment between prefix and suffix — from a spend key of the
+// form prefix + {id} + suffix. Robust to a '/' inside the id (the per-agent "{ns}/{name}" case): it
+// slices strictly by the fixed prefix + suffix lengths, never by splitting on ':' (which would break on
+// the '/' — and, more importantly, could mis-parse a scope id, so a fixed-length slice is used instead).
+// Returns "" when the key is too short to carry an id (prefix + suffix with nothing between).
+func extractScopeID(key, prefix, suffix string) string {
+	// e.g. tenant: "tenant:acme:spend:2026-01"  →  "acme"
+	//      agent:  "agent:ns/foo:spend:2026-01"  →  "ns/foo"
+	if len(key) <= len(prefix)+len(suffix) {
 		return ""
 	}
-	inner := key[len(spendKeyPrefix) : len(key)-len(suffix)]
+	inner := key[len(prefix) : len(key)-len(suffix)]
 	if inner == "" {
 		return ""
 	}
 	return inner
+}
+
+// snapshotAgents SCANs the per-AGENT Valkey spend keys for the current month and upserts one cost_rollups
+// row per agent ({scope_type:"agent", scope_id:"{ns}/{name}", day:today, spend:MTD}). It MIRRORS
+// snapshotTenants exactly — same SCAN/GET/Upsert shape, same log-and-continue error handling (a single
+// bad key never aborts the sweep) — differing only in the "agent:" prefix and the scope_type. Errors on
+// individual agents are logged and skipped.
+func (s *Server) snapshotAgents(ctx context.Context, addr string, today time.Time) {
+	rdb := redis.NewClient(&redis.Options{
+		Addr:        addr,
+		DialTimeout: usageOpTimeout,
+		ReadTimeout: usageOpTimeout,
+	})
+	defer func() { _ = rdb.Close() }()
+
+	suffix := spendKeySuffix(today)
+	pattern := agentSpendKeyPrefix + "*" + suffix
+
+	var cursor uint64
+	for {
+		keys, nextCursor, err := rdb.Scan(ctx, cursor, pattern, costRollupScanCount).Result()
+		if err != nil {
+			s.log.Error(err, "cost-rollup worker: SCAN agent spend keys failed")
+			return
+		}
+		for _, key := range keys {
+			scopeID := extractScopeID(key, agentSpendKeyPrefix, suffix)
+			if scopeID == "" {
+				continue
+			}
+			spend, err := rdb.Get(ctx, key).Float64()
+			if err != nil {
+				s.log.Error(err, "cost-rollup worker: read agent spend key failed (skipped)", "key", key)
+				continue
+			}
+			if uErr := s.rollupStore.Upsert(ctx, costrollup.Rollup{
+				ScopeType: scopeTypeAgent,
+				ScopeID:   scopeID,
+				Day:       today,
+				SpendUSD:  spend,
+				Tokens:    0, // Valkey holds spend only; per-agent tokens are tracked via Langfuse
+			}); uErr != nil {
+				s.log.Error(uErr, "cost-rollup worker: upsert agent rollup failed (skipped)", "agent", scopeID)
+			}
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
 }
