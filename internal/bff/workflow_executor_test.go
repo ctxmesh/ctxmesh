@@ -324,7 +324,7 @@ func TestWorkflowExecutor_PlanApprovalGate_PausesBeforeNode1(t *testing.T) {
 		assert.NotEqual(t, wfID, r.ParentRunID, "no node sub-run may be launched while the plan is unapproved")
 	}
 	// The console banner event fired.
-	_, found := wfHasEventPrefix(drainEvents(t, s, wfID), run.EventStep, "plan-approval-required")
+	_, found := wfHasEventPrefix(drainEvents(t, s, wfID), "plan-approval-required")
 	assert.True(t, found, "a plan-approval-required event is emitted for the console")
 }
 
@@ -669,7 +669,7 @@ func TestWorkflowExecutor_Map_FanOutAndJoin(t *testing.T) {
 		assert.Equal(t, run.StatusQueued, kids[id].Status)
 	}
 	assert.Equal(t, []string{ids[0], ids[1], ids[2]}, getRun(t, s, wfID).WaitOn, "the run waits on all 3 in order")
-	assert.Equal(t, run.WaitAll, getRun(t, s, wfID).WaitMode, "WaitAll = the join (all-complete collect)")
+	assert.Equal(t, run.WaitAllFailFast, getRun(t, s, wfID).WaitMode, "completion:all → fail-fast join (collect all on success, early-wake on first failure) — ADR 0075")
 
 	// Complete the 3 items OUT OF ORDER to prove the collect is ordered by item index, not completion order.
 	assert.Nil(t, completeChildRun(t, s, ids[1], `{"v":"B"}`), "a non-final map child does not wake the parent")
@@ -692,13 +692,14 @@ func TestWorkflowExecutor_Map_FanOutAndJoin(t *testing.T) {
 	assert.Equal(t, "C", parts[2].(map[string]any)["v"], "collected[2] is item 2's output")
 }
 
-// TestWorkflowExecutor_Map_FailFast: one map item fails → the workflow fails once the fan-out is terminal, the
-// join never runs, and a still-non-terminal sibling is cancelled by the fail-fast cascade.
+// TestWorkflowExecutor_Map_FailFast: one map item fails → the workflow fails, the join never runs, and a
+// still-non-terminal sibling is cancelled by the fail-fast cascade.
 //
-// WAKE-SEMANTICS NOTE (documented, not a weakening): the m67.2 store wakes a WaitAll parent only when EVERY
-// child in its wait set is terminal — there is no first-failure wake at the store layer. So a map learns of a
-// failure when its full fan-out resolves, then fail-fasts (a failed item is never collected; the join never
-// runs). The cancel-cascade cancels any workflow child STILL non-terminal at that point — proven here by
+// WAKE-SEMANTICS NOTE (ADR 0075 §1 — completion:all now suspends WaitAllFailFast): the store now EARLY-WAKES
+// the map parent the moment the FIRST item fails (item 1 here), without waiting for the whole fan-out. On
+// resume the executor still re-reads every terminal child and fail-fasts on the failed one (a failed item is
+// never collected; the join never runs) — so the OUTCOME is identical to the old all-terminal behavior, only
+// earlier. The cancel-cascade cancels any workflow child STILL non-terminal at that point — proven here by
 // injecting a running sibling (as a parallel node would be) that the cascade cancels.
 func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	s := newWorkflowServer(t)
@@ -717,10 +718,11 @@ func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	sibling.Status = run.StatusRunning
 	require.NoError(t, s.runStore.Create(sibling))
 
-	// Item 0 succeeds; item 1 FAILS; item 2 succeeds — the fan-out is now all-terminal, so the parent wakes.
+	// Item 0 succeeds (parent stays waiting); item 1 FAILS → the fail-fast store EARLY-WAKES the parent (it no
+	// longer waits for item 2). Item 2's later completion then finds the parent no longer waiting → a no-op.
 	require.Nil(t, completeChildRun(t, s, ids[0], `{"v":"A"}`))
-	failNode(t, s, ids[1], "worker exploded on item b")
-	completeChildRun(t, s, ids[2], `{"v":"C"}`) // completes the WaitAll → wakes the parent.
+	failNode(t, s, ids[1], "worker exploded on item b") // first failure early-wakes the fail-fast parent.
+	completeChildRun(t, s, ids[2], `{"v":"C"}`)         // parent already queued → this completion is a no-op wake.
 	drive(t, s, wfID)
 
 	fin := getRun(t, s, wfID)
@@ -728,6 +730,88 @@ func TestWorkflowExecutor_Map_FailFast(t *testing.T) {
 	assert.Contains(t, fin.Error, "worker exploded on item b")
 	assert.Empty(t, fin.Messages, "the join never runs on a failed map (no collected list)")
 	assert.Equal(t, run.StatusCancelled, getRun(t, s, "sub-sibling").Status, "the non-terminal sibling is cancelled by the cascade")
+}
+
+// TestWorkflowExecutor_Map_FailFast_EarlyWakeCancelsRunningSibling proves the fail-fast SIBLING-CANCEL fires
+// BEFORE the surviving item finishes (ADR 0075 §2): item 0 fails while item 1 is STILL RUNNING → the store
+// early-wakes the parent, the executor cancel-cascades the running item, the join never runs.
+func TestWorkflowExecutor_Map_FailFast_EarlyWakeCancelsRunningSibling(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapWorkflowSpec(), `{"items":["a","b"]}`)
+	drive(t, s, wfID)
+	ids := []string{run.SpawnRunID(wfID, "fan", "map:0"), run.SpawnRunID(wfID, "fan", "map:1")}
+
+	// Item 0 FAILS while item 1 is still in flight (never completed) → fail-fast early-wakes the parent.
+	failNode(t, s, ids[0], "item a exploded")
+	assert.Equal(t, run.StatusQueued, getRun(t, s, wfID).Status, "the first failure early-wakes the fail-fast map (item 1 still in flight)")
+	assert.False(t, getRun(t, s, ids[1]).Status.IsTerminal(), "item 1 is still non-terminal (in flight) at wake time")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "the fail-fast map fails on the first item failure")
+	assert.Contains(t, fin.Error, "item a exploded")
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[1]).Status, "the still-running sibling is cancelled before it could finish")
+}
+
+// mapAnyWorkflowSpec is the map spec with completion:any (WaitAnySuccess) + a join over the collected list.
+func mapAnyWorkflowSpec() agentsv1beta1.WorkflowSpec {
+	spec := mapWorkflowSpec()
+	spec.Steps[0].Map.Completion = "any" // the "fan" node
+	return spec
+}
+
+// TestWorkflowExecutor_Map_AnySuccess_FirstWins: completion:any → the FIRST successful item is the map's
+// output (a single-element list fed to the join), the still-running siblings are cancelled, and the map
+// succeeds even though other items never completed.
+func TestWorkflowExecutor_Map_AnySuccess_FirstWins(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapAnyWorkflowSpec(), `{"items":["a","b","c"]}`)
+	drive(t, s, wfID)
+	require.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status)
+	assert.Equal(t, run.WaitAnySuccess, getRun(t, s, wfID).WaitMode, "completion:any → WaitAnySuccess")
+	ids := []string{
+		run.SpawnRunID(wfID, "fan", "map:0"),
+		run.SpawnRunID(wfID, "fan", "map:1"),
+		run.SpawnRunID(wfID, "fan", "map:2"),
+	}
+
+	// Item 1 SUCCEEDS first (items 0 and 2 still running) → any-success early-wakes the parent.
+	woke := completeChildRun(t, s, ids[1], `{"v":"WINNER"}`)
+	require.NotNil(t, woke, "the first successful item wakes the any-success map")
+	assert.Equal(t, run.StatusQueued, woke.Status)
+
+	drive(t, s, wfID)
+	// The surviving items are cancelled; the join runs over the single-element winning list.
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[0]).Status, "sibling item 0 cancelled after the first success")
+	assert.Equal(t, run.StatusCancelled, getRun(t, s, ids[2]).Status, "sibling item 2 cancelled after the first success")
+	joinChild := inFlightChild(t, s, wfID)
+	require.Equal(t, "join-agent", joinChild.Agent, "the join runs on the any-success winner")
+	var joinInput map[string]any
+	require.NoError(t, json.Unmarshal(joinChild.Input, &joinInput))
+	parts, ok := joinInput["parts"].([]any)
+	require.True(t, ok, "join.input.parts is the (single-element) collected list")
+	require.Len(t, parts, 1, "any-success feeds the join a single-element list: [winner]")
+	assert.Equal(t, "WINNER", parts[0].(map[string]any)["v"], "the collected element is the first successful item's output")
+}
+
+// TestWorkflowExecutor_Map_AnySuccess_AllFail: completion:any where EVERY item fails → exhaustion → the map
+// fails (no successful item), the join never runs.
+func TestWorkflowExecutor_Map_AnySuccess_AllFail(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, mapAnyWorkflowSpec(), `{"items":["a","b"]}`)
+	drive(t, s, wfID)
+	ids := []string{run.SpawnRunID(wfID, "fan", "map:0"), run.SpawnRunID(wfID, "fan", "map:1")}
+
+	failNode(t, s, ids[0], "a exploded") // no success yet + a sibling still running → no wake.
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "a failed item does not wake any-success while a sibling runs")
+	failNode(t, s, ids[1], "b exploded") // the LAST failure = exhaustion → wakes the parent.
+	assert.Equal(t, run.StatusQueued, getRun(t, s, wfID).Status, "exhaustion (all failed) wakes the any-success parent")
+
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "an any-success map with all items failed → the map fails")
+	assert.Contains(t, fin.Error, "all")
+	assert.Empty(t, fin.Messages, "the join never runs on an exhausted any-success map")
 }
 
 // TestWorkflowExecutor_Map_IdempotentRelaunch: re-driving a map launch (a reclaimed executor) reuses the
@@ -994,6 +1078,157 @@ func TestWorkflowExecutor_AlreadyRunning_OpeningTransitionIsNoOp(t *testing.T) {
 	drive(t, s, wfID)
 	fin := getRun(t, s, wfID)
 	require.Equal(t, run.StatusSucceeded, fin.Status, "the workflow succeeds end-to-end — m67.3 behavior unchanged")
+}
+
+// ── m83.3: error-routing edges (onError, route-only v1) ─────────────────────────────────────────────────────
+//
+// A plain node whose sub-run FAILS after exhausting its retry budget ROUTES to its onError handler step and the
+// workflow CONTINUES, instead of fail-fasting. Retries take precedence (retry first; route only on exhaustion).
+// No onError ⇒ fail-fast exactly as today (the regression guard is the existing TestWorkflowExecutor_FailFast).
+
+// onErrorSpec: a guarded node `work` (with `retries`) that routes to `handler` on failure; handler is terminal.
+func onErrorSpec(retries int32) agentsv1beta1.WorkflowSpec {
+	work := stepNode("work", "work-agent")
+	work.Retries = retries
+	work.OnError = "handler"
+	handler := stepNode("handler", "handler-agent") // terminal
+	return agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{work, handler},
+	}
+}
+
+// TestWorkflowExecutor_OnError_RoutesToHandler: a plain node whose sub-run FAILS (retries:0, so the first
+// failure exhausts the budget) with onError:handler ROUTES to the handler and runs it, then the workflow
+// completes SUCCEEDED (not failed) with the handler's output.
+func TestWorkflowExecutor_OnError_RoutesToHandler(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(0), `{}`)
+
+	// Advance 1: node "work" launches.
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	assert.Equal(t, "work-agent", work.Agent, "the guarded node launches first")
+
+	// work FAILS (no retry budget) → the executor ROUTES to the handler on the next advance.
+	failNode(t, s, work.ID, "work blew up")
+	drive(t, s, wfID)
+	handler := inFlightChild(t, s, wfID)
+	assert.Equal(t, "handler-agent", handler.Agent, "a failed node with onError routes to the handler (does not fail-fast)")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the workflow continues, parking on the handler")
+
+	// The error-routed event fired (the console surfaces the catch), NOT a node-completed for the failed node.
+	events := drainEvents(t, s, wfID)
+	_, routed := wfHasEventPrefix(events, "node-error-routed:work:handler:")
+	assert.True(t, routed, "a node-error-routed event is emitted for the console when onError catches")
+
+	// Handler completes → the workflow SUCCEEDS with the handler's output (the error was handled).
+	completeNode(t, s, handler.ID, "recovered-by-handler")
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "a handled error completes the workflow succeeded, not failed")
+	require.Len(t, fin.Messages, 1)
+	assert.Equal(t, "recovered-by-handler", fin.Messages[0].Content, "the terminal output is the handler's output")
+}
+
+// TestWorkflowExecutor_OnError_RetriesTakePrecedence: a node with retries:2 + onError fails on every attempt →
+// it retries 2 times FIRST (attempt 0 + retry:1 + retry:2), and only AFTER the budget is spent does it route
+// to the handler — proving retries take precedence over onError.
+func TestWorkflowExecutor_OnError_RetriesTakePrecedence(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(2), `{}`)
+
+	// Attempt 0 (original launch, index "0") — fails.
+	drive(t, s, wfID)
+	a0 := run.SpawnRunID(wfID, "work", "0")
+	require.Contains(t, childrenOf(t, s, wfID), a0, "attempt 0 is the original launch")
+	failNode(t, s, a0, "fail-0")
+
+	// Attempt 1 (retry:1) — the failure had retry budget, so it retried BEFORE routing.
+	drive(t, s, wfID)
+	a1 := run.SpawnRunID(wfID, "work", "retry:1")
+	require.Contains(t, childrenOf(t, s, wfID), a1, "retries take precedence: attempt 1 (retry:1) launched, not the handler")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "still retrying — not yet routed")
+	failNode(t, s, a1, "fail-1")
+
+	// Attempt 2 (retry:2) — fails.
+	drive(t, s, wfID)
+	a2 := run.SpawnRunID(wfID, "work", "retry:2")
+	require.Contains(t, childrenOf(t, s, wfID), a2, "attempt 2 (retry:2) launched — still exhausting the budget before routing")
+	failNode(t, s, a2, "fail-2")
+
+	// Budget spent (2 retries used) → NOW it routes to the handler (not fail-fast).
+	drive(t, s, wfID)
+	handler := inFlightChild(t, s, wfID)
+	assert.Equal(t, "handler-agent", handler.Agent, "only after retries are exhausted does onError route to the handler")
+
+	completeNode(t, s, handler.ID, "handled")
+	drive(t, s, wfID)
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusSucceeded, fin.Status, "after retries + handler the workflow succeeds")
+	assert.Equal(t, "handled", fin.Messages[0].Content)
+	// 3 work attempts (0, retry:1, retry:2) + 1 handler = 4 child sub-runs.
+	assert.Len(t, childrenOf(t, s, wfID), 4, "3 work attempts + 1 handler ran")
+}
+
+// TestWorkflowExecutor_NoOnError_FailFastUnchanged: the SAME failing guarded node with NO onError fail-fasts
+// (workflow failed) — byte-for-byte the pre-m83.3 behavior. This is the additive-change proof (a spec with no
+// onError behaves exactly as today).
+func TestWorkflowExecutor_NoOnError_FailFastUnchanged(t *testing.T) {
+	s := newWorkflowServer(t)
+	spec := onErrorSpec(0)
+	spec.Steps[0].OnError = "" // drop the handler edge → the old fail-fast path.
+	wfID := seedWorkflowRun(t, s, spec, `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "work blew up")
+	drive(t, s, wfID)
+
+	fin := getRun(t, s, wfID)
+	require.Equal(t, run.StatusFailed, fin.Status, "with NO onError a failed node fail-fasts the workflow (unchanged)")
+	assert.Contains(t, fin.Error, "work blew up", "the workflow surfaces the node's error, as before")
+	// Only the workflow run + the failed work node exist; the handler never launched.
+	assert.Len(t, childrenOf(t, s, wfID), 1, "no handler launched on the fail-fast path")
+}
+
+// TestWorkflowExecutor_OnError_IdempotentReroute: re-driving the routing advance (a reclaimed executor that
+// crashed after routing but before persisting the handler launch) re-derives cleanly — the handler launches
+// ONCE (deterministic id), no double-launch and no re-fail. The crash-safety guard for the onError transition.
+func TestWorkflowExecutor_OnError_IdempotentReroute(t *testing.T) {
+	s := newWorkflowServer(t)
+	wfID := seedWorkflowRun(t, s, onErrorSpec(0), `{}`)
+
+	drive(t, s, wfID)
+	work := inFlightChild(t, s, wfID)
+	failNode(t, s, work.ID, "boom")
+
+	// Advance: routes to the handler + parks on it.
+	drive(t, s, wfID)
+	handlerID := run.SpawnRunID(wfID, "handler", "0")
+	require.Contains(t, childrenOf(t, s, wfID), handlerID, "the handler launched with its deterministic id")
+
+	// Simulate a spurious re-drive (a worker that died mid-advance is re-scheduled): wake waiting→queued, drive
+	// again. The handler child is NOT yet terminal → the advance re-launches the handler, which must reuse the
+	// existing sub-run (deterministic id) and re-suspend — not double-launch, not re-fail the workflow.
+	_, err := s.runStore.Update(wfID, func(r *run.Run) error { return r.Transition(run.StatusQueued, time.Now()) })
+	require.NoError(t, err)
+	drive(t, s, wfID)
+
+	kids := childrenOf(t, s, wfID)
+	handlerCount := 0
+	for id := range kids {
+		if id == handlerID {
+			handlerCount++
+		}
+	}
+	assert.Equal(t, 1, handlerCount, "the reclaimed re-drive reused the existing handler sub-run (no double-launch)")
+	assert.Equal(t, run.StatusWaiting, getRun(t, s, wfID).Status, "the run re-suspends on the same handler (no re-fail)")
+
+	// The handler still completes the workflow normally.
+	completeNode(t, s, handlerID, "done")
+	drive(t, s, wfID)
+	assert.Equal(t, run.StatusSucceeded, getRun(t, s, wfID).Status, "the workflow completes after the idempotent reroute")
 }
 
 // itoa is a tiny int→string for building loop:<n> ids in tests without importing strconv at call sites.

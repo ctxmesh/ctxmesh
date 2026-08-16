@@ -114,6 +114,67 @@ func TestHandoff_TransfersToNewRun(t *testing.T) {
 	assert.Equal(t, "A-1", active.SourceRunID, "the pointer records the handing-off run A")
 }
 
+// boolPtr is a tiny helper for the optional include_history pointer field (m83.6).
+func boolPtr(b bool) *bool { return &b }
+
+// TestHandoff_IncludeHistoryDefaultsToReplay — the m83.6 DEFAULT-UNCHANGED proof: a handoff with NO
+// include_history (an old launcher/SDK, or an author who did not opt out) creates B with
+// HandoffSkipHistoryReplay=false, so B replays the full history exactly as before (ADR 0060 §5).
+func TestHandoff_IncludeHistoryDefaultsToReplay(t *testing.T) {
+	s, signer, store, _ := newHandoffServer(t, mkSourceRun("A-1"))
+
+	body := validHandoffBody() // no IncludeHistory field
+	require.Nil(t, body.IncludeHistory, "the default body omits include_history")
+	rec := postHandoff(t, s, mintCap(t, signer, "A-1"), body)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var resp HandoffRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	b, err := store.Get(resp.RunID)
+	require.NoError(t, err)
+	assert.False(t, b.HandoffSkipHistoryReplay,
+		"an absent include_history ⇒ B replays the full history (byte-for-byte unchanged)")
+}
+
+// TestHandoff_IncludeHistoryTrueReplays — an EXPLICIT include_history=true is the same as absent:
+// B replays the full history (no skip recorded).
+func TestHandoff_IncludeHistoryTrueReplays(t *testing.T) {
+	s, signer, store, _ := newHandoffServer(t, mkSourceRun("A-1"))
+
+	body := validHandoffBody()
+	body.IncludeHistory = boolPtr(true)
+	rec := postHandoff(t, s, mintCap(t, signer, "A-1"), body)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var resp HandoffRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	b, err := store.Get(resp.RunID)
+	require.NoError(t, err)
+	assert.False(t, b.HandoffSkipHistoryReplay, "include_history=true ⇒ replay (no skip)")
+}
+
+// TestHandoff_IncludeHistoryFalseSkipsReplay — an EXPLICIT include_history=false records the one-turn
+// skip on B (HandoffSkipHistoryReplay=true), so the run-worker will stamp X-Ctxmesh-Include-History:
+// false on B's transfer-turn invoke and B starts from A's handoff summary instead of the full thread.
+func TestHandoff_IncludeHistoryFalseSkipsReplay(t *testing.T) {
+	s, signer, store, _ := newHandoffServer(t, mkSourceRun("A-1"))
+
+	body := validHandoffBody()
+	body.IncludeHistory = boolPtr(false)
+	rec := postHandoff(t, s, mintCap(t, signer, "A-1"), body)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var resp HandoffRunResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	b, err := store.Get(resp.RunID)
+	require.NoError(t, err)
+	assert.True(t, b.HandoffSkipHistoryReplay,
+		"include_history=false ⇒ B skips the transfer-turn history replay (starts from A's summary)")
+	// Everything else about B is unchanged — still the same conversation, still queued, OBO preserved.
+	assert.Equal(t, "conv-99", b.ConversationID, "B stays on the SAME conversation")
+	assert.Equal(t, string(run.StatusQueued), string(b.Status))
+}
+
 // TestHandoff_MissingCapabilityIs401 — the route authenticates ONLY on the capability.
 func TestHandoff_MissingCapabilityIs401(t *testing.T) {
 	s, _, _, _ := newHandoffServer(t, mkSourceRun("A-1"))

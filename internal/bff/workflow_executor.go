@@ -307,19 +307,65 @@ func (s *Server) resumePlainNode(
 			return nil, false, true // load failed → already failed the workflow.
 		}
 		if !terminal {
-			s.defensiveResuspend(runID, cur.Name, []string{prog.ChildID})
+			s.defensiveResuspend(runID, cur.Name, []string{prog.ChildID}, run.WaitAll)
 			return nil, false, true
 		}
 		if child.Status != run.StatusSucceeded {
-			if s.retryNode(runID, rn, cursor, cur, prog, child) {
+			if s.retryNode(runID, rn, cursor, cur, prog) {
 				return nil, false, true // re-launched a retry attempt + re-suspended.
 			}
-			return nil, false, true // retries exhausted → fail-fasted.
+			// Retries exhausted. An onError handler ROUTES the workflow to that handler step instead of
+			// fail-fasting (AWS Step Functions Catch / Temporal); no onError ⇒ fail-fast exactly as before.
+			if cur.OnError != "" {
+				return s.routeOnError(runID, spec, cursor, cur, child)
+			}
+			s.failExhaustedNode(runID, cur, prog, child)
+			return nil, false, true // retries exhausted, no handler → fail-fasted.
 		}
 		s.recordNodeSuccess(runID, cursor.Current, prog, decodeNodeOutput(child), prog.ChildID)
 	}
 
 	return s.advanceFrom(runID, spec, cursor, cur)
+}
+
+// routeOnError transfers control from a plain node whose sub-run FAILED (retries exhausted) to its onError
+// handler step, so the workflow CONTINUES instead of fail-fasting (m83.3, route-only v1). It records the
+// guarded node as `done` (its output is null — v1 injects NO $error binding; the handler runs like any node
+// over the workflow input + prior node outputs) and returns the handler as the next node. This reuses the
+// SAME advance machinery: recording the node done + clearing Current is exactly what a normal advance does, so
+// the transition is as crash-safe as any other — a reclaim after routing re-derives cleanly (the node is
+// `done`, none in flight) and re-enters at the handler via nodeSuccessor→cursor, never double-launching or
+// re-failing. onError names an existing step (a validation invariant, defended here via stepIndex).
+func (s *Server) routeOnError(
+	runID string, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor,
+	cur *agentsv1beta1.WorkflowStep, failed *run.Run,
+) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
+	idx := stepIndex(spec, cur.OnError)
+	if idx < 0 {
+		// A dangling onError target cannot occur for a validated spec; defend it honestly rather than panic.
+		s.failWorkflow(runID, fmt.Sprintf("workflow node %q references unknown onError handler %q", cur.Name, cur.OnError))
+		return nil, false, true
+	}
+	prog := cursor.Nodes[cur.Name]
+	// Record the guarded node `done` with a null output (no $error binding in v1) — the same checkpoint a
+	// normal completion makes, so advanceFrom leaves the cursor crash-safe (node done, Current cleared next).
+	// Emit node-error-routed (NOT node-completed): the node failed, then routed to its handler.
+	markNodeDone(prog, json.RawMessage(`null`))
+	_ = s.runStore.AppendEvent(runID, run.EventStep, fmt.Sprintf("node-error-routed:%s:%s:%s", cur.Name, cur.OnError, failed.ID))
+	cursor.Current = ""
+	return &spec.Steps[idx], false, false
+}
+
+// failExhaustedNode fail-fasts the workflow after a plain node's retries are exhausted and it has NO onError
+// handler — the original fail-fast behavior (unchanged), factored out of retryNode so the caller chooses
+// route-vs-fail-fast. It cancels surviving siblings and fails the workflow with the node's error.
+func (s *Server) failExhaustedNode(runID string, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run) {
+	reason := failed.Error
+	if reason == "" {
+		reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
+	}
+	s.cancelCascade(runID)
+	s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
 }
 
 // advanceFrom computes the successor of a just-completed node and returns it (or done). It clears Current +
@@ -367,10 +413,12 @@ func (s *Server) loadTerminalChild(runID, nodeName, childID string) (child *run.
 }
 
 // defensiveResuspend re-parks the workflow run on children that are not terminal yet (the wake fired early —
-// should not happen, but proceed on a non-answer is worse). Best-effort; a fail is surfaced.
-func (s *Server) defensiveResuspend(runID, nodeName string, childIDs []string) {
-	s.log.Info("workflow: awaited node not terminal on resume; re-suspending", "run", runID, "node", nodeName, "children", childIDs)
-	if _, err := s.runStore.Suspend(runID, childIDs, run.WaitAll, nil); err != nil {
+// should not happen, but proceed on a non-answer is worse). It re-suspends under the node's REAL mode
+// (ADR 0075 §1): a fail-fast / any-success node must not silently degrade to plain WaitAll on a re-suspend,
+// or a later item outcome could fail to wake it early. Best-effort; a fail is surfaced.
+func (s *Server) defensiveResuspend(runID, nodeName string, childIDs []string, mode run.WaitMode) {
+	s.log.Info("workflow: awaited node not terminal on resume; re-suspending", "run", runID, "node", nodeName, "children", childIDs, "mode", mode)
+	if _, err := s.runStore.Suspend(runID, childIDs, mode, nil); err != nil {
 		if cur, gErr := s.runStore.Get(runID); gErr == nil && cur.Status == run.StatusWaiting {
 			return
 		}
@@ -378,10 +426,17 @@ func (s *Server) defensiveResuspend(runID, nodeName string, childIDs []string) {
 	}
 }
 
-// recordNodeSuccess marks a node done with its decoded output + emits the node-completed event.
-func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, output json.RawMessage, childID string) {
+// markNodeDone records a node's cursor state as done(output) WITHOUT emitting any event — the pure
+// checkpoint. recordNodeSuccess wraps it with the node-completed event; the onError route wraps it with its
+// own node-error-routed event (a failed node did not "complete", so it must not emit node-completed).
+func markNodeDone(prog *nodeProgress, output json.RawMessage) {
 	prog.Output = output
 	prog.State = cursorDone
+}
+
+// recordNodeSuccess marks a node done with its decoded output + emits the node-completed event.
+func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, output json.RawMessage, childID string) {
+	markNodeDone(prog, output)
 	// Emit node-completed with the child run id so the SSE stream surfaces per-node completion (m67.4).
 	_ = s.runStore.AppendEvent(runID, run.EventStep, "node-completed:"+nodeName+":"+childID)
 }
@@ -389,21 +444,16 @@ func (s *Server) recordNodeSuccess(runID, nodeName string, prog *nodeProgress, o
 // retryNode re-launches a plain node's FAILED sub-run as a fresh attempt when the node has retry budget left
 // (Attempts < node.Retries), using iterationIndex "retry:<attempt>" (a NEW sub-run — a retry is a new attempt,
 // never a re-read of the failed run) and re-suspends on it. Returns true when it retried; false when retries
-// are exhausted (having ALREADY fail-fasted the workflow). Retries default off (0) → the first failure is
-// fail-fast (Attempts starts at 0 = the original launch).
+// are EXHAUSTED — the caller (resumePlainNode) then chooses route-on-error vs fail-fast (retries take
+// precedence: a node routes/fail-fasts only after its budget is spent). retryNode NO LONGER fail-fasts on
+// exhaustion; failExhaustedNode / routeOnError own that decision. Retries default off (0) → the first failure
+// is a route/fail-fast (Attempts starts at 0 = the original launch).
 func (s *Server) retryNode(
 	runID string, rn *run.Run, cursor *workflowCursor,
-	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, failed *run.Run,
+	cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
 ) (retried bool) {
 	if prog.Attempts >= int(cur.Retries) {
-		// Retries exhausted (or none configured) → fail-fast + cancel any siblings.
-		reason := failed.Error
-		if reason == "" {
-			reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
-		}
-		s.cancelCascade(runID)
-		s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
-		return false
+		return false // retries exhausted (or none configured) → the caller routes-on-error or fail-fasts.
 	}
 
 	attempt := prog.Attempts + 1 // the next attempt (1-based for retries; attempt 0 was the original).
@@ -423,7 +473,7 @@ func (s *Server) retryNode(
 	prog.State = cursorLaunched
 	prog.ChildID = childID
 	prog.Attempts = attempt
-	return s.suspendOnChildren(runID, cur.Name, []string{childID}, cursor)
+	return s.suspendOnChildren(runID, cur.Name, []string{childID}, run.WaitAll, cursor)
 }
 
 // evalNextNode picks a node's successor: the first branch whose `when` CEL is true → its `to`; else the
@@ -496,21 +546,22 @@ func (s *Server) enterPlainNode(
 	}
 	cursor.Nodes[node.Name] = &nodeProgress{State: cursorLaunched, ChildID: childID}
 	cursor.Current = node.Name
-	s.suspendOnChildren(runID, node.Name, []string{childID}, cursor)
+	s.suspendOnChildren(runID, node.Name, []string{childID}, run.WaitAll, cursor)
 }
 
-// suspendOnChildren records the cursor + SUSPENDS the workflow run on the given child ids (WaitAll — every
-// child terminal, which for one child is "the child terminal", for a map's N children is the join semantics).
-// The cursor is checkpointed under the same row lock as the suspend (Suspend's fn). Returns true on success;
-// false when it already fail-fasted. An already-`waiting` run (a reclaim re-suspending) is benign + idempotent.
+// suspendOnChildren records the cursor + SUSPENDS the workflow run on the given child ids under `mode`.
+// A plain node passes WaitAll (WaitAll-of-1 = "the child terminal"); a map node passes its outcome-aware
+// mode (WaitAllFailFast for completion:all, WaitAnySuccess for completion:any — ADR 0075 §1). The cursor
+// is checkpointed under the same row lock as the suspend (Suspend's fn). Returns true on success; false
+// when it already fail-fasted. An already-`waiting` run (a reclaim re-suspending) is benign + idempotent.
 // A node-started event is emitted per launched child for the console SSE.
-func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, cursor *workflowCursor) bool {
+func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, mode run.WaitMode, cursor *workflowCursor) bool {
 	cursorJSON, err := cursor.marshal()
 	if err != nil {
 		s.failWorkflow(runID, fmt.Sprintf("workflow node %q: encoding cursor: %v", nodeName, err))
 		return false
 	}
-	if _, err := s.runStore.Suspend(runID, childIDs, run.WaitAll, func(r *run.Run) error {
+	if _, err := s.runStore.Suspend(runID, childIDs, mode, func(r *run.Run) error {
 		r.Cursor = cursorJSON
 		return nil
 	}); err != nil {
@@ -618,6 +669,8 @@ func (s *Server) enterMapNode(
 	cursor.Current = node.Name
 
 	// An EMPTY list is a valid map: no children to wait on → collect the empty list + advance to the join now.
+	// (This is the same for completion:all and completion:any — a map over nothing yields the empty list; a
+	// suspend on an empty wait set is rejected by the store anyway.)
 	if len(children) == 0 {
 		s.recordNodeSuccess(runID, node.Name, prog, json.RawMessage(`[]`), "")
 		next, done, _ := s.advanceFrom(runID, spec, cursor, node)
@@ -629,12 +682,36 @@ func (s *Server) enterMapNode(
 		return
 	}
 
-	s.suspendOnChildren(runID, node.Name, children, cursor)
+	s.suspendOnChildren(runID, node.Name, children, mapWaitMode(node.Map), cursor)
 }
 
-// resumeMapNode collects a map node's item outputs once EVERY item sub-run is terminal. Any failed item →
-// fail-fast + cancel the siblings (the still-running items). All succeeded → the ordered list of outputs is the
-// map node's output; the successor is the map's `join` step (or terminal when no join).
+// mapWaitMode maps a map node's `completion` to the outcome-aware wake mode the fan-out suspends under
+// (ADR 0075 §1). completion:all (the default, and any unknown/blank value from an older snapshot) →
+// WaitAllFailFast: collect every item on full success, but wake the moment the first item fails/cancels
+// so resumeMapNode can cancel the doomed siblings and fail. completion:any → WaitAnySuccess: wake on the
+// first successful item (resumeMapNode collects it + cancels the rest), else on full exhaustion (fail).
+func mapWaitMode(m *agentsv1beta1.WorkflowMap) run.WaitMode {
+	if m != nil && m.Completion == mapCompletionAny {
+		return run.WaitAnySuccess
+	}
+	return run.WaitAllFailFast
+}
+
+// mapCompletionAny is the map.completion value that selects the any-success (first-winner) wake mode; the
+// default/blank/"all" value selects the fail-fast all-collect mode (mapWaitMode). Kept as a const so the
+// executor's two uses (mapWaitMode + resumeMapNode's dispatch) can't drift on the literal.
+const mapCompletionAny = "any"
+
+// resumeMapNode folds a map node's item sub-runs into the cursor per the node's `completion` mode (ADR 0075
+// §1). It re-reads every child and derives the outcome from their persisted statuses — a wake is a reason-free
+// KICK, so this never depends on WHY it woke. completion:any dispatches to resumeMapNodeAny; completion:all
+// (the default) is the fail-fast join below.
+//
+// completion:all (WaitAllFailFast) — the FIRST failed/cancelled item fail-fasts: cancel the surviving siblings
+// + fail the workflow (the store now early-wakes on that first failure, so this fires sooner than a full join,
+// but the OUTCOME is identical to the old all-terminal behavior — fail on any failure, collect all on success).
+// Every item succeeded → the ordered JSON list of outputs is the map's output; the successor is `join` (or
+// terminal when no join).
 func (s *Server) resumeMapNode(
 	runID string, spec *agentsv1beta1.WorkflowSpec,
 	cursor *workflowCursor, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress,
@@ -646,6 +723,10 @@ func (s *Server) resumeMapNode(
 	if mp == nil {
 		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: cursor has no map progress", cur.Name))
 		return nil, false, true
+	}
+
+	if cur.Map != nil && cur.Map.Completion == mapCompletionAny {
+		return s.resumeMapNodeAny(runID, spec, cursor, cur, prog, mp)
 	}
 
 	collected := make([]json.RawMessage, len(mp.Children))
@@ -672,8 +753,10 @@ func (s *Server) resumeMapNode(
 		collected[i] = decodeNodeOutput(child)
 	}
 	if !allTerminal {
-		// The wake fired before every item is terminal (WaitAll should prevent this) — re-suspend defensively.
-		s.defensiveResuspend(runID, cur.Name, mp.Children)
+		// The wake fired before every item is terminal (a spurious/early kick under fail-fast when the FIRST
+		// terminal child succeeded) — re-suspend defensively under the node's real mode so a later failure
+		// still wakes us early.
+		s.defensiveResuspend(runID, cur.Name, mp.Children, run.WaitAllFailFast)
 		return nil, false, true
 	}
 
@@ -686,6 +769,52 @@ func (s *Server) resumeMapNode(
 	mp.Collected = collected
 	s.recordNodeSuccess(runID, cur.Name, prog, list, "")
 	return s.advanceFrom(runID, spec, cursor, cur)
+}
+
+// resumeMapNodeAny is the completion:any (WaitAnySuccess) collect: the FIRST successful item is the map's
+// output (its output is fed forward as a SINGLE-ELEMENT JSON list `[output]` — the map's output shape is a
+// list for all completion modes, so a `join` step consumes it identically whether one item or all N were
+// collected; the any-of winner is just a 1-element collection). It cancel-cascades the still-running siblings.
+// If EVERY item is terminal with NONE succeeded (exhaustion — all failed/cancelled), the map fails. If the
+// wake fired before any success AND some items are still running (the store only early-wakes on a success or
+// full exhaustion, so this is a spurious/reclaim kick), it re-suspends defensively under WaitAnySuccess.
+func (s *Server) resumeMapNodeAny(
+	runID string, spec *agentsv1beta1.WorkflowSpec,
+	cursor *workflowCursor, cur *agentsv1beta1.WorkflowStep, prog *nodeProgress, mp *mapProgress,
+) (next *agentsv1beta1.WorkflowStep, done, consumed bool) {
+	allTerminal := true
+	for i, cid := range mp.Children {
+		child, ok, terminal := s.loadTerminalChild(runID, cur.Name, cid)
+		if !ok {
+			return nil, false, true // load failed → already failed the workflow.
+		}
+		if !terminal {
+			allTerminal = false
+			continue
+		}
+		if child.Status == run.StatusSucceeded {
+			// FIRST success wins: its output (a single-element list) is the map's output; cancel the rest.
+			out := decodeNodeOutput(child)
+			s.cancelCascade(runID)
+			list, err := json.Marshal([]json.RawMessage{out})
+			if err != nil {
+				s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: encoding winning item %d output: %v", cur.Name, i, err))
+				return nil, false, true
+			}
+			mp.Collected = []json.RawMessage{out}
+			s.recordNodeSuccess(runID, cur.Name, prog, list, mp.Children[i])
+			return s.advanceFrom(runID, spec, cursor, cur)
+		}
+	}
+	if allTerminal {
+		// EXHAUSTION: every item is terminal and none succeeded → the any-of has no winner → fail the map.
+		s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: all %d items failed (completion: any, no successful item)", cur.Name, len(mp.Children)))
+		return nil, false, true
+	}
+	// No success yet, some items still running → re-suspend defensively under the node's real mode so the
+	// next success (or the last failure = exhaustion) wakes us. This covers a reclaim/spurious kick.
+	s.defensiveResuspend(runID, cur.Name, mp.Children, run.WaitAnySuccess)
+	return nil, false, true
 }
 
 // mapDoStep resolves a map node's `do` step (the per-item work). A dangling do is a validation invariant
@@ -800,7 +929,7 @@ func (s *Server) resumeLoopNode(
 		return nil, false, true
 	}
 	if !terminal {
-		s.defensiveResuspend(runID, cur.Name, []string{lp.ChildID})
+		s.defensiveResuspend(runID, cur.Name, []string{lp.ChildID}, run.WaitAll)
 		return nil, false, true
 	}
 	if child.Status != run.StatusSucceeded {
@@ -869,7 +998,7 @@ func (s *Server) launchLoopIteration(
 	}
 	prog.State = cursorLaunched
 	prog.Loop.ChildID = childID
-	s.suspendOnChildren(runID, node.Name, []string{childID}, cursor)
+	s.suspendOnChildren(runID, node.Name, []string{childID}, run.WaitAll, cursor)
 }
 
 // evalLoopUntil evaluates a loop node's `until` predicate over the workflow input + prior node outputs + the

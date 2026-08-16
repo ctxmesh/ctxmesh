@@ -68,6 +68,16 @@ const MESSAGE_HEADER = "X-Message-Id";
 /** X-Ctxmesh-Spawn-Depth (m65.6, ADR 0058) — the delegation depth stamped by the BFF. */
 const SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth";
 
+/**
+ * X-Ctxmesh-Include-History (m83.6) — the handoff INPUT FILTER the BFF stamps on the target
+ * agent B's FIRST /invoke after a `handoff_to include_history=false`. Value "false" ⇒ B does NOT
+ * replay the prior conversation history on THIS transfer turn (A handed off with a SUMMARY, the
+ * handoff `message`, so B starts from that instead of the full raw thread). It only rides B's
+ * transfer invoke; every subsequent user turn replays normally. Absent / any non-"false" value ⇒
+ * replay as today (default include_history=true — byte-for-byte unchanged).
+ */
+const INCLUDE_HISTORY_HEADER = "X-Ctxmesh-Include-History";
+
 /** The most recent conversation messages the loop replays as context on each turn. */
 const MAX_HISTORY_MESSAGES = 40;
 
@@ -102,6 +112,17 @@ function spawnDepthFromHeaders(headers: Record<string, string> | undefined): num
   if (!raw) return 0;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Read the handoff INPUT FILTER (X-Ctxmesh-Include-History, m83.6) from inbound headers. Returns
+ * `false` ONLY when the BFF stamped the header with the literal "false" (a `handoff_to
+ * include_history=false` transfer turn — B skips replaying the prior thread and starts from A's
+ * summary). Absent, blank, or any other value ⇒ `true` (the default: replay the full history as
+ * today), so a normal invoke and a default handoff are byte-for-byte unchanged. Case-insensitive.
+ */
+function includeHistoryFromHeaders(headers: Record<string, string> | undefined): boolean {
+  return headerValue(headers, INCLUDE_HISTORY_HEADER).toLowerCase() !== "false";
 }
 
 /**
@@ -809,7 +830,13 @@ export async function runManagedLoop(
   const messageId = messageIdFromHeaders(headers);
   const spawnDepth = spawnDepthFromHeaders(headers);
   const threaded = Boolean(conversationId) && client.config.memoryWired;
-  const history = threaded
+  // Handoff input filter (m83.6): on a `handoff_to include_history=false` TRANSFER turn the BFF
+  // stamps X-Ctxmesh-Include-History: false, so B starts from A's handoff SUMMARY instead of
+  // replaying the full raw thread. This gates the READ side ONLY — `threaded` still governs
+  // PERSISTENCE, so B stays memory-wired on the shared conversation and this transfer turn is still
+  // persisted; every subsequent user turn (no header) replays normally. Default ⇒ replay as today.
+  const replayHistory = threaded && includeHistoryFromHeaders(headers);
+  const history = replayHistory
     ? await loadHistory(client, conversationId, config.maxHistoryMessages)
     : [];
 
@@ -1196,33 +1223,42 @@ async function dispatchHandoff(
   const args = parseArguments(call.function?.arguments);
   const target = String(args["target_agent"] ?? "");
   const message = String(args["message"] ?? "");
+  // Handoff input filter (m83.6): default true (replay B's full history, today's behavior). Only an
+  // EXPLICIT false disables it (hand off with `message` as a summary; B skips the full-history
+  // replay on the transfer turn). A missing / non-bool arg keeps the default — old-shape handoff
+  // unchanged.
+  const includeHistory = args["include_history"] !== false;
   if (!target) {
     return { ok: "false", targetAgent: "", error: "handoff_to requires a 'target_agent'" };
   }
-  return client.trace.tool(HANDOFF_TOOL_NAME, { target_agent: target, message }, async (span) => {
-    let resp: Record<string, unknown>;
-    try {
-      resp = await client.tools.handoff(target, message);
-    } catch (err) {
-      if (err instanceof EndpointError) {
-        span.setOutput({ ok: false, error: err.message });
-        return { ok: "false", targetAgent: target, error: `handoff failed: ${err.message}` };
+  return client.trace.tool(
+    HANDOFF_TOOL_NAME,
+    { target_agent: target, message, include_history: includeHistory },
+    async (span) => {
+      let resp: Record<string, unknown>;
+      try {
+        resp = await client.tools.handoff(target, message, includeHistory);
+      } catch (err) {
+        if (err instanceof EndpointError) {
+          span.setOutput({ ok: false, error: err.message });
+          return { ok: "false", targetAgent: target, error: `handoff failed: ${err.message}` };
+        }
+        throw err;
       }
-      throw err;
-    }
-    span.setOutput(resp);
-    const out: Record<string, string> = {
-      targetAgent: target,
-      ok: resp["ok"] ? "true" : "false",
-    };
-    if (resp["ok"]) {
-      out["runId"] = String(resp["runId"] ?? "");
-      out["sourceRun"] = String(resp["sourceRun"] ?? "");
-    } else {
-      out["error"] = String(resp["error"] ?? "unknown error");
-    }
-    return out;
-  });
+      span.setOutput(resp);
+      const out: Record<string, string> = {
+        targetAgent: target,
+        ok: resp["ok"] ? "true" : "false",
+      };
+      if (resp["ok"]) {
+        out["runId"] = String(resp["runId"] ?? "");
+        out["sourceRun"] = String(resp["sourceRun"] ?? "");
+      } else {
+        out["error"] = String(resp["error"] ?? "unknown error");
+      }
+      return out;
+    },
+  );
 }
 
 /** Dispatch a knowledge_search call (M68, ADR 0061 Fork 3) via client.knowledge.search. */

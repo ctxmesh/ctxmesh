@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS runs (
     wait_mode        text NOT NULL DEFAULT '',
     handed_off_to    text NOT NULL DEFAULT '',
     handoff_source_run_id text NOT NULL DEFAULT '',
+    handoff_skip_history_replay boolean NOT NULL DEFAULT false,
     ingestion_ref    text NOT NULL DEFAULT '',
     ingestion_spec   text NOT NULL DEFAULT '',
     outcome          text NOT NULL DEFAULT '',
@@ -136,6 +137,11 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS handed_off_to text NOT NULL DEFAULT ''
 -- Handoff backlink (M67, ADR 0060 §5): B's run records the run (A) whose handoff_to created it, since
 -- a transferred run is a NEW ROOT with no parent_run_id. Default '' ⇒ not created by a handoff.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS handoff_source_run_id text NOT NULL DEFAULT '';
+-- Handoff input filter (m83.6): a target run B created by a handoff_to with include_history=false
+-- carries this flag so the run-worker stamps X-Ctxmesh-Include-History: false on B's transfer-turn
+-- /invoke and the SDK skips the full-history replay (B starts from A's summary). Default false ⇒
+-- replay the full history (ADR 0060 §5 default), so old rows + a default handoff load unchanged.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS handoff_skip_history_replay boolean NOT NULL DEFAULT false;
 -- Ingestion job (M68, ADR 0061 Fork 2): an ingestion run pins its IngestionRef (the KB name) + resolved
 -- IngestionSpec (source/embeddingRoute/chunking/doc-keys), routed to executeIngestion by IsIngestionJob().
 -- outcome carries the executor-written terminal outcome (counts + partial flag + coded reason) — the m68.10
@@ -203,8 +209,9 @@ func (p *pgStore) Create(r *Run) error {
 		 caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		 parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		 workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		 node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec, version, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,1,$34,$35)
+		 node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec,
+		 handoff_skip_history_replay, version, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,1,$35,$36)
 		ON CONFLICT (id) DO NOTHING`
 	res, err := p.db.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
@@ -212,7 +219,8 @@ func (p *pgStore) Create(r *Run) error {
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
 		r.ParentRunID, r.RootRunID, r.SpawnDepth, nullableString(r.OutputSchema), r.Record,
 		r.WorkflowRef, r.SpecSnapshot, r.Cursor, waitOn, string(r.WaitMode), r.HandedOffTo, r.HandoffSourceRunID,
-		nodeEndpoints, r.IngestionRef, r.IngestionSpec, r.Outcome, r.ExportRef, r.ExportSpec, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
+		nodeEndpoints, r.IngestionRef, r.IngestionSpec, r.Outcome, r.ExportRef, r.ExportSpec,
+		r.HandoffSkipHistoryReplay, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("run: insert: %w", err)
 	}
@@ -277,7 +285,8 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
-		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec, version, created_at, updated_at
+		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec,
+		handoff_skip_history_replay, version, created_at, updated_at
 		FROM runs WHERE id=$1`
 	var (
 		r             Run
@@ -299,7 +308,8 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema, &r.Record,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
-		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &r.ExportRef, &r.ExportSpec, &version, &created, &updated)
+		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &r.ExportRef, &r.ExportSpec,
+		&r.HandoffSkipHistoryReplay, &version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, 0, ErrNotFound
@@ -580,7 +590,7 @@ func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply 
 		case gErr != nil:
 			return nil, nil, gErr
 		case parent.Status == StatusWaiting:
-			met, removed := parent.satisfyChild(childID)
+			met, removed := parent.satisfyChild(childID, child.Status)
 			if removed {
 				pOld := parent.Status
 				if met {
@@ -673,29 +683,26 @@ func (p *pgStore) sweepOne(ctx context.Context, id string) (bool, error) {
 	return requeued, nil
 }
 
-// waitMet reports whether a waiting run's condition is met by its children's persisted statuses.
-// all → every WaitOn child is terminal (a missing child counts as satisfied — it can never wake us);
-// any → at least one is terminal. Read on the pool (advisory); the caller re-checks under the lock.
+// waitMet is the Postgres sweep adapter: it reads the run's WaitOn children's persisted statuses (a
+// MISSING child row → StatusCancelled, per waitSatisfied's contract — a non-success terminal, never a
+// success) and defers the decision to the SINGLE predicate waitSatisfied. There is NO second copy of the
+// mode logic here — the hot path (satisfyChild) and the sweep must agree, and a property test pins it.
+// Read on the pool (advisory); the caller re-checks under the row lock.
 func (p *pgStore) waitMet(ctx context.Context, r *Run) (bool, error) {
-	terminal := 0
-	for _, cid := range r.WaitOn {
+	statuses := make([]Status, len(r.WaitOn))
+	for i, cid := range r.WaitOn {
 		var status string
 		err := p.db.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=$1`, cid).Scan(&status)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			terminal++ // missing child → satisfied
+			statuses[i] = StatusCancelled // a missing child ⇒ cancelled-equivalent (never a success)
 		case err != nil:
 			return false, fmt.Errorf("run: sweep child status: %w", err)
 		default:
-			if Status(status).IsTerminal() {
-				terminal++
-			}
+			statuses[i] = Status(status)
 		}
 	}
-	if r.WaitMode == WaitAny {
-		return terminal > 0, nil
-	}
-	return terminal == len(r.WaitOn), nil
+	return waitSatisfied(r.WaitMode, statuses), nil
 }
 
 // lockRunsOrdered acquires FOR UPDATE row locks on the given run ids in a single statement, ordered

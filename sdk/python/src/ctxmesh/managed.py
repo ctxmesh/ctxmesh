@@ -87,6 +87,16 @@ MESSAGE_HEADER = "X-Message-Id"
 #: (pausing a sub-run hangs the supervisor's synchronous await — fail-closed deny instead).
 SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth"
 
+#: X-Ctxmesh-Include-History (m83.6) — the handoff INPUT FILTER the BFF stamps on the target
+#: agent B's FIRST /invoke after a `handoff_to include_history=false`. Value "false" ⇒ B does NOT
+#: replay the prior conversation history on THIS transfer turn: A handed off with a SUMMARY (the
+#: handoff `message`), so B starts from that summary instead of the full raw thread (token-cheap on
+#: a long chat). It is a ONE-TURN signal — it only rides B's transfer invoke; every SUBSEQUENT user
+#: turn to B has no header and replays normally. B stays memory-wired on the SAME conversationId
+#: (this turn is still PERSISTED); only the read-side replay is skipped. Absent / any value other
+#: than "false" ⇒ replay as today (default include_history=true — byte-for-byte unchanged).
+INCLUDE_HISTORY_HEADER = "X-Ctxmesh-Include-History"
+
 #: The most recent conversation messages the loop replays as context on each turn.
 #: Bounds the prompt so a long chat can't grow the context without limit — older turns
 #: fall out of the window (the memory plane still retains the full history).
@@ -127,6 +137,18 @@ def _spawn_depth_from_headers(headers: Optional[Dict[str, str]]) -> int:
         return int(raw)
     except ValueError:
         return 0
+
+
+def _include_history_from_headers(headers: Optional[Dict[str, str]]) -> bool:
+    """Read the handoff INPUT FILTER (X-Ctxmesh-Include-History, m83.6) from inbound *headers*.
+
+    Returns ``False`` ONLY when the BFF stamped the header with the literal ``"false"`` (a
+    ``handoff_to include_history=false`` transfer turn — B skips replaying the prior thread and
+    starts from A's summary). Absent, blank, or any other value ⇒ ``True`` — the DEFAULT (replay
+    the full history as today), so a normal invoke and a default handoff are byte-for-byte
+    unchanged. Case-insensitive on the value so "False"/"FALSE" also disable replay.
+    """
+    return _header_value(headers, INCLUDE_HISTORY_HEADER).lower() != "false"
 
 
 def mint_conversation_id() -> str:
@@ -794,8 +816,17 @@ def run_managed_loop(
     # coordination is the m52.J2 deferral). None when no breaker is configured (unchanged).
     breaker = _make_breaker(config.resilience)
     threaded = bool(conversation_id) and client.config.memory_wired
+    # Handoff input filter (m83.6): on a `handoff_to include_history=false` TRANSFER turn the BFF
+    # stamps X-Ctxmesh-Include-History: false, so B starts from A's handoff SUMMARY instead of
+    # replaying the full raw thread (token-cheap on a long chat). This gates the READ side ONLY —
+    # `threaded` still governs PERSISTENCE, so B stays memory-wired on the shared conversation and
+    # this transfer turn is still persisted; every subsequent user turn (no header) replays
+    # normally. Default (absent / "true") ⇒ replay as today, byte-for-byte unchanged.
+    replay_history = threaded and _include_history_from_headers(headers)
     history = (
-        _load_history(client, conversation_id, config.max_history_messages) if threaded else []
+        _load_history(client, conversation_id, config.max_history_messages)
+        if replay_history
+        else []
     )
 
     # Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a per-run UNPREDICTABLE
@@ -991,13 +1022,21 @@ def _dispatch_handoff(client: Client, call: Dict[str, Any]) -> Dict[str, str]:
     args = _parse_arguments(_call_arguments(call))
     target = str(args.get("target_agent", ""))
     message = str(args.get("message", ""))
+    # Handoff input filter (m83.6): default True (replay B's full history, today's behavior). The
+    # model sets include_history=false to hand off with a SUMMARY (the `message`) so B skips the
+    # full-history replay on the transfer turn. Only an EXPLICIT False disables it — a missing /
+    # non-bool arg keeps the default, so an old-shape handoff is unchanged.
+    include_history = args.get("include_history", True) is not False
     if not target:
         return {"ok": "false", "targetAgent": "", "error": "handoff_to requires a 'target_agent'"}
     with client.trace.tool(
-        HANDOFF_TOOL_NAME, input={"target_agent": target, "message": message}
+        HANDOFF_TOOL_NAME,
+        input={"target_agent": target, "message": message, "include_history": include_history},
     ) as span:
         try:
-            resp = client.tools.handoff(target_agent=target, message=message)
+            resp = client.tools.handoff(
+                target_agent=target, message=message, include_history=include_history
+            )
         except EndpointError as exc:
             # The launcher-local handoff edge was unreachable (down / slow / a non-200). Like a
             # delegate failure, this is an OUTCOME the loop records as ok=false — NEVER a raise that
