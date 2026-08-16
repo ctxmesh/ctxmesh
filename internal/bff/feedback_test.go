@@ -227,6 +227,7 @@ func TestFeedbackRouteServesScores(t *testing.T) {
 			{ID: "sc-2", TraceID: "t1", Name: "label", DataType: "CATEGORICAL", StringValue: "good", Source: "REVIEW", CreatedAt: "2026-07-01T00:01:00Z"},
 		},
 	}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feedback?traceId=t1", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -256,6 +257,7 @@ func TestFeedbackRouteMissingTraceIDReturns400(t *testing.T) {
 // the handler returns 200 with {scores:[]} so the panel can show "no feedback yet".
 func TestFeedbackRouteEmptyScoresReturns200(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{scores: []FeedbackScore{}}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feedback?traceId=t1", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -283,6 +285,7 @@ func TestFeedbackRouteLangfuseAbsentReturns501(t *testing.T) {
 // never a 500 (programming error) and never a fabricated 200 (honest degrade).
 func TestFeedbackRouteUpstreamFailureReturns502(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{scoresErr: assert.AnError}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feedback?traceId=t1", nil))
 	assert.Equal(t, http.StatusBadGateway, rec.Code,
@@ -299,6 +302,7 @@ func TestFeedbackResponseScoresNonNullWhenAdapterReturnsNil(t *testing.T) {
 	// The nil path is covered by the handler coercion (scores == nil → []).
 	// We test it by wiring a fake that does return nil.
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{scores: nil}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feedback?traceId=t1", nil))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -311,6 +315,7 @@ func TestFeedbackResponseScoresNonNullWhenAdapterReturnsNil(t *testing.T) {
 // application/json (never text/plain or missing), matching all other BFF endpoints.
 func TestFeedbackResponseContentType(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{}})
+	seedRunForTrace(t, s, "t1")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feedback?traceId=t1", nil))
 	require.Equal(t, http.StatusOK, rec.Code)

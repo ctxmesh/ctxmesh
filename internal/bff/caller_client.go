@@ -86,6 +86,13 @@ type PodLogAccessor interface {
 // This is the single choke point through which every user-facing CRD op obtains
 // its client, so no handler can accidentally reach for a static SA client.
 func (s *Server) callerClient(w http.ResponseWriter, r *http.Request) (client.Client, bool) {
+	// Defensive: some routes (the Langfuse-backed runs/traces/feedback handlers) are wired on the trace
+	// adapter's presence, not the cluster path's. If the caller-scoped factory isn't configured, refuse
+	// rather than nil-panic — a handler that needs the caller's identity cannot serve without it (501).
+	if s.callerClients == nil {
+		writeError(w, http.StatusNotImplemented, "caller-scoped cluster access is not configured")
+		return nil, false
+	}
 	c, err := s.callerClients.ForRequest(r)
 	if err != nil {
 		if err == errUnauthenticated {

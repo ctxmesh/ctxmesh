@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/sharedrun"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -137,18 +138,25 @@ func (s *Server) registerShareRoutes(authed *http.ServeMux) {
 	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", notImplemented("run shares"))
 }
 
-// authorizeShareForRun is the mint/manage authorization gate (ADR 0069 §1 — the crux). A share is a
-// DELEGATION of read access to a run, so the caller MUST be able to access that run before they can mint /
-// list / revoke a public link for it. The authoritative check is the SAME caller-scoped AgentDeployment
-// GET that run-create (ADR 0011) required — the caller's OWN RBAC on the run's agent, in the run's
-// namespace, gates it. This is strictly stronger than "authenticated" (which is all handleGetRun requires,
-// and is NOT sufficient to mint a public link) and, being caller-scoped, needs no BFF-SA RBAC grant. A
-// forbidden/absent agent → 403/404 (uniform with resolveAgent). It returns the resolved run + ok.
+// authorizeRunAccess is the caller-scoped authorization gate for a single run (ADR 0011). Every user-facing
+// run read/mutate — GET a run, cancel it, stream its events, view its trace detail / feedback, and mint /
+// list / revoke a public share of it — MUST prove the caller can access that run first, on the caller's OWN
+// token (never the BFF SA, which has rules:[]). This is strictly stronger than "presence of a bearer" (the
+// edge auth alone never validates the token; only a real K8s API call on the caller token does — see
+// auth.go BearerAuthenticator). It returns the resolved run + ok. runID may be a run.ID or a traceId (the
+// trace-detail page identifies a run by traceId); both resolve here.
 //
-// Ownership note: the run's CallerUsername (its creator) is ALSO a legitimate sharer, but agent-access is
-// the broader, correct gate — an operator with read on the agent may legitimately share a run they did not
-// personally create, exactly as they can already GET it. We authorize on agent access, not creator-match.
-func (s *Server) authorizeShareForRun(w http.ResponseWriter, r *http.Request, caller client.Client, runID string) (*run.Run, bool) {
+// allowOwner selects the policy:
+//   - true (run READS/cancel/events/trace/feedback): the run's CREATOR (CallerUsername, resolved via a
+//     token-validating SelfSubjectReview) is authorized to read their own run even without current RBAC on
+//     the backing resource; a non-creator falls to the RBAC gate (operator-investigation).
+//   - false (share MINT/list/revoke): creator-match is NOT sufficient — delegating PUBLIC access requires
+//     CURRENT RBAC on the run's backing resource (ADR 0069 §1: an operator with read on the agent may share a
+//     run they did not personally create; a former creator who lost access may not). Only the RBAC gate runs.
+//
+// A forbidden/absent backing resource → 403/404 (uniform with resolveAgent, no oracle on whether the run or
+// the backing resource is the missing one).
+func (s *Server) authorizeRunAccess(w http.ResponseWriter, r *http.Request, caller client.Client, runID string, allowOwner bool) (*run.Run, bool) {
 	// Resolve the run by its internal ID first; if not found, fall back to traceId. The
 	// trace-detail page (/traces/:id) identifies a run by traceId, which is DISTINCT from
 	// run.ID, so the Share button on that page passes a traceId — not the internal ID. We
@@ -157,14 +165,14 @@ func (s *Server) authorizeShareForRun(w http.ResponseWriter, r *http.Request, ca
 	rn, err := s.runStore.Get(runID)
 	if err != nil {
 		if !errors.Is(err, run.ErrNotFound) {
-			s.log.Error(err, "share: run store read failed", "id", runID)
+			s.log.Error(err, "authorize run access: run store read failed", "id", runID)
 			writeError(w, http.StatusInternalServerError, "failed to read run")
 			return nil, false
 		}
 		// Not found by run.ID — try traceId fallback.
 		rn, err = s.runStore.GetByTraceID(runID)
 		if err != nil {
-			s.log.Error(err, "share: run store trace-id lookup failed", "traceId", runID)
+			s.log.Error(err, "authorize run access: run store trace-id lookup failed", "traceId", runID)
 			writeError(w, http.StatusInternalServerError, "failed to read run")
 			return nil, false
 		}
@@ -173,26 +181,75 @@ func (s *Server) authorizeShareForRun(w http.ResponseWriter, r *http.Request, ca
 			return nil, false
 		}
 	}
-	// Caller-scoped authz: read the run's AgentDeployment through the CALLER'S client. Their RBAC — not
-	// the BFF's — is the gate (ADR 0011). A denial is an honest 403; a missing agent a 404.
-	var deploy agentsv1alpha1.AgentDeployment
-	if gErr := caller.Get(r.Context(), client.ObjectKey{Name: rn.Agent, Namespace: rn.Namespace}, &deploy); gErr != nil {
-		switch {
-		case apierrors.IsForbidden(gErr):
-			writeError(w, http.StatusForbidden, "forbidden: you do not have access to this run's agent")
-		case apierrors.IsUnauthorized(gErr):
+	// Caller-scoped authz (ADR 0011) — two gates, both on the CALLER's own token (never the BFF SA):
+	//
+	// (1) Ownership. callerUsername issues a SelfSubjectReview, which BOTH validates the token AND yields the
+	//     caller identity; a match against the run's persisted CallerUsername authorizes UNIFORMLY for every
+	//     run kind — agent, workflow-CR instance, inline (CR-less) workflow, and spawned/handoff sub-runs
+	//     (all persist CallerUsername). This is the gate that shuts the cross-tenant-id leak: another
+	//     principal's token yields a different username. A genuine token rejection short-circuits to 401.
+	//     Any OTHER SelfSubjectReview failure (e.g. a cluster/test client without the virtual resource) is
+	//     treated as "identity unknown" and falls THROUGH to (2): ownership is an ADDITIONAL allow, never the
+	//     sole boundary — the RBAC Get in (2) is itself a token-validating, authorizing API call.
+	//
+	// (2) RBAC on the backing resource. A caller who did not create the run may still read it if their OWN
+	//     RBAC grants read on the run's backing CR — the operator-investigation path (uniform with resolveAgent:
+	//     403 forbidden / 404 absent, no oracle).
+	if allowOwner {
+		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+			if rn.CallerUsername != "" && rn.CallerUsername == username {
+				return rn, true
+			}
+		} else if apierrors.IsUnauthorized(uErr) {
 			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
-		case apierrors.IsNotFound(gErr):
-			// The agent is gone — the caller cannot prove access, so they cannot share it. 404 (uniform
-			// with a missing run: no oracle on whether the run or the agent is the missing one).
-			writeError(w, http.StatusNotFound, "run not found")
-		default:
-			s.log.Error(gErr, "share: authorize run access failed", "run", runID, "agentName", rn.Agent, "namespace", rn.Namespace)
-			writeError(w, http.StatusInternalServerError, "failed to authorize run access")
+			return nil, false
 		}
+	}
+	if !s.callerCanReadRunBacking(w, r, caller, rn) {
 		return nil, false
 	}
 	return rn, true
+}
+
+// callerCanReadRunBacking authorizes a NON-creator caller to read a run through their OWN RBAC on the run's
+// backing resource (ADR 0011): the Workflow CR for a workflow instance, otherwise the run's AgentDeployment.
+// An inline (CR-less) workflow run has no backing CR, so a non-creator is denied (404 — no oracle, uniform
+// with a missing run). It writes the error response and returns false on denial/absence.
+func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run) bool {
+	var (
+		obj  client.Object
+		name = rn.Agent
+	)
+	switch {
+	case rn.WorkflowRef != "":
+		// A workflow instance: authorize against the Workflow CR (rn.Agent is the CR name, but be explicit).
+		obj = &agentsv1beta1.Workflow{}
+		name = rn.WorkflowRef
+	case rn.Agent == inlineWorkflowAgentLabel:
+		// CR-less inline workflow plan: no backing resource exists to authorize against, so a non-creator
+		// cannot prove access. Fail closed (404, no oracle).
+		writeError(w, http.StatusNotFound, "run not found")
+		return false
+	default:
+		obj = &agentsv1alpha1.AgentDeployment{}
+	}
+	if gErr := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: rn.Namespace}, obj); gErr != nil {
+		switch {
+		case apierrors.IsForbidden(gErr):
+			writeError(w, http.StatusForbidden, "forbidden: you do not have access to this run")
+		case apierrors.IsUnauthorized(gErr):
+			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
+		case apierrors.IsNotFound(gErr):
+			// The backing agent/workflow is gone — the caller cannot prove access. 404 (uniform with a
+			// missing run: no oracle on whether the run or the backing resource is the missing one).
+			writeError(w, http.StatusNotFound, "run not found")
+		default:
+			s.log.Error(gErr, "authorize run access: backing-resource check failed", "run", rn.ID, "agent", rn.Agent, "workflowRef", rn.WorkflowRef, "namespace", rn.Namespace)
+			writeError(w, http.StatusInternalServerError, "failed to authorize run access")
+		}
+		return false
+	}
+	return true
 }
 
 // handleCreateShare serves POST /api/runs/{id}/shares — MINT a single-run capability link (M75, m75.1,
@@ -210,7 +267,7 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := r.PathValue("id")
 
-	rn, ok := s.authorizeShareForRun(w, r, caller, runID)
+	rn, ok := s.authorizeRunAccess(w, r, caller, runID, false)
 	if !ok {
 		return
 	}
@@ -322,7 +379,7 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 	}
 	runID := r.PathValue("id")
 
-	rn, ok := s.authorizeShareForRun(w, r, caller, runID)
+	rn, ok := s.authorizeRunAccess(w, r, caller, runID, false)
 	if !ok {
 		return
 	}
@@ -363,7 +420,7 @@ func (s *Server) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
 	shareID := r.PathValue("shareId")
 
-	rn, ok := s.authorizeShareForRun(w, r, caller, runID)
+	rn, ok := s.authorizeRunAccess(w, r, caller, runID, false)
 	if !ok {
 		return
 	}
