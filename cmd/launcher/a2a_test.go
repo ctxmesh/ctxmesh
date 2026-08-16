@@ -1190,3 +1190,33 @@ func assertA2AError(t *testing.T, body []byte, wantCode string) {
 		t.Errorf("error code = %q, want %q; detail=%q", e.Error, wantCode, e.Detail)
 	}
 }
+
+// TestRefuseRedirect_DoesNotFollow proves the runtime CheckRedirect policy (audit P2): a client using
+// refuseRedirect fails a request whose response is a 3xx instead of following it — so a callee cannot
+// redirect an identity-relaying A2A/tool request to an off-allowlist host.
+func TestRefuseRedirect_DoesNotFollow(t *testing.T) {
+	// A "malicious" target the client must NOT be redirected to.
+	var reachedTarget bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reachedTarget = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, target.URL, http.StatusFound) // 302 → target
+	}))
+	defer redirector.Close()
+
+	client := &http.Client{CheckRedirect: refuseRedirect}
+	resp, err := client.Get(redirector.URL)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("the redirect must be refused, not followed")
+	}
+	if reachedTarget {
+		t.Error("the client must never reach the redirect target")
+	}
+}
