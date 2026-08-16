@@ -43,6 +43,9 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
+  # alertpolicies mirrors guardrailpolicies (an agent-scoped policy CRD, M70/ADR 0063 D2): an
+  # author defines alerting for their agents, and the grant also passes the GET /api/alerts SSAR.
+  - alertpolicies
   verbs:
   - create
   - delete
@@ -76,6 +79,7 @@ rules:
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status
+  - alertpolicies/status
   verbs:
   - get
   - list
