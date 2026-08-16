@@ -115,6 +115,12 @@ type AlertPolicyReconciler struct {
 	// the reconciler.
 	Runs ApprovalRunLister
 
+	// RunOutcomes is the read side of the durable run store (from cpDB), used ONLY by the runFailureRate
+	// condition (M84, ADR 0063 D2) to count failed/total runs per (namespace, agent) over the condition's
+	// window. nil ⇒ runFailureRate abstains (a dev deployment without cpDB). Like Runs, it is a NARROW
+	// COUNT-only read interface — no run mutation, and not the whole run store, reaches the reconciler.
+	RunOutcomes RunOutcomeCounter
+
 	// ConsoleURL is the browser-reachable console origin (from CONSOLE_URL, mirroring the BFF). It is
 	// the prefix for the approval-waiting notification's deep-link to the AUTHENTICATED console approval
 	// view. Empty ⇒ the payload carries a relative path (still a pointer, never a capability). This is a
@@ -140,6 +146,19 @@ type WaitingApprovalRun struct {
 	ID      string // the run id — the per-run dedup key + the deep-link target
 	Agent   string // the AgentDeployment name, matched against the policy's selected agents
 	Message string // the RequiresAction.Message (the approval summary), surfaced in the notification
+}
+
+// RunOutcomeCounter is the narrow COUNT-only read the AlertPolicyReconciler needs to evaluate the
+// runFailureRate condition (M84, ADR 0063 D2): the number of failed vs total runs for one (namespace,
+// agent) over the condition's look-back window. The durable run store (run.PostgresStore) satisfies it;
+// a nil counter makes runFailureRate abstain. It exposes NO mutation and NOT the whole run store — the
+// reconciler can never read run contents or drive a run, only tally outcomes over a window.
+type RunOutcomeCounter interface {
+	// CountRunOutcomes returns (failed, total) run counts for the (namespace, agent) whose runs were
+	// created at or after `since`. failed counts terminal-FAILED runs; total counts all runs created in
+	// the window (the base rate denominator). A store/read error returns it (the caller logs + abstains —
+	// a failed read must never wedge the reconcile or fabricate a rate).
+	CountRunOutcomes(ctx context.Context, namespace, agent string, since time.Time) (failed, total int, err error)
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=alertpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -280,9 +299,13 @@ func (r *AlertPolicyReconciler) evaluateCondition(
 	case condTypeForecastExceeded:
 		return r.evalForecastExceeded(ctx, ap, cond)
 
-	case condTypeErrorRate, condTypeP95Latency, condTypeRunFailureRate:
-		// Recognized-but-abstain: these have no wired data source yet (m52 Theme Q). Log once at V(1)
-		// and treat as not firing — NEVER error, so the rest of the policy still evaluates.
+	case condTypeRunFailureRate:
+		return r.evalRunFailureRate(ctx, ap, cond, agents)
+
+	case condTypeErrorRate, condTypeP95Latency:
+		// Recognized-but-abstain: these need Prometheus request metrics that are not wired yet (m52
+		// Theme Q; runFailureRate — which HAS a cpDB-native source — was split out above in m84). Log
+		// once at V(1) and treat as not firing — NEVER error, so the rest of the policy still evaluates.
 		log.V(1).Info("alert condition type not yet evaluated — no data source (m52 Theme Q)",
 			"alertpolicy", ap.Name, "condition", cond.Name, "type", cond.Type)
 		return false, ""
@@ -482,6 +505,92 @@ func (r *AlertPolicyReconciler) evalForecastExceeded(
 
 	value := fmt.Sprintf("%.2f/%.2f", projected, thresholdUSD)
 	return projected >= thresholdUSD, value
+}
+
+// evalRunFailureRate fires when ANY selected agent's run-failure rate over the condition's window
+// exceeds the threshold (M84, ADR 0063 D2). The rate for an agent = failed_runs / total_runs over
+// [now-window, now], read from the cpDB runs table via the injected RunOutcomeCounter. It mirrors
+// evalRegressionDetected's multi-agent aggregation semantics: ANY breaching agent fires, and the value
+// reports the MAX rate seen alongside the breaching agent name(s) — a rate-shaped analogue of the
+// "list the breaching agents" contract. Threshold is a 0..1 fraction (per the CRD: "0.05" = 5 %); the
+// comparison is strict-greater ("exceeds the threshold", card wording).
+//
+// It ABSTAINS (not firing) when:
+//   - the run-outcome counter is not wired (no control-plane DB)
+//   - Window is empty or not parseable as a Go duration, or Threshold is empty/unparseable/negative
+//   - a per-agent count read fails (that agent is skipped, never fabricated)
+//   - an agent has zero runs in the window (total==0 ⇒ no signal, no divide-by-zero)
+//
+// value is "maxRate/threshold agent=<breaching>" on fire, "" on a clean no-signal abstain, and
+// "maxRate/threshold" when there is a measured rate below the threshold (so status.lastValue tracks it).
+func (r *AlertPolicyReconciler) evalRunFailureRate(
+	ctx context.Context,
+	ap *agentsv1beta1.AlertPolicy,
+	cond agentsv1beta1.AlertCondition,
+	agents []agentsv1alpha1.AgentDeployment,
+) (bool, string) {
+	log := logf.FromContext(ctx)
+
+	if r.RunOutcomes == nil {
+		log.V(1).Info("runFailureRate abstains: run-outcome counter not wired (no control-plane DB)",
+			"alertpolicy", ap.Name, "condition", cond.Name)
+		return false, ""
+	}
+
+	window, err := time.ParseDuration(strings.TrimSpace(cond.Window))
+	if err != nil || window <= 0 {
+		log.V(1).Info("runFailureRate abstains: empty/unparseable window (want a Go duration, e.g. \"5m\")",
+			"alertpolicy", ap.Name, "condition", cond.Name, "window", cond.Window)
+		return false, ""
+	}
+
+	threshold, err := strconv.ParseFloat(strings.TrimSpace(cond.Threshold), 64)
+	if err != nil || threshold < 0 {
+		log.V(1).Info("runFailureRate abstains: unparseable or negative threshold (want a 0..1 fraction, e.g. \"0.05\")",
+			"alertpolicy", ap.Name, "condition", cond.Name, "threshold", cond.Threshold)
+		return false, ""
+	}
+
+	since := time.Now().UTC().Add(-window)
+	var (
+		breaching  []string
+		maxRate    float64
+		haveSignal bool
+	)
+	for i := range agents {
+		agent := agents[i].Name
+		failed, total, cErr := r.RunOutcomes.CountRunOutcomes(ctx, ap.Namespace, agent, since)
+		if cErr != nil {
+			// A per-agent read failure must not wedge the whole condition — skip this agent, never
+			// fabricate a rate. The next requeue re-reads.
+			log.V(1).Info("runFailureRate: run-outcome count read failed for agent — skipping it",
+				"alertpolicy", ap.Name, "condition", cond.Name, "agent", agent, "err", cErr.Error())
+			continue
+		}
+		if total == 0 {
+			continue // no runs in the window for this agent ⇒ no signal (guards divide-by-zero)
+		}
+		haveSignal = true
+		rate := float64(failed) / float64(total)
+		if rate > maxRate {
+			maxRate = rate
+		}
+		if rate > threshold {
+			breaching = append(breaching, agent)
+		}
+	}
+
+	if !haveSignal {
+		// No agent had any runs in the window — abstain with no value (nothing measured).
+		return false, ""
+	}
+	if len(breaching) > 0 {
+		slices.Sort(breaching)
+		value := fmt.Sprintf("%.4f/%.4f agent=%s", maxRate, threshold, strings.Join(breaching, ","))
+		return true, value
+	}
+	// Measured, but below threshold: not firing, but record the max observed rate so status tracks it.
+	return false, fmt.Sprintf("%.4f/%.4f", maxRate, threshold)
 }
 
 // applyConditionResult updates the per-condition status entry (keyed by AlertCondition.name) with
