@@ -165,11 +165,21 @@ type TenantSpec struct {
 
 	// networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
 	// (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
-	// platform (knative/kourier/gateway/valkey/langfuse/DNS) but NOT other tenants. Opt-in + OFF by
-	// default — a blanket policy would also restrict non-agent workloads in the namespace, so a tenant
-	// enables it deliberately (the Capsule model). Omitted/false ⇒ no NetworkPolicy is stamped.
+	// platform (knative/kourier/gateway/valkey/langfuse/DNS) + any tenant listed in peerTenants, but NOT
+	// other tenants. **SECURE BY DEFAULT (ADR 0073): a nil/absent field is served as TRUE** — a new tenant
+	// isolates from birth; an explicit `false` is a deliberate, condition-flagged opt-out. Existing tenants
+	// at the upgrade are grandfathered to explicit `false` by the ordered backfill (no upgrade incident).
+	// A pointer (not a bare bool) so "absent" is distinguishable at the API layer for the migration.
 	// +optional
-	NetworkIsolation bool `json:"networkIsolation,omitempty"`
+	// +kubebuilder:default=true
+	NetworkIsolation *bool `json:"networkIsolation,omitempty"`
+
+	// peerTenants is an allowlist of OTHER tenant names whose member namespaces may exchange east-west
+	// traffic with this tenant's namespaces under isolation (ADR 0073). Without it the secure-default flip
+	// is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
+	// isolation (same-tenant + platform only).
+	// +optional
+	PeerTenants []string `json:"peerTenants,omitempty"`
 }
 
 // TenantStatus defines the observed state of a Tenant.
