@@ -27,10 +27,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
 // fakeLangfuseAdapter is an in-memory LangfuseAdapter for the handler-wiring
@@ -164,9 +167,21 @@ func (f fakePrometheusAdapter) Query(_ context.Context, _ string) ([]MetricPoint
 	return f.points, nil
 }
 
+// inspectorTestAgentNs/Name is the default agent serverWithAdapters seeds into the caller's fake client so
+// the caller-scoped authz on the runs/traces/feedback handlers (ADR 0011, m90.1) resolves. Tests that
+// exercise those handlers map their run/trace id to this agent via seedRunForTrace rather than re-testing
+// authz — the caller (AllowAll → fake client holds the agent) is authorized to read it.
+const (
+	inspectorTestAgentNs   = "default"
+	inspectorTestAgentName = "insp"
+)
+
 func serverWithAdapters(t *testing.T, a Adapters) *Server {
 	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	agent := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: inspectorTestAgentName, Namespace: inspectorTestAgentNs},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	return NewServer(Options{
 		CallerClients: newFakeFactory(c),
 		Scheme:        testScheme(t),
@@ -175,6 +190,16 @@ func serverWithAdapters(t *testing.T, a Adapters) *Server {
 		Version:       "test",
 		Log:           logr.Discard(),
 	})
+}
+
+// seedRunForTrace inserts a run into s.runStore mapping traceID (via a derived run id) to the seeded
+// inspector test agent, so the caller-scoped authz on the trace/feedback/run handlers (ADR 0011, m90.1)
+// resolves trace→run→agent and the caller — who can read the seeded agent — is authorized.
+func seedRunForTrace(t *testing.T, s *Server, traceID string) {
+	t.Helper()
+	rn := run.New("run-"+traceID, inspectorTestAgentNs, inspectorTestAgentName, nil, "", time.Now())
+	rn.TraceID = traceID
+	require.NoError(t, s.runStore.Create(rn))
 }
 
 // serverWithCallerAndAdapters builds a Server wiring BOTH a caller-client factory
@@ -194,8 +219,10 @@ func serverWithCallerAndAdapters(t *testing.T, factory CallerClientFactory, a Ad
 }
 
 func TestRunsRouteServesLangfuseData(t *testing.T) {
+	// The rows carry the seeded inspector agent's tag so they survive the caller-scoped visible-agent
+	// filter (ADR 0011, m90.1); an untagged/cross-tenant row would be dropped.
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{
-		runs: []RunSummary{{TraceID: "t1", Name: "chat", CostUSD: 0.5, Tokens: 900}},
+		runs: []RunSummary{{TraceID: "t1", Name: "chat", CostUSD: 0.5, Tokens: 900, AgentNs: inspectorTestAgentNs, AgentName: inspectorTestAgentName}},
 	}})
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
@@ -288,9 +315,11 @@ func TestRunsRouteSurfacesUpstreamError(t *testing.T) {
 // TestHandleRunsBackwardCompat: GET /api/runs with NO params returns all runs
 // and an empty nextCursor — the dashboard's existing consumption is unchanged.
 func TestHandleRunsBackwardCompat(t *testing.T) {
+	// Both rows carry the seeded inspector agent's tag so they survive the caller-scoped visible-agent
+	// filter (ADR 0011, m90.1).
 	runs := []RunSummary{
-		{TraceID: "t1", Name: "chat", CostUSD: 0.5, Tokens: 900},
-		{TraceID: "t2", Name: "summarize", CostUSD: 0.2, Tokens: 400},
+		{TraceID: "t1", Name: "chat", CostUSD: 0.5, Tokens: 900, AgentNs: inspectorTestAgentNs, AgentName: inspectorTestAgentName},
+		{TraceID: "t2", Name: "summarize", CostUSD: 0.2, Tokens: 400, AgentNs: inspectorTestAgentNs, AgentName: inspectorTestAgentName},
 	}
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{runs: runs}})
 	rec := httptest.NewRecorder()
@@ -357,9 +386,11 @@ func TestHandleRunsLangfuseAbsentReturns501(t *testing.T) {
 // TestHandleRunsUpstreamFailureReturns502: adapter returns an error → 502, not
 // a fabricated 200 or silent empty list.
 func TestHandleRunsUpstreamFailureReturns502(t *testing.T) {
+	// ?agent points at the seeded inspector agent so the caller-scoped authz (ADR 0011, m90.1) passes and
+	// the upstream error — not an authz denial — is what surfaces (502).
 	s := serverWithAdapters(t, Adapters{Langfuse: fakeLangfuseAdapter{filteredErr: assert.AnError}})
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?agent=default/foo", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs?agent="+inspectorTestAgentNs+"/"+inspectorTestAgentName, nil))
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
 }
 

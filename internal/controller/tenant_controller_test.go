@@ -966,3 +966,39 @@ func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exceeded2, "the projected flag must be cleared once under the cap (unblocking growth)")
 }
+
+// TestTenant_ProtectedNamespaceRefused pins the audit P1-3 guardrail: a Tenant that lists a protected
+// system namespace (kube-system) must NEVER stamp it — no ResourceQuota, no isolation NetworkPolicy — and
+// must surface a ProtectedNamespaceRefused condition. Otherwise a Tenant could fence the cluster's own DNS /
+// control plane behind a default-deny NetworkPolicy (a cluster outage).
+func TestTenant_ProtectedNamespaceRefused(t *testing.T) {
+	tnt := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: "sys-claimer"},
+		Spec: agentsv1alpha1.TenantSpec{
+			Namespaces: []string{"kube-system"},
+			Quota:      &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, tnt))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tnt) })
+	reconcileTenant(t, "sys-claimer")
+	reconcileTenant(t, "sys-claimer")
+
+	// Nothing is owned/stamped.
+	var got agentsv1alpha1.Tenant
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "sys-claimer"}, &got))
+	assert.Equal(t, int32(0), got.Status.MemberNamespaces, "a protected namespace is never owned")
+
+	// No isolation NetworkPolicy and no ResourceQuota were stamped on kube-system.
+	npErr := k8sClient.Get(testCtx,
+		types.NamespacedName{Namespace: "kube-system", Name: tenantNetworkPolicyName}, &networkingv1.NetworkPolicy{})
+	assert.True(t, apierrors.IsNotFound(npErr), "no isolation NetworkPolicy may be stamped on kube-system, got %v", npErr)
+	_, qErr := getQuota(t, "kube-system")
+	assert.True(t, apierrors.IsNotFound(qErr), "no ResourceQuota may be stamped on kube-system, got %v", qErr)
+
+	// The refusal is surfaced as a distinct condition.
+	cond := meta.FindStatusCondition(got.Status.Conditions, "ProtectedNamespaceRefused")
+	require.NotNil(t, cond, "a refused protected namespace must report ProtectedNamespaceRefused")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "SystemNamespaceDenylisted", cond.Reason)
+}
