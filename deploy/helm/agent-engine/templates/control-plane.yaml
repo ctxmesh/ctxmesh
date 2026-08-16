@@ -288,6 +288,7 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
+  - alertpolicies
   verbs:
   - create
   - delete
@@ -319,6 +320,7 @@ rules:
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status
+  - alertpolicies/status
   verbs:
   - get
   - list
@@ -569,6 +571,7 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
+  - alertpolicies
   - tenants
   - auditlogs
   - costrollups
@@ -589,6 +592,7 @@ rules:
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status
+  - alertpolicies/status
   verbs:
   - get
   - list
@@ -665,6 +669,7 @@ rules:
   - agentscalingpolicies
   - evalsuites
   - guardrailpolicies
+  - alertpolicies
   - tenants
   verbs:
   - get
@@ -685,6 +690,7 @@ rules:
   - agentscalingpolicies/status
   - evalsuites/status
   - guardrailpolicies/status
+  - alertpolicies/status
   verbs:
   - get
   - list
