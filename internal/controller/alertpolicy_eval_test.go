@@ -20,6 +20,8 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
@@ -38,6 +40,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/alertstore"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/costrollup"
+	"github.com/ctxmesh/agent-engine/internal/promql"
 )
 
 // fakeAlertStore is a minimal in-memory alertstore.Store for the evaluator tests: it records appended
@@ -465,6 +468,85 @@ func TestAlertPolicy_RunFailureRateFullReconcile(t *testing.T) {
 	require.NotNil(t, csNil)
 	assert.False(t, csNil.Firing, "an unwired run-outcome counter must abstain")
 	assert.Equal(t, 0, alertsNil.count(ns), "no alert when the counter is unwired")
+}
+
+// TestAlertPolicy_ErrorRateFullReconcile exercises the FULL Reconcile path (M84, ADR 0076) for an
+// errorRate condition against a MOCK Prometheus the real internal/promql client queries: a policy selecting
+// an agent, with the mock returning a 5xx-fraction ABOVE the threshold, fires exactly one durable alert;
+// a re-reconcile appends none (dedup); dropping the fraction below the threshold resolves it. The mock's
+// response is switched between reconciles to drive the fire→dedup→resolve cycle.
+func TestAlertPolicy_ErrorRateFullReconcile(t *testing.T) {
+	const (
+		ns       = "default"
+		agent    = "ap-eval-err-agent"
+		policy   = "ap-eval-err-policy"
+		condName = "edge-5xx"
+	)
+	labels := map[string]string{"app": "ap-eval-err"}
+
+	// The selected agent must exist for selectedAgents to match it by label.
+	d := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns, Labels: labels},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, d))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
+
+	// A mock Prometheus whose returned 5xx-fraction the test flips between reconciles.
+	var fraction string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[` +
+			`{"metric":{},"value":[1720000000,"` + fraction + `"]}]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	pc, err := promql.New(promql.Config{BaseURL: srv.URL})
+	require.NoError(t, err)
+
+	spec := agentsv1beta1.AlertPolicySpec{
+		Selector: agentsv1beta1.AlertSelector{MatchLabels: labels},
+		Conditions: []agentsv1beta1.AlertCondition{
+			{Name: condName, Type: condTypeErrorRate, Threshold: "0.05", Window: "5m"},
+		},
+		Route: agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policy, ns, spec)
+
+	alerts := newFakeAlertStore()
+	r := apEvalReconciler(alerts, nil)
+	r.PromMetrics = pc
+
+	// First reconcile: 12 % > 5 % → false→true → Firing + exactly one alert.
+	fraction = "0.12"
+	reconcileAPEval(t, r, policy, ns)
+	cs := apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs, "errorRate condition status must be recorded")
+	assert.True(t, cs.Firing, "errorRate must fire when the 5xx-fraction exceeds the threshold")
+	assert.Equal(t, "0.1200/0.0500 agent="+agent, cs.LastValue, "lastValue is maxRate/threshold + agent")
+	assert.Equal(t, 1, alerts.count(ns), "errorRate firing appends exactly one alert")
+
+	// Second reconcile still above threshold: NO new alert (dedup).
+	reconcileAPEval(t, r, policy, ns)
+	assert.Equal(t, 1, alerts.count(ns), "a still-firing condition must NOT append a new alert (dedup)")
+
+	// Drop the fraction below threshold → resolve.
+	fraction = "0.01"
+	reconcileAPEval(t, r, policy, ns)
+	cs = apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs)
+	assert.False(t, cs.Firing, "errorRate must clear when the fraction drops below the threshold")
+	assert.Equal(t, 0, alerts.openCount(ns), "the open alert must resolve on true→false")
+
+	// A separate policy with PromMetrics UNWIRED (nil) abstains — unchanged unwired behaviour.
+	const policyNil = "ap-eval-err-policy-nil"
+	mkAlertPolicy(t, policyNil, ns, spec)
+	alertsNil := newFakeAlertStore()
+	rNil := apEvalReconciler(alertsNil, nil) // PromMetrics stays nil
+	reconcileAPEval(t, rNil, policyNil, ns)
+	csNil := apConditionStatus(t, policyNil, ns, condName)
+	require.NotNil(t, csNil)
+	assert.False(t, csNil.Firing, "an unwired promql client must abstain")
+	assert.Equal(t, 0, alertsNil.count(ns), "no alert when Prometheus is unwired")
 }
 
 // fakeEvalApprovalLister is a minimal ApprovalRunLister for the envtest approvalWaiting test: it returns

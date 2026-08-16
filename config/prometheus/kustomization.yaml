@@ -1,5 +1,7 @@
 resources:
 - monitor.yaml
+# Knative queue-proxy PodMonitor feeding the errorRate/p95Latency SLO conditions (M84, ADR 0076).
+- queue-proxy-monitor.yaml
 
 # [PROMETHEUS-WITH-CERTS] The following patch configures the ServiceMonitor in ../prometheus
 # to securely reference certificates created and managed by cert-manager.

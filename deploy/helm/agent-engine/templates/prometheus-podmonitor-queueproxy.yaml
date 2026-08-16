@@ -1,0 +1,38 @@
+{{- /*
+Prometheus PodMonitor for Knative queue-proxy per-revision request metrics (M84, ADR 0076).
+Feeds the AlertPolicy errorRate + p95Latency SLO conditions: it scrapes the queue-proxy sidecar's
+metrics port across ALL agent namespaces so the controller can query the per-agent 5xx-fraction /
+p95 latency via Prometheus.
+
+Opt-in (values: prometheus.podMonitor.queueProxy.enabled) because it requires the Prometheus Operator
+CRDs AND a Knative install that EXPORTS request metrics in a Prometheus-scrapeable form. The Knative
+install (a platform prerequisite, NOT owned by this chart) owns config-observability in the
+knative-serving namespace; enable Prometheus request-metrics export there (Knative <= ~1.17:
+metrics.request-metrics-backend-destination=prometheus; newer OTLP-default Knative such as v1.22:
+request-metrics-protocol=prometheus). If request metrics are absent, the SLO conditions ABSTAIN — a clear
+status reason, never a false alert (ADR 0076 "Degrade gracefully"). Mirrors
+config/prometheus/queue-proxy-monitor.yaml. Additive add-on; OFF by default so it does not change the
+no-drift control-plane baseline and touches NO agent-CRD RBAC (monitoring infra, not controller RBAC).
+*/ -}}
+{{- if .Values.prometheus.podMonitor.queueProxy.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: knative-queue-proxy-metrics
+  name: agent-engine-knative-queue-proxy
+  namespace: {{ .Values.namespace }}
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchExpressions:
+      - key: serving.knative.dev/revision
+        operator: Exists
+  podMetricsEndpoints:
+    - port: {{ .Values.prometheus.podMonitor.queueProxy.port | quote }}
+      path: /metrics
+      interval: {{ .Values.prometheus.podMonitor.queueProxy.interval | quote }}
+{{- end }}
