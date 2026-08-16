@@ -368,6 +368,105 @@ func TestAlertPolicy_ForecastExceededFires(t *testing.T) {
 	assert.Equal(t, 0, alertsLo.count(ns), "no alert below the cap")
 }
 
+// fakeEvalRunOutcomeCounter is a minimal RunOutcomeCounter for the envtest runFailureRate test: it
+// returns a per-agent (failed, total) so a full Reconcile can drive the condition without real Postgres
+// (the real cpDB query is proven separately in internal/run's TestPostgresStore_CountRunOutcomes).
+type fakeEvalRunOutcomeCounter struct {
+	counts map[string]struct{ failed, total int }
+}
+
+func (f *fakeEvalRunOutcomeCounter) CountRunOutcomes(
+	_ context.Context, _, agent string, _ time.Time,
+) (int, int, error) {
+	c := f.counts[agent]
+	return c.failed, c.total, nil
+}
+
+// TestAlertPolicy_RunFailureRateFullReconcile exercises the FULL Reconcile path (M84, ADR 0063 D2) for a
+// runFailureRate condition: a policy selecting an agent, with the injected run-outcome counter reporting a
+// failure rate ABOVE the threshold, fires exactly one durable alert through the real reconcile against the
+// envtest API server; a re-reconcile appends none (dedup); dropping the rate BELOW the threshold resolves
+// it. A second policy whose agent's rate is below the threshold never fires.
+func TestAlertPolicy_RunFailureRateFullReconcile(t *testing.T) {
+	const (
+		ns       = "default"
+		agent    = "ap-eval-rfr-agent"
+		policy   = "ap-eval-rfr-policy"
+		condName = "run-failures"
+	)
+	labels := map[string]string{"app": "ap-eval-rfr"}
+
+	// The selected agent must exist for selectedAgents to match it by label.
+	d := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: agent, Namespace: ns, Labels: labels},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, d))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, d) })
+
+	spec := agentsv1beta1.AlertPolicySpec{
+		Selector: agentsv1beta1.AlertSelector{MatchLabels: labels},
+		Conditions: []agentsv1beta1.AlertCondition{
+			{Name: condName, Type: condTypeRunFailureRate, Threshold: "0.2", Window: "10m"},
+		},
+		Route: agentsv1beta1.AlertRoute{Channels: []agentsv1beta1.AlertChannel{{Type: "console"}}},
+	}
+	mkAlertPolicy(t, policy, ns, spec)
+
+	alerts := newFakeAlertStore()
+	r := apEvalReconciler(alerts, nil)
+	// 4 failed / 10 total = 0.40 > 0.2 → fires.
+	counter := &fakeEvalRunOutcomeCounter{counts: map[string]struct{ failed, total int }{
+		agent: {failed: 4, total: 10},
+	}}
+	r.RunOutcomes = counter
+
+	// First reconcile: false→true → Firing + exactly one alert.
+	reconcileAPEval(t, r, policy, ns)
+	cs := apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs, "runFailureRate condition status must be recorded")
+	assert.True(t, cs.Firing, "runFailureRate must fire when failed/total exceeds the threshold")
+	assert.Equal(t, "0.4000/0.2000 agent="+agent, cs.LastValue, "lastValue is maxRate/threshold + agent")
+	assert.Equal(t, 1, alerts.count(ns), "runFailureRate firing appends exactly one alert")
+
+	// Second reconcile still above threshold: NO new alert (dedup).
+	reconcileAPEval(t, r, policy, ns)
+	assert.Equal(t, 1, alerts.count(ns), "a still-firing condition must NOT append a new alert (dedup)")
+
+	// Drop the rate below threshold → resolve.
+	counter.counts[agent] = struct{ failed, total int }{failed: 1, total: 10} // 0.10 < 0.2
+	reconcileAPEval(t, r, policy, ns)
+	cs = apConditionStatus(t, policy, ns, condName)
+	require.NotNil(t, cs)
+	assert.False(t, cs.Firing, "runFailureRate must clear when the rate drops below the threshold")
+	assert.Equal(t, 0, alerts.openCount(ns), "the open alert must resolve on true→false")
+
+	// A separate policy whose agent's rate is below the threshold from the start never fires.
+	const policyLow = "ap-eval-rfr-policy-low"
+	mkAlertPolicy(t, policyLow, ns, spec)
+	alertsLow := newFakeAlertStore()
+	rLow := apEvalReconciler(alertsLow, nil)
+	rLow.RunOutcomes = &fakeEvalRunOutcomeCounter{counts: map[string]struct{ failed, total int }{
+		agent: {failed: 1, total: 10}, // 0.10 < 0.2
+	}}
+	reconcileAPEval(t, rLow, policyLow, ns)
+	csLow := apConditionStatus(t, policyLow, ns, condName)
+	require.NotNil(t, csLow)
+	assert.False(t, csLow.Firing, "runFailureRate must NOT fire below the threshold")
+	assert.Equal(t, 0, alertsLow.count(ns), "no alert below the threshold")
+
+	// A THIRD policy with the counter UNWIRED (nil) abstains — unchanged unwired behaviour.
+	const policyNil = "ap-eval-rfr-policy-nil"
+	mkAlertPolicy(t, policyNil, ns, spec)
+	alertsNil := newFakeAlertStore()
+	rNil := apEvalReconciler(alertsNil, nil) // RunOutcomes stays nil
+	reconcileAPEval(t, rNil, policyNil, ns)
+	csNil := apConditionStatus(t, policyNil, ns, condName)
+	require.NotNil(t, csNil)
+	assert.False(t, csNil.Firing, "an unwired run-outcome counter must abstain")
+	assert.Equal(t, 0, alertsNil.count(ns), "no alert when the counter is unwired")
+}
+
 // fakeEvalApprovalLister is a minimal ApprovalRunLister for the envtest approvalWaiting test: it returns
 // a fixed set of plan_approval-waiting runs.
 type fakeEvalApprovalLister struct {

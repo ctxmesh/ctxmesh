@@ -489,6 +489,16 @@ func main() {
 		approvalRuns = approvalRunLister{store: lister}
 	}
 
+	// AlertPolicy runFailureRate condition (M84, ADR 0063 D2): counts failed/total runs per (namespace, agent)
+	// over the condition's window, off the SAME SHARED cpDB run store (a read-only COUNT wiring, no new RBAC).
+	// The durable pgStore satisfies CountRunOutcomes directly (Store's mem twin does not implement it — a dev
+	// deployment without cpDB simply abstains). Nil-safe: if the shared store failed to build, runFailureRate
+	// eval is disabled (RunOutcomes stays nil).
+	var runOutcomes controller.RunOutcomeCounter
+	if counter, ok := ctrlRunStore.(controller.RunOutcomeCounter); ok && ctrlRunStore != nil {
+		runOutcomes = counter
+	}
+
 	// AlertPolicy reconciler (M70, ADR 0063 D2): evaluates each policy condition, fires once per
 	// false→true transition (dedup in .status), and PERSISTS fired alerts to the durable alerts ledger
 	// + audit_log (m70.4). Stores are the manager's existing cpDB (mirrors the regression detector +
@@ -497,13 +507,14 @@ func main() {
 	// the M75 approvalWaiting condition (ADR 0069 §3): the run store lists plan_approval-waiting runs
 	// and ConsoleURL prefixes the notification's deep-link to the AUTHENTICATED console approval view.
 	if err := (&controller.AlertPolicyReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Alerts:     alertstore.NewPostgresStore(cpDB),
-		Rollups:    costrollup.NewPostgresStore(cpDB),
-		Audit:      auditlog.NewPostgresStore(cpDB),
-		Runs:       approvalRuns,
-		ConsoleURL: os.Getenv("CONSOLE_URL"),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Alerts:      alertstore.NewPostgresStore(cpDB),
+		Rollups:     costrollup.NewPostgresStore(cpDB),
+		Audit:       auditlog.NewPostgresStore(cpDB),
+		Runs:        approvalRuns,
+		RunOutcomes: runOutcomes,
+		ConsoleURL:  os.Getenv("CONSOLE_URL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "alertpolicy")
 		os.Exit(1)
