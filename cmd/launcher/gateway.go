@@ -308,6 +308,11 @@ type gatewayProxy struct {
 	// tenant enforces the M47 tenant model quota (rate + aggregate budget) against
 	// the shared Valkey. nil ⇒ untenanted or no tenant model caps.
 	tenant *tenantQuota
+	// agentSpend books this agent's post-call model spend onto a durable per-agent monthly Valkey key
+	// (agent:{ns}/{name}:spend:{YYYY-MM}), ADDITIVE to the tenant key at the SAME accounting point (m84.6,
+	// ADR 0063 D1 follow-up). It is a durable cost-rollup SOURCE (the cost-rollup worker snapshots it),
+	// NOT an enforcement cap. nil ⇒ off (no direct Valkey addr, or an unnamed agent) — a nil-safe no-op.
+	agentSpend *agentSpendAccountant
 	// policy holds the three POLICY-DERIVED, RUNTIME-RELOADABLE pieces — the guardrail
 	// engine, the fenced LLM-judge, and the per-user quota — behind an RWMutex so a
 	// GuardrailPolicy edit can atomically swap the whole bundle WITHOUT a revision roll
@@ -431,6 +436,12 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 				"TENANT_QUOTA_ADDR — quota NOT enforced", cfg.TenantID)
 		}
 	}
+
+	// Per-agent durable cost rollup (m84.6): book post-call spend onto a per-agent monthly Valkey key
+	// alongside the tenant key, so the cost-rollup worker can snapshot a durable per-agent spend series.
+	// nil (off) when the agent is unnamed or no direct Valkey addr is configured — exactly like the
+	// per-user quota; never blocks a model call.
+	gp.agentSpend = newAgentSpendAccountant(cfg, logf)
 
 	// Real-kill control channel (m70.8): the launcher polls the pod-authed /control endpoint to abort a
 	// cancelled run's in-flight model call. It is available ONLY on the state-layer-proxy path (which gives
@@ -764,6 +775,10 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// M47: accrue the tenant's aggregate spend to the shared Valkey (nil-safe; only when a tenant budget
 	// is set). Runs even when the M8 per-agent budget is not enforced for this agent.
 	gp.tenant.postCall(ctx, moneyToFloat(actual.String()))
+	// m84.6: ADDITIVELY book the SAME delta onto this agent's durable per-agent monthly Valkey key
+	// (a SEPARATE key — the tenant key above is untouched) so the cost-rollup worker can snapshot a
+	// durable per-agent spend series. nil-safe; independent of any budget cap.
+	gp.agentSpend.postCall(ctx, moneyToFloat(actual.String()))
 	// M66: accrue the invoking user's monthly spend (nil-safe; only when a per-user budget is set AND the
 	// capability resolved a userHash — a missing/forged capability booked no user, so nothing accrues).
 	// Uses the SAME per-request bundle snapshot as the pre-call so the pre/post pair is symmetric even
