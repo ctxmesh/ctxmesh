@@ -341,6 +341,18 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					// minio :9000, state-layer PROXY :8080 (the m53.7 cutover default for
 					// memory/quota/dedup), token-service :8443 (long-term-memory OBO). Omitting
 					// :8080 makes a member's quota fail-closed (402) post-cutover (audit SEC-1).
+					//
+					// SECURITY DEBT (audit P1-2, 2026-08-16): :6379 is direct access to the SHARED,
+					// UNAUTHENTICATED Valkey (ADR 0049) — an agent that opens it can issue arbitrary Redis
+					// against every tenant's keys (the :8080 proxy's per-tenant scoping is bypassed). It CANNOT
+					// be dropped yet: the AgentTeam-supervisor SPAWN GUARD (delegate.go -> newRedisSpawnStore,
+					// injected as TENANT_QUOTA_ADDR at agentdeployment_controller.go ~1351) is the last consumer
+					// with NO :8080 path — the proxy exposes memory/quota/dedup/control ops but no spawn-counter
+					// ops. Removing :6379 here would break fail-closed spawn enforcement for supervisors. The fix
+					// is a proper carded task (audit P1-2): add spawn acquire/release + counter ops to the
+					// state-layer proxy (mirror /quota/slot + /quota/spend), a launcher newHTTPSpawnStore, gate
+					// the TENANT_QUOTA_ADDR injection on proxy-off, THEN drop :6379 — with a live supervisor-
+					// delegation fail-closed proof (ADR 0052).
 					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
