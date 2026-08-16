@@ -350,6 +350,10 @@ func main() {
 		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
 		// deferred, so this is guard-side only).
 		OnlineScore: onlinescore.NewPostgresStore(cpDB),
+		// Online-scoring config writer (m84.3, ADR 0062 Fork 2 / ADR 0011): the controller resolves each
+		// agent's evalSuiteRef → EvalSuite.spec.online and UPSERTS/CLEARS the per-(ns, agent) config row the
+		// BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA). Same cpDB store; nil-safe.
+		OnlineConfig: onlinescore.NewPostgresStore(cpDB),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)

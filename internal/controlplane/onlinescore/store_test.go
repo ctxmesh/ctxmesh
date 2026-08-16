@@ -49,7 +49,7 @@ func eachStore(t *testing.T, fn func(t *testing.T, s onlinescore.Store)) {
 	db, err := controlplane.OpenDB(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`TRUNCATE online_score_aggregates`)
+	_, err = db.Exec(`TRUNCATE online_score_aggregates, online_score_config`)
 	require.NoError(t, err)
 	t.Run("postgres", func(t *testing.T) { fn(t, onlinescore.NewPostgresStore(db)) })
 }
@@ -259,5 +259,70 @@ func TestStore_WindowStartTruncatedToHour(t *testing.T) {
 		if !got.WindowStart.Equal(hourBoundary) {
 			t.Errorf("WindowStart: got %v, want %v", got.WindowStart, hourBoundary)
 		}
+	})
+}
+
+// TestOnlineConfig_UpsertGetDelete exercises the per-(namespace, agent) online-scoring config row the
+// CONTROLLER writes and the BFF worker reads (m84.3): upsert round-trips every field (including the
+// window as whole seconds), a re-upsert updates in place, a missing row is (found==false), and a delete
+// clears it. Runs against BOTH the mem twin and (when CONTROLLER_TEST_DSN is set) real Postgres.
+func TestOnlineConfig_UpsertGetDelete(t *testing.T) {
+	eachStore(t, func(t *testing.T, s onlinescore.Store) {
+		ctx := context.Background()
+
+		// Missing row ⇒ (found==false, nil error) — the worker's judge-OFF fail-safe.
+		_, found, err := s.GetOnlineConfig(ctx, "default", "agent-cfg")
+		require.NoError(t, err)
+		require.False(t, found, "no row yet ⇒ found==false")
+
+		cfg := onlinescore.OnlineConfig{
+			Namespace:       "default",
+			AgentName:       "agent-cfg",
+			Enabled:         true,
+			SampleRate:      0.25,
+			MaxScoredPerDay: 12,
+			Window:          24 * time.Hour,
+			MinSamples:      7,
+		}
+		require.NoError(t, s.UpsertOnlineConfig(ctx, cfg))
+
+		got, found, err := s.GetOnlineConfig(ctx, "default", "agent-cfg")
+		require.NoError(t, err)
+		require.True(t, found, "after upsert the row is found")
+		require.True(t, got.Enabled)
+		require.InDelta(t, 0.25, got.SampleRate, 1e-9)
+		require.Equal(t, 12, got.MaxScoredPerDay)
+		require.Equal(t, 24*time.Hour, got.Window, "window round-trips as whole seconds")
+		require.Equal(t, 7, got.MinSamples)
+
+		// Re-upsert updates in place (idempotent — the controller writes every reconcile).
+		cfg.SampleRate = 0.5
+		cfg.MaxScoredPerDay = 3
+		cfg.Enabled = false
+		require.NoError(t, s.UpsertOnlineConfig(ctx, cfg))
+		got, found, err = s.GetOnlineConfig(ctx, "default", "agent-cfg")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.False(t, got.Enabled, "re-upsert flips enabled")
+		require.InDelta(t, 0.5, got.SampleRate, 1e-9)
+		require.Equal(t, 3, got.MaxScoredPerDay)
+
+		// Delete clears the row (idempotent — a second delete is a no-op).
+		require.NoError(t, s.DeleteOnlineConfig(ctx, "default", "agent-cfg"))
+		_, found, err = s.GetOnlineConfig(ctx, "default", "agent-cfg")
+		require.NoError(t, err)
+		require.False(t, found, "after delete the row is gone")
+		require.NoError(t, s.DeleteOnlineConfig(ctx, "default", "agent-cfg"), "deleting a missing row is a no-op")
+	})
+}
+
+// TestOnlineConfig_UpsertRejectsEmptyKey: the config upsert requires a non-empty (namespace, agentName).
+func TestOnlineConfig_UpsertRejectsEmptyKey(t *testing.T) {
+	eachStore(t, func(t *testing.T, s onlinescore.Store) {
+		ctx := context.Background()
+		err := s.UpsertOnlineConfig(ctx, onlinescore.OnlineConfig{AgentName: "a"})
+		require.ErrorIs(t, err, controlplane.ErrInvalid, "empty namespace ⇒ ErrInvalid")
+		err = s.UpsertOnlineConfig(ctx, onlinescore.OnlineConfig{Namespace: "ns"})
+		require.ErrorIs(t, err, controlplane.ErrInvalid, "empty agentName ⇒ ErrInvalid")
 	})
 }
