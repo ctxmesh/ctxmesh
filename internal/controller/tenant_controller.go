@@ -368,26 +368,23 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in agent-engine-system: gateway :4000, direct valkey :6379,
-					// minio :9000, state-layer PROXY :8080 (the m53.7 cutover default for
-					// memory/quota/dedup), token-service :8443 (long-term-memory OBO). Omitting
-					// :8080 makes a member's quota fail-closed (402) post-cutover (audit SEC-1).
+				{ // platform backends in agent-engine-system: gateway :4000, minio :9000, state-layer PROXY
+					// :8080 (memory/quota/dedup/control/SPAWN — the pod-authed, per-tenant-scoped choke point),
+					// token-service :8443 (long-term-memory OBO). Omitting :8080 makes a member's quota
+					// fail-closed (402) post-cutover (audit SEC-1).
 					//
-					// SECURITY DEBT (audit P1-2, 2026-08-16): :6379 is direct access to the SHARED,
-					// UNAUTHENTICATED Valkey (ADR 0049) — an agent that opens it can issue arbitrary Redis
-					// against every tenant's keys (the :8080 proxy's per-tenant scoping is bypassed). It CANNOT
-					// be dropped yet: the AgentTeam-supervisor SPAWN GUARD (delegate.go -> newRedisSpawnStore,
-					// injected as TENANT_QUOTA_ADDR at agentdeployment_controller.go ~1351) is the last consumer
-					// with NO :8080 path — the proxy exposes memory/quota/dedup/control ops but no spawn-counter
-					// ops. Removing :6379 here would break fail-closed spawn enforcement for supervisors. The fix
-					// is a proper carded task (audit P1-2): add spawn acquire/release + counter ops to the
-					// state-layer proxy (mirror /quota/slot + /quota/spend), a launcher newHTTPSpawnStore, gate
-					// the TENANT_QUOTA_ADDR injection on proxy-off, THEN drop :6379 — with a live supervisor-
-					// delegation fail-closed proof (ADR 0052).
+					// RESOLVED (audit P1-2, M94, 2026-08-17): raw Valkey `:6379` is NO LONGER in this
+					// allowlist. It was direct access to the SHARED, UNAUTHENTICATED Valkey (ADR 0049) — an
+					// agent could issue arbitrary Redis against every tenant's keys, bypassing the :8080
+					// proxy's per-tenant scoping. The last direct-`:6379` consumer was the AgentTeam-supervisor
+					// spawn guard; M94 added `/spawn/acquire`+`/spawn/release` to the state-layer proxy and a
+					// launcher httpSpawnStore, and the controller now injects `STATELAYER_PROXY_URL` (not
+					// `TENANT_QUOTA_ADDR`) for a supervisor when the proxy is configured. So no agent reaches
+					// raw Valkey anymore — every memory/quota/dedup/control/spawn op flows through the pod-authed
+					// proxy. (Live supervisor-fail-closed proof on kind+Calico is user-gated — carded m52.C13.)
 					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
-						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
