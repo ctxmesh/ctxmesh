@@ -336,6 +336,11 @@ func main() {
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
 		StatelayerProxyURL: strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL")),
+		// Launcher injection (C8, ADR 0079): opt-in + digest-pinned. Set ⇒ agents run the
+		// platform-injected launcher (initContainer + emptyDir + Command override) so a
+		// launcher fix rolls centrally; empty (default) ⇒ baked-launcher images run unchanged.
+		// REQUIRES the Knative podspec-init-containers/-volumes-emptydir feature flags.
+		LauncherImage: strings.TrimSpace(os.Getenv("LAUNCHER_IMAGE")),
 		// Prompt-only deploy (M9): the resolve seam. v1 ships the deterministic,
 		// OFFLINE fixture resolver — the dev/CI environment has no live git remote
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
