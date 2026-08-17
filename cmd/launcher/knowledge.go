@@ -153,7 +153,7 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 		tokenServiceURL: strings.TrimRight(tsURL, "/"),
 		namespace:       ns,
 		roster:          parseKnowledgeRoster(os.Getenv("KNOWLEDGE_BASES")),
-		client:          &http.Client{Timeout: 30 * time.Second},
+		client:          &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
 		tracer:          tracer,
 		logf:            logf,
 	}
