@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -257,6 +258,16 @@ type AgentDeploymentReconciler struct {
 	// (M51, ADR 0050 §8 phase 1 — opt-in dual-mode). Empty (default) ⇒ not injected,
 	// agents keep the direct-Valkey path (no drift).
 	StatelayerProxyURL string
+
+	// LauncherImage, when set (from the controller's LAUNCHER_IMAGE env), enables C8 launcher injection
+	// (ADR 0079): a launcher-inject initContainer stages the platform launcher into a shared emptyDir and
+	// the user container's Command is overridden to exec it — so a launcher security fix rolls CENTRALLY
+	// (a controller roll → a new revision) instead of a fleet image rebuild. Empty (default) ⇒ no injection
+	// (fully backward-compatible: baked-launcher images run unchanged). MUST be a DIGEST-pinned reference
+	// (fleet-RCE-equivalent config) and REQUIRES the Knative feature flags kubernetes.podspec-init-containers
+	// + kubernetes.podspec-volumes-emptydir (+ -securitycontext) enabled cluster-wide — else the ksvc is
+	// REJECTED. Confirm the flags before setting this (m92.2).
+	LauncherImage string
 
 	// PromptResolver resolves a PromptVersion git pointer (repo, ref, path) into
 	// prompt content for the prompt-only-deploy path (M9). It is the mock⇄real
@@ -786,6 +797,11 @@ func (r *AgentDeploymentReconciler) ensureAgentVersion(
 type podTemplate struct {
 	// containers is the ordered container list (user container first).
 	containers []corev1.Container
+	// initContainers run to completion before the pod's containers start (C8, ADR 0079): the
+	// launcher-inject initContainer that stages the platform launcher into the shared emptyDir. Empty
+	// unless LAUNCHER_IMAGE is configured. NOTE: initContainers on a Knative serving ksvc require the
+	// `kubernetes.podspec-init-containers` feature flag.
+	initContainers []corev1.Container
 	// volumes are the pod volumes (collector config, tools).
 	volumes []corev1.Volume
 	// labels are the pod-template labels (registry membership) or nil.
@@ -1636,8 +1652,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		saName = agentIdentitySAName(deploy.Name)
 	}
 
+	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject
+	// initContainer + shared emptyDir and override the user container's Command. Fold the launcher image
+	// into the structural digest so a LAUNCHER_IMAGE change ROLLS A NEW REVISION — initContainers run only
+	// at pod start, so a central launcher fix reaches agents via a revision roll (the M4 silent-loss
+	// landmine class: a real pod-spec change MUST roll a revision).
+	var initContainers []corev1.Container
+	if r.LauncherImage != "" {
+		initContainers, containers, volumes = injectPlatformLauncher(containers, volumes, r.LauncherImage)
+		sum := sha256.Sum256([]byte(combinedDigest + "|launcher:" + r.LauncherImage))
+		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+	}
+
 	return podTemplate{
 		containers:         containers,
+		initContainers:     initContainers,
 		volumes:            volumes,
 		labels:             templateLabels,
 		digest:             combinedDigest,
@@ -1653,6 +1682,78 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 // 0052 §C6 RESOLUTION).
 func agentIdentitySAName(deployName string) string {
 	return "agent-" + deployName
+}
+
+// C8 launcher-injection constants (ADR 0079).
+const (
+	// platformLauncherVolume is the emptyDir the launcher-inject initContainer stages the launcher into,
+	// mounted read-only into the user container.
+	platformLauncherVolume = "platform-launcher"
+	// platformLauncherMountDir / platformLauncherBinary: the mount point + the staged launcher path.
+	platformLauncherMountDir = "/platform"
+	platformLauncherBinary   = "/platform/launcher"
+	// launcherInjectContainer is the initContainer name; userContainerName is the user container it targets
+	// (by NAME, so a future sidecar is never Command-clobbered).
+	launcherInjectContainer = "launcher-inject"
+	userContainerName       = "user-container"
+	// launcherInstallSubcommand mirrors cmd/launcher/install.go's launcherInstallFlag — the launcher
+	// self-copy subcommand the distroless (no-cp) launcher image runs as the initContainer.
+	launcherInstallSubcommand = "--install"
+	// launcherImageInContainer is the launcher binary's path inside LAUNCHER_IMAGE (Dockerfile.launcher).
+	launcherImageInContainer = "/launcher"
+)
+
+// injectPlatformLauncher rewrites the pod template to run the PLATFORM-pinned launcher (C8, ADR 0079). A
+// launcher-inject initContainer self-copies the launcher into a shared emptyDir; the USER container (matched
+// by name, never a sidecar) mounts it read-only and its Command is overridden to exec it — so the user image
+// needs no baked launcher and a launcher fix rolls centrally. Off unless launcherImage is set (backward-
+// compatible). The initContainer is HARDENED (nonroot uid 65532, no caps, RO rootfs, RuntimeDefault seccomp)
+// and RESOURCE-BOUNDED so restricted-PSS / ResourceQuota'd namespaces admit it; the emptyDir is size-capped.
+// REQUIRES the Knative podspec-init-containers + podspec-volumes-emptydir (+ -securitycontext) feature flags.
+func injectPlatformLauncher(containers []corev1.Container, volumes []corev1.Volume, launcherImage string) (initContainers, outContainers []corev1.Container, outVolumes []corev1.Volume) {
+	for i := range containers {
+		if containers[i].Name != userContainerName {
+			continue // only the user container execs the launcher; sidecars keep their own Command
+		}
+		containers[i].Command = []string{platformLauncherBinary} // Args left absent: k8s ignores the image CMD entirely
+		containers[i].VolumeMounts = append(containers[i].VolumeMounts, corev1.VolumeMount{
+			Name: platformLauncherVolume, MountPath: platformLauncherMountDir, ReadOnly: true,
+		})
+	}
+
+	initC := corev1.Container{
+		Name:    launcherInjectContainer,
+		Image:   launcherImage,
+		Command: []string{launcherImageInContainer, launcherInstallSubcommand, platformLauncherBinary},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: platformLauncherVolume, MountPath: platformLauncherMountDir},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("10m"),
+				corev1.ResourceMemory: resource.MustParse("16Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             ptr.To(true),
+			RunAsUser:                ptr.To(int64(65532)),
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+	}
+	vol := corev1.Volume{
+		Name: platformLauncherVolume,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: ptr.To(resource.MustParse("64Mi"))},
+		},
+	}
+	return []corev1.Container{initC}, containers, append(volumes, vol)
 }
 
 // mountAPIToken reports whether the agent opts into auto-mounting the default kube-API
@@ -1817,6 +1918,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 				Spec: servingv1.RevisionSpec{
 					PodSpec: corev1.PodSpec{
 						ServiceAccountName: pod.serviceAccountName,
+						InitContainers:     pod.initContainers,
 						Containers:         pod.containers,
 						Volumes:            pod.volumes,
 					},
