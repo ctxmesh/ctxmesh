@@ -392,7 +392,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		upstream:       u,
 		enforcer:       budget.NewEnforcer(),
 		estimator:      budget.NewEstimator(),
-		client:         &http.Client{Timeout: gatewayRequestTimeout},
+		client:         &http.Client{Timeout: gatewayRequestTimeout, CheckRedirect: refuseRedirect},
 		tracer:         tracer,
 		bffInternalURL: cfg.BFFInternalURL,
 		logf:           logf,

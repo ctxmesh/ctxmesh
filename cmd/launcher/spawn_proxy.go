@@ -39,7 +39,7 @@ func newHTTPSpawnStore(baseURL, tokenPath string) *httpSpawnStore {
 	return &httpSpawnStore{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: quotaProxyTimeout},
+		client:    &http.Client{Timeout: quotaProxyTimeout, CheckRedirect: refuseRedirect},
 	}
 }
 

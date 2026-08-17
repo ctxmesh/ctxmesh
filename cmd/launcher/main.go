@@ -114,7 +114,7 @@ func main() {
 			seen:    seen,
 			tracer:  tracer,
 			offload: off,
-			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout}),
+			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: a2aRequestTimeout, CheckRedirect: refuseRedirect}),
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)

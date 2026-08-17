@@ -81,7 +81,7 @@ func newLongTermProxy(logf func(string, ...any), tracer trace.Tracer) *longTermP
 		agent:           strings.TrimSpace(os.Getenv("AGENT_NAME")),
 		scope:           scope,
 		embeddingModel:  strings.TrimSpace(os.Getenv("EMBEDDING_ROUTE")),
-		client:          &http.Client{Timeout: 30 * time.Second},
+		client:          &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
 		tracer:          tracer,
 		logf:            logf,
 	}

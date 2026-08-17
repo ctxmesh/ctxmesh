@@ -56,7 +56,7 @@ func newHTTPTenantStore(baseURL, tokenPath string) *httpTenantStore {
 	return &httpTenantStore{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: quotaProxyTimeout},
+		client:    &http.Client{Timeout: quotaProxyTimeout, CheckRedirect: refuseRedirect},
 	}
 }
 

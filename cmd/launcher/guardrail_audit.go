@@ -123,7 +123,7 @@ func (gp *gatewayProxy) fireGuardrailBlockAudit(r *http.Request, dec guardrailDe
 		req.Header.Set(runcap.HeaderName, capToken)
 
 		// Reuse the gateway's HTTP client (same timeout pool), but with the goroutine's ctx.
-		hc := &http.Client{Timeout: guardrailAuditTimeout}
+		hc := &http.Client{Timeout: guardrailAuditTimeout, CheckRedirect: refuseRedirect}
 		resp, err := hc.Do(req)
 		if err != nil {
 			gp.logf("launcher: guardrail audit: POST %s: %v (block already sent; durable record skipped)", url, err)
