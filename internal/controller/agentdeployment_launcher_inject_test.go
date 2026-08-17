@@ -24,13 +24,42 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
+
+// setLauncherFeatureFlags create-or-updates knative-serving/config-features so the C8c preflight
+// (launcherInjectionReady) sees the required flags on/off. Idempotent (the knative-serving namespace +
+// the CM may already exist from a prior test).
+func setLauncherFeatureFlags(t *testing.T, enabled bool) {
+	t.Helper()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: knativeServingNamespace}}
+	if err := k8sClient.Create(testCtx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
+	val := "disabled"
+	if enabled {
+		val = "enabled"
+	}
+	data := map[string]string{}
+	for _, f := range launcherRequiredKnativeFlags {
+		data[f] = val
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: knativeFeaturesConfigMap, Namespace: knativeServingNamespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(testCtx, k8sClient, cm, func() error {
+		cm.Data = data
+		return nil
+	})
+	require.NoError(t, err)
+}
 
 func reconcileAgentForKsvc(t *testing.T, r *AgentDeploymentReconciler, name string) servingv1.Service {
 	t.Helper()
@@ -51,6 +80,7 @@ func reconcileAgentForKsvc(t *testing.T, r *AgentDeploymentReconciler, name stri
 // emptyDir, and the user container's Command is overridden to exec the staged launcher.
 func TestReconcile_LauncherInjection(t *testing.T) {
 	const launcherImage = "ghcr.io/ctxmesh/launcher@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	setLauncherFeatureFlags(t, true) // C8c: the Knative flags must be enabled for injection to apply
 	r := newReconciler()
 	r.LauncherImage = launcherImage
 
@@ -103,6 +133,10 @@ func TestReconcile_LauncherInjection(t *testing.T) {
 	if col, ok := containerByName(spec.Containers, "collector"); ok {
 		assert.Nil(t, col.Command, "the collector sidecar Command must not be touched by injection")
 	}
+
+	// C8d: the launcher image is stamped on the revision for auditability.
+	assert.Equal(t, launcherImage, ksvc.Spec.Template.Annotations["agents.ctxmesh.ai/launcher-image"],
+		"the injected launcher image must be stamped on the ksvc revision")
 }
 
 // Default (no LAUNCHER_IMAGE): NO injection — fully backward-compatible with baked-launcher images.
@@ -118,4 +152,31 @@ func TestReconcile_NoLauncherInjection_Default(t *testing.T) {
 	for _, v := range spec.Volumes {
 		assert.NotEqual(t, "platform-launcher", v.Name, "no platform-launcher volume without LAUNCHER_IMAGE")
 	}
+}
+
+// C8c preflight (ADR 0079): LAUNCHER_IMAGE set but the Knative feature flags OFF ⇒ injection is SKIPPED
+// (fail-safe, no fleet outage) — the agent keeps its baked-launcher behavior.
+func TestReconcile_LauncherInjection_FlagsOff_IsSkipped(t *testing.T) {
+	setLauncherFeatureFlags(t, false) // flags present but disabled
+	r := newReconciler()
+	r.LauncherImage = "ghcr.io/ctxmesh/launcher@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	ksvc := reconcileAgentForKsvc(t, r, "flags-off-agent")
+	spec := ksvc.Spec.Template.Spec
+
+	assert.Empty(t, spec.InitContainers, "injection must be skipped when the Knative flags are off")
+	uc, ok := containerByName(spec.Containers, "user-container")
+	require.True(t, ok)
+	assert.Nil(t, uc.Command, "no Command override when injection is skipped (fail-safe)")
+}
+
+// C8b pinning MVP (ADR 0079): a mutable-tag LAUNCHER_IMAGE (no @sha256:) ⇒ injection SKIPPED even with the
+// flags on — a mutable tag is fleet-RCE-equivalent, so only a digest-pinned reference is injected.
+func TestReconcile_LauncherInjection_MutableTag_IsRejected(t *testing.T) {
+	setLauncherFeatureFlags(t, true) // flags ON, so only the tag-vs-digest check gates injection
+	r := newReconciler()
+	r.LauncherImage = "ghcr.io/ctxmesh/launcher:latest" // a mutable tag, NOT a digest
+
+	ksvc := reconcileAgentForKsvc(t, r, "mutable-tag-agent")
+	assert.Empty(t, ksvc.Spec.Template.Spec.InitContainers, "a mutable-tag LAUNCHER_IMAGE must not be injected")
 }
