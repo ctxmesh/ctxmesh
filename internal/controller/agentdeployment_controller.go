@@ -1658,7 +1658,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// at pod start, so a central launcher fix reaches agents via a revision roll (the M4 silent-loss
 	// landmine class: a real pod-spec change MUST roll a revision).
 	var initContainers []corev1.Container
-	if r.LauncherImage != "" {
+	if r.launcherInjectionReady(ctx) { // C8c: only inject when LAUNCHER_IMAGE is set AND the Knative flags are on
 		initContainers, containers, volumes = injectPlatformLauncher(containers, volumes, r.LauncherImage)
 		sum := sha256.Sum256([]byte(combinedDigest + "|launcher:" + r.LauncherImage))
 		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
@@ -1701,7 +1701,61 @@ const (
 	launcherInstallSubcommand = "--install"
 	// launcherImageInContainer is the launcher binary's path inside LAUNCHER_IMAGE (Dockerfile.launcher).
 	launcherImageInContainer = "/launcher"
+	// launcherImageAnnotation stamps the injected launcher image onto the ksvc revision (C8d auditability):
+	// "which agents run launcher X" is then one query. It changes exactly when LAUNCHER_IMAGE does (which
+	// already rolls a revision via the structural digest), so it never causes a spurious roll.
+	launcherImageAnnotation = "agents.ctxmesh.ai/launcher-image"
 )
+
+// knativeFeaturesConfigMap is the Knative Serving feature-flags ConfigMap (knative-serving namespace).
+const knativeFeaturesConfigMap = "config-features"
+
+// launcherRequiredKnativeFlags are the Knative feature flags C8 launcher injection needs on the ksvc pod
+// template (ADR 0079): initContainers, an emptyDir volume, and a hardened initContainer securityContext.
+// With any of them off, Knative REJECTS the ksvc — so the controller must not inject unless all are on.
+var launcherRequiredKnativeFlags = []string{
+	"kubernetes.podspec-init-containers",
+	"kubernetes.podspec-volumes-emptydir",
+	"kubernetes.podspec-securitycontext",
+}
+
+// launcherInjectionReady reports whether C8 launcher injection is BOTH configured (LAUNCHER_IMAGE set) AND
+// safe to apply — the required Knative feature flags are enabled in knative-serving/config-features (C8c
+// preflight, ADR 0079). If LAUNCHER_IMAGE is set but a flag is absent/off (or the ConfigMap can't be read),
+// it returns false FAIL-SAFE — injection is skipped (baked-launcher agents run unchanged) and a loud warning
+// is logged — so a misconfiguration (LAUNCHER_IMAGE set + flags off) never rejects every ksvc into a
+// self-inflicted fleet outage.
+func (r *AgentDeploymentReconciler) launcherInjectionReady(ctx context.Context) bool {
+	if r.LauncherImage == "" {
+		return false
+	}
+	// C8b (pinning MVP): LAUNCHER_IMAGE is fleet-RCE-equivalent config — whoever sets it owns PID 1 in every
+	// agent pod. Require a DIGEST-pinned reference (…@sha256:…); a mutable tag would let a mutated registry
+	// image silently swap the launcher. Reject fail-safe (skip injection) rather than inject a mutable tag.
+	// (Auto tag→digest resolution + cosign verification are carded — m52.C8b.)
+	if !strings.Contains(r.LauncherImage, "@sha256:") {
+		logf.FromContext(ctx).Info("WARNING: C8 launcher injection SKIPPED — LAUNCHER_IMAGE is not digest-pinned; it MUST be a …@sha256:… reference (a mutable tag is fleet-RCE-equivalent). Keeping baked-launcher behavior.",
+			"launcherImage", r.LauncherImage)
+		return false
+	}
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, client.ObjectKey{Namespace: knativeServingNamespace, Name: knativeFeaturesConfigMap}, &cm); err != nil {
+		logf.FromContext(ctx).Info("WARNING: C8 launcher injection SKIPPED — cannot read knative-serving/config-features to confirm the required feature flags; keeping baked-launcher behavior. Set LAUNCHER_IMAGE only after enabling the flags.",
+			"err", err.Error(), "flags", launcherRequiredKnativeFlags)
+		return false
+	}
+	for _, flag := range launcherRequiredKnativeFlags {
+		switch strings.ToLower(strings.TrimSpace(cm.Data[flag])) {
+		case "enabled", "allowed":
+			// on
+		default:
+			logf.FromContext(ctx).Info("WARNING: C8 launcher injection SKIPPED — a required Knative feature flag is not enabled; keeping baked-launcher behavior (fail-safe, no fleet outage).",
+				"flag", flag, "value", cm.Data[flag])
+			return false
+		}
+	}
+	return true
+}
 
 // injectPlatformLauncher rewrites the pod template to run the PLATFORM-pinned launcher (C8, ADR 0079). A
 // launcher-inject initContainer self-copies the launcher into a shared emptyDir; the USER container (matched
@@ -1905,6 +1959,15 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	annotations, err := r.autoscalingAnnotations(ctx, deploy)
 	if err != nil {
 		return nil, fmt.Errorf("resolving autoscaling annotations: %w", err)
+	}
+	// C8d auditability: when the launcher was injected, stamp its image on the revision so an operator can
+	// query "which agents still run launcher X" (the injected image is also on the initContainer, but the
+	// annotation makes it a metadata-level query).
+	if len(pod.initContainers) > 0 {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[launcherImageAnnotation] = r.LauncherImage
 	}
 
 	desiredSpec := servingv1.ServiceSpec{
