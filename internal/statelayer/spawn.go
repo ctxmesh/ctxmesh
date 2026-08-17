@@ -27,8 +27,9 @@ import (
 )
 
 // spawnKeyTTL bounds a spawn tree's counters so a leaked slot (a supervisor that crashed mid-delegation)
-// self-heals once the tree goes idle — a coarse guard, never a hard budget.
-const spawnKeyTTL = 2 * time.Hour
+// self-heals once the tree goes idle — a coarse guard, never a hard budget. Aligned with the launcher's
+// direct-store spawnCounterTTL (6h) so a proxy-path tree does not lose its counters mid-flight (audit P2-5).
+const spawnKeyTTL = 6 * time.Hour
 
 // maxSpawnKeyPart bounds a client-supplied scope / rootRunID so a request can never compose an unbounded
 // Valkey key.
@@ -109,7 +110,21 @@ func (s *redisSpawnStore) Release(ctx context.Context, namespace, scope, rootRun
 	if !spawnCounters[counter] {
 		return errors.New("unknown spawn counter")
 	}
-	return s.rdb.Decr(ctx, spawnKey(namespace, scope, rootRunID, counter)).Err()
+	key := spawnKey(namespace, scope, rootRunID, counter)
+	n, err := s.rdb.Decr(ctx, key).Result()
+	if err != nil {
+		return err
+	}
+	// Floor at 0 (audit P2-3): an over-release — release-spam, a double-release, or a Decr on an expired
+	// key (which Redis creates at -1) — must NOT drive the counter negative, or a subsequent Acquire would
+	// admit far past the budget (a budget bypass). Reset to 0 with a TTL so the key still self-expires
+	// (never a persistent negative/stale key). A concurrent racer may briefly see the pre-clamp value; this
+	// is a coarse best-effort budget, not a ledger.
+	if n < 0 {
+		return s.rdb.Set(ctx, key, 0, spawnKeyTTL).Err()
+	}
+	_ = s.rdb.Expire(ctx, key, spawnKeyTTL).Err() // a decremented key must still self-expire
+	return nil
 }
 
 // normalizeSpawnCounter lowercases + trims a client counter so "Inflight" / "COUNT" resolve.
