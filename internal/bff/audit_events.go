@@ -31,6 +31,11 @@ const (
 	auditActionConnect     = "connect"      // a provider connection was created/rotated
 	auditActionGrantCreate = "grant.create" // a per-user MCP OAuth grant was stored (consent)
 	auditActionGrantRevoke = "grant.revoke" // a per-user MCP grant was revoked
+	auditActionInvoke      = "invoke"       // an end-user invoked an agent (M91 EU2 — who invoked which agent/run)
+
+	// auditKindAgent is the audit ResourceKind for an agent invocation (EU2). Matches the AgentDeployment
+	// the caller ran, so the audit read-API can filter "all invocations of agent X".
+	auditKindAgent = "AgentDeployment"
 
 	// actorUnknown is the fallback actor when the authenticated username can't be resolved (never an
 	// error — audit is observability, never a gate). actorKindUser marks a caller-authenticated row.
@@ -76,4 +81,29 @@ func (s *Server) appendAudit(ctx context.Context, e auditlog.Entry) {
 		s.log.Error(err, "audit event not persisted (the action succeeded regardless)",
 			"action", e.Action, "resource", e.ResourceName)
 	}
+}
+
+// auditInvoke records an `invoke` audit event — "end-user <actor> invoked agent <ns>/<agent>" (M91 EU2,
+// ADR 0056). actor is the ALREADY-RESOLVED caller username (callers pass the identity they already have —
+// the durable-run path reuses the persisted Run.CallerUsername, avoiding a redundant SelfSubjectReview);
+// an empty actor is normalized to "unknown". runID is the durable run's id (empty for the synchronous
+// /api/invoke path, which has no durable run) and, when present, is stored as the row's TraceID so the
+// audit read-API links the invocation to its run/trace. Best-effort + record-after-effect: a no-op when
+// audit is not wired, and it NEVER gates the invoke.
+func (s *Server) auditInvoke(ctx context.Context, actor, agent, namespace, runID string) {
+	if s.auditStore == nil {
+		return
+	}
+	if actor == "" {
+		actor = actorUnknown
+	}
+	s.appendAudit(ctx, auditlog.Entry{
+		Actor:        actor,
+		Action:       auditActionInvoke,
+		ResourceKind: auditKindAgent,
+		ResourceName: agent,
+		Namespace:    namespace,
+		Outcome:      "success",
+		TraceID:      runID,
+	})
 }

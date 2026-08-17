@@ -304,6 +304,10 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create the run")
 		return
 	}
+	// Invoke audit attribution (M91 EU2): record "who invoked which agent + run" now the durable run
+	// exists. Reuse the already-resolved rn.CallerUsername (no redundant SelfSubjectReview); the runID is
+	// stored as the audit row's TraceID so "all invocations of run X / agent Y" is queryable. Best-effort.
+	s.auditInvoke(r.Context(), rn.CallerUsername, req.Agent, ns, runID)
 
 	// Worker-dispatch mode (ADR 0034): leave the run `queued` — a KEDA-scaled worker pool claims and
 	// executes it against the durable store, decoupled from this request (and this pod). Otherwise
