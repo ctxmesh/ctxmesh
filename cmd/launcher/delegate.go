@@ -204,6 +204,11 @@ type delegateRuntime struct {
 	Port      int
 	BFFURL    string
 	QuotaAddr string
+	// ProxyURL/TokenPath (M94): when STATELAYER_PROXY_URL is set the spawn guard goes through the pod-authed
+	// state-layer proxy (httpSpawnStore) instead of direct Valkey (QuotaAddr) — so a supervisor holds no
+	// direct :6379 path. The controller injects one OR the other (proxy-on gates off TENANT_QUOTA_ADDR).
+	ProxyURL  string
+	TokenPath string
 	cfg       delegateConfig
 }
 
@@ -226,6 +231,8 @@ func loadDelegateConfig(lookup func(string) string) delegateRuntime {
 		Port:      envIntDefault(lookup, "DELEGATE_PORT", defaultDelegatePort),
 		BFFURL:    strings.TrimSpace(lookup("BFF_INTERNAL_URL")),
 		QuotaAddr: strings.TrimSpace(lookup("TENANT_QUOTA_ADDR")),
+		ProxyURL:  strings.TrimSpace(lookup("STATELAYER_PROXY_URL")),
+		TokenPath: resolvePodTokenPath(lookup("STATELAYER_TOKEN_PATH")),
 		cfg: delegateConfig{
 			SelfName:  strings.TrimSpace(lookup("AGENT_NAME")),
 			Namespace: strings.TrimSpace(lookup("POD_NAMESPACE")),
@@ -251,15 +258,27 @@ func envIntDefault(lookup func(string) string, name string, def int) int {
 
 // buildServer returns the http.Server for the delegate listener (nil when disabled or under-configured).
 func (dr delegateRuntime) buildServer() *http.Server {
-	if !dr.Enabled || dr.BFFURL == "" || dr.QuotaAddr == "" {
+	// The spawn guard needs a counter store: the state-layer PROXY (preferred — no direct Valkey path) or,
+	// pre-cutover, direct Valkey (QuotaAddr). Under-configured (neither) ⇒ no delegate listener.
+	if !dr.Enabled || dr.BFFURL == "" || (dr.QuotaAddr == "" && dr.ProxyURL == "") {
 		return nil
 	}
-	guard := NewSpawnGuard(newRedisSpawnStore(dr.QuotaAddr))
+	guard := NewSpawnGuard(dr.spawnStore())
 	client := newHTTPSpawnClient(dr.BFFURL)
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", dr.Port),
 		Handler: newDelegateServer(dr.cfg, guard, client).handler(),
 	}
+}
+
+// spawnStore selects the spawn-guard counter store: the pod-authed state-layer PROXY when STATELAYER_PROXY_URL
+// is set (M94 — no direct Valkey path), else the direct-Valkey store (pre-cutover). The proxy path fails
+// CLOSED on any proxy error (SpawnGuard.Admit maps a store error to SpawnDeniedError).
+func (dr delegateRuntime) spawnStore() spawnGuardStore {
+	if dr.ProxyURL != "" {
+		return newHTTPSpawnStore(dr.ProxyURL, dr.TokenPath)
+	}
+	return newRedisSpawnStore(dr.QuotaAddr)
 }
 
 // delegateServer serves the launcher-local delegate_to endpoint.
