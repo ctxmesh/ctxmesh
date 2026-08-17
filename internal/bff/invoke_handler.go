@@ -114,6 +114,12 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	// adapter attaches it to the agent's /invoke (runcap, ADR 0030 §2). Best-effort: a
 	// mint failure never fails the run — it just proceeds without a capability (unattended).
 	r = s.attachRunCapability(r, caller, req.Agent, req.Namespace)
+	// Invoke audit attribution (M91 EU2): record "who invoked which agent" now that the caller is
+	// authorized for this agent and the invoke is about to dispatch. Best-effort + never a gate; the
+	// synchronous /api/invoke has no durable run, so runID is empty (the durable /api/runs path carries it).
+	if s.auditStore != nil {
+		s.auditInvoke(r.Context(), s.auditActor(r.Context(), caller), req.Agent, req.Namespace, "")
+	}
 	s.writeInvokeResult(w, r, req.Agent, endpoint, []byte(req.Input))
 }
 
