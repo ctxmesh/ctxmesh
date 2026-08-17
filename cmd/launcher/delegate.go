@@ -111,7 +111,7 @@ type httpSpawnClient struct {
 func newHTTPSpawnClient(bffURL string) *httpSpawnClient {
 	return &httpSpawnClient{
 		bffURL: strings.TrimRight(bffURL, "/"),
-		hc:     &http.Client{Timeout: 30 * time.Second},
+		hc:     &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
 		poll:   500 * time.Millisecond,
 	}
 }

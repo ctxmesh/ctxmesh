@@ -174,7 +174,7 @@ func newLangfuseScoresClient(cfg feedbackConfig) *langfuseScoresClient {
 		baseURL:   cfg.LangfuseHost,
 		publicKey: cfg.PublicKey,
 		secretKey: cfg.SecretKey,
-		client:    &http.Client{Timeout: feedbackUpstreamTimeout},
+		client:    &http.Client{Timeout: feedbackUpstreamTimeout, CheckRedirect: refuseRedirect},
 	}
 }
 
