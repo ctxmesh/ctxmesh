@@ -24,8 +24,12 @@ webhooks:
         namespace: system
         path: /validate-tenant-label
     rules:
+      # audit P2-1: include the status + finalize subresources — for a built-in Namespace the status/finalize
+      # strategies do not reset metadata, so a label set via either subresource would otherwise bypass the
+      # webhook (needs explicit `update namespaces/status|/finalize` RBAC, but close it anyway). The handler
+      # compares full old/new objects, so it evaluates them correctly.
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["namespaces"]
+        resources: ["namespaces", "namespaces/status", "namespaces/finalize"]
         scope: "Cluster"

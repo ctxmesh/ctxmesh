@@ -583,7 +583,16 @@ func main() {
 	// step the base install does not yet wire (no cert-manager). When enabled, only the Tenant controller's
 	// SA (TENANT_WEBHOOK_CONTROLLER_SA) may set/change the `agents.ctxmesh.ai/tenant` namespace label.
 	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == "true" {
-		enginewebhook.SetupTenantLabelWebhook(mgr, strings.TrimSpace(os.Getenv("TENANT_WEBHOOK_CONTROLLER_SA")))
+		// audit P2-2: an empty controller SA would deny EVERYONE — including the Tenant controller's own
+		// label stamping — wedging every Tenant reconcile once the VWC is applied. Refuse to start rather
+		// than ship a self-inflicted lockout.
+		controllerSA := strings.TrimSpace(os.Getenv("TENANT_WEBHOOK_CONTROLLER_SA"))
+		if controllerSA == "" {
+			setupLog.Error(errors.New("TENANT_WEBHOOK_CONTROLLER_SA is required when the webhook is enabled"),
+				"refusing to enable the tenant-label webhook without the controller SA (would deny the controller itself)")
+			os.Exit(1)
+		}
+		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
 		setupLog.Info("tenant-label ValidatingWebhook registered (opt-in; activate via config/webhook + certs)")
 	}
 

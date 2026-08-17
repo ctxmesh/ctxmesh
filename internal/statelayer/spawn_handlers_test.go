@@ -85,6 +85,24 @@ func TestSpawnNamespaceIsolation(t *testing.T) {
 	require.Contains(t, mr.Keys(), "spawn:ns-b:reg:shared:count")
 }
 
+// Release-spam must NOT drive a counter negative (audit P2-3) — else a later Acquire would admit far past
+// the budget. The counter floors at 0 and the budget stays enforced.
+func TestSpawnReleaseFloorsAtZero(t *testing.T) {
+	s, mr := newSpawnProxy(t, map[string]string{"tok": "ns"}, nil)
+	rel := `{"scope":"s","rootRunId":"r","counter":"inflight"}`
+	for range 3 { // spam release on a fresh/at-zero tree
+		require.Equal(t, http.StatusOK, do(t, s, "POST", "/spawn/release", "tok", rel, nil).Code)
+	}
+	v, _ := mr.Get("spawn:ns:s:r:inflight")
+	assert.Equal(t, "0", v, "release-spam must floor at 0, never negative (audit P2-3)")
+
+	// The budget is still enforced: with max=1 the first acquire admits, the second is denied.
+	acq := `{"scope":"s","rootRunId":"r","counter":"inflight","max":1}`
+	assert.JSONEq(t, `{"acquired":true}`, do(t, s, "POST", "/spawn/acquire", "tok", acq, nil).Body.String())
+	assert.JSONEq(t, `{"acquired":false}`, do(t, s, "POST", "/spawn/acquire", "tok", acq, nil).Body.String(),
+		"the budget is still enforced after release-spam (no bypass)")
+}
+
 // A non-agent SA (or a rejected token) cannot touch the spawn endpoints.
 func TestSpawnRejectsNonAgentAndBadInput(t *testing.T) {
 	// A verified-but-NON-agent SA (saByToken not agent-prefixed) → 403.
