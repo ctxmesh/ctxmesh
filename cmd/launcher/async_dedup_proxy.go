@@ -41,7 +41,7 @@ func newHTTPSeenSet(baseURL, tokenPath string) *httpSeenSet {
 	return &httpSeenSet{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		tokenPath: tokenPath,
-		client:    &http.Client{Timeout: dedupeOpTimeout},
+		client:    &http.Client{Timeout: dedupeOpTimeout, CheckRedirect: refuseRedirect},
 	}
 }
 
