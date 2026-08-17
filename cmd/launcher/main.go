@@ -29,6 +29,14 @@ import (
 )
 
 func main() {
+	// C8 launcher-injection (ADR 0079): when run as the `launcher-inject` initContainer with
+	// `--install <path>`, self-copy into the shared emptyDir and exit — BEFORE any config/OTel/proxy setup
+	// (the initContainer has none of that env). A normal launcher invocation has no --install arg and falls
+	// through to the runtime path below.
+	if handled, code := maybeInstall(os.Args); handled {
+		os.Exit(code)
+	}
+
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "launcher: %v\n", err)
