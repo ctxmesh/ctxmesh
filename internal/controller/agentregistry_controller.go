@@ -455,11 +455,17 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform backends in agent-engine-system: the LiteLLM model
-					// gateway (:4000), the direct Valkey state layer (:6379,
-					// proxy-less path), the MinIO object store (:9000), the
-					// state-layer PROXY (:8080, the m53.7 cutover default for
-					// memory/quota/dedup), and the token-service (:8443, long-term
-					// memory OBO). One namespace peer, scoped to these ports.
+					// gateway (:4000), the MinIO object store (:9000), the state-layer
+					// PROXY (:8080, the m53.7 cutover default for memory/quota/dedup/
+					// spawn), the token-service (:8443, long-term memory OBO), and the
+					// BFF. One namespace peer, scoped to these ports.
+					//
+					// M97 (audit P1-A): raw Valkey `:6379` is NOT allowlisted here —
+					// mirroring the tenant egress NP (tenant_controller.go, M94). NP
+					// rules are ADDITIVE, and every AgentTeam supervisor is a registry
+					// member, so leaving `:6379` here re-opened the cross-tenant
+					// raw-Redis hole M94 closed. Every memory/quota/spawn op flows
+					// through the pod-authed :8080 proxy now.
 					To: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{namespaceNameLabel: agentEngineSystemNamespace},
@@ -467,7 +473,6 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
-						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(memoryBackendPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
