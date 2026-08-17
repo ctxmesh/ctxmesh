@@ -1346,10 +1346,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			})
 		}
 
-		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject
-		// the launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as
-		// sub-runs. The spawn guard shares the tenant Valkey, so ensure TENANT_QUOTA_ADDR is present even
-		// for an UNbudgeted supervisor (otherwise the guard has no counter and can't fail-closed).
+		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject the
+		// launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as sub-runs.
+		// The spawn guard needs a counter store to fail-closed on: post-cutover (M94, audit P1-2) that is the
+		// pod-authed state-layer PROXY (no direct Valkey path); pre-cutover it is the direct Valkey addr.
 		team, tErr := resolveSupervisedTeam(ctx, r.Client, deploy)
 		if tErr != nil {
 			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
@@ -1364,7 +1364,18 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 					env = append(env, e)
 				}
 			}
-			if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
+			// M94: route the spawn guard through the state-layer proxy when configured (the supervisor then
+			// holds NO direct :6379 path — the last direct-Valkey consumer, so `:6379` can leave the egress
+			// allowlist). Otherwise (proxy-less) fall back to the direct Valkey addr.
+			if r.StatelayerProxyURL != "" {
+				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
+				}
+				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
+				}
+				injectPodToken = true
+			} else if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
 				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 			}
 		}

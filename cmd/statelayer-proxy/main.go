@@ -79,6 +79,7 @@ func run(log logr.Logger) error {
 	opts := statelayer.Options{
 		Store:      store,
 		QuotaStore: statelayer.NewRedisQuotaStore(addr, username, password),
+		SpawnStore: statelayer.NewRedisSpawnStore(addr, username, password),
 		DedupStore: statelayer.NewRedisDedupStore(addr, username, password),
 		// Run-control marker read (m70.8, real-kill cancel channel): the /control endpoint reads the
 		// `run:{id}:control` verb the trusted BFF writes on cancel, over the SAME credentialed Valkey.

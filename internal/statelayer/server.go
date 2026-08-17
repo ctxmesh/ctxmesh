@@ -69,6 +69,9 @@ type Server struct {
 	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
 	// deployments; the quota endpoints then report unavailable.
 	quota QuotaStore
+	// spawn is the AgentTeam-supervisor spawn-tree counter store (M94, closing audit P1-2 — moves the
+	// spawn guard off direct Valkey). nil ⇒ the spawn endpoints report unavailable.
+	spawn SpawnStore
 	// dedup is the async seen-set (M53). nil in memory-only deployments; the dedup
 	// endpoint then reports unavailable (the launcher fails CLOSED).
 	dedup DedupStore
@@ -101,6 +104,9 @@ type Options struct {
 	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
 	// quota endpoints report unavailable.
 	QuotaStore QuotaStore
+	// SpawnStore is the AgentTeam-supervisor spawn-tree counter store (M94). Optional: nil ⇒ the spawn
+	// endpoints report unavailable (a supervisor with STATELAYER_PROXY_URL fails closed on delegation).
+	SpawnStore SpawnStore
 	// DedupStore is the async seen-set (M53). Optional: nil ⇒ the dedup endpoint
 	// reports unavailable.
 	DedupStore DedupStore
@@ -129,6 +135,7 @@ func NewServer(opts Options) (*Server, error) {
 		podAuth:    opts.PodAuthenticator,
 		registries: opts.RegistryResolver,
 		quota:      opts.QuotaStore,
+		spawn:      opts.SpawnStore,
 		dedup:      opts.DedupStore,
 		control:    opts.ControlStore,
 		now:        now,
@@ -162,6 +169,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
 	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
+
+	// Spawn-tree counters (M94) — pod-identity authenticated, namespace-scoped SERVER-SIDE. Moves the
+	// AgentTeam-supervisor spawn guard off direct Valkey (:6379) so no agent reaches the shared store.
+	mux.HandleFunc("POST /spawn/acquire", s.handleSpawnAcquire)
+	mux.HandleFunc("POST /spawn/release", s.handleSpawnRelease)
 	// Async dedup (M53) — pod-identity authenticated, namespace-scoped SERVER-SIDE.
 	mux.HandleFunc("POST /dedup", s.handleDedup)
 	// Run control (m70.8) — pod-identity authenticated; the run-scoped CONTROL verb the
