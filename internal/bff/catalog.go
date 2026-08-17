@@ -98,6 +98,13 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	// This is the same SSAR authorizeStore call that mcpListToolRegistries performs for the
 	// own-namespace list. We call it directly so the store read below can use the tenant-wide
 	// member set (not just callerNS).
+	//
+	// DEPLOYMENT REQUIREMENT (audit P2 / C17): this gate is only as tight as the persona RBAC BINDING.
+	// Persona ClusterRoles MUST be RoleBound PER-NAMESPACE (not ClusterRoleBound cluster-wide) — the
+	// assumption the whole caller-scoped model (ADR 0011) rests on. Bound cluster-wide, a tenant-A principal
+	// could pass tenant-B's `?namespace=` and enumerate B's team catalog. A defense-in-depth membership check
+	// is hard here (the BFF is caller-scoped and derives tenant from namespace — no ambient tenant lookup,
+	// ADR 0011/0046), so the binding is the control; see specs/tenancy-and-quotas.md.
 	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, callerNS, ""); err != nil {
 		s.writeAuthzError(w, err, "read the MCP catalog")
 		return

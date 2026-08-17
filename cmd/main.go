@@ -64,6 +64,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/promql"
 	"github.com/ctxmesh/agent-engine/internal/run"
+	enginewebhook "github.com/ctxmesh/agent-engine/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -575,6 +576,15 @@ func main() {
 	if err := mgr.Add(auditPruner); err != nil {
 		setupLog.Error(err, "Failed to register the audit retention pruner")
 		os.Exit(1)
+	}
+
+	// Tenant-label ValidatingWebhook (C14, audit P1-3): OPT-IN (ENABLE_TENANT_LABEL_WEBHOOK=true) because it
+	// needs webhook serving certs + a ValidatingWebhookConfiguration (config/webhook) — a user-gated deploy
+	// step the base install does not yet wire (no cert-manager). When enabled, only the Tenant controller's
+	// SA (TENANT_WEBHOOK_CONTROLLER_SA) may set/change the `agents.ctxmesh.ai/tenant` namespace label.
+	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == "true" {
+		enginewebhook.SetupTenantLabelWebhook(mgr, strings.TrimSpace(os.Getenv("TENANT_WEBHOOK_CONTROLLER_SA")))
+		setupLog.Info("tenant-label ValidatingWebhook registered (opt-in; activate via config/webhook + certs)")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
