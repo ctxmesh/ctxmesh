@@ -704,6 +704,19 @@ spec:
                         maxLength: 256
                         type: string
                     type: object
+                  perUser:
+                    description: |-
+                      perUser isolates each invoking end-user's conversation memory into a separate bucket (M98, EU1a,
+                      ADR 0080), so one user's session history never surfaces in another user's — the launcher stamps a
+                      hash of the VERIFIED run capability's user id and the state-layer proxy keys under it. It is
+                      PRODUCT-grade, not security-grade: isolation is launcher-stamped inside the pod boundary (a
+                      compromised pod could still read its own users' buckets, same posture as long-term perUser); the
+                      enforcement-point move is EU1b. Only meaningful for the private ("session") scope — ignored for the
+                      shared team scratchpad, which is per-conversation by design. Default off: existing agents keep the
+                      agent-wide bucket, and it breaks conversation handoff / share-links for the agent, so it is opt-in.
+                      Requires the state-layer proxy path (the default install). An async/eventing turn (no run
+                      capability) falls back to the agent-wide bucket rather than failing — see ADR 0080.
+                    type: boolean
                   scope:
                     default: session
                     description: |-
@@ -1667,6 +1680,19 @@ spec:
                         maxLength: 256
                         type: string
                     type: object
+                  perUser:
+                    description: |-
+                      perUser isolates each invoking end-user's conversation memory into a separate bucket (M98, EU1a,
+                      ADR 0080), so one user's session history never surfaces in another user's — the launcher stamps a
+                      hash of the VERIFIED run capability's user id and the state-layer proxy keys under it. It is
+                      PRODUCT-grade, not security-grade: isolation is launcher-stamped inside the pod boundary (a
+                      compromised pod could still read its own users' buckets, same posture as long-term perUser); the
+                      enforcement-point move is EU1b. Only meaningful for the private ("session") scope — ignored for the
+                      shared team scratchpad, which is per-conversation by design. Default off: existing agents keep the
+                      agent-wide bucket, and it breaks conversation handoff / share-links for the agent, so it is opt-in.
+                      Requires the state-layer proxy path (the default install). An async/eventing turn (no run
+                      capability) falls back to the agent-wide bucket rather than failing — see ADR 0080.
+                    type: boolean
                   scope:
                     default: session
                     description: |-
@@ -3875,6 +3901,19 @@ spec:
                             maxLength: 256
                             type: string
                         type: object
+                      perUser:
+                        description: |-
+                          perUser isolates each invoking end-user's conversation memory into a separate bucket (M98, EU1a,
+                          ADR 0080), so one user's session history never surfaces in another user's — the launcher stamps a
+                          hash of the VERIFIED run capability's user id and the state-layer proxy keys under it. It is
+                          PRODUCT-grade, not security-grade: isolation is launcher-stamped inside the pod boundary (a
+                          compromised pod could still read its own users' buckets, same posture as long-term perUser); the
+                          enforcement-point move is EU1b. Only meaningful for the private ("session") scope — ignored for the
+                          shared team scratchpad, which is per-conversation by design. Default off: existing agents keep the
+                          agent-wide bucket, and it breaks conversation handoff / share-links for the agent, so it is opt-in.
+                          Requires the state-layer proxy path (the default install). An async/eventing turn (no run
+                          capability) falls back to the agent-wide bucket rather than failing — see ADR 0080.
+                        type: boolean
                       scope:
                         default: session
                         description: |-
@@ -4640,6 +4679,19 @@ spec:
                             maxLength: 256
                             type: string
                         type: object
+                      perUser:
+                        description: |-
+                          perUser isolates each invoking end-user's conversation memory into a separate bucket (M98, EU1a,
+                          ADR 0080), so one user's session history never surfaces in another user's — the launcher stamps a
+                          hash of the VERIFIED run capability's user id and the state-layer proxy keys under it. It is
+                          PRODUCT-grade, not security-grade: isolation is launcher-stamped inside the pod boundary (a
+                          compromised pod could still read its own users' buckets, same posture as long-term perUser); the
+                          enforcement-point move is EU1b. Only meaningful for the private ("session") scope — ignored for the
+                          shared team scratchpad, which is per-conversation by design. Default off: existing agents keep the
+                          agent-wide bucket, and it breaks conversation handoff / share-links for the agent, so it is opt-in.
+                          Requires the state-layer proxy path (the default install). An async/eventing turn (no run
+                          capability) falls back to the agent-wide bucket rather than failing — see ADR 0080.
+                        type: boolean
                       scope:
                         default: session
                         description: |-

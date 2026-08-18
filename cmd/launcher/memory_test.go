@@ -145,6 +145,154 @@ func TestMemoryForwardsToProxy(t *testing.T) {
 	}
 }
 
+// Per-user session memory (M98, EU1a, ADR 0080): with MEMORY_PER_USER on a PRIVATE-scope agent, the
+// forward stamps X-Memory-User (a hash of the VERIFIED runcap user). Fail-SAFE: no / invalid cap ⇒ no
+// header (agent-wide, never a 401 — ADR 0052 async-safety), and a client-supplied X-Memory-User is
+// stripped (never trusted). The runcap itself is still consumed at the forward, never relayed.
+func TestMemoryForwardsPerUserHeader(t *testing.T) {
+	const audience = "ctxmesh-test-aud"
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MCP_CAPABILITY_PUBLIC_KEY", runcap.EncodePublicKey(pub))
+	t.Setenv("MCP_CAPABILITY_AUDIENCE", audience)
+	validTok, err := runcap.NewSigner(priv, audience, nil).Mint(runcap.MintRequest{
+		User: "user-hash-alice", Agent: "asst", RunID: "run-1", TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotUser, gotScope, gotRuncap string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = r.Header.Get("X-Memory-User")
+		gotScope = r.Header.Get("X-Memory-Scope")
+		gotRuncap = r.Header.Get(runcap.HeaderName)
+		w.Header().Set("ETag", "0")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(proxy.Close)
+
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("pod-sa-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(nil, // forward-only, PRIVATE scope, perUser
+		memoryConfig{
+			Port: defaultMemoryPort, Namespace: "team-alpha", Agent: "support",
+			ProxyURL: proxy.URL, TokenPath: tokenPath, PerUser: true,
+		},
+		tp.Tracer(tracerName), nil, nil)
+	srv := httptest.NewServer(ms.handler())
+	t.Cleanup(srv.Close)
+
+	get := func(setup func(*http.Request)) {
+		t.Helper()
+		gotUser, gotScope, gotRuncap = "sentinel", "sentinel", "sentinel"
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/memory/c1", nil)
+		if setup != nil {
+			setup(req)
+		}
+		resp, derr := http.DefaultClient.Do(req)
+		if derr != nil {
+			t.Fatal(derr)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (per-user must never 401)", resp.StatusCode)
+		}
+	}
+
+	want := memoryUserBucket("user-hash-alice")
+
+	// (a) a VALID runcap → the derived per-user bucket, runcap stripped, no shared scope.
+	get(func(r *http.Request) { r.Header.Set(runcap.HeaderName, validTok) })
+	if gotUser != want {
+		t.Errorf("X-Memory-User = %q, want the hashed bucket %q", gotUser, want)
+	}
+	if gotRuncap != "" {
+		t.Errorf("runcap = %q, must be stripped from the forward", gotRuncap)
+	}
+	if gotScope != "" {
+		t.Errorf("X-Memory-Scope = %q, want empty (private scope)", gotScope)
+	}
+
+	// (b) NO runcap (async/eventing turn) → agent-wide, never a 401.
+	get(nil)
+	if gotUser != "" {
+		t.Errorf("no cap: X-Memory-User = %q, want empty (agent-wide fallback)", gotUser)
+	}
+
+	// (c) a client-forged X-Memory-User with no valid cap must be STRIPPED (never trusted).
+	get(func(r *http.Request) { r.Header.Set("X-Memory-User", "deadbeefcafe") })
+	if gotUser != "" {
+		t.Errorf("forged X-Memory-User survived (%q) — the launcher must never trust a client value", gotUser)
+	}
+
+	// (d) an INVALID runcap → fail-safe agent-wide (no header), not an error.
+	get(func(r *http.Request) { r.Header.Set(runcap.HeaderName, "garbage.not.a.jwt") })
+	if gotUser != "" {
+		t.Errorf("invalid cap: X-Memory-User = %q, want empty (fail-safe agent-wide)", gotUser)
+	}
+}
+
+// A perUser SHARED-scope agent never stamps X-Memory-User even with a valid cap: the shared
+// scratchpad is per-conversation by design (the launcher builds no verifier for shared scope).
+func TestMemoryPerUserIgnoredForSharedScope(t *testing.T) {
+	const audience = "ctxmesh-test-aud"
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MCP_CAPABILITY_PUBLIC_KEY", runcap.EncodePublicKey(pub))
+	t.Setenv("MCP_CAPABILITY_AUDIENCE", audience)
+	validTok, err := runcap.NewSigner(priv, audience, nil).Mint(runcap.MintRequest{
+		User: "user-hash-alice", Agent: "asst", RunID: "run-1", TTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotUser, gotScope string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser, gotScope = r.Header.Get("X-Memory-User"), r.Header.Get("X-Memory-Scope")
+		w.Header().Set("ETag", "0")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(proxy.Close)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("pod-sa-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, tp := newTestTracer(t)
+	ms := newMemoryServer(nil,
+		memoryConfig{
+			Port: defaultMemoryPort, Namespace: "team-alpha", Agent: "support",
+			Scope: "shared", Registry: "reg-1", ProxyURL: proxy.URL, TokenPath: tokenPath, PerUser: true,
+		},
+		tp.Tracer(tracerName), nil, nil)
+	srv := httptest.NewServer(ms.handler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/memory/c1", nil)
+	req.Header.Set(runcap.HeaderName, validTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if gotUser != "" {
+		t.Errorf("shared scope stamped X-Memory-User = %q — per-user must never apply to shared", gotUser)
+	}
+	if gotScope != "shared" {
+		t.Errorf("X-Memory-Scope = %q, want shared", gotScope)
+	}
+}
+
 // ── healthz ───────────────────────────────────────────────────────────────────
 
 func TestMemoryHealthz(t *testing.T) {

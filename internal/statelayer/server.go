@@ -37,6 +37,13 @@ const maxMemoryBody = 1 << 20
 // only ever reach its own registry's shared space (never another tenant's).
 const memoryScopeHeader = "X-Memory-Scope"
 
+// memoryUserHeader carries a launcher-stamped hash of the invoking end-user (M98,
+// EU1a, ADR 0080) for a perUser private-scope agent. The proxy prepends it to the
+// conversation id so each user gets an isolated bucket. It is KEY material derived
+// inside the pod from the VERIFIED runcap — never authz (the pod token is still the
+// authz). Bounded/hex-validated below to keep it injection-proof.
+const memoryUserHeader = "X-Memory-User"
+
 // RegistryResolver maps a pod identity (namespace + agent SA name) to the agent's
 // registry id — the SERVER-TRUSTED shared-memory boundary (`mem:shared:{registry}:`),
 // which used to be the runcap `bnd` claim (ADR 0052 §C6 RESOLUTION). It reads the
@@ -196,6 +203,19 @@ func (s *Server) scoped(fn scopedHandler) http.HandlerFunc {
 		if err := validateConversationID(convID); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// Per-user session memory (M98, EU1a, ADR 0080): a perUser PRIVATE-scope agent's launcher stamps
+		// X-Memory-User (a hash of the invoking user, derived from the VERIFIED runcap inside the pod). We
+		// prepend it to the convID so the key is user-isolated (mem:{ns}/{agent}:u.{user}.{convId}). It is
+		// launcher-stamped KEY material (product-grade) — the proxy keys on it, never authenticates the user
+		// (the pod token is still the authz). Absent (async/eventing, or perUser off) ⇒ agent-wide, unchanged.
+		// NEVER applied to shared scope (a team scratchpad is per-conversation by design).
+		if user := r.Header.Get(memoryUserHeader); user != "" && !sc.shared {
+			if err := validateMemoryUserBucket(user); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			convID = "u." + user + "." + convID
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
 		defer cancel()

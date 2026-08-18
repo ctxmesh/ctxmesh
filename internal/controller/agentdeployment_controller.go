@@ -1172,6 +1172,17 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		if r.StatelayerProxyURL != "" {
 			env = append(env, corev1.EnvVar{Name: "STATELAYER_PROXY_URL", Value: r.StatelayerProxyURL})
 		}
+		// Per-user session memory (M98, EU1a, ADR 0080): isolate each invoking end-user's conversation
+		// memory into its own bucket. The launcher stamps X-Memory-User from the VERIFIED run capability
+		// and the state-layer proxy keys under it. Injected ONLY when (a) the folded sessionMemory opts in
+		// (perUser), (b) the scope is PRIVATE — never the shared team scratchpad, which is per-conversation
+		// by design — and (c) the state-layer proxy path is on (there is no proxy to compose the per-user
+		// key in a proxy-less install). Default off ⇒ inert for every existing agent. Adding this env rolls
+		// a new revision (it is part of the pod template), so a toggle takes effect on the next reconcile.
+		if sm := deploy.Spec.SessionMemory; sm != nil && sm.PerUser &&
+			memScope != memoryScopeShared && r.StatelayerProxyURL != "" {
+			env = append(env, corev1.EnvVar{Name: "MEMORY_PER_USER", Value: annotationTrue})
+		}
 	}
 
 	// Long-term memory (M46, ADR 0045): when spec.longTermMemory.enabled, the launcher exposes
