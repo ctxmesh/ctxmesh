@@ -476,7 +476,7 @@ export function CostPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Cost</h2>
         <p className="text-sm text-muted-foreground">
-          Per-agent cost breakdown from recent activity.
+          Per-agent spend within a tenant, from recent activity.
         </p>
       </div>
       {tenants.length > 0 && (
@@ -494,12 +494,30 @@ export function CostPage() {
       <div className="mx-auto max-w-5xl space-y-6" data-testid="cost-page">
         {header}
         <div
-          className="flex h-40 items-center justify-center rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
+          className="flex h-40 flex-col items-center justify-center gap-3 rounded-lg border bg-card px-6 text-center text-sm text-muted-foreground"
           data-testid="cost-no-tenant"
         >
-          {tenantsState.kind === "forbidden"
-            ? "Cost is per-tenant. You don't have permission to list tenants — ask an operator for access to view cost."
-            : "Cost is per-tenant, and this cluster has no tenants yet. An operator creates a Tenant to enable cost tracking."}
+          {tenantsState.kind === "forbidden" ? (
+            <p>
+              Cost is grouped by tenant. You don&apos;t have permission to list
+              tenants — ask an operator for access.
+            </p>
+          ) : (
+            <>
+              <p>
+                Cost is grouped by tenant, and this cluster has no tenants yet.
+                Create a tenant to start tracking per-agent spend.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/tenants")}
+                data-testid="cost-create-tenant"
+              >
+                Create a tenant
+              </Button>
+            </>
+          )}
         </div>
       </div>
     );
