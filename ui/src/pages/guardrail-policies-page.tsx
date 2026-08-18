@@ -132,8 +132,7 @@ export function GuardrailPoliciesPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Guardrail Policies</h2>
         <p className="text-sm text-muted-foreground">
           Namespace-scoped content-governance policies: PII scanning, pattern deny-lists, optional
-          LLM-judge, and per-user rate limits. Applies at inference time via a sidecar. Authored via
-          YAML for now.
+          LLM-judge, and per-user rate limits. Applies at inference time.
         </p>
       </div>
 

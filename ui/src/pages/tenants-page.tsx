@@ -303,8 +303,7 @@ export function TenantsPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Tenants</h2>
         <p className="text-sm text-muted-foreground">
-          Cluster-scoped groupings of namespaces with compute + model quotas. Read-only here; operators
-          manage tenants (the RBAC split is enforced by the API server).
+          Cluster-scoped groupings of namespaces with compute + model quotas.
         </p>
       </div>
 

@@ -231,10 +231,9 @@ export function ModelRoutesPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Model Routes</h2>
           <p className="text-sm text-muted-foreground">
-            The provider bindings behind your models — the platform creates and
-            maintains one automatically when you connect a provider and pick a
-            model, so you rarely need this page. It&apos;s here for operators who
-            want to inspect or hand-author routing directly.
+            The provider bindings behind your models. The platform creates one
+            automatically when you connect a provider and pick a model; inspect
+            or hand-author routing here.
           </p>
         </div>
         {canCreate && (
