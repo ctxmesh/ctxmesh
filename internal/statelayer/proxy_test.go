@@ -203,6 +203,57 @@ func TestProxySharedScopeResolverErrorFailsClosed(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
+// Per-user session memory (M98, EU1a): a validated X-Memory-User header isolates the
+// private key per user (mem:{ns}/{agent}:u.{bucket}.{convId}); two users on the SAME
+// conversation id get INDEPENDENT keys, and no header ⇒ the agent-wide key (unchanged).
+func TestProxyPerUserKeyIsolation(t *testing.T) {
+	s, mr, auth := newTestProxy(t)
+	tok := podToken(auth, "team-alpha/support-agent")
+
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"alice"}`,
+			map[string]string{memoryUserHeader: "aaaa1111"}).Code)
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"bob"}`,
+			map[string]string{memoryUserHeader: "bbbb2222"}).Code)
+	// No header → the agent-wide bucket (async/eventing, or perUser off).
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"team"}`, nil).Code)
+
+	keys := mr.Keys()
+	assert.Contains(t, keys, "mem:team-alpha/support-agent:u.aaaa1111.c1", "alice's per-user key")
+	assert.Contains(t, keys, "mem:team-alpha/support-agent:u.bbbb2222.c1", "bob's per-user key")
+	assert.Contains(t, keys, "mem:team-alpha/support-agent:c1", "no header ⇒ agent-wide key (unchanged)")
+	assert.Len(t, keys, 3, "three distinct buckets on the same conversation id")
+}
+
+// Per-user keying NEVER applies to the shared team scratchpad — a shared request with a
+// stray X-Memory-User still keys per-conversation under the registry (team-visible by design).
+func TestProxyPerUserNeverAppliesToShared(t *testing.T) {
+	resolver := fakeRegistryResolver{byNsSA: map[string]string{
+		"team-alpha/agent-support-agent": "reg-1",
+	}}
+	s, mr, auth := newTestProxy(t, func(o *Options) { o.RegistryResolver = resolver })
+	tok := podToken(auth, "team-alpha/support-agent")
+
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"team"}`,
+			map[string]string{memoryScopeHeader: "shared", memoryUserHeader: "aaaa1111"}).Code)
+	require.Equal(t, "mem:shared:reg-1:c1", mr.Keys()[0], "shared scope ignores X-Memory-User")
+}
+
+// A malformed X-Memory-User (non-hex, ':' injection, or oversized) is rejected 400 — the
+// proxy never lets an unvalidated segment into the key.
+func TestProxyPerUserRejectsBadBucket(t *testing.T) {
+	s, _, auth := newTestProxy(t)
+	tok := podToken(auth, "team-alpha/support-agent")
+	for _, bad := range []string{"UPPER", "has:colon", "with/slash", "sp ace", strings.Repeat("a", 65)} {
+		rec := do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"x"}`,
+			map[string]string{memoryUserHeader: bad})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "bad bucket %q must be rejected", bad)
+	}
+}
+
 // The dev bypass scopes unauthenticated requests to a static identity (never enabled in prod).
 func TestProxyDevBypass(t *testing.T) {
 	s, mr, _ := newTestProxy(t, func(o *Options) { o.DevAgent = "dev-ns/dev-agent" })
