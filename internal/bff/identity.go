@@ -66,6 +66,10 @@ const (
 	// ClusterRole grants it, so developer/viewer chrome hides the nav item (display-only; the
 	// API still enforces on GET /api/audit).
 	resAuditLogs = "auditlogs"
+	// resKnowledgeBases is probed so the console can GATE the Knowledge Bases nav item on
+	// `list knowledgebases` (M99 C2) — a persona that can't list KBs (e.g. developer) must not see a
+	// nav item that then 403s. Display-only; the API still enforces on GET /api/knowledgebases.
+	resKnowledgeBases = "knowledgebases"
 )
 
 // agentsAPIGroup is the API group all the golden CRD kinds live in.
@@ -89,6 +93,7 @@ var (
 		resEvalSuites,
 		resPromptVersions,
 		resAuditLogs,
+		resKnowledgeBases,
 	}
 	goldenVerbs = []string{"get", "list", "create", "update", "delete"}
 )
