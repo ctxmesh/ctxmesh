@@ -541,13 +541,33 @@ func TestHandlerCostTenantIsolatesSummary(t *testing.T) {
 }
 
 // TestHandlerCostBreakdownRequiresTenant: /api/cost/breakdown without ?tenant= →
-// 400 (ADR 0077), checked BEFORE the `by` param.
+// 400 (ADR 0077) WHEN tenants exist (a cluster-wide breakdown would leak across them).
 func TestHandlerCostBreakdownRequiresTenant(t *testing.T) {
-	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, costrollup.NewMemStore())
-	// Even with a valid ?by=agent, a missing ?tenant= is a 400.
+	// A tenant exists → a missing ?tenant= must still be a 400 (never cluster-wide).
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{}}, costrollup.NewMemStore(),
+		tenantCR("acme", "default"))
 	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
-	assert.Equal(t, http.StatusBadRequest, w.Code, "missing ?tenant= ⇒ 400")
+	assert.Equal(t, http.StatusBadRequest, w.Code, "missing ?tenant= with tenants present ⇒ 400")
 	assert.Contains(t, w.Body.String(), "tenant")
+}
+
+// TestHandlerCostBreakdownZeroTenantsFallback (M99 B1): on a cluster with NO tenants there is no
+// boundary to leak across, so a missing ?tenant= serves the cluster-wide per-agent breakdown instead
+// of 400 — the "per-agent fallback" so the Cost page isn't empty on a tenant-less cluster.
+func TestHandlerCostBreakdownZeroTenantsFallback(t *testing.T) {
+	br := &CostBreakdownResponse{
+		Agents:     []AgentCostItem{{AgentNs: "default", AgentName: "a1", TotalCostUSD: 1.5, TotalTokens: 100, RunCount: 3}},
+		Total:      CostSummary{TotalCostUSD: 1.5, TotalTokens: 100, Observations: 3, ByModel: []MetricPoint{}},
+		NextCursor: "",
+	}
+	// No tenant CRs seeded → the fallback engages.
+	s := newIsolationCostServer(t, Adapters{Langfuse: fakeLangfuseAdapter{breakdown: br}}, costrollup.NewMemStore())
+	w := serveWithToken(t, s, "/api/cost/breakdown?by=agent")
+	require.Equal(t, http.StatusOK, w.Code, "zero tenants + missing ?tenant= ⇒ cluster-wide breakdown, not 400")
+	var resp CostBreakdownResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp.Agents, 1)
+	assert.Equal(t, "a1", resp.Agents[0].AgentName)
 }
 
 // TestHandlerCostBreakdownFiltersByTenantNamespaces is the core breakdown-
