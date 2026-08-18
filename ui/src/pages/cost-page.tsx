@@ -320,12 +320,19 @@ export function CostPage() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // ADR 0077: the breakdown is tenant-scoped and REQUIRES ?tenant= (a missing
-    // tenant is a 400). Don't fire a guaranteed-400 call — render a calm "pick a
-    // tenant" state instead, mirroring the forecast card's silent-hide.
+    // ADR 0077: the breakdown is tenant-scoped and REQUIRES ?tenant= when tenants exist. M99 B1
+    // zero-tenant fallback: on a cluster with genuinely NO tenants the BFF serves the cluster-wide
+    // per-agent breakdown for an empty tenant, so we FETCH it (not a dead-end empty state). While the
+    // tenant list is still loading, forbidden, or non-empty (the picker's default-to-first will select
+    // one), keep the calm no-tenant state.
     if (!tenant) {
-      setLoadState({ kind: "no-tenant" });
-      return;
+      const zeroTenants =
+        tenantsState.kind === "ready" && tenantsState.tenants.length === 0;
+      if (!zeroTenants) {
+        setLoadState({ kind: "no-tenant" });
+        return;
+      }
+      // else: fall through and fetch with an empty tenant → the cluster-wide breakdown.
     }
 
     setLoadState({ kind: "loading" });
@@ -366,7 +373,7 @@ export function CostPage() {
           forbidden: err instanceof ApiError && err.isForbidden,
         });
       });
-  }, [cursor, tenant]);
+  }, [cursor, tenant, tenantsState]);
 
   useEffect(() => {
     load();
@@ -574,6 +581,28 @@ export function CostPage() {
           <TenantPicker tenant={tenant} tenants={tenants} onChange={setTenant} />
         )}
       </div>
+
+      {/* M99 B1: when the cluster has no tenants we show the cluster-wide per-agent breakdown; make
+          that explicit + offer to create a tenant for per-tenant tracking. */}
+      {loadState.kind === "ready" && !tenant && (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-4 py-2 text-xs text-muted-foreground"
+          data-testid="cost-all-agents-note"
+        >
+          <span>
+            No tenants yet — showing spend across <strong>all agents</strong>.
+            Create a tenant for per-tenant cost + budgets.
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate("/tenants")}
+            data-testid="cost-create-tenant"
+          >
+            Create a tenant
+          </Button>
+        </div>
+      )}
 
       {loadState.kind === "ready" && (
         <CostSummaryCard total={total} />

@@ -473,18 +473,19 @@ describe("CostPage — query params sent to API (m16.10)", () => {
     ).toBe(true);
   });
 
-  it("does NOT call the breakdown API when there are zero tenants (ADR 0077 gate)", async () => {
-    // With genuinely NO tenants there is nothing to default to → the calm
-    // no-tenant state, and a tenant-less breakdown would be a guaranteed 400.
+  it("calls the cluster-wide breakdown when there are zero tenants (M99 B1 fallback)", async () => {
+    // With genuinely NO tenants there is no boundary to leak across, so the Cost page fetches the
+    // cluster-wide per-agent breakdown (the BFF serves it for an empty tenant) instead of a dead-end.
     const captured = installFetch(
-      () => ({ ok: true, body: { agents: [], total: summary(), nextCursor: "" } }),
+      () => ({ ok: true, body: { agents: [item()], total: summary(), nextCursor: "" } }),
       [], // zero tenants
     );
 
     renderPage(""); // no ?tenant=
 
-    await screen.findByTestId("cost-no-tenant");
-    expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(false);
+    await screen.findByTestId("cost-breakdown-table");
+    expect(captured.some((u) => u.includes("/api/cost/breakdown"))).toBe(true);
+    expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
   });
 });
 
@@ -626,18 +627,18 @@ describe("CostPage — forecast card (M70 ADR 0063 D3)", () => {
     expect(card.textContent).toContain("Month forecast");
   });
 
-  it("does NOT render the forecast card when there are zero tenants (the no-tenant gate)", async () => {
+  it("renders the breakdown but NOT the forecast card when there are zero tenants (M99 B1)", async () => {
     installFetch(
-      () => ({ ok: true, body: { agents: [], total: summary(), nextCursor: "" } }),
-      [], // zero tenants → nothing to default to
+      () => ({ ok: true, body: { agents: [item()], total: summary(), nextCursor: "" } }),
+      [], // zero tenants → the cluster-wide per-agent breakdown fallback
     );
 
     renderPage(""); // no ?tenant=
 
-    // ADR 0077: no tenant to scope to ⇒ the calm gate, no breakdown, no forecast.
-    await screen.findByTestId("cost-no-tenant");
+    // M99 B1: the per-agent breakdown renders (fallback); the forecast stays tenant-required (absent).
+    await screen.findByTestId("cost-breakdown-table");
     expect(screen.queryByTestId("cost-forecast-card")).toBeNull();
-    expect(screen.queryByTestId("cost-breakdown-table")).toBeNull();
+    expect(screen.queryByTestId("cost-no-tenant")).toBeNull();
   });
 
   it("does NOT render the forecast card when the store returns 501", async () => {
