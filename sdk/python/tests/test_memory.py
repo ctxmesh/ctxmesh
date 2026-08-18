@@ -69,6 +69,29 @@ def test_search_passes_query_param(client, memory_stub: MemoryStub):
     assert req.query.get("q") == ["needle"]
 
 
+def test_session_forwards_run_capability(client, memory_stub: MemoryStub):
+    # M98 (EU1a, ADR 0080): the session methods forward the run capability (like long-term memory)
+    # so the launcher can user-scope per-user session memory. Every verb relays it when bound.
+    from ctxmesh._capability import CAPABILITY_HEADER, capability_scope
+
+    memory_stub.store["c1"] = [{"content": "hi"}]
+    with capability_scope({CAPABILITY_HEADER: "cap-token-abc"}):
+        client.memory.get("c1")
+        client.memory.put([{"role": "user", "content": "a"}], conversation_id="c1")
+        client.memory.append({"role": "user", "content": "b"}, conversation_id="c1")
+        client.memory.search("hi", conversation_id="c1")
+
+    relayed = [r.headers.get("x-ctxmesh-run-capability") for r in memory_stub.requests[-4:]]
+    assert relayed == ["cap-token-abc"] * 4, "get/put/append/search all relay the run capability"
+
+
+def test_session_omits_capability_when_absent(client, memory_stub: MemoryStub):
+    # No active capability (e.g. an async/eventing turn) ⇒ no header; the launcher falls back to the
+    # agent-wide bucket rather than 401ing (ADR 0052 async-safety).
+    client.memory.append({"role": "user", "content": "x"}, conversation_id="c2")
+    assert "x-ctxmesh-run-capability" not in memory_stub.requests[-1].headers
+
+
 def test_with_conversation_binds_default_id(client, memory_stub: MemoryStub):
     memory_stub.store["bound"] = [{"content": "z"}]
     turn = client.with_conversation("bound")

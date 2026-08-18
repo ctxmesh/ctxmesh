@@ -566,6 +566,68 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 		"the folded field injects the memory backend without a MemoryBinding CRD")
 	assert.Equal(t, namespace, envMap["MEMORY_KEY_NAMESPACE"])
 	assert.NotContains(t, envMap, "MEMORY_SCOPE", "private scope injects no MEMORY_SCOPE")
+	assert.NotContains(t, envMap, "MEMORY_PER_USER", "perUser off by default")
+}
+
+// TestMemory_PerUserSessionInjectsEnv (M98, EU1a, ADR 0080): a folded sessionMemory with perUser on the
+// PRIVATE scope + the state-layer proxy path injects MEMORY_PER_USER=true. It stays inert for the shared
+// scope (per-conversation by design), for a proxy-less install (no proxy to compose the per-user key),
+// and when perUser is off — so every existing agent is byte-for-byte unchanged.
+func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
+	const namespace = "default"
+	const proxyURL = "http://statelayer-proxy.agent-engine-system.svc:8080"
+
+	mkAgent := func(name string, sm *agentsv1alpha1.SessionMemorySpec) *agentsv1alpha1.AgentDeployment {
+		return &agentsv1alpha1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: agentsv1alpha1.AgentDeploymentSpec{
+				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
+				SessionMemory: sm,
+			},
+		}
+	}
+	envFor := func(t *testing.T, agent *agentsv1alpha1.AgentDeployment, proxy string) map[string]string {
+		t.Helper()
+		require.NoError(t, k8sClient.Create(testCtx, agent))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+		r := newReconciler()
+		r.StatelayerProxyURL = proxy
+		reconcileNN(t, r, agent.Name, namespace)
+		return envByName(getKsvc(t, agent.Name, namespace).Spec.Template.Spec.Containers[0].Env)
+	}
+	backend := &agentsv1alpha1.MemoryBackend{Addr: "valkey.svc:6379"}
+
+	t.Run("private+perUser+proxy injects MEMORY_PER_USER", func(t *testing.T) {
+		env := envFor(t, mkAgent("peruser-on", &agentsv1alpha1.SessionMemorySpec{
+			Scope: "session", PerUser: true, Backend: backend,
+		}), proxyURL)
+		assert.Equal(t, "true", env["MEMORY_PER_USER"],
+			"a perUser private-scope agent on the proxy path gets MEMORY_PER_USER=true")
+		assert.Equal(t, proxyURL, env["STATELAYER_PROXY_URL"], "on the proxy path")
+	})
+
+	t.Run("perUser off is inert", func(t *testing.T) {
+		env := envFor(t, mkAgent("peruser-off", &agentsv1alpha1.SessionMemorySpec{
+			Scope: "session", Backend: backend,
+		}), proxyURL)
+		assert.NotContains(t, env, "MEMORY_PER_USER", "default (perUser off) injects nothing")
+	})
+
+	t.Run("proxy-less install does not inject", func(t *testing.T) {
+		env := envFor(t, mkAgent("peruser-noproxy", &agentsv1alpha1.SessionMemorySpec{
+			Scope: "session", PerUser: true, Backend: backend,
+		}), "")
+		assert.NotContains(t, env, "MEMORY_PER_USER",
+			"no state-layer proxy to compose the per-user key ⇒ not injected")
+	})
+
+	t.Run("shared scope never gets per-user", func(t *testing.T) {
+		env := envFor(t, mkAgent("peruser-shared", &agentsv1alpha1.SessionMemorySpec{
+			Scope: "shared", PerUser: true, Backend: backend,
+		}), proxyURL)
+		assert.NotContains(t, env, "MEMORY_PER_USER",
+			"per-user never applies to the shared team scratchpad (per-conversation by design)")
+	})
 }
 
 // TestMemory_LongTermFoldedField: spec.longTermMemory (ADR 0045) injects the launcher's long-term-memory

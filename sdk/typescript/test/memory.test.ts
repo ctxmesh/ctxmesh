@@ -99,6 +99,32 @@ describe("MemoryClient.append", () => {
   });
 });
 
+describe("MemoryClient session memory forwards the run capability (M98, EU1a)", () => {
+  it("get/put/append/search all relay X-Ctxmesh-Run-Capability when a cap is bound", async () => {
+    // The launcher user-scopes per-user session memory off the forwarded run capability (ADR 0080);
+    // when perUser is off it strips it, so the relay is always safe.
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-session-token");
+    const client = new MemoryClient(plane.config);
+
+    await client.get("c1");
+    await client.put([{ role: "user", content: "a" }], "c1");
+    await client.append({ role: "user", content: "b" }, "c1");
+    await client.search("b", "c1");
+
+    expect(plane.memory.requests.length).toBe(4);
+    for (const req of plane.memory.requests) {
+      expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-session-token");
+    }
+  });
+
+  it("omits the capability header when none is bound (async/eventing turn)", async () => {
+    const client = new MemoryClient(plane.config);
+    await client.append({ role: "user", content: "x" }, "c2");
+    const req = plane.memory.requests[0];
+    expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
+  });
+});
+
 describe("MemoryClient.search", () => {
   it("GET /memory/{id}/search?q= returns matching entries", async () => {
     const client = new MemoryClient(plane.config);
