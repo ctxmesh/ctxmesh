@@ -308,6 +308,9 @@ func loadMemoryConfig(lookup func(string) string, agentName string) (memoryConfi
 		// STATELAYER_TOKEN_PATH: the projected SA-token file the forward authenticates to the proxy
 		// with (ADR 0052 §C6 RESOLUTION). Empty ⇒ the default mount path.
 		TokenPath: lookup("STATELAYER_TOKEN_PATH"),
+		// MEMORY_PER_USER=true (M98, ADR 0080): stamp X-Memory-User from the verified runcap so the
+		// proxy isolates each end-user's session memory (private scope only; fail-safe to agent-wide).
+		PerUser: strings.TrimSpace(lookup("MEMORY_PER_USER")) == enabledTrue,
 	}, nil
 }
 

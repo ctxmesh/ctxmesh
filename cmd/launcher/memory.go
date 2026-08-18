@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -255,6 +256,12 @@ type memoryConfig struct {
 	// TokenPath is the mounted projected SA-token file (STATELAYER_TOKEN_PATH) the forward reads to
 	// authenticate to the proxy. Empty ⇒ the default mount path (resolvePodTokenPath).
 	TokenPath string
+	// PerUser is MEMORY_PER_USER=true (M98, EU1a, ADR 0080): the launcher stamps an X-Memory-User
+	// header (a hash of the VERIFIED runcap's user id) on the private-scope forward so the proxy keys
+	// each end-user's session memory into an isolated bucket. Fail-SAFE — an async/eventing turn with
+	// no runcap simply gets the agent-wide bucket (never a 401). Ignored for the shared scope. Requires
+	// STATELAYER_PROXY_URL (the proxy composes the key) + MCP_CAPABILITY_PUBLIC_KEY (to verify the cap).
+	PerUser bool
 }
 
 // memoryScopeShared is the MEMORY_SCOPE value that selects the shared team scratchpad.
@@ -315,7 +322,22 @@ func newMemoryServer(
 		longTerm:  longTerm,
 		knowledge: knowledge,
 	}
-	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath)
+	// Per-user session memory (M98, ADR 0080): build the run-capability verifier so the forward can
+	// stamp X-Memory-User from a VERIFIED cap. Only needed for perUser private scope. Missing key ⇒
+	// nil verifier ⇒ the forward degrades to the agent-wide bucket + logs (a visible misconfig, never
+	// a cross-tenant leak — the users here already share one agent's trust boundary, product-grade).
+	var capVerifier *runcap.Verifier
+	if cfg.PerUser && cfg.Scope != memoryScopeShared {
+		const degrade = "launcher: memory: per-user session requested but %s — session memory stays agent-wide\n"
+		if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 == "" {
+			fmt.Fprintf(os.Stderr, degrade, "MCP_CAPABILITY_PUBLIC_KEY unset")
+		} else if pub, err := runcap.DecodePublicKey(pubB64); err != nil {
+			fmt.Fprintf(os.Stderr, degrade, fmt.Sprintf("MCP_CAPABILITY_PUBLIC_KEY is bad (%v)", err))
+		} else {
+			capVerifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
+		}
+	}
+	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath, capVerifier)
 	return m
 }
 
@@ -328,7 +350,9 @@ func newMemoryServer(
 // always current. The scope INTENT (shared vs private) rides X-Memory-Scope; the proxy still keys
 // shared memory under the SA-derived registry, so a bad scope hint can't cross tenants. The run
 // capability is stripped — the proxy doesn't consume it, and it must not leak onward.
-func buildStatelayerForward(proxyURL string, shared bool, tokenPath string) *httputil.ReverseProxy {
+func buildStatelayerForward(
+	proxyURL string, shared bool, tokenPath string, verifier *runcap.Verifier,
+) *httputil.ReverseProxy {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
 		return nil
@@ -352,6 +376,20 @@ func buildStatelayerForward(proxyURL string, shared bool, tokenPath string) *htt
 			} else {
 				fmt.Fprintf(os.Stderr, "launcher: memory: pod token unavailable (%v) — proxy will reject\n", terr)
 			}
+			// Per-user session memory (M98, ADR 0080). NEVER trust a client-supplied X-Memory-User —
+			// strip it unconditionally, then re-stamp it ONLY from a VERIFIED runcap (so a compromised
+			// agent process can't read another user's bucket by forging the header). Fail-SAFE: no /
+			// invalid cap, or no user id, ⇒ no header ⇒ agent-wide bucket, never a 401 (ADR 0052
+			// async-safety — an eventing/async turn carries no runcap). verifier is nil unless perUser
+			// private scope is configured with a good capability key.
+			req.Header.Del(memoryUserHeader)
+			if verifier != nil {
+				if tok := strings.TrimSpace(req.Header.Get(runcap.HeaderName)); tok != "" {
+					if c, verr := verifier.Verify(tok); verr == nil && c.User != "" {
+						req.Header.Set(memoryUserHeader, memoryUserBucket(c.User))
+					}
+				}
+			}
 			// The agent's runcap has no meaning to the proxy's memory path; never forward it.
 			req.Header.Del(runcap.HeaderName)
 			if shared {
@@ -359,6 +397,18 @@ func buildStatelayerForward(proxyURL string, shared bool, tokenPath string) *htt
 			}
 		},
 	}
+}
+
+// memoryUserHeader carries the per-user key segment to the state-layer proxy (M98, EU1a). The proxy
+// validates it as bounded lowercase hex and prepends it to the conversation key.
+const memoryUserHeader = "X-Memory-User"
+
+// memoryUserBucket derives that segment from the runcap's already-hashed user id: a truncated sha256
+// hex so the value is ALWAYS bounded lowercase hex (matching the proxy's validator) and the raw id
+// never becomes key material. 128 bits is ample against collisions within one agent's user set.
+func memoryUserBucket(user string) string {
+	sum := sha256.Sum256([]byte(user))
+	return hex.EncodeToString(sum[:])[:32]
 }
 
 // messageIDHeader carries a per-hop message id (ADR 0035, m33.4). When an append omits it, the

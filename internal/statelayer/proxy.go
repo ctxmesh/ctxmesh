@@ -174,6 +174,7 @@ func (s *redisStore) Append(ctx context.Context, key string, entry json.RawMessa
 type Scope struct {
 	prefix string // e.g. "mem:team-alpha/support-agent:" or "mem:shared:reg-1:"
 	agent  string // the agent name (private-scope), for server-authoritative attribution
+	shared bool   // true for the shared team scratchpad — per-user keying (M98) NEVER applies to shared
 }
 
 // scopeFromAgent derives the private-memory scope from a capability's Agent claim
@@ -193,7 +194,7 @@ func scopeFromAgent(agent, boundary string, requestedShared bool) (Scope, error)
 	}
 	if requestedShared {
 		if reg, ok := strings.CutPrefix(strings.TrimSpace(boundary), "r:"); ok && reg != "" {
-			return Scope{prefix: "mem:shared:" + reg + ":", agent: name}, nil
+			return Scope{prefix: "mem:shared:" + reg + ":", agent: name, shared: true}, nil
 		}
 		// shared requested but no registry boundary → private fallback.
 	}
@@ -269,6 +270,26 @@ func validateConversationID(id string) error {
 		switch r {
 		case '/', ':', ' ', '\t', '\n', '\r':
 			return fmt.Errorf("conversationId contains disallowed character %q", r)
+		}
+	}
+	return nil
+}
+
+// maxMemoryUserBucket bounds the launcher-stamped X-Memory-User value. The launcher
+// emits a short lowercase-hex hash of the runcap sub (M98); we accept up to a full
+// sha256 hex so the format can widen without a proxy change.
+const maxMemoryUserBucket = 64
+
+// validateMemoryUserBucket keeps the per-user key segment injection-proof: lowercase
+// hex only (the launcher's hash alphabet) and bounded — no ':'/'/' can leak into the
+// Valkey key, and a hostile launcher can't smuggle a control char or an oversized value.
+func validateMemoryUserBucket(v string) error {
+	if v == "" || len(v) > maxMemoryUserBucket {
+		return fmt.Errorf("X-Memory-User must be 1..%d hex chars", maxMemoryUserBucket)
+	}
+	for _, r := range v {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return errors.New("X-Memory-User must be lowercase hex")
 		}
 	}
 	return nil

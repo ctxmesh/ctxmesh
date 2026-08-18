@@ -68,10 +68,23 @@ class MemoryClient:
         # id needs no escaping, but the URL must never be corruptible.
         return f"{self._config.memory_base_url}/memory/{quote(conv_id, safe='')}{suffix}"
 
+    def _session_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Headers for a SESSION-memory call. Attaches the run capability (like long-term memory)
+        so the launcher can user-scope per-user session memory (M98, EU1a, ADR 0080). Harmless when
+        the agent is not perUser: the launcher strips the capability before forwarding to the
+        state-layer proxy either way, and only derives X-Memory-User from it when perUser is on."""
+        headers = dict(extra or {})
+        cap = current_capability()
+        if cap:
+            headers[CAPABILITY_HEADER] = cap
+        return headers
+
     def get(self, conversation_id: Optional[str] = None) -> List[Any]:
         """GET the full conversation context as a list of entries (empty if none)."""
         self._require_wired()
-        resp = _http.request("GET", self._url(conversation_id), expect=(200,))
+        resp = _http.request(
+            "GET", self._url(conversation_id), headers=self._session_headers(), expect=(200,)
+        )
         data = resp.json()
         return data if isinstance(data, list) else []
 
@@ -84,7 +97,7 @@ class MemoryClient:
             "PUT",
             self._url(conversation_id),
             body=_http.json_body(entries),
-            headers={"Content-Type": "application/json"},
+            headers=self._session_headers({"Content-Type": "application/json"}),
             expect=(204,),
         )
 
@@ -98,14 +111,14 @@ class MemoryClient:
         the endpoint mints one. Relayed by the managed loop from the inbound A2A hop's messageId.
         """
         self._require_wired()
-        headers = {"Content-Type": "application/json"}
+        extra = {"Content-Type": "application/json"}
         if message_id:
-            headers["X-Message-Id"] = message_id
+            extra["X-Message-Id"] = message_id
         _http.request(
             "POST",
             self._url(conversation_id, "/append"),
             body=_http.json_body(entry),
-            headers=headers,
+            headers=self._session_headers(extra),
             expect=(204,),
         )
 
@@ -113,7 +126,7 @@ class MemoryClient:
         """GET entries matching *query* (v1 = naive substring; empty q = all)."""
         self._require_wired()
         url = self._url(conversation_id, "/search") + f"?q={quote(query, safe='')}"
-        resp = _http.request("GET", url, expect=(200,))
+        resp = _http.request("GET", url, headers=self._session_headers(), expect=(200,))
         data = resp.json()
         return data if isinstance(data, list) else []
 

@@ -109,10 +109,28 @@ export class MemoryClient {
     return `${this.config.memoryBaseUrl}/memory/${encodeURIComponent(convId)}${suffix}`;
   }
 
+  /**
+   * Headers for a SESSION-memory call. Attaches the run capability (like long-term memory) so the
+   * launcher can user-scope per-user session memory (M98, EU1a, ADR 0080). Harmless when the agent
+   * is not perUser: the launcher strips the capability before forwarding to the state-layer proxy
+   * either way, and only derives X-Memory-User from it when perUser is on.
+   */
+  private sessionHeaders(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = { ...(extra ?? {}) };
+    const cap = currentCapability();
+    if (cap) {
+      headers[CAPABILITY_HEADER] = cap;
+    }
+    return headers;
+  }
+
   /** GET the full conversation context as a list of entries (empty if none). */
   async get(conversationId?: string): Promise<unknown[]> {
     this.requireWired();
-    const resp = await httpRequest("GET", this.url(conversationId), { expect: [200] });
+    const resp = await httpRequest("GET", this.url(conversationId), {
+      headers: this.sessionHeaders(),
+      expect: [200],
+    });
     const data: unknown = await resp.json();
     return Array.isArray(data) ? data : [];
   }
@@ -125,7 +143,7 @@ export class MemoryClient {
     }
     await httpRequest("PUT", this.url(conversationId), {
       body: JSON.stringify(entries),
-      headers: { "Content-Type": "application/json" },
+      headers: this.sessionHeaders({ "Content-Type": "application/json" }),
       expect: [204],
     });
   }
@@ -138,13 +156,13 @@ export class MemoryClient {
    */
   async append(entry: unknown, conversationId?: string, messageId?: string): Promise<void> {
     this.requireWired();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const extra: Record<string, string> = { "Content-Type": "application/json" };
     if (messageId) {
-      headers["X-Message-Id"] = messageId;
+      extra["X-Message-Id"] = messageId;
     }
     await httpRequest("POST", this.url(conversationId, "/append"), {
       body: JSON.stringify(entry),
-      headers,
+      headers: this.sessionHeaders(extra),
       expect: [204],
     });
   }
@@ -153,7 +171,10 @@ export class MemoryClient {
   async search(query = "", conversationId?: string): Promise<unknown[]> {
     this.requireWired();
     const url = this.url(conversationId, "/search") + `?q=${encodeURIComponent(query)}`;
-    const resp = await httpRequest("GET", url, { expect: [200] });
+    const resp = await httpRequest("GET", url, {
+      headers: this.sessionHeaders(),
+      expect: [200],
+    });
     const data: unknown = await resp.json();
     return Array.isArray(data) ? data : [];
   }
