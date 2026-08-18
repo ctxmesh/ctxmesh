@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Boxes, MessagesSquare } from "lucide-react";
+import { Boxes, Check, Copy, MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -118,9 +118,50 @@ function RunsFilterBar({
   );
 }
 
+// TraceIdCell shows a SHORT trace id (32-char hex is unreadable in a column) with a copy button for the
+// full id (M99 B3). stopPropagation so copying doesn't also trigger the row's navigate-to-trace.
+function TraceIdCell({ traceId }: { traceId: string }) {
+  const [copied, setCopied] = useState(false);
+  const short =
+    traceId.length > 12 ? `${traceId.slice(0, 8)}…${traceId.slice(-4)}` : traceId;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="font-mono text-xs text-muted-foreground" title={traceId}>
+        {short}
+      </span>
+      <button
+        type="button"
+        aria-label="Copy trace ID"
+        data-testid={`copy-trace-${traceId}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard?.writeText(traceId).then(
+            () => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            },
+            () => {},
+          );
+        }}
+        className="text-muted-foreground/70 transition-colors hover:text-foreground"
+      >
+        {copied ? (
+          <Check className="h-3 w-3 text-success" />
+        ) : (
+          <Copy className="h-3 w-3" />
+        )}
+      </button>
+    </span>
+  );
+}
+
+// fmtCost keeps ONE consistent precision down the column (M99 B3): a true zero is "$0.00", a non-zero
+// amount too small to show at 3 decimals collapses to "<$0.001" (rather than a jarring "$0.00037" next
+// to "$0.008"), and everything else is 3 decimals. No mixed 3-vs-5-decimal rows.
 function fmtCost(usd: number): string {
-  if (usd === 0) return "$0.000";
-  return usd < 0.001 ? `$${usd.toFixed(5)}` : `$${usd.toFixed(3)}`;
+  if (usd === 0) return "$0.00";
+  if (usd < 0.001) return "<$0.001";
+  return `$${usd.toFixed(3)}`;
 }
 
 function fmtTimestamp(ts: string): string {
@@ -304,11 +345,7 @@ export function RunsPage() {
       id: "traceId",
       header: "Trace ID",
       hideOnMobile: true,
-      cell: (r) => (
-        <span className="font-mono text-xs text-muted-foreground">
-          {r.traceId}
-        </span>
-      ),
+      cell: (r) => <TraceIdCell traceId={r.traceId} />,
     },
     {
       id: "timestamp",
