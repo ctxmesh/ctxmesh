@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Lock, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -40,7 +40,9 @@ export function ErrorState({
   className,
 }: ErrorStateProps) {
   const forbidden = variant === "forbidden";
-  const Icon = forbidden ? ShieldAlert : AlertTriangle;
+  // A permission boundary is a CALM, expected state — a lock, not an alarm (M99 C1). The alarming
+  // amber/ShieldAlert treatment made a routine "not for your role" read like a data warning.
+  const Icon = forbidden ? Lock : AlertTriangle;
   const heading =
     title ?? (forbidden ? "You don't have access" : "Something went wrong");
 
@@ -62,7 +64,7 @@ export function ErrorState({
       className={cn(
         "flex flex-col items-center justify-center rounded-lg border px-6 py-12 text-center",
         forbidden
-          ? "border-warning/40 bg-warning/5"
+          ? "border-border bg-muted/30"
           : "border-destructive/40 bg-destructive/5",
         className,
       )}
@@ -71,7 +73,7 @@ export function ErrorState({
         className={cn(
           "mb-4 flex h-12 w-12 items-center justify-center rounded-xl",
           forbidden
-            ? "bg-warning/15 text-warning"
+            ? "bg-muted text-muted-foreground"
             : "bg-destructive/15 text-destructive",
         )}
       >
