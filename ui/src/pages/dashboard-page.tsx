@@ -116,8 +116,8 @@ export function DashboardPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Dashboard</h2>
           <p className="text-sm text-muted-foreground">
-            Live topology and traced runs across your agents — over the BFF
-            (creds server-side). Per-tenant cost lives on the Cost page.
+            Live topology and traced runs across your agents. Cost lives on the
+            Cost page.
           </p>
         </div>
         <Button

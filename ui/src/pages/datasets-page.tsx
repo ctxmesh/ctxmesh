@@ -154,9 +154,8 @@ export function DatasetsPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Datasets</h2>
         <p className="text-sm text-muted-foreground">
-          Human-labeled eval datasets for the improvement loop (ADR 0062 Fork 5). Add
-          traces as cases via the trace view or{" "}
-          <span className="font-mono">POST /api/datasets/{"{name}"}/cases/from-run</span>.
+          Human-labeled eval datasets for the improvement loop. Add a trace as a
+          case with the “Add to dataset” action on any trace.
         </p>
       </div>
 
@@ -175,7 +174,7 @@ export function DatasetsPage() {
           icon: Database,
           title: "No datasets",
           description:
-            "No labeling datasets yet. Use the 'Add to dataset' action on a trace to add a case, or POST /api/datasets/{name}/cases/from-run directly.",
+            "No labeling datasets yet. Use the “Add to dataset” action on a trace to create one from a run.",
         }}
       />
     </div>

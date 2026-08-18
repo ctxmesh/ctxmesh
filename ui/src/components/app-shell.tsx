@@ -26,8 +26,25 @@ import { cn } from "@/lib/utils";
 // the caller lacks the right; a probe failure shows an honest banner and leaves
 // affordances VISIBLE (never a silently all-disabled console).
 
-// WhoAmIBadge renders the caller's identity (initials avatar + username + first
-// group) from the live session, matching the console-chrome wireframe's header.
+// humanizeIdentity turns a raw auth principal into a friendly display name + honest identity type.
+// A Kubernetes service account (`system:serviceaccount:<ns>:<name>`) shows its short name and
+// "Service account" scoped to its namespace; an OIDC user shows their username + a real (non-system)
+// group. This replaces the header's raw `system:serviceaccount:...` leak AND the misleading
+// hardcoded "Member" chip: the console cannot know the caller's RBAC role (ClusterRoles are bound
+// server-side, not carried in the token), so it states the identity TYPE truthfully rather than
+// inventing a role. (A real access-tier chip would need the BFF to surface the caller's effective role.)
+function humanizeIdentity(
+  username: string,
+  group: string | undefined,
+): { name: string; type: string; context: string | undefined } {
+  const sa = username.match(/^system:serviceaccount:([^:]+):(.+)$/);
+  if (sa) return { name: sa[2], type: "Service account", context: sa[1] };
+  const realGroup = group && !group.startsWith("system:") ? group : undefined;
+  return { name: username, type: "User", context: realGroup };
+}
+
+// WhoAmIBadge renders the caller's identity (initials avatar + friendly name + identity type) from
+// the live session, matching the console-chrome wireframe's header.
 function WhoAmIBadge({
   username,
   group,
@@ -35,7 +52,8 @@ function WhoAmIBadge({
   username: string;
   group: string | undefined;
 }) {
-  const initials = (username || "?").slice(0, 2).toUpperCase();
+  const { name, type, context } = humanizeIdentity(username, group);
+  const initials = (name || "?").slice(0, 2).toUpperCase();
   return (
     <div className="flex items-center gap-2.5 rounded-md border bg-card px-2.5 py-1">
       <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary">
@@ -43,12 +61,12 @@ function WhoAmIBadge({
       </div>
       <div className="leading-tight">
         <p className="text-xs font-medium" data-testid="whoami-username">
-          {username}
+          {name}
         </p>
-        {group && <p className="text-[10px] text-muted-foreground">{group}</p>}
+        {context && <p className="text-[10px] text-muted-foreground">{context}</p>}
       </div>
       <Badge variant="secondary" className="text-[9px]">
-        {group ? "Member" : "Authenticated"}
+        {type}
       </Badge>
     </div>
   );

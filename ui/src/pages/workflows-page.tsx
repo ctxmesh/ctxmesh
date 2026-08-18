@@ -210,8 +210,7 @@ export function WorkflowsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Workflows</h2>
         <p className="text-sm text-muted-foreground">
           Declarative graphs of agent invocations — conditional branching, map/loop control flow, and
-          deterministic execution. Each workflow is validated by the controller (structure + CEL + registry
-          membership) before it can be invoked. Authored via YAML/kubectl.
+          deterministic execution. Each workflow is validated before it can be invoked.
         </p>
       </div>
 
