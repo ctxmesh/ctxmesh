@@ -123,20 +123,18 @@ export function ShareRunDialog({ open, onClose, runId, canShare = true }: ShareR
     return () => controller.abort();
   }, [open, runId]);
 
-  // V9: fetch the real projection when the preview expander opens. Uses getSharedRun if
-  // a share exists, otherwise the preview fetches the metadata by building a temporary share.
-  // Simpler: we fetch the run's own shared view via getSharedRun using the first available token.
-  // Since we don't have the token (it's one-time), we generate a preview by calling the share
-  // API with includeContent to see what fields are returned — but that mints a real share.
-  // HONEST APPROACH: show the real SharedRunView from the most-recently-created "done" state link,
-  // OR if none exists yet, fetch from the public endpoint using the token from createState.done.
+  // V9: fetch the real projection when the preview expander opens, using the token from the
+  // just-created share. The plaintext token is shown to the sharer ONCE (the store keeps only a
+  // hash), so the client only holds it right after minting — that is why the preview is available
+  // then and not on a later reopen. It is NOT because the link is single-use: a share link is
+  // multi-fetch until it expires or is revoked (SharedRun.IsLive, m75.2 / V14).
   async function onTogglePreview() {
     const next = !previewOpen;
     setPreviewOpen(next);
     if (!next) return;
-    // Only fetch if we have a fresh token (just created — one-time only).
+    // Only fetch if we hold the freshly-minted token in memory (shown once). Absent it, the preview
+    // shows the structural field list only — the link still works, we just can't re-derive the token.
     if (createState.kind !== "done") {
-      // No token available yet — preview shows structural field list only.
       return;
     }
     if (previewState.kind === "ready" || previewState.kind === "loading") return;
@@ -408,6 +406,13 @@ export function ShareRunDialog({ open, onClose, runId, canShare = true }: ShareR
               {" · "}
               {createState.result.includeContent ? "Includes transcript" : "Metadata only"}
             </p>
+            {/* V14: the real link semantics — multi-fetch until expiry/revoke (no single-use marking;
+                the store keeps only a hash). Shown so a sharer isn't misled into thinking a preview or
+                a first open "burns" the link. */}
+            <p className="text-xs text-muted-foreground" data-testid="share-link-semantics">
+              Anyone with this link can open it as many times as they like until it expires or you
+              revoke it.
+            </p>
 
             {/* V9: "Preview what will be shared" expander — shows the real projection. */}
             <div className="border-t pt-3">
@@ -426,11 +431,12 @@ export function ShareRunDialog({ open, onClose, runId, canShare = true }: ShareR
                     <p className="text-muted-foreground">Loading preview…</p>
                   )}
                   {previewState.kind === "error" && (
-                    <p className="text-muted-foreground">Preview unavailable (the link may have already been used to fetch once).</p>
+                    <p className="text-muted-foreground">Preview unavailable right now — try again in a moment.</p>
                   )}
                   {previewState.kind === "idle" && (
                     <p className="text-muted-foreground">
-                      Preview shows the actual content that will be public. Available while the token has not yet been used.
+                      Preview shows the actual content that will be public. The link itself keeps working for anyone
+                      who has it until it expires or you revoke it.
                     </p>
                   )}
                   {previewState.kind === "ready" && (

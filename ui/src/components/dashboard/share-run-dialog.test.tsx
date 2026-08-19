@@ -308,4 +308,26 @@ describe("ShareRunDialog (m75.4)", () => {
     expect(screen.queryByTestId("share-create-btn")).toBeNull();
     expect(screen.getByText(/not available/i)).toBeInTheDocument();
   });
+
+  // V14: after minting, the dialog states the REAL link semantics — a share link is multi-fetch
+  // until it expires or is revoked (no single-use marking) — not the old "available while the token
+  // has not yet been used" / "already been used to fetch once" which scared sharers into thinking a
+  // preview or a first open burns the recipient's link.
+  it("states multi-fetch-until-expiry semantics after minting, not single-use (V14)", async () => {
+    installFetch();
+    renderDialog();
+
+    await screen.findByTestId("share-create-btn");
+    fireEvent.click(screen.getByTestId("share-create-btn"));
+    await screen.findByTestId("share-link-once");
+
+    const semantics = screen.getByTestId("share-link-semantics");
+    expect(semantics).toHaveTextContent(
+      /open it as many times as they like until it expires or you revoke it/i,
+    );
+    // No single-use language anywhere in the dialog.
+    const dialog = screen.getByTestId("share-run-dialog");
+    expect(dialog).not.toHaveTextContent(/not yet been used/i);
+    expect(dialog).not.toHaveTextContent(/already been used to fetch/i);
+  });
 });
