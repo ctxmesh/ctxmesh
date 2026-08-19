@@ -389,7 +389,8 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
     });
     fireEvent.click(await screen.findByTestId("create-button"));
     expect(await screen.findByText("Not allowed to create this agent")).toBeInTheDocument();
-    expect(screen.getByText(/forbidden: cannot create agentdeployments/)).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
   });
 });
 

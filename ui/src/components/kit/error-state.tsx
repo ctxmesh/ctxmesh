@@ -22,6 +22,14 @@ export interface ErrorStateProps {
   description?: React.ReactNode;
   /** The raw error/detail, shown in a monospace well (collapsible feel). */
   detail?: string;
+  /**
+   * The resource the caller was denied, e.g. "agents", "model routes" (M100 UI99-403). On the
+   * `forbidden` variant it drives a friendly, consistent message ("You don't have permission to
+   * view <resource>. Ask an admin for a role that can read <resource>.") IN PLACE OF the raw BFF
+   * RBAC string — so a 403 reads the same, human way everywhere and never leaks "cannot list <kind>".
+   * Ignored on the `error` variant.
+   */
+  resource?: string;
   onRetry?: () => void;
   retryLabel?: string;
   /** Extra action (e.g. "Request access", "Switch namespace"). */
@@ -34,6 +42,7 @@ export function ErrorState({
   title,
   description,
   detail,
+  resource,
   onRetry,
   retryLabel = "Retry",
   action,
@@ -44,7 +53,12 @@ export function ErrorState({
   // amber/ShieldAlert treatment made a routine "not for your role" read like a data warning.
   const Icon = forbidden ? Lock : AlertTriangle;
   const heading =
-    title ?? (forbidden ? "You don't have access" : "Something went wrong");
+    title ??
+    (forbidden
+      ? resource
+        ? `You don't have permission to view ${resource}`
+        : "You don't have access"
+      : "Something went wrong");
 
   // ALWAYS-a-next-action invariant. `error` gets a default Retry only when the
   // caller wired one; when it wired nothing at all, a default explanation keeps
@@ -53,10 +67,18 @@ export function ErrorState({
   const resolvedDescription =
     description ??
     (forbidden
-      ? "Ask an admin to grant access, or switch to a namespace you can read."
+      ? resource
+        ? `Ask an admin for a role that can read ${resource}.`
+        : "Ask an admin to grant access, or switch to a namespace you can read."
       : hasButtonAction
         ? undefined
         : "Reload the page or try again in a moment.");
+
+  // A permission boundary NEVER surfaces the raw BFF RBAC string ("forbidden: cannot list <kind>")
+  // — it is noise to an end user and the exact leak the audit flagged (M100 UI99-403). The friendly
+  // heading + description above carry the whole message; the raw detail well is for the `error`
+  // variant (a 502/500 where the reason aids debugging), not for a routine 403.
+  const showDetail = detail && !forbidden;
 
   return (
     <div
@@ -85,7 +107,7 @@ export function ErrorState({
           {resolvedDescription}
         </p>
       )}
-      {detail && (
+      {showDetail && (
         <pre className="mt-4 max-w-md overflow-x-auto rounded-md bg-surface-3 px-3 py-2 text-left text-xs text-muted-foreground">
           {detail}
         </pre>

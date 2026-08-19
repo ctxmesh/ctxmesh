@@ -168,10 +168,11 @@ describe("ConfigBuilderPage", () => {
     await screen.findByLabelText("Expanded CRD preview");
     fireEvent.click(screen.getByRole("button", { name: /Apply to cluster/ }));
 
-    // A 403 now renders the ForbiddenInline explain-and-suggest primitive (the
-    // BFF's reason is shown), not a terse red line.
-    expect(await screen.findByText(/forbidden: not allowed to create/)).toBeInTheDocument();
-    expect(screen.getByText("Not allowed to apply")).toBeInTheDocument();
+    // A 403 now renders the ForbiddenInline explain-and-suggest primitive with a
+    // custom title, not a terse red line — and never the raw BFF RBAC string.
+    expect(await screen.findByText("Not allowed to apply")).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: not allowed/)).toBeNull();
   });
 });
 

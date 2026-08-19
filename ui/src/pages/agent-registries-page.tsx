@@ -160,6 +160,7 @@ export function AgentRegistriesPage() {
       ? {
           message: state.message,
           forbidden: state.forbidden,
+          resource: "agent registries",
           onRetry: state.forbidden ? undefined : load,
         }
       : null;

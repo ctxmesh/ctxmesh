@@ -152,11 +152,11 @@ describe("WorkflowsPage (m67.9)", () => {
       body: { error: "you do not have permission to list workflows" },
     }));
     renderPage();
-    await waitFor(() =>
-      expect(
-        screen.getByText(/you do not have permission to list workflows/),
-      ).toBeInTheDocument(),
-    );
+    expect(
+      await screen.findByText("You don't have permission to view workflows"),
+    ).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/you do not have permission to/)).toBeNull();
     expect(screen.queryByText("No workflows")).toBeNull();
   });
 

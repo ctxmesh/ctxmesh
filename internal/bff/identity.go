@@ -70,6 +70,16 @@ const (
 	// `list knowledgebases` (M99 C2) — a persona that can't list KBs (e.g. developer) must not see a
 	// nav item that then 403s. Display-only; the API still enforces on GET /api/knowledgebases.
 	resKnowledgeBases = "knowledgebases"
+	// resLogs is a SYNTHETIC capability key (NOT an agents.ctxmesh.ai CRD): it maps to the caller's
+	// `get pods/log` permission in the target namespace — the CORE-group subresource the live-log
+	// tail actually requires (handleAgentLogs, ADR 0011: the BFF SA has rules:[] and cannot read pod
+	// logs; only the caller can). Probed so the console can GATE the agent-detail **Logs** tab (M100
+	// UI99-logs): a persona who can't read pod logs must not see a tab that then 403s. Display-only;
+	// the API still enforces on GET /api/agents/{ns}/{name}/logs.
+	resLogs = "logs"
+	// resPods / verbGet name the core-group pods/log SSAR the logs capability probes (M100).
+	resPods = "pods"
+	verbGet = "get"
 )
 
 // agentsAPIGroup is the API group all the golden CRD kinds live in.
@@ -95,7 +105,7 @@ var (
 		resAuditLogs,
 		resKnowledgeBases,
 	}
-	goldenVerbs = []string{"get", "list", "create", "update", "delete"}
+	goldenVerbs = []string{verbGet, "list", "create", "update", "delete"}
 )
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
@@ -180,10 +190,13 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 	// Pre-size and pre-seed the result so concurrent writers only ever touch
 	// their own (resource, verb) cell — no map-growth race, no shared verb map
 	// written by two goroutines.
-	allowed := make(map[string]map[string]bool, len(goldenResources))
+	allowed := make(map[string]map[string]bool, len(goldenResources)+1)
 	for _, res := range goldenResources {
 		allowed[res] = make(map[string]bool, len(goldenVerbs))
 	}
+	// The synthetic `logs` capability is a SINGLE `get pods/log` probe (core group + subresource),
+	// distinct from the agents-group golden cross-product — seed its own cell.
+	allowed[resLogs] = make(map[string]bool, 1)
 
 	var (
 		wg       sync.WaitGroup
@@ -213,6 +226,15 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 	if firstErr != nil {
 		return nil, firstErr
 	}
+
+	// The synthetic `logs` capability (core-group `get pods/log`, M100 UI99-logs) — one extra SSAR,
+	// run after the golden fan-out. A single serial round-trip keeps the concurrency simple; its own
+	// probe so a nil answer never masks a golden deny.
+	logsOK, err := reviewLogsAccess(ctx, caller, namespace)
+	if err != nil {
+		return nil, err
+	}
+	allowed[resLogs][verbGet] = logsOK
 	return allowed, nil
 }
 
@@ -228,6 +250,29 @@ func reviewAccess(ctx context.Context, caller client.Client, namespace, resource
 				Group:     agentsAPIGroup,
 				Resource:  resource,
 				Verb:      verb,
+			},
+		},
+	}
+	if err := caller.Create(ctx, ssar); err != nil {
+		return false, err
+	}
+	return ssar.Status.Allowed, nil
+}
+
+// reviewLogsAccess issues one SelfSubjectAccessReview for `get pods/log` in namespace — the
+// CORE-group subresource the live pod-log tail requires (handleAgentLogs). It is separate from
+// reviewAccess (which is agents-group only) because pod logs live in the core API group ("") with
+// the `log` subresource, not in agents.ctxmesh.ai. A transport/API error (not the allow/deny
+// answer) is returned so the caller can fail honestly.
+func reviewLogsAccess(ctx context.Context, caller client.Client, namespace string) (bool, error) {
+	ssar := &authzv1.SelfSubjectAccessReview{
+		Spec: authzv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authzv1.ResourceAttributes{
+				Namespace:   namespace,
+				Group:       "", // core API group
+				Resource:    resPods,
+				Subresource: "log",
+				Verb:        verbGet,
 			},
 		},
 	}

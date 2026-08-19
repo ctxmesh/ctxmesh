@@ -131,6 +131,7 @@ export function KnowledgeBasesPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "knowledge bases",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;

@@ -453,9 +453,11 @@ describe("PlaygroundPage", () => {
     fill("Image", "ghcr.io/ctxmesh/echo:v1");
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
-    // A 403 renders the ForbiddenInline explain-and-suggest primitive.
-    expect(await screen.findByText(/forbidden: not allowed to read the requested agent/)).toBeInTheDocument();
-    expect(screen.getByText("Not allowed to run this agent")).toBeInTheDocument();
+    // A 403 renders the ForbiddenInline explain-and-suggest primitive with a
+    // custom title — and never the raw BFF RBAC string.
+    expect(await screen.findByText("Not allowed to run this agent")).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: not allowed/)).toBeNull();
     // No trace link or iframe mounts for a failed run (m17.13: no Langfuse iframe anywhere).
     expect(screen.queryByTestId("view-full-trace")).toBeNull();
     expect(document.querySelector("iframe")).toBeNull();

@@ -301,8 +301,7 @@ describe("ConnectProviderPage — RBAC-gated", () => {
     expect(
       await screen.findByText("Not allowed to connect a provider"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/forbidden: cannot create secretbindings/),
-    ).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
   });
 });

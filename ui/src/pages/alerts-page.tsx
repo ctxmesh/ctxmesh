@@ -101,6 +101,7 @@ export function AlertsPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "alerts",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;
