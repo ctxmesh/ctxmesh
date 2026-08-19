@@ -30,6 +30,8 @@ export type { ErrorStateProps } from "./error-state";
 export { ForbiddenInline } from "./forbidden-inline";
 export type { ForbiddenInlineProps } from "./forbidden-inline";
 
+export { StatusBadge } from "./status-badge";
+
 export { ComboSelect } from "./combo-select";
 
 export { ResourceLink, resourcePath } from "./resource-link";

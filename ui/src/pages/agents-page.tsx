@@ -4,7 +4,7 @@ import { Boxes, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type AgentSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -222,9 +222,7 @@ export function AgentsPage() {
       className: "w-44",
       cell: (a) => (
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant={a.ready ? "success" : "warning"}>
-            {a.phase || (a.ready ? "Ready" : "Pending")}
-          </Badge>
+          <StatusBadge ready={a.ready} phase={a.phase} />
           {/* Inline the NotReady reason (m23.7b) so a user sees WHY (e.g.
               "RevisionFailed") without clicking into the detail page. Only shown
               when not ready and a reason is present; the full message is the
