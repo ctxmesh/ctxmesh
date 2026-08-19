@@ -3697,10 +3697,14 @@ export const api = {
   deleteAgent: async (
     ns: string,
     name: string,
+    // unpublish (U4): also tombstone the agent's published template(s) — opt-in, best-effort. A bare
+    // delete keeps ADR 0068's registry semantics (a published snapshot outlives its origin).
+    unpublish?: boolean,
     signal?: AbortSignal,
   ): Promise<DeleteAgentResponse> => {
+    const q = unpublish ? "?unpublish=true" : "";
     const res = await apiFetch(
-      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}${q}`,
       {
         method: "DELETE",
         headers: { Accept: "application/json" },
