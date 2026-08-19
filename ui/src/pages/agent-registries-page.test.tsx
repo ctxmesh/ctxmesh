@@ -169,7 +169,9 @@ describe("AgentRegistriesPage — list", () => {
   it("renders 403 as forbidden variant", async () => {
     installFetch({ registries: () => ({ ok: false, status: 403, body: { error: "forbidden: cannot list agentregistries" } }) });
     renderList();
-    expect(await screen.findByText(/forbidden: cannot list agentregistries/)).toBeInTheDocument();
+    expect(await screen.findByText("You don't have permission to view agent registries")).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
   });
 });
 

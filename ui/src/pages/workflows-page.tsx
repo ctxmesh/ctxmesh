@@ -93,6 +93,7 @@ export function WorkflowsPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "workflows",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;

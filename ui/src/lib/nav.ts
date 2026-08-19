@@ -84,6 +84,11 @@ export const RES_ALERTPOLICIES = "alertpolicies";
 // `list knowledgebases` (e.g. developer) must not see a nav item that then 403s. The BFF
 // probes it in the golden set; display-only, the API still enforces.
 export const RES_KNOWLEDGEBASES = "knowledgebases";
+// RES_LOGS gates the agent-detail **Logs** tab (M100 UI99-logs): a persona who can't
+// `get pods/log` (the core-group subresource the live-log tail needs) must not see a tab that
+// then 403s. It is a SYNTHETIC capability key the BFF probes as `get pods/log`; display-only,
+// the API still enforces on the logs SSE endpoint. Verb is "get".
+export const RES_LOGS = "logs";
 
 export interface NavItem {
   id: string;

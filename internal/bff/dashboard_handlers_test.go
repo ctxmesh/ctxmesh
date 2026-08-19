@@ -45,7 +45,13 @@ type fakeLangfuseAdapter struct {
 	traceFn   func(string) (string, error)
 	detail    TraceDetail
 	detailErr error
-	err       error
+	// detailByID / detailErrByID key TraceDetail per traceID so a test can prove the runs
+	// enrichment (ADR 0081) maps the right tokens/status per row and that one trace's fetch
+	// failing degrades ONLY that row. When a traceID is absent from both maps the fake falls
+	// back to detail/detailErr (existing single-detail tests are unaffected).
+	detailByID    map[string]TraceDetail
+	detailErrByID map[string]error
+	err           error
 	// agentRuns keys the per-agent run list on the "<ns>/<name>" identity so a
 	// handler test can prove the runs of default/foo exclude those of other/foo.
 	agentRuns map[string][]RunSummary
@@ -99,7 +105,13 @@ func (f fakeLangfuseAdapter) TraceURL(id string) (string, error) {
 	return "https://lf.example/trace/" + id, nil
 }
 
-func (f fakeLangfuseAdapter) TraceDetail(_ context.Context, _ string) (TraceDetail, error) {
+func (f fakeLangfuseAdapter) TraceDetail(_ context.Context, id string) (TraceDetail, error) {
+	if err, ok := f.detailErrByID[id]; ok {
+		return TraceDetail{}, err
+	}
+	if d, ok := f.detailByID[id]; ok {
+		return d, nil
+	}
 	if f.detailErr != nil {
 		return TraceDetail{}, f.detailErr
 	}

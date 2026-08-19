@@ -192,6 +192,7 @@ export function AgentsPage() {
       ? {
           message: state.message,
           forbidden: state.forbidden,
+          resource: "agents",
           onRetry: state.forbidden ? undefined : load,
         }
       : null;
@@ -202,7 +203,28 @@ export function AgentsPage() {
     {
       id: "name",
       header: "Name",
-      cell: (a) => <span className="font-medium">{a.name}</span>,
+      // Provenance rides with the agent IDENTITY here (M100 UI99-refs), not in the STATUS lane —
+      // "external" (created outside the console) and "draft" (unpublished) describe WHAT the agent
+      // is, not its health, so mixing them with Ready/Pending muddled the status column.
+      cell: (a) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="font-medium">{a.name}</span>
+          {a.managedOutsideUI && !a.drift && (
+            <Badge
+              variant="secondary"
+              data-testid={`external-${a.name}`}
+              title="Created outside the console (e.g. kubectl) — edits are limited."
+            >
+              external
+            </Badge>
+          )}
+          {a.isDraft && (
+            <Badge variant="secondary" data-testid={`draft-${a.name}`}>
+              draft
+            </Badge>
+          )}
+        </span>
+      ),
     },
     {
       id: "namespace",
@@ -236,7 +258,8 @@ export function AgentsPage() {
               {a.reason}
             </span>
           )}
-          {/* Fleet-health badges (m18.12) from the m18.11 flags. */}
+          {/* Only the drift badge stays in the STATUS lane — it is a HEALTH/sync signal (the live
+              spec diverged), not provenance. `external`/`draft` moved to the Name column (M100). */}
           {a.drift && (
             <Badge
               variant="warning"
@@ -244,20 +267,6 @@ export function AgentsPage() {
               title="The live spec has diverged from the console config (ADR 0017)."
             >
               drift
-            </Badge>
-          )}
-          {a.managedOutsideUI && !a.drift && (
-            <Badge
-              variant="secondary"
-              data-testid={`external-${a.name}`}
-              title="Created outside the console (e.g. kubectl) — edits are limited."
-            >
-              external
-            </Badge>
-          )}
-          {a.isDraft && (
-            <Badge variant="secondary" data-testid={`draft-${a.name}`}>
-              draft
             </Badge>
           )}
         </div>

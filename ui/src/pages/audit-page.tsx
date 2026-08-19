@@ -501,6 +501,7 @@ export function AuditPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "the audit log",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;

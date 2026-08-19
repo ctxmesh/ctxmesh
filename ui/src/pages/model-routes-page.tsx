@@ -161,6 +161,7 @@ export function ModelRoutesPage() {
       ? {
           message: state.message,
           forbidden: state.forbidden,
+          resource: "model routes",
           onRetry: state.forbidden ? undefined : load,
         }
       : null;

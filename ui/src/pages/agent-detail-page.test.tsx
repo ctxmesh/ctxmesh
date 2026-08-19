@@ -2102,3 +2102,39 @@ describe("AgentDetailPage — P1-1 share verb coherence (entry button)", () => {
     expect(screen.getByTestId("unpublish-agent-button")).toHaveTextContent("Unpublish");
   });
 });
+
+// ── M100 UI99-logs: the Logs tab is gated on `get pods/log` ─────────────────────
+
+describe("AgentDetailPage — Logs tab RBAC gate (M100 UI99-logs)", () => {
+  it("hides the Logs tab when the caller cannot read pod logs (logs.get=false)", async () => {
+    installFetch({ caps: { logs: { get: false } } });
+    renderAt();
+    // The page loads (Overview tab present) but the Logs tab is gated out.
+    await screen.findByTestId("tab-overview");
+    expect(screen.queryByTestId("tab-logs")).toBeNull();
+  });
+
+  it("shows the Logs tab when the caller can read pod logs (logs.get=true)", async () => {
+    installFetch({ caps: { logs: { get: true } } });
+    renderAt();
+    expect(await screen.findByTestId("tab-logs")).toBeInTheDocument();
+  });
+
+  it("shows the Logs tab optimistically when the probe is unknown (fail-open, display-only)", async () => {
+    // Default caps carry no `logs` cell → can() is unknown → fail-OPEN (the tab shows; the API
+    // still enforces, and the LogsTab renders a calm 403 if the caller truly can't read logs).
+    installFetch();
+    renderAt();
+    expect(await screen.findByTestId("tab-logs")).toBeInTheDocument();
+  });
+
+  it("a deep-link to ?tab=Logs by a denied persona falls back to Overview (no blank tab)", async () => {
+    installFetch({ caps: { logs: { get: false } } });
+    renderAt("/agents/prod/billing?tab=Logs");
+    // The Logs tab is hidden AND the content falls back to Overview (never a blank page).
+    await screen.findByTestId("tab-overview");
+    expect(screen.queryByTestId("tab-logs")).toBeNull();
+    expect(screen.queryByTestId("logs-tab")).toBeNull();
+    expect(screen.getByTestId("tab-overview")).toHaveAttribute("aria-selected", "true");
+  });
+});

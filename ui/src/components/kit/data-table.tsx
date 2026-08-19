@@ -70,6 +70,12 @@ export interface DataTableError {
   onRetry?: () => void;
   /** Render as the 403 forbidden variant (RBAC-aware; spec §3). */
   forbidden?: boolean;
+  /**
+   * The resource denied, e.g. "agents" (M100 UI99-403). On a forbidden error it drives the friendly
+   * "You don't have permission to view <resource>" message instead of the raw BFF RBAC string (which
+   * is never surfaced on a 403). Optional — omitted → the generic friendly permission message.
+   */
+  resource?: string;
 }
 
 export interface DataTableProps<T> {
@@ -326,12 +332,19 @@ export function DataTable<T>({
                           ))}
                       </button>
                     ) : (
-                      col.header
+                      // An empty visual header (e.g. an actions column) still needs an accessible
+                      // name for screen readers + WCAG (axe empty-table-header, M100 UI99-7): fall
+                      // back to an sr-only label derived from the column id.
+                      col.header || <span className="sr-only">{col.id}</span>
                     )}
                   </th>
                 );
               })}
-              {rowActions && <th className="w-10 px-4 py-2.5" />}
+              {rowActions && (
+                <th className="w-10 px-4 py-2.5">
+                  <span className="sr-only">Actions</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -348,7 +361,11 @@ export function DataTable<T>({
                 <td colSpan={colSpan} className="p-6">
                   <ErrorState
                     variant={error.forbidden ? "forbidden" : "error"}
-                    description={error.message}
+                    // A forbidden error shows the friendly, resource-named permission message (M100
+                    // UI99-403) — NEVER the raw BFF RBAC string. Only the generic `error` variant
+                    // surfaces the real message (a 502/500 where the reason helps).
+                    description={error.forbidden ? undefined : error.message}
+                    resource={error.forbidden ? error.resource : undefined}
                     onRetry={error.forbidden ? undefined : error.onRetry}
                   />
                 </td>

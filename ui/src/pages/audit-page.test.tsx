@@ -400,11 +400,11 @@ describe("AuditPage — 501 / 403 / 500 states (m63.5)", () => {
 
     renderPage();
 
-    await waitFor(() =>
-      expect(
-        screen.getByText(/you do not have permission to read the audit log/),
-      ).toBeInTheDocument(),
-    );
+    expect(
+      await screen.findByText("You don't have permission to view the audit log"),
+    ).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/you do not have permission to/)).toBeNull();
     // A forbidden result is NOT the calm "not enabled" state and NOT the teaching empty.
     expect(screen.queryByTestId("audit-unavailable")).toBeNull();
     expect(screen.queryByText("No audit events")).toBeNull();

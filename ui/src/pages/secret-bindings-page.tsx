@@ -164,6 +164,7 @@ export function SecretBindingsPage() {
       ? {
           message: state.message,
           forbidden: state.forbidden,
+          resource: "secret bindings",
           onRetry: state.forbidden ? undefined : load,
         }
       : null;

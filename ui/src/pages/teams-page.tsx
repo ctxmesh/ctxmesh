@@ -153,6 +153,7 @@ export function TeamsPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "agent teams",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;

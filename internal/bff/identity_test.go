@@ -212,32 +212,81 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "operator-persona-token", factory.gotToken)
 
-	// Exactly the cross product was probed (4 resources × 5 verbs = 20), each in
-	// the agents group and the requested namespace.
+	// Exactly the golden cross product (resources × verbs) in the agents group + the requested
+	// namespace, PLUS the single synthetic `get pods/log` probe in the CORE group (M100 UI99-logs).
 	want := map[probe]bool{}
 	for _, res := range goldenResources {
 		for _, verb := range goldenVerbs {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
-	require.Len(t, got, len(want), "one SSAR per golden resource×verb")
+	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
+	require.Len(t, got, len(want), "one SSAR per golden resource×verb, plus the logs probe")
 	for _, p := range got {
 		assert.Contains(t, want, p, "unexpected SSAR probe: %+v", p)
 		delete(want, p)
 	}
-	assert.Empty(t, want, "every golden resource×verb must be probed exactly once")
+	assert.Empty(t, want, "every golden resource×verb + the logs probe must be probed exactly once")
 
-	// The response echoes the namespace and carries the full flat matrix.
+	// The response echoes the namespace and carries the full flat matrix + the logs cell.
 	var body CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "prod", body.Namespace)
-	require.Len(t, body.Allowed, len(goldenResources))
+	require.Len(t, body.Allowed, len(goldenResources)+1) // golden kinds + the synthetic "logs"
 	for _, res := range goldenResources {
 		require.Contains(t, body.Allowed, res)
 		for _, verb := range goldenVerbs {
 			assert.True(t, body.Allowed[res][verb], "%s/%s should be allowed", res, verb)
 		}
 	}
+	require.Contains(t, body.Allowed, resLogs)
+	assert.True(t, body.Allowed[resLogs]["get"], "the logs capability should reflect the pods/log SSAR")
+}
+
+// TestCapabilitiesProbesLogsGate proves the synthetic `logs` capability tracks the caller's
+// `get pods/log` decision (M100 UI99-logs) — so the console can GATE the agent-detail Logs tab. A
+// caller allowed pods/log gets logs.get=true; one denied it gets false (the tab is then hidden).
+func TestCapabilitiesProbesLogsGate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		allowPods bool
+	}{
+		{"can read logs", true},
+		{"cannot read logs", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				// Everything else allowed; pods/log gated by the case (resource "pods" is the log probe).
+				WithInterceptorFuncs(ssrInterceptorForLogs(tc.allowPods)).
+				Build()
+			s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/capabilities?namespace=prod", nil)
+			req.Header.Set("Authorization", "Bearer some-token")
+			s.Handler().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var body CapabilitiesResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Contains(t, body.Allowed, resLogs)
+			assert.Equal(t, tc.allowPods, body.Allowed[resLogs]["get"],
+				"logs.get must mirror the pods/log SSAR decision")
+		})
+	}
+}
+
+// ssrInterceptorForLogs answers SSARs: every agents-group golden probe is allowed, and the core
+// `pods`/log probe is allowed iff allowPods. Models a persona whose only relevant difference is
+// pod-log access, so the Logs-tab gate is exercised in isolation.
+func ssrInterceptorForLogs(allowPods bool) interceptor.Funcs {
+	return ssarInterceptor(func(resource, _, _ string) bool {
+		if resource == "pods" {
+			return allowPods
+		}
+		return true
+	})
 }
 
 // TestCapabilitiesPartialDenials proves a viewer-shaped RBAC (reads allowed,

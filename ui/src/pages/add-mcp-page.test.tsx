@@ -221,7 +221,8 @@ describe("AddMcpPage — RBAC-gated", () => {
     fireEvent.click(screen.getByRole("button", { name: /Probe \+ discover/ }));
 
     expect(await screen.findByText("Not allowed to add an MCP server")).toBeInTheDocument();
-    expect(screen.getByText(/forbidden: cannot create toolregistries/)).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
   });
 
   it("shows the read-only note for a viewer (no create on agentregistries)", async () => {

@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Boxes, Check, Copy, MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
@@ -195,6 +196,34 @@ function fmtTimestamp(ts: string): string {
   }
 }
 
+// RunStatusCell renders the enriched run outcome (ADR 0081): "ok" → a calm success chip, "error" →
+// a destructive chip, and an ABSENT status (an unenriched row, or a trace whose /detail we couldn't
+// fetch) → a muted "—" — an honest "unknown", never a fabricated pass/fail.
+function RunStatusCell({ status }: { status?: string }) {
+  if (status === "ok")
+    return (
+      <Badge variant="success" className="capitalize">
+        OK
+      </Badge>
+    );
+  if (status === "error")
+    return <Badge variant="destructive">Error</Badge>;
+  return <span className="text-sm text-muted-foreground">—</span>;
+}
+
+// runNameDistinctFromAgent returns the run's own name ONLY when it adds information beyond the Agent
+// column — i.e. it is NOT just the agent-identity display ("ns/name" or bare "name") the launcher
+// stamps as the default trace name (M100 UI99-runstable, the NAME≈AGENT dedup). When the name is
+// merely the agent identity (the common case), it returns "" so the Name column collapses to "—"
+// and the eye goes to the single Agent column instead of reading the same text twice.
+function runNameDistinctFromAgent(r: RunSummary): string {
+  const name = (r.name ?? "").trim();
+  if (!name) return "";
+  if (!r.agentName) return name; // ambient/untagged run — the name is all we have
+  const identity = r.agentNs ? `${r.agentNs}/${r.agentName}` : r.agentName;
+  return name === identity ? "" : name;
+}
+
 // RANGE_PRESETS are the quick time-range shortcuts every observability console offers (M99 B3) — a
 // one-click "last N" that beats hand-entering two datetimes. Each sets `from = now − ms` and clears `to`
 // (open-ended = up to now).
@@ -262,6 +291,10 @@ export function RunsPage() {
 
     const params: RunsFilteredParams = {
       limit: PAGE_LIMIT,
+      // The Runs browser opts into per-trace enrichment (ADR 0081) so each row shows REAL
+      // tokens + an ok/error status the list API can't carry. The dashboard's recent-runs
+      // peek deliberately does NOT (it only needs cost/latency — the cheap path).
+      enrich: true,
       ...(cursor ? { cursor } : {}),
       ...(agentFilter ? { agent: agentFilter } : {}),
       ...(fromRfc ? { from: fromRfc } : {}),
@@ -357,7 +390,16 @@ export function RunsPage() {
     {
       id: "name",
       header: "Name",
-      cell: (r) => <span className="font-medium">{r.name || "—"}</span>,
+      // Deduped against the Agent column (M100): show the run's own name only when it differs from
+      // the agent identity the Agent column already renders; otherwise "—" (no repeated text).
+      cell: (r) => {
+        const name = runNameDistinctFromAgent(r);
+        return name ? (
+          <span className="font-medium">{name}</span>
+        ) : (
+          <span className="text-sm text-muted-foreground">—</span>
+        );
+      },
     },
     {
       id: "agent",
@@ -396,6 +438,11 @@ export function RunsPage() {
           {fmtTimestamp(r.timestamp)}
         </span>
       ),
+    },
+    {
+      id: "status",
+      header: "Status",
+      cell: (r) => <RunStatusCell status={r.status} />,
     },
     {
       id: "tokens",
