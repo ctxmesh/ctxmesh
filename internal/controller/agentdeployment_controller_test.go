@@ -46,6 +46,11 @@ func newReconciler() *AgentDeploymentReconciler {
 		Client:   k8sClient,
 		Scheme:   k8sClient.Scheme(),
 		Registry: NewPostgresRegistryReader(testRegStore),
+		// Dev posture (OPS-2): the envtest suite seeds the bundled dev data plane (dev Langfuse
+		// Secret, dev MinIO), so the reconciler injects the dev object-store + feedback creds — the
+		// behavior these suites assert. A production render sets this false (no dev-cred injection);
+		// that gate is covered by the unit test TestEgressSidecarContainer_RecordCapableNoDevDataPlane.
+		DevDataPlane: true,
 	}
 }
 

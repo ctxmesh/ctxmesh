@@ -810,6 +810,26 @@ func (p *pgStore) Heartbeat(id, workerID string, lease time.Duration) error {
 	return nil
 }
 
+// ReleaseLease expires the lease on a run still leased by workerID (D4). It sets lease_expires_at to
+// NOW so ClaimReclaimable (which takes lease_expires_at < now) can re-lease it immediately, without
+// waiting a full lease-TTL. Scoped to worker_id + status=running: a run already reclaimed by a peer,
+// terminal, or gone matches nothing and is a no-op (nil) — releasing is best-effort + idempotent, so
+// a draining worker never fails on it and never disturbs a run it no longer holds. No version bump (a
+// lease release is not a logical state change, exactly like Heartbeat).
+func (p *pgStore) ReleaseLease(id, workerID string) error {
+	ctx := context.Background()
+	now := p.clock()
+	// Set the lease to a moment strictly in the PAST so ClaimReclaimable (lease_expires_at < now) can
+	// re-lease it immediately — robust even under a fixed test clock where release-now == reclaim-now.
+	expired := now.Add(-time.Second)
+	const q = `UPDATE runs SET lease_expires_at=$1, updated_at=$2
+		WHERE id=$3 AND worker_id=$4 AND status=$5`
+	if _, err := p.db.ExecContext(ctx, q, expired.UTC(), now.UTC(), id, workerID, string(StatusRunning)); err != nil {
+		return fmt.Errorf("run: release lease: %w", err)
+	}
+	return nil
+}
+
 func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, error) {
 	ctx := context.Background()
 	tx, err := p.db.BeginTx(ctx, nil)

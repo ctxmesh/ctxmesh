@@ -82,6 +82,36 @@ spec:
           # BFF's CONSOLE_URL; the Helm chart can template it from the same console-origin value.
           - name: CONSOLE_URL
             value: ""
+          # OPS-4a — controller-injected image + OBO-egress config, exposed as Helm values. Each is
+          # hardcoded here to its os.Getenv code default (empty ⇒ off / dev.local image), so
+          # `kustomize build`/`make deploy` behavior is byte-identical; gen_helm_chart.py replaces
+          # each literal with a `.Values.controllerManager.*` template so a real install can point the
+          # injected sidecar images at its registry (they ImagePullBackOff off dev.local otherwise —
+          # OPS-1) and enable OBO egress-sidecar injection (ADR 0030). A working OBO install needs the
+          # whole oboEgress block set; the credential namespace MUST match bff.mcp.credentialNamespace.
+          - name: COLLECTOR_IMAGE
+            value: ""
+          - name: DISCOVERY_IMAGE
+            value: ""
+          - name: MCP_OBO_EGRESS_ENABLED
+            value: "false"
+          - name: EGRESS_SIDECAR_IMAGE
+            value: ""
+          - name: MCP_CAPABILITY_PUBLIC_KEY
+            value: ""
+          - name: MCP_CAPABILITY_AUDIENCE
+            value: ""
+          - name: MCP_CREDENTIAL_NAMESPACE
+            value: ""
+          - name: TOKEN_SERVICE_URL
+            value: ""
+          # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
+          # controller inject the DEV-ONLY object-store + Langfuse feedback creds into agent pods;
+          # gen_helm_chart templates it to {{ .Values.devDataPlane.enabled }}, so a
+          # `profile: production` render (devDataPlane off) sets it "false" and NO dev creds are
+          # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
+          - name: DEV_DATA_PLANE
+            value: "true"
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a

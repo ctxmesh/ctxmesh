@@ -14,7 +14,7 @@ apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
   name: run-worker
-  namespace: system
+  namespace: agent-engine-system
   labels:
     app.kubernetes.io/name: agent-engine
     app.kubernetes.io/component: run-worker

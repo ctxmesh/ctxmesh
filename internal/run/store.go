@@ -100,6 +100,13 @@ type Store interface {
 	// The run stays `running` (no state change). Returns ErrNoQueuedRun when none is reclaimable —
 	// the headline resume-on-pod-loss path (m32.3).
 	ClaimReclaimable(workerID string, lease time.Duration) (*Run, error)
+	// ReleaseLease expires the lease on a run still leased by workerID (still running) so a peer can
+	// reclaim it IMMEDIATELY (ClaimReclaimable takes an expired lease), rather than waiting a full
+	// lease-TTL. It is the graceful-drain counterpart of Heartbeat: on SIGTERM a worker that will not
+	// finish an in-flight run in the drain window releases it for prompt resume-on-another-worker
+	// (D4). No state change (the run stays `running`, resumed from its checkpoint). A no-op (nil) when
+	// the run is gone or already leased by someone else — releasing is best-effort and idempotent.
+	ReleaseLease(id, workerID string) error
 	// ReserveSpawn atomically increments the total-spawn counter for a spawn TREE (keyed by its ROOT
 	// run id) and returns whether the reservation is within maxTotal (M64, ADR 0057). This is the
 	// AUTHORITATIVE aggregate spawn-budget gate: the BFF keys it on the root it derived from the VERIFIED
@@ -405,6 +412,21 @@ func (m *memStore) Heartbeat(id, workerID string, lease time.Duration) error {
 	}
 	exp := time.Now().Add(lease)
 	e.run.LeaseExpiresAt = &exp
+	return nil
+}
+
+// ReleaseLease expires this worker's lease so ClaimReclaimable re-leases the run immediately (D4).
+// Best-effort + idempotent: a run that is gone, terminal, or held by another worker matches nothing
+// and is a no-op (nil), mirroring the pg store.
+func (m *memStore) ReleaseLease(id, workerID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[id]
+	if !ok || e.run.Status != StatusRunning || e.run.WorkerID != workerID {
+		return nil
+	}
+	expired := time.Now().Add(-time.Second)
+	e.run.LeaseExpiresAt = &expired
 	return nil
 }
 

@@ -179,6 +179,76 @@ OIDC_CLIENT_ID_ENV_HELM = (
     "          value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}\"\"{{ end }}"
 )
 
+# OPS-4a — the controller-injected sidecar images + the OBO egress-sidecar config (ADR 0030) ->
+# Helm values. config/manager hardcodes each to its os.Getenv code default (empty image / off), so
+# the DEFAULT render == kustomize (no drift); the chart templates them from controllerManager.* so a
+# real install points the injected collector/discovery/egress images at its registry (they
+# ImagePullBackOff off dev.local — OPS-1) and enables OBO egress. MCP_CREDENTIAL_NAMESPACE is NOT
+# here: the manager shares the BFF's locked namespace via the existing bff.mcp.credentialNamespace
+# replace below (one namespace across the BFF + the controller's OBO injection, by construction).
+COLLECTOR_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: COLLECTOR_IMAGE\n' '          value: ""'
+)
+COLLECTOR_IMAGE_ENV_HELM = (
+    "        - name: COLLECTOR_IMAGE\n"
+    '          value: {{ .Values.controllerManager.injectedImages.collector | default "" | quote }}'
+)
+DISCOVERY_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: DISCOVERY_IMAGE\n' '          value: ""'
+)
+DISCOVERY_IMAGE_ENV_HELM = (
+    "        - name: DISCOVERY_IMAGE\n"
+    '          value: {{ .Values.controllerManager.injectedImages.discovery | default "" | quote }}'
+)
+MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE = (
+    '        - name: MCP_OBO_EGRESS_ENABLED\n' '          value: "false"'
+)
+MCP_OBO_EGRESS_ENABLED_ENV_HELM = (
+    "        - name: MCP_OBO_EGRESS_ENABLED\n"
+    "          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}"
+)
+EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: EGRESS_SIDECAR_IMAGE\n' '          value: ""'
+)
+EGRESS_SIDECAR_IMAGE_ENV_HELM = (
+    "        - name: EGRESS_SIDECAR_IMAGE\n"
+    '          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}'
+)
+MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE = (
+    '        - name: MCP_CAPABILITY_PUBLIC_KEY\n' '          value: ""'
+)
+MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM = (
+    "        - name: MCP_CAPABILITY_PUBLIC_KEY\n"
+    '          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}'
+)
+MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE = (
+    '        - name: MCP_CAPABILITY_AUDIENCE\n' '          value: ""'
+)
+MCP_CAPABILITY_AUDIENCE_ENV_HELM = (
+    "        - name: MCP_CAPABILITY_AUDIENCE\n"
+    '          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}'
+)
+TOKEN_SERVICE_URL_ENV_KUSTOMIZE = (
+    '        - name: TOKEN_SERVICE_URL\n' '          value: ""'
+)
+TOKEN_SERVICE_URL_ENV_HELM = (
+    "        - name: TOKEN_SERVICE_URL\n"
+    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}'
+)
+
+# OPS-2 — the dev-data-plane gate on the manager. config/manager hardcodes "true" (== the kustomize
+# dev posture, so the DEFAULT render matches, no drift); the chart templates it from
+# devDataPlane.enabled so a `profile: production` render sets it "false" and the controller injects
+# NO dev-only object-store / Langfuse feedback creds into agent pods (OPS-2). One source of truth
+# with the bundled dev Valkey/MinIO, which are gated on the same value.
+DEV_DATA_PLANE_ENV_KUSTOMIZE = (
+    '        - name: DEV_DATA_PLANE\n' '          value: "true"'
+)
+DEV_DATA_PLANE_ENV_HELM = (
+    "        - name: DEV_DATA_PLANE\n"
+    "          value: {{ .Values.devDataPlane.enabled | quote }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -327,6 +397,20 @@ def substitute(doc: str) -> str:
     doc = doc.replace(OIDC_ENABLED_ENV_KUSTOMIZE, OIDC_ENABLED_ENV_HELM)
     doc = doc.replace(OIDC_ISSUER_ENV_KUSTOMIZE, OIDC_ISSUER_ENV_HELM)
     doc = doc.replace(OIDC_CLIENT_ID_ENV_KUSTOMIZE, OIDC_CLIENT_ID_ENV_HELM)
+    # OPS-4a — the controller's injected-image + OBO-egress env -> Helm values. All default
+    # empty/false render == the config/manager literals (no drift); a real install points the
+    # injected collector/discovery/egress-sidecar images at its registry + enables OBO egress
+    # (ADR 0030). Manager-only literals, so these never collide with the BFF/token-service docs.
+    doc = doc.replace(COLLECTOR_IMAGE_ENV_KUSTOMIZE, COLLECTOR_IMAGE_ENV_HELM)
+    doc = doc.replace(DISCOVERY_IMAGE_ENV_KUSTOMIZE, DISCOVERY_IMAGE_ENV_HELM)
+    doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
+    doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
+    doc = doc.replace(MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE, MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM)
+    doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
+    doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
+    # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
+    # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
+    doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
     return doc

@@ -45,6 +45,30 @@ controllerManager:
     enabled: false
     minAvailable: 1
 
+  # OPS-4a — config the controller INJECTS into agent pods, exposed so a real install can override
+  # it (the controller reads each as env). All default empty/off ⇒ the DEFAULT render == kustomize
+  # (helm-verify no-drift), so this block is inert until an operator sets it.
+  #
+  # injectedImages: the collector + tool-discovery sidecar images the controller injects into EVERY
+  # agent pod. Empty ⇒ the controller's dev.local defaults, which ImagePullBackOff off a real
+  # cluster — a PRODUCTION install MUST point these at your registry, digest-pinned (OPS-1).
+  injectedImages:
+    collector: ""
+    discovery: ""
+
+  # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into
+  # agents with remote OBO tools so tool calls are made as the end-user. Default OFF. A WORKING OBO
+  # install needs the whole block: enabled=true + the sidecar image + the platform capability PUBLIC
+  # key (safe to expose in values — it only VERIFIES capabilities, never signs) + its audience + the
+  # token-service URL. The locked credential namespace is SHARED with the BFF via
+  # bff.mcp.credentialNamespace (they must be the same namespace), so it is not repeated here.
+  oboEgress:
+    enabled: false
+    sidecarImage: ""
+    capabilityPublicKey: ""
+    capabilityAudience: ""
+    tokenServiceURL: ""
+
 # Optional PodDisruptionBudgets for the stateless request-serving components
 # (bff / gateway / token-service), M48 / ADR 0047. OFF by default (no-drift).
 # Enable ALONGSIDE their replicas>1 so a node drain/upgrade can't evict a whole

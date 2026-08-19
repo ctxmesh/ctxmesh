@@ -33,6 +33,12 @@ const (
 	defaultRunWorkerConcurrency = 4
 	defaultRunWorkerLease       = 2 * runExecTimeout
 	defaultRunWorkerPollBackoff = time.Second
+	// defaultRunWorkerDrainGrace bounds how long a draining worker (SIGTERM → pool ctx cancelled)
+	// lets an in-flight run keep going before it hands the run off — cancels it + releases its lease
+	// so a peer reclaims promptly (D4) instead of the run waiting a full lease-TTL after this pod
+	// dies. Kept well under a typical Kubernetes terminationGracePeriodSeconds (30s) so the release
+	// lands before SIGKILL, while still giving a nearly-done run a window to finish + commit.
+	defaultRunWorkerDrainGrace = 10 * time.Second
 )
 
 // RunWorkerConfig configures the durable run-worker pool.
@@ -40,6 +46,7 @@ type RunWorkerConfig struct {
 	Concurrency int           // concurrent claim loops (defaults to 4)
 	Lease       time.Duration // how long a claimed run is leased before reclaim (defaults to 2×exec timeout)
 	PollBackoff time.Duration // idle poll interval when the queue is empty (defaults to 1s)
+	DrainGrace  time.Duration // on drain, grace for an in-flight run to finish before hand-off (defaults to 10s, D4)
 }
 
 func (c RunWorkerConfig) withDefaults() RunWorkerConfig {
@@ -51,6 +58,9 @@ func (c RunWorkerConfig) withDefaults() RunWorkerConfig {
 	}
 	if c.PollBackoff <= 0 {
 		c.PollBackoff = defaultRunWorkerPollBackoff
+	}
+	if c.DrainGrace <= 0 {
+		c.DrainGrace = defaultRunWorkerDrainGrace
 	}
 	return c
 }
@@ -133,7 +143,7 @@ func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWork
 			}
 			continue
 		}
-		s.executeClaimedRun(ctx, workerID, rn, cfg.Lease)
+		s.executeClaimedRun(ctx, workerID, rn, cfg.Lease, cfg.DrainGrace)
 	}
 }
 
@@ -163,7 +173,9 @@ func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, erro
 // detached from the pool's ctx (executeRun applies its own timeout) so an in-flight run finishes
 // during a graceful drain rather than being failed by shutdown. A heartbeat renews the lease while
 // the run executes so a healthy long run is not falsely reclaimed by a peer.
-func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run.Run, lease time.Duration) {
+func (s *Server) executeClaimedRun(
+	ctx context.Context, workerID string, rn *run.Run, lease, drainGrace time.Duration,
+) {
 	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
 	if rn.CallerUsername != "" {
 		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID); ok {
@@ -189,11 +201,46 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 		execCtx = contextWithSkipHistoryReplay(execCtx, true)
 	}
 
-	// Renew the lease periodically while executing. If the lease is lost (a slow heartbeat let a
-	// peer reclaim us) the heartbeat loop stops — the run continues here, and the idempotency key
-	// bounds any duplicate downstream effect (at-least-once, the honest lease guarantee).
-	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease)
+	// D3: make the exec context cancellable so a DEFINITIVE lease loss stops this worker. A peer
+	// reclaiming our run (worker_id changed) makes us a zombie whose continued execution would append
+	// duplicate run_events into the reclaiming worker's stream; cancelling execCtx stops the ctx-
+	// honoring executors (executeRun / ingestion / dataset-export) at the root. A transient heartbeat
+	// blip does NOT cancel (see startHeartbeat) — a run we may still hold is not aborted on a DB hiccup.
+	execCtx, cancelExec := context.WithCancel(execCtx)
+	defer cancelExec()
+
+	// Renew the lease periodically while executing. If the lease is DEFINITIVELY lost (a peer
+	// reclaimed us) the heartbeat cancels execCtx (D3) so we stop; a transient heartbeat error just
+	// stops renewing and the run continues here, the idempotency key bounding any duplicate
+	// downstream effect (at-least-once, the honest lease guarantee).
+	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease, cancelExec)
 	defer stopHeartbeat()
+
+	// D4: on graceful drain (the pool ctx is cancelled by SIGTERM), give the in-flight run a bounded
+	// grace to finish; if it outlasts the grace, hand it off — cancel it (stop executing) + release
+	// its lease so a peer reclaims + resumes from the checkpoint PROMPTLY, instead of the run waiting a
+	// full lease-TTL after this pod is SIGKILLed. A run that finishes within the grace commits normally
+	// (the common short-run case). runDone (closed on return) tells the watcher the run completed.
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
+		select {
+		case <-runDone:
+			return // finished on its own — nothing to hand off
+		case <-ctx.Done():
+			select {
+			case <-runDone:
+				return // finished within the drain grace — committed normally
+			case <-time.After(drainGrace):
+				s.log.Info("run-worker: draining — handing off an unfinished run for prompt reclaim (D4)",
+					"run", rn.ID, "worker", workerID)
+				cancelExec()
+				if err := s.runStore.ReleaseLease(rn.ID, workerID); err != nil {
+					s.log.Error(err, "run-worker: release lease on drain failed", "run", rn.ID, "worker", workerID)
+				}
+			}
+		}
+	}()
 
 	// An INGESTION JOB (a pinned IngestionRef, ADR 0061 Fork 2) is driven by the ingestion executor — it
 	// runs straight through (no suspend; the resume story is worker reclaim, driven off the cursor). Like the
@@ -226,7 +273,16 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 
 // startHeartbeat renews the run's lease every lease/3 until the returned stop func is called or ctx
 // ends. It returns a no-op stopper when heartbeating can't help (no lease interval).
-func (s *Server) startHeartbeat(ctx context.Context, workerID, runID string, lease time.Duration) func() {
+//
+// onLeaseLost (D3) is invoked exactly when a heartbeat returns run.ErrLeaseLost — a DEFINITIVE loss:
+// a peer worker has reclaimed this run (its worker_id changed), so we are now a zombie. The caller
+// wires it to cancel the run's execution so this worker stops executing + appending duplicate
+// run_events into the reclaiming worker's stream. It is NOT called on a transient heartbeat error or
+// ErrNotFound — a mere DB blip must not abort a run we may still legitimately hold (the at-least-once
+// lease guarantee is preserved for everything except a proven hand-off to another worker).
+func (s *Server) startHeartbeat(
+	ctx context.Context, workerID, runID string, lease time.Duration, onLeaseLost func(),
+) func() {
 	interval := lease / 3
 	if interval <= 0 {
 		return func() {}
@@ -241,7 +297,12 @@ func (s *Server) startHeartbeat(ctx context.Context, workerID, runID string, lea
 				return
 			case <-ticker.C:
 				if err := s.runStore.Heartbeat(runID, workerID, lease); err != nil {
-					// Lease lost or run gone — stop renewing (do not spin).
+					// A DEFINITIVE lease loss (a peer reclaimed this run) ⇒ stop executing so we do
+					// not append duplicate events (D3). A transient error / ErrNotFound just stops
+					// renewing (the run continues under at-least-once, as before).
+					if errors.Is(err, run.ErrLeaseLost) && onLeaseLost != nil {
+						onLeaseLost()
+					}
 					return
 				}
 			}
