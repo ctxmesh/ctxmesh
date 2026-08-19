@@ -530,6 +530,13 @@ type RunSummary struct {
 	// AgentNs/AgentName: a clean projected field, so the online-scoring worker can
 	// separate a window's runs by version without re-parsing raw tags.
 	Version string `json:"version,omitempty"`
+	// Status is the coarse per-run outcome — "ok" or "error" (traceStatusOK/traceStatusError) —
+	// projected from the trace's observations. The Langfuse traces-LIST carries NO per-trace
+	// status (verified against the raw API — M99/UI99), so it is populated ONLY by the opt-in
+	// N+1 detail enrichment (?enrich=, ADR 0081): the plain list leaves it "" (unknown), which
+	// the console renders honestly rather than fabricating an outcome. omitempty so an
+	// unenriched list is byte-identical to the pre-M100 wire shape (backward-compatible).
+	Status string `json:"status,omitempty"`
 }
 
 // RunListResponse is returned by GET /api/runs. Runs is non-nil ([] not null).

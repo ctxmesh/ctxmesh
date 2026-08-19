@@ -320,6 +320,11 @@ type Server struct {
 	// static is the filesystem serving the Vite build (dist/). Nil disables
 	// static serving (api-only mode, useful in tests).
 	static fs.FS
+
+	// enrichCache is the bounded, TTL cache of per-trace Runs enrichment (real tokens + coarse
+	// status) fetched via the opt-in N+1 /detail path (ADR 0081, runs_enrich.go). Always non-nil
+	// (built in NewServer) so the enrichment never nil-derefs it; it is a pure optimization.
+	enrichCache *traceEnrichCache
 }
 
 // Options configures a Server.
@@ -569,6 +574,7 @@ func NewServer(opts Options) *Server {
 		rollupStore:              opts.RollupStore,
 		embedder:                 opts.Embedder,
 		judgeCounters:            &judgeCounter{},
+		enrichCache:              newTraceEnrichCache(),
 		log:                      opts.Log,
 	}
 	if s.runStore == nil {
