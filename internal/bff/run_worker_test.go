@@ -17,7 +17,9 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -28,6 +30,47 @@ import (
 
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
+
+// leaseHeartbeatStore embeds run.Store (nil — only Heartbeat is exercised by startHeartbeat) and
+// returns a configured error from Heartbeat, so the D3 onLeaseLost wiring is tested in isolation.
+type leaseHeartbeatStore struct {
+	run.Store
+	hbErr error
+}
+
+func (f *leaseHeartbeatStore) Heartbeat(_, _ string, _ time.Duration) error { return f.hbErr }
+
+// TestStartHeartbeat_CancelsExecOnLeaseLost proves D3: a DEFINITIVE lease loss (run.ErrLeaseLost)
+// fires onLeaseLost (so the worker cancels execution + stops appending duplicate events), while a
+// transient heartbeat error or ErrNotFound does NOT — a mere DB blip must not abort a run the
+// worker may still legitimately hold (the at-least-once guarantee is preserved except on a proven
+// hand-off to another worker).
+func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
+	cases := []struct {
+		name       string
+		hbErr      error
+		wantCancel bool
+	}{
+		{"lease lost cancels exec", run.ErrLeaseLost, true},
+		{"transient error does not cancel", errors.New("db blip"), false},
+		{"not-found does not cancel", run.ErrNotFound, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{runStore: &leaseHeartbeatStore{hbErr: tc.hbErr}}
+			lostCh := make(chan struct{}, 1)
+			stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 30*time.Millisecond,
+				func() { lostCh <- struct{}{} })
+			defer stop()
+			select {
+			case <-lostCh:
+				assert.True(t, tc.wantCancel, "onLeaseLost fired but should not have for %v", tc.hbErr)
+			case <-time.After(300 * time.Millisecond):
+				assert.False(t, tc.wantCancel, "onLeaseLost did NOT fire but should have for %v", tc.hbErr)
+			}
+		})
+	}
+}
 
 // TestRunWorker_DrainsQueue is the worker-path contract (m32.2): in dispatch mode a created run
 // stays `queued` (no inline execution), and once the worker pool is started it claims the run and

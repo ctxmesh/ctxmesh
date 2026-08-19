@@ -15,7 +15,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: run-worker
-  namespace: system
+  namespace: agent-engine-system
   labels:
     control-plane: run-worker
     app.kubernetes.io/name: agent-engine
@@ -33,7 +33,11 @@ spec:
         control-plane: run-worker
         app.kubernetes.io/name: agent-engine
     spec:
-      serviceAccountName: bff
+      # The bff SA as it exists in the cluster: config/default applies namePrefix `agent-engine-` to
+      # the `bff` SA, so the deployed name is `agent-engine-bff`. This standalone overlay has no
+      # prefix transformer (see kustomization.yaml), so the reference is name-aligned explicitly —
+      # otherwise the worker would reference a non-existent `bff` SA (OPS-4e).
+      serviceAccountName: agent-engine-bff
       securityContext:
         runAsNonRoot: true
         seccompProfile:

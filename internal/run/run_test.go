@@ -213,6 +213,29 @@ func TestMemStore_RoundTripsSpawnLineage(t *testing.T) {
 	assert.Equal(t, 2, got.SpawnDepth)
 }
 
+// TestMemStore_ReleaseLeaseMakesReclaimable proves D4 on the in-memory twin (parity with the pg
+// store): a holder's ReleaseLease makes the run immediately reclaimable by a peer, while a foreign
+// worker's release is a no-op.
+func TestMemStore_ReleaseLeaseMakesReclaimable(t *testing.T) {
+	s := NewMemStore()
+	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
+	_, err := s.ClaimQueued("w1", time.Minute)
+	require.NoError(t, err)
+
+	// A foreign worker's release does nothing — the lease stays fresh, still not reclaimable.
+	require.NoError(t, s.ReleaseLease("r1", "w-other"))
+	_, err = s.ClaimReclaimable("w2", time.Minute)
+	require.ErrorIs(t, err, ErrNoQueuedRun, "a foreign release must not free the lease")
+
+	// The holder releases → the run is immediately reclaimable, resumed running by the peer.
+	require.NoError(t, s.ReleaseLease("r1", "w1"))
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "r1", reclaimed.ID)
+	assert.Equal(t, "w2", reclaimed.WorkerID)
+	assert.Equal(t, StatusRunning, reclaimed.Status)
+}
+
 // TestMemStore_RoundTripsOutputSchema proves the in-memory twin preserves the M65 OutputSchema field
 // (parity with the Postgres store, m65.3 ADR 0058).
 func TestMemStore_RoundTripsOutputSchema(t *testing.T) {

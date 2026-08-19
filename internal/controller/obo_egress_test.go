@@ -43,7 +43,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, false, nil, nil)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -80,7 +80,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, nil)
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, nil, nil)
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
@@ -96,7 +96,7 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, true, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
@@ -107,6 +107,29 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		require.True(t, present, "record-capable sidecar carries %s (the fixture sink)", name)
 		assert.NotEmpty(t, e.Value, name)
 		assert.Nil(t, e.ValueFrom, "%s must be a static value (Knative rejects valueFrom)", name)
+	}
+}
+
+// TestEgressSidecarContainer_RecordCapableNoDevDataPlane proves OPS-2: a record-capable sidecar
+// rendered with the dev data plane OFF (a production install) carries RECORD_CAPABLE but NO
+// object-store creds — the dev.local fixture sink is never injected into production, so the sidecar
+// C2-fails-closed on the absent store rather than pointing at a non-existent dev MinIO.
+func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
+	cfg := OBOEgressConfig{
+		SidecarImage:           "egress-sidecar:test",
+		CapabilityPublicKeyB64: "PUBKEY",
+		CapabilityAudience:     "aud",
+		CredentialNamespace:    "ae-credentials",
+	}
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, false, nil, nil)
+
+	rec, ok := envValue(c, "RECORD_CAPABLE")
+	require.True(t, ok, "record-capable sidecar still carries RECORD_CAPABLE")
+	assert.Equal(t, "true", rec.Value)
+
+	for _, name := range []string{"OBJECT_STORE_ADDR", "OBJECT_STORE_ACCESS_KEY", "OBJECT_STORE_SECRET_KEY"} {
+		_, present := envValue(c, name)
+		assert.False(t, present, "dev data plane OFF ⇒ %s must NOT be injected (OPS-2)", name)
 	}
 }
 
@@ -122,7 +145,7 @@ func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
 	}
 	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, mount, env)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, mount, env)
 
 	e, ok := envValue(c, envToolPolicyFile)
 	require.True(t, ok, "a tool-policy agent's sidecar carries TOOL_POLICY_FILE")
