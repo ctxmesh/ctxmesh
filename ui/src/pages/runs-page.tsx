@@ -84,6 +84,27 @@ function RunsFilterBar({
         />
       </div>
       <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-muted-foreground">Range</span>
+        <div className="flex gap-1" data-testid="runs-range-presets">
+          {RANGE_PRESETS.map((p) => (
+            <Button
+              key={p.label}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => {
+                onFrom(datetimeLocalAgo(p.ms));
+                onTo("");
+              }}
+              data-testid={`runs-range-${p.label}`}
+            >
+              {p.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="flex flex-col gap-1">
         <label
           htmlFor="runs-filter-from"
           className="text-xs font-medium text-muted-foreground"
@@ -172,6 +193,24 @@ function fmtTimestamp(ts: string): string {
   } catch {
     return ts;
   }
+}
+
+// RANGE_PRESETS are the quick time-range shortcuts every observability console offers (M99 B3) — a
+// one-click "last N" that beats hand-entering two datetimes. Each sets `from = now − ms` and clears `to`
+// (open-ended = up to now).
+const RANGE_PRESETS: { label: string; ms: number }[] = [
+  { label: "15m", ms: 15 * 60_000 },
+  { label: "1h", ms: 60 * 60_000 },
+  { label: "24h", ms: 24 * 60 * 60_000 },
+  { label: "7d", ms: 7 * 24 * 60 * 60_000 },
+];
+
+// datetimeLocalAgo formats (now − ms) as a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
+// LOCAL time), the shape the From/To inputs + toRFC3339 already expect.
+function datetimeLocalAgo(ms: number): string {
+  const d = new Date(Date.now() - ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // toRFC3339 converts a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
