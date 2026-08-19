@@ -114,6 +114,7 @@ export function AgentDetailPage() {
   // unknown → true): the tab hides ONLY on a definite deny, and the API still enforces. A deep-link
   // to ?tab=Logs by a denied persona falls back to Overview (activeTab), never a blank tab.
   const { can } = useCapabilities();
+  const { toast } = useToast();
   const canLogs = can(RES_LOGS, "get");
   const visibleTabs = TABS.filter((t) => t !== "Logs" || canLogs);
   const activeTab: Tab = tab === "Logs" && !canLogs ? "Overview" : tab;
@@ -239,8 +240,16 @@ export function AgentDetailPage() {
             try {
               await api.unpublishTemplate("agent", detail.namespace, detail.name);
               setPublishedState(null);
-            } catch {
-              // If unpublish fails, the badge stays — the user can try again.
+              toast({ title: "Template unpublished", variant: "success" });
+            } catch (err) {
+              // U15: a swallowed unpublish looked like a dead button — surface the failure so the
+              // user knows the template is still published (the badge intentionally stays).
+              toast({
+                title: "Couldn't unpublish",
+                description:
+                  err instanceof Error ? err.message : "The template is still published — try again.",
+                variant: "error",
+              });
             }
           })();
         }}
@@ -3358,8 +3367,11 @@ function PublishTemplateDialog({
       onDone(res, selected);
     } catch (err) {
       const isForbidden = err instanceof ApiError && err.isForbidden;
+      const serverMsg = err instanceof ApiError ? err.message : null;
       // U8 / U12: keep dialog open, show error inline instead of closing.
-      const errMsg = isForbidden
+      // U15: prefer the server's REAL message (server-truth roles) — matching the MCP dialog — and
+      // fall back to a human role string only when the server gave nothing.
+      const fallback = isForbidden
         ? `You need ${
             selected === "public"
               ? "Platform-admin"
@@ -3370,7 +3382,7 @@ function PublishTemplateDialog({
         : err instanceof Error
         ? err.message
         : "publish failed";
-      setInlineError(errMsg);
+      setInlineError(serverMsg || fallback);
       setBusy(false);
     }
   }

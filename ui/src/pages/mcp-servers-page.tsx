@@ -366,7 +366,7 @@ function ShareDialog({
         const isForbidden = err instanceof ApiError && err.isForbidden;
         const serverMsg = err instanceof ApiError ? err.message : null;
         const fallback = isForbidden
-          ? `You need org-admin rights to publish ${selected}-wide.`
+          ? `You need Tenant-admin rights to publish ${selected}-wide.`
           : err instanceof Error
           ? err.message
           : "publish failed";
@@ -499,7 +499,7 @@ function ShareDialog({
                     {v === "team"
                       ? "Visible to your team's namespace"
                       : v === "org"
-                      ? "Visible org-wide (org-admin required)"
+                      ? "Visible org-wide (Tenant-admin required)"
                       : "Visible to everyone (Platform-admin required)"}
                   </p>
                 </div>
