@@ -6,6 +6,7 @@ import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { formatTokens } from "@/lib/format";
 
 // RunsPage — the global paginated + filterable runs browser (m16.8).
 //
@@ -362,7 +363,7 @@ export function RunsPage() {
       header: "Tokens",
       className: "text-right",
       cell: (r) => (
-        <span className="tabular-nums">{r.tokens.toLocaleString()}</span>
+        <span className="tabular-nums">{formatTokens(r.tokens)}</span>
       ),
     },
     {

@@ -13,6 +13,15 @@ export function formatUSD(n: number): string {
   return `$${n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
 }
 
+// formatTokens renders an LLM token count, distinguishing "not captured" from a real zero (M99 A1).
+// The Langfuse traces-LIST API doesn't carry per-trace token usage, so a runs/trace row's tokens are 0
+// whenever they weren't captured — showing a bare "0" reads as "used no tokens", which is false for any
+// real LLM call. Render "—" for 0/non-finite (not captured) and the locale count otherwise. Real token
+// capture (per-trace enrichment) is carded — see m52.
+export function formatTokens(n: number): string {
+  return Number.isFinite(n) && n > 0 ? n.toLocaleString() : "—";
+}
+
 // formatCompact renders a large count compactly: 426986 → "427K", 1_200_000 → "1.2M".
 // Pinned to en-US so the suffix is the globally-legible K/M/B — NOT the locale's numbering
 // (e.g. en-IN would render "4.3L" lakhs), which reads as a bug on a platform dashboard.
