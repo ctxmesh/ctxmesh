@@ -332,12 +332,19 @@ export function DataTable<T>({
                           ))}
                       </button>
                     ) : (
-                      col.header
+                      // An empty visual header (e.g. an actions column) still needs an accessible
+                      // name for screen readers + WCAG (axe empty-table-header, M100 UI99-7): fall
+                      // back to an sr-only label derived from the column id.
+                      col.header || <span className="sr-only">{col.id}</span>
                     )}
                   </th>
                 );
               })}
-              {rowActions && <th className="w-10 px-4 py-2.5" />}
+              {rowActions && (
+                <th className="w-10 px-4 py-2.5">
+                  <span className="sr-only">Actions</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>

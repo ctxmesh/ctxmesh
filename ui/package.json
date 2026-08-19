@@ -40,6 +40,7 @@
     "@types/react-dom": "18.3.5",
     "@vitejs/plugin-react": "4.3.4",
     "autoprefixer": "10.4.20",
+    "axe-core": "^4.13.0",
     "eslint": "9.17.0",
     "eslint-plugin-react-hooks": "5.1.0",
     "eslint-plugin-react-refresh": "0.4.16",
@@ -50,6 +51,7 @@
     "typescript": "5.7.2",
     "typescript-eslint": "8.19.1",
     "vite": "5.4.11",
-    "vitest": "2.1.8"
+    "vitest": "2.1.8",
+    "vitest-axe": "^0.1.0"
   }
 }

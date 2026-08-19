@@ -1,7 +1,8 @@
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { axe } from "vitest-axe";
 
 import { AgentsPage } from "@/pages/agents-page";
 import { CapabilitiesProvider } from "@/lib/capabilities";
@@ -101,6 +102,22 @@ describe("AgentsPage (DataTable + list contract)", () => {
     expect(await screen.findByText("echo")).toBeInTheDocument();
     expect(screen.getByText("prod")).toBeInTheDocument();
     expect(screen.getByText("echo:1")).toBeInTheDocument();
+  });
+
+  // Page-level WCAG 2.1 AA structural gate (M100 UI99-7): the whole Agents page, with the RBAC-aware
+  // row actions rendered, must be axe-clean (accessible names/roles/aria/landmarks/table structure).
+  // color-contrast is disabled (jsdom has no layout engine — verified on the live loop).
+  it("the rendered page has no axe violations (WCAG 2.1 AA structural)", async () => {
+    installFetch({
+      agents: () => ({ ok: true, body: { agents: [], items: [agent("echo")], nextCursor: "" } }),
+    });
+    const { container } = renderWithCaps(<AgentsPage />);
+    await screen.findByText("echo");
+    await waitFor(async () => {
+      expect(
+        await axe(container, { rules: { "color-contrast": { enabled: false } } }),
+      ).toHaveNoViolations();
+    });
   });
 
   it("paginates by the opaque cursor (Next/Prev walk the page stack)", async () => {
