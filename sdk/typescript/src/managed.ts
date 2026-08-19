@@ -36,6 +36,9 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 
+import { Ajv2020 } from "ajv/dist/2020.js";
+import type { ValidateFunction } from "ajv";
+
 import { capabilityScope } from "./_capability.js";
 import { currentRecordRunId, recordScope } from "./_record.js";
 import { approvalScope, pauseForApproval, voucherScope } from "./_approval.js";
@@ -165,6 +168,68 @@ function objectOrNull(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+// ── structured-output validation + repair (O4 — parity with the Python SDK, m65.5, ADR 0058) ─────
+//
+// When an agent is configured with an `outputSchema`, the loop already steers the provider via
+// `response_format`; O4 adds the Python SDK's in-loop VALIDATE + bounded REPAIR: validate the final
+// answer against the schema and, on a violation, re-ask the model to fix it — up to MAX_SCHEMA_REPAIR
+// times, then return the last answer for the AUTHORITATIVE server-side validator (m65.4) to gate.
+//
+// Validator choice (ADR 0082): ajv on the `dist/2020` (draft 2020-12) build — the SAME dialect the
+// server-side `santhosh-tekuri/jsonschema/v5` + the Python `jsonschema` use. It is RE-ASK-ONLY: it
+// never hard-fails, so a false negative is caught by the server and a false positive costs at most two
+// wasted turns. `strict:false` (arbitrary operator schemas must not throw at compile),
+// `validateFormats:false` (`format` is annotation-only on both authoritative validators — asserting
+// it would make the SDK stricter than the server), `allErrors:true` (name every violation in one
+// re-ask; capped below).
+
+/** Bounded corrective re-asks after a final-answer outputSchema violation (parity: Python m65.5). */
+export const MAX_SCHEMA_REPAIR = 2;
+
+/** How many schema errors to surface in one corrective message (a pathological answer must not flood
+ * the model's context). */
+const MAX_SCHEMA_ERRORS = 5;
+
+const ajv = new Ajv2020({ strict: false, allErrors: true, validateFormats: false });
+
+/**
+ * Compile the outputSchema ONCE per run (best-effort). An uncompilable schema → null: in-loop
+ * validation is skipped (the server-side validator, m65.4, fail-closes on it anyway, so pass-through
+ * is correctly non-authoritative). Never throws.
+ */
+export function compileOutputSchema(
+  schema: Record<string, unknown> | null,
+): ValidateFunction | null {
+  if (schema === null) return null;
+  try {
+    return ajv.compile(schema);
+  } catch (err) {
+    warn(
+      `outputSchema did not compile; in-loop validation skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Validate a final-answer string against the compiled outputSchema. Returns an error MESSAGE for the
+ * corrective re-ask, or null when valid. A non-JSON answer is itself a violation. Re-ask-only — this
+ * never hard-fails.
+ */
+export function validateAgainstSchema(text: string, validate: ValidateFunction): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return "the response was not valid JSON";
+  }
+  if (validate(value)) return null;
+  const errs = (validate.errors ?? [])
+    .slice(0, MAX_SCHEMA_ERRORS)
+    .map((e) => `${e.instancePath || "(root)"} ${e.message ?? ""}`.trim());
+  return errs.join("; ") || "the response did not conform to the required JSON schema";
 }
 
 /** The behaviour of one managed-agent run — everything comes from here. */
@@ -1062,6 +1127,11 @@ async function driveLoop(
   let modelIndex = 0;
   let toolIndex = 0;
 
+  // O4: compile the outputSchema ONCE per run (null when absent/uncompilable → no in-loop
+  // validation). schemaRepairs counts corrective re-asks, bounded SEPARATELY from maxSteps.
+  const outputValidator = compileOutputSchema(config.outputSchema);
+  let schemaRepairs = 0;
+
   for (let step = 1; step <= config.maxSteps; step += 1) {
     state.stepHolder.value = step;
     const result = await client.trace.step(`turn-${step}`, async (turn) => {
@@ -1120,6 +1190,30 @@ async function driveLoop(
       modelIndex += 1;
 
       if (!resp.hasToolCalls) {
+        // O4: structured-output validation + bounded repair (parity m65.5). Validate the final answer
+        // against the outputSchema; on a violation, re-ask the model to fix it — up to
+        // MAX_SCHEMA_REPAIR times. On budget exhaustion, fall through and return the last answer for
+        // the AUTHORITATIVE server-side validator (m65.4) to gate. Re-ask-only — never hard-fails.
+        if (outputValidator !== null && schemaRepairs < MAX_SCHEMA_REPAIR) {
+          const error = validateAgainstSchema(resp.text, outputValidator);
+          if (error !== null) {
+            schemaRepairs += 1;
+            warn(
+              `structured output schema violation (repair ${schemaRepairs}/${MAX_SCHEMA_REPAIR}): ${error}`,
+            );
+            messages.push({ role: "assistant", content: resp.text || "" });
+            messages.push({
+              role: "user",
+              content:
+                `Your previous response was not valid per the required JSON schema: ${error}. ` +
+                `Reply with ONLY a JSON value that conforms to the schema.`,
+            });
+            turn.setOutput(`schema-repair-${schemaRepairs}: ${error}`);
+            // Signal the outer loop to run another step (a `continue` can't cross the trace-step
+            // closure boundary); the corrective message was just appended, so the next turn re-asks.
+            return { done: false as const };
+          }
+        }
         // The model stopped calling tools → the final answer.
         turn.setOutput(resp.text);
         root.setOutput(resp.text);
