@@ -1396,6 +1396,16 @@ export interface TemplateEntry {
   provenance?: TemplateProvenance | "builtin";
   // visibility: "team" | "org" | "public" (absent for built-in recipes).
   visibility?: string;
+  // alreadyForkedAs is set (U16) when the caller ALREADY has a fork of this published entry —
+  // the fork's {namespace,name}, so the gallery can badge + link it ("Already forked → your-fork")
+  // instead of only revealing it on a fork attempt. Absent for recipes + un-forked entries.
+  alreadyForkedAs?: ForkRef;
+}
+
+// ForkRef is a minimal {namespace,name} pointer to the caller's existing fork of a template (U16).
+export interface ForkRef {
+  namespace: string;
+  name: string;
 }
 
 export interface TemplateListResponse {

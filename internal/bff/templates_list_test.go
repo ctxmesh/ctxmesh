@@ -34,8 +34,10 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
@@ -305,6 +307,70 @@ func TestHandleTemplates_PublishedEntriesIncluded(t *testing.T) {
 	assert.Equal(t, "ns-caller", published[0].Provenance.OriginNamespace)
 	assert.Equal(t, "my-agent", published[0].Provenance.OriginName)
 	assert.Equal(t, 1, published[0].Provenance.Version)
+}
+
+// TestHandleTemplates_AlreadyForkedMark: a published entry the caller already forked (under a
+// DIFFERENT name — rename-on-fork) is marked with the fork's coordinates (U16, m101.3); an un-forked
+// entry and recipes are not marked.
+func TestHandleTemplates_AlreadyForkedMark(t *testing.T) {
+	store := publishedartifact.NewMemStore()
+	for _, name := range []string{"forked-agent", "unforked-agent"} {
+		_, err := store.Publish(context.Background(), publishedartifact.PublishedArtifact{
+			Kind: kindAgent, OriginNamespace: "ns-caller", OriginName: name,
+			SpecJSON: json.RawMessage(`{"name":"` + name + `"}`), Visibility: "team", ContentHash: "h-" + name,
+		})
+		require.NoError(t, err)
+	}
+
+	// The caller's fork of "forked-agent" — under a DIFFERENT name (the any-name match, not the
+	// endpoint's same-name idempotency check).
+	fork := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns-caller",
+			Name:      "my-renamed-fork",
+			Labels: map[string]string{
+				labelForkOriginNamespace: "ns-caller",
+				labelForkOriginName:      "forked-agent",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(fork).Build()
+	s := NewServer(Options{
+		CallerClients:          &fakeCallerClientFactory{client: c},
+		Scheme:                 testScheme(t),
+		Auth:                   AllowAll{},
+		PublishedArtifactStore: store,
+		NamespaceTenantStore:   namespacetenant.NewMemStore(),
+		Version:                "test",
+		Log:                    logr.Discard(),
+	})
+	s.authorizer = &recordingAuthorizer{}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, templatesRequest())
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp TemplateListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	byName := map[string]TemplateEntry{}
+	for _, e := range resp.Templates {
+		if e.Source == templateSourcePublished {
+			byName[e.Name] = e
+		}
+	}
+	// The forked origin is marked with the caller's fork coordinates (matched by origin, any name).
+	require.NotNil(t, byName["forked-agent"].AlreadyForkedAs, "the forked entry must be marked")
+	assert.Equal(t, "ns-caller", byName["forked-agent"].AlreadyForkedAs.Namespace)
+	assert.Equal(t, "my-renamed-fork", byName["forked-agent"].AlreadyForkedAs.Name)
+	// The un-forked origin is NOT marked.
+	assert.Nil(t, byName["unforked-agent"].AlreadyForkedAs, "an un-forked entry must not be marked")
+	// Recipes are never marked (no fork-origin labels).
+	for _, e := range resp.Templates {
+		if e.Source == templateSourceRecipe {
+			assert.Nil(t, e.AlreadyForkedAs, "recipes are never marked")
+		}
+	}
 }
 
 // TestHandleTemplates_UnmappedNSFailsClosed: when the namespace has no tenant mapping, the handler

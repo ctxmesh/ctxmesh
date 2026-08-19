@@ -76,6 +76,21 @@ type TemplateEntry struct {
 	Visibility string `json:"visibility"`
 	// Provenance carries origin coordinates for published entries; nil for builtin recipes.
 	Provenance *TemplateProvenance `json:"provenance,omitempty"`
+	// AlreadyForkedAs is set (m101.3 / U16) when the caller ALREADY has a fork of this published
+	// entry in their namespace — the coordinates of that fork, so the gallery can badge + link it
+	// ("Already forked → your-fork") instead of only revealing it on a fork attempt. Version-agnostic
+	// (a fork of v1 still marks when v2 is published), matched on the fork-origin labels. nil for
+	// recipes (no fork-origin labels) and for un-forked entries. omitempty — pure decoration, so a
+	// failed lookup simply omits it (the gallery renders unmarked; the fork endpoint stays the
+	// correctness backstop).
+	AlreadyForkedAs *ForkRef `json:"alreadyForkedAs,omitempty"`
+}
+
+// ForkRef is a minimal {namespace, name} pointer to an agent — the caller's existing fork of a
+// template (U16). Distinct from Provenance (the ORIGIN); this is the caller-side copy.
+type ForkRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
 }
 
 // TemplateListResponse is returned by GET /api/templates. Templates is non-nil on the wire ([] not null).
@@ -181,6 +196,26 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 			Visibility:  visibilityPublic,
 			// Provenance is nil for builtins — Source==templateSourceRecipe is the provenance signal.
 		})
+	}
+
+	// U16 (m101.3): pre-mark the published entries the caller already forked, so the gallery can badge
+	// + link them ("Already forked → your-fork") instead of only revealing it on a fork attempt. One
+	// caller-scoped, label-selected LIST in callerNS (the same read the SSAR gate above already
+	// authorized). Best-effort DECORATION: on a list error we log and leave the gallery unmarked —
+	// never a 500 — and the fork endpoint remains the correctness backstop. Recipes carry no origin,
+	// so they are never marked.
+	if forks, fErr := s.callerForkOrigins(r.Context(), caller, callerNS); fErr != nil {
+		s.log.Error(fErr, "templates: fork-origin lookup failed; gallery renders without already-forked marks", "namespace", callerNS)
+	} else {
+		for i := range entries {
+			if entries[i].Provenance == nil {
+				continue // recipes carry no origin labels to match
+			}
+			if ref, ok := forks[forkOriginKey(entries[i].Provenance.OriginNamespace, entries[i].Provenance.OriginName)]; ok {
+				r := ref
+				entries[i].AlreadyForkedAs = &r
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, TemplateListResponse{Templates: entries})

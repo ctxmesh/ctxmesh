@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
   Building2,
@@ -169,6 +169,19 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
               {isRecipe ? "built-in" : "published"}
             </Badge>
             <VisibilityBadge visibility={entry.visibility} />
+            {/* U16: pre-mark an entry the caller already forked — a badge that LINKS to their fork,
+                so they don't have to attempt a fork to discover it. Fork stays enabled (re-forking
+                under a new name is a supported flow); it is just visually demoted below. */}
+            {entry.alreadyForkedAs && (
+              <Link
+                to={`/agents/${encodeURIComponent(entry.alreadyForkedAs.namespace)}/${encodeURIComponent(entry.alreadyForkedAs.name)}`}
+                data-testid={`template-already-forked-${entry.name}`}
+                className="inline-flex items-center rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success hover:underline"
+                title={`You already forked this as ${entry.alreadyForkedAs.namespace}/${entry.alreadyForkedAs.name}`}
+              >
+                Already forked ✓
+              </Link>
+            )}
           </div>
           <p className="text-xs text-muted-foreground" data-testid={`template-origin-${entry.name}`}>
             origin: <span className="font-mono">{originLabel}</span>
@@ -185,9 +198,18 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
           {canFork ? (
             <Button
               size="sm"
+              // U16: demote to secondary when already forked — re-forking (under a new name) is still
+              // allowed, but the primary action is now "open your fork" (the linked badge above).
+              variant={entry.alreadyForkedAs ? "outline" : "default"}
               onClick={() => onFork(entry)}
               disabled={isAnyForking}
-              title={isAnyForking && !isThisEntryForking ? "Another fork is in progress" : undefined}
+              title={
+                entry.alreadyForkedAs
+                  ? "You already forked this — forking again creates another copy under a new name"
+                  : isAnyForking && !isThisEntryForking
+                    ? "Another fork is in progress"
+                    : undefined
+              }
               data-testid={`fork-template-${entry.name}`}
             >
               {isThisEntryForking ? (
@@ -429,7 +451,7 @@ function TemplatesTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Built-in recipes and published agents you can fork into your namespace.
+          Built-in recipes to install and published agents to fork into your namespace.
         </p>
         <Button
           variant="ghost"
@@ -770,7 +792,7 @@ export function TemplateGalleryPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Gallery</h2>
         <p className="text-sm text-muted-foreground">
-          Start from a template — fork an agent recipe or connect an MCP server.
+          Start from a template — install a recipe, fork a published agent, or connect an MCP server.
         </p>
       </div>
 

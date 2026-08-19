@@ -401,6 +401,40 @@ func forkOriginMatches(ad *agentsv1alpha1.AgentDeployment, prov forkProvenance) 
 		lbls[labelForkOriginName] == prov.originName
 }
 
+// forkOriginKey is the map key for callerForkOrigins — "originNamespace/originName".
+func forkOriginKey(ns, name string) string {
+	return ns + "/" + name
+}
+
+// callerForkOrigins builds a map of ORIGIN "namespace/name" → the caller's existing fork of it, by
+// listing the caller's own fork-labeled agents in callerNS (U16, m101.3). It powers the gallery's
+// "Already forked" pre-mark. UNLIKE forkOriginMatches (the endpoint's same-NAME idempotency check),
+// this matches ANY agent in callerNS carrying those origin labels — the user may have forked under a
+// different name. Version-agnostic (the fork-origin labels record only ns+name). The LIST is
+// caller-scoped (the caller already proved `list agentdeployments` in callerNS via the SSAR gate)
+// and label-selected to forks only. When the same origin was forked under multiple names we keep the
+// FIRST — any existing fork is enough to mark + link. A list error is returned so the caller can
+// degrade to an unmarked gallery, never a 500.
+func (s *Server) callerForkOrigins(ctx context.Context, caller client.Client, callerNS string) (map[string]ForkRef, error) {
+	var list agentsv1alpha1.AgentDeploymentList
+	if err := caller.List(ctx, &list, client.InNamespace(callerNS), client.HasLabels{labelForkOriginName}); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ForkRef, len(list.Items))
+	for i := range list.Items {
+		lbls := list.Items[i].GetLabels()
+		originName := lbls[labelForkOriginName]
+		if originName == "" {
+			continue
+		}
+		key := forkOriginKey(lbls[labelForkOriginNamespace], originName)
+		if _, seen := out[key]; !seen {
+			out[key] = ForkRef{Namespace: list.Items[i].Namespace, Name: list.Items[i].Name}
+		}
+	}
+	return out, nil
+}
+
 // publishedDiscoverable applies the ADR 0067 §6 / ADR 0068 §4 catalog visibility predicate to
 // a published artifact's visibility for a caller in callerNS — the same rule as
 // mcpConnectDiscoverable, keyed on a visibility string (the published snapshot carries the
