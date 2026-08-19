@@ -164,6 +164,10 @@ CREATE INDEX IF NOT EXISTS runs_waiting ON runs (id) WHERE status = 'waiting';
 CREATE INDEX IF NOT EXISTS runs_requires_action ON runs (namespace) WHERE status = 'requires_action';
 -- Walk a spawn tree (audit / the console's parent→sub-run view) by its root.
 CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> '';
+-- Resolve a run by its trace_id (GetByTraceID — the share-mint path, m75.4 / V6). trace_id defaults
+-- to '' for runs not yet traced, so a PARTIAL index on the non-empty values keeps it small (most
+-- rows early in a run's life have no trace yet) — mirroring the runs_root partial-index pattern.
+CREATE INDEX IF NOT EXISTS runs_trace_id ON runs (trace_id) WHERE trace_id <> '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
 -- root run id), incremented atomically as the BFF admits each sub-run. The BFF keys it on the root it
 -- derived from the VERIFIED parent, so it cannot be re-keyed by an agent for a fresh budget.
