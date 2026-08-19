@@ -2308,3 +2308,73 @@ describe("AgentDetailPage — version diff (V3)", () => {
     expect(screen.queryByTestId("version-diff-output")).toBeNull();
   });
 });
+
+// ── U4: opt-in auto-unpublish on delete ──────────────────────────────────────
+describe("AgentDetailPage — delete auto-unpublish (U4)", () => {
+  function installDeleteFetch(published: boolean) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (method === "DELETE" && url.includes("/api/agents/")) {
+          calls.push(url);
+          return j({ accepted: true });
+        }
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { delete: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/) && method === "GET")
+          return j({ ...DEFAULT_DETAIL, published: published ? { visibility: "org", version: 3 } : undefined }, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+    return calls;
+  }
+
+  it("shows a pre-checked unpublish checkbox for a published agent, and deletes with ?unpublish=true", async () => {
+    const calls = installDeleteFetch(true);
+    renderAt("/agents/prod/billing?delete=1");
+    await screen.findByTestId("agent-detail-page");
+
+    const checkbox = await screen.findByTestId("delete-unpublish-checkbox");
+    expect(checkbox).toBeChecked(); // pre-checked (default intent)
+
+    fireEvent.change(screen.getByPlaceholderText("billing"), { target: { value: "billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete agent" }));
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).toContain("unpublish=true");
+  });
+
+  it("unchecking keeps the template (bare delete, no ?unpublish)", async () => {
+    const calls = installDeleteFetch(true);
+    renderAt("/agents/prod/billing?delete=1");
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(await screen.findByTestId("delete-unpublish-checkbox")); // uncheck
+    fireEvent.change(screen.getByPlaceholderText("billing"), { target: { value: "billing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete agent" }));
+
+    await waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).not.toContain("unpublish");
+  });
+
+  it("shows no unpublish checkbox for an unpublished agent", async () => {
+    installDeleteFetch(false);
+    renderAt("/agents/prod/billing?delete=1");
+    await screen.findByTestId("agent-detail-page");
+    // The confirm dialog is open (references loaded) but there is no unpublish row.
+    await screen.findByPlaceholderText("billing");
+    expect(screen.queryByTestId("delete-unpublish-checkbox")).toBeNull();
+  });
+});

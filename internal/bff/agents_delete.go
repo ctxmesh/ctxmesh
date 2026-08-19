@@ -85,6 +85,21 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// U4 (opt-in auto-unpublish): when the caller passes ?unpublish=true, tombstone the agent's
+	// published template(s) now the origin is gone. It is OPT-IN by design — ADR 0068 §1's registry
+	// model deliberately lets a published snapshot outlive its origin (publish-then-delete-the-dev-
+	// agent is the canonical workflow), so a bare DELETE keeps that behavior; the console offers a
+	// pre-checked "also unpublish" only when the agent is published. Best-effort + AFTER the K8s
+	// delete succeeded: the delete is done, so a Tombstone failure must NOT fail the response — the
+	// stale gallery row is cosmetic and still manually unpublishable (logged with ns/name to do so).
+	// Tombstone is a no-op when nothing is published (verified). Only covers CONSOLE deletes; a
+	// `kubectl delete` keeps ADR 0068's default (the documented gap).
+	if isTruthyParam(r.URL.Query().Get("unpublish")) && s.publishedArtifactStore != nil {
+		if tErr := s.publishedArtifactStore.Tombstone(r.Context(), kindAgent, ns, name); tErr != nil {
+			s.log.Error(tErr, "delete agent: auto-unpublish tombstone failed (published template left live — unpublish manually)", "namespace", ns, "name", name)
+		}
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 

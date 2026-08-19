@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
 )
 
 // deleteAgent drives DELETE /api/agents/team-a/{name} with a caller token and
@@ -116,6 +117,82 @@ func TestDeleteAgentRemovesObject(t *testing.T) {
 	var got agentsv1alpha1.AgentDeployment
 	err := c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got)
 	require.True(t, apierrors.IsNotFound(err), "AgentDeployment must be gone after a successful DELETE")
+}
+
+// deleteAgentUnpublish drives DELETE /api/agents/{ns}/{name}?unpublish=true (U4 opt-in auto-unpublish).
+func deleteAgentUnpublish(t *testing.T, s *Server, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/agents/"+detailNS+"/"+name+"?unpublish=true", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestDeleteAgent_UnpublishTrueTombstones: ?unpublish=true tombstones the agent's published template
+// AFTER the delete (U4).
+func TestDeleteAgent_UnpublishTrueTombstones(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	store := publishedartifact.NewMemStore()
+	_, err := store.Publish(context.Background(), publishedartifact.PublishedArtifact{
+		Kind: kindAgent, OriginNamespace: detailNS, OriginName: "echo",
+		SpecJSON: []byte(`{"name":"echo"}`), Visibility: "org", ContentHash: "h1",
+	})
+	require.NoError(t, err)
+	s.publishedArtifactStore = store
+
+	rec := deleteAgentUnpublish(t, s, "echo")
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+	// The published template is now tombstoned → GetLatest reports no live release.
+	_, ok, gErr := store.GetLatest(context.Background(), kindAgent, detailNS, "echo")
+	require.NoError(t, gErr)
+	assert.False(t, ok, "?unpublish=true must tombstone the published template")
+}
+
+// TestDeleteAgent_BareDeleteKeepsPublished: a bare DELETE (no ?unpublish) keeps the published template
+// live — ADR 0068 registry semantics (U4 is opt-in).
+func TestDeleteAgent_BareDeleteKeepsPublished(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	store := publishedartifact.NewMemStore()
+	_, err := store.Publish(context.Background(), publishedartifact.PublishedArtifact{
+		Kind: kindAgent, OriginNamespace: detailNS, OriginName: "echo",
+		SpecJSON: []byte(`{"name":"echo"}`), Visibility: "org", ContentHash: "h1",
+	})
+	require.NoError(t, err)
+	s.publishedArtifactStore = store
+
+	rec := deleteAgent(t, s, "echo")
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	// The published template survives the origin's deletion (the intentional default).
+	_, ok, gErr := store.GetLatest(context.Background(), kindAgent, detailNS, "echo")
+	require.NoError(t, gErr)
+	assert.True(t, ok, "a bare DELETE must keep the published template live (ADR 0068)")
+}
+
+// TestDeleteAgent_UnpublishNoStoreStillDeletes: ?unpublish=true with NO published store still deletes
+// (best-effort — the tombstone is a no-op, never fails the delete).
+func TestDeleteAgent_UnpublishNoStoreStillDeletes(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c}) // no publishedArtifactStore
+
+	rec := deleteAgentUnpublish(t, s, "echo")
+	assert.Equal(t, http.StatusNoContent, rec.Code, "the delete must succeed even with no published store")
 }
 
 // TestDeleteAgentNotFoundIs404 proves deleting a missing agent surfaces as 404.
