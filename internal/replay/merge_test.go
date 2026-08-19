@@ -32,7 +32,7 @@ func TestMergeFixtures_UnionsChannels(t *testing.T) {
 	modelBlob.AppendModel([]byte(`{"m":2}`), []byte(`{"ok":2}`), "application/json", 200)
 
 	toolBlob := NewFixture("run-7", "team/planner")
-	toolBlob.AppendTool("c1", "search", []byte(`{"q":"a"}`), []byte(`{"r":1}`))
+	toolBlob.AppendTool("c1", "search", []byte(`{"q":"a"}`), []byte(`{"r":1}`), "")
 
 	merged := MergeFixtures(modelBlob, toolBlob)
 
@@ -101,7 +101,7 @@ func TestLoadFixturePath_DirectoryMerges(t *testing.T) {
 	writeFixture(t, filepath.Join(dir, "model.json"), modelBlob)
 
 	toolBlob := NewFixture("run-9", "a")
-	toolBlob.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte(`{"r":1}`))
+	toolBlob.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte(`{"r":1}`), "")
 	writeFixture(t, filepath.Join(dir, "tools.json"), toolBlob)
 
 	got, err := LoadFixturePath(dir)

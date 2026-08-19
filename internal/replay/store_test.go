@@ -38,7 +38,7 @@ func TestFixtureStorePutGetRoundTrip(t *testing.T) {
 	f := NewFixture("run-xyz", "team/agent")
 	sse := []byte("data: {\"delta\":\"hi\"}\n\ndata: [DONE]\n\n")
 	f.AppendModel([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), sse, "text/event-stream", 200)
-	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"r":1}`))
+	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"r":1}`), "")
 
 	ref, err := fs.Put(ctx, f)
 	if err != nil {
