@@ -236,8 +236,8 @@ export function DashboardPage() {
           <CardContent>
             <div className="flex min-h-[14rem] flex-col items-center justify-center gap-3 rounded-md border p-4 text-center">
               <p className="text-sm text-muted-foreground">
-                Cost is tracked per tenant. Open the Cost page to see spend,
-                per-agent breakdown, and month forecast — pick a tenant there.
+                Per-agent spend, tenant breakdowns, and month-end forecasts live
+                on the Cost page.
               </p>
               <Link
                 to="/cost"
