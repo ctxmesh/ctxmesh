@@ -192,6 +192,7 @@ export function AgentsPage() {
       ? {
           message: state.message,
           forbidden: state.forbidden,
+          resource: "agents",
           onRetry: state.forbidden ? undefined : load,
         }
       : null;

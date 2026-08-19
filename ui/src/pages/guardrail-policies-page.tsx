@@ -61,6 +61,7 @@ export function GuardrailPoliciesPage() {
       ? {
           message: loadState.message,
           forbidden: loadState.forbidden,
+          resource: "guardrail policies",
           onRetry: loadState.forbidden ? undefined : load,
         }
       : null;

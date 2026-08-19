@@ -181,8 +181,10 @@ describe("AgentsPage (DataTable + list contract)", () => {
     });
     renderPage(<AgentsPage />);
     expect(
-      await screen.findByText(/forbidden: cannot list agentdeployments/),
+      await screen.findByText("You don't have permission to view agents"),
     ).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
     // A forbidden error offers no misleading "Retry" (RBAC won't change on retry).
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
   });

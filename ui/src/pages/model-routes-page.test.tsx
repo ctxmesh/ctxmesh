@@ -167,7 +167,9 @@ describe("ModelRoutesPage — list", () => {
   it("renders 403 as the forbidden variant, not empty list", async () => {
     installFetch({ routes: () => ({ ok: false, status: 403, body: { error: "forbidden: cannot list modelroutes" } }) });
     renderList();
-    expect(await screen.findByText(/forbidden: cannot list modelroutes/)).toBeInTheDocument();
+    expect(await screen.findByText("You don't have permission to view model routes")).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/forbidden: cannot/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
   });
 });
