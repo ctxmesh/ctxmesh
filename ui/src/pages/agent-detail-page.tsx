@@ -1045,6 +1045,10 @@ function DeleteDialog({
   const { reprobe } = useCapabilities();
   const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
   const [deleting, setDeleting] = React.useState(false);
+  // U4: when this agent is published, offer to ALSO unpublish its template — pre-checked (the common
+  // intent), but visible + uncheckable to preserve ADR 0068's publish-then-delete-the-dev-agent flow.
+  const isPublished = detail.published != null;
+  const [alsoUnpublish, setAlsoUnpublish] = React.useState(true);
 
   React.useEffect(() => {
     const controller = new AbortController();
@@ -1067,11 +1071,14 @@ function DeleteDialog({
   async function onConfirm() {
     setDeleting(true);
     try {
-      await api.deleteAgent(detail.namespace, detail.name);
+      await api.deleteAgent(detail.namespace, detail.name, isPublished && alsoUnpublish);
       toast({
         variant: "success",
         title: "Agent deleted",
-        description: `${detail.name} has been removed.`,
+        description:
+          isPublished && alsoUnpublish
+            ? `${detail.name} has been removed and its template unpublished.`
+            : `${detail.name} has been removed.`,
       });
       onDeleted();
     } catch (err) {
@@ -1131,6 +1138,36 @@ function DeleteDialog({
       </div>
     );
 
+  // U4: when the agent is published, append an "also unpublish the template" checkbox to the impact
+  // slot — pre-checked (default intent) but the user can uncheck it to keep the template in the
+  // gallery (ADR 0068 registry semantics). Shown only when there is a published template to withdraw.
+  const impactWithUnpublish = (
+    <>
+      {impact}
+      {isPublished && (
+        <label
+          className="mt-3 flex items-start gap-2 text-sm"
+          data-testid="delete-unpublish-row"
+        >
+          <input
+            type="checkbox"
+            checked={alsoUnpublish}
+            onChange={(e) => setAlsoUnpublish(e.target.checked)}
+            className="mt-0.5"
+            data-testid="delete-unpublish-checkbox"
+          />
+          <span>
+            Also unpublish this agent's template
+            {detail.published?.version ? ` (v${detail.published.version})` : ""} from the gallery.
+            <span className="block text-xs text-muted-foreground">
+              Uncheck to keep the published template available for others to fork.
+            </span>
+          </span>
+        </label>
+      )}
+    </>
+  );
+
   return (
     <ConfirmDialog
       open={true}
@@ -1141,7 +1178,7 @@ function DeleteDialog({
       confirmText={detail.name}
       confirmLabel="Delete agent"
       busy={deleting}
-      impact={impact}
+      impact={impactWithUnpublish}
     />
   );
 }
