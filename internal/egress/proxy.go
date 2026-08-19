@@ -224,9 +224,12 @@ func (p *Proxy) captureResponse(resp *http.Response) error {
 	if cap == nil || p.cfg.Recorder == nil {
 		return nil
 	}
+	// O9: capture the tool response Content-Type so replay serves the recorded framing instead of
+	// sniffing SSE-vs-JSON from the bytes.
+	contentType := resp.Header.Get("Content-Type")
 	body := resp.Body
 	if body == nil {
-		p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, nil)
+		p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, nil, contentType)
 		return nil
 	}
 	buffered, err := io.ReadAll(io.LimitReader(body, maxRecordBody+1))
@@ -242,7 +245,7 @@ func (p *Proxy) captureResponse(resp *http.Response) error {
 	}
 	// Restore an identical reader so the agent sees the response verbatim.
 	resp.Body = io.NopCloser(bytes.NewReader(buffered))
-	p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, buffered)
+	p.cfg.Recorder.capture(resp.Request.Context(), cap.runID, cap.callID, cap.toolName, cap.reqBody, buffered, contentType)
 	return nil
 }
 

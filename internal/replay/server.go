@@ -359,13 +359,15 @@ func (s *ReplaySession) handleToolsCall(w http.ResponseWriter, req mcpRequest) {
 	serveRecordedTool(w, req.ID, ti)
 }
 
-// serveRecordedTool re-serves a recorded tool result. The fixture schema stores NO tool
-// content-type (only ResponseBytes — ADR 0071 §3a v1 limit 1), so the content-type is SNIFFED:
-// bytes that look like an SSE frame (start with "event:" or "data:") are served as
-// text/event-stream verbatim; anything else is served as application/json. The recorded bytes
-// are re-served byte-identically either way.
+// serveRecordedTool re-serves a recorded tool result. O9: the fixture now records the tool
+// Content-Type (ToolInteraction.ContentType), so replay serves the RECORDED framing when present;
+// OLD fixtures (schema v1, no tool content-type) fall back to SNIFFING — bytes that look like an SSE
+// frame ("event:"/"data:") → text/event-stream, else application/json. The recorded bytes are
+// re-served byte-identically either way.
 func serveRecordedTool(w http.ResponseWriter, id json.RawMessage, ti ToolInteraction) {
-	if looksLikeSSE(ti.ResponseBytes) {
+	sse := strings.HasPrefix(ti.ContentType, "text/event-stream") ||
+		(ti.ContentType == "" && looksLikeSSE(ti.ResponseBytes))
+	if sse {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(ti.ResponseBytes)

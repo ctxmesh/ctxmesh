@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
+	"strings"
 
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 )
@@ -124,9 +126,70 @@ func (s *FixtureStore) Get(ctx context.Context, ref string) (*Fixture, error) {
 func fixtureKey(runID string, data []byte) string {
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
-	safeRun := path.Base(path.Clean("/" + runID))
-	if safeRun == "." || safeRun == "/" || safeRun == "" {
-		safeRun = "_unkeyed"
+	return path.Join(fixturesKeyPrefix, SanitizeRunID(runID), digest) + ".json"
+}
+
+// SanitizeRunID reduces a run id to a single safe path segment (defensive against traversal),
+// matching what fixtureKey stamps into the store key. GetRun lists a run's prefix with the SAME
+// sanitization so a LIST finds exactly what Put wrote, and the download-fixture CLI reuses it to
+// derive a filesystem-safe default output filename. A run id that sanitizes to nothing maps to the
+// same "_unkeyed" bucket the key builder uses.
+func SanitizeRunID(runID string) string {
+	safe := path.Base(path.Clean("/" + runID))
+	if safe == "." || safe == "/" || safe == "" {
+		safe = "_unkeyed"
 	}
-	return path.Join(fixturesKeyPrefix, safeRun, digest) + ".json"
+	return safe
+}
+
+// fixtureRunPrefix is the durable-store key prefix under which ALL of a run's partial fixture blobs
+// live: fixtures/{runId}/. Listing it enumerates every channel blob (the launcher gateway's MODEL
+// blob + the egress sidecar's TOOLS blob, ADR 0071 §3a) a run recorded — what GetRun merges into
+// one replayable fixture. The trailing slash makes the prefix exclusive to this run's subtree so a
+// run id that is a prefix of another's does not over-match.
+func fixtureRunPrefix(runID string) string {
+	return path.Join(fixturesKeyPrefix, SanitizeRunID(runID)) + "/"
+}
+
+// GetRun downloads and merges ALL partial fixture blobs a run recorded into one replayable fixture
+// (the load-side of ADR 0071 §3a assembly, off the durable object store instead of a local dir).
+// It lists the run's fixtures/{runId}/ prefix, Gets + validates each *.json blob (Get enforces the
+// schema-version gate and the C4 no-credential invariant), and MergeFixtures them in a deterministic
+// key order so a re-download is byte-stable. A run with no fixture blobs is an honest error (nothing
+// was recorded, or the run id is wrong) — never an empty fixture. The caller MUST have gated its own
+// RBAC before calling (caller-scoped read, ADR 0011); this does the blob I/O only.
+func (s *FixtureStore) GetRun(ctx context.Context, runID string) (*Fixture, error) {
+	prefix := fixtureRunPrefix(runID)
+	infos, err := s.store.List(ctx, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("replay: list fixtures for run %q: %w", runID, err)
+	}
+	keys := make([]string, 0, len(infos))
+	for _, in := range infos {
+		if strings.HasSuffix(in.Key, ".json") {
+			keys = append(keys, in.Key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf(
+			"replay: no fixture blobs found for run %q (object-store prefix %q) — nothing was recorded for "+
+				"this run, or the run id is wrong", runID, prefix)
+	}
+	// Deterministic order so a re-download is byte-stable (the model channel is re-indexed on merge).
+	slices.Sort(keys)
+
+	blobs := make([]*Fixture, 0, len(keys))
+	for _, k := range keys {
+		fx, gerr := s.Get(ctx, k)
+		if gerr != nil {
+			return nil, gerr
+		}
+		blobs = append(blobs, fx)
+	}
+	merged := MergeFixtures(blobs...)
+	// Re-assert the invariant on the merged whole (belt-and-braces; each blob was already checked).
+	if err := merged.AssertNoCredentials(); err != nil {
+		return nil, err
+	}
+	return merged, nil
 }

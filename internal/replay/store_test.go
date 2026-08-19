@@ -38,7 +38,7 @@ func TestFixtureStorePutGetRoundTrip(t *testing.T) {
 	f := NewFixture("run-xyz", "team/agent")
 	sse := []byte("data: {\"delta\":\"hi\"}\n\ndata: [DONE]\n\n")
 	f.AppendModel([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), sse, "text/event-stream", 200)
-	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"r":1}`))
+	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"r":1}`), "")
 
 	ref, err := fs.Put(ctx, f)
 	if err != nil {
@@ -115,6 +115,87 @@ func TestFixtureStorePutRefusesCredentialLeak(t *testing.T) {
 func TestNewFixtureStoreRejectsNilStore(t *testing.T) {
 	if _, err := NewFixtureStore(nil); err == nil {
 		t.Fatal("NewFixtureStore(nil) must return an error")
+	}
+}
+
+// TestFixtureStoreGetRunMergesPartialBlobs proves GetRun lists a run's fixtures/{runId}/ prefix,
+// downloads BOTH partial channel blobs (the gateway's MODEL blob + the sidecar's TOOLS blob, written
+// as two distinct content-addressed keys), and merges them into one replayable fixture — the
+// object-store analogue of `dev --replay <dir>` that the download-fixture CLI relies on.
+func TestFixtureStoreGetRunMergesPartialBlobs(t *testing.T) {
+	ctx := context.Background()
+	mem := objectstore.NewMemObjectStore()
+	fs, _ := NewFixtureStore(mem)
+
+	// Two partial blobs for the SAME run, each Put under its own content-addressed key.
+	modelBlob := NewFixture("run-merge", "team/agent")
+	modelBlob.AppendModel([]byte(`{"q":1}`), []byte(`{"ok":1}`), "application/json", 200)
+	if _, err := fs.Put(ctx, modelBlob); err != nil {
+		t.Fatalf("Put model blob: %v", err)
+	}
+	toolBlob := NewFixture("run-merge", "team/agent")
+	toolBlob.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"r":1}`), "text/event-stream")
+	if _, err := fs.Put(ctx, toolBlob); err != nil {
+		t.Fatalf("Put tool blob: %v", err)
+	}
+
+	got, err := fs.GetRun(ctx, "run-merge")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.RunID != "run-merge" || got.Agent != "team/agent" {
+		t.Errorf("GetRun lost provenance: %+v", got)
+	}
+	if len(got.Model) != 1 || len(got.Tools) != 1 {
+		t.Fatalf("GetRun did not merge both channels: %d model, %d tool", len(got.Model), len(got.Tools))
+	}
+	if got.Model[0].Index != 0 {
+		t.Errorf("merged model index not re-assigned: %d", got.Model[0].Index)
+	}
+	if got.Tools[0].ContentType != "text/event-stream" {
+		t.Errorf("merged tool lost recorded content-type: %q", got.Tools[0].ContentType)
+	}
+}
+
+// TestFixtureStoreGetRunNoBlobsIsHonestError proves a run with no recorded fixture is a clear error
+// (nothing recorded / wrong run id) — never an empty fixture the CLI would silently write out.
+func TestFixtureStoreGetRunNoBlobsIsHonestError(t *testing.T) {
+	ctx := context.Background()
+	fs, _ := NewFixtureStore(objectstore.NewMemObjectStore())
+
+	_, err := fs.GetRun(ctx, "run-never-recorded")
+	if err == nil {
+		t.Fatal("GetRun must error for a run with no fixture blobs")
+	}
+	if !strings.Contains(err.Error(), "run-never-recorded") {
+		t.Errorf("error should name the run id, got: %v", err)
+	}
+}
+
+// TestFixtureStoreGetRunPrefixIsExclusive proves GetRun's run prefix does not over-match a run whose
+// id is a prefix of another's (the trailing slash) — "run-1" must not pull "run-12"'s blobs.
+func TestFixtureStoreGetRunPrefixIsExclusive(t *testing.T) {
+	ctx := context.Background()
+	fs, _ := NewFixtureStore(objectstore.NewMemObjectStore())
+
+	f1 := NewFixture("run-1", "a")
+	f1.AppendModel([]byte(`{"q":1}`), []byte(`resp1`), "application/json", 200)
+	if _, err := fs.Put(ctx, f1); err != nil {
+		t.Fatalf("Put run-1: %v", err)
+	}
+	f12 := NewFixture("run-12", "a")
+	f12.AppendModel([]byte(`{"q":2}`), []byte(`resp2`), "application/json", 200)
+	f12.AppendTool("c", "t", []byte(`{}`), []byte(`{}`), "")
+	if _, err := fs.Put(ctx, f12); err != nil {
+		t.Fatalf("Put run-12: %v", err)
+	}
+
+	got, err := fs.GetRun(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("GetRun run-1: %v", err)
+	}
+	if len(got.Model) != 1 || len(got.Tools) != 0 {
+		t.Errorf("run-1 over-matched run-12's blobs: %d model, %d tool", len(got.Model), len(got.Tools))
 	}
 }
 

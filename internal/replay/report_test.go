@@ -52,8 +52,8 @@ func TestExitCode_Mapping(t *testing.T) {
 // tool name by edit distance. This confirms the hint is OUT of MatchTool.
 func TestRenderReport_NearestRecordedHint(t *testing.T) {
 	f := NewFixture("run-1", "a")
-	f.AppendTool("c1", "send_email", []byte(`{}`), []byte(`{}`))
-	f.AppendTool("c2", "search", []byte(`{}`), []byte(`{}`))
+	f.AppendTool("c1", "send_email", []byte(`{}`), []byte(`{}`), "")
+	f.AppendTool("c2", "search", []byte(`{}`), []byte(`{}`), "")
 
 	rep := Report{
 		RunID: "run-1",

@@ -36,6 +36,9 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 
+import { Ajv2020 } from "ajv/dist/2020.js";
+import type { ValidateFunction } from "ajv";
+
 import { capabilityScope } from "./_capability.js";
 import { currentRecordRunId, recordScope } from "./_record.js";
 import { approvalScope, pauseForApproval, voucherScope } from "./_approval.js";
@@ -165,6 +168,68 @@ function objectOrNull(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+// ── structured-output validation + repair (O4 — parity with the Python SDK, m65.5, ADR 0058) ─────
+//
+// When an agent is configured with an `outputSchema`, the loop already steers the provider via
+// `response_format`; O4 adds the Python SDK's in-loop VALIDATE + bounded REPAIR: validate the final
+// answer against the schema and, on a violation, re-ask the model to fix it — up to MAX_SCHEMA_REPAIR
+// times, then return the last answer for the AUTHORITATIVE server-side validator (m65.4) to gate.
+//
+// Validator choice (ADR 0082): ajv on the `dist/2020` (draft 2020-12) build — the SAME dialect the
+// server-side `santhosh-tekuri/jsonschema/v5` + the Python `jsonschema` use. It is RE-ASK-ONLY: it
+// never hard-fails, so a false negative is caught by the server and a false positive costs at most two
+// wasted turns. `strict:false` (arbitrary operator schemas must not throw at compile),
+// `validateFormats:false` (`format` is annotation-only on both authoritative validators — asserting
+// it would make the SDK stricter than the server), `allErrors:true` (name every violation in one
+// re-ask; capped below).
+
+/** Bounded corrective re-asks after a final-answer outputSchema violation (parity: Python m65.5). */
+export const MAX_SCHEMA_REPAIR = 2;
+
+/** How many schema errors to surface in one corrective message (a pathological answer must not flood
+ * the model's context). */
+const MAX_SCHEMA_ERRORS = 5;
+
+const ajv = new Ajv2020({ strict: false, allErrors: true, validateFormats: false });
+
+/**
+ * Compile the outputSchema ONCE per run (best-effort). An uncompilable schema → null: in-loop
+ * validation is skipped (the server-side validator, m65.4, fail-closes on it anyway, so pass-through
+ * is correctly non-authoritative). Never throws.
+ */
+export function compileOutputSchema(
+  schema: Record<string, unknown> | null,
+): ValidateFunction | null {
+  if (schema === null) return null;
+  try {
+    return ajv.compile(schema);
+  } catch (err) {
+    warn(
+      `outputSchema did not compile; in-loop validation skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Validate a final-answer string against the compiled outputSchema. Returns an error MESSAGE for the
+ * corrective re-ask, or null when valid. A non-JSON answer is itself a violation. Re-ask-only — this
+ * never hard-fails.
+ */
+export function validateAgainstSchema(text: string, validate: ValidateFunction): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return "the response was not valid JSON";
+  }
+  if (validate(value)) return null;
+  const errs = (validate.errors ?? [])
+    .slice(0, MAX_SCHEMA_ERRORS)
+    .map((e) => `${e.instancePath || "(root)"} ${e.message ?? ""}`.trim());
+  return errs.join("; ") || "the response did not conform to the required JSON schema";
 }
 
 /** The behaviour of one managed-agent run — everything comes from here. */
@@ -763,6 +828,7 @@ async function callToolWithResilience(
   name: string,
   args: Record<string, unknown>,
   spawnDepth: number,
+  breaker: CircuitBreaker | null,
 ): Promise<unknown> {
   const toolCall = resilienceSection(config.resilience, "toolCall");
   const opts: { timeout?: number } = {};
@@ -777,12 +843,18 @@ async function callToolWithResilience(
 
   let attempt = 0;
   for (;;) {
+    // O5: short-circuit when the per-run breaker is open for this tool (before any dispatch).
+    if (breaker && !breaker.allow(name)) throw new CircuitOpenError(name);
     try {
-      return await client.tools.call(name, args, opts);
+      const r = await client.tools.call(name, args, opts);
+      breaker?.recordSuccess(name);
+      return r;
     } catch (err) {
-      // Consent-required is a user-action outcome, not a transient fault: surface it.
+      // Consent-required is a user-action outcome, not a transient fault: it must NOT count toward
+      // the breaker or be retried — surface it.
       if (err instanceof ConsentRequiredError) throw err;
       if (err instanceof EndpointError) {
+        breaker?.recordFailure(name);
         if (attempt >= retries) throw err;
         attempt += 1;
         await sleep(retryBackoffMs(attempt));
@@ -791,6 +863,91 @@ async function callToolWithResilience(
       throw err;
     }
   }
+}
+
+// ── per-run tool circuit breaker (O5 — parity with the Python `_CircuitBreaker`, m65.7, ADR 0058) ──
+//
+// Scope is deliberately PER-RUN: a fresh breaker is created in `runManagedLoop` and threaded into the
+// loop, so one run's tool failures never trip another's (coordinated/per-pod fleet breaking is the
+// conscious deferral m52.J2 — do NOT add shared state here). It is a health heuristic, not a global
+// ceiling. Unlike the Python impl there is no lock: JS is single-threaded and these methods are
+// synchronous (no `await` inside), so the per-tool state transitions are already atomic.
+//
+// State per tool: closed (count consecutive failures; a success resets) → open at `threshold`
+// consecutive failures (every call short-circuits until `openUntil`) → after the cooldown, ONE
+// half-open probe is admitted (success → closed, failure → re-open with a fresh cooldown).
+
+interface BreakerEntry {
+  failures: number;
+  openUntil: number | null; // epoch ms, or null when closed
+}
+
+export class CircuitBreaker {
+  private readonly state = new Map<string, BreakerEntry>();
+  constructor(
+    private readonly threshold: number,
+    private readonly cooldownMs: number,
+  ) {}
+
+  private entry(name: string): BreakerEntry {
+    let e = this.state.get(name);
+    if (e === undefined) {
+      e = { failures: 0, openUntil: null };
+      this.state.set(name, e);
+    }
+    return e;
+  }
+
+  /** True if a call to `name` may dispatch now (closed, or a half-open probe once the cooldown
+   * elapsed); false while the breaker is open and still cooling down (short-circuit). */
+  allow(name: string): boolean {
+    if (this.threshold <= 0) return true; // disabled → always allow
+    const e = this.entry(name);
+    // null → closed. Cooldown elapsed → allow ONE half-open probe (leave openUntil set so a
+    // concurrent second caller still short-circuits until the probe resolves). Else → deny.
+    return e.openUntil === null || Date.now() >= e.openUntil;
+  }
+
+  /** A successful call: reset to closed. */
+  recordSuccess(name: string): void {
+    if (this.threshold <= 0) return;
+    const e = this.entry(name);
+    e.failures = 0;
+    e.openUntil = null;
+  }
+
+  /** A failed call: increment consecutive failures; open (or re-open) at the threshold. */
+  recordFailure(name: string): void {
+    if (this.threshold <= 0) return;
+    const e = this.entry(name);
+    e.failures += 1;
+    if (e.failures >= this.threshold) e.openUntil = Date.now() + this.cooldownMs;
+  }
+}
+
+/** Raised inside the tool dispatch when the per-run breaker is open for a tool — caught in the loop
+ * and turned into an honest "circuit open" tool result the model sees (never propagated). */
+export class CircuitOpenError extends Error {
+  constructor(readonly toolName: string) {
+    super(`circuit open for tool ${JSON.stringify(toolName)}`);
+    this.name = "CircuitOpenError";
+  }
+}
+
+/** Build the per-run tool breaker from `resilience.toolCall.circuitBreaker`. Returns null when
+ * resilience/toolCall/circuitBreaker is absent or the threshold is not positive — then the loop
+ * dispatches with no breaker (the "None → unchanged" contract). */
+export function makeBreaker(
+  resilience: Record<string, unknown> | null,
+): CircuitBreaker | null {
+  const toolCall = resilienceSection(resilience, "toolCall");
+  if (!toolCall) return null;
+  const cb = objectOrNull(toolCall["circuitBreaker"]);
+  if (!cb) return null;
+  const threshold = positiveInt(cb, "failureThreshold");
+  if (threshold <= 0) return null;
+  const cooldownSeconds = positiveInt(cb, "cooldownSeconds");
+  return new CircuitBreaker(threshold, cooldownSeconds * 1000);
 }
 
 // ── the loop ───────────────────────────────────────────────────────────────────
@@ -824,6 +981,9 @@ export async function runManagedLoop(
   const tools = await client.tools.list();
   const toolNames = new Set(tools.map((t) => t.name));
   const toolSchemas = tools.map((t) => toolSchema(t));
+
+  // O5: a fresh PER-RUN tool circuit breaker (null when unconfigured → the loop is byte-unchanged).
+  const breaker = makeBreaker(config.resilience);
 
   // Conversation id resolution (m33.5): inbound session id > agent-supplied id > "".
   const conversationId = conversationIdFromHeaders(headers) || opts.conversationId || "";
@@ -891,6 +1051,7 @@ export async function runManagedLoop(
             spawnDepth,
             stepHolder,
             spotlightToken,
+            breaker,
           });
         } catch (err) {
           if (err instanceof ApprovalRequiredError) {
@@ -941,6 +1102,8 @@ interface DriveState {
    * DATA (see `spotlightToolContent`). The system prompt carries the matching instruction.
    */
   spotlightToken: string;
+  /** O5: the per-run tool circuit breaker, or null when unconfigured (the loop is then unchanged). */
+  breaker: CircuitBreaker | null;
 }
 
 /** The tool-calling loop body — extracted so the caller wraps it in the scopes + catch. */
@@ -963,6 +1126,11 @@ async function driveLoop(
   const emitStep = state.onStep ?? ((_frame: StepFrame): void => undefined);
   let modelIndex = 0;
   let toolIndex = 0;
+
+  // O4: compile the outputSchema ONCE per run (null when absent/uncompilable → no in-loop
+  // validation). schemaRepairs counts corrective re-asks, bounded SEPARATELY from maxSteps.
+  const outputValidator = compileOutputSchema(config.outputSchema);
+  let schemaRepairs = 0;
 
   for (let step = 1; step <= config.maxSteps; step += 1) {
     state.stepHolder.value = step;
@@ -1022,6 +1190,30 @@ async function driveLoop(
       modelIndex += 1;
 
       if (!resp.hasToolCalls) {
+        // O4: structured-output validation + bounded repair (parity m65.5). Validate the final answer
+        // against the outputSchema; on a violation, re-ask the model to fix it — up to
+        // MAX_SCHEMA_REPAIR times. On budget exhaustion, fall through and return the last answer for
+        // the AUTHORITATIVE server-side validator (m65.4) to gate. Re-ask-only — never hard-fails.
+        if (outputValidator !== null && schemaRepairs < MAX_SCHEMA_REPAIR) {
+          const error = validateAgainstSchema(resp.text, outputValidator);
+          if (error !== null) {
+            schemaRepairs += 1;
+            warn(
+              `structured output schema violation (repair ${schemaRepairs}/${MAX_SCHEMA_REPAIR}): ${error}`,
+            );
+            messages.push({ role: "assistant", content: resp.text || "" });
+            messages.push({
+              role: "user",
+              content:
+                `Your previous response was not valid per the required JSON schema: ${error}. ` +
+                `Reply with ONLY a JSON value that conforms to the schema.`,
+            });
+            turn.setOutput(`schema-repair-${schemaRepairs}: ${error}`);
+            // Signal the outer loop to run another step (a `continue` can't cross the trace-step
+            // closure boundary); the corrective message was just appended, so the next turn re-asks.
+            return { done: false as const };
+          }
+        }
         // The model stopped calling tools → the final answer.
         turn.setOutput(resp.text);
         root.setOutput(resp.text);
@@ -1136,7 +1328,7 @@ async function driveLoop(
         } else {
           try {
             content = await client.trace.tool(name, args, async (toolSpan) => {
-              const r = await callToolWithResilience(client, config, name, args, state.spawnDepth);
+              const r = await callToolWithResilience(client, config, name, args, state.spawnDepth, state.breaker);
               toolSpan.setOutput(r);
               return toolResultContent(r);
             });
@@ -1150,6 +1342,10 @@ async function driveLoop(
                 `consent_required: the user must connect their account for the ` +
                 `${JSON.stringify(err.server)} MCP server before this tool can run. ` +
                 `Report this to the user and stop — do not retry.`;
+            } else if (err instanceof CircuitOpenError) {
+              // O5: the per-run breaker is open for this tool — thread an honest "circuit open" tool
+              // result the model sees (mirroring the blocked-message threading), never propagate.
+              content = `circuit open for tool ${JSON.stringify(name)}: too many recent failures`;
             } else if (err instanceof EndpointError) {
               // WITH tool-call resilience configured, thread the failure so the run
               // continues; WITHOUT it, preserve the historical behaviour (propagate).
