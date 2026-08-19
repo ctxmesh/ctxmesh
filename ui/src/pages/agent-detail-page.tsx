@@ -63,10 +63,6 @@ import {
   type RunSummary,
 } from "@/lib/api";
 
-// FORK_NEEDS_REBINDING_LABEL is the Kubernetes label the operator sets on a
-// forked agent that has unresolved references (model route, tools). Its presence
-// in the agent's labels drives the "Needs attention" banner (m74.6).
-const FORK_NEEDS_REBINDING_LABEL = "agents.ctxmesh.ai/fork-needs-rebinding";
 // Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
 // Used for lineage display (U12, m76.3) and banner repair links (U5).
 const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
@@ -114,6 +110,7 @@ export function AgentDetailPage() {
   // unknown → true): the tab hides ONLY on a definite deny, and the API still enforces. A deep-link
   // to ?tab=Logs by a denied persona falls back to Overview (activeTab), never a blank tab.
   const { can } = useCapabilities();
+  const { toast } = useToast();
   const canLogs = can(RES_LOGS, "get");
   const visibleTabs = TABS.filter((t) => t !== "Logs" || canLogs);
   const activeTab: Tab = tab === "Logs" && !canLogs ? "Overview" : tab;
@@ -129,7 +126,8 @@ export function AgentDetailPage() {
   const [publishOpen, setPublishOpen] = React.useState(false);
   // U7: track in-session published state. When the user publishes, we store the
   // response (version + visibility) so the header badge can show it without a
-  // reload. No persistent read — the agent DTO doesn't yet carry published state.
+  // reload. U13: it is ALSO seeded from the durable `detail.published` on load
+  // (below), so the badge + Unpublish survive a reload — previously in-session only.
   const [publishedState, setPublishedState] = React.useState<{
     version: string;
     visibility: string;
@@ -156,6 +154,13 @@ export function AgentDetailPage() {
       .then((detail) => {
         if (controller.signal.aborted) return;
         setState({ kind: "ready", detail });
+        // U13: seed the publish badge from the DURABLE published state so it survives a reload.
+        // (An in-session publish/unpublish still overrides this immediately.)
+        setPublishedState(
+          detail.published
+            ? { version: String(detail.published.version), visibility: detail.published.visibility }
+            : null,
+        );
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
@@ -221,10 +226,11 @@ export function AgentDetailPage() {
 
   const detail = state.detail;
 
-  // m74.6: fork-needs-rebinding banner — visible when the label is set on the
-  // AgentDeployment CR (the operator stamps it at fork time when refs are dangling).
-  const needsRebinding =
-    detail.labels?.[FORK_NEEDS_REBINDING_LABEL] === "true";
+  // m74.6 / U14: fork-needs-rebinding banner — driven by the explicit `needsRebinding` flag the BFF
+  // now sends (it previously keyed on a `labels` map the BFF never populated → the banner was dead in
+  // production). `forkUnresolvedRefs` carries the SPECIFIC dangling refs to itemize.
+  const needsRebinding = detail.needsRebinding === true;
+  const unresolvedRefs = detail.forkUnresolvedRefs ?? [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="agent-detail-page">
@@ -239,8 +245,16 @@ export function AgentDetailPage() {
             try {
               await api.unpublishTemplate("agent", detail.namespace, detail.name);
               setPublishedState(null);
-            } catch {
-              // If unpublish fails, the badge stays — the user can try again.
+              toast({ title: "Template unpublished", variant: "success" });
+            } catch (err) {
+              // U15: a swallowed unpublish looked like a dead button — surface the failure so the
+              // user knows the template is still published (the badge intentionally stays).
+              toast({
+                title: "Couldn't unpublish",
+                description:
+                  err instanceof Error ? err.message : "The template is still published — try again.",
+                variant: "error",
+              });
             }
           })();
         }}
@@ -268,31 +282,89 @@ export function AgentDetailPage() {
                 This agent was forked from a template but has unresolved references.
                 Complete the steps below so it can run successfully.
               </p>
-              {/* U5: actionable line items with repair links */}
-              <ul className="space-y-1 text-sm">
-                {!detail.modelRoute && (
-                  <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                    <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                    <Link
-                      to="/routes"
-                      className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                      data-testid="rebind-model-route-link"
-                    >
-                      Connect a model route
-                    </Link>
-                    <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
-                  </li>
+              {/* U5 + U14: itemize the ACTUAL dangling refs (when the BFF recorded them) with the
+                  right repair action per category — no more generic "review and bind tools" line
+                  that showed even when nothing tool-shaped dangled. */}
+              <ul className="space-y-1 text-sm" data-testid="rebind-ref-list">
+                {unresolvedRefs.length > 0 ? (
+                  unresolvedRefs.map((ref, i) => {
+                    const isRoute = ref.startsWith("model route:");
+                    const isPrompt = ref.startsWith("prompt:");
+                    const isEval = ref.startsWith("evalSuite:");
+                    const isTool = !isRoute && !isPrompt && !isEval;
+                    return (
+                      <li
+                        key={`${ref}-${i}`}
+                        className="flex items-center gap-2 text-amber-800 dark:text-amber-300"
+                        data-testid={`rebind-ref-${i}`}
+                      >
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        <span className="font-medium">{ref}</span>
+                        {isRoute && (
+                          <Link
+                            to="/routes"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                            data-testid="rebind-model-route-link"
+                          >
+                            — connect a model route
+                          </Link>
+                        )}
+                        {isTool && (
+                          <button
+                            onClick={() => setTab("Bindings")}
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                            data-testid="rebind-bindings-tab-link"
+                          >
+                            — bind in the Bindings tab
+                          </button>
+                        )}
+                        {isPrompt && (
+                          <Link
+                            to="/prompts"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          >
+                            — add the prompt
+                          </Link>
+                        )}
+                        {isEval && (
+                          <Link
+                            to="/evals"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          >
+                            — add the eval suite
+                          </Link>
+                        )}
+                      </li>
+                    );
+                  })
+                ) : (
+                  // Fallback for an older fork (label present, no ref annotation): generic guidance.
+                  <>
+                    {!detail.modelRoute && (
+                      <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        <Link
+                          to="/routes"
+                          className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          data-testid="rebind-model-route-link"
+                        >
+                          Connect a model route
+                        </Link>
+                        <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
+                      </li>
+                    )}
+                    <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      <button
+                        onClick={() => setTab("Bindings")}
+                        className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                        data-testid="rebind-bindings-tab-link"
+                      >
+                        Review and bind tools in the Bindings tab
+                      </button>
+                    </li>
+                  </>
                 )}
-                <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                  <button
-                    onClick={() => setTab("Bindings")}
-                    className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                    data-testid="rebind-bindings-tab-link"
-                  >
-                    Review and bind tools in the Bindings tab
-                  </button>
-                </li>
               </ul>
               <p className="text-xs text-amber-600 dark:text-amber-400">
                 This banner clears once the operator confirms all references are resolved.
@@ -1116,6 +1188,15 @@ function OverviewTab({
                 </li>
               ))}
             </ul>
+            {/* V3: read-only diff of two version snapshots (only useful with ≥2 versions). */}
+            {detail.versions.length >= 2 && (
+              <VersionDiffPanel
+                ns={detail.namespace}
+                name={detail.name}
+                versions={detail.versions}
+                latestVersion={detail.latestVersion}
+              />
+            )}
           </div>
         )}
 
@@ -1421,6 +1502,136 @@ function StatusTimeline({
   );
 }
 
+// ── Version diff (V3) ────────────────────────────────────────────────────────
+// A read-only diff of two of the agent's version snapshots (the deployed spec, as YAML). Two selects
+// (never free-text) populated from the agent's versions; defaults to previous → latest. Renders the
+// unified line diff with +/- coloring, a calm "no changes" for identical, and an honest error — it
+// never fabricates a diff (mirrors the prompt-diff contract).
+type VersionDiffState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; diff: string; identical: boolean }
+  | { kind: "error"; message: string };
+
+function VersionDiffPanel({
+  ns,
+  name,
+  versions,
+  latestVersion,
+}: {
+  ns: string;
+  name: string;
+  versions: string[];
+  latestVersion: string;
+}) {
+  const defaultTo = latestVersion || versions[0] || "";
+  const defaultFrom =
+    versions.find((v) => v !== defaultTo) ?? versions[0] ?? "";
+  const [from, setFrom] = React.useState(defaultFrom);
+  const [to, setTo] = React.useState(defaultTo);
+  const [state, setState] = React.useState<VersionDiffState>({ kind: "idle" });
+
+  function compare() {
+    if (!from || !to) return;
+    setState({ kind: "loading" });
+    api
+      .agentVersionDiff(ns, name, from, to)
+      .then((res) =>
+        setState({ kind: "ready", diff: res.diff, identical: res.identical }),
+      )
+      .catch((err: unknown) =>
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't diff the versions",
+        }),
+      );
+  }
+
+  const selectClass =
+    "h-8 rounded-md border bg-background px-2 font-mono text-xs";
+
+  return (
+    <div className="mt-4 border-t pt-4" data-testid="version-diff-panel">
+      <p className="text-xs font-medium">Compare versions</p>
+      <p className="mb-2 text-[11px] text-muted-foreground">
+        Diff of the deployed spec snapshot.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          className={selectClass}
+          aria-label="From version"
+          data-testid="version-diff-from"
+        >
+          {versions.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-muted-foreground">→</span>
+        <select
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className={selectClass}
+          aria-label="To version"
+          data-testid="version-diff-to"
+        >
+          {versions.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={compare}
+          data-testid="version-diff-compare"
+        >
+          Compare
+        </Button>
+      </div>
+
+      {state.kind === "loading" && (
+        <p className="mt-2 text-xs text-muted-foreground">Loading diff…</p>
+      )}
+      {state.kind === "error" && (
+        <p className="mt-2 text-xs text-destructive" role="alert">
+          {state.message}
+        </p>
+      )}
+      {state.kind === "ready" && state.identical && (
+        <p
+          className="mt-2 text-xs text-muted-foreground"
+          data-testid="version-diff-identical"
+        >
+          No changes between these versions.
+        </p>
+      )}
+      {state.kind === "ready" && !state.identical && (
+        <pre
+          className="mt-2 max-h-96 overflow-auto rounded-md bg-surface-3 p-3 text-xs leading-relaxed"
+          data-testid="version-diff-output"
+        >
+          {state.diff.split("\n").map((line, i) => {
+            const cls = line.startsWith("+")
+              ? "text-success"
+              : line.startsWith("-")
+                ? "text-destructive"
+                : "text-muted-foreground";
+            return (
+              <div key={i} className={cls}>
+                {line || " "}
+              </div>
+            );
+          })}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 // ── Logs tab (live SSE tail, bearer-attached fetch-stream) ───────────────────
 type LogLine = { seq: number; text: string };
@@ -3358,8 +3569,11 @@ function PublishTemplateDialog({
       onDone(res, selected);
     } catch (err) {
       const isForbidden = err instanceof ApiError && err.isForbidden;
+      const serverMsg = err instanceof ApiError ? err.message : null;
       // U8 / U12: keep dialog open, show error inline instead of closing.
-      const errMsg = isForbidden
+      // U15: prefer the server's REAL message (server-truth roles) — matching the MCP dialog — and
+      // fall back to a human role string only when the server gave nothing.
+      const fallback = isForbidden
         ? `You need ${
             selected === "public"
               ? "Platform-admin"
@@ -3370,7 +3584,7 @@ function PublishTemplateDialog({
         : err instanceof Error
         ? err.message
         : "publish failed";
-      setInlineError(errMsg);
+      setInlineError(serverMsg || fallback);
       setBusy(false);
     }
   }

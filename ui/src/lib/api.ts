@@ -214,9 +214,31 @@ export interface AgentDetailResponse {
   };
   resourceVersion?: string;
   isDraft?: boolean;
-  // m74.6 — Kubernetes labels forwarded from the AgentDeployment CR. Used to
-  // surface the fork-needs-rebinding banner when the label is present.
+  // m74.6 — Kubernetes labels forwarded from the AgentDeployment CR. DEPRECATED (U14): the BFF
+  // never actually populated this, so the fork-needs-rebinding banner keyed on it was dead in
+  // production. Superseded by the explicit `needsRebinding` + `forkUnresolvedRefs` fields below.
   labels?: Record<string, string>;
+  // needsRebinding is true when the agent was forked with unresolvable references (U14) — drives the
+  // "connect resources before running" banner. forkUnresolvedRefs is the SPECIFIC list of dangling
+  // references (already human-readable + category-prefixed, e.g. "model route: x", "prompt: y", a
+  // tool name), so the banner itemizes exactly what to connect instead of showing generic steps.
+  needsRebinding?: boolean;
+  forkUnresolvedRefs?: string[];
+  // published is the DURABLE published-template state (U13): the visibility + version of the agent's
+  // latest published_artifacts release, read server-side — so the "Published" badge + Unpublish
+  // survive a reload (they were in-session only). Absent when the agent is not published.
+  published?: { visibility: string; version: number };
+}
+
+// AgentVersionDiffResponse (V3) — a read-only TEXTUAL diff of two agent-version snapshots (deployed
+// spec, rendered as YAML). Mirrors the prompt-diff contract: `diff` is the unified "+"/"-"/" " line
+// text; `identical` is true (with an empty diff) when the two are the same. Never fabricated.
+export interface AgentVersionDiffResponse {
+  resolveMode: string;
+  fromName: string;
+  toName: string;
+  diff: string;
+  identical: boolean;
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
@@ -1396,6 +1418,16 @@ export interface TemplateEntry {
   provenance?: TemplateProvenance | "builtin";
   // visibility: "team" | "org" | "public" (absent for built-in recipes).
   visibility?: string;
+  // alreadyForkedAs is set (U16) when the caller ALREADY has a fork of this published entry —
+  // the fork's {namespace,name}, so the gallery can badge + link it ("Already forked → your-fork")
+  // instead of only revealing it on a fork attempt. Absent for recipes + un-forked entries.
+  alreadyForkedAs?: ForkRef;
+}
+
+// ForkRef is a minimal {namespace,name} pointer to the caller's existing fork of a template (U16).
+export interface ForkRef {
+  namespace: string;
+  name: string;
 }
 
 export interface TemplateListResponse {
@@ -2945,6 +2977,21 @@ export const api = {
   agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
     getJSON<AgentDetailResponse>(
       `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // agentVersionDiff reads a read-only textual diff of two of the agent's version snapshots (V3) —
+  // a YAML line diff of the DEPLOYED-SPEC snapshots. Caller-scoped; the BFF anchors both versions to
+  // this agent. Never fabricates a diff (identical → empty + identical:true).
+  agentVersionDiff: (
+    ns: string,
+    name: string,
+    from: string,
+    to: string,
+    signal?: AbortSignal,
+  ) =>
+    getJSON<AgentVersionDiffResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/versions/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
       signal,
     ),
 

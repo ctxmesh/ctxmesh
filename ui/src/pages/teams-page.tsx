@@ -51,8 +51,10 @@ function TeamDetailPanel({
         {team.ready ? (
           <Badge variant="success" data-testid="team-detail-ready-badge">Ready</Badge>
         ) : (
+          // H5: the badge is a STATUS label; the reason detail lives in the span below — previously
+          // both rendered the reason, so it appeared twice.
           <Badge variant="warning" data-testid="team-detail-notready-badge">
-            {team.reason || "Pending"}
+            Not ready
           </Badge>
         )}
         {!team.ready && team.reason && (
@@ -236,7 +238,13 @@ export function TeamsPage() {
         onQueryChange={setQuery}
         queryPlaceholder="Filter teams by name…"
         ariaLabel="Agent teams"
-        onRowClick={(t) => setSelectedTeam((prev) => (prev?.name === t.name ? null : t))}
+        onRowClick={(t) =>
+          setSelectedTeam((prev) =>
+            // H5: compare namespace+name — two teams can share a name across namespaces (rowKey is
+            // already ns/name); keying the toggle on name alone mis-selected the wrong row.
+            prev?.name === t.name && prev?.namespace === t.namespace ? null : t,
+          )
+        }
         empty={{
           icon: Waypoints,
           title: "No agent teams",

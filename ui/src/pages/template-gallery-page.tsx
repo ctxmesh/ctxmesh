@@ -1,19 +1,15 @@
 import * as React from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
-  Building2,
   Check,
   Download,
   GitFork,
-  Globe,
   Link2,
   Loader2,
-  Lock,
   RefreshCw,
   Search,
   Store,
-  Users,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +23,7 @@ import {
   SkeletonCard,
   useFocusTrap,
   useToast,
+  VisibilityBadge,
 } from "@/components/kit";
 import {
   api,
@@ -53,38 +50,18 @@ import { RES_AGENTS } from "@/lib/nav";
 
 type ActiveTab = "templates" | "mcp";
 
-// ── Shared visibility badge ──────────────────────────────────────────────────
-function VisibilityBadge({ visibility }: { visibility: string | undefined }) {
-  if (!visibility) return null;
-  switch (visibility) {
-    case "public":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Globe className="h-3 w-3" />
-          public
-        </Badge>
-      );
-    case "org":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Building2 className="h-3 w-3" />
-          org
-        </Badge>
-      );
-    case "team":
-      return (
-        <Badge variant="outline" className="gap-1">
-          <Users className="h-3 w-3" />
-          team
-        </Badge>
-      );
+// authTypeLabel humanizes an MCP server's auth type for display (H5) — the gallery previously showed
+// the raw "oauth" while the owned list showed "OAuth". One place, used on both.
+function authTypeLabel(authType: string): string {
+  switch (authType) {
+    case "oauth":
+      return "OAuth";
+    case "apikey":
+      return "API key";
+    case "none":
+      return "No auth";
     default:
-      return (
-        <Badge variant="outline" className="gap-1">
-          <Lock className="h-3 w-3" />
-          {visibility}
-        </Badge>
-      );
+      return authType;
   }
 }
 
@@ -169,6 +146,19 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
               {isRecipe ? "built-in" : "published"}
             </Badge>
             <VisibilityBadge visibility={entry.visibility} />
+            {/* U16: pre-mark an entry the caller already forked — a badge that LINKS to their fork,
+                so they don't have to attempt a fork to discover it. Fork stays enabled (re-forking
+                under a new name is a supported flow); it is just visually demoted below. */}
+            {entry.alreadyForkedAs && (
+              <Link
+                to={`/agents/${encodeURIComponent(entry.alreadyForkedAs.namespace)}/${encodeURIComponent(entry.alreadyForkedAs.name)}`}
+                data-testid={`template-already-forked-${entry.name}`}
+                className="inline-flex items-center rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success hover:underline"
+                title={`You already forked this as ${entry.alreadyForkedAs.namespace}/${entry.alreadyForkedAs.name}`}
+              >
+                Already forked ✓
+              </Link>
+            )}
           </div>
           <p className="text-xs text-muted-foreground" data-testid={`template-origin-${entry.name}`}>
             origin: <span className="font-mono">{originLabel}</span>
@@ -185,9 +175,18 @@ function TemplateCard({ entry, onFork, forkingKey, canFork }: TemplateCardProps)
           {canFork ? (
             <Button
               size="sm"
+              // U16: demote to secondary when already forked — re-forking (under a new name) is still
+              // allowed, but the primary action is now "open your fork" (the linked badge above).
+              variant={entry.alreadyForkedAs ? "outline" : "default"}
               onClick={() => onFork(entry)}
               disabled={isAnyForking}
-              title={isAnyForking && !isThisEntryForking ? "Another fork is in progress" : undefined}
+              title={
+                entry.alreadyForkedAs
+                  ? "You already forked this — forking again creates another copy under a new name"
+                  : isAnyForking && !isThisEntryForking
+                    ? "Another fork is in progress"
+                    : undefined
+              }
               data-testid={`fork-template-${entry.name}`}
             >
               {isThisEntryForking ? (
@@ -429,7 +428,7 @@ function TemplatesTab() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Built-in recipes and published agents you can fork into your namespace.
+          Built-in recipes to install and published agents to fork into your namespace.
         </p>
         <Button
           variant="ghost"
@@ -629,7 +628,7 @@ function McpCatalogTab() {
           variant="ghost"
           size="icon"
           onClick={() => load()}
-          aria-label="Refresh MCP catalog"
+          aria-label="Refresh shared servers"
           data-testid="mcp-catalog-tab-refresh"
         >
           <RefreshCw className="h-4 w-4" />
@@ -655,15 +654,15 @@ function McpCatalogTab() {
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
-          title="Not allowed to browse the MCP catalog"
-          description="Your account can't list the MCP catalog."
+          title="Not allowed to browse shared servers"
+          description="Your account can't list shared servers."
           detail={state.message}
         />
       )}
 
       {state.kind === "error" && (
         <ErrorState
-          title="Couldn't load the MCP catalog"
+          title="Couldn't load shared servers"
           description={state.message}
           onRetry={() => load()}
         />
@@ -702,7 +701,7 @@ function McpCatalogTab() {
                       <p className="truncate font-medium">{e.name}</p>
                       <VisibilityBadge visibility={e.visibility} />
                       {e.authType && (
-                        <Badge variant="secondary">{e.authType}</Badge>
+                        <Badge variant="secondary">{authTypeLabel(e.authType)}</Badge>
                       )}
                       {/* T8: human-label credentialSource badge */}
                       <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />
@@ -770,7 +769,7 @@ export function TemplateGalleryPage() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">Gallery</h2>
         <p className="text-sm text-muted-foreground">
-          Start from a template — fork an agent recipe or connect an MCP server.
+          Start from a template — install a recipe, fork a published agent, or connect an MCP server.
         </p>
       </div>
 

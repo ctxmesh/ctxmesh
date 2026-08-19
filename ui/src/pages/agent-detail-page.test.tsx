@@ -1662,7 +1662,9 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
         // publish template endpoint
         if (url === "/api/templates" && method === "POST") {
           const status = opts.publishStatus ?? 200;
-          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          // A server-truth 403 message (U15) — the dialog must PREFER it over the hardcoded role hint.
+          if (status >= 400)
+            return j({ error: "you must be a Tenant admin to publish org-wide" }, false, status);
           return j({ version: "v1", name: "billing", namespace: "prod" });
         }
 
@@ -1767,7 +1769,10 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     await waitFor(() => {
       expect(screen.getByTestId("publish-template-error")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(/team-admin/);
+    // U15: the dialog PREFERS the server's real message (server-truth) over the hardcoded role hint.
+    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(
+      /you must be a Tenant admin to publish org-wide/,
+    );
     // The dialog stays open.
     expect(screen.getByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
   });
@@ -1798,7 +1803,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1819,7 +1824,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "false" },
+        needsRebinding: false,
       },
     });
     renderAt();
@@ -1835,7 +1840,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
       detail: {
         ...DEFAULT_DETAIL,
         modelRoute: "",
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1848,7 +1853,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1862,12 +1867,55 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
       detail: {
         ...DEFAULT_DETAIL,
         modelRoute: "gpt4-prod",
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
     expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
+  });
+
+  // U14: when the BFF recorded the SPECIFIC dangling refs, the banner ITEMIZES them (with the right
+  // repair action per category) instead of the generic steps — and the tools line does NOT show when
+  // nothing tool-shaped dangles.
+  it("itemizes the actual dangling refs and omits the tools line when none dangle (U14)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "",
+        needsRebinding: true,
+        forkUnresolvedRefs: ["model route: gpt4", "prompt: greeting"],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // The real ref names are listed.
+    const list = screen.getByTestId("rebind-ref-list");
+    expect(list).toHaveTextContent("model route: gpt4");
+    expect(list).toHaveTextContent("prompt: greeting");
+    // The model-route ref carries the connect-route action; the prompt carries an add-prompt link.
+    expect(screen.getByTestId("rebind-model-route-link")).toBeInTheDocument();
+    // No tool-shaped ref → the "bind tools" line is NOT rendered (the old always-on line is gone).
+    expect(screen.queryByTestId("rebind-bindings-tab-link")).toBeNull();
+  });
+
+  it("shows the bind-tools action only for tool-shaped refs (U14)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "gpt4-prod",
+        needsRebinding: true,
+        forkUnresolvedRefs: ["slack-search"], // a bare tool name
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("rebind-ref-list")).toHaveTextContent("slack-search");
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
+    // No model-route/prompt ref → those actions absent.
     expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
   });
 });
@@ -1973,6 +2021,69 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("published-badge")).toBeNull();
     });
+  });
+
+  // U13: the published badge is seeded from the DURABLE `detail.published` on load — so it survives a
+  // reload WITHOUT any in-session publish action (previously it was in-session only → vanished).
+  it("shows the published badge on load from durable state (U13)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        published: { visibility: "org", version: 4 },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // No publish click — the badge is present purely from the loaded detail.
+    expect(screen.getByTestId("published-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/org/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/v4/);
+    // And Unpublish is available durably.
+    expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument();
+  });
+
+  // U15: a FAILED unpublish must surface a toast (it used to be swallowed → the button looked dead)
+  // AND the published badge must stay (the template is still published).
+  it("surfaces a toast and keeps the badge when unpublish fails (U15)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") return j({ version: "2" });
+        // The DELETE (unpublish) FAILS.
+        if (url.match(/\/api\/templates\//) && method === "DELETE") return j({ error: "store unavailable" }, false, 500);
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("unpublish-agent-button"));
+
+    // A failure toast appears (no longer swallowed) …
+    await waitFor(() => expect(screen.getByText("Couldn't unpublish")).toBeInTheDocument());
+    // … and the badge STAYS (the template is still published).
+    expect(screen.getByTestId("published-badge")).toBeInTheDocument();
   });
 });
 
@@ -2136,5 +2247,64 @@ describe("AgentDetailPage — Logs tab RBAC gate (M100 UI99-logs)", () => {
     expect(screen.queryByTestId("tab-logs")).toBeNull();
     expect(screen.queryByTestId("logs-tab")).toBeNull();
     expect(screen.getByTestId("tab-overview")).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+// ── V3: read-only version-snapshot diff ──────────────────────────────────────
+describe("AgentDetailPage — version diff (V3)", () => {
+  function installVersionDiffFetch(diff: {
+    diff: string;
+    identical: boolean;
+  }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: {} });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET")
+          return j({ resolveMode: "textual", fromName: "echo-v1", toName: "echo-v2", ...diff });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/))
+          return j({ ...DEFAULT_DETAIL, versions: ["echo-v2", "echo-v1"], latestVersion: "echo-v2" }, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("renders the picker and diffs two versions on Compare (V3)", async () => {
+    installVersionDiffFetch({ diff: " image: base\n-tag: v1\n+tag: v2", identical: false });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // The panel + both selects are present (with ≥2 versions).
+    expect(screen.getByTestId("version-diff-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("version-diff-from")).toBeInTheDocument();
+    expect(screen.getByTestId("version-diff-to")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+
+    const out = await screen.findByTestId("version-diff-output");
+    expect(out).toHaveTextContent("-tag: v1");
+    expect(out).toHaveTextContent("+tag: v2");
+  });
+
+  it("shows a calm 'no changes' state for identical versions (V3)", async () => {
+    installVersionDiffFetch({ diff: "", identical: true });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+    await screen.findByTestId("version-diff-identical");
+    expect(screen.queryByTestId("version-diff-output")).toBeNull();
   });
 });

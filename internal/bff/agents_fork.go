@@ -321,7 +321,10 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 	// detail (m74.6) surfaces a degraded/needs-attention state. Best-effort: a label-stamp
 	// failure does not fail the fork (the arrays already carry the honest signal).
 	if len(needsRebinding) > 0 {
-		if lErr := s.stampForkNeedsRebinding(ctx, caller, callerNS, localName); lErr != nil {
+		// Persist the SPECIFIC dangling refs (needsRebinding ∪ unresolvedRefs) so the detail banner
+		// itemizes them (U14), not just the transient toast.
+		allRefs := append(append([]string{}, needsRebinding...), unresolvedRefs...)
+		if lErr := s.stampForkNeedsRebinding(ctx, caller, callerNS, localName, allRefs); lErr != nil {
 			s.log.Error(lErr, "fork: stamping needs-rebinding label failed", "namespace", callerNS, "name", localName)
 		}
 	}
@@ -368,12 +371,21 @@ func (s *Server) stampForkProvenance(ctx context.Context, caller client.Client, 
 	return nil
 }
 
-// stampForkNeedsRebinding patches the degraded-status label (labelForkNeedsRebinding="true")
-// onto the forked AgentDeployment, caller-scoped (ADR 0068 §5). A merge patch touches only the
-// label — it never clobbers spec/status. Called only when the ref-closure left at least one
-// unresolvable rebinding, so the agent detail can surface a needs-attention state. Errors are
-// returned (not swallowed) for the caller to log; a stamp failure does not fail the fork.
-func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string) error {
+// annForkUnresolvedRefs is the annotation holding the JSON array of the fork's specific dangling
+// ref names (already human-readable + category-prefixed, e.g. "model route: x", "prompt: y", a tool
+// name). It rides ALONGSIDE labelForkNeedsRebinding so the agent-detail banner can ITEMIZE the real
+// refs (U14) instead of showing generic steps — an annotation (not a label) because the value is an
+// arbitrary-length list that cannot fit a K8s label value. Read only while the banner is shown (which
+// is gated on the LABEL), so a lingering annotation on a since-resolved agent is never surfaced.
+const annForkUnresolvedRefs = "agents.ctxmesh.ai/fork-unresolved-refs"
+
+// stampForkNeedsRebinding patches the degraded-status label (labelForkNeedsRebinding="true") — and
+// the specific dangling-ref names as an annotation (U14) — onto the forked AgentDeployment,
+// caller-scoped (ADR 0068 §5). A merge patch touches only metadata — it never clobbers spec/status.
+// Called only when the ref-closure left at least one unresolvable rebinding, so the agent detail can
+// surface a needs-attention state + list exactly what dangles. Errors are returned (not swallowed)
+// for the caller to log; a stamp failure does not fail the fork.
+func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string, refs []string) error {
 	var ad agentsv1alpha1.AgentDeployment
 	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		return gErr
@@ -385,6 +397,19 @@ func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Clie
 	}
 	lbls[labelForkNeedsRebinding] = labelValueTrue
 	ad.SetLabels(lbls)
+	// Persist the specific ref names so the detail banner itemizes them durably (survives reload),
+	// not just the transient fork toast. Best-effort: a marshal failure just omits the annotation
+	// (the banner falls back to its generic guidance) — never fails the stamp.
+	if len(refs) > 0 {
+		if raw, mErr := json.Marshal(refs); mErr == nil {
+			anns := ad.GetAnnotations()
+			if anns == nil {
+				anns = map[string]string{}
+			}
+			anns[annForkUnresolvedRefs] = string(raw)
+			ad.SetAnnotations(anns)
+		}
+	}
 	return caller.Patch(ctx, &ad, client.MergeFrom(base))
 }
 
@@ -399,6 +424,40 @@ func forkOriginMatches(ad *agentsv1alpha1.AgentDeployment, prov forkProvenance) 
 	}
 	return lbls[labelForkOriginNamespace] == prov.originNamespace &&
 		lbls[labelForkOriginName] == prov.originName
+}
+
+// forkOriginKey is the map key for callerForkOrigins — "originNamespace/originName".
+func forkOriginKey(ns, name string) string {
+	return ns + "/" + name
+}
+
+// callerForkOrigins builds a map of ORIGIN "namespace/name" → the caller's existing fork of it, by
+// listing the caller's own fork-labeled agents in callerNS (U16, m101.3). It powers the gallery's
+// "Already forked" pre-mark. UNLIKE forkOriginMatches (the endpoint's same-NAME idempotency check),
+// this matches ANY agent in callerNS carrying those origin labels — the user may have forked under a
+// different name. Version-agnostic (the fork-origin labels record only ns+name). The LIST is
+// caller-scoped (the caller already proved `list agentdeployments` in callerNS via the SSAR gate)
+// and label-selected to forks only. When the same origin was forked under multiple names we keep the
+// FIRST — any existing fork is enough to mark + link. A list error is returned so the caller can
+// degrade to an unmarked gallery, never a 500.
+func (s *Server) callerForkOrigins(ctx context.Context, caller client.Client, callerNS string) (map[string]ForkRef, error) {
+	var list agentsv1alpha1.AgentDeploymentList
+	if err := caller.List(ctx, &list, client.InNamespace(callerNS), client.HasLabels{labelForkOriginName}); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ForkRef, len(list.Items))
+	for i := range list.Items {
+		lbls := list.Items[i].GetLabels()
+		originName := lbls[labelForkOriginName]
+		if originName == "" {
+			continue
+		}
+		key := forkOriginKey(lbls[labelForkOriginNamespace], originName)
+		if _, seen := out[key]; !seen {
+			out[key] = ForkRef{Namespace: list.Items[i].Namespace, Name: list.Items[i].Name}
+		}
+	}
+	return out, nil
 }
 
 // publishedDiscoverable applies the ADR 0067 §6 / ADR 0068 §4 catalog visibility predicate to

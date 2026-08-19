@@ -124,6 +124,9 @@ func TestForkRefClosure_MissingModelRoute(t *testing.T) {
 	var forked agentsv1alpha1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Equal(t, "true", forked.Labels[labelForkNeedsRebinding], "a needs-rebinding fork must carry the degraded label")
+	// U14: the SPECIFIC dangling refs are persisted as an annotation so the detail banner itemizes them.
+	assert.Contains(t, forked.Annotations[annForkUnresolvedRefs], "model route: gpt4-prod",
+		"the fork must persist its dangling refs for the detail banner to itemize")
 }
 
 // TestForkRefClosure_ModelRoutePresent_NoFlag: the SAME fork when a ModelRoute of that name
