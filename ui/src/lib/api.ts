@@ -230,6 +230,17 @@ export interface AgentDetailResponse {
   published?: { visibility: string; version: number };
 }
 
+// AgentVersionDiffResponse (V3) — a read-only TEXTUAL diff of two agent-version snapshots (deployed
+// spec, rendered as YAML). Mirrors the prompt-diff contract: `diff` is the unified "+"/"-"/" " line
+// text; `identical` is true (with an empty diff) when the two are the same. Never fabricated.
+export interface AgentVersionDiffResponse {
+  resolveMode: string;
+  fromName: string;
+  toName: string;
+  diff: string;
+  identical: boolean;
+}
+
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
 // The edit round-trip: the simplified spec fields the console knows about.
 // For a console-managed agent this is a FULL round-trip (all fields).
@@ -2966,6 +2977,21 @@ export const api = {
   agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
     getJSON<AgentDetailResponse>(
       `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      signal,
+    ),
+
+  // agentVersionDiff reads a read-only textual diff of two of the agent's version snapshots (V3) —
+  // a YAML line diff of the DEPLOYED-SPEC snapshots. Caller-scoped; the BFF anchors both versions to
+  // this agent. Never fabricates a diff (identical → empty + identical:true).
+  agentVersionDiff: (
+    ns: string,
+    name: string,
+    from: string,
+    to: string,
+    signal?: AbortSignal,
+  ) =>
+    getJSON<AgentVersionDiffResponse>(
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/versions/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
       signal,
     ),
 

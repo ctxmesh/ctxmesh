@@ -2249,3 +2249,62 @@ describe("AgentDetailPage — Logs tab RBAC gate (M100 UI99-logs)", () => {
     expect(screen.getByTestId("tab-overview")).toHaveAttribute("aria-selected", "true");
   });
 });
+
+// ── V3: read-only version-snapshot diff ──────────────────────────────────────
+describe("AgentDetailPage — version diff (V3)", () => {
+  function installVersionDiffFetch(diff: {
+    diff: string;
+    identical: boolean;
+  }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: {} });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET")
+          return j({ resolveMode: "textual", fromName: "echo-v1", toName: "echo-v2", ...diff });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/))
+          return j({ ...DEFAULT_DETAIL, versions: ["echo-v2", "echo-v1"], latestVersion: "echo-v2" }, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+  }
+
+  it("renders the picker and diffs two versions on Compare (V3)", async () => {
+    installVersionDiffFetch({ diff: " image: base\n-tag: v1\n+tag: v2", identical: false });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // The panel + both selects are present (with ≥2 versions).
+    expect(screen.getByTestId("version-diff-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("version-diff-from")).toBeInTheDocument();
+    expect(screen.getByTestId("version-diff-to")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+
+    const out = await screen.findByTestId("version-diff-output");
+    expect(out).toHaveTextContent("-tag: v1");
+    expect(out).toHaveTextContent("+tag: v2");
+  });
+
+  it("shows a calm 'no changes' state for identical versions (V3)", async () => {
+    installVersionDiffFetch({ diff: "", identical: true });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+    await screen.findByTestId("version-diff-identical");
+    expect(screen.queryByTestId("version-diff-output")).toBeNull();
+  });
+});

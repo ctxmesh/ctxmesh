@@ -718,6 +718,7 @@ func (s *Server) Handler() http.Handler {
 		// ".../{name}/logs" as three DISTINCT patterns (the more specific wins), so
 		// these never shadow the list route above or the create route below.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
+		authed.HandleFunc("GET /api/agents/{ns}/{name}/versions/diff", s.handleAgentVersionDiff)
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
 		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
 		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
