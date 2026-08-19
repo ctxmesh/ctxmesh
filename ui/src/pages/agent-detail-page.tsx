@@ -73,7 +73,7 @@ const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
 const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
 import { useCapabilities } from "@/lib/capabilities";
-import { navRoute, RES_AGENTS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
+import { navRoute, RES_AGENTS, RES_LOGS, RES_MEMORY, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the agent LANDING page (first-agent-flow.md §5, m14.11,
 // extended m15.11). It closes the aha loop: watch the agent come alive (status
@@ -109,6 +109,14 @@ export function AgentDetailPage() {
     return (TABS as readonly string[]).includes(t ?? "") ? (t as Tab) : "Overview";
   })();
   const [tab, setTab] = React.useState<Tab>(initialTab);
+  // Gate the Logs tab (M100 UI99-logs): the live-log tail needs `get pods/log`, so a persona who
+  // can't read pod logs must not see a tab that then 403s. Display-only + fail-OPEN (can() defaults
+  // unknown → true): the tab hides ONLY on a definite deny, and the API still enforces. A deep-link
+  // to ?tab=Logs by a denied persona falls back to Overview (activeTab), never a blank tab.
+  const { can } = useCapabilities();
+  const canLogs = can(RES_LOGS, "get");
+  const visibleTabs = TABS.filter((t) => t !== "Logs" || canLogs);
+  const activeTab: Tab = tab === "Logs" && !canLogs ? "Overview" : tab;
   // The trace to inspect — set when a run returns a traceId; opens the inspector
   // drawer over the page (list context preserved).
   const [inspectTrace, setInspectTrace] = React.useState<string | null>(null);
@@ -295,15 +303,15 @@ export function AgentDetailPage() {
       )}
 
       <div className="flex flex-wrap gap-1 border-b" role="tablist" aria-label="Agent detail">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t}
             role="tab"
-            aria-selected={tab === t}
+            aria-selected={activeTab === t}
             onClick={() => setTab(t)}
             data-testid={`tab-${t.toLowerCase()}`}
             className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-              tab === t
+              activeTab === t
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
@@ -313,21 +321,21 @@ export function AgentDetailPage() {
         ))}
       </div>
 
-      {tab === "Overview" && (
+      {activeTab === "Overview" && (
         <OverviewTab detail={detail} onTraced={(id) => setInspectTrace(id)} />
       )}
-      {tab === "Logs" && <LogsTab ns={detail.namespace} name={detail.name} ready={detail.ready} />}
-      {tab === "Runs" && (
+      {activeTab === "Logs" && <LogsTab ns={detail.namespace} name={detail.name} ready={detail.ready} />}
+      {activeTab === "Runs" && (
         <AgentRunsTab ns={detail.namespace} name={detail.name} onInspect={(id) => setInspectTrace(id)} />
       )}
-      {tab === "Bindings" && <BindingsTab bindings={detail.bindings} />}
-      {tab === "Memory" && (
+      {activeTab === "Bindings" && <BindingsTab bindings={detail.bindings} />}
+      {activeTab === "Memory" && (
         <MemoryPanel ns={detail.namespace} agentName={detail.name} />
       )}
-      {tab === "Scaling" && (
+      {activeTab === "Scaling" && (
         <ScalingPanel ns={detail.namespace} agentName={detail.name} />
       )}
-      {tab === "Redaction" && (
+      {activeTab === "Redaction" && (
         <RedactionPanel ns={detail.namespace} agentName={detail.name} />
       )}
 
