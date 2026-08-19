@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -117,6 +118,45 @@ func TestGetTenantDetail(t *testing.T) {
 	// A missing tenant → 404.
 	_, code404 := getTenant(t, s, "nope")
 	assert.Equal(t, http.StatusNotFound, code404)
+}
+
+// postTenant issues POST /api/tenants with the given body.
+func postTenant(t *testing.T, s *Server, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tenants", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCreateTenant (M99 C4): POST /api/tenants creates a cluster-scoped Tenant; it becomes listable; a
+// duplicate is a 409; a missing name is a 400.
+func TestCreateTenant(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	iso := false
+	create, err := json.Marshal(TenantCreateRequest{Name: "acme", Namespaces: []string{"team-a", "team-b"}, NetworkIsolation: &iso})
+	require.NoError(t, err)
+
+	rec := postTenant(t, s, create)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var sum TenantSummary
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sum))
+	assert.Equal(t, "acme", sum.Name)
+	assert.Equal(t, []string{"team-a", "team-b"}, sum.Namespaces)
+
+	// It is now listable.
+	list, _ := getTenants(t, s)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, "acme", list.Items[0].Name)
+
+	// A duplicate create → 409.
+	assert.Equal(t, http.StatusConflict, postTenant(t, s, create).Code)
+
+	// Missing name → 400.
+	assert.Equal(t, http.StatusBadRequest, postTenant(t, s, []byte(`{"namespaces":["x"]}`)).Code)
 }
 
 // The list is a non-nil [] for zero tenants (never null).

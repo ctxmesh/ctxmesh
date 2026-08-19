@@ -2671,6 +2671,14 @@ export interface TenantListResponse {
   items: TenantSummary[];
 }
 
+// TenantCreateRequest is the POST /api/tenants body (M99 C4). Minimal: a name + member namespaces;
+// networkIsolation defaults to true (secure) when omitted.
+export interface TenantCreateRequest {
+  name: string;
+  namespaces?: string[];
+  networkIsolation?: boolean;
+}
+
 // A tenant's LIVE quota consumption (M49) — the usage-vs-cap answer to "who's about to be throttled?".
 export interface TenantUsage {
   spendUSD: number;
@@ -3863,6 +3871,11 @@ export const api = {
   // Tenants (M47, ADR 0046) — read-only, cluster-scoped.
   listTenants: (signal?: AbortSignal) =>
     getJSON<TenantListResponse>("/api/tenants", signal),
+
+  // createTenant creates a cluster-scoped Tenant (M99 C4). RBAC is the API server's real answer:
+  // a persona without `create tenants` gets a typed 403 (isForbidden). Returns the new tenant row.
+  createTenant: (req: TenantCreateRequest, signal?: AbortSignal): Promise<TenantSummary> =>
+    postJSON<TenantCreateRequest, TenantSummary>("/api/tenants", req, signal),
 
   // listTeams reads the AgentTeams (M64) — orchestration rosters (caller-scoped). A 403 surfaces
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
