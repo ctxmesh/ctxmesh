@@ -17,6 +17,8 @@ limitations under the License.
 package bff
 
 import (
+	"sync/atomic"
+
 	"github.com/go-logr/logr"
 
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
@@ -64,10 +66,18 @@ const annMCPGrantServerURL = annMCPURL
 // legacy unsalted SHA-256 — a DOCUMENTED PRODUCTION PREREQUISITE (like etcd
 // encryption-at-rest, ADR 0016): a prod cluster MUST set the key. Immutable after
 // start-up; changing it re-keys all grants (⇒ re-consent).
-var grantHMACKey []byte
+// grantHMACKey is an atomic.Pointer (not a bare []byte) so setGrantHMACKey (called in NewServer) and
+// userGrantHash (the hot read path) are DATA-RACE-FREE even when servers are constructed concurrently
+// — e.g. parallel tests, `go test -race` (m52.K8b). In production it is still written once at start-up
+// and immutable thereafter; the atomic just makes the concurrent-construction case honest.
+var grantHMACKey atomic.Pointer[[]byte]
 
-// setGrantHMACKey wires the per-cluster HMAC key at BFF construction (from Options).
-func setGrantHMACKey(key []byte) { grantHMACKey = key }
+// setGrantHMACKey wires the per-cluster HMAC key at BFF construction (from Options). Stores a COPY
+// behind the pointer so the caller's slice can't be mutated out from under a concurrent read.
+func setGrantHMACKey(key []byte) {
+	k := key
+	grantHMACKey.Store(&k)
+}
 
 // userGrantHash derives a stable, non-PII, DNS-1123-safe LABEL VALUE from a raw
 // username (e.g. "alice@example.com" or a "system:serviceaccount:ns:sa" string),
@@ -84,7 +94,11 @@ func setGrantHMACKey(key []byte) { grantHMACKey = key }
 // username against a leaked hash — the extra guarantee the mcp-owner annotation
 // (a wider audience) needs before m25.1b spreads the hash to it.
 func userGrantHash(username string) string {
-	return credresolve.UserHash(grantHMACKey, username)
+	var key []byte
+	if p := grantHMACKey.Load(); p != nil {
+		key = *p
+	}
+	return credresolve.UserHash(key, username)
 }
 
 // grantSecretName is the deterministic name of the (user, server) grant Secret. It
