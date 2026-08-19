@@ -157,8 +157,14 @@ export function ProvidersPage() {
       id: "models",
       header: "Models",
       hideOnMobile: true,
+      // "N models" is discoverable (M100 UI99-refs): hovering reveals the actual model names rather
+      // than leaving a dead count. (No per-model detail page exists to link to.)
       cell: (p) => (
-        <span className="text-xs text-muted-foreground">
+        <span
+          className="text-xs text-muted-foreground"
+          title={p.models.length ? p.models.join(", ") : undefined}
+          data-testid={`provider-models-${p.name}`}
+        >
           {p.models.length === 0
             ? "—"
             : `${p.models.length} model${p.models.length === 1 ? "" : "s"}`}

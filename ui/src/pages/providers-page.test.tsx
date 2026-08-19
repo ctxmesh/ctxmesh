@@ -93,6 +93,11 @@ describe("ProvidersPage", () => {
     expect(await screen.findByText("Anthropic")).toBeInTheDocument();
     // The fixture's provider has 2 models — rendered as a count, never key material.
     expect(screen.getByText(/2 models/)).toBeInTheDocument();
+    // …and the count is DISCOVERABLE (M100 UI99-refs): hovering reveals the actual model names.
+    expect(screen.getByTestId("provider-models-anthropic")).toHaveAttribute(
+      "title",
+      expect.stringContaining("claude"),
+    );
     expect(screen.getByTestId("row-actions-anthropic")).toBeInTheDocument();
     // m54.6: the per-row action reads "Create agent" (parity with the connect
     // flow's "Create agent with this"), not the ambiguous "Use".
