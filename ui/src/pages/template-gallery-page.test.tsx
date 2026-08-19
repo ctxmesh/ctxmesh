@@ -33,6 +33,7 @@ interface TemplateRow {
     version?: string;
   } | "builtin";
   visibility?: string;
+  alreadyForkedAs?: { namespace: string; name: string };
 }
 
 interface CatalogRow {
@@ -225,6 +226,43 @@ describe("TemplateGalleryPage — templates tab", () => {
     renderPage();
     const originEl = await screen.findByTestId(`template-origin-${defaultPublished.name}`);
     expect(originEl).toHaveTextContent("prod/support-agent");
+  });
+
+  // U16: a template the caller already forked is pre-marked with a badge that LINKS to their fork,
+  // and the Fork button is demoted (but stays enabled — re-forking under a new name is allowed).
+  it("pre-marks an already-forked template with a link to the fork (U16)", async () => {
+    makeFetch({
+      templates: [
+        {
+          ...defaultPublished,
+          alreadyForkedAs: { namespace: "team-a", name: "my-support-copy" },
+        },
+      ],
+    });
+    renderPage();
+
+    const badge = await screen.findByTestId(
+      `template-already-forked-${defaultPublished.name}`,
+    );
+    expect(badge).toHaveTextContent(/Already forked/i);
+    // The badge links to the caller's fork, not the origin.
+    expect(badge).toHaveAttribute(
+      "href",
+      "/agents/team-a/my-support-copy",
+    );
+    // Fork stays available (re-fork under a new name is legit).
+    expect(
+      screen.getByTestId(`fork-template-${defaultPublished.name}`),
+    ).toBeEnabled();
+  });
+
+  it("does NOT mark an un-forked template", async () => {
+    makeFetch(); // defaultPublished has no alreadyForkedAs
+    renderPage();
+    await screen.findByTestId(`template-card-${defaultPublished.name}`);
+    expect(
+      screen.queryByTestId(`template-already-forked-${defaultPublished.name}`),
+    ).toBeNull();
   });
 
   it("recipe Install navigates to /agents/new?recipe=<name> (not ?spec=)", async () => {
