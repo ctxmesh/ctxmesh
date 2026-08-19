@@ -123,6 +123,11 @@ type ToolInteraction struct {
 	Request json.RawMessage `json:"request,omitempty"`
 	// ResponseBytes is the verbatim tool result bytes re-served on replay.
 	ResponseBytes []byte `json:"responseBytes"`
+	// ContentType is the tool response's Content-Type (e.g. text/event-stream for a streamed MCP
+	// result), captured at the egress sidecar (O9) so replay serves the recorded framing instead of
+	// SNIFFING it from the bytes. omitempty + a sniff fallback on replay keep OLD fixtures (schema v1,
+	// no tool content-type) working unchanged — a backward-compatible additive evolution.
+	ContentType string `json:"contentType,omitempty"`
 }
 
 // NewFixture builds an empty, current-schema fixture for a run. RecordedAt is stamped by the caller
@@ -159,13 +164,14 @@ func (f *Fixture) AppendModel(requestBody, responseBytes []byte, contentType str
 // AppendTool appends a tool interaction. callID is the model-assigned tool-call id (may be empty);
 // toolName + argsBody drive the fallback matcher; responseBytes are the verbatim tool result. The
 // args hash is computed from argsBody so the fallback matcher is stable across whitespace/key-order.
-func (f *Fixture) AppendTool(callID, toolName string, argsBody, responseBytes []byte) {
+func (f *Fixture) AppendTool(callID, toolName string, argsBody, responseBytes []byte, contentType string) {
 	f.Tools = append(f.Tools, ToolInteraction{
 		CallID:        callID,
 		ToolName:      toolName,
 		ArgsHash:      HashToolArgs(argsBody),
 		Request:       rawOrNil(argsBody),
 		ResponseBytes: responseBytes,
+		ContentType:   contentType,
 	})
 }
 
