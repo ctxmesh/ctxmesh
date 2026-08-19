@@ -763,6 +763,7 @@ async function callToolWithResilience(
   name: string,
   args: Record<string, unknown>,
   spawnDepth: number,
+  breaker: CircuitBreaker | null,
 ): Promise<unknown> {
   const toolCall = resilienceSection(config.resilience, "toolCall");
   const opts: { timeout?: number } = {};
@@ -777,12 +778,18 @@ async function callToolWithResilience(
 
   let attempt = 0;
   for (;;) {
+    // O5: short-circuit when the per-run breaker is open for this tool (before any dispatch).
+    if (breaker && !breaker.allow(name)) throw new CircuitOpenError(name);
     try {
-      return await client.tools.call(name, args, opts);
+      const r = await client.tools.call(name, args, opts);
+      breaker?.recordSuccess(name);
+      return r;
     } catch (err) {
-      // Consent-required is a user-action outcome, not a transient fault: surface it.
+      // Consent-required is a user-action outcome, not a transient fault: it must NOT count toward
+      // the breaker or be retried — surface it.
       if (err instanceof ConsentRequiredError) throw err;
       if (err instanceof EndpointError) {
+        breaker?.recordFailure(name);
         if (attempt >= retries) throw err;
         attempt += 1;
         await sleep(retryBackoffMs(attempt));
@@ -791,6 +798,91 @@ async function callToolWithResilience(
       throw err;
     }
   }
+}
+
+// ── per-run tool circuit breaker (O5 — parity with the Python `_CircuitBreaker`, m65.7, ADR 0058) ──
+//
+// Scope is deliberately PER-RUN: a fresh breaker is created in `runManagedLoop` and threaded into the
+// loop, so one run's tool failures never trip another's (coordinated/per-pod fleet breaking is the
+// conscious deferral m52.J2 — do NOT add shared state here). It is a health heuristic, not a global
+// ceiling. Unlike the Python impl there is no lock: JS is single-threaded and these methods are
+// synchronous (no `await` inside), so the per-tool state transitions are already atomic.
+//
+// State per tool: closed (count consecutive failures; a success resets) → open at `threshold`
+// consecutive failures (every call short-circuits until `openUntil`) → after the cooldown, ONE
+// half-open probe is admitted (success → closed, failure → re-open with a fresh cooldown).
+
+interface BreakerEntry {
+  failures: number;
+  openUntil: number | null; // epoch ms, or null when closed
+}
+
+export class CircuitBreaker {
+  private readonly state = new Map<string, BreakerEntry>();
+  constructor(
+    private readonly threshold: number,
+    private readonly cooldownMs: number,
+  ) {}
+
+  private entry(name: string): BreakerEntry {
+    let e = this.state.get(name);
+    if (e === undefined) {
+      e = { failures: 0, openUntil: null };
+      this.state.set(name, e);
+    }
+    return e;
+  }
+
+  /** True if a call to `name` may dispatch now (closed, or a half-open probe once the cooldown
+   * elapsed); false while the breaker is open and still cooling down (short-circuit). */
+  allow(name: string): boolean {
+    if (this.threshold <= 0) return true; // disabled → always allow
+    const e = this.entry(name);
+    // null → closed. Cooldown elapsed → allow ONE half-open probe (leave openUntil set so a
+    // concurrent second caller still short-circuits until the probe resolves). Else → deny.
+    return e.openUntil === null || Date.now() >= e.openUntil;
+  }
+
+  /** A successful call: reset to closed. */
+  recordSuccess(name: string): void {
+    if (this.threshold <= 0) return;
+    const e = this.entry(name);
+    e.failures = 0;
+    e.openUntil = null;
+  }
+
+  /** A failed call: increment consecutive failures; open (or re-open) at the threshold. */
+  recordFailure(name: string): void {
+    if (this.threshold <= 0) return;
+    const e = this.entry(name);
+    e.failures += 1;
+    if (e.failures >= this.threshold) e.openUntil = Date.now() + this.cooldownMs;
+  }
+}
+
+/** Raised inside the tool dispatch when the per-run breaker is open for a tool — caught in the loop
+ * and turned into an honest "circuit open" tool result the model sees (never propagated). */
+export class CircuitOpenError extends Error {
+  constructor(readonly toolName: string) {
+    super(`circuit open for tool ${JSON.stringify(toolName)}`);
+    this.name = "CircuitOpenError";
+  }
+}
+
+/** Build the per-run tool breaker from `resilience.toolCall.circuitBreaker`. Returns null when
+ * resilience/toolCall/circuitBreaker is absent or the threshold is not positive — then the loop
+ * dispatches with no breaker (the "None → unchanged" contract). */
+export function makeBreaker(
+  resilience: Record<string, unknown> | null,
+): CircuitBreaker | null {
+  const toolCall = resilienceSection(resilience, "toolCall");
+  if (!toolCall) return null;
+  const cb = objectOrNull(toolCall["circuitBreaker"]);
+  if (!cb) return null;
+  const threshold = positiveInt(cb, "failureThreshold");
+  if (threshold <= 0) return null;
+  const cooldownSeconds = positiveInt(cb, "cooldownSeconds");
+  return new CircuitBreaker(threshold, cooldownSeconds * 1000);
 }
 
 // ── the loop ───────────────────────────────────────────────────────────────────
@@ -824,6 +916,9 @@ export async function runManagedLoop(
   const tools = await client.tools.list();
   const toolNames = new Set(tools.map((t) => t.name));
   const toolSchemas = tools.map((t) => toolSchema(t));
+
+  // O5: a fresh PER-RUN tool circuit breaker (null when unconfigured → the loop is byte-unchanged).
+  const breaker = makeBreaker(config.resilience);
 
   // Conversation id resolution (m33.5): inbound session id > agent-supplied id > "".
   const conversationId = conversationIdFromHeaders(headers) || opts.conversationId || "";
@@ -891,6 +986,7 @@ export async function runManagedLoop(
             spawnDepth,
             stepHolder,
             spotlightToken,
+            breaker,
           });
         } catch (err) {
           if (err instanceof ApprovalRequiredError) {
@@ -941,6 +1037,8 @@ interface DriveState {
    * DATA (see `spotlightToolContent`). The system prompt carries the matching instruction.
    */
   spotlightToken: string;
+  /** O5: the per-run tool circuit breaker, or null when unconfigured (the loop is then unchanged). */
+  breaker: CircuitBreaker | null;
 }
 
 /** The tool-calling loop body — extracted so the caller wraps it in the scopes + catch. */
@@ -1136,7 +1234,7 @@ async function driveLoop(
         } else {
           try {
             content = await client.trace.tool(name, args, async (toolSpan) => {
-              const r = await callToolWithResilience(client, config, name, args, state.spawnDepth);
+              const r = await callToolWithResilience(client, config, name, args, state.spawnDepth, state.breaker);
               toolSpan.setOutput(r);
               return toolResultContent(r);
             });
@@ -1150,6 +1248,10 @@ async function driveLoop(
                 `consent_required: the user must connect their account for the ` +
                 `${JSON.stringify(err.server)} MCP server before this tool can run. ` +
                 `Report this to the user and stop — do not retry.`;
+            } else if (err instanceof CircuitOpenError) {
+              // O5: the per-run breaker is open for this tool — thread an honest "circuit open" tool
+              // result the model sees (mirroring the blocked-message threading), never propagate.
+              content = `circuit open for tool ${JSON.stringify(name)}: too many recent failures`;
             } else if (err instanceof EndpointError) {
               // WITH tool-call resilience configured, thread the failure so the run
               // continues; WITHOUT it, preserve the historical behaviour (propagate).
