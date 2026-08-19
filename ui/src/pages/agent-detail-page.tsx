@@ -1387,8 +1387,15 @@ function StatusTimeline({
                 </div>
                 <div className="pb-1">
                   <p className="text-sm font-medium">
-                    {c.type}
-                    {c.reason && (
+                    {/* `RegressionDetected` reads as an alarm, but with reason NoBaseline / not firing
+                        it is the ABSENCE of a regression — show a neutral label + suppress the raw
+                        camelCase reason (the real regression alarm is the regression-detected-badge). */}
+                    {c.type === "RegressionDetected"
+                      ? c.status === "True"
+                        ? "Regression detected"
+                        : "No baseline yet"
+                      : c.type}
+                    {c.reason && c.type !== "RegressionDetected" && (
                       <span className="ml-2 font-normal text-muted-foreground">{c.reason}</span>
                     )}
                   </p>

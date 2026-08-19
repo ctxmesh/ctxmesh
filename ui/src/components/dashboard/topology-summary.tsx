@@ -41,13 +41,16 @@ export function TopologySummary({ topology }: { topology: TopologyResponse }) {
   const health = { ready: 0, notReady: 0, pending: 0, unknown: 0 };
   for (const n of nodes) {
     counts[n.kind] += 1;
-    health[n.health] += 1;
+    // Tools are DECLARATIVE capabilities — they have no runtime readiness lifecycle, so they must not
+    // count toward the health rollup or "Needs attention" (else every tool shows "not ready", a false
+    // all-broken alarm that contradicts the agents' actual health + the /topology graph). (M99 A3.)
+    if (n.kind !== "tool") health[n.health] += 1;
   }
 
   // Hotspots: the resources that need attention (notReady first, then pending),
-  // capped — a summary points you at problems, it doesn't list everything.
+  // capped — a summary points you at problems, it doesn't list everything. Tools excluded (see above).
   const hotspots = nodes
-    .filter((n) => n.health === "notReady" || n.health === "pending")
+    .filter((n) => n.kind !== "tool" && (n.health === "notReady" || n.health === "pending"))
     .sort((a, b) => HEALTH_RANK[a.health] - HEALTH_RANK[b.health])
     .slice(0, 6);
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Shield } from "lucide-react";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { api, ApiError, type GuardrailPolicySummary } from "@/lib/api";
 
@@ -116,13 +116,7 @@ export function GuardrailPoliciesPage() {
       id: "status",
       header: "Status",
       cell: (p) =>
-        p.validated ? (
-          <Badge variant="success">valid</Badge>
-        ) : (
-          <Badge variant="warning" title={p.reason}>
-            {p.reason || "invalid"}
-          </Badge>
-        ),
+        <StatusBadge ready={p.validated} phase={p.validated ? undefined : p.reason} />,
     },
   ];
 
@@ -132,8 +126,7 @@ export function GuardrailPoliciesPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Guardrail Policies</h2>
         <p className="text-sm text-muted-foreground">
           Namespace-scoped content-governance policies: PII scanning, pattern deny-lists, optional
-          LLM-judge, and per-user rate limits. Applies at inference time via a sidecar. Authored via
-          YAML for now.
+          LLM-judge, and per-user rate limits. Applies at inference time.
         </p>
       </div>
 
@@ -151,7 +144,7 @@ export function GuardrailPoliciesPage() {
           icon: Shield,
           title: "No guardrail policies",
           description:
-            "No GuardrailPolicies defined yet. Apply a GuardrailPolicy manifest with kubectl to enable content governance (PII scanning, deny-lists, an optional LLM-judge, and per-user rate limits) for an agent.",
+            "No guardrail policies yet. A guardrail policy applies content governance — PII scanning, deny-lists, an optional LLM-judge, and per-user rate limits — to your agents.",
         }}
       />
     </div>

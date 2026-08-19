@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Boxes, MessagesSquare } from "lucide-react";
+import { Boxes, Check, Copy, MessagesSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type RunSummary, type RunsFilteredParams } from "@/lib/api";
+import { formatTokens } from "@/lib/format";
 
 // RunsPage — the global paginated + filterable runs browser (m16.8).
 //
@@ -83,6 +84,27 @@ function RunsFilterBar({
         />
       </div>
       <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-muted-foreground">Range</span>
+        <div className="flex gap-1" data-testid="runs-range-presets">
+          {RANGE_PRESETS.map((p) => (
+            <Button
+              key={p.label}
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => {
+                onFrom(datetimeLocalAgo(p.ms));
+                onTo("");
+              }}
+              data-testid={`runs-range-${p.label}`}
+            >
+              {p.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="flex flex-col gap-1">
         <label
           htmlFor="runs-filter-from"
           className="text-xs font-medium text-muted-foreground"
@@ -118,9 +140,50 @@ function RunsFilterBar({
   );
 }
 
+// TraceIdCell shows a SHORT trace id (32-char hex is unreadable in a column) with a copy button for the
+// full id (M99 B3). stopPropagation so copying doesn't also trigger the row's navigate-to-trace.
+function TraceIdCell({ traceId }: { traceId: string }) {
+  const [copied, setCopied] = useState(false);
+  const short =
+    traceId.length > 12 ? `${traceId.slice(0, 8)}…${traceId.slice(-4)}` : traceId;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="font-mono text-xs text-muted-foreground" title={traceId}>
+        {short}
+      </span>
+      <button
+        type="button"
+        aria-label="Copy trace ID"
+        data-testid={`copy-trace-${traceId}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard?.writeText(traceId).then(
+            () => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            },
+            () => {},
+          );
+        }}
+        className="text-muted-foreground/70 transition-colors hover:text-foreground"
+      >
+        {copied ? (
+          <Check className="h-3 w-3 text-success" />
+        ) : (
+          <Copy className="h-3 w-3" />
+        )}
+      </button>
+    </span>
+  );
+}
+
+// fmtCost keeps ONE consistent precision down the column (M99 B3): a true zero is "$0.00", a non-zero
+// amount too small to show at 3 decimals collapses to "<$0.001" (rather than a jarring "$0.00037" next
+// to "$0.008"), and everything else is 3 decimals. No mixed 3-vs-5-decimal rows.
 function fmtCost(usd: number): string {
-  if (usd === 0) return "$0.000";
-  return usd < 0.001 ? `$${usd.toFixed(5)}` : `$${usd.toFixed(3)}`;
+  if (usd === 0) return "$0.00";
+  if (usd < 0.001) return "<$0.001";
+  return `$${usd.toFixed(3)}`;
 }
 
 function fmtTimestamp(ts: string): string {
@@ -130,6 +193,24 @@ function fmtTimestamp(ts: string): string {
   } catch {
     return ts;
   }
+}
+
+// RANGE_PRESETS are the quick time-range shortcuts every observability console offers (M99 B3) — a
+// one-click "last N" that beats hand-entering two datetimes. Each sets `from = now − ms` and clears `to`
+// (open-ended = up to now).
+const RANGE_PRESETS: { label: string; ms: number }[] = [
+  { label: "15m", ms: 15 * 60_000 },
+  { label: "1h", ms: 60 * 60_000 },
+  { label: "24h", ms: 24 * 60 * 60_000 },
+  { label: "7d", ms: 7 * 24 * 60 * 60_000 },
+];
+
+// datetimeLocalAgo formats (now − ms) as a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
+// LOCAL time), the shape the From/To inputs + toRFC3339 already expect.
+function datetimeLocalAgo(ms: number): string {
+  const d = new Date(Date.now() - ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // toRFC3339 converts a <input type="datetime-local"> value ("YYYY-MM-DDTHH:MM",
@@ -304,11 +385,7 @@ export function RunsPage() {
       id: "traceId",
       header: "Trace ID",
       hideOnMobile: true,
-      cell: (r) => (
-        <span className="font-mono text-xs text-muted-foreground">
-          {r.traceId}
-        </span>
-      ),
+      cell: (r) => <TraceIdCell traceId={r.traceId} />,
     },
     {
       id: "timestamp",
@@ -325,7 +402,7 @@ export function RunsPage() {
       header: "Tokens",
       className: "text-right",
       cell: (r) => (
-        <span className="tabular-nums">{r.tokens.toLocaleString()}</span>
+        <span className="tabular-nums">{formatTokens(r.tokens)}</span>
       ),
     },
     {

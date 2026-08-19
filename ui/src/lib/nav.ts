@@ -80,6 +80,10 @@ export const RES_GUARDRAIL = "guardrailpolicies";
 // RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2). The caller-scoped SSAR
 // authorizes against `list alertpolicies` — the same resource the CRD path enforced.
 export const RES_ALERTPOLICIES = "alertpolicies";
+// RES_KNOWLEDGEBASES gates the Knowledge Bases nav item (M99 C2): a persona that can't
+// `list knowledgebases` (e.g. developer) must not see a nav item that then 403s. The BFF
+// probes it in the golden set; display-only, the API still enforces.
+export const RES_KNOWLEDGEBASES = "knowledgebases";
 
 export interface NavItem {
   id: string;
@@ -348,13 +352,14 @@ export const NAV_SECTIONS: NavSection[] = [
       },
       {
         // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora: upload docs → ingest →
-        // watch phase → test-query with citations. Read-open (RBAC gate at the API server,
-        // ADR 0011); authored via YAML/kubectl.
+        // watch phase → test-query with citations. GATED on `list knowledgebases` (M99 C2) so a
+        // persona that can't list them never sees a nav item that 403s; the API still enforces.
         id: "knowledgebases",
         label: "Knowledge Bases",
         icon: BookOpen,
         milestone: "M68",
         route: "/knowledgebases",
+        requiresCapability: { resource: RES_KNOWLEDGEBASES, verb: "list" },
       },
     ],
   },

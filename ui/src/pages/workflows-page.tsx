@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GitFork, Play } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
-import { Badge } from "@/components/ui/badge";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -173,13 +172,7 @@ export function WorkflowsPage() {
       id: "status",
       header: "Status",
       cell: (w) =>
-        w.validated ? (
-          <Badge variant="success">valid</Badge>
-        ) : (
-          <Badge variant="warning" title={w.reason}>
-            {w.reason || "invalid"}
-          </Badge>
-        ),
+        <StatusBadge ready={w.validated} phase={w.validated ? undefined : w.reason} />,
     },
     {
       id: "invoke",
@@ -210,8 +203,7 @@ export function WorkflowsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Workflows</h2>
         <p className="text-sm text-muted-foreground">
           Declarative graphs of agent invocations — conditional branching, map/loop control flow, and
-          deterministic execution. Each workflow is validated by the controller (structure + CEL + registry
-          membership) before it can be invoked. Authored via YAML/kubectl.
+          deterministic execution. Each workflow is validated before it can be invoked.
         </p>
       </div>
 
@@ -229,7 +221,7 @@ export function WorkflowsPage() {
           icon: GitFork,
           title: "No workflows",
           description:
-            "No Workflow CRs defined yet. Apply a Workflow manifest with kubectl to define a declarative graph of agent invocations.",
+            "No workflows yet. A workflow is a declarative graph of agent invocations — conditional branching, map/loop control flow, and deterministic execution.",
         }}
       />
 

@@ -146,7 +146,7 @@ function EvalGatedStatCard({ metric }: { metric: MetricState }) {
           >
             {meetsTarget
               ? `✓ Above ${TARGET_PERCENT}% target`
-              : `Target: >${TARGET_PERCENT}% (PRD §5)`}
+              : `Target: >${TARGET_PERCENT}% of deploys eval-gated`}
           </p>
         )}
       </CardContent>

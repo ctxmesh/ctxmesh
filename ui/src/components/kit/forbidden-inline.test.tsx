@@ -6,7 +6,8 @@ import { ApiError } from "@/lib/api";
 
 // ForbiddenInline is the reusable 403 primitive m13.5 surfaces render when
 // api.ts hands them a typed 403 (ApiError.isForbidden). It must explain-and-
-// suggest, never blank — and surface the BFF's real reason.
+// suggest, never blank. M99 C1 made the boundary CALM (a lock, neutral tone —
+// not an alarm); scrubbing the raw RBAC string is a per-page follow-up (m52).
 
 describe("ForbiddenInline", () => {
   it("renders the explain-and-suggest 403 state with the BFF reason", () => {

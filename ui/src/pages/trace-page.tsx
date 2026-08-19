@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { formatTokens } from "@/lib/format";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { TraceExplorer } from "@/components/dashboard/trace-explorer";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
@@ -308,7 +309,7 @@ export function TracePage() {
             <div className="flex flex-col items-end">
               <dt className="text-xs text-muted-foreground">Tokens</dt>
               <dd className="tabular-nums font-medium">
-                {rollup.tokens.toLocaleString()}
+                {formatTokens(rollup.tokens)}
               </dd>
             </div>
             <div className="flex flex-col items-end">

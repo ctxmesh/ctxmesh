@@ -469,7 +469,10 @@ function TemplatesTab() {
       )}
 
       {state.kind === "ready" && state.entries.length > 0 && (
-        <ul className="space-y-2" data-testid="template-list">
+        <ul
+          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+          data-testid="template-list"
+        >
           {state.entries.map((e) => {
             // U12: include origin namespace in the key to avoid React key collision for
             // same-named templates published from different namespaces.
