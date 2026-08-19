@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,10 +40,23 @@ import (
 // It records the received events and returns the given statusCode. The test can inspect
 // receivedEvents to assert the PII-safe body the launcher sends.
 type mockIngestServer struct {
-	statusCode     int
+	statusCode int
+	// receivedEvents is appended by the httptest HANDLER goroutine and read by the test body, so it
+	// is guarded by mu (K8) — accessed only via append-under-lock in the handler + events() in tests.
+	mu             sync.Mutex
 	receivedEvents []guardrailAuditEvent
 	callCount      atomic.Int64
 	server         *httptest.Server
+}
+
+// events returns a snapshot of the received audit events under the lock — the race-free read the
+// test body uses instead of touching receivedEvents directly (K8).
+func (m *mockIngestServer) events() []guardrailAuditEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]guardrailAuditEvent, len(m.receivedEvents))
+	copy(out, m.receivedEvents)
+	return out
 }
 
 func newMockIngestServer(t *testing.T, statusCode int) *mockIngestServer {
@@ -54,7 +68,9 @@ func newMockIngestServer(t *testing.T, statusCode int) *mockIngestServer {
 			body, _ := io.ReadAll(r.Body)
 			var evt guardrailAuditEvent
 			_ = json.Unmarshal(body, &evt)
+			m.mu.Lock()
 			m.receivedEvents = append(m.receivedEvents, evt)
+			m.mu.Unlock()
 		}
 		w.WriteHeader(statusCode)
 	}))
@@ -137,8 +153,8 @@ func TestGuardrailAudit_BlockTriggersPostToBFF(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	require.Equal(t, int64(1), mock.callCount.Load(), "exactly one POST to the BFF ingest")
-	require.Len(t, mock.receivedEvents, 1)
-	evt := mock.receivedEvents[0]
+	require.Len(t, mock.events(), 1)
+	evt := mock.events()[0]
 
 	// PII-safe: the body must contain a hash, not the raw SSN "123-45-6789".
 	assert.Equal(t, "ssn", evt.Detector)
@@ -236,8 +252,8 @@ func TestGuardrailAudit_FireGuardrailBlockAudit_DirectUnit(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Equal(t, int64(1), mock.callCount.Load(), "exactly one POST to the BFF ingest")
-	require.Len(t, mock.receivedEvents, 1)
-	evt := mock.receivedEvents[0]
+	require.Len(t, mock.events(), 1)
+	evt := mock.events()[0]
 	assert.Equal(t, "ssn", evt.Detector)
 	assert.Equal(t, "input", evt.ScanPoint)
 	assert.Equal(t, "deadbeefdeadbeefdeadbeefdeadbeef", evt.ContentHash)
@@ -248,9 +264,15 @@ func TestGuardrailAudit_FireGuardrailBlockAudit_DirectUnit(t *testing.T) {
 // TestGuardrailAudit_FireGuardrailBlockAudit_NoRawContent verifies the PII-safe invariant:
 // the body POSTed to the BFF ingest never contains raw content — only a content_hash.
 func TestGuardrailAudit_FireGuardrailBlockAudit_NoRawContent(t *testing.T) {
-	var receivedBody []byte
+	// K8: the audit POST fires from a goroutine, so hand the captured body back over a channel — a
+	// shared `receivedBody` var written by the handler + polled by the test body is a data race.
+	bodyCh := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = io.ReadAll(r.Body)
+		b, _ := io.ReadAll(r.Body)
+		select {
+		case bodyCh <- b:
+		default:
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -273,9 +295,10 @@ func TestGuardrailAudit_FireGuardrailBlockAudit_NoRawContent(t *testing.T) {
 
 	gp.fireGuardrailBlockAudit(req, dec)
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && len(receivedBody) == 0 {
-		time.Sleep(5 * time.Millisecond)
+	var receivedBody []byte
+	select {
+	case receivedBody = <-bodyCh:
+	case <-time.After(3 * time.Second):
 	}
 
 	require.NotEmpty(t, receivedBody, "body was received")
