@@ -160,8 +160,11 @@ describe("TeamsPage detail panel (I3 m76.6)", () => {
     fireEvent.click(screen.getByText("broken"));
     await screen.findByTestId("team-detail");
 
-    // The not-ready badge and reason are shown.
-    expect(screen.getByTestId("team-detail-notready-badge")).toHaveTextContent("MemberNotFound");
+    // H5: the badge is a status label ("Not ready"); the reason lives in the span (not duplicated).
+    expect(screen.getByTestId("team-detail-notready-badge")).toHaveTextContent("Not ready");
+    expect(screen.getByTestId("team-detail-notready-reason")).toHaveTextContent("MemberNotFound");
+    // The reason must NOT also appear in the badge (the H5 double-render fix).
+    expect(screen.getByTestId("team-detail-notready-badge")).not.toHaveTextContent("MemberNotFound");
   });
 
   it("clicking the same row again closes the panel (toggle)", async () => {
