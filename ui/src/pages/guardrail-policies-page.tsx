@@ -144,7 +144,7 @@ export function GuardrailPoliciesPage() {
           icon: Shield,
           title: "No guardrail policies",
           description:
-            "No GuardrailPolicies defined yet. Apply a GuardrailPolicy manifest with kubectl to enable content governance (PII scanning, deny-lists, an optional LLM-judge, and per-user rate limits) for an agent.",
+            "No guardrail policies yet. A guardrail policy applies content governance — PII scanning, deny-lists, an optional LLM-judge, and per-user rate limits — to your agents.",
         }}
       />
     </div>

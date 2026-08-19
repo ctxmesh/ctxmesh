@@ -209,7 +209,7 @@ export function KnowledgeBasesPage() {
           icon: BookOpen,
           title: "No knowledge bases",
           description:
-            "No KnowledgeBase CRs defined yet. Apply a KnowledgeBase manifest with kubectl to create a managed RAG corpus.",
+            "No knowledge bases yet. A knowledge base is a managed RAG corpus your agents retrieve from — upload documents and they are chunked, embedded, and searchable.",
         }}
       />
     </div>
