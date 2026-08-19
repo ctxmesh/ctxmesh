@@ -209,6 +209,17 @@ type AgentDetailResponse struct {
 	// Gate is the deploy-gate projection (m69.11, ADR 0062 Fork 3) — the phase-
 	// based canary/promote state. Nil when no EvalSuite is wired (no gate active).
 	Gate *AgentGateDetail `json:"gate,omitempty"`
+	// NeedsRebinding is true when the agent was forked with unresolvable references and carries the
+	// `fork-needs-rebinding` label (U14 / m101.4). It drives the agent-detail "connect resources"
+	// banner. NOTE: this replaces the previous reliance on a `labels` map that the BFF never
+	// forwarded — so the banner was dead in production until now (it only rendered in tests that
+	// mocked `labels`).
+	NeedsRebinding bool `json:"needsRebinding,omitempty"`
+	// ForkUnresolvedRefs is the SPECIFIC list of dangling references the fork left (U14), parsed from
+	// the `fork-unresolved-refs` annotation — already human-readable + category-prefixed
+	// ("model route: x", "prompt: y", a tool name). It lets the banner ITEMIZE what to connect
+	// instead of showing generic steps. Empty/nil when none recorded (an older fork, or resolved).
+	ForkUnresolvedRefs []string `json:"forkUnresolvedRefs,omitempty"`
 }
 
 // AgentRuntimeDetail is the read-only projection of spec.runtime for the agent
@@ -1416,6 +1427,19 @@ func newAgentDetail(
 		}
 	}
 
+	// Fork needs-rebinding state (U14, m101.4): forward the label as an explicit boolean (the banner
+	// previously keyed on a `labels` map the BFF never sent → dead in prod) and itemize the specific
+	// dangling refs from the annotation, so the banner lists exactly what to connect.
+	needsRebinding := ad.GetLabels()[labelForkNeedsRebinding] == labelValueTrue
+	var forkUnresolvedRefs []string
+	if needsRebinding {
+		if raw := ad.GetAnnotations()[annForkUnresolvedRefs]; raw != "" {
+			// Best-effort: a malformed annotation just yields no items (the banner falls back to its
+			// generic guidance) — never fails the read.
+			_ = json.Unmarshal([]byte(raw), &forkUnresolvedRefs)
+		}
+	}
+
 	return AgentDetailResponse{
 		Name:               ad.Name,
 		Namespace:          ad.Namespace,
@@ -1439,6 +1463,8 @@ func newAgentDetail(
 		Runtime:            newAgentRuntimeDetail(ad.Spec.Runtime),
 		GuardrailPolicyRef: ad.Spec.GuardrailPolicyRef,
 		Gate:               newAgentGateDetail(ad.Status.Gate),
+		NeedsRebinding:     needsRebinding,
+		ForkUnresolvedRefs: forkUnresolvedRefs,
 	}
 }
 

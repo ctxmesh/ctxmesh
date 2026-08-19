@@ -158,6 +158,53 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	assert.Equal(t, []string{"echo-abc123"}, got.Versions)
 }
 
+// TestAgentDetailForkNeedsRebinding proves the fork needs-rebinding state is forwarded as explicit
+// fields (U14, m101.4) — the banner previously keyed on a `labels` map the BFF never sent (dead in
+// prod). NeedsRebinding comes from the label; ForkUnresolvedRefs is parsed from the annotation.
+func TestAgentDetailForkNeedsRebinding(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "forked",
+			Namespace: detailNS,
+			Labels:    map[string]string{labelForkNeedsRebinding: labelValueTrue},
+			Annotations: map[string]string{
+				annForkUnresolvedRefs: `["model route: gpt4","prompt: greeting"]`,
+			},
+		},
+		Spec:   agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Status: agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionFalse, "NotReady", "pending")}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "forked")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.True(t, got.NeedsRebinding, "the fork label must project to NeedsRebinding=true")
+	assert.Equal(t, []string{"model route: gpt4", "prompt: greeting"}, got.ForkUnresolvedRefs,
+		"the annotation must project to the itemized ref list")
+}
+
+// TestAgentDetailNoForkStateIsClean proves a normal agent carries no needs-rebinding state.
+func TestAgentDetailNoForkStateIsClean(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "clean", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := getDetail(t, s, "clean")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.False(t, got.NeedsRebinding)
+	assert.Empty(t, got.ForkUnresolvedRefs)
+}
+
 // TestAgentDetailNotFoundIs404 proves a missing agent surfaces as 404.
 func TestAgentDetailNotFoundIs404(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()

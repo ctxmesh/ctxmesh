@@ -1803,7 +1803,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1824,7 +1824,7 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "false" },
+        needsRebinding: false,
       },
     });
     renderAt();
@@ -1840,7 +1840,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
       detail: {
         ...DEFAULT_DETAIL,
         modelRoute: "",
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1853,7 +1853,7 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
     installFetch({
       detail: {
         ...DEFAULT_DETAIL,
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
@@ -1867,12 +1867,55 @@ describe("AgentDetailPage (m76.3 U5) — needs-rebinding banner repair links", (
       detail: {
         ...DEFAULT_DETAIL,
         modelRoute: "gpt4-prod",
-        labels: { "agents.ctxmesh.ai/fork-needs-rebinding": "true" },
+        needsRebinding: true,
       },
     });
     renderAt();
     await screen.findByTestId("agent-detail-page");
     expect(screen.getByTestId("needs-rebinding-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
+  });
+
+  // U14: when the BFF recorded the SPECIFIC dangling refs, the banner ITEMIZES them (with the right
+  // repair action per category) instead of the generic steps — and the tools line does NOT show when
+  // nothing tool-shaped dangles.
+  it("itemizes the actual dangling refs and omits the tools line when none dangle (U14)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "",
+        needsRebinding: true,
+        forkUnresolvedRefs: ["model route: gpt4", "prompt: greeting"],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // The real ref names are listed.
+    const list = screen.getByTestId("rebind-ref-list");
+    expect(list).toHaveTextContent("model route: gpt4");
+    expect(list).toHaveTextContent("prompt: greeting");
+    // The model-route ref carries the connect-route action; the prompt carries an add-prompt link.
+    expect(screen.getByTestId("rebind-model-route-link")).toBeInTheDocument();
+    // No tool-shaped ref → the "bind tools" line is NOT rendered (the old always-on line is gone).
+    expect(screen.queryByTestId("rebind-bindings-tab-link")).toBeNull();
+  });
+
+  it("shows the bind-tools action only for tool-shaped refs (U14)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "gpt4-prod",
+        needsRebinding: true,
+        forkUnresolvedRefs: ["slack-search"], // a bare tool name
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    expect(screen.getByTestId("rebind-ref-list")).toHaveTextContent("slack-search");
+    expect(screen.getByTestId("rebind-bindings-tab-link")).toBeInTheDocument();
+    // No model-route/prompt ref → those actions absent.
     expect(screen.queryByTestId("rebind-model-route-link")).toBeNull();
   });
 });
