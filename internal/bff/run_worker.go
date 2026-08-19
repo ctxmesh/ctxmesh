@@ -189,10 +189,19 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 		execCtx = contextWithSkipHistoryReplay(execCtx, true)
 	}
 
-	// Renew the lease periodically while executing. If the lease is lost (a slow heartbeat let a
-	// peer reclaim us) the heartbeat loop stops — the run continues here, and the idempotency key
-	// bounds any duplicate downstream effect (at-least-once, the honest lease guarantee).
-	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease)
+	// D3: make the exec context cancellable so a DEFINITIVE lease loss stops this worker. A peer
+	// reclaiming our run (worker_id changed) makes us a zombie whose continued execution would append
+	// duplicate run_events into the reclaiming worker's stream; cancelling execCtx stops the ctx-
+	// honoring executors (executeRun / ingestion / dataset-export) at the root. A transient heartbeat
+	// blip does NOT cancel (see startHeartbeat) — a run we may still hold is not aborted on a DB hiccup.
+	execCtx, cancelExec := context.WithCancel(execCtx)
+	defer cancelExec()
+
+	// Renew the lease periodically while executing. If the lease is DEFINITIVELY lost (a peer
+	// reclaimed us) the heartbeat cancels execCtx (D3) so we stop; a transient heartbeat error just
+	// stops renewing and the run continues here, the idempotency key bounding any duplicate
+	// downstream effect (at-least-once, the honest lease guarantee).
+	stopHeartbeat := s.startHeartbeat(ctx, workerID, rn.ID, lease, cancelExec)
 	defer stopHeartbeat()
 
 	// An INGESTION JOB (a pinned IngestionRef, ADR 0061 Fork 2) is driven by the ingestion executor — it
@@ -226,7 +235,16 @@ func (s *Server) executeClaimedRun(ctx context.Context, workerID string, rn *run
 
 // startHeartbeat renews the run's lease every lease/3 until the returned stop func is called or ctx
 // ends. It returns a no-op stopper when heartbeating can't help (no lease interval).
-func (s *Server) startHeartbeat(ctx context.Context, workerID, runID string, lease time.Duration) func() {
+//
+// onLeaseLost (D3) is invoked exactly when a heartbeat returns run.ErrLeaseLost — a DEFINITIVE loss:
+// a peer worker has reclaimed this run (its worker_id changed), so we are now a zombie. The caller
+// wires it to cancel the run's execution so this worker stops executing + appending duplicate
+// run_events into the reclaiming worker's stream. It is NOT called on a transient heartbeat error or
+// ErrNotFound — a mere DB blip must not abort a run we may still legitimately hold (the at-least-once
+// lease guarantee is preserved for everything except a proven hand-off to another worker).
+func (s *Server) startHeartbeat(
+	ctx context.Context, workerID, runID string, lease time.Duration, onLeaseLost func(),
+) func() {
 	interval := lease / 3
 	if interval <= 0 {
 		return func() {}
@@ -241,7 +259,12 @@ func (s *Server) startHeartbeat(ctx context.Context, workerID, runID string, lea
 				return
 			case <-ticker.C:
 				if err := s.runStore.Heartbeat(runID, workerID, lease); err != nil {
-					// Lease lost or run gone — stop renewing (do not spin).
+					// A DEFINITIVE lease loss (a peer reclaimed this run) ⇒ stop executing so we do
+					// not append duplicate events (D3). A transient error / ErrNotFound just stops
+					// renewing (the run continues under at-least-once, as before).
+					if errors.Is(err, run.ErrLeaseLost) && onLeaseLost != nil {
+						onLeaseLost()
+					}
 					return
 				}
 			}
