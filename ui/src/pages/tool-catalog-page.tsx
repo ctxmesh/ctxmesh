@@ -180,7 +180,7 @@ export function ToolCatalogPage() {
     <div className="mx-auto max-w-4xl space-y-6" data-testid="tool-catalog">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Tool catalog</h2>
+          <h2 className="text-2xl font-semibold tracking-tight">Tool Catalog</h2>
           <p className="text-sm text-muted-foreground">
             Browse curated, user-added, and pending-approval tools. Bind an
             approved tool to an agent to enable it in that agent's managed loop.
