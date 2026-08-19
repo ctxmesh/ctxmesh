@@ -2,18 +2,14 @@ import * as React from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BookOpen,
-  Building2,
   Check,
   Download,
   GitFork,
-  Globe,
   Link2,
   Loader2,
-  Lock,
   RefreshCw,
   Search,
   Store,
-  Users,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +23,7 @@ import {
   SkeletonCard,
   useFocusTrap,
   useToast,
+  VisibilityBadge,
 } from "@/components/kit";
 import {
   api,
@@ -53,38 +50,18 @@ import { RES_AGENTS } from "@/lib/nav";
 
 type ActiveTab = "templates" | "mcp";
 
-// ── Shared visibility badge ──────────────────────────────────────────────────
-function VisibilityBadge({ visibility }: { visibility: string | undefined }) {
-  if (!visibility) return null;
-  switch (visibility) {
-    case "public":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Globe className="h-3 w-3" />
-          public
-        </Badge>
-      );
-    case "org":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Building2 className="h-3 w-3" />
-          org
-        </Badge>
-      );
-    case "team":
-      return (
-        <Badge variant="outline" className="gap-1">
-          <Users className="h-3 w-3" />
-          team
-        </Badge>
-      );
+// authTypeLabel humanizes an MCP server's auth type for display (H5) — the gallery previously showed
+// the raw "oauth" while the owned list showed "OAuth". One place, used on both.
+function authTypeLabel(authType: string): string {
+  switch (authType) {
+    case "oauth":
+      return "OAuth";
+    case "apikey":
+      return "API key";
+    case "none":
+      return "No auth";
     default:
-      return (
-        <Badge variant="outline" className="gap-1">
-          <Lock className="h-3 w-3" />
-          {visibility}
-        </Badge>
-      );
+      return authType;
   }
 }
 
@@ -651,7 +628,7 @@ function McpCatalogTab() {
           variant="ghost"
           size="icon"
           onClick={() => load()}
-          aria-label="Refresh MCP catalog"
+          aria-label="Refresh shared servers"
           data-testid="mcp-catalog-tab-refresh"
         >
           <RefreshCw className="h-4 w-4" />
@@ -677,15 +654,15 @@ function McpCatalogTab() {
 
       {state.kind === "forbidden" && (
         <ForbiddenInline
-          title="Not allowed to browse the MCP catalog"
-          description="Your account can't list the MCP catalog."
+          title="Not allowed to browse shared servers"
+          description="Your account can't list shared servers."
           detail={state.message}
         />
       )}
 
       {state.kind === "error" && (
         <ErrorState
-          title="Couldn't load the MCP catalog"
+          title="Couldn't load shared servers"
           description={state.message}
           onRetry={() => load()}
         />
@@ -724,7 +701,7 @@ function McpCatalogTab() {
                       <p className="truncate font-medium">{e.name}</p>
                       <VisibilityBadge visibility={e.visibility} />
                       {e.authType && (
-                        <Badge variant="secondary">{e.authType}</Badge>
+                        <Badge variant="secondary">{authTypeLabel(e.authType)}</Badge>
                       )}
                       {/* T8: human-label credentialSource badge */}
                       <CredentialSourceBadge credentialSource={e.credentialSource} name={e.name} />

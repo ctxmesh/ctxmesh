@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Building2, ExternalLink, Globe, Lock, Plus, Share2, Trash2, Users, Wrench } from "lucide-react";
+import { ExternalLink, Plus, Share2, Trash2, Wrench } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   SkeletonTable,
   useFocusTrap,
   useToast,
+  VisibilityBadge,
 } from "@/components/kit";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_REGISTRIES } from "@/lib/nav";
@@ -194,7 +195,7 @@ export function McpServersPage() {
                         </Badge>
                       )}
                       {s.visibility && (
-                        <ServerVisibilityBadge visibility={s.visibility} name={s.name} />
+                        <VisibilityBadge visibility={s.visibility} name={s.name} />
                       )}
                       <CredentialSourceBadge credentialSource={s.credentialSource} name={s.name} />
                     </div>
@@ -267,26 +268,6 @@ export function McpServersPage() {
         />
       )}
     </div>
-  );
-}
-
-// ServerVisibilityBadge (m73.7) — shows the m73 visibility field alongside the
-// legacy scope badge in each server row.
-function ServerVisibilityBadge({ visibility, name }: { visibility: string; name: string }) {
-  const icon =
-    visibility === "public" ? <Globe className="h-3 w-3" /> :
-    visibility === "org" ? <Building2 className="h-3 w-3" /> :
-    visibility === "team" ? <Users className="h-3 w-3" /> :
-    <Lock className="h-3 w-3" />;
-  return (
-    <Badge
-      variant={visibility === "public" ? "secondary" : "outline"}
-      className="gap-1 text-[10px]"
-      data-testid={`visibility-${name}`}
-    >
-      {icon}
-      {visibility}
-    </Badge>
   );
 }
 
