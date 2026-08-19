@@ -220,6 +220,19 @@ type AgentDetailResponse struct {
 	// ("model route: x", "prompt: y", a tool name). It lets the banner ITEMIZE what to connect
 	// instead of showing generic steps. Empty/nil when none recorded (an older fork, or resolved).
 	ForkUnresolvedRefs []string `json:"forkUnresolvedRefs,omitempty"`
+	// Published is the agent's DURABLE published-template state (U13, m101.4): the visibility +
+	// version of its latest non-tombstoned published_artifacts release, read server-side. It makes
+	// the "Published" badge + Unpublish survive a page reload (they were previously in-session only →
+	// the badge vanished on reload). nil when the agent is not published (or the store is unavailable
+	// — a best-effort read that degrades to no-badge, never a 500).
+	Published *PublishedRef `json:"published,omitempty"`
+}
+
+// PublishedRef is the durable published-template state on the agent detail (U13): the visibility +
+// version of the agent's latest published_artifacts release.
+type PublishedRef struct {
+	Visibility string `json:"visibility"`
+	Version    int    `json:"version"`
 }
 
 // AgentRuntimeDetail is the read-only projection of spec.runtime for the agent

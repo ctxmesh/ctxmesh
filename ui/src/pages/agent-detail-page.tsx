@@ -126,7 +126,8 @@ export function AgentDetailPage() {
   const [publishOpen, setPublishOpen] = React.useState(false);
   // U7: track in-session published state. When the user publishes, we store the
   // response (version + visibility) so the header badge can show it without a
-  // reload. No persistent read — the agent DTO doesn't yet carry published state.
+  // reload. U13: it is ALSO seeded from the durable `detail.published` on load
+  // (below), so the badge + Unpublish survive a reload — previously in-session only.
   const [publishedState, setPublishedState] = React.useState<{
     version: string;
     visibility: string;
@@ -153,6 +154,13 @@ export function AgentDetailPage() {
       .then((detail) => {
         if (controller.signal.aborted) return;
         setState({ kind: "ready", detail });
+        // U13: seed the publish badge from the DURABLE published state so it survives a reload.
+        // (An in-session publish/unpublish still overrides this immediately.)
+        setPublishedState(
+          detail.published
+            ? { version: String(detail.published.version), visibility: detail.published.visibility }
+            : null,
+        );
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
