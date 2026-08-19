@@ -2023,6 +2023,27 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     });
   });
 
+  // U13: the published badge is seeded from the DURABLE `detail.published` on load — so it survives a
+  // reload WITHOUT any in-session publish action (previously it was in-session only → vanished).
+  it("shows the published badge on load from durable state (U13)", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        published: { visibility: "org", version: 4 },
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    // No publish click — the badge is present purely from the loaded detail.
+    expect(screen.getByTestId("published-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/Published/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/org/);
+    expect(screen.getByTestId("published-badge")).toHaveTextContent(/v4/);
+    // And Unpublish is available durably.
+    expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument();
+  });
+
   // U15: a FAILED unpublish must surface a toast (it used to be swallowed → the button looked dead)
   // AND the published badge must stay (the template is still published).
   it("surfaces a toast and keeps the badge when unpublish fails (U15)", async () => {

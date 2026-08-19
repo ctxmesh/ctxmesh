@@ -127,7 +127,21 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	// detail page is a read and must not 500 on a stale annotation.
 	managedOutsideUI, drift := s.editModeFlags(&ad)
 
-	writeJSON(w, http.StatusOK, newAgentDetail(&ad, toolBindings, memoryBindings, versions, managedOutsideUI, drift))
+	detail := newAgentDetail(&ad, toolBindings, memoryBindings, versions, managedOutsideUI, drift)
+
+	// U13: read the agent's DURABLE published-template state so the "Published" badge + Unpublish
+	// survive a reload (they were in-session only). A store read on the BFF's own cpDB (the same
+	// GetLatest the fork path uses); best-effort — a nil store or an error degrades to no badge
+	// (never a 500), since publish state is decoration, not the detail's contract.
+	if s.publishedArtifactStore != nil {
+		if pa, ok, err := s.publishedArtifactStore.GetLatest(r.Context(), kindAgent, ns, name); err != nil {
+			s.log.Error(err, "agent detail: published-state lookup failed; badge omitted", "namespace", ns, "name", name)
+		} else if ok {
+			detail.Published = &PublishedRef{Visibility: pa.Visibility, Version: pa.Version}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // defaultAgentRunLimit is the bounded per-agent run count when ?limit is absent.

@@ -224,6 +224,10 @@ export interface AgentDetailResponse {
   // tool name), so the banner itemizes exactly what to connect instead of showing generic steps.
   needsRebinding?: boolean;
   forkUnresolvedRefs?: string[];
+  // published is the DURABLE published-template state (U13): the visibility + version of the agent's
+  // latest published_artifacts release, read server-side — so the "Published" badge + Unpublish
+  // survive a reload (they were in-session only). Absent when the agent is not published.
+  published?: { visibility: string; version: number };
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------

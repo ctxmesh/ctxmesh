@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
+	"github.com/ctxmesh/agent-engine/internal/controlplane/publishedartifact"
 )
 
 // readyCondition is a terse "Ready" condition fixture for the detail tests.
@@ -203,6 +204,52 @@ func TestAgentDetailNoForkStateIsClean(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.False(t, got.NeedsRebinding)
 	assert.Empty(t, got.ForkUnresolvedRefs)
+}
+
+// TestAgentDetailPublishedState proves the durable published-template state is projected onto the
+// detail (U13, m101.4) — so the badge survives a reload (it was in-session only).
+func TestAgentDetailPublishedState(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	store := publishedartifact.NewMemStore()
+	_, err := store.Publish(context.Background(), publishedartifact.PublishedArtifact{
+		Kind: kindAgent, OriginNamespace: detailNS, OriginName: "echo",
+		SpecJSON: []byte(`{"name":"echo"}`), Visibility: "org", ContentHash: "h1",
+	})
+	require.NoError(t, err)
+	s.publishedArtifactStore = store
+
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.NotNil(t, got.Published, "a published agent must carry durable published state")
+	assert.Equal(t, "org", got.Published.Visibility)
+	assert.Equal(t, 1, got.Published.Version)
+}
+
+// TestAgentDetailNotPublishedIsNil proves an unpublished agent carries no published state.
+func TestAgentDetailNotPublishedIsNil(t *testing.T) {
+	ad := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: detailNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s.publishedArtifactStore = publishedartifact.NewMemStore() // empty
+
+	rec := getDetail(t, s, "solo")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Nil(t, got.Published)
 }
 
 // TestAgentDetailNotFoundIs404 proves a missing agent surfaces as 404.
