@@ -36,7 +36,7 @@ func TestFixtureRoundTrip(t *testing.T) {
 	if idx2 != 1 {
 		t.Fatalf("second AppendModel index = %d, want 1", idx2)
 	}
-	f.AppendTool("call_abc", "search", []byte(`{"q":"go"}`), []byte(`{"results":["a","b"]}`))
+	f.AppendTool("call_abc", "search", []byte(`{"q":"go"}`), []byte(`{"results":["a","b"]}`), "")
 
 	data, err := f.MarshalJSON()
 	if err != nil {
@@ -186,8 +186,8 @@ func TestMatchModelCanonicalHash(t *testing.T) {
 // consumed at most once (two identical calls consume two distinct recordings in order).
 func TestMatchToolByCallID(t *testing.T) {
 	f := NewFixture("r", "a")
-	f.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte("r1"))
-	f.AppendTool("c2", "search", []byte(`{"q":"x"}`), []byte("r2"))
+	f.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte("r1"), "")
+	f.AppendTool("c2", "search", []byte(`{"q":"x"}`), []byte("r2"), "")
 
 	used := map[int]bool{}
 	ti, ok := f.MatchTool("c2", "search", []byte(`{"q":"x"}`), used)
@@ -208,7 +208,7 @@ func TestMatchToolByCallID(t *testing.T) {
 // hash is canonical (key order / whitespace insensitive).
 func TestMatchToolByNameArgsHashFallback(t *testing.T) {
 	f := NewFixture("r", "a")
-	f.AppendTool("", "weather", []byte(`{"city":"NYC","unit":"c"}`), []byte("cold"))
+	f.AppendTool("", "weather", []byte(`{"city":"NYC","unit":"c"}`), []byte("cold"), "")
 
 	used := map[int]bool{}
 	// Match with no call id, different key order + whitespace.
@@ -232,7 +232,7 @@ func TestAssertNoCredentials_Clean(t *testing.T) {
 	// A prompt that MENTIONS the word "Authorization" in prose must NOT trip the invariant — only a
 	// real header line does.
 	f.AppendModel([]byte(`{"messages":[{"role":"user","content":"explain the Authorization header"}]}`), []byte("ok"), "application/json", 200)
-	f.AppendTool("c1", "search", []byte(`{"q":"authorization: bearer as a search term is fine mid-value"}`), []byte("ok"))
+	f.AppendTool("c1", "search", []byte(`{"q":"authorization: bearer as a search term is fine mid-value"}`), []byte("ok"), "")
 	if err := f.AssertNoCredentials(); err != nil {
 		t.Errorf("clean fixture should pass the no-credential invariant, got: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestAssertNoCredentials_AuthorizationHeaderFails(t *testing.T) {
 func TestAssertNoCredentials_ToolBearerFails(t *testing.T) {
 	f := NewFixture("r", "a")
 	leaked := []byte("GET /calendar HTTP/1.1\nAuthorization: Bearer obo-user-token\n\n")
-	f.AppendTool("c1", "gcal", leaked, []byte("ok"))
+	f.AppendTool("c1", "gcal", leaked, []byte("ok"), "")
 	if err := f.AssertNoCredentials(); err == nil {
 		t.Fatal("a leaked OBO bearer on the tool channel MUST fail the invariant")
 	}

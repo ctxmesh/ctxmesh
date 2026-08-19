@@ -135,7 +135,7 @@ func NewToolRecorderWithStore(
 // — capture is best-effort relative to the live run (the tool response was already relayed); a
 // recording failure must NEVER fail the agent's tool call. Before persisting we call
 // Fixture.AssertNoCredentials (defense-in-depth, C4; FixtureStore.Put enforces it again).
-func (rec *ToolRecorder) capture(ctx context.Context, runID, callID, toolName string, argsBody, responseBytes []byte) {
+func (rec *ToolRecorder) capture(ctx context.Context, runID, callID, toolName string, argsBody, responseBytes []byte, contentType string) {
 	if rec == nil || strings.TrimSpace(runID) == "" {
 		return
 	}
@@ -146,7 +146,7 @@ func (rec *ToolRecorder) capture(ctx context.Context, runID, callID, toolName st
 		f = replay.NewFixture(runID, rec.agent)
 		rec.runs[runID] = f
 	}
-	f.AppendTool(callID, toolName, argsBody, responseBytes)
+	f.AppendTool(callID, toolName, argsBody, responseBytes, contentType)
 	// Snapshot the fixture pointer under the lock; the Put below reads the slice we just appended.
 	toPut := f
 	rec.mu.Unlock()

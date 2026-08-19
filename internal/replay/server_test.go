@@ -171,7 +171,7 @@ func TestModelChannel_IndexOverflowIsStructural(t *testing.T) {
 func TestToolChannel_MCPHandshakeAndCallByID(t *testing.T) {
 	f := NewFixture("run-1", "a")
 	jsonResult := []byte(`{"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"42"}]}}`)
-	f.AppendTool("call_abc", "search", []byte(`{"q":"go"}`), jsonResult)
+	f.AppendTool("call_abc", "search", []byte(`{"q":"go"}`), jsonResult, "")
 
 	srv, sess := newTestServer(t, f)
 
@@ -219,7 +219,7 @@ func TestToolChannel_MCPHandshakeAndCallByID(t *testing.T) {
 func TestToolChannel_SSESniffAndNameArgsFallback(t *testing.T) {
 	f := NewFixture("run-1", "a")
 	sseResult := []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"content\":[]}}\n\n")
-	f.AppendTool("", "wordcount", []byte(`{"text":"a b c"}`), sseResult)
+	f.AppendTool("", "wordcount", []byte(`{"text":"a b c"}`), sseResult, "")
 
 	srv, _ := newTestServer(t, f)
 
@@ -238,11 +238,36 @@ func TestToolChannel_SSESniffAndNameArgsFallback(t *testing.T) {
 	}
 }
 
+// TestToolChannel_RecordedContentTypeWins proves O9: when the fixture records a tool Content-Type,
+// replay serves THAT framing even when the bytes would sniff differently — a streamable-http tool
+// whose response is JSON-shaped but was sent as text/event-stream is re-served as SSE, not JSON.
+func TestToolChannel_RecordedContentTypeWins(t *testing.T) {
+	f := NewFixture("run-1", "a")
+	// JSON-RPC-envelope bytes (these would SNIFF to application/json) recorded as text/event-stream.
+	jsonBytes := []byte(`{"jsonrpc":"2.0","id":9,"result":{"content":[]}}`)
+	f.AppendTool("", "stream_tool", []byte(`{"q":"x"}`), jsonBytes, "text/event-stream")
+
+	srv, _ := newTestServer(t, f)
+	status, ct, data := postJSON(t, srv.URL+"/mcp/", mustJSON(map[string]any{
+		"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+		"params": map[string]any{"name": "stream_tool", "arguments": map[string]any{"q": "x"}},
+	}))
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if ct != "text/event-stream" {
+		t.Errorf("the RECORDED content-type must win over the byte sniff, got %q", ct)
+	}
+	if !bytes.Equal(data, jsonBytes) {
+		t.Errorf("bytes must be re-served verbatim: got %q", data)
+	}
+}
+
 // TestToolChannel_UnrecordedCallIsStructural proves an unrecorded tool call is a STRUCTURAL
 // divergence: an MCP error + a tool_call_unrecorded event + the session fails (→ exit 2).
 func TestToolChannel_UnrecordedCallIsStructural(t *testing.T) {
 	f := NewFixture("run-1", "a")
-	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"jsonrpc":"2.0","result":{}}`))
+	f.AppendTool("call_1", "search", []byte(`{"q":"go"}`), []byte(`{"jsonrpc":"2.0","result":{}}`), "")
 
 	srv, sess := newTestServer(t, f)
 
@@ -272,7 +297,7 @@ func TestToolChannel_UnrecordedCallIsStructural(t *testing.T) {
 func TestReport_UnconsumedWarningOnly(t *testing.T) {
 	f := NewFixture("run-1", "a")
 	f.AppendModel([]byte(`{"m":1}`), []byte(`{"ok":true}`), "application/json", 200)
-	f.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte(`{"jsonrpc":"2.0","result":{}}`))
+	f.AppendTool("c1", "search", []byte(`{"q":"x"}`), []byte(`{"jsonrpc":"2.0","result":{}}`), "")
 
 	srv, sess := newTestServer(t, f)
 	// Consume the model call but NOT the tool call.

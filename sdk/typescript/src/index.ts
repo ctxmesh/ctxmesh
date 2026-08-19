@@ -42,6 +42,10 @@ export { FeedbackClient } from "./feedback.js";
 export { ModelClient, ChatResponse } from "./model.js";
 export type { ToolCall, ChatUsage } from "./model.js";
 
+// Multimodal message-content helpers (O6) — surface parity with the Python SDK.
+export { textPart, imageUrl, content } from "./_multimodal.js";
+export type { TextPart, ImageUrlPart, ContentPart } from "./_multimodal.js";
+
 export { Client } from "./client.js";
 
 // ── M77.3: tools client + MCP ─────────────────────────────────────────────────
