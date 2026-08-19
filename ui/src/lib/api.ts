@@ -645,6 +645,11 @@ export interface RunSummary {
   // ambient/untagged trace.
   agentNs?: string;
   agentName?: string;
+  // The coarse run outcome — "ok" | "error" — projected from the trace's observations
+  // (ADR 0081). The Langfuse traces-LIST carries no per-trace status, so this is populated
+  // ONLY by the opt-in ?enrich= path; absent (undefined) on a plain list, which the Status
+  // column renders as "—" (unknown) rather than a fabricated outcome. M100 (UI99-runstable).
+  status?: string;
 }
 
 // RunListResponse mirrors the BFF's list-contract DTO for runs (m16.3):
@@ -676,6 +681,11 @@ export interface RunsFilteredParams {
   q?: string;
   limit?: number;
   cursor?: string;
+  // enrich requests the opt-in per-trace token+status enrichment (?enrich=, ADR 0081): the BFF
+  // fetches each visible trace's /detail to fill REAL tokens + a coarse ok/error status the list
+  // API cannot carry. Off (undefined) → the cheap, unenriched list. The Runs browser sets it; the
+  // dashboard's recent-runs peek does not (it only needs cost/latency).
+  enrich?: boolean;
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
@@ -2843,6 +2853,7 @@ export const api = {
     if (params.q) qs.set("q", params.q);
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.enrich) qs.set("enrich", "1");
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     const res = await apiFetch(`/api/runs${suffix}`, {
       headers: { Accept: "application/json" },

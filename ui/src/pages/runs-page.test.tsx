@@ -396,3 +396,86 @@ describe("RunsPage — RBAC (m16.8)", () => {
     expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
   });
 });
+
+// ── M100: enrichment (real tokens + status column) + NAME≈AGENT dedup ────────────
+
+describe("RunsPage — enrichment + status column (M100, ADR 0081)", () => {
+  it("opts into ?enrich=1 and renders the ok/error/unknown status column", async () => {
+    let sawEnrich = false;
+    installFetch((qs) => {
+      if (qs.get("enrich") === "1") sawEnrich = true;
+      return {
+        ok: true,
+        body: {
+          runs: [
+            run({ traceId: "t-ok", name: "ok-run", status: "ok" }),
+            run({ traceId: "t-err", name: "err-run", status: "error" }),
+            // No status → an unenriched/undeterminable row → "—", never a fabricated outcome.
+            run({ traceId: "t-unknown", name: "unknown-run", status: undefined }),
+          ],
+          nextCursor: "",
+        },
+      };
+    });
+
+    renderPage();
+    await screen.findByText("ok-run");
+
+    expect(sawEnrich).toBe(true);
+    // The enriched outcomes render as calm chips; the unknown row shows a muted em-dash.
+    expect(screen.getByText("OK")).toBeInTheDocument();
+    expect(screen.getByText("Error")).toBeInTheDocument();
+    // "Status" is a COLUMN header, not a filter input (the filter bar still has none).
+    expect(screen.getByRole("columnheader", { name: /status/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/status/i)).toBeNull();
+  });
+
+  it("dedups NAME≈AGENT: the name collapses to — when it equals the agent identity", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          // name IS the agent identity "prod/billing" → the Name cell must not repeat it.
+          run({
+            traceId: "t-dup",
+            name: "prod/billing",
+            agentNs: "prod",
+            agentName: "billing",
+          }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    // The agent identity renders exactly once (the Agent-column link), NOT twice.
+    await waitFor(() =>
+      expect(screen.getAllByText("prod/billing")).toHaveLength(1),
+    );
+    // The single occurrence is the agent link (navigates to the agent), not a plain Name cell.
+    expect(screen.getByTestId("run-agent-link-t-dup")).toHaveTextContent(
+      "prod/billing",
+    );
+  });
+
+  it("keeps a distinct run name when it differs from the agent identity", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: {
+        runs: [
+          run({
+            traceId: "t-named",
+            name: "nightly-report",
+            agentNs: "prod",
+            agentName: "billing",
+          }),
+        ],
+        nextCursor: "",
+      },
+    }));
+
+    renderPage();
+    // A meaningful, distinct name survives in the Name column.
+    expect(await screen.findByText("nightly-report")).toBeInTheDocument();
+  });
+});
