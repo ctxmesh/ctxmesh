@@ -1188,6 +1188,15 @@ function OverviewTab({
                 </li>
               ))}
             </ul>
+            {/* V3: read-only diff of two version snapshots (only useful with ≥2 versions). */}
+            {detail.versions.length >= 2 && (
+              <VersionDiffPanel
+                ns={detail.namespace}
+                name={detail.name}
+                versions={detail.versions}
+                latestVersion={detail.latestVersion}
+              />
+            )}
           </div>
         )}
 
@@ -1493,6 +1502,136 @@ function StatusTimeline({
   );
 }
 
+// ── Version diff (V3) ────────────────────────────────────────────────────────
+// A read-only diff of two of the agent's version snapshots (the deployed spec, as YAML). Two selects
+// (never free-text) populated from the agent's versions; defaults to previous → latest. Renders the
+// unified line diff with +/- coloring, a calm "no changes" for identical, and an honest error — it
+// never fabricates a diff (mirrors the prompt-diff contract).
+type VersionDiffState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; diff: string; identical: boolean }
+  | { kind: "error"; message: string };
+
+function VersionDiffPanel({
+  ns,
+  name,
+  versions,
+  latestVersion,
+}: {
+  ns: string;
+  name: string;
+  versions: string[];
+  latestVersion: string;
+}) {
+  const defaultTo = latestVersion || versions[0] || "";
+  const defaultFrom =
+    versions.find((v) => v !== defaultTo) ?? versions[0] ?? "";
+  const [from, setFrom] = React.useState(defaultFrom);
+  const [to, setTo] = React.useState(defaultTo);
+  const [state, setState] = React.useState<VersionDiffState>({ kind: "idle" });
+
+  function compare() {
+    if (!from || !to) return;
+    setState({ kind: "loading" });
+    api
+      .agentVersionDiff(ns, name, from, to)
+      .then((res) =>
+        setState({ kind: "ready", diff: res.diff, identical: res.identical }),
+      )
+      .catch((err: unknown) =>
+        setState({
+          kind: "error",
+          message: err instanceof Error ? err.message : "couldn't diff the versions",
+        }),
+      );
+  }
+
+  const selectClass =
+    "h-8 rounded-md border bg-background px-2 font-mono text-xs";
+
+  return (
+    <div className="mt-4 border-t pt-4" data-testid="version-diff-panel">
+      <p className="text-xs font-medium">Compare versions</p>
+      <p className="mb-2 text-[11px] text-muted-foreground">
+        Diff of the deployed spec snapshot.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          className={selectClass}
+          aria-label="From version"
+          data-testid="version-diff-from"
+        >
+          {versions.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-muted-foreground">→</span>
+        <select
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          className={selectClass}
+          aria-label="To version"
+          data-testid="version-diff-to"
+        >
+          {versions.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={compare}
+          data-testid="version-diff-compare"
+        >
+          Compare
+        </Button>
+      </div>
+
+      {state.kind === "loading" && (
+        <p className="mt-2 text-xs text-muted-foreground">Loading diff…</p>
+      )}
+      {state.kind === "error" && (
+        <p className="mt-2 text-xs text-destructive" role="alert">
+          {state.message}
+        </p>
+      )}
+      {state.kind === "ready" && state.identical && (
+        <p
+          className="mt-2 text-xs text-muted-foreground"
+          data-testid="version-diff-identical"
+        >
+          No changes between these versions.
+        </p>
+      )}
+      {state.kind === "ready" && !state.identical && (
+        <pre
+          className="mt-2 max-h-96 overflow-auto rounded-md bg-surface-3 p-3 text-xs leading-relaxed"
+          data-testid="version-diff-output"
+        >
+          {state.diff.split("\n").map((line, i) => {
+            const cls = line.startsWith("+")
+              ? "text-success"
+              : line.startsWith("-")
+                ? "text-destructive"
+                : "text-muted-foreground";
+            return (
+              <div key={i} className={cls}>
+                {line || " "}
+              </div>
+            );
+          })}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 // ── Logs tab (live SSE tail, bearer-attached fetch-stream) ───────────────────
 type LogLine = { seq: number; text: string };
