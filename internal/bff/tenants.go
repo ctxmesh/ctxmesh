@@ -17,9 +17,12 @@ limitations under the License.
 package bff
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -79,6 +82,69 @@ type TenantDetail struct {
 // TenantListResponse is the tenants-list payload.
 type TenantListResponse struct {
 	Items []TenantSummary `json:"items"`
+}
+
+// TenantCreateRequest is the POST /api/tenants body (M99 C4). Minimal by design: a name + the member
+// namespaces; compute/model/storage quotas are optional and added later (kubectl / a future edit surface).
+// networkIsolation defaults to true (secure-by-default, ADR 0073) when omitted.
+type TenantCreateRequest struct {
+	Name             string   `json:"name"`
+	Namespaces       []string `json:"namespaces,omitempty"`
+	NetworkIsolation *bool    `json:"networkIsolation,omitempty"`
+}
+
+// handleCreateTenant serves POST /api/tenants — creates a cluster-scoped Tenant via the CALLER-scoped
+// client, so RBAC is the API server's real answer (M99 C4): only a persona with `create tenants`
+// (operator/admin) succeeds; a developer/viewer gets an honest 403. This is the missing half of the
+// advertised "operators manage tenants".
+func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	body, err := readLimitedBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	var req TenantCreateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	t := &agentsv1alpha1.Tenant{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       agentsv1alpha1.TenantSpec{Namespaces: req.Namespaces, NetworkIsolation: req.NetworkIsolation},
+	}
+	if err := ensureGVK(t, s.scheme); err != nil {
+		s.log.Error(err, "resolve GVK for Tenant failed")
+		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot resolve tenant kind")
+		return
+	}
+	if cErr := caller.Create(r.Context(), t); cErr != nil {
+		if status, msg, isRBAC := classifyReadError(cErr); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		if apierrors.IsAlreadyExists(cErr) {
+			writeError(w, http.StatusConflict, fmt.Sprintf("tenant %q already exists", name))
+			return
+		}
+		if apierrors.IsInvalid(cErr) || apierrors.IsBadRequest(cErr) {
+			writeError(w, http.StatusBadRequest, cErr.Error())
+			return
+		}
+		s.log.Error(cErr, "create Tenant failed", "name", name)
+		writeError(w, http.StatusInternalServerError, "failed to create tenant")
+		return
+	}
+	writeJSON(w, http.StatusCreated, newTenantSummary(t))
 }
 
 func tenantReady(t *agentsv1alpha1.Tenant) bool {

@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Pencil, Plus, Trash2, Users } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type AgentRegistrySummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -197,9 +196,7 @@ export function AgentRegistriesPage() {
       header: "Status",
       className: "w-32",
       cell: (r) => (
-        <Badge variant={r.ready ? "success" : "warning"}>
-          {r.phase || (r.ready ? "Ready" : "Pending")}
-        </Badge>
+        <StatusBadge ready={r.ready} phase={r.phase} />
       ),
     },
     ...(canEdit || canDelete

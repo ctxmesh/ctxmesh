@@ -927,8 +927,10 @@ func (s *Server) Handler() http.Handler {
 		authed.HandleFunc("POST /api/datasets/{name}/cases/from-run", s.handleFromRun)
 		authed.HandleFunc("POST /api/datasets/{name}/pin", s.handlePinDataset)
 
-		// Tenants (M47, ADR 0046): read-only, cluster-scoped, caller-scoped.
+		// Tenants (M47, ADR 0046): cluster-scoped, caller-scoped. Read + create (M99 C4 — operators
+		// manage tenants; RBAC is the API server's real answer via the caller-scoped client).
 		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
+		authed.HandleFunc("POST /api/tenants", s.handleCreateTenant)
 		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
 		// on the list. Registered before the {name} routes; the literal "usage" segment
 		// takes precedence over the {name} wildcard (Go 1.22 ServeMux).

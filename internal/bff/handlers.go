@@ -598,10 +598,19 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	}
 	// ADR 0077: tenant-scope the per-agent breakdown — require ?tenant= (closes the m52.Q4
 	// cross-tenant leak; the Langfuse breakdown is otherwise cluster-wide).
+	// M99 B1: a missing tenant is allowed ONLY when the cluster has genuinely ZERO tenants — then
+	// there is no tenant boundary to leak across, so the cluster-wide per-agent breakdown is safe
+	// (this is the "per-agent fallback" so the Cost page isn't empty on a tenant-less cluster). With
+	// ≥1 tenant, or if we can't verify the count (a can't-list-tenants RBAC error), keep the strict
+	// gate — never serve a cluster-wide breakdown when tenant boundaries exist.
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
 	if tenant == "" {
-		writeError(w, http.StatusBadRequest, "missing required query param: tenant")
-		return
+		var tenants agentsv1alpha1.TenantList
+		if err := caller.List(r.Context(), &tenants); err != nil || len(tenants.Items) > 0 {
+			writeError(w, http.StatusBadRequest, "missing required query param: tenant")
+			return
+		}
+		// zero tenants → fall through to the cluster-wide per-agent breakdown (safe).
 	}
 
 	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
@@ -661,6 +670,13 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Agents == nil {
 		resp.Agents = []AgentCostItem{}
+	}
+	// M99 B1 zero-tenant fallback: with no tenant there is nothing to filter/isolate against — return
+	// the cluster-wide per-agent breakdown as-is (only reachable when the cluster has zero tenants, per
+	// the guard above).
+	if tenant == "" {
+		writeJSON(w, http.StatusOK, resp)
+		return
 	}
 	// ADR 0077: keep only agents whose namespace belongs to the requested tenant (one Tenant GET;
 	// Tenant.spec.namespaces is the membership set) + recompute the page total over the kept rows —

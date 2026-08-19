@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GitBranch, Pencil, Plus, Trash2 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type ModelRouteSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -192,9 +191,7 @@ export function ModelRoutesPage() {
       header: "Status",
       className: "w-32",
       cell: (r) => (
-        <Badge variant={r.ready ? "success" : "warning"}>
-          {r.phase || (r.ready ? "Ready" : "Pending")}
-        </Badge>
+        <StatusBadge ready={r.ready} phase={r.phase} />
       ),
     },
     ...(canEdit || canDelete
@@ -231,10 +228,9 @@ export function ModelRoutesPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Model Routes</h2>
           <p className="text-sm text-muted-foreground">
-            The provider bindings behind your models — the platform creates and
-            maintains one automatically when you connect a provider and pick a
-            model, so you rarely need this page. It&apos;s here for operators who
-            want to inspect or hand-author routing directly.
+            The provider bindings behind your models. The platform creates one
+            automatically when you connect a provider and pick a model; inspect
+            or hand-author routing here.
           </p>
         </div>
         {canCreate && (

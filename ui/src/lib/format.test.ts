@@ -3,10 +3,23 @@ import { describe, expect, it } from "vitest";
 import {
   formatCompact,
   formatLatency,
+  formatTokens,
   formatUSD,
   latencyStats,
   shortTraceId,
 } from "@/lib/format";
+
+describe("formatTokens", () => {
+  it("renders 0 (not captured) as a dash, not a misleading '0'", () => {
+    expect(formatTokens(0)).toBe("—");
+  });
+  it("renders a real count with locale grouping", () => {
+    expect(formatTokens(1234)).toBe((1234).toLocaleString());
+  });
+  it("renders a non-finite value as a dash", () => {
+    expect(formatTokens(NaN)).toBe("—");
+  });
+});
 
 describe("formatUSD", () => {
   it("renders zero as $0.00, not a dash", () => {

@@ -4,7 +4,10 @@ import { Building2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { useCapabilities } from "@/lib/capabilities";
+import { RES_TENANTS } from "@/lib/nav";
 import {
   api,
   ApiError,
@@ -12,6 +15,7 @@ import {
   type TenantDetail,
   type TenantModelDTO,
   type TenantUsage,
+  type TenantCreateRequest,
 } from "@/lib/api";
 
 // NEAR_CAP_RATIO is the fraction of any model cap at which a tenant is flagged
@@ -170,7 +174,97 @@ function TenantDetailPanel({
   );
 }
 
+// CreateTenantPanel is the minimal admin Create-tenant form (M99 C4): a name + member namespaces
+// (comma/space separated) + a network-isolation toggle (secure-by-default). Compute/model/storage quotas
+// are added later (kubectl / a future edit surface). On success it calls onCreated(name) to refresh + close.
+function CreateTenantPanel({
+  onCreated,
+  onClose,
+}: {
+  onCreated: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [namespaces, setNamespaces] = useState("");
+  const [isolate, setIsolate] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    const nm = name.trim();
+    if (!nm) {
+      setError("Name is required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const req: TenantCreateRequest = {
+      name: nm,
+      namespaces: namespaces
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      networkIsolation: isolate,
+    };
+    try {
+      await api.createTenant(req);
+      onCreated(nm);
+    } catch (e) {
+      setError(
+        e instanceof ApiError && e.isForbidden
+          ? "You don't have permission to create tenants — ask an admin for access."
+          : e instanceof Error
+            ? e.message
+            : "Create failed.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border bg-card p-4 shadow-card" data-testid="create-tenant-panel">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">New tenant</p>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-xs text-muted-foreground">Name</span>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="acme" data-testid="new-tenant-name" />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-muted-foreground">Member namespaces (comma-separated)</span>
+          <Input
+            value={namespaces}
+            onChange={(e) => setNamespaces(e.target.value)}
+            placeholder="team-a, team-b"
+            data-testid="new-tenant-namespaces"
+          />
+        </label>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} data-testid="new-tenant-isolation" />
+        Network isolation (recommended — deny cross-tenant pod traffic)
+      </label>
+      {error && (
+        <p className="text-xs text-destructive" data-testid="new-tenant-error">
+          {error}
+        </p>
+      )}
+      <Button size="sm" onClick={submit} disabled={busy} data-testid="new-tenant-submit">
+        {busy ? "Creating…" : "Create tenant"}
+      </Button>
+    </div>
+  );
+}
+
 export function TenantsPage() {
+  const { can } = useCapabilities();
+  const canCreate = can(RES_TENANTS, "create");
+  const [showCreate, setShowCreate] = useState(false);
   // Pre-fill the filter from ?q= so an agent's namespace link (agent-detail →
   // /tenants?q=<namespace>) lands with the owning tenant already filtered (m49.4).
   const [searchParams] = useSearchParams();
@@ -300,13 +394,29 @@ export function TenantsPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="tenants-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Tenants</h2>
-        <p className="text-sm text-muted-foreground">
-          Cluster-scoped groupings of namespaces with compute + model quotas. Read-only here; operators
-          manage tenants (the RBAC split is enforced by the API server).
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Tenants</h2>
+          <p className="text-sm text-muted-foreground">
+            Cluster-scoped groupings of namespaces with compute + model quotas.
+          </p>
+        </div>
+        {canCreate && !showCreate && (
+          <Button size="sm" onClick={() => setShowCreate(true)} data-testid="new-tenant-button">
+            New tenant
+          </Button>
+        )}
       </div>
+
+      {showCreate && (
+        <CreateTenantPanel
+          onClose={() => setShowCreate(false)}
+          onCreated={() => {
+            setShowCreate(false);
+            load();
+          }}
+        />
+      )}
 
       <DataTable<TenantSummary>
         columns={columns}

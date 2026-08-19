@@ -2,18 +2,10 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PlugZap, Plus, RotateCw, Sparkles, Trash2 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  ConfirmDialog,
-  DataTable,
-  useFocusTrap,
-  useToast,
-  type Column,
-  type DataTableError,
-} from "@/components/kit";
+import { ConfirmDialog, DataTable, StatusBadge, useFocusTrap, useToast, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type ProviderSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { RES_SECRETS } from "@/lib/nav";
@@ -182,9 +174,7 @@ export function ProvidersPage() {
       header: "Status",
       className: "w-28",
       cell: (p) => (
-        <Badge variant={p.ready ? "success" : "warning"}>
-          {p.ready ? "Ready" : "Pending"}
-        </Badge>
+        <StatusBadge ready={p.ready} />
       ),
     },
     {

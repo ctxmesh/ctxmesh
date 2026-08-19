@@ -38,9 +38,28 @@ describe("TopologySummary (scale-first dashboard card, m22.6/U5)", () => {
     const card = screen.getByTestId("topology-summary");
     expect(card).toHaveTextContent("Registries");
     expect(card).toHaveTextContent("Agents");
-    // 3 ready (registry + agent + tool), 1 not ready (a2).
-    expect(card).toHaveTextContent("3 ready");
+    // 2 ready (registry + agent a1) — tools are declarative, excluded from health; 1 not ready (a2).
+    expect(card).toHaveTextContent("2 ready");
     expect(card).toHaveTextContent("1 not ready");
+  });
+
+  it("excludes tools from the health rollup + hotspots (declarative — no readiness)", () => {
+    render(
+      <MemoryRouter>
+        <TopologySummary
+          topology={topo([
+            node({ id: "agent/default/a", name: "a", health: "ready" }),
+            node({ id: "tool/default/t1", kind: "tool", name: "t1", health: "notReady" }),
+            node({ id: "tool/default/t2", kind: "tool", name: "t2", health: "notReady" }),
+          ])}
+        />
+      </MemoryRouter>,
+    );
+    const card = screen.getByTestId("topology-summary");
+    expect(card).toHaveTextContent("1 ready"); // just the agent
+    expect(card).not.toHaveTextContent("not ready"); // the two tools do NOT raise a false alarm
+    expect(card).toHaveTextContent("All resources healthy.");
+    expect(screen.queryByTestId("topology-hotspots")).toBeNull();
   });
 
   it("lists unhealthy nodes as hotspots, linked to their detail", () => {

@@ -115,9 +115,9 @@ describe("WorkflowsPage (m67.9)", () => {
     expect(screen.getByText("my-pipeline")).toBeInTheDocument();
     expect(screen.getByText("broken-wf")).toBeInTheDocument();
 
-    // Status badges: validated → "valid", invalid → shows the reason.
-    expect(screen.getByText("valid")).toBeInTheDocument();
-    const validBadge = screen.getByText("valid");
+    // Status badges: validated → "Ready" (unified, M99 E1), invalid → shows the reason.
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    const validBadge = screen.getByText("Ready");
     expect(validBadge.className).toMatch(/bg-success/);
 
     expect(screen.getByText("DanglingEdge")).toBeInTheDocument();

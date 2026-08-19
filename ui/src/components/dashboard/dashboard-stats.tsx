@@ -61,7 +61,9 @@ function CostPointerCard() {
           </p>
           <Coins className="h-4 w-4 shrink-0 text-muted-foreground" />
         </div>
-        <p className="mt-2 text-sm text-muted-foreground">Per tenant</p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Spend &amp; forecasts
+        </p>
         <Link
           to="/cost"
           className="mt-0.5 inline-block text-xs text-primary underline-offset-4 hover:underline"
