@@ -7,10 +7,11 @@ import { ApiError } from "@/lib/api";
 // ForbiddenInline is the reusable 403 primitive m13.5 surfaces render when
 // api.ts hands them a typed 403 (ApiError.isForbidden). It must explain-and-
 // suggest, never blank. M99 C1 made the boundary CALM (a lock, neutral tone —
-// not an alarm); scrubbing the raw RBAC string is a per-page follow-up (m52).
+// not an alarm); M100 UI99-403 completed it: the raw BFF RBAC string is NEVER
+// surfaced on a 403 — a friendly, resource-named message carries it instead.
 
 describe("ForbiddenInline", () => {
-  it("renders the explain-and-suggest 403 state with the BFF reason", () => {
+  it("renders the explain-and-suggest 403 state and NEVER the raw RBAC string", () => {
     render(
       <ForbiddenInline
         title="Can't list agents in team-a"
@@ -23,8 +24,18 @@ describe("ForbiddenInline", () => {
     expect(
       screen.getByText(/Ask an admin to grant access|switch to a namespace/i),
     ).toBeInTheDocument();
-    // The real RBAC reason is surfaced.
-    expect(screen.getByText(/is forbidden: user cannot list/)).toBeInTheDocument();
+    // The raw BFF RBAC reason is NOT surfaced (M100 UI99-403 — it is noise + the audit's leak).
+    expect(screen.queryByText(/is forbidden: user cannot list/)).toBeNull();
+  });
+
+  it("uses `resource` for the friendly, resource-named message", () => {
+    render(<ForbiddenInline resource="agents" />);
+    expect(
+      screen.getByText("You don't have permission to view agents"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Ask an admin for a role that can read agents/),
+    ).toBeInTheDocument();
   });
 
   it("wires an optional next action", () => {
@@ -49,6 +60,7 @@ describe("ForbiddenInline", () => {
     );
     render(node);
     expect(screen.getByText("No write access")).toBeInTheDocument();
-    expect(screen.getByText(/forbidden: cannot create/)).toBeInTheDocument();
+    // The raw message is passed but suppressed — never rendered on a 403.
+    expect(screen.queryByText(/forbidden: cannot create/)).toBeNull();
   });
 });

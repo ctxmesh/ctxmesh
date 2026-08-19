@@ -101,9 +101,9 @@ describe("GuardrailPoliciesPage (m66.10)", () => {
   it("403 surfaces a forbidden state (never a fake empty list)", async () => {
     installFetch(() => ({ ok: false, status: 403, body: { error: "you do not have permission to list guardrailpolicies" } }));
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByText(/you do not have permission to list guardrailpolicies/)).toBeInTheDocument(),
-    );
+    expect(await screen.findByText("You don't have permission to view guardrail policies")).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/you do not have permission to/)).toBeNull();
     expect(screen.queryByText("No guardrail policies")).toBeNull();
   });
 

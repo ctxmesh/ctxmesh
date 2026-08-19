@@ -184,11 +184,11 @@ describe("KnowledgeBasesPage — list (m68.13)", () => {
       },
     });
     renderListPage();
-    await waitFor(() =>
-      expect(
-        screen.getByText(/you do not have permission to list knowledge bases/),
-      ).toBeInTheDocument(),
-    );
+    expect(
+      await screen.findByText("You don't have permission to view knowledge bases"),
+    ).toBeInTheDocument();
+    // the raw RBAC string is never surfaced on a 403 (M100 UI99-403)
+    expect(screen.queryByText(/you do not have permission to/)).toBeNull();
     expect(screen.queryByText("No knowledge bases")).toBeNull();
   });
 });
