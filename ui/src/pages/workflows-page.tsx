@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GitFork, Play } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
-import { Badge } from "@/components/ui/badge";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -173,13 +172,7 @@ export function WorkflowsPage() {
       id: "status",
       header: "Status",
       cell: (w) =>
-        w.validated ? (
-          <Badge variant="success">valid</Badge>
-        ) : (
-          <Badge variant="warning" title={w.reason}>
-            {w.reason || "invalid"}
-          </Badge>
-        ),
+        <StatusBadge ready={w.validated} phase={w.validated ? undefined : w.reason} />,
     },
     {
       id: "invoke",

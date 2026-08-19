@@ -49,10 +49,10 @@ function TeamDetailPanel({
       {/* Team-level readiness */}
       <div className="mb-3 flex items-center gap-2">
         {team.ready ? (
-          <Badge variant="success" data-testid="team-detail-ready-badge">ready</Badge>
+          <Badge variant="success" data-testid="team-detail-ready-badge">Ready</Badge>
         ) : (
           <Badge variant="warning" data-testid="team-detail-notready-badge">
-            {team.reason || "not ready"}
+            {team.reason || "Pending"}
           </Badge>
         )}
         {!team.ready && team.reason && (

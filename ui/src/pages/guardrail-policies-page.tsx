@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Shield } from "lucide-react";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { api, ApiError, type GuardrailPolicySummary } from "@/lib/api";
 
@@ -116,13 +116,7 @@ export function GuardrailPoliciesPage() {
       id: "status",
       header: "Status",
       cell: (p) =>
-        p.validated ? (
-          <Badge variant="success">valid</Badge>
-        ) : (
-          <Badge variant="warning" title={p.reason}>
-            {p.reason || "invalid"}
-          </Badge>
-        ),
+        <StatusBadge ready={p.validated} phase={p.validated ? undefined : p.reason} />,
     },
   ];
 

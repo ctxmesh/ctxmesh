@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, StatusBadge, type Column, type DataTableError } from "@/components/kit";
 import { api, ApiError, type SecretBindingSummary } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
@@ -196,9 +195,7 @@ export function SecretBindingsPage() {
       header: "Status",
       className: "w-32",
       cell: (s) => (
-        <Badge variant={s.ready ? "success" : "warning"}>
-          {s.phase || (s.ready ? "Resolved" : "Pending")}
-        </Badge>
+        <StatusBadge ready={s.ready} phase={s.phase} />
       ),
     },
     ...(canEdit || canDelete
