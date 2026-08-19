@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { TenantsPage } from "@/pages/tenants-page";
@@ -59,6 +59,41 @@ afterEach(() => {
 });
 
 describe("TenantsPage", () => {
+  it("creates a tenant via the New tenant form (M99 C4)", async () => {
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url === "/api/tenants" && method === "POST") {
+          posts.push(String(init?.body));
+          return Promise.resolve({
+            ok: true,
+            status: 201,
+            json: async () => ({ name: "acme", namespaces: ["team-a"], memberNamespaces: 1, ready: false }),
+          } as Response);
+        }
+        if (url === "/api/tenants" && method === "GET") {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ items: [] }) } as Response);
+        }
+        return Promise.resolve({ ok: false, status: 501, json: async () => ({}) } as Response);
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("new-tenant-button"));
+    fireEvent.change(screen.getByTestId("new-tenant-name"), { target: { value: "acme" } });
+    fireEvent.change(screen.getByTestId("new-tenant-namespaces"), { target: { value: "team-a, team-b" } });
+    fireEvent.click(screen.getByTestId("new-tenant-submit"));
+
+    await waitFor(() => expect(posts.length).toBe(1));
+    const body = JSON.parse(posts[0]);
+    expect(body.name).toBe("acme");
+    expect(body.namespaces).toEqual(["team-a", "team-b"]);
+    expect(body.networkIsolation).toBe(true); // secure-by-default
+  });
+
   it("lists tenants with their member count + status", async () => {
     installFetch({
       tenants: {
