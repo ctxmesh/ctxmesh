@@ -5,7 +5,13 @@
 # with `kubectl apply -k config/run-worker` once the `run-store` + `bff-capability` Secrets exist.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: system
+# The default install namespace (config/default). A standalone `kustomize build config/run-worker |
+# kubectl apply` must target the SAME namespace the control plane installed into, or it lands in a
+# non-existent `system` ns with a dangling SA (OPS-4e). This overlay carries no namePrefix on purpose:
+# the run-worker Deployment name (`run-worker`) is referenced verbatim by the ScaledObject's
+# scaleTargetRef, which kustomize's name-reference transformer does NOT rewrite for a CRD — a prefix
+# would silently break the KEDA target. The bff SA is name-aligned explicitly on the Deployment below.
+namespace: agent-engine-system
 resources:
   - deployment.yaml
   - scaledobject.yaml
