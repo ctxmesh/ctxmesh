@@ -121,6 +121,11 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// envValueTrue is the canonical "on" value for the boolean-ish env toggles the controller reads
+// (a static "true" the chart/kustomize sets). One const so the several os.Getenv()=="true" gates
+// share a spelling (goconst).
+const envValueTrue = "true"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -281,7 +286,7 @@ func main() {
 	// and the locked credential namespace. Shared by the deployment (injects the sidecar) and
 	// binding (rewrites remote endpoints) reconcilers.
 	oboEgress := controller.OBOEgressConfig{
-		Enabled:                os.Getenv("MCP_OBO_EGRESS_ENABLED") == "true",
+		Enabled:                os.Getenv("MCP_OBO_EGRESS_ENABLED") == envValueTrue,
 		SidecarImage:           os.Getenv("EGRESS_SIDECAR_IMAGE"),
 		CapabilityPublicKeyB64: os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
 		CapabilityAudience:     os.Getenv("MCP_CAPABILITY_AUDIENCE"),
@@ -334,6 +339,12 @@ func main() {
 		// which ImagePullBackOff off a kind cluster, so a real install sets these.
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
 		DiscoveryImage: strings.TrimSpace(os.Getenv("DISCOVERY_IMAGE")),
+		// Dev data plane gate (OPS-2): whether to inject the DEV-ONLY object-store + Langfuse
+		// feedback creds into agent pods. From DEV_DATA_PLANE, which the chart templates from
+		// .Values.devDataPlane.enabled (true == the kustomize dev posture; profile=production sets
+		// it false). False ⇒ neither dev credential family is injected, so a production render
+		// never ships the bundled dev.local creds.
+		DevDataPlane: strings.TrimSpace(os.Getenv("DEV_DATA_PLANE")) == envValueTrue,
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
 		StatelayerProxyURL: strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL")),
@@ -582,7 +593,7 @@ func main() {
 	// needs webhook serving certs + a ValidatingWebhookConfiguration (config/webhook) — a user-gated deploy
 	// step the base install does not yet wire (no cert-manager). When enabled, only the Tenant controller's
 	// SA (TENANT_WEBHOOK_CONTROLLER_SA) may set/change the `agents.ctxmesh.ai/tenant` namespace label.
-	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == "true" {
+	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
 		// audit P2-2: an empty controller SA would deny EVERYONE — including the Tenant controller's own
 		// label stamping — wedging every Tenant reconcile once the VWC is applied. Refuse to start rather
 		// than ship a self-inflicted lockout.

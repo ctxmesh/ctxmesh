@@ -121,7 +121,16 @@ const (
 // store (address + dev creds). One helper for every injection site (launcher blob offload, M78
 // record fixture sinks) so the names + values stay in lockstep. Values are reconcile-time
 // constants — NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom guard).
-func objectStoreEnv() []corev1.EnvVar {
+//
+// OPS-2: the triple is DEV-ONLY (the bundled MinIO). It is injected ONLY when the dev data plane is
+// enabled (devDataPlane=false ⇒ nil, no injection), so a `profile: production` install never ships
+// the dev.local object-store creds into agent pods — a record-capable agent there then C2-fails-
+// closed on the absent store rather than pointing at a non-existent dev MinIO (the correct posture:
+// production has not provisioned a durable store, so record/blob-offload is feature-off).
+func objectStoreEnv(devDataPlane bool) []corev1.EnvVar {
+	if !devDataPlane {
+		return nil
+	}
 	return []corev1.EnvVar{
 		{Name: envObjectStoreAddr, Value: objectStoreAddr},
 		{Name: envObjectStoreAccessKey, Value: objectStoreDevAccessKey},
@@ -251,6 +260,16 @@ type AgentDeploymentReconciler struct {
 	// reachable registry (wired through the chart, OPS-4).
 	CollectorImage string
 	DiscoveryImage string
+
+	// DevDataPlane gates injection of the DEV-ONLY blob-offload/record object-store creds and the
+	// dev Langfuse feedback-scores creds into agent pods (OPS-2). Set from the controller's
+	// DEV_DATA_PLANE env, which the Helm chart templates from `.Values.devDataPlane.enabled`
+	// (default true == the kustomize dev posture; a `profile: production` install sets it false).
+	// False ⇒ neither dev credential family is injected, so a production render never ships the
+	// bundled dev.local creds — the launcher already treats an absent object store / LANGFUSE_HOST
+	// as feature-off (blob offload / record fixtures / feedback scores simply do not run). The
+	// creds themselves remain deterministic dev-only non-secrets; this gate governs INJECTION.
+	DevDataPlane bool
 
 	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
 	// is injected into memory-bound agents so the launcher reverse-proxies session/
@@ -946,7 +965,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if recordCapable {
 		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
 		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv()...)
+			env = append(env, objectStoreEnv(r.DevDataPlane)...)
 		}
 	}
 
@@ -955,16 +974,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// credentials, and port are STATIC env (values known at reconcile time — NEVER
 	// valueFrom, the m5.7 Knative ksvc landmine; tier1 no-valueFrom guard asserts
 	// this). The dev creds match those seeded by `dev-up M=3` into the
-	// langfuse-otlp Secret and the Langfuse Helm chart. Injected unconditionally:
-	// feedback is always available to the launcher; it is a thin relay, no CRD
-	// surface in v1 (the FeedbackStore CRD is phase 2).
-	env = append(
-		env,
-		corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
-		corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
-		corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
-		corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
-	)
+	// langfuse-otlp Secret and the Langfuse Helm chart.
+	//
+	// OPS-2: these are DEV-ONLY Langfuse creds, so they inject ONLY when the dev data plane is
+	// enabled (devDataPlane=false ⇒ skipped) — a `profile: production` render never ships the
+	// dev.local feedback creds; with LANGFUSE_HOST absent the launcher simply does not start the
+	// feedback relay (feature-off). Prod-functional feedback against an operator-provided Langfuse
+	// (resolved from the langfuse-otlp Secret, like the collector path) is a carded follow-up
+	// (m52.G1a) — beyond this gate, whose charter is only to keep the dev creds out of production.
+	if r.DevDataPlane {
+		env = append(
+			env,
+			corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
+			corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
+			corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
+			corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
+		)
+	}
 
 	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
 	// RuntimeSpec as JSON and inject it as AGENT_RUNTIME — a STATIC platform env var
@@ -1408,7 +1434,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// record-mode block above — inject only when not already present (last-write
 		// semantics would otherwise leave a duplicate env entry).
 		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv()...)
+			env = append(env, objectStoreEnv(r.DevDataPlane)...)
 		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
@@ -1557,7 +1583,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
-			egressRoutesJSON(egressRoutes), recordCapable, toolPolicyMount, toolPolicyEnv))
+			egressRoutesJSON(egressRoutes), recordCapable, r.DevDataPlane, toolPolicyMount, toolPolicyEnv))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare

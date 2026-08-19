@@ -236,6 +236,19 @@ TOKEN_SERVICE_URL_ENV_HELM = (
     '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}'
 )
 
+# OPS-2 — the dev-data-plane gate on the manager. config/manager hardcodes "true" (== the kustomize
+# dev posture, so the DEFAULT render matches, no drift); the chart templates it from
+# devDataPlane.enabled so a `profile: production` render sets it "false" and the controller injects
+# NO dev-only object-store / Langfuse feedback creds into agent pods (OPS-2). One source of truth
+# with the bundled dev Valkey/MinIO, which are gated on the same value.
+DEV_DATA_PLANE_ENV_KUSTOMIZE = (
+    '        - name: DEV_DATA_PLANE\n' '          value: "true"'
+)
+DEV_DATA_PLANE_ENV_HELM = (
+    "        - name: DEV_DATA_PLANE\n"
+    "          value: {{ .Values.devDataPlane.enabled | quote }}"
+)
+
 # Resources whose `control-plane:` label marks them as the bundled DEV data
 # plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
@@ -395,6 +408,9 @@ def substitute(doc: str) -> str:
     doc = doc.replace(MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE, MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM)
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
+    # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
+    # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
+    doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
     return doc
