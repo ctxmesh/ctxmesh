@@ -953,6 +953,22 @@ spec:
           value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
         - name: CONSOLE_URL
           value: {{ .Values.bff.consoleURL | default "" | quote }}
+        - name: COLLECTOR_IMAGE
+          value: {{ .Values.controllerManager.injectedImages.collector | default "" | quote }}
+        - name: DISCOVERY_IMAGE
+          value: {{ .Values.controllerManager.injectedImages.discovery | default "" | quote }}
+        - name: MCP_OBO_EGRESS_ENABLED
+          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+        - name: EGRESS_SIDECAR_IMAGE
+          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
+        - name: MCP_CAPABILITY_PUBLIC_KEY
+          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}
+        - name: MCP_CAPABILITY_AUDIENCE
+          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
+        - name: MCP_CREDENTIAL_NAMESPACE
+          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+        - name: TOKEN_SERVICE_URL
+          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters
