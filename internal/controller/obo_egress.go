@@ -88,7 +88,8 @@ type OBOEgressConfig struct {
 // starts with no policy). This task is PLUMBING only — the policy is delivered + parsed + held but
 // NOT yet enforced (enforcement is a later M82 task).
 func egressSidecarContainer(
-	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string, recordCapable bool,
+	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string,
+	recordCapable, devDataPlane bool,
 	toolPolicyMount *corev1.VolumeMount, toolPolicyEnv []corev1.EnvVar,
 ) corev1.Container {
 	env := []corev1.EnvVar{
@@ -116,7 +117,7 @@ func egressSidecarContainer(
 	// STATIC env (reconcile-time constants), never valueFrom.
 	if recordCapable {
 		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
-		env = append(env, objectStoreEnv()...)
+		env = append(env, objectStoreEnv(devDataPlane)...)
 	}
 	// Tool-call governance (M82, ADR 0074 §1): the resolved tool-policy file path (TOOL_POLICY_FILE)
 	// — STATIC (a mounted path, never valueFrom). Appended after the record env so the sidecar reads

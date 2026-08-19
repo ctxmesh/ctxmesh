@@ -969,6 +969,8 @@ spec:
           value: {{ .Values.bff.mcp.credentialNamespace | quote }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}
+        - name: DEV_DATA_PLANE
+          value: {{ .Values.devDataPlane.enabled | quote }}
         envFrom:
         - secretRef:
             name: bff-adapters

@@ -105,6 +105,13 @@ spec:
             value: ""
           - name: TOKEN_SERVICE_URL
             value: ""
+          # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
+          # controller inject the DEV-ONLY object-store + Langfuse feedback creds into agent pods;
+          # gen_helm_chart templates it to {{ .Values.devDataPlane.enabled }}, so a
+          # `profile: production` render (devDataPlane off) sets it "false" and NO dev creds are
+          # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
+          - name: DEV_DATA_PLANE
+            value: "true"
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
