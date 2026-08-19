@@ -38,6 +38,7 @@ func main() {
 	root.AddCommand(newDevCmd())
 	root.AddCommand(newEvalCmd())
 	root.AddCommand(newReplayServeCmd())
+	root.AddCommand(newDownloadFixtureCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
