@@ -1662,7 +1662,9 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
         // publish template endpoint
         if (url === "/api/templates" && method === "POST") {
           const status = opts.publishStatus ?? 200;
-          if (status >= 400) return j({ error: "forbidden" }, false, status);
+          // A server-truth 403 message (U15) — the dialog must PREFER it over the hardcoded role hint.
+          if (status >= 400)
+            return j({ error: "you must be a Tenant admin to publish org-wide" }, false, status);
           return j({ version: "v1", name: "billing", namespace: "prod" });
         }
 
@@ -1767,7 +1769,10 @@ describe("AgentDetailPage (m74.6) — Publish-as-template and needs-rebinding ba
     await waitFor(() => {
       expect(screen.getByTestId("publish-template-error")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(/team-admin/);
+    // U15: the dialog PREFERS the server's real message (server-truth) over the hardcoded role hint.
+    expect(screen.getByTestId("publish-template-error")).toHaveTextContent(
+      /you must be a Tenant admin to publish org-wide/,
+    );
     // The dialog stays open.
     expect(screen.getByRole("dialog", { name: /Share billing as template/ })).toBeInTheDocument();
   });
@@ -1973,6 +1978,48 @@ describe("AgentDetailPage (m76.3 U7) — published badge and unpublish", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("published-badge")).toBeNull();
     });
+  });
+
+  // U15: a FAILED unpublish must surface a toast (it used to be swallowed → the button looked dead)
+  // AND the published badge must stay (the template is still published).
+  it("surfaces a toast and keeps the badge when unpublish fails (U15)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = init?.method ?? "GET";
+        const j = (body: unknown, ok = true, status = 200) =>
+          Promise.resolve({ ok, status, json: async () => body, text: async () => JSON.stringify(body) } as Response);
+        if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
+        if (url.startsWith("/api/capabilities"))
+          return j({ namespace: "", allowed: { agentdeployments: { create: true, update: true, delete: true }, memorybindings: { create: true }, agentscalingpolicies: { create: true } } });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/references/)) return j({ references: [] });
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
+        if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
+        if (url === "/api/templates" && method === "POST") return j({ version: "2" });
+        // The DELETE (unpublish) FAILS.
+        if (url.match(/\/api\/templates\//) && method === "DELETE") return j({ error: "store unavailable" }, false, 500);
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/)) return j(DEFAULT_DETAIL, true, 200);
+        return j({}, false, 404);
+      }),
+    );
+
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(screen.getByTestId("publish-agent-button"));
+    await screen.findByRole("dialog", { name: /Share billing as template/ });
+    fireEvent.click(screen.getByTestId("publish-template-submit"));
+    await waitFor(() => expect(screen.getByTestId("unpublish-agent-button")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("unpublish-agent-button"));
+
+    // A failure toast appears (no longer swallowed) …
+    await waitFor(() => expect(screen.getByText("Couldn't unpublish")).toBeInTheDocument());
+    // … and the badge STAYS (the template is still published).
+    expect(screen.getByTestId("published-badge")).toBeInTheDocument();
   });
 });
 
