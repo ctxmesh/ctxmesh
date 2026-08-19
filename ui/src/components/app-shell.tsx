@@ -253,7 +253,7 @@ function ShellChrome() {
 
         <div className="flex min-h-screen flex-col">
           <header className="flex h-16 items-center justify-between border-b bg-card/50 px-8 backdrop-blur">
-            <h1 className="text-lg font-semibold tracking-tight">
+            <h1 className="whitespace-nowrap text-lg font-semibold tracking-tight">
               Control plane
             </h1>
             <div className="flex items-center gap-4">

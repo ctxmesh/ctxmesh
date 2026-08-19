@@ -138,7 +138,7 @@ export function McpApprovalsPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6" data-testid="mcp-approvals">
       <div>
-        <h2 className="text-2xl font-semibold tracking-tight">MCP approval queue</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">MCP Approvals</h2>
         <p className="text-sm text-muted-foreground">
           Pending MCP servers submitted by users — approve to add them to the
           catalog, or reject to remove them.
