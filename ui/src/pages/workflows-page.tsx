@@ -221,7 +221,7 @@ export function WorkflowsPage() {
           icon: GitFork,
           title: "No workflows",
           description:
-            "No Workflow CRs defined yet. Apply a Workflow manifest with kubectl to define a declarative graph of agent invocations.",
+            "No workflows yet. A workflow is a declarative graph of agent invocations — conditional branching, map/loop control flow, and deterministic execution.",
         }}
       />
 
