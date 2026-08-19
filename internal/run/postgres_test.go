@@ -389,6 +389,38 @@ func TestPostgresStore_ReclaimExpiredLease(t *testing.T) {
 	assert.ErrorIs(t, s.Heartbeat("r1", "w1", time.Minute), ErrLeaseLost)
 }
 
+// TestPostgresStore_ReleaseLease proves D4: a worker that releases its lease (a graceful-drain
+// hand-off) makes the run IMMEDIATELY reclaimable by a peer — no full lease-TTL wait — while a fresh
+// unreleased lease stays non-reclaimable. Release is scoped to the holding worker: a foreign
+// worker's release is a no-op.
+func TestPostgresStore_ReleaseLease(t *testing.T) {
+	s := openPGStore(t)
+	var mu sync.Mutex
+	current := t0
+	s.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return current }
+
+	require.NoError(t, s.Create(New("r1", "ns", "a", nil, "", t0)))
+	claimed, err := s.ClaimQueued("w1", time.Minute) // lease expires at t0+1m — not yet reclaimable
+	require.NoError(t, err)
+	require.Equal(t, "w1", claimed.WorkerID)
+
+	// A non-holder's release is a no-op — the lease stays fresh, still not reclaimable.
+	require.NoError(t, s.ReleaseLease("r1", "w-other"))
+	_, err = s.ClaimReclaimable("w2", time.Minute)
+	assert.ErrorIs(t, err, ErrNoQueuedRun, "a foreign release must not free the lease")
+
+	// The holder releases → immediately reclaimable (no TTL wait), resumed running by the peer.
+	require.NoError(t, s.ReleaseLease("r1", "w1"))
+	reclaimed, err := s.ClaimReclaimable("w2", time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, "r1", reclaimed.ID)
+	assert.Equal(t, "w2", reclaimed.WorkerID, "released lease re-leased to the reclaiming peer")
+	assert.Equal(t, StatusRunning, reclaimed.Status, "release + reclaim resumes, never restarts")
+
+	// The draining worker's heartbeat now fails — it handed the lease off.
+	assert.ErrorIs(t, s.Heartbeat("r1", "w1", time.Minute), ErrLeaseLost)
+}
+
 // --- M67 (ADR 0060): the waiting state + the transactional cross-run wake, on REAL Postgres --------
 
 // pgMkWaitingParent creates parent "p" parked in `waiting` on the given children (mode) against real
