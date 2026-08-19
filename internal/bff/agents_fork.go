@@ -321,7 +321,10 @@ func (s *Server) forkFromSourceSpec(r *http.Request, caller client.Client, sourc
 	// detail (m74.6) surfaces a degraded/needs-attention state. Best-effort: a label-stamp
 	// failure does not fail the fork (the arrays already carry the honest signal).
 	if len(needsRebinding) > 0 {
-		if lErr := s.stampForkNeedsRebinding(ctx, caller, callerNS, localName); lErr != nil {
+		// Persist the SPECIFIC dangling refs (needsRebinding ∪ unresolvedRefs) so the detail banner
+		// itemizes them (U14), not just the transient toast.
+		allRefs := append(append([]string{}, needsRebinding...), unresolvedRefs...)
+		if lErr := s.stampForkNeedsRebinding(ctx, caller, callerNS, localName, allRefs); lErr != nil {
 			s.log.Error(lErr, "fork: stamping needs-rebinding label failed", "namespace", callerNS, "name", localName)
 		}
 	}
@@ -368,12 +371,21 @@ func (s *Server) stampForkProvenance(ctx context.Context, caller client.Client, 
 	return nil
 }
 
-// stampForkNeedsRebinding patches the degraded-status label (labelForkNeedsRebinding="true")
-// onto the forked AgentDeployment, caller-scoped (ADR 0068 §5). A merge patch touches only the
-// label — it never clobbers spec/status. Called only when the ref-closure left at least one
-// unresolvable rebinding, so the agent detail can surface a needs-attention state. Errors are
-// returned (not swallowed) for the caller to log; a stamp failure does not fail the fork.
-func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string) error {
+// annForkUnresolvedRefs is the annotation holding the JSON array of the fork's specific dangling
+// ref names (already human-readable + category-prefixed, e.g. "model route: x", "prompt: y", a tool
+// name). It rides ALONGSIDE labelForkNeedsRebinding so the agent-detail banner can ITEMIZE the real
+// refs (U14) instead of showing generic steps — an annotation (not a label) because the value is an
+// arbitrary-length list that cannot fit a K8s label value. Read only while the banner is shown (which
+// is gated on the LABEL), so a lingering annotation on a since-resolved agent is never surfaced.
+const annForkUnresolvedRefs = "agents.ctxmesh.ai/fork-unresolved-refs"
+
+// stampForkNeedsRebinding patches the degraded-status label (labelForkNeedsRebinding="true") — and
+// the specific dangling-ref names as an annotation (U14) — onto the forked AgentDeployment,
+// caller-scoped (ADR 0068 §5). A merge patch touches only metadata — it never clobbers spec/status.
+// Called only when the ref-closure left at least one unresolvable rebinding, so the agent detail can
+// surface a needs-attention state + list exactly what dangles. Errors are returned (not swallowed)
+// for the caller to log; a stamp failure does not fail the fork.
+func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Client, ns, name string, refs []string) error {
 	var ad agentsv1alpha1.AgentDeployment
 	if gErr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		return gErr
@@ -385,6 +397,19 @@ func (s *Server) stampForkNeedsRebinding(ctx context.Context, caller client.Clie
 	}
 	lbls[labelForkNeedsRebinding] = labelValueTrue
 	ad.SetLabels(lbls)
+	// Persist the specific ref names so the detail banner itemizes them durably (survives reload),
+	// not just the transient fork toast. Best-effort: a marshal failure just omits the annotation
+	// (the banner falls back to its generic guidance) — never fails the stamp.
+	if len(refs) > 0 {
+		if raw, mErr := json.Marshal(refs); mErr == nil {
+			anns := ad.GetAnnotations()
+			if anns == nil {
+				anns = map[string]string{}
+			}
+			anns[annForkUnresolvedRefs] = string(raw)
+			ad.SetAnnotations(anns)
+		}
+	}
 	return caller.Patch(ctx, &ad, client.MergeFrom(base))
 }
 

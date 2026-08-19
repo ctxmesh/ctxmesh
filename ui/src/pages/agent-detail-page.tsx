@@ -63,10 +63,6 @@ import {
   type RunSummary,
 } from "@/lib/api";
 
-// FORK_NEEDS_REBINDING_LABEL is the Kubernetes label the operator sets on a
-// forked agent that has unresolved references (model route, tools). Its presence
-// in the agent's labels drives the "Needs attention" banner (m74.6).
-const FORK_NEEDS_REBINDING_LABEL = "agents.ctxmesh.ai/fork-needs-rebinding";
 // Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
 // Used for lineage display (U12, m76.3) and banner repair links (U5).
 const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
@@ -222,10 +218,11 @@ export function AgentDetailPage() {
 
   const detail = state.detail;
 
-  // m74.6: fork-needs-rebinding banner — visible when the label is set on the
-  // AgentDeployment CR (the operator stamps it at fork time when refs are dangling).
-  const needsRebinding =
-    detail.labels?.[FORK_NEEDS_REBINDING_LABEL] === "true";
+  // m74.6 / U14: fork-needs-rebinding banner — driven by the explicit `needsRebinding` flag the BFF
+  // now sends (it previously keyed on a `labels` map the BFF never populated → the banner was dead in
+  // production). `forkUnresolvedRefs` carries the SPECIFIC dangling refs to itemize.
+  const needsRebinding = detail.needsRebinding === true;
+  const unresolvedRefs = detail.forkUnresolvedRefs ?? [];
 
   return (
     <div className="mx-auto max-w-5xl space-y-6" data-testid="agent-detail-page">
@@ -277,31 +274,89 @@ export function AgentDetailPage() {
                 This agent was forked from a template but has unresolved references.
                 Complete the steps below so it can run successfully.
               </p>
-              {/* U5: actionable line items with repair links */}
-              <ul className="space-y-1 text-sm">
-                {!detail.modelRoute && (
-                  <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                    <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                    <Link
-                      to="/routes"
-                      className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                      data-testid="rebind-model-route-link"
-                    >
-                      Connect a model route
-                    </Link>
-                    <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
-                  </li>
+              {/* U5 + U14: itemize the ACTUAL dangling refs (when the BFF recorded them) with the
+                  right repair action per category — no more generic "review and bind tools" line
+                  that showed even when nothing tool-shaped dangled. */}
+              <ul className="space-y-1 text-sm" data-testid="rebind-ref-list">
+                {unresolvedRefs.length > 0 ? (
+                  unresolvedRefs.map((ref, i) => {
+                    const isRoute = ref.startsWith("model route:");
+                    const isPrompt = ref.startsWith("prompt:");
+                    const isEval = ref.startsWith("evalSuite:");
+                    const isTool = !isRoute && !isPrompt && !isEval;
+                    return (
+                      <li
+                        key={`${ref}-${i}`}
+                        className="flex items-center gap-2 text-amber-800 dark:text-amber-300"
+                        data-testid={`rebind-ref-${i}`}
+                      >
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        <span className="font-medium">{ref}</span>
+                        {isRoute && (
+                          <Link
+                            to="/routes"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                            data-testid="rebind-model-route-link"
+                          >
+                            — connect a model route
+                          </Link>
+                        )}
+                        {isTool && (
+                          <button
+                            onClick={() => setTab("Bindings")}
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                            data-testid="rebind-bindings-tab-link"
+                          >
+                            — bind in the Bindings tab
+                          </button>
+                        )}
+                        {isPrompt && (
+                          <Link
+                            to="/prompts"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          >
+                            — add the prompt
+                          </Link>
+                        )}
+                        {isEval && (
+                          <Link
+                            to="/evals"
+                            className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          >
+                            — add the eval suite
+                          </Link>
+                        )}
+                      </li>
+                    );
+                  })
+                ) : (
+                  // Fallback for an older fork (label present, no ref annotation): generic guidance.
+                  <>
+                    {!detail.modelRoute && (
+                      <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                        <Link
+                          to="/routes"
+                          className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                          data-testid="rebind-model-route-link"
+                        >
+                          Connect a model route
+                        </Link>
+                        <span className="text-amber-600 dark:text-amber-400 text-xs">— required to run</span>
+                      </li>
+                    )}
+                    <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                      <button
+                        onClick={() => setTab("Bindings")}
+                        className="underline hover:text-amber-600 dark:hover:text-amber-200"
+                        data-testid="rebind-bindings-tab-link"
+                      >
+                        Review and bind tools in the Bindings tab
+                      </button>
+                    </li>
+                  </>
                 )}
-                <li className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                  <button
-                    onClick={() => setTab("Bindings")}
-                    className="underline hover:text-amber-600 dark:hover:text-amber-200"
-                    data-testid="rebind-bindings-tab-link"
-                  >
-                    Review and bind tools in the Bindings tab
-                  </button>
-                </li>
               </ul>
               <p className="text-xs text-amber-600 dark:text-amber-400">
                 This banner clears once the operator confirms all references are resolved.

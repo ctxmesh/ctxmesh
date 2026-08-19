@@ -214,9 +214,16 @@ export interface AgentDetailResponse {
   };
   resourceVersion?: string;
   isDraft?: boolean;
-  // m74.6 — Kubernetes labels forwarded from the AgentDeployment CR. Used to
-  // surface the fork-needs-rebinding banner when the label is present.
+  // m74.6 — Kubernetes labels forwarded from the AgentDeployment CR. DEPRECATED (U14): the BFF
+  // never actually populated this, so the fork-needs-rebinding banner keyed on it was dead in
+  // production. Superseded by the explicit `needsRebinding` + `forkUnresolvedRefs` fields below.
   labels?: Record<string, string>;
+  // needsRebinding is true when the agent was forked with unresolvable references (U14) — drives the
+  // "connect resources before running" banner. forkUnresolvedRefs is the SPECIFIC list of dangling
+  // references (already human-readable + category-prefixed, e.g. "model route: x", "prompt: y", a
+  // tool name), so the banner itemizes exactly what to connect instead of showing generic steps.
+  needsRebinding?: boolean;
+  forkUnresolvedRefs?: string[];
 }
 
 // --- Agent update (PUT /api/agents/{ns}/{name}, m15.11) -----------------------
