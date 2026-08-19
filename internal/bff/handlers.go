@@ -419,6 +419,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	if allow != nil {
 		page.Runs = filterRunsToVisibleAgents(page.Runs, allow)
 	}
+	// Opt-in per-trace enrichment (ADR 0081): ?enrich= fills in REAL tokens + a coarse status by
+	// fetching each visible trace's /detail (the list API carries neither — M99/UI99). It is an N+1
+	// over the visible page, so it stays OFF by default (the hot path is cheap); when on it is bounded,
+	// cached, and fail-soft (a per-trace error leaves that row honest — "—"/blank). It runs AFTER the
+	// visible-agent filter so we never fetch detail for rows the caller cannot see.
+	if isTruthyParam(qs.Get("enrich")) {
+		page.Runs = s.enrichRunsWithDetail(r.Context(), page.Runs)
+	}
 	writeJSON(w, http.StatusOK, RunListResponse{Runs: page.Runs, NextCursor: page.NextCursor})
 }
 
