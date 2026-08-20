@@ -150,9 +150,39 @@ type guardrailPolicyConfig struct {
 	// gateway proxy (gateway.go) to build the per-user quota enforcer; nil ⇒ no per-user
 	// limit. The engine's content rules ignore it.
 	UserRateLimit *userRateLimitConfig `json:"userRateLimit,omitempty"`
+	// Streaming is the K2 (ADR 0086) opt-in to span-suppression streaming. nil / mode!="Enabled"
+	// ⇒ buffered-only (the M66 default). Read by the bundle builder to compute stream eligibility.
+	Streaming *streamingGuardrailConfig `json:"streaming,omitempty"`
 	// failMode is "closed" (default) or "open". Retained so a future task can honor
 	// it at engine-run failures; the load path itself is always fail-closed.
 	FailMode string `json:"failMode,omitempty"`
+}
+
+// streamingGuardrailConfig mirrors StreamingGuardrail's JSON (K2, ADR 0086).
+type streamingGuardrailConfig struct {
+	Mode string `json:"mode,omitempty"`
+}
+
+// streamModeEnabled is the StreamingGuardrail.mode value that opts a stream-safe policy into
+// span-suppression streaming. Any other value (incl. the "Disabled" default) ⇒ buffered-only.
+const streamModeEnabled = "Enabled"
+
+// parseStreamingMode extracts spec.streaming.mode from the raw policy JSON, mirroring
+// parseUserRateLimit's shape. "" (no streaming section) ⇒ the buffered-only default. A policy
+// that does not parse is a hard error (the same fail-closed load posture; the controller already
+// validated it, so this is defence-in-depth).
+func parseStreamingMode(policyJSON string) (string, error) {
+	if policyJSON == "" {
+		return "", nil
+	}
+	var cfg guardrailPolicyConfig
+	if err := json.Unmarshal([]byte(policyJSON), &cfg); err != nil {
+		return "", fmt.Errorf("guardrail: parsing GUARDRAIL_POLICY: %w", err)
+	}
+	if cfg.Streaming == nil {
+		return "", nil
+	}
+	return cfg.Streaming.Mode, nil
 }
 
 // userRateLimitConfig mirrors UserRateLimit's JSON (api/v1beta1). Zero/blank fields ⇒
@@ -697,8 +727,8 @@ func (gp *gatewayProxy) writeGuardrailStreamingUnsupported(w http.ResponseWriter
 //   - unparseable request JSON ⇒ can't locate the messages to scan (scanRequest).
 //   - a redaction that cannot be re-serialised ⇒ never forward the raw content.
 func (gp *gatewayProxy) applyRequestGuardrail(
-	w http.ResponseWriter, span trace.Span, r *http.Request, pol *guardrailBundle,
-) (refused bool) {
+	w http.ResponseWriter, span trace.Span, r *http.Request, pol *guardrailBundle, allowStream bool,
+) (refused, streaming bool) {
 	// Buffer the body with a limit of maxGatewayReqBody + 1 sentinel byte: if the read
 	// yields MORE than the cap, the body is oversize and we fail closed rather than
 	// truncate-and-forward.
@@ -711,27 +741,32 @@ func (gp *gatewayProxy) applyRequestGuardrail(
 		gp.writeGuardrailBlocked(w, span, failDec)
 		gp.logf("launcher: gateway: guardrail fail-closed BLOCK (request body read error: %v)", err)
 		gp.fireGuardrailBlockAudit(r, failDec) // m66.9: durable record even for fail-closed blocks
-		return true
+		return true, false
 	}
 	if oversize {
 		failDec := guardrailDecision{blocked: true, detector: "oversize-request", action: actionBlock, scanPoint: scanInput}
 		gp.writeGuardrailBlocked(w, span, failDec)
 		gp.logf("launcher: gateway: guardrail fail-closed BLOCK (request body exceeds %d bytes)", maxGatewayReqBody)
 		gp.fireGuardrailBlockAudit(r, failDec) // m66.9: durable record even for fail-closed blocks
-		return true
+		return true, false
 	}
 
-	// Streaming incompatibility check (m66.6, ADR 0059 §4): a guarded agent MUST NOT
-	// use stream:true. Output-blocking cannot un-send tokens already streamed to the
-	// client, so the guardrail can only work on a fully-buffered response. Reject the
-	// call with a typed guardrail_streaming_unsupported BEFORE content-scanning.
-	// This uses the already-buffered body (parseChatBody is cheap) — no extra read.
+	// Streaming gate (m66.6 / K2, ADR 0059 §4 + ADR 0086): by default a guarded agent MUST NOT
+	// use stream:true — output-blocking cannot un-send tokens already streamed, so the guardrail
+	// needs a fully-buffered response, and the call is refused with a typed
+	// guardrail_streaming_unsupported. When allowStream is set (the policy opted into
+	// span-suppression streaming AND is stream-safe AND this is not a recorded run), we do NOT
+	// refuse: the INPUT is still scanned below, and serve() takes the SSE hold-release path (the
+	// only path that scans a streamed completion). Uses the already-buffered body (no extra read).
 	if requestHasStreamTrue(buffered) {
-		// Restore the body so the caller is not surprised (though we return refused=true).
-		r.Body = io.NopCloser(bytes.NewReader(buffered))
-		r.ContentLength = int64(len(buffered))
-		gp.writeGuardrailStreamingUnsupported(w, span)
-		return true
+		if !allowStream {
+			// Restore the body so the caller is not surprised (though we return refused=true).
+			r.Body = io.NopCloser(bytes.NewReader(buffered))
+			r.ContentLength = int64(len(buffered))
+			gp.writeGuardrailStreamingUnsupported(w, span)
+			return true, false
+		}
+		streaming = true // eligible: fall through to scan the input, then stream the completion
 	}
 
 	res, forwardBody := pol.engine.scanRequest(buffered)
@@ -764,7 +799,7 @@ func (gp *gatewayProxy) applyRequestGuardrail(
 		// m66.9: fire the durable compliance record AFTER the refusal is written — the block is
 		// never delayed by the audit write (fire-and-forget goroutine, independent timeout).
 		gp.fireGuardrailBlockAudit(r, cause)
-		return true
+		return true, false
 	}
 
 	if res.redacted {
@@ -785,10 +820,10 @@ func (gp *gatewayProxy) applyRequestGuardrail(
 				dec.detector, dec.scanPoint)
 			// m66.9: durable compliance record for a semantic-judge block (same contract).
 			gp.fireGuardrailBlockAudit(r, dec)
-			return true
+			return true, false
 		}
 	}
-	return false
+	return false, streaming
 }
 
 // applyOutputGuardrail scans the buffered RESPONSE completion (choices[].message.content)

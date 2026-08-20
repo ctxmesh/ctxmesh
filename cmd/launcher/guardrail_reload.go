@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -57,6 +58,13 @@ type guardrailBundle struct {
 	engine     *guardrailEngine
 	judge      *semanticJudge
 	user       *userQuota
+	// streamEligible is true iff this policy opted into streaming (spec.streaming.mode=Enabled)
+	// AND it is provably stream-safe: every OUTPUT detector is bounded/non-empty/within the window
+	// cap AND there is no semanticJudge (K2, ADR 0086). false ⇒ a guarded agent stays buffered-only
+	// (stream:true is refused). streamWindow is the rune hold-window W the scanner uses; valid only
+	// when streamEligible.
+	streamEligible bool
+	streamWindow   int
 }
 
 // guardrailHolder guards the current guardrailBundle behind an RWMutex so the fsnotify
@@ -116,7 +124,43 @@ func buildGuardrailBundle(policyJSON string, cfg gatewayConfig, logf func(string
 	if err != nil {
 		return nil, fmt.Errorf("user quota: %w", err)
 	}
-	return &guardrailBundle{policyJSON: policyJSON, engine: engine, judge: judge, user: user}, nil
+	eligible, window := evalStreamEligibility(policyJSON, engine, judge, logf)
+	return &guardrailBundle{
+		policyJSON: policyJSON, engine: engine, judge: judge, user: user,
+		streamEligible: eligible, streamWindow: window,
+	}, nil
+}
+
+// evalStreamEligibility decides whether this policy may serve STREAMING responses (K2, ADR 0086)
+// and the hold-window W the scanner needs. Eligible requires ALL of: the operator opted in
+// (spec.streaming.mode=Enabled); an active engine to guard; NO semanticJudge (it needs the whole
+// completion); and a stream-SAFE output rule set (analyzeOutputStreamability). Any miss ⇒ not
+// eligible (buffered-only) — a fail-safe default, never a silent weakening. A malformed policy
+// (which the engine builder already rejected) ⇒ not eligible. Non-eligibility is logged once at
+// build time (a visible, one-line operator signal), not on the request hot path.
+func evalStreamEligibility(
+	policyJSON string, engine *guardrailEngine, judge *semanticJudge, logf func(string, ...any),
+) (bool, int) {
+	mode, err := parseStreamingMode(policyJSON)
+	if err != nil || !strings.EqualFold(mode, streamModeEnabled) {
+		return false, 0 // not opted in (the default) — buffered-only, no log needed
+	}
+	if engine == nil {
+		return false, 0 // no policy to guard; the unguarded path handles stream:true itself
+	}
+	if judge != nil {
+		logf("launcher: gateway: streaming requested but a semanticJudge needs the whole completion " +
+			"→ buffered-only (ADR 0086)")
+		return false, 0
+	}
+	v := analyzeOutputStreamability(engine.output)
+	if !v.ok {
+		logf("launcher: gateway: streaming requested but the policy is not stream-safe (%s) → buffered-only "+
+			"(ADR 0086)", v.reason)
+		return false, 0
+	}
+	logf("launcher: gateway: streaming ENABLED (span-suppression, hold-window W=%d runes; ADR 0086)", v.window)
+	return true, v.window
 }
 
 // readGuardrailPolicyFile reads the mounted policy file. A missing file OR an empty/whitespace

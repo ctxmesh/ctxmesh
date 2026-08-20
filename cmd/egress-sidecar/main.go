@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,15 +82,29 @@ func run(log logr.Logger) error {
 		audience = defaultCapabilityAudience
 	}
 
-	// The routes the controller rendered from the agent's bindings (m25.8). Required — with
-	// no routes the sidecar fronts nothing.
-	routesJSON := strings.TrimSpace(os.Getenv("EGRESS_ROUTES"))
-	if routesJSON == "" {
-		return errors.New("EGRESS_ROUTES is required (the JSON server route table)")
-	}
-	routes, err := egress.ParseRouteTable([]byte(routesJSON))
-	if err != nil {
-		return err
+	// The routes the controller rendered from the agent's bindings (m25.8), delivered EITHER as a
+	// hot-reloadable mounted ConfigMap file (EGRESS_ROUTES_FILE — J7: a remote-tool-URL edit takes
+	// effect on the running sidecar WITHOUT a revision roll) OR, legacy, as the static EGRESS_ROUTES
+	// env. At least one is required — with no routes the sidecar fronts nothing.
+	var (
+		routes       egress.RouteTable   // static (EGRESS_ROUTES) — used when no file is mounted.
+		routesHolder *egress.RouteHolder // hot-reloadable (EGRESS_ROUTES_FILE) — supersedes when set.
+	)
+	routesFile := strings.TrimSpace(os.Getenv("EGRESS_ROUTES_FILE"))
+	if routesFile != "" {
+		routesHolder = &egress.RouteHolder{}
+		if lErr := loadInitialRoutes(routesHolder, routesFile, log); lErr != nil {
+			return fmt.Errorf("loading EGRESS_ROUTES_FILE %q: %w", routesFile, lErr)
+		}
+	} else {
+		routesJSON := strings.TrimSpace(os.Getenv("EGRESS_ROUTES"))
+		if routesJSON == "" {
+			return errors.New("EGRESS_ROUTES or EGRESS_ROUTES_FILE is required (the JSON server route table)")
+		}
+		routes, err = egress.ParseRouteTable([]byte(routesJSON))
+		if err != nil {
+			return err
+		}
 	}
 
 	// The agent's own namespace is the grant SOURCE namespace; the locked credential
@@ -151,6 +166,7 @@ func run(log logr.Logger) error {
 		ExpectedAgent:    expectedAgent,
 		ExpectedBoundary: expectedBoundary,
 		Routes:           routes,
+		RoutesHolder:     routesHolder, // J7: nil ⇒ the static Routes; set ⇒ the hot-reloadable table.
 		Log:              log,
 		Recorder:         recorder,
 		Policy:           policyHolder,
@@ -159,6 +175,8 @@ func run(log logr.Logger) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	// /metrics (J9): the per-(agent,tool) fan-out counter the proxy records at the tool-call chokepoint.
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/", proxy)
 
 	srv := &http.Server{Addr: listenAddr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
@@ -173,6 +191,15 @@ func run(log logr.Logger) error {
 		watchStop := make(chan struct{})
 		go watchToolPolicy(policyHolder, toolPolicyFile, log, watchStop)
 		defer close(watchStop)
+	}
+
+	// Routes hot-reload (J7): fsnotify-watch the mounted routes file so a controller-driven remote-tool-
+	// URL edit (an in-place ConfigMap update) reloads live — no restart, no revision roll. Only when the
+	// file-delivery seam is in use (EGRESS_ROUTES_FILE); the legacy static EGRESS_ROUTES env is fixed.
+	if routesFile != "" {
+		routesWatchStop := make(chan struct{})
+		go watchRoutes(routesHolder, routesFile, log, routesWatchStop)
+		defer close(routesWatchStop)
 	}
 
 	serveErr := make(chan error, 1)

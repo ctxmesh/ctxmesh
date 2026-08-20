@@ -402,16 +402,14 @@ func TestBinding_RegistryMismatch_ReadyFalse(t *testing.T) {
 	assertBindingReady(t, binding.Name, ns, metav1.ConditionFalse, reasonRegistryMismatch)
 }
 
-// TestBinding_RemoteURLUpdate_RollsRevision_M82 records the M82 front-all consequence (ADR 0074 §1):
-// with front-all always-on, a remote tool's REAL URL now lives in the egress sidecar's EGRESS_ROUTES
-// env (kept out of the agent manifest — the whole point of the chokepoint), NOT in the pushed CM. So
-// editing a remote URL is now a STRUCTURAL change (the sidecar's env must change → the pod must roll)
-// — it CHANGES the ksvc revision name. This SUPERSEDES the pre-M82 "remote-URL edit is a restart-free
-// hot-path CM push" invariant (which held only because the URL used to sit in the agent-visible CM).
-// The agent's manifest endpoint stays STABLE (it points at the sidecar under the server segment); the
-// churn is confined to the sidecar's route env. (A future routes-hot-reload seam could restore the
-// restart-free edit; deferred — not part of the M82 plumbing.)
-func TestBinding_RemoteURLUpdate_RollsRevision_M82(t *testing.T) {
+// TestBinding_RemoteURLUpdate_HotReloadsNoRoll_J7 proves J7 (the routes hot-reload seam the M82 test
+// this replaced anticipated): with front-all always-on, a remote tool's REAL URL lives in the egress
+// sidecar's route table (kept out of the agent manifest — the chokepoint's point). M82 delivered that
+// as a static env, so a URL edit ROLLED the revision. J7 delivers it as a hot-reloadable
+// <agent>-egress-routes ConfigMap the sidecar fsnotify-watches AND excludes the URL from the pod-template
+// digest, so a remote-URL edit now takes effect LIVE — the ksvc revision name is UNCHANGED (no roll) and
+// the new URL lands in the ConfigMap. The agent's manifest endpoint stays STABLE (the sidecar segment).
+func TestBinding_RemoteURLUpdate_HotReloadsNoRoll_J7(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "hotpath-agent", ns)
 
@@ -439,7 +437,8 @@ func TestBinding_RemoteURLUpdate_RollsRevision_M82(t *testing.T) {
 	require.Len(t, m1.Tools, 1)
 	assert.Equal(t, "http://127.0.0.1:8899/reg-hot", m1.Tools[0].Endpoint)
 
-	// Edit the remote URL. Under front-all this moves the real URL in the sidecar's EGRESS_ROUTES env.
+	// Edit the remote URL. Under front-all + J7 this updates the <agent>-egress-routes ConfigMap the
+	// sidecar hot-reloads — NOT the pod spec.
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), binding))
 	binding.Spec.Server.URL = "http://v2.svc/mcp"
 	require.NoError(t, k8sClient.Update(testCtx, binding))
@@ -449,12 +448,11 @@ func TestBinding_RemoteURLUpdate_RollsRevision_M82(t *testing.T) {
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
 
 	revAfter := getKsvc(t, agent.Name, ns).Spec.Template.Name
-	assert.NotEqual(t, revBefore, revAfter,
-		"M82: a remote-URL edit now ROLLS the revision — the real URL lives in the sidecar's env, "+
-			"so its change is structural (supersedes the pre-M82 restart-free hot-path push)")
+	assert.Equal(t, revBefore, revAfter,
+		"J7: a remote-URL edit does NOT roll the revision — the URL rides the hot-reloaded "+
+			"<agent>-egress-routes ConfigMap (excluded from the digest), so it takes effect live")
 
-	// The agent's manifest endpoint is UNCHANGED (still the sidecar under the server segment) — the
-	// real URL never rides the agent CM. The URL churn is confined to the sidecar's EGRESS_ROUTES env.
+	// The agent's manifest endpoint is UNCHANGED (still the sidecar under the server segment).
 	var cm2 corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: toolsConfigMapName(agent.Name), Namespace: ns}, &cm2))
@@ -464,12 +462,22 @@ func TestBinding_RemoteURLUpdate_RollsRevision_M82(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:8899/reg-hot", m2.Tools[0].Endpoint,
 		"the agent manifest endpoint stays the sidecar segment — the real URL never reaches the agent")
 
-	// The sidecar's EGRESS_ROUTES env carries the NEW real URL (kept out of the agent manifest).
+	// J7: the NEW real URL lands in the hot-reloadable <agent>-egress-routes ConfigMap (the sidecar
+	// fsnotify-reloads it), so the edit propagated WITHOUT the revision roll asserted above.
+	var routesCM corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: egressRoutesConfigMapName(agent.Name), Namespace: ns}, &routesCM))
+	assert.Contains(t, routesCM.Data[egressRoutesConfigMapKey], "http://v2.svc/mcp",
+		"the routes ConfigMap carries the updated real URL (hot-reloaded, no roll)")
+
+	// The sidecar reads the routes via EGRESS_ROUTES_FILE, not the static EGRESS_ROUTES env (J7).
 	ksvc := getKsvc(t, agent.Name, ns)
 	sidecar, ok := containerByName(ksvc.Spec.Template.Spec.Containers, egressSidecarContainerName)
 	require.True(t, ok)
-	routes, _ := envValue(sidecar, "EGRESS_ROUTES")
-	assert.Contains(t, routes.Value, "http://v2.svc/mcp", "the sidecar route table carries the updated real URL")
+	_, hasStatic := envValue(sidecar, "EGRESS_ROUTES")
+	assert.False(t, hasStatic, "J7: routes are delivered via the ConfigMap, not the static EGRESS_ROUTES env")
+	_, hasFile := envValue(sidecar, "EGRESS_ROUTES_FILE")
+	assert.True(t, hasFile, "the sidecar reads EGRESS_ROUTES_FILE")
 }
 
 // TestBinding_StructuralChange_RevisionNameChanged is the cold-path assertion:
