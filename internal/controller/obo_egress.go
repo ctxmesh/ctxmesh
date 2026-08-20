@@ -91,17 +91,25 @@ func egressSidecarContainer(
 	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string,
 	recordCapable, devDataPlane bool,
 	toolPolicyMount *corev1.VolumeMount, toolPolicyEnv []corev1.EnvVar,
+	routesMount *corev1.VolumeMount, routesEnv []corev1.EnvVar,
 ) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
 		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
 		{Name: "MCP_CREDENTIAL_NAMESPACE", Value: cfg.CredentialNamespace},
 		{Name: "EGRESS_AGENT", Value: agentIdentity},
-		{Name: "EGRESS_ROUTES", Value: routesJSON},
 		{Name: "POD_NAMESPACE", Value: namespace},
 		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
 		// port (the managed-agent's own listener collided at the default 8081).
 		{Name: "EGRESS_LISTEN_ADDR", Value: egressSidecarListenAddr},
+	}
+	// Routes delivery (J7): prefer the hot-reloadable mounted ConfigMap (EGRESS_ROUTES_FILE) so a
+	// remote-tool-URL edit reloads live without a revision roll; fall back to the static EGRESS_ROUTES
+	// env only when no routes mount is provided (dev/tests). The two are mutually exclusive.
+	if routesMount != nil {
+		env = append(env, routesEnv...)
+	} else {
+		env = append(env, corev1.EnvVar{Name: "EGRESS_ROUTES", Value: routesJSON})
 	}
 	// The trust boundary (ADR 0033) the sidecar serves — the agent's registry, or the agent
 	// itself. It supersedes EGRESS_AGENT as the scoping gate so registry teammates can redeem a
@@ -126,6 +134,9 @@ func egressSidecarContainer(
 	var mounts []corev1.VolumeMount
 	if toolPolicyMount != nil {
 		mounts = append(mounts, *toolPolicyMount)
+	}
+	if routesMount != nil {
+		mounts = append(mounts, *routesMount) // J7: the hot-reloadable routes ConfigMap.
 	}
 	return corev1.Container{
 		Name:         egressSidecarContainerName,
@@ -166,23 +177,27 @@ func egressRoutesJSON(routes []toolmanifest.Route) string {
 	return string(b)
 }
 
-// egressDigest folds the injected egress sidecar (image + routes + record flag) into the
-// pod-template structural digest, so adding/removing the sidecar, changing a route (the real
-// URL now lives in the sidecar env, not the hot-path manifest), OR toggling record mode
-// (which adds RECORD_CAPABLE + object-store env to the sidecar) rolls a new revision. Empty
-// when no route is present (the pod template is unchanged).
+// egressDigest folds the injected egress sidecar (image + record flag + boundary + routes PRESENCE)
+// into the pod-template structural digest, so adding/removing the sidecar, toggling record mode (which
+// adds RECORD_CAPABLE + object-store env), or a boundary change rolls a new revision. Empty when no
+// route is present (the pod template is unchanged).
+//
+// J7: the routes CONTENT (the real upstream URLs) is INTENTIONALLY EXCLUDED — it rides the watched
+// <agent>-egress-routes ConfigMap the sidecar hot-reloads, so a remote-tool-URL edit does NOT roll the
+// revision (it takes effect live). Only the PRESENCE of routes is folded; a route NAME add/remove is a
+// tool-manifest change already captured by toolmanifest.StructuralDigest, which rolls independently.
 func egressDigest(image, boundary string, routes []toolmanifest.Route, recordCapable bool) string {
 	if len(routes) == 0 {
 		return ""
 	}
 	type shape struct {
-		Image         string               `json:"image"`
-		ListenAddr    string               `json:"listenAddr"`
-		Boundary      string               `json:"boundary"`
-		RecordCapable bool                 `json:"recordCapable"`
-		Routes        []toolmanifest.Route `json:"routes"`
+		Image         string `json:"image"`
+		ListenAddr    string `json:"listenAddr"`
+		Boundary      string `json:"boundary"`
+		RecordCapable bool   `json:"recordCapable"`
+		HasRoutes     bool   `json:"hasRoutes"` // J7: presence only — the URLs ride the hot-reloaded ConfigMap.
 	}
-	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, RecordCapable: recordCapable, Routes: routes})
+	b, err := json.Marshal(shape{Image: image, ListenAddr: egressSidecarListenAddr, Boundary: boundary, RecordCapable: recordCapable, HasRoutes: len(routes) > 0})
 	if err != nil {
 		return "invalid"
 	}

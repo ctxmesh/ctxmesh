@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // ServerRoute is one remote MCP server the egress sidecar fronts: the grant server NAME
@@ -44,6 +45,52 @@ func (r ServerRoute) Target() *url.URL { return r.target }
 // endpoint at — http://127.0.0.1:PORT/<name>) to its ServerRoute. The controller renders
 // it from the agent's MCPToolBindings (m25.8); the sidecar loads it at start-up.
 type RouteTable map[string]ServerRoute
+
+// RouteHolder guards the current route table behind an RWMutex so the sidecar's fsnotify watcher can
+// atomically swap it while request goroutines read it (J7 — mirrors PolicyHolder / the launcher's
+// guardrail holder). Delivering the routes as a WATCHED, mounted ConfigMap (vs a static pod-spec env)
+// is what lets a remote-tool-URL edit take effect on the RUNNING sidecar WITHOUT a revision roll: the
+// edit updates the ConfigMap content the sidecar reloads, not the pod template. The zero value is an
+// empty holder; Load on a nil receiver returns nil so a caller can always read. It remembers the raw
+// JSON so a byte-identical (spurious) fsnotify event skips the reparse.
+type RouteHolder struct {
+	mu      sync.RWMutex
+	current RouteTable
+	rawJSON string
+}
+
+// Store swaps in a new route table under the write lock (the reload path). raw is the JSON it was
+// built from (for the unchanged-content skip).
+func (h *RouteHolder) Store(t RouteTable, raw string) {
+	h.mu.Lock()
+	h.current = t
+	h.rawJSON = raw
+	h.mu.Unlock()
+}
+
+// Load returns the current route table under the read lock. Safe on a nil receiver (an unwired
+// holder ⇒ nil), so the proxy can always read.
+func (h *RouteHolder) Load() RouteTable {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	t := h.current
+	h.mu.RUnlock()
+	return t
+}
+
+// RawEquals reports whether the held table was built from byte-identical raw JSON (the skip-reparse
+// fast path on a spurious fsnotify event).
+func (h *RouteHolder) RawEquals(raw string) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	eq := h.rawJSON == raw
+	h.mu.RUnlock()
+	return eq
+}
 
 // ParseRouteTable parses the JSON route config (a list of ServerRoute) into a keyed table,
 // validating each entry has a name and an absolute upstream URL. A route with a relative

@@ -135,8 +135,13 @@ func TestRecordMode_FrontsAllTools_SidecarInjected(t *testing.T) {
 		assert.Nil(t, e.ValueFrom, "sidecar env %q must be static (Knative no-valueFrom guard)", e.Name)
 	}
 	// The route table the sidecar fronts includes BOTH the remote tool's server (= RegistryRef) and
-	// the sidecar-mode tool (keyed on its tool name, routed to its in-pod localhost endpoint).
-	routes := env["EGRESS_ROUTES"].Value
+	// the sidecar-mode tool (keyed on its tool name, routed to its in-pod localhost endpoint). J7: the
+	// routes ride the hot-reloadable <agent>-egress-routes ConfigMap (EGRESS_ROUTES_FILE), not the env.
+	require.Contains(t, env, "EGRESS_ROUTES_FILE", "J7: record-capable sidecar reads routes from the mounted file")
+	var routesCM corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		client.ObjectKey{Name: egressRoutesConfigMapName(agent.Name), Namespace: ns}, &routesCM))
+	routes := routesCM.Data[egressRoutesConfigMapKey]
 	assert.Contains(t, routes, "reg-rec", "the record route table fronts the remote tool's server")
 	assert.Contains(t, routes, url, "the real URL lives in the sidecar route table, not the manifest")
 	assert.Contains(t, routes, "echo_tool", "the record route table ALSO fronts the in-pod sidecar tool")

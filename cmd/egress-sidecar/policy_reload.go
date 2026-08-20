@@ -35,9 +35,7 @@ package main
 import (
 	"errors"
 	"os"
-	"path/filepath"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/go-logr/logr"
 
 	"github.com/ctxmesh/agent-engine/internal/egress"
@@ -115,37 +113,5 @@ func reloadToolPolicy(holder *egress.PolicyHolder, path string, log logr.Logger)
 // is logged and the function returns — the initial policy stays active, just not reloadable (a
 // visible degradation, never a crash).
 func watchToolPolicy(holder *egress.PolicyHolder, path string, log logr.Logger, stop <-chan struct{}) {
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Info("egress: tool policy watch disabled (fsnotify init failed) — policy is fixed at startup",
-			"err", err.Error())
-		return
-	}
-	defer func() { _ = w.Close() }()
-
-	dir := filepath.Dir(path)
-	if err := w.Add(dir); err != nil {
-		log.Info("egress: tool policy watch disabled (watch add failed) — policy is fixed at startup",
-			"dir", dir, "err", err.Error())
-		return
-	}
-
-	for {
-		select {
-		case <-stop:
-			return
-		case ev, ok := <-w.Events:
-			if !ok {
-				return
-			}
-			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) != 0 {
-				reloadToolPolicy(holder, path, log)
-			}
-		case werr, ok := <-w.Errors:
-			if !ok {
-				return
-			}
-			log.Info("egress: tool policy watch error (KEEPING last-good policy)", "err", werr.Error())
-		}
-	}
+	watchFileReload(path, log, stop, "tool policy", func() { reloadToolPolicy(holder, path, log) })
 }
