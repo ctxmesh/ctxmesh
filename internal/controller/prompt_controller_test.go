@@ -177,8 +177,8 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 		types.NamespacedName{Name: "bare-agent", Namespace: namespace}, &bareKsvc))
 	bareHash, err := specHash(bare.Spec)
 	require.NoError(t, err)
-	assert.Equal(t, "bare-agent-"+bareHash, bareKsvc.Spec.Template.Name,
-		"a promptless agent must have the bare revision name (no -h suffix)")
+	assert.Equal(t, "bare-agent-"+bareHash+bareIdentitySuffix, bareKsvc.Spec.Template.Name,
+		"a promptless agent has the spec-hash revision name (+ the C7b identity-SA suffix)")
 	for _, e := range bareKsvc.Spec.Template.Spec.Containers[0].Env {
 		assert.NotEqual(t, envPromptFile, e.Name, "promptless agent must not get PROMPT_FILE")
 		assert.NotEqual(t, envPromptVersion, e.Name, "promptless agent must not get PROMPT_VERSION")
