@@ -61,3 +61,26 @@ func TestStatelayerProxylessWarning(t *testing.T) {
 		t.Errorf("a configured proxy URL must be silent, got warn=%v msg=%q", warn, msg)
 	}
 }
+
+// TestLauncherImageDigestWarning covers the C8b startup preflight: a mutable-tag LAUNCHER_IMAGE warns
+// (injection is fleet-RCE-equivalent and will be skipped fail-safe); a digest-pinned or empty value is silent.
+func TestLauncherImageDigestWarning(t *testing.T) {
+	// Mutable tags (or bare) → warn.
+	for _, img := range []string{"ghcr.io/ctxmesh/launcher:v1", "launcher:latest", "launcher"} {
+		msg, warn := launcherImageDigestWarning(img)
+		if !warn {
+			t.Errorf("a non-pinned LAUNCHER_IMAGE (%q) must warn", img)
+		}
+		for _, want := range []string{"LAUNCHER_IMAGE", "digest-pinned", "SKIPPED"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("warning %q missing %q", msg, want)
+			}
+		}
+	}
+	// Empty (injection off) or a digest-pinned reference → silent.
+	for _, img := range []string{"", "ghcr.io/ctxmesh/launcher:v1@sha256:" + strings.Repeat("a", 64)} {
+		if msg, warn := launcherImageDigestWarning(img); warn || msg != "" {
+			t.Errorf("a digest-pinned/empty LAUNCHER_IMAGE (%q) must be silent, got warn=%v", img, warn)
+		}
+	}
+}
