@@ -91,6 +91,8 @@ func TestHTTPQuotaRoundTrips(t *testing.T) {
 
 // A 404 (the proxy has no tenant for this namespace) maps to the PERMISSIVE value
 // per op — the launcher's existing nil-quota "allow" path.
+//
+//nolint:dupl // structurally mirrors TestHTTPUserStore404Permissive (user-quota path) — distinct types under test.
 func TestHTTPQuota404Permissive(t *testing.T) {
 	ctx := context.Background()
 	s := newTestProxyStore(t, func(w http.ResponseWriter, _ *http.Request) {

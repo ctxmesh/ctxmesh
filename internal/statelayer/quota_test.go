@@ -88,6 +88,7 @@ func newQuotaProxy(t *testing.T, byToken, nsToTenant map[string]string, auth Pod
 	s, err := NewServer(Options{
 		Store:            NewRedisStore(mr.Addr(), "", ""),
 		QuotaStore:       NewRedisQuotaStore(mr.Addr(), "", ""),
+		UserQuotaStore:   NewRedisUserQuotaStore(mr.Addr(), "", ""),
 		PodAuthenticator: auth,
 		TenantResolver:   NewLabelTenantResolver(cl),
 	})
@@ -207,6 +208,7 @@ func TestQuotaNonAgentSARejected(t *testing.T) {
 	s, err := NewServer(Options{
 		Store:            NewRedisStore(mr.Addr(), "", ""),
 		QuotaStore:       NewRedisQuotaStore(mr.Addr(), "", ""),
+		UserQuotaStore:   NewRedisUserQuotaStore(mr.Addr(), "", ""),
 		PodAuthenticator: auth,
 		TenantResolver:   NewLabelTenantResolver(cl),
 	})
@@ -221,12 +223,18 @@ func TestQuotaNonAgentSARejected(t *testing.T) {
 		{"POST", "/quota/agent-spend", `{"deltaUSD":5}`}, // Q8: same non-agent-SA gate.
 		{"POST", "/quota/slot", `{"max":1}`},
 		{"DELETE", "/quota/slot", ""},
+		// M107 C20: per-user ops share the same non-agent-SA gate.
+		{"POST", "/quota/user-rpm", `{"userHash":"u1","window":1}`},
+		{"GET", "/quota/user-spend?userHash=u1", ""},
+		{"POST", "/quota/user-spend", `{"userHash":"u1","deltaUSD":5}`},
+		{"POST", "/quota/user-slot", `{"userHash":"u1","max":1}`},
+		{"DELETE", "/quota/user-slot", `{"userHash":"u1"}`},
 	} {
 		rec := do(t, s, tc.method, tc.path, "default-tok", tc.body, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: non-agent SA must be 403", tc.method, tc.path)
 	}
-	// The spoof wrote nothing: no tenant accumulator exists.
-	assert.Empty(t, mr.Keys(), "a rejected non-agent SA must never touch the tenant ledger")
+	// The spoof wrote nothing: no tenant or user accumulator exists.
+	assert.Empty(t, mr.Keys(), "a rejected non-agent SA must never touch the tenant or user ledger")
 }
 
 // TestQuotaAgentSpend_BooksPerAgentKey proves Q8: /quota/agent-spend resolves the agent identity
@@ -304,4 +312,49 @@ func TestQuotaBackendError(t *testing.T) {
 		map[string]string{"team-alpha-ns": "team-alpha"}, nil)
 	mr.Close() // Valkey now unreachable
 	assert.Equal(t, http.StatusBadGateway, do(t, s, "GET", "/quota/spend", "t", "", nil).Code)
+}
+
+// TestUserQuotaProxy_BooksPerUserKey proves that the /quota/user-spend endpoint accrues
+// spend under the per-user key user:{userHash}:spend:{month} (byte-identical to the
+// launcher's direct-Valkey key in cmd/launcher/user_quota.go), that two distinct userHashes
+// get DISTINCT buckets, and that the per-TENANT aggregate is untouched (per-user spend is a
+// separate enforcement bucket, never an alias of the tenant key).
+func TestUserQuotaProxy_BooksPerUserKey(t *testing.T) {
+	byToken := map[string]string{"ag-tok": "ns-a"}
+	s, mr := newQuotaProxy(t, byToken, map[string]string{"ns-a": "tenant-x"}, nil)
+
+	// User alice accumulates $3.
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/quota/user-spend", "ag-tok", `{"userHash":"alice","deltaUSD":2.0}`, nil).Code)
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/quota/user-spend", "ag-tok", `{"userHash":"alice","deltaUSD":1.0}`, nil).Code)
+
+	// User bob accumulates $5 — a DIFFERENT bucket.
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/quota/user-spend", "ag-tok", `{"userHash":"bob","deltaUSD":5.0}`, nil).Code)
+
+	// Read alice's spend back via GET.
+	rec := do(t, s, "GET", "/quota/user-spend?userHash=alice", "ag-tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"spentUSD":3}`, rec.Body.String(), "alice's spend must accrue both deltas")
+
+	// Bob has his own isolated bucket.
+	rec = do(t, s, "GET", "/quota/user-spend?userHash=bob", "ag-tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"spentUSD":5}`, rec.Body.String(), "bob's spend is independent of alice's")
+
+	// The user-spend keys must carry the user:{hash}:spend:{month} grammar.
+	userKeys := make([]string, 0)
+	for _, k := range mr.Keys() {
+		if strings.Contains(k, "user:") && strings.Contains(k, ":spend:") {
+			userKeys = append(userKeys, k)
+		}
+	}
+	require.Len(t, userKeys, 2, "exactly two per-user spend keys (alice + bob)")
+	assert.True(t, strings.HasPrefix(userKeys[0], "user:") || strings.HasPrefix(userKeys[1], "user:"),
+		"keys must use the user: prefix")
+
+	// The per-TENANT aggregate is untouched — per-user spend is a separate enforcement bucket.
+	tenantSpend, _ := mr.Get(quotaSpendKey("tenant-x"))
+	assert.Empty(t, tenantSpend, "per-user spend must NOT touch the tenant aggregate key")
 }
