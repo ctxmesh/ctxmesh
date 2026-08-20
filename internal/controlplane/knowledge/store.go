@@ -99,6 +99,15 @@ type SearchQuery struct {
 	Vector         []float32
 	TopK           int
 	Threshold      float64
+
+	// Hybrid + QueryText enable hybrid retrieval (M12, ADR 0084): when Hybrid is true AND QueryText is
+	// non-empty, the store fuses the vector (cosine) ranking with a keyword (tsvector) ranking over
+	// QueryText via reciprocal-rank-fusion, so an exact-keyword match the embedding misses is still
+	// retrieved. Hybrid=false (the default) is the byte-for-byte-unchanged cosine-only path. The vector
+	// Threshold still gates the cosine half; the keyword half is @@-match-gated (not threshold-gated), so a
+	// keyword-only hit surfaces via fusion. QueryText is the RAW user query (the text that produced Vector).
+	Hybrid    bool
+	QueryText string
 }
 
 // ScoredChunk pairs a retrieved chunk with its cosine similarity in [0,1] (1 = identical direction). The chunk
