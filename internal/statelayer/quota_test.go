@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -217,6 +218,7 @@ func TestQuotaNonAgentSARejected(t *testing.T) {
 		{"POST", "/quota/rpm", ""},
 		{"GET", "/quota/spend", ""},
 		{"POST", "/quota/spend", `{"deltaUSD":5}`},
+		{"POST", "/quota/agent-spend", `{"deltaUSD":5}`}, // Q8: same non-agent-SA gate.
 		{"POST", "/quota/slot", `{"max":1}`},
 		{"DELETE", "/quota/slot", ""},
 	} {
@@ -225,6 +227,31 @@ func TestQuotaNonAgentSARejected(t *testing.T) {
 	}
 	// The spoof wrote nothing: no tenant accumulator exists.
 	assert.Empty(t, mr.Keys(), "a rejected non-agent SA must never touch the tenant ledger")
+}
+
+// TestQuotaAgentSpend_BooksPerAgentKey proves Q8: /quota/agent-spend resolves the agent identity
+// ({ns}/{name}) from the pod token SERVER-SIDE and accrues onto the per-agent breakdown key
+// agent:{ns}/{name}:spend:{window} (the SAME key the cost-rollup worker snapshots), so per-agent
+// chargeback works in proxy mode — and it does NOT touch the per-tenant aggregate.
+func TestQuotaAgentSpend_BooksPerAgentKey(t *testing.T) {
+	byToken := map[string]string{"a-tok": "team-a"} // SA agent-a-tok ⇒ agent name "a-tok".
+	s, mr := newQuotaProxy(t, byToken, map[string]string{"team-a": "tenant-x"}, nil)
+
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/quota/agent-spend", "a-tok", `{"deltaUSD":2.5}`, nil).Code)
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/quota/agent-spend", "a-tok", `{"deltaUSD":1.5}`, nil).Code)
+
+	// The per-agent key accrued 2.5 + 1.5 = 4.0 under agent:{ns}/{name}:spend:{window}.
+	got, err := mr.Get(agentSpendKey("team-a/a-tok"))
+	require.NoError(t, err, "the per-agent spend key must exist")
+	v, err := strconv.ParseFloat(got, 64)
+	require.NoError(t, err)
+	assert.InDelta(t, 4.0, v, 1e-9, "per-agent spend accrued both deltas")
+
+	// The per-TENANT aggregate is untouched — per-agent spend is a separate breakdown, not the cap.
+	tenantSpend, _ := mr.Get(quotaSpendKey("tenant-x"))
+	assert.Empty(t, tenantSpend, "per-agent spend must not touch the tenant aggregate key")
 }
 
 // m79.2: a pod in a tenant namespace whose SA is NOT an agent (the concrete C7 spoof —

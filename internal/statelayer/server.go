@@ -174,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /quota/rpm", s.handleQuotaRPM)
 	mux.HandleFunc("GET /quota/spend", s.handleQuotaGetSpend)
 	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
+	mux.HandleFunc("POST /quota/agent-spend", s.handleQuotaAddAgentSpend) // Q8: per-agent breakdown in proxy mode.
 	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
 
@@ -374,6 +375,26 @@ func (s *Server) authenticateAgentNamespace(ctx context.Context, token string) (
 		return "", errNotAnAgentIdentity
 	}
 	return id.Namespace, nil
+}
+
+// authenticateAgentIdentity verifies the pod token AND returns the FULL per-agent identity (namespace +
+// name) derived un-forgeably from the agent-<name> SA username — for the per-agent spend path (Q8),
+// which keys on "{ns}/{name}" rather than the tenant. Same failure posture as
+// authenticateAgentNamespace (errPodAuthUnavailable / the pod-auth error / errNotAnAgentIdentity), so
+// writeAgentAuthError maps it identically.
+func (s *Server) authenticateAgentIdentity(ctx context.Context, token string) (ns, name string, err error) {
+	if s.podAuth == nil {
+		return "", "", errPodAuthUnavailable
+	}
+	id, err := s.podAuth.Identity(ctx, token)
+	if err != nil {
+		return "", "", err
+	}
+	agent, ok := agentNameFromSA(id.ServiceAccount)
+	if !ok {
+		return "", "", errNotAnAgentIdentity
+	}
+	return id.Namespace, agent, nil
 }
 
 // errPodAuthUnavailable signals the proxy has no pod authenticator wired (no
