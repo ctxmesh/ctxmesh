@@ -54,6 +54,10 @@ func (s *pgStore) EnsureCorpus(ctx context.Context, namespace, knowledgeBase str
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_filter_idx ON %s (namespace, knowledge_base, subject, embedding_model)`, part, part),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_doc_idx ON %s (namespace, knowledge_base, document_ref)`, part, part),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_hnsw_idx ON %s USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`, part, part),
+		// M12 (hybrid retrieval, ADR 0084): a GIN index over the generated content_tsv column (migration 0018), so
+		// the keyword half of a hybrid search is index-backed per corpus (matching the per-partition HNSW pattern).
+		// The column exists on every partition via the parent (0018); this makes its @@/ts_rank probe fast.
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_tsv_idx ON %s USING GIN (content_tsv)`, part, part),
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -134,9 +138,29 @@ func (s *pgStore) SweepOrphans(ctx context.Context, namespace, knowledgeBase, do
 	return int(n), nil
 }
 
-// Search returns the nearest chunks in a corpus by cosine similarity, filtered on the corpus's embedding_model
-// (the one-way door — ADR 0045), threshold-gated, TopK-capped, with provenance for citation.
+// searchRRFk is the reciprocal-rank-fusion constant (score = Σ 1/(k + rank_i)). 60 is the widely-used TREC
+// default; a larger k flattens the top-rank contribution. searchFusionDepth is how many candidates each half
+// (vector + keyword) contributes before the final TopK cut — deep enough that a strong keyword-only hit outside
+// the vector top-K still fuses in.
+const (
+	searchRRFk        = 60
+	searchFusionDepth = 60
+)
+
+// Search returns the nearest chunks in a corpus, filtered on the corpus's embedding_model (the one-way door —
+// ADR 0045), TopK-capped, with provenance for citation. Two modes: cosine-only (default) and HYBRID (M12, ADR
+// 0084) — the latter fuses the cosine ranking with a keyword (tsvector) ranking via reciprocal-rank-fusion when
+// SearchQuery.Hybrid is set and QueryText is non-empty.
 func (s *pgStore) Search(ctx context.Context, q SearchQuery) ([]ScoredChunk, error) {
+	if q.Hybrid && strings.TrimSpace(q.QueryText) != "" {
+		return s.searchHybrid(ctx, q)
+	}
+	return s.searchVector(ctx, q)
+}
+
+// searchVector is the cosine-only path (the pre-M12 behaviour, byte-for-byte unchanged): nearest by cosine,
+// threshold-gated, ORDER BY the vector distance.
+func (s *pgStore) searchVector(ctx context.Context, q SearchQuery) ([]ScoredChunk, error) {
 	limit := resolveTopK(q.TopK)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, namespace, knowledge_base, subject, document_ref, chunk_index, start_offset, end_offset,
@@ -150,6 +174,61 @@ func (s *pgStore) Search(ctx context.Context, q SearchQuery) ([]ScoredChunk, err
 		pgvector.NewVector(q.Vector), q.Namespace, q.KnowledgeBase, q.Subject, q.EmbeddingModel, q.Threshold, limit)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: search: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]ScoredChunk, 0)
+	for rows.Next() {
+		c, score, sErr := scanChunkRow(rows)
+		if sErr != nil {
+			return nil, sErr
+		}
+		out = append(out, ScoredChunk{Chunk: c, Score: score})
+	}
+	return out, rows.Err()
+}
+
+// searchHybrid fuses the vector (cosine) ranking with a keyword (tsvector) ranking via reciprocal-rank-fusion
+// (M12, ADR 0084). Each half contributes up to searchFusionDepth candidates: the vector half is cosine-ordered
+// + Threshold-gated (unchanged), the keyword half is `content_tsv @@ plainto_tsquery` matched + ts_rank-ordered.
+// A FULL OUTER JOIN unions them and the RRF score Σ 1/(k+rank) orders the final TopK — so a keyword-only hit
+// (below the vector threshold, e.g. a rare identifier the embedding blurs) still surfaces. The returned Score is
+// the RRF fusion score (NOT cosine [0,1]) — meaningful only as a within-result ordering. Same columns as the
+// cosine path, so scanChunkRow is shared. `english` config matches the generated content_tsv column (0018).
+func (s *pgStore) searchHybrid(ctx context.Context, q SearchQuery) ([]ScoredChunk, error) {
+	limit := resolveTopK(q.TopK)
+	rows, err := s.db.QueryContext(ctx, `
+		WITH vec AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rnk
+			FROM knowledge_chunks
+			WHERE namespace = $2 AND knowledge_base = $3 AND subject = $4 AND embedding_model = $5
+				AND 1 - (embedding <=> $1) >= $6
+			ORDER BY embedding <=> $1
+			LIMIT $7
+		),
+		txt AS (
+			SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $8)) DESC, id) AS rnk
+			FROM knowledge_chunks
+			WHERE namespace = $2 AND knowledge_base = $3 AND subject = $4 AND embedding_model = $5
+				AND content_tsv @@ plainto_tsquery('english', $8)
+			ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $8)) DESC, id
+			LIMIT $7
+		),
+		fused AS (
+			SELECT COALESCE(vec.id, txt.id) AS id,
+				COALESCE(1.0 / ($9 + vec.rnk), 0) + COALESCE(1.0 / ($9 + txt.rnk), 0) AS score
+			FROM vec FULL OUTER JOIN txt ON vec.id = txt.id
+		)
+		SELECT c.id, c.namespace, c.knowledge_base, c.subject, c.document_ref, c.chunk_index, c.start_offset,
+			c.end_offset, c.mime_type, c.blob_ref, c.content, c.tags, c.embedding_model, c.embedding_dim,
+			c.ingestion_run_id, c.created_at, c.updated_at, f.score
+		FROM fused f JOIN knowledge_chunks c ON c.knowledge_base = $3 AND c.id = f.id
+		ORDER BY f.score DESC, c.id
+		LIMIT $10`,
+		pgvector.NewVector(q.Vector), q.Namespace, q.KnowledgeBase, q.Subject, q.EmbeddingModel, q.Threshold,
+		searchFusionDepth, q.QueryText, searchRRFk, limit)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: hybrid search: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 

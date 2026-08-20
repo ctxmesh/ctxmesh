@@ -89,6 +89,7 @@ type ChunkingConfig struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.embeddingRoute == oldSelf.embeddingRoute",message="embeddingRoute is immutable after creation (one-way door #1, ADR 0061): changing the embedding model requires a full re-ingest — delete and recreate the KnowledgeBase"
 // +kubebuilder:validation:XValidation:rule="self.chunking.size == oldSelf.chunking.size && self.chunking.overlap == oldSelf.chunking.overlap && self.chunking.splitter == oldSelf.chunking.splitter",message="chunking parameters (size/overlap/splitter) are immutable after creation (one-way door #2, ADR 0061): re-chunking requires a full re-ingest — delete and recreate the KnowledgeBase"
+// +kubebuilder:validation:XValidation:rule="(has(self.perUser) ? self.perUser : false) == (has(oldSelf.perUser) ? oldSelf.perUser : false)",message="perUser is immutable after creation (one-way door #3, ADR 0061 Fork 3 / m52.M17): flipping it strands org-wide chunks in a now-per-user corpus (subjectless keys skipped) or orphans per-user chunks in a now-org-wide one — delete and recreate the KnowledgeBase. The has()-normalized compare treats absent==false so a false→true flip is also rejected."
 type KnowledgeBaseSpec struct {
 	// displayName is an optional human-readable label for the KnowledgeBase, surfaced in
 	// the console and audit log. It does not affect routing or retrieval.
@@ -119,6 +120,13 @@ type KnowledgeBaseSpec struct {
 	// so a user retrieves ONLY their own chunks; when false (default) the corpus is org-wide
 	// (subject "", shared) — the byte-for-byte-unchanged legacy behaviour. The knowledge_chunks.subject
 	// column exists from day one so enabling per-user needs no schema migration. Defaults to false.
+	//
+	// IMMUTABLE after creation (one-way door #3, ADR 0061 Fork 3 / m52.M17): the object-store key
+	// layout differs (org-wide `knowledge/{ns}/{kb}/{doc}` vs per-user `.../{subject}/{doc}`), so
+	// flipping it on a KB that already holds blobs is UNDEFINED — org-wide blobs are stranded (their
+	// subjectless keys are skipped by per-user retrieval) or per-user blobs are orphaned. Enforced by
+	// the spec-level CEL transition rule above. NOTE: a cluster HMAC-key rotation changes every
+	// `userGrantHash`, orphaning every existing per-user subject — see specs/knowledge.md.
 	// +optional
 	PerUser bool `json:"perUser,omitempty"`
 

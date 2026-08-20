@@ -157,6 +157,37 @@ func TestKnowledgeBase_EmptyEmbeddingRoute_RejectedAtAdmission(t *testing.T) {
 	assert.Contains(t, err.Error(), "embeddingRoute", "the admission rejection should name the offending field")
 }
 
+// TestKnowledgeBase_PerUser_ImmutableAfterCreation proves M17 (ADR 0061 Fork 3): the CEL transition
+// rule rejects flipping spec.perUser after creation — in BOTH directions (the has()-normalized
+// compare treats an absent/omitted perUser as false, so a false→true flip is rejected too). Flipping
+// it strands org-wide chunks in a now-per-user corpus or orphans per-user chunks in a now-org-wide
+// one, so it is a one-way door like embeddingRoute/chunking. A no-op update is still allowed.
+func TestKnowledgeBase_PerUser_ImmutableAfterCreation(t *testing.T) {
+	const ns = "default"
+
+	// false (org-wide, the default) → true is rejected.
+	mkKnowledgeBase(t, "kb-peruser-on", ns, validKBSpec()) // perUser omitted == false
+	var kb agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-peruser-on", Namespace: ns}, &kb))
+	kb.Spec.PerUser = true
+	err := k8sClient.Update(testCtx, &kb)
+	require.Error(t, err, "flipping perUser false→true must be rejected (one-way door #3)")
+	assert.Contains(t, err.Error(), "perUser", "the rejection should name perUser")
+
+	// true → false is rejected too.
+	mkKnowledgeBase(t, "kb-peruser-off", ns, perUserKBSpec(0))
+	var kb2 agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-peruser-off", Namespace: ns}, &kb2))
+	kb2.Spec.PerUser = false
+	err = k8sClient.Update(testCtx, &kb2)
+	require.Error(t, err, "flipping perUser true→false must be rejected (one-way door #3)")
+
+	// A no-op update (perUser unchanged) is allowed — the rule is a transition guard, not a freeze.
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "kb-peruser-off", Namespace: ns}, &kb2))
+	kb2.Spec.DisplayName = "renamed"
+	require.NoError(t, k8sClient.Update(testCtx, &kb2), "an update leaving perUser unchanged must be allowed")
+}
+
 // TestKnowledgeBase_OverlapGESize_IsInvalid — chunking.overlap >= chunking.size → Validated=False / InvalidChunking.
 func TestKnowledgeBase_OverlapGESize_IsInvalid(t *testing.T) {
 	const ns = "default"
