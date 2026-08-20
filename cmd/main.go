@@ -142,6 +142,25 @@ func statelayerProxylessWarning(statelayerProxyURL string) (string, bool) {
 		"for any install with network isolation enabled.", true
 }
 
+// launcherImageDigestWarning returns a startup warning (and true) when LAUNCHER_IMAGE is set but NOT
+// digest-pinned (…@sha256:…) — C8b (ADR 0089). LAUNCHER_IMAGE is fleet-RCE-equivalent config: it becomes
+// PID 1 in every injected agent pod, so it MUST be a digest, not a mutable tag a registry push could swap.
+// The controller already refuses to INJECT a non-pinned launcher (launcherInjectionReady, fail-safe); this
+// surfaces the misconfig ONCE at startup (loud) rather than only per-agent-reconcile. Empty (injection off)
+// or a digest-pinned value ⇒ ("", false). Cosign signature verification is DEFERRED (m52.C8b-cosign): the
+// digest pin already defeats mutable-tag + registry tampering (a digest is content-addressed), and the
+// LAUNCHER_IMAGE setter is cluster-admin — cosign's marginal provenance value doesn't justify the sigstore
+// dependency + key management now. Pure function so the preflight is unit-testable.
+func launcherImageDigestWarning(launcherImage string) (string, bool) {
+	img := strings.TrimSpace(launcherImage)
+	if img == "" || strings.Contains(img, "@sha256:") {
+		return "", false
+	}
+	return "LAUNCHER_IMAGE is set but NOT digest-pinned (…@sha256:…): launcher injection will be SKIPPED " +
+		"(fail-safe) because a mutable tag is fleet-RCE-equivalent (it becomes PID 1 in every agent pod). " +
+		"Pin LAUNCHER_IMAGE to a @sha256: digest to enable injection.", true
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -354,6 +373,11 @@ func main() {
 	statelayerProxyURL := strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL"))
 	if msg, warn := statelayerProxylessWarning(statelayerProxyURL); warn {
 		setupLog.Info("startup preflight WARNING (C21): " + msg)
+	}
+	// C8b (ADR 0089): LAUNCHER_IMAGE is fleet-RCE-equivalent config — warn loudly at startup if it is set
+	// but not digest-pinned (the controller then fail-safe SKIPS injection). Cosign verify deferred.
+	if msg, warn := launcherImageDigestWarning(os.Getenv("LAUNCHER_IMAGE")); warn {
+		setupLog.Info("startup preflight WARNING (C8b): " + msg)
 	}
 
 	if err := (&controller.AgentDeploymentReconciler{
