@@ -48,6 +48,7 @@ type mockEmbedder struct {
 	textsSeen  []string // every text embedded, in order (to prove no re-embed on resume)
 	failStatus int      // 0 = never fail; else the EmbedError status to return
 	failRemain int      // how many more calls should fail with failStatus before succeeding
+	onCall     func()   // optional hook fired at the START of EmbedBatch (e.g. cancel the ctx mid-doc)
 }
 
 // testEmbedDim is the vector dimension the mock embedder + the tests use (small — cosine over the leading
@@ -68,6 +69,9 @@ func (m *mockEmbedder) EmbedBatch(_ context.Context, _ string, texts []string) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.batchCalls++
+	if m.onCall != nil {
+		m.onCall()
+	}
 	if m.failStatus != 0 && m.failRemain > 0 {
 		m.failRemain--
 		return nil, 0, &credplane.EmbedError{Status: m.failStatus, Snippet: "mock"}
@@ -375,6 +379,37 @@ func TestExecuteIngestion_RateLimitLeavesReclaimable(t *testing.T) {
 	rn, err := s.runStore.Get("ing-6")
 	require.NoError(t, err)
 	assert.Equal(t, run.StatusRunning, rn.Status, "a persistent 429 leaves the run running (reclaimable), not terminal")
+}
+
+// TestExecuteIngestion_CancelledMidDocLeavesReclaimable proves M16b: when THIS executor is cancelled
+// mid-document (a D3 lease-loss / D4 drain), an I/O error is NOT recorded as a terminal Failure — the
+// run is left RUNNING (reclaimable) so the reclaiming executor owns the outcome. Without the guard a
+// mid-doc embed error would fail the run, letting a superseded zombie clobber the reclaim's result.
+func TestExecuteIngestion_CancelledMidDocLeavesReclaimable(t *testing.T) {
+	emb := newMockEmbedder()
+	emb.failStatus = 500 // a non-budget, non-rate embed error — normally fails the run fast.
+	emb.failRemain = 1000
+	s, _, os := newIngestionTestServer(t, emb)
+
+	ns, kb := "team-a", "docs"
+	key := objectstore.KnowledgeKey(ns, kb, "a.md")
+	putDoc(t, os, key, docBodyA)
+	spec := IngestionSpec{
+		Namespace: ns, KnowledgeBase: kb, EmbeddingRoute: "embed-v1",
+		Documents: []IngestionDoc{{Key: key, ContentType: "text/markdown"}},
+	}
+	createIngestionRun(t, s, "ing-cancel", spec)
+
+	// Cancel the executor's context the moment it reaches the embed I/O (mid-document), so the 500
+	// error is observed WITH a cancelled context — the M16b guard must treat it as a reclaim, not a Failure.
+	ctx, cancel := context.WithCancel(context.Background())
+	emb.onCall = cancel
+	s.executeIngestion(ctx, "ing-cancel")
+
+	rn, err := s.runStore.Get("ing-cancel")
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusRunning, rn.Status,
+		"a mid-doc cancellation must leave the run reclaimable, not terminal-Failed (M16b)")
 }
 
 // TestExecuteIngestion_DegradesWhenUnwired proves the executor fails the run honestly (never panics) when the

@@ -332,6 +332,20 @@ const (
 	ingestReclaimable                   // 429 retries exhausted → leave the run reclaimable (cursor preserved).
 )
 
+// cancelledMidDoc reports whether THIS executor's context was cancelled (a D3 lease-loss / D4 drain,
+// M104). When true, an I/O error inside a document is NOT a genuine document failure — the caller
+// leaves the run RECLAIMABLE (no terminal write) so the reclaiming executor owns the terminal outcome
+// (M16b: a cancelled/superseded zombie must not write a spurious Failed that clobbers the reclaim's
+// result). It logs the skip. When the context is live, the error is a real failure (fail-fast).
+func (s *Server) cancelledMidDoc(ctx context.Context, runID, docKey string) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	s.log.Info("ingestion: cancelled mid-document; run left reclaimable (no spurious terminal write, M16b)",
+		"run", runID, "doc", docKey)
+	return true
+}
+
 // ingestOneDocument fetches, extracts, chunks, batch-embeds, upserts, and sweeps ONE document. It returns
 // (ingestDocDone, false) on success; (ingestReclaimable, false) when a 429 back-off is exhausted (the caller
 // leaves the run reclaimable); and (_, true) when it has ALREADY recorded a terminal outcome + failed the run
@@ -343,6 +357,9 @@ func (s *Server) ingestOneDocument(
 	// (a) Fetch the raw bytes from the durable object store.
 	data, err := s.getDocument(ctx, doc.Key)
 	if err != nil {
+		if s.cancelledMidDoc(ctx, runID, doc.Key) {
+			return ingestReclaimable, false
+		}
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("fetching document %q: %v", doc.Key, err))
 		return 0, true
 	}
@@ -363,6 +380,9 @@ func (s *Server) ingestOneDocument(
 		// sweep any prior chunks for this doc (a doc that WAS ingested and is now empty must not leave stale chunks).
 		cursor.Partial = true
 		if _, sErr := s.knowledgeStore.SweepOrphans(ctx, spec.Namespace, spec.KnowledgeBase, doc.Key, runID); sErr != nil {
+			if s.cancelledMidDoc(ctx, runID, doc.Key) {
+				return ingestReclaimable, false
+			}
 			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for empty document %q: %v", doc.Key, sErr))
 			return 0, true
 		}
@@ -384,6 +404,9 @@ func (s *Server) ingestOneDocument(
 	// wrong text — the correctness half of re-ingest, ADR 0061 Fork 2). This runs AFTER every current-run batch
 	// has upserted; SweepOrphans deletes only ingestion_run_id <> runID, so the batches just written survive.
 	if _, sErr := s.knowledgeStore.SweepOrphans(ctx, spec.Namespace, spec.KnowledgeBase, doc.Key, runID); sErr != nil {
+		if s.cancelledMidDoc(ctx, runID, doc.Key) {
+			return ingestReclaimable, false
+		}
 		s.failIngestion(runID, ingestionFailed, fmt.Sprintf("sweeping orphans for document %q: %v", doc.Key, sErr))
 		return 0, true
 	}
@@ -437,7 +460,11 @@ func (s *Server) embedAndUpsertChunks(
 				// RATE-limited after in-executor retries → leave reclaimable (the cursor preserves progress).
 				return 0, ingestReclaimable, false
 			default:
-				// A genuine embed error → fail-fast.
+				// A genuine embed error → fail-fast, UNLESS our context was cancelled (reclaim/drain) —
+				// then leave the run reclaimable so the reclaim owns the outcome (M16b).
+				if s.cancelledMidDoc(ctx, runID, doc.Key) {
+					return 0, ingestReclaimable, false
+				}
 				s.failIngestion(runID, ingestionFailed,
 					fmt.Sprintf("embedding document %q: %v", doc.Key, err))
 				return 0, 0, true
@@ -473,6 +500,9 @@ func (s *Server) embedAndUpsertChunks(
 		// Upsert THIS sub-batch immediately (content-hash idempotent) rather than accumulating every batch first —
 		// the buffering bound. A failure fails the run fast; the cursor is preserved so a resume re-drives the doc.
 		if uErr := s.knowledgeStore.Upsert(ctx, records); uErr != nil {
+			if s.cancelledMidDoc(ctx, runID, doc.Key) {
+				return 0, ingestReclaimable, false
+			}
 			s.failIngestion(runID, ingestionFailed, fmt.Sprintf("upserting chunks for document %q: %v", doc.Key, uErr))
 			return 0, 0, true
 		}
