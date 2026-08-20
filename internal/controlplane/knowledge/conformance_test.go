@@ -71,6 +71,9 @@ func eachStore(t *testing.T, fn func(t *testing.T, s Store)) {
 			content_hash text NOT NULL, embedding_model text NOT NULL, embedding_dim int NOT NULL,
 			embedding vector(1536) NOT NULL, ingestion_run_id text NOT NULL DEFAULT '',
 			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+			-- M12 (migration 0018): the generated full-text column the hybrid search fuses on. Mirrored here so the
+			-- conformance store matches production (this test hand-rolls the parent rather than running migrations).
+			content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
 			PRIMARY KEY (knowledge_base, id),
 			UNIQUE (namespace, knowledge_base, subject, embedding_model, document_ref, content_hash)
 		) PARTITION BY LIST (knowledge_base)`)
@@ -253,6 +256,52 @@ func TestStore_SearchThreshold(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Empty(t, got, "a cosine-0 match is below the 0.5 threshold")
+	})
+}
+
+// TestStore_HybridRetrievesKeywordOnlyMiss proves M12 (ADR 0084): hybrid retrieval surfaces an exact-keyword
+// document that the VECTOR half misses (its embedding is orthogonal to the query → cosine ~0, gated out by the
+// threshold), via the fused keyword (tsvector) rank. Cosine-only would not return it; hybrid does. It is pg-only
+// (tsvector); the mem twin stays vector-only.
+func TestStore_HybridRetrievesKeywordOnlyMiss(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		if _, ok := s.(*memStore); ok {
+			t.Skip("hybrid (tsvector) is a Postgres-only feature; the mem twin is vector-only")
+		}
+		ctx := context.Background()
+		ensure(t, s)
+		require.NoError(t, s.Upsert(ctx, []Chunk{
+			// Orthogonal embedding (cosine 0 vs the query) BUT its content carries the exact rare keyword.
+			chunk("", "codes.md", 0, "the error code XZ9QORTHO indicates a disk fault", 0, 1, 0),
+			// Aligned embedding (cosine 1) but no keyword — the vector-only winner.
+			chunk("", "semantic.md", 0, "general troubleshooting overview", 1, 0, 0),
+		}))
+		q := func(hybrid bool) SearchQuery {
+			return SearchQuery{
+				Namespace: "prod", KnowledgeBase: testKB, EmbeddingModel: embModel,
+				Vector: pad(1, 0, 0), TopK: 5, Threshold: 0.5, Hybrid: hybrid, QueryText: "XZ9QORTHO disk fault",
+			}
+		}
+		containsDoc := func(res []ScoredChunk, doc string) bool {
+			for _, r := range res {
+				if r.Chunk.DocumentRef == doc {
+					return true
+				}
+			}
+			return false
+		}
+
+		vres, err := s.Search(ctx, q(false))
+		require.NoError(t, err)
+		assert.False(t, containsDoc(vres, "codes.md"),
+			"cosine-only + threshold must MISS the orthogonal keyword doc")
+
+		hres, err := s.Search(ctx, q(true))
+		require.NoError(t, err)
+		assert.True(t, containsDoc(hres, "codes.md"),
+			"hybrid must retrieve the exact-keyword doc the vector half missed (M12 RRF)")
+		assert.True(t, containsDoc(hres, "semantic.md"),
+			"hybrid must still include the vector-aligned doc (fusion, not replacement)")
 	})
 }
 

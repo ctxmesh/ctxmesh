@@ -59,7 +59,8 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	"github.com/ctxmesh/agent-engine/internal/objectstore"
 )
 
 const (
@@ -127,12 +128,9 @@ type minioStore struct {
 // posture as the dev Valkey. A construction error (bad addr) is returned so the
 // caller can log it and run WITHOUT offload rather than crash the launcher.
 func newMinioStore(addr, accessKey, secretKey string) (*minioStore, error) {
-	client, err := minio.New(addr, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: false, // dev in-cluster: plain HTTP, no TLS (like the dev Valkey).
-	})
+	client, err := objectstore.NewMinioClient(addr, accessKey, secretKey) // M13: shared client construction.
 	if err != nil {
-		return nil, fmt.Errorf("build object-store client for %q: %w", addr, err)
+		return nil, err
 	}
 	return &minioStore{client: client, bucket: objectStoreBucket}, nil
 }
@@ -141,23 +139,7 @@ func newMinioStore(addr, accessKey, secretKey string) (*minioStore, error) {
 // (BucketExists → skip) and bounded by the caller's context. Called lazily on
 // the first PUT so a fresh dev MinIO with no init still gets the bucket.
 func (s *minioStore) ensureBucket(ctx context.Context) error {
-	exists, err := s.client.BucketExists(ctx, s.bucket)
-	if err != nil {
-		return fmt.Errorf("check bucket %q: %w", s.bucket, err)
-	}
-	if exists {
-		return nil
-	}
-	if err := s.client.MakeBucket(ctx, s.bucket, minio.MakeBucketOptions{}); err != nil {
-		// A concurrent creator may have won the race between BucketExists and
-		// MakeBucket — treat an already-owned bucket as success rather than a hard
-		// error (idempotent create).
-		if exists, exErr := s.client.BucketExists(ctx, s.bucket); exErr == nil && exists {
-			return nil
-		}
-		return fmt.Errorf("create bucket %q: %w", s.bucket, err)
-	}
-	return nil
+	return objectstore.EnsureBucket(ctx, s.client, s.bucket) // M13: shared idempotent-create logic.
 }
 
 func (s *minioStore) Put(ctx context.Context, key string, data []byte) error {

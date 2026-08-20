@@ -62,9 +62,14 @@ const (
 	envMaxTopK       = "KNOWLEDGE_MAX_TOPK"
 	envMaxChunkChars = "KNOWLEDGE_MAX_CHUNK_CHARS"
 	envMaxTotalChars = "KNOWLEDGE_MAX_TOTAL_CHARS"
-	defaultMaxTopK   = 50
-	defaultMaxChunk  = 4000
-	defaultMaxTotal  = 24000
+	// envHybridSearch opts retrieval into HYBRID mode (M12, ADR 0084): "true" fuses the vector (cosine)
+	// ranking with a keyword (tsvector) ranking via reciprocal-rank-fusion so an exact-keyword match the
+	// embedding misses is still retrieved. Unset/false = the cosine-only path (byte-for-byte unchanged), so
+	// this is a safe opt-in until an operator turns it on (the pg store backs it; the mem twin is vector-only).
+	envHybridSearch = "KNOWLEDGE_HYBRID_SEARCH"
+	defaultMaxTopK  = 50
+	defaultMaxChunk = 4000
+	defaultMaxTotal = 24000
 )
 
 // resolveIntEnv reads a positive-integer env var, returning defVal when the env is unset or invalid.
@@ -188,6 +193,11 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 	scored, err := s.knowledgeStore.Search(ctx, knowledge.SearchQuery{
 		Namespace: req.Namespace, KnowledgeBase: req.KnowledgeBase, Subject: req.Subject,
 		EmbeddingModel: req.EmbeddingModel, Vector: vec, TopK: topK, Threshold: req.Threshold,
+		// M12 (ADR 0084): opt-in hybrid retrieval. QueryText is the same raw query already embedded above;
+		// with Hybrid on, the store fuses the keyword ranking so a rare-term/identifier hit the embedding
+		// blurs is still retrieved. Off by default (unchanged cosine-only) until an operator sets the env.
+		Hybrid:    strings.TrimSpace(os.Getenv(envHybridSearch)) == "true",
+		QueryText: req.Query,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())

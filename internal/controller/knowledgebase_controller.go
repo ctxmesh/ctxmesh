@@ -453,6 +453,9 @@ func (r *KnowledgeBaseReconciler) reconcileStuckIngesting(
 	if uErr := r.Status().Update(ctx, kb); uErr != nil {
 		return false, fmt.Errorf("safety-net projecting Failed onto %s/%s: %w", kb.Namespace, kb.Name, uErr)
 	}
+	// M16(d): make the rescue OBSERVABLE — a non-zero counter means the primary status channel (the
+	// executor's recordCorpusStatus) dropped a terminal-failure write, previously visible only in logs.
+	kbIngestionSafetyNetTotal.WithLabelValues(kb.Namespace).Inc()
 	log.Info("KnowledgeBase un-stuck from Ingesting: referenced ingestion run terminated failed out-of-band "+
 		"(no corpus-status row) — projecting Failed (ADR 0061 Fork 2 safety-net)",
 		"knowledgebase", kb.Name, "ingestionRun", kb.Status.IngestionRunRef)

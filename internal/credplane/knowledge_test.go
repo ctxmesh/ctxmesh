@@ -410,6 +410,8 @@ func setupKnowledgeSchema(t *testing.T, db *sql.DB) {
 			content_hash text NOT NULL, embedding_model text NOT NULL, embedding_dim int NOT NULL,
 			embedding vector(1536) NOT NULL, ingestion_run_id text NOT NULL DEFAULT '',
 			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+			-- M12 (migration 0018): the generated full-text column EnsureCorpus builds its GIN index over.
+			content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
 			PRIMARY KEY (knowledge_base, id),
 			UNIQUE (namespace, knowledge_base, subject, embedding_model, document_ref, content_hash)
 		) PARTITION BY LIST (knowledge_base)`)
