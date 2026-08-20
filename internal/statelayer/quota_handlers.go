@@ -142,6 +142,35 @@ func (s *Server) handleQuotaAddSpend(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleQuotaAddAgentSpend accrues per-AGENT spend (Q8): unlike the tenant spend endpoint it resolves
+// the FULL agent identity ({ns}/{name}) from the verified pod token and adds the delta to the per-agent
+// key agent:{ns}/{name}:spend:{window} — so per-agent chargeback works in proxy mode, where the launcher
+// holds no direct Valkey path. Same pod-auth posture as the tenant paths (401 non-token / 403 non-agent /
+// 503 not-configured). It does NOT enforce a cap (per-agent spend is a durable BREAKDOWN, not a budget —
+// the tenant aggregate is the enforced cap); it only records.
+func (s *Server) handleQuotaAddAgentSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.quota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "quota is not configured on this proxy")
+		return
+	}
+	ns, name, err := s.authenticateAgentIdentity(ctx, bearerToken(r))
+	if err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	var req quotaAddSpendRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if err := s.quota.AddAgentSpend(ctx, ns+"/"+name, req.DeltaUSD); err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleQuotaAcquireSlot(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
 	defer cancel()

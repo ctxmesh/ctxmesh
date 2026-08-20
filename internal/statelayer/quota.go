@@ -37,6 +37,11 @@ type QuotaStore interface {
 	Spend(ctx context.Context, tenantID string) (float64, error)
 	// AddSpend atomically adds deltaUSD to the tenant's accumulated spend.
 	AddSpend(ctx context.Context, tenantID string, deltaUSD float64) error
+	// AddAgentSpend atomically adds deltaUSD to the per-AGENT accumulated spend (scopeID = "{ns}/{name}"),
+	// the durable per-agent breakdown key the cost-rollup worker snapshots (Q8). Distinct from AddSpend,
+	// which keys the per-TENANT aggregate — this is what makes per-agent chargeback work in proxy mode,
+	// where the launcher holds no direct Valkey path.
+	AddAgentSpend(ctx context.Context, scopeID string, deltaUSD float64) error
 	// AcquireSlot increments the tenant's in-flight counter, returning false (and rolling
 	// back) when it would exceed maxSlots.
 	AcquireSlot(ctx context.Context, tenantID string, maxSlots int) (bool, error)
@@ -59,6 +64,13 @@ func quotaSpendKey(tenantID string) string {
 }
 
 func quotaInflightKey(tenantID string) string { return "tenant:" + tenantID + ":inflight" }
+
+// agentSpendKey MUST match cmd/launcher/agent_spend.go's agentSpendKey exactly: agent:{scopeID}:spend:
+// {window}, where scopeID = "{ns}/{name}" — so a proxy-mode accrual (Q8) and a legacy direct-Valkey
+// accrual hit the SAME durable per-agent key the cost-rollup worker snapshots.
+func agentSpendKey(scopeID string) string {
+	return "agent:" + scopeID + ":spend:" + quotaSpendWindow()
+}
 
 // redisQuotaStore is the production QuotaStore over the credentialed Valkey.
 type redisQuotaStore struct{ rdb *redis.Client }
@@ -92,6 +104,15 @@ func (s *redisQuotaStore) Spend(ctx context.Context, tenantID string) (float64, 
 		return 0, nil
 	}
 	return v, err
+}
+
+func (s *redisQuotaStore) AddAgentSpend(ctx context.Context, scopeID string, deltaUSD float64) error {
+	key := agentSpendKey(scopeID)
+	if err := s.rdb.IncrByFloat(ctx, key, deltaUSD).Err(); err != nil {
+		return err
+	}
+	// Same self-expiring TTL as the tenant ledger (~2 periods); best-effort.
+	return s.rdb.Expire(ctx, key, 62*24*time.Hour).Err()
 }
 
 func (s *redisQuotaStore) AddSpend(ctx context.Context, tenantID string, deltaUSD float64) error {
