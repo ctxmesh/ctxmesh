@@ -1149,6 +1149,22 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// Routes hot-reload delivery (J7): deliver the sidecar's remote-tool URL table as a
+	// controller-owned, STABLE-named <agent>-egress-routes ConfigMap mounted read-only on the sidecar
+	// with the static EGRESS_ROUTES_FILE path env (the same K3 mounted-ConfigMap + fsnotify pattern as
+	// the tool policy). A remote-URL edit updates the ConfigMap content — not the pod template (the
+	// route URLs are excluded from the egress digest) — so the sidecar reloads it live WITHOUT a
+	// revision roll. Only when the agent has ≥1 route (a sidecar to mount it on).
+	var routesVol *corev1.Volume
+	var routesMount *corev1.VolumeMount
+	var routesEnv []corev1.EnvVar
+	if len(egressRoutes) > 0 {
+		routesVol, routesMount, routesEnv, err = r.reconcileEgressRoutesConfigMap(ctx, deploy, egressRoutesJSON(egressRoutes))
+		if err != nil {
+			return podTemplate{}, err
+		}
+	}
+
 	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
 	// inject MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (downward
 	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
@@ -1539,6 +1555,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// constant for any tool-having agent.
 		volumes = append(volumes, *toolPolicyVol)
 	}
+	if routesVol != nil {
+		// Routes hot-reload (J7): the <agent>-egress-routes ConfigMap volume, mounted read-only on the
+		// EGRESS SIDECAR. The route URLs ride this watched file (the sidecar reloads via fsnotify) +
+		// are excluded from the egress digest, so a remote-URL edit updates this ConfigMap in place
+		// WITHOUT rolling the revision — the mount is structurally constant for any tool-having agent.
+		volumes = append(volumes, *routesVol)
+	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
 		// A projected VOLUME (not valueFrom) — Knative admits it (verified on 1.22.1). The
@@ -1583,7 +1606,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
 		containers = append(containers, egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
-			egressRoutesJSON(egressRoutes), recordCapable, r.DevDataPlane, toolPolicyMount, toolPolicyEnv))
+			egressRoutesJSON(egressRoutes), recordCapable, r.DevDataPlane, toolPolicyMount, toolPolicyEnv,
+			routesMount, routesEnv))
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
