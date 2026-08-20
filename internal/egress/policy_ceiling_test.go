@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -77,6 +78,32 @@ func TestCeilingFloodBlockedPastLimit(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "tool_call_ceiling_exceeded")
 	}
 	assert.Equal(t, limit, h.up.hits, "no further calls reached the upstream past the ceiling")
+}
+
+// (J9) The fan-out chokepoint records a per-(agent, tool, outcome) metric: forwarded calls under the ceiling
+// count outcome=forwarded; a call past the ceiling counts outcome=ceiling_denied — the per-tool observability
+// M82's per-run TOTAL cap lacked. A unique tool name keeps the counter deltas isolated from other tests.
+func TestCeilingRecordsPerToolMetric(t *testing.T) {
+	const limit = 2
+	const tool = "j9_metric_tool"
+	h := newPolicyHarness(t, ceilingPolicy(limit))
+	fwd := func() float64 {
+		return testutil.ToFloat64(toolCallsTotal.WithLabelValues(testAgent, tool, "forwarded"))
+	}
+	denied := func() float64 {
+		return testutil.ToFloat64(toolCallsTotal.WithLabelValues(testAgent, tool, "ceiling_denied"))
+	}
+	fwd0, denied0 := fwd(), denied()
+
+	for i := 1; i <= limit; i++ {
+		rec := h.sendAsRun(t, "run-J9", toolCallBody(tool))
+		require.Equalf(t, http.StatusOK, rec.Code, "call %d/%d is under the ceiling", i, limit)
+	}
+	rec := h.sendAsRun(t, "run-J9", toolCallBody(tool))
+	require.Equal(t, http.StatusForbidden, rec.Code, "the past-ceiling call is denied")
+
+	assert.Equal(t, float64(limit), fwd()-fwd0, "each under-ceiling forward increments outcome=forwarded")
+	assert.Equal(t, float64(1), denied()-denied0, "the past-ceiling call increments outcome=ceiling_denied")
 }
 
 // (2) A DIFFERENT run (distinct verified runcap RunID) is unaffected by the first run hitting its

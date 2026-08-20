@@ -477,13 +477,15 @@ func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server
 func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, tool, runID string) bool {
 	limit := policy.MaxToolCallsPerRun
 	if limit <= 0 {
-		return true // no active ceiling — do not count.
+		p.recordToolCall(tool, "forwarded") // J9: count fan-out even with no active ceiling.
+		return true                         // no active ceiling — do not count against a limit.
 	}
 	if runID == "" {
 		// A verified runcap with no RunID under an active ceiling: an unattributable call cannot be
 		// bounded, so fail closed rather than let it bypass the ceiling.
 		p.cfg.Log.Info("egress: policy: tool call under an active fan-out ceiling has no run id — failing closed",
 			"server", server, "tool", tool)
+		p.recordToolCall(tool, "ceiling_denied") // J9
 		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
 		return false
 	}
@@ -492,9 +494,11 @@ func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, t
 		// Terminal 403 (non-retryable) — stop the flood, do NOT invite a retry-after.
 		p.cfg.Log.Info("egress: policy: run exceeded its tool-call fan-out ceiling — 403",
 			"server", server, "tool", tool, "count", n, "limit", limit)
+		p.recordToolCall(tool, "ceiling_denied") // J9
 		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
 		return false
 	}
+	p.recordToolCall(tool, "forwarded") // J9
 	return true
 }
 
