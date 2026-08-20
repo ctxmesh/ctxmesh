@@ -87,6 +87,23 @@ type SpawnBudget struct {
 	MaxTotalSpawns int32 `json:"maxTotalSpawns,omitempty"`
 }
 
+// Spawn-budget PLATFORM ceilings (C19, ADR 0088). The per-team SpawnBudget is relayed by the launcher
+// from its controller-injected env, but the launcher runs in the (untrusted-adjacent) agent pod, so a
+// hostile/prompt-injected pod can send an arbitrary budget (maxTotalSpawns=1<<40). BOTH server-side
+// enforcement points — the state-layer proxy's /spawn/acquire and the BFF's authoritative ReserveSpawn
+// gate — clamp the client-supplied value to these ceilings (effectiveMax = min(clientMax, ceiling)),
+// converting "unbounded" into "bounded by a platform constant". They are set FAR above any legitimate
+// budget (defaults 4/3/20) so they never bite a real config — they kill the abuse, not the feature. The
+// EXACT per-team enforcement (a tenant's maxTotalSpawns:5 really getting 5, not the ceiling) is m52.C19b.
+const (
+	// MaxFanOutCeiling bounds a single supervisor step's concurrent sub-runs (the "inflight" counter).
+	MaxFanOutCeiling = 128
+	// MaxSpawnDepthCeiling bounds the spawn-tree depth.
+	MaxSpawnDepthCeiling = 32
+	// MaxTotalSpawnsCeiling bounds total sub-runs across one root run's whole tree (the "count" counter).
+	MaxTotalSpawnsCeiling = 1024
+)
+
 // AgentTeamSpec defines the desired state of an AgentTeam (ADR 0057).
 type AgentTeamSpec struct {
 	// registryRef is the name of the AgentRegistry (same namespace) that is this team's trust boundary:
