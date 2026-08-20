@@ -115,3 +115,24 @@ func TestSpawnRejectsNonAgentAndBadInput(t *testing.T) {
 	// A rootRunId with a disallowed ':' (key-injection attempt) → 400.
 	assert.Equal(t, http.StatusBadRequest, do(t, s2, "POST", "/spawn/acquire", "tok", `{"scope":"s","rootRunId":"r:evil","counter":"inflight","max":1}`, nil).Code)
 }
+
+// TestClampSpawnMax covers the C19 (ADR 0088) server-side ceiling: an inflated client max is clamped to
+// the platform ceiling (fan-out for "inflight", total for "count"); a legit or 0 value passes through.
+// Literal ceilings (128/1024) are a deliberate guard — bumping api/v1beta1.Max*Ceiling must update this.
+func TestClampSpawnMax(t *testing.T) {
+	cases := []struct {
+		counter  string
+		in, want int
+	}{
+		{spawnCounterInflight, 4, 4},         // a legit fan-out passes unchanged
+		{spawnCounterInflight, 128, 128},     // exactly the fan-out ceiling
+		{spawnCounterInflight, 1 << 40, 128}, // the max=1<<40 abuse -> fan-out ceiling
+		{spawnCounterCount, 20, 20},          // a legit total passes unchanged
+		{spawnCounterCount, 1024, 1024},      // exactly the total ceiling
+		{spawnCounterCount, 1 << 40, 1024},   // the abuse -> total ceiling
+		{spawnCounterCount, 0, 0},            // unbudgeted (0) preserved
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, clampSpawnMax(tc.counter, tc.in), "%s in=%d", tc.counter, tc.in)
+	}
+}
