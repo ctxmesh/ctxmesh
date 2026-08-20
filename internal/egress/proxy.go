@@ -99,10 +99,10 @@ type ProxyConfig struct {
 	// the capture path is a no-op (zero overhead, the forward is byte-for-byte unchanged).
 	Recorder *ToolRecorder
 	// Policy holds the resolved spec.runtime.toolPolicy the controller delivers (M82, ADR 0074 §1),
-	// read + fsnotify-watched from the mounted TOOL_POLICY_FILE. This task DELIVERS + PARSES + HOLDS
-	// it only — ServeHTTP does NOT consult it, so behavior stays PERMISSIVE. Enforcement (deny 403 /
-	// require-approval voucher / fan-out ceiling) is a later M82 task that will read this holder on
-	// the hot path. nil ⇒ no holder wired (permissive).
+	// read + fsnotify-watched from the mounted TOOL_POLICY_FILE. ServeHTTP CONSULTS it on the hot path
+	// (Policy.Load()) and ENFORCES it: deny → 403, require-approval → the voucher protocol, plus the
+	// fan-out ceiling. A malformed initial policy is a hard startup error (C16, ADR 0087). nil ⇒ no
+	// holder wired (permissive). A nil-VALUED holder (no policy set) is also permissive.
 	Policy *PolicyHolder
 }
 

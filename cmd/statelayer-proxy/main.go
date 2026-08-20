@@ -79,8 +79,12 @@ func run(log logr.Logger) error {
 	opts := statelayer.Options{
 		Store:      store,
 		QuotaStore: statelayer.NewRedisQuotaStore(addr, username, password),
-		SpawnStore: statelayer.NewRedisSpawnStore(addr, username, password),
-		DedupStore: statelayer.NewRedisDedupStore(addr, username, password),
+		// Per-user (OBO) quota accumulator over the SAME credentialed Valkey (M107 C20): makes
+		// userRateLimit (RPM + monthly SpendUSD + maxInFlight) enforce in proxy mode, where the
+		// launcher has no direct Valkey path (previously silently OFF).
+		UserQuotaStore: statelayer.NewRedisUserQuotaStore(addr, username, password),
+		SpawnStore:     statelayer.NewRedisSpawnStore(addr, username, password),
+		DedupStore:     statelayer.NewRedisDedupStore(addr, username, password),
 		// Run-control marker read (m70.8, real-kill cancel channel): the /control endpoint reads the
 		// `run:{id}:control` verb the trusted BFF writes on cancel, over the SAME credentialed Valkey.
 		ControlStore: statelayer.NewRedisControlStore(addr, username, password),

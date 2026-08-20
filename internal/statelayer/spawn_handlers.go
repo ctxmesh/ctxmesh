@@ -19,7 +19,26 @@ package statelayer
 import (
 	"context"
 	"net/http"
+
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 )
+
+// clampSpawnMax bounds a launcher-supplied spawn max to the platform ceiling (C19, ADR 0088):
+// effectiveMax = min(clientMax, ceiling). The launcher runs in the (untrusted-adjacent) agent pod, so a
+// hostile/prompt-injected pod can send max=1<<40; clamping server-side converts "unbounded" into
+// "bounded by a platform constant". The "inflight" counter (a step's concurrent fan-out) uses the
+// fan-out ceiling; "count" (the whole tree's total) uses the total ceiling. The EXACT per-team budget is
+// m52.C19b. Never raises a client's OWN tighter max — a launcher self-restricting is legitimate (min).
+func clampSpawnMax(counter string, max int) int {
+	ceiling := agentsv1beta1.MaxTotalSpawnsCeiling
+	if counter == spawnCounterInflight {
+		ceiling = agentsv1beta1.MaxFanOutCeiling
+	}
+	if max > ceiling {
+		return ceiling
+	}
+	return max
+}
 
 // spawnAcquireRequest / spawnReleaseRequest are the POST bodies from the launcher's httpSpawnStore. scope +
 // rootRunId identify the spawn tree; counter is "inflight" or "count". The NAMESPACE is NOT in the body — it
@@ -95,7 +114,9 @@ func (s *Server) handleSpawnAcquire(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "max must be >= 0")
 		return
 	}
-	acquired, err := s.spawn.Acquire(ctx, ns, req.Scope, req.RootRunID, counter, req.Max)
+	// C19 (ADR 0088): clamp the launcher-supplied max to the platform ceiling — a hostile pod can send
+	// max=1<<40 to defeat the fan-out/total guard. effectiveMax = min(clientMax, ceiling).
+	acquired, err := s.spawn.Acquire(ctx, ns, req.Scope, req.RootRunID, counter, clampSpawnMax(counter, req.Max))
 	if err != nil {
 		quotaBackendError(w, err)
 		return

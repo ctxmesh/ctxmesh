@@ -273,3 +273,24 @@ func TestSpawn_IdempotentDoesNotConsumeBudget(t *testing.T) {
 	body3.CallID = "call-c"
 	assert.Equal(t, http.StatusAccepted, postSpawn(t, s, cap, body3).Code, "the idempotent retry did not consume budget")
 }
+
+// TestClampSpawnBudget covers the C19 (ADR 0088) authoritative-gate ceiling: an inflated relayed budget
+// is clamped per dimension (depth <= 32, total <= 1024); legit and 0 (unbudgeted) values pass through.
+func TestClampSpawnBudget(t *testing.T) {
+	cases := []struct {
+		inDepth, inTotal     int
+		wantDepth, wantTotal int
+	}{
+		{3, 20, 3, 20},               // legit passes unchanged
+		{32, 1024, 32, 1024},         // exactly the ceilings
+		{1 << 40, 1 << 40, 32, 1024}, // the abuse -> ceilings
+		{100, 5000, 32, 1024},        // both over
+		{0, 0, 0, 0},                 // unbudgeted preserved
+		{5, 0, 5, 0},                 // total unbudgeted, depth legit
+	}
+	for _, tc := range cases {
+		d, tot := clampSpawnBudget(tc.inDepth, tc.inTotal)
+		assert.Equal(t, tc.wantDepth, d, "depth in=%d", tc.inDepth)
+		assert.Equal(t, tc.wantTotal, tot, "total in=%d", tc.inTotal)
+	}
+}

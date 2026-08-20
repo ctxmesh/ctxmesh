@@ -719,8 +719,8 @@ func TestRegistry_NonMemberUnaffected(t *testing.T) {
 	// this agent has no other bindings).
 	hash, err := specHash(agent.Spec)
 	require.NoError(t, err)
-	assert.Equal(t, agentName+"-"+hash, ksvc.Spec.Template.Name,
-		"non-member revision name must be the bare spec-hash form")
+	assert.Equal(t, agentName+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
+		"non-member revision name must be the spec-hash form (+ the C7b identity-SA suffix)")
 }
 
 // TestRegistry_MemberRemoved verifies membership changes update status: when a

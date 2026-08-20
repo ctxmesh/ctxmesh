@@ -76,6 +76,9 @@ type Server struct {
 	// quota is the per-tenant model-quota accumulator (M53). nil in memory-only
 	// deployments; the quota endpoints then report unavailable.
 	quota QuotaStore
+	// userQuota is the per-user (OBO) model-quota accumulator (M107 C20). nil in
+	// memory-only deployments; the user-quota endpoints then report unavailable.
+	userQuota UserQuotaStore
 	// spawn is the AgentTeam-supervisor spawn-tree counter store (M94, closing audit P1-2 — moves the
 	// spawn guard off direct Valkey). nil ⇒ the spawn endpoints report unavailable.
 	spawn SpawnStore
@@ -111,6 +114,9 @@ type Options struct {
 	// QuotaStore is the per-tenant model-quota accumulator (M53). Optional: nil ⇒ the
 	// quota endpoints report unavailable.
 	QuotaStore QuotaStore
+	// UserQuotaStore is the per-user (OBO) model-quota accumulator (M107 C20). Optional:
+	// nil ⇒ the user-quota endpoints report unavailable.
+	UserQuotaStore UserQuotaStore
 	// SpawnStore is the AgentTeam-supervisor spawn-tree counter store (M94). Optional: nil ⇒ the spawn
 	// endpoints report unavailable (a supervisor with STATELAYER_PROXY_URL fails closed on delegation).
 	SpawnStore SpawnStore
@@ -142,6 +148,7 @@ func NewServer(opts Options) (*Server, error) {
 		podAuth:    opts.PodAuthenticator,
 		registries: opts.RegistryResolver,
 		quota:      opts.QuotaStore,
+		userQuota:  opts.UserQuotaStore,
 		spawn:      opts.SpawnStore,
 		dedup:      opts.DedupStore,
 		control:    opts.ControlStore,
@@ -177,6 +184,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /quota/agent-spend", s.handleQuotaAddAgentSpend) // Q8: per-agent breakdown in proxy mode.
 	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
+	// Per-USER (OBO) quota endpoints (M107 C20) — pod-identity authenticated (agent gate),
+	// userHash supplied by the launcher body (the proxy cannot derive an end-user from a pod token).
+	mux.HandleFunc("POST /quota/user-rpm", s.handleQuotaUserRPM)
+	mux.HandleFunc("GET /quota/user-spend", s.handleQuotaGetUserSpend)
+	mux.HandleFunc("POST /quota/user-spend", s.handleQuotaAddUserSpend)
+	mux.HandleFunc("POST /quota/user-slot", s.handleQuotaAcquireUserSlot)
+	mux.HandleFunc("DELETE /quota/user-slot", s.handleQuotaReleaseUserSlot)
 
 	// Spawn-tree counters (M94) — pod-identity authenticated, namespace-scoped SERVER-SIDE. Moves the
 	// AgentTeam-supervisor spawn guard off direct Valkey (:6379) so no agent reaches the shared store.

@@ -23,17 +23,23 @@ package main
 // updates the ConfigMap in place via the controller's reconcile — propagates to the RUNNING sidecar
 // WITHOUT a revision roll.
 //
-// This task is PLUMBING ONLY: the policy is read, parsed, and held behind the PolicyHolder's
-// RWMutex (atomic swap on reload). It is NOT enforced — ServeHTTP does not consult it, so behavior
-// stays PERMISSIVE (a denied/require-approval tool still works). Enforcement is a later M82 task.
+// The policy is read, parsed, and held behind the PolicyHolder's RWMutex (atomic swap on reload). The
+// proxy ENFORCES it (M82, ADR 0074): deny → 403, require-approval → the voucher protocol, plus the
+// fan-out ceiling — so an invalid policy is NOT harmless.
 //
-// FAIL-CLOSED, KEEP-LAST-GOOD (the sacred invariant, mirrored from the guardrail reload): a
-// malformed/unparseable new policy — or a transient read error — NEVER drops the active policy or
-// crashes. The watcher logs loudly and KEEPS the last-good policy. The only content-driven
-// transition to nil is an explicitly EMPTY file (the operator cleared the policy).
+// STARTUP is FAIL-CLOSED (C16, ADR 0087): a MALFORMED initial policy is a HARD startup error
+// (loadInitialToolPolicy returns it → the sidecar exits) — since the sidecar enforces, starting
+// permissive on a broken policy would silently disable the governance the operator configured. A
+// legitimately ABSENT/EMPTY policy is permissive (a nil policy — the agent set no toolPolicy).
+//
+// RELOAD is FAIL-CLOSED, KEEP-LAST-GOOD (the sacred invariant, mirrored from the guardrail reload): a
+// malformed/unparseable NEW policy — or a transient read error — NEVER drops the active policy or
+// crashes. The watcher logs loudly and KEEPS the last-good policy. The only content-driven transition
+// to nil is an explicitly EMPTY file (the operator cleared the policy).
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/go-logr/logr"
@@ -57,25 +63,25 @@ func readToolPolicyFile(path string) (string, error) {
 }
 
 // loadInitialToolPolicy reads + parses the mounted policy at startup and stores it in the holder.
-// Empty/absent ⇒ nil policy (permissive). A malformed file at STARTUP logs loudly and leaves the
-// holder empty (permissive) — this task never enforces, so a bad file must not crash-loop the
-// sidecar (the launcher's guardrail path fails closed because it enforces; here there is nothing to
-// fail closed ON yet). The (later) enforcement task will tighten this to a hard startup error.
-func loadInitialToolPolicy(holder *egress.PolicyHolder, path string, log logr.Logger) {
+// FAIL-CLOSED (C16, ADR 0087): the sidecar ENFORCES the policy (M82), so a MALFORMED initial policy is
+// a HARD startup error — starting permissive on a broken policy would silently disable the governance
+// the operator configured. A legitimately ABSENT/EMPTY policy is NOT an error (readToolPolicyFile maps
+// a missing/empty file → ""; ParseToolPolicy("") → a nil policy = permissive, the un-governed agent). A
+// transient READ error (mount not ready) is ALSO a hard error — we cannot confirm the intended policy,
+// so we refuse to start un-governed. Mirrors loadInitialRoutes (J7) + the guardrail engine's load.
+func loadInitialToolPolicy(holder *egress.PolicyHolder, path string, log logr.Logger) error {
 	raw, err := readToolPolicyFile(path)
 	if err != nil {
-		log.Info("WARNING: egress: tool policy: initial read failed — starting with NO policy (permissive)",
-			"path", path, "err", err.Error())
-		return
+		return fmt.Errorf("reading tool policy %q: %w", path, err)
 	}
 	policy, err := egress.ParseToolPolicy(raw)
 	if err != nil {
-		log.Info("WARNING: egress: tool policy: initial policy is INVALID — starting with NO policy (permissive)",
-			"path", path, "err", err.Error())
-		return
+		return fmt.Errorf("parsing tool policy %q (a malformed policy must not start permissive — the "+
+			"sidecar enforces it): %w", path, err)
 	}
 	holder.Store(policy, raw)
 	log.Info("egress: tool policy loaded", "path", path, "present", policy != nil)
+	return nil
 }
 
 // reloadToolPolicy re-reads the mounted file on a watch event and, on a genuine content change,

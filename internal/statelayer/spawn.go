@@ -37,7 +37,12 @@ const maxSpawnKeyPart = 256
 
 // spawnCounters are the two per-tree counters the AgentTeam-supervisor spawn guard maintains (mirrors
 // cmd/launcher/spawn_guard.go): the live in-flight slots and the lifetime accepted-spawn total.
-var spawnCounters = map[string]bool{"inflight": true, "count": true}
+const (
+	spawnCounterInflight = "inflight" // a step's concurrent fan-out (min against MaxFanOutCeiling)
+	spawnCounterCount    = "count"    // the whole tree's lifetime total (min against MaxTotalSpawnsCeiling)
+)
+
+var spawnCounters = map[string]bool{spawnCounterInflight: true, spawnCounterCount: true}
 
 // SpawnStore is the proxy-side spawn-tree counter store (M94, closing audit P1-2): it moves the
 // AgentTeam-supervisor spawn guard OFF direct Valkey (:6379) and behind the pod-authed proxy, so an agent

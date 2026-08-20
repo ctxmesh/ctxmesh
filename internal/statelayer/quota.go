@@ -72,12 +72,57 @@ func agentSpendKey(scopeID string) string {
 	return "agent:" + scopeID + ":spend:" + quotaSpendWindow()
 }
 
+// UserQuotaStore is the per-user (OBO) model-quota accumulator over the credentialed
+// Valkey (M107, C20). It is the proxy-side analogue of the launcher's userQuotaStore
+// (cmd/launcher/user_quota.go): the key formats + semantics are byte-identical so both
+// hit the SAME per-user accumulator during the migration. The proxy cannot derive an
+// end-user from a pod token — the launcher is the enforcement point; the userHash comes
+// from the launcher's body (the same trust model as direct-Valkey mode).
+type UserQuotaStore interface {
+	// IncrUserRPM increments the user's fixed-minute request counter, returning the new count.
+	IncrUserRPM(ctx context.Context, userHash string, window int64) (int64, error)
+	// UserSpend returns the user's accumulated model spend in USD for the current month (0 when unset).
+	UserSpend(ctx context.Context, userHash string) (float64, error)
+	// AddUserSpend atomically adds deltaUSD to the user's accumulated monthly spend.
+	AddUserSpend(ctx context.Context, userHash string, deltaUSD float64) error
+	// AcquireUserSlot increments the user's in-flight counter, returning false (and rolling
+	// back) when it would exceed maxSlots.
+	AcquireUserSlot(ctx context.Context, userHash string, maxSlots int) (bool, error)
+	// ReleaseUserSlot decrements the user's in-flight counter.
+	ReleaseUserSlot(ctx context.Context, userHash string) error
+}
+
+// userRPMKey mirrors cmd/launcher/user_quota.go's grammar exactly:
+// user:{userHash}:rpm:{window}
+func userRPMKey(userHash string, window int64) string {
+	return fmt.Sprintf("user:%s:rpm:%d", userHash, window)
+}
+
+// userSpendKey scopes the per-user budget to the current UTC calendar month — a RECURRING monthly ceiling
+// (mirroring the tenant quotaSpendWindow and the launcher's spendWindow, ADR 0047), never a lifetime cap:
+// each month starts at 0. Key grammar: user:{userHash}:spend:{YYYY-MM}
+func userSpendKey(userHash string) string { return "user:" + userHash + ":spend:" + quotaSpendWindow() }
+
+// userInflightKey mirrors cmd/launcher/user_quota.go's grammar: user:{userHash}:inflight
+func userInflightKey(userHash string) string { return "user:" + userHash + ":inflight" }
+
 // redisQuotaStore is the production QuotaStore over the credentialed Valkey.
 type redisQuotaStore struct{ rdb *redis.Client }
 
 // NewRedisQuotaStore builds a QuotaStore over the state-layer Valkey (the proxy's
 // credentialed connection).
 func NewRedisQuotaStore(addr, username, password string) QuotaStore {
+	return &redisQuotaStore{rdb: redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Username: username,
+		Password: password,
+	})}
+}
+
+// NewRedisUserQuotaStore builds a UserQuotaStore over the state-layer Valkey (the proxy's
+// credentialed connection). It uses the same client as NewRedisQuotaStore — both may share
+// one Valkey instance with disjoint key prefixes (tenant: vs user:).
+func NewRedisUserQuotaStore(addr, username, password string) UserQuotaStore {
 	return &redisQuotaStore{rdb: redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Username: username,
@@ -143,4 +188,59 @@ func (s *redisQuotaStore) AcquireSlot(ctx context.Context, tenantID string, maxS
 
 func (s *redisQuotaStore) ReleaseSlot(ctx context.Context, tenantID string) error {
 	return s.rdb.Decr(ctx, quotaInflightKey(tenantID)).Err()
+}
+
+// ── Per-USER (OBO) quota ops (M107 C20) ────────────────────────────────────────────────────────
+// Key grammar is byte-identical to cmd/launcher/user_quota.go so both the proxy path and the
+// legacy direct-Valkey path hit the SAME per-user accumulator.
+
+func (s *redisQuotaStore) IncrUserRPM(ctx context.Context, userHash string, window int64) (int64, error) {
+	key := userRPMKey(userHash, window)
+	n, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	if n == 1 {
+		// Best-effort TTL so the window key self-expires (2× the window absorbs clock skew).
+		_ = s.rdb.Expire(ctx, key, 2*time.Minute).Err()
+	}
+	return n, nil
+}
+
+func (s *redisQuotaStore) UserSpend(ctx context.Context, userHash string) (float64, error) {
+	v, err := s.rdb.Get(ctx, userSpendKey(userHash)).Float64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return v, err
+}
+
+func (s *redisQuotaStore) AddUserSpend(ctx context.Context, userHash string, deltaUSD float64) error {
+	key := userSpendKey(userHash)
+	if err := s.rdb.IncrByFloat(ctx, key, deltaUSD).Err(); err != nil {
+		return err
+	}
+	// Refresh a generous TTL (~2 periods) so a past month's window self-expires. Best-effort:
+	// a failed TTL only delays cleanup, never over-counts.
+	return s.rdb.Expire(ctx, key, 62*24*time.Hour).Err()
+}
+
+func (s *redisQuotaStore) AcquireUserSlot(ctx context.Context, userHash string, maxSlots int) (bool, error) {
+	key := userInflightKey(userHash)
+	n, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	// Refresh a safety TTL so a leaked slot (a holder that crashed without releasing) self-heals
+	// once the user goes idle — a coarse guard, never money.
+	_ = s.rdb.Expire(ctx, key, 10*time.Minute).Err()
+	if int(n) > maxSlots {
+		_ = s.rdb.Decr(ctx, key).Err() // roll back — we did not get the slot
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *redisQuotaStore) ReleaseUserSlot(ctx context.Context, userHash string) error {
+	return s.rdb.Decr(ctx, userInflightKey(userHash)).Err()
 }

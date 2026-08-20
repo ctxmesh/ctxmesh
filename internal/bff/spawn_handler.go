@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	agentsv1beta1 "github.com/ctxmesh/agent-engine/api/v1beta1"
 	"github.com/ctxmesh/agent-engine/internal/run"
 	"github.com/ctxmesh/agent-engine/internal/runcap"
 )
@@ -54,6 +55,15 @@ type SpawnRunRequest struct {
 	// (a legacy/unbudgeted caller); the CRD always injects positive values for a real team.
 	MaxSpawnDepth  int `json:"maxSpawnDepth,omitempty"`
 	MaxTotalSpawns int `json:"maxTotalSpawns,omitempty"`
+}
+
+// clampSpawnBudget bounds the launcher-relayed spawn budget to the platform ceilings (C19, ADR 0088):
+// min(client, ceiling) per dimension. A hostile/prompt-injected pod can POST an inflated budget
+// (maxTotalSpawns=1<<40) directly to this authoritative gate; clamping converts "unbounded" into
+// "bounded by a platform constant". A 0 (unbudgeted/legacy) is preserved as 0 — the total ceiling is the
+// backstop. Pure + testable; the EXACT per-team budget is m52.C19b.
+func clampSpawnBudget(maxDepth, maxTotal int) (depth, total int) {
+	return min(maxDepth, agentsv1beta1.MaxSpawnDepthCeiling), min(maxTotal, agentsv1beta1.MaxTotalSpawnsCeiling)
 }
 
 // SpawnRunResponse returns the (possibly pre-existing) sub-run id + status.
@@ -210,6 +220,19 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	// (6) AUTHORITATIVE spawn-budget gate (the M64 security review's P1-A fix). Depth uses the verified
 	// parent's lineage; the total counter is keyed on the authoritative root (an agent can't re-key it
 	// for a fresh budget). Fails CLOSED. The launcher relays the budget from its controller-injected env.
+	//
+	// C19 (ADR 0088): the launcher runs in the (untrusted-adjacent) agent pod, so a hostile pod can
+	// inflate the relayed budget (maxTotalSpawns=1<<40) to defeat this gate. Clamp to the platform
+	// ceiling here — this is the AUTHORITATIVE server-side gate, so a pod skipping the launcher's guard
+	// and POSTing here directly is still bounded. effectiveMax = min(clientBudget, ceiling); the EXACT
+	// per-team budget is m52.C19b. (0 = unbudgeted stays 0 — the total ceiling is the backstop.)
+	clampedDepth, clampedTotal := clampSpawnBudget(req.MaxSpawnDepth, req.MaxTotalSpawns)
+	if clampedTotal != req.MaxTotalSpawns || clampedDepth != req.MaxSpawnDepth {
+		s.log.Info("bff: spawn: clamped an over-ceiling spawn budget to the platform ceiling",
+			"root", rootRunID, "requestedDepth", req.MaxSpawnDepth, "requestedTotal", req.MaxTotalSpawns,
+			"depthCeiling", agentsv1beta1.MaxSpawnDepthCeiling, "totalCeiling", agentsv1beta1.MaxTotalSpawnsCeiling)
+	}
+	req.MaxSpawnDepth, req.MaxTotalSpawns = clampedDepth, clampedTotal
 	if req.MaxSpawnDepth > 0 && childDepth > req.MaxSpawnDepth {
 		writeError(w, http.StatusTooManyRequests,
 			"spawn denied: the team's max spawn depth is exceeded")

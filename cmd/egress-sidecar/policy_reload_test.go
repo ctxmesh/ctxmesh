@@ -56,7 +56,7 @@ func TestToolPolicy_InitialLoad_Present(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("deny", "web_search", "allow"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 
 	p := holder.Load()
 	require.NotNil(t, p, "a mounted policy must be held after the initial load")
@@ -69,14 +69,37 @@ func TestToolPolicy_InitialLoad_Present(t *testing.T) {
 func TestToolPolicy_AbsentFile_Permissive(t *testing.T) {
 	holder := &egress.PolicyHolder{}
 	// A path that does not exist (no ConfigMap mounted) ⇒ nil policy, no error.
-	loadInitialToolPolicy(holder, filepath.Join(t.TempDir(), "missing.json"), logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, filepath.Join(t.TempDir(), "missing.json"), logr.Discard()))
 	assert.Nil(t, holder.Load(), "an absent policy file ⇒ no policy (permissive)")
 
 	// An explicitly EMPTY file ⇒ nil policy too.
 	dir := t.TempDir()
 	path := writePolicyFile(t, dir, "")
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	assert.Nil(t, holder.Load(), "an empty policy file ⇒ no policy (permissive)")
+}
+
+// TestToolPolicy_InitialLoad_MalformedIsHardError is the C16 (ADR 0087) fail-closed contract: because the
+// sidecar ENFORCES the policy (M82), a MALFORMED initial policy is a HARD startup error — never a silent
+// permissive start that would disable the governance the operator configured.
+func TestToolPolicy_InitialLoad_MalformedIsHardError(t *testing.T) {
+	dir := t.TempDir()
+	path := writePolicyFile(t, dir, `{ this is not valid json`)
+
+	holder := &egress.PolicyHolder{}
+	err := loadInitialToolPolicy(holder, path, logr.Discard())
+	require.Error(t, err, "a malformed initial policy must hard-fail startup, not start permissive")
+	assert.Nil(t, holder.Load(), "a malformed initial policy stores nothing")
+}
+
+// TestToolPolicy_InitialLoad_ReadErrorIsHardError proves a transient read error at startup (reading a
+// DIRECTORY as a file — a non-NotExist error) is a hard error too: we cannot confirm the intended policy,
+// so we refuse to start un-governed (an absent/not-exist file stays permissive; a broken read does not).
+func TestToolPolicy_InitialLoad_ReadErrorIsHardError(t *testing.T) {
+	holder := &egress.PolicyHolder{}
+	err := loadInitialToolPolicy(holder, t.TempDir(), logr.Discard()) // a dir, not a file
+	require.Error(t, err, "a non-NotExist read error at startup must hard-fail")
+	assert.Nil(t, holder.Load())
 }
 
 // TestToolPolicy_Reload_NewPolicyActive proves the K3 core: rewriting the mounted file and reloading
@@ -86,7 +109,7 @@ func TestToolPolicy_Reload_NewPolicyActive(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("allow", "shell_exec", "deny"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	require.Equal(t, "deny", holder.Load().RuleFor("shell_exec"), "original policy denies shell_exec")
 
 	// Rewrite to a DIFFERENT policy and reload (as the fsnotify watch would).
@@ -105,7 +128,7 @@ func TestToolPolicy_Reload_MalformedKeepsLastGood(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("deny", "web_search", "allow"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	require.NotNil(t, holder.Load())
 
 	// Rewrite to GARBAGE and reload — the parse must fail and the swap must NOT happen.
@@ -124,7 +147,7 @@ func TestToolPolicy_Reload_EmptyClears(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("deny", "web_search", "allow"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	require.NotNil(t, holder.Load(), "policy active at startup")
 
 	require.NoError(t, os.WriteFile(path, []byte(""), 0o600)) // operator cleared it
@@ -139,7 +162,7 @@ func TestToolPolicy_Reload_TransientReadErrorKeepsLastGood(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("deny", "web_search", "allow"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	require.NotNil(t, holder.Load())
 
 	// Reading a DIRECTORY as a file yields a non-NotExist read error → keep last-good.
@@ -159,7 +182,7 @@ func TestToolPolicy_Watch_LiveReload(t *testing.T) {
 	path := writePolicyFile(t, dir, denyPolicy("allow", "shell_exec", "deny"))
 
 	holder := &egress.PolicyHolder{}
-	loadInitialToolPolicy(holder, path, logr.Discard())
+	require.NoError(t, loadInitialToolPolicy(holder, path, logr.Discard()))
 	require.Equal(t, "deny", holder.Load().RuleFor("shell_exec"))
 
 	stop := make(chan struct{})

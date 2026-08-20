@@ -126,6 +126,41 @@ var (
 // share a spelling (goconst).
 const envValueTrue = "true"
 
+// statelayerProxylessWarning returns a startup warning (and true) when the controller is proxy-less
+// (STATELAYER_PROXY_URL unset) — an UNSUPPORTED combination with the default network isolation (C21,
+// m52 / Fable audit P2-7). Proxy-less injects a DIRECT MEMORY_BACKEND_ADDR/TENANT_QUOTA_ADDR, but the
+// M94/M97 default network isolation blocks cross-namespace :6379, so a proxy-less AND tenant-isolated
+// install has memory fail-OPEN (silent loss) + budget fail-CLOSED (402). A set URL ⇒ ("", false): the
+// supported default. Kept as a pure function so the preflight is unit-testable without a live manager.
+func statelayerProxylessWarning(statelayerProxyURL string) (string, bool) {
+	if strings.TrimSpace(statelayerProxyURL) != "" {
+		return "", false
+	}
+	return "STATELAYER_PROXY_URL is unset (proxy-less / direct-Valkey mode): UNSUPPORTED for " +
+		"tenant-isolated installs — the default network isolation (M94/M97) blocks cross-namespace :6379, " +
+		"so agent memory fails OPEN (silent loss) and budget fails CLOSED (402). Set STATELAYER_PROXY_URL " +
+		"for any install with network isolation enabled.", true
+}
+
+// launcherImageDigestWarning returns a startup warning (and true) when LAUNCHER_IMAGE is set but NOT
+// digest-pinned (…@sha256:…) — C8b (ADR 0089). LAUNCHER_IMAGE is fleet-RCE-equivalent config: it becomes
+// PID 1 in every injected agent pod, so it MUST be a digest, not a mutable tag a registry push could swap.
+// The controller already refuses to INJECT a non-pinned launcher (launcherInjectionReady, fail-safe); this
+// surfaces the misconfig ONCE at startup (loud) rather than only per-agent-reconcile. Empty (injection off)
+// or a digest-pinned value ⇒ ("", false). Cosign signature verification is DEFERRED (m52.C8b-cosign): the
+// digest pin already defeats mutable-tag + registry tampering (a digest is content-addressed), and the
+// LAUNCHER_IMAGE setter is cluster-admin — cosign's marginal provenance value doesn't justify the sigstore
+// dependency + key management now. Pure function so the preflight is unit-testable.
+func launcherImageDigestWarning(launcherImage string) (string, bool) {
+	img := strings.TrimSpace(launcherImage)
+	if img == "" || strings.Contains(img, "@sha256:") {
+		return "", false
+	}
+	return "LAUNCHER_IMAGE is set but NOT digest-pinned (…@sha256:…): launcher injection will be SKIPPED " +
+		"(fail-safe) because a mutable tag is fleet-RCE-equivalent (it becomes PID 1 in every agent pod). " +
+		"Pin LAUNCHER_IMAGE to a @sha256: digest to enable injection.", true
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -330,6 +365,21 @@ func main() {
 	var registryChanges <-chan event.GenericEvent = registryChangesCh
 	setupLog.Info("ToolRegistry served from Postgres (ADR 0044): read-switch + poll source active")
 
+	// C21 (m52 / Fable audit P2-7): a proxy-less controller (STATELAYER_PROXY_URL unset) injects
+	// DIRECT MEMORY_BACKEND_ADDR/TENANT_QUOTA_ADDR, but the M94/M97 default network isolation blocks
+	// cross-namespace :6379 — so a proxy-less AND tenant-isolated install has memory fail-OPEN + budget
+	// fail-CLOSED. Warn loudly at startup (not a hard fail — an intentionally proxy-less, isolation-off
+	// dev install is legitimate). The default install SETS the proxy URL, so this only fires on drift.
+	statelayerProxyURL := strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL"))
+	if msg, warn := statelayerProxylessWarning(statelayerProxyURL); warn {
+		setupLog.Info("startup preflight WARNING (C21): " + msg)
+	}
+	// C8b (ADR 0089): LAUNCHER_IMAGE is fleet-RCE-equivalent config — warn loudly at startup if it is set
+	// but not digest-pinned (the controller then fail-safe SKIPS injection). Cosign verify deferred.
+	if msg, warn := launcherImageDigestWarning(os.Getenv("LAUNCHER_IMAGE")); warn {
+		setupLog.Info("startup preflight WARNING (C8b): " + msg)
+	}
+
 	if err := (&controller.AgentDeploymentReconciler{
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
@@ -347,7 +397,7 @@ func main() {
 		DevDataPlane: strings.TrimSpace(os.Getenv("DEV_DATA_PLANE")) == envValueTrue,
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
-		StatelayerProxyURL: strings.TrimSpace(os.Getenv("STATELAYER_PROXY_URL")),
+		StatelayerProxyURL: statelayerProxyURL,
 		// Launcher injection (C8, ADR 0079): opt-in + digest-pinned. Set ⇒ agents run the
 		// platform-injected launcher (initContainer + emptyDir + Command override) so a
 		// launcher fix rolls centrally; empty (default) ⇒ baked-launcher images run unchanged.
