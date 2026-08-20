@@ -377,8 +377,8 @@ func TestBinding_UnregisteredTool_ReadyFalseAndExcluded(t *testing.T) {
 	_, has := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
 	assert.False(t, has, "an agent with no VALID binding must not get the discovery sidecar")
 	hash, _ := specHash(agent.Spec)
-	assert.Equal(t, agent.Name+"-"+hash, ksvc.Spec.Template.Name,
-		"no valid bindings → revision name stays the bare spec-hash")
+	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
+		"no valid bindings → revision name is the spec-hash (+ the C7b identity-SA suffix)")
 }
 
 // TestBinding_RegistryMismatch_ReadyFalse: a binding whose image does not match
@@ -624,8 +624,8 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	ksvc = getKsvc(t, agent.Name, ns)
 	hash, herr := specHash(agent.Spec)
 	require.NoError(t, herr)
-	assert.Equal(t, agent.Name+"-"+hash, ksvc.Spec.Template.Name,
-		"revision name must revert to the bare spec-hash when no bindings remain")
+	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
+		"revision name reverts to the spec-hash (+ the C7b identity-SA suffix) when no bindings remain")
 	_, hasDisc = containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
 	assert.False(t, hasDisc, "discovery sidecar must be removed with the last binding")
 }

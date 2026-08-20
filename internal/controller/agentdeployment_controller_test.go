@@ -39,6 +39,13 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/telemetry"
 )
 
+// bareIdentitySuffix is the "-h<digest>" combined-digest suffix EVERY agent's revision name now carries
+// after C7b (ADR 0090): even a "bare" agent (no bindings/overrides) runs its own per-agent identity SA
+// (agent-<name>), a structural pod-spec element folded into the digest. Appended to the spec-hash base
+// (`{name}-{specHash}` → `{name}-{specHash}-h<digest>`).
+var bareIdentitySuffix = "-h" + combinedBindingDigest("", "", "", "", "", "",
+	universalIdentitySADigest(false), "", "", "")
+
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
 // API server.
 func newReconciler() *AgentDeploymentReconciler {
@@ -173,8 +180,8 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 		envMap["MODEL_GATEWAY_URL"], "MODEL_GATEWAY_URL env var")
 
 	// Stable revision name — must be "{service}-{hash}" for idempotent reconciles.
-	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash), ksvc.Spec.Template.Name,
-		"revision name must be stable spec-hash-based name")
+	assert.Equal(t, fmt.Sprintf("%s-%s%s", name, hash, bareIdentitySuffix), ksvc.Spec.Template.Name,
+		"revision name must be the stable spec-hash-based name (+ the C7b identity-SA suffix)")
 
 	// Autoscaling annotations
 	tmplAnnotations := ksvc.Spec.Template.Annotations
@@ -245,7 +252,7 @@ func TestReconcile_IdempotentRereconcile(t *testing.T) {
 
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
-	expectedRevName := fmt.Sprintf("%s-%s", name, hash)
+	expectedRevName := fmt.Sprintf("%s-%s%s", name, hash, bareIdentitySuffix)
 
 	var ksvc1 servingv1.Service
 	require.NoError(t, k8sClient.Get(testCtx,
@@ -338,7 +345,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.Len(t, ksvc.Spec.Template.Spec.Containers, 2) // user + collector sidecar
 	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", ksvc.Spec.Template.Spec.Containers[0].Image,
 		"ksvc container image must be updated to v2")
-	assert.Equal(t, fmt.Sprintf("%s-%s", name, hash2), ksvc.Spec.Template.Name,
+	assert.Equal(t, fmt.Sprintf("%s-%s%s", name, hash2, bareIdentitySuffix), ksvc.Spec.Template.Name,
 		"revision name must change when spec changes")
 
 	// status.latestVersion must point to the new version
@@ -898,11 +905,58 @@ func TestReconcile_NoRuntimeNoInjection(t *testing.T) {
 			"AGENT_RUNTIME must NOT be injected when spec.runtime is nil (backward-compat)")
 	}
 
-	// The revision name must NOT carry a "-h" combined digest suffix for a
-	// bare agent with no bindings or structural overrides.
+	// C7b (ADR 0090): even a bare agent (no runtime, no bindings) now runs its own per-agent identity SA,
+	// so its revision name carries the universal identity-SA digest suffix and it runs as agent-<name>.
 	revName := ksvc.Spec.Template.Name
-	assert.NotContains(t, revName, "-h",
-		"bare agent (no runtime, no bindings) must NOT have a combined digest suffix")
+	assert.Contains(t, revName, bareIdentitySuffix,
+		"C7b: a bare agent carries the universal identity-SA digest suffix")
+	assert.Equal(t, agentIdentitySAName(name), ksvc.Spec.Template.Spec.ServiceAccountName,
+		"C7b: every agent runs its own agent-<name> identity SA")
+}
+
+// TestReconcile_C7b_PlainAgentIdentitySAAndPullSecretMirror proves C7b (ADR 0090): a PLAIN agent (no
+// memory/proxy/OBO) runs its OWN per-agent identity SA (automount-false), and that SA MIRRORS the
+// namespace default SA's imagePullSecrets — the private-registry compat floor. Uses an ISOLATED namespace
+// so the shared "default"-namespace default SA is never polluted.
+func TestReconcile_C7b_PlainAgentIdentitySAAndPullSecretMirror(t *testing.T) {
+	const (
+		ns   = "c7b-mirror-ns"
+		name = "c7b-plain"
+	)
+	if err := k8sClient.Create(testCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil &&
+		!apierrors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
+	// The namespace default SA carries a pull secret (the canonical private-registry pattern).
+	defSA := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: ns}}
+	_, err := ctrl.CreateOrUpdate(testCtx, k8sClient, defSA, func() error {
+		defSA.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "regcred"}}
+		return nil
+	})
+	require.NoError(t, err)
+
+	deploy := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+	reconcileNN(t, newReconciler(), name, ns)
+
+	// The ksvc runs the per-agent identity SA (not the namespace default).
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &ksvc))
+	assert.Equal(t, agentIdentitySAName(name), ksvc.Spec.Template.Spec.ServiceAccountName,
+		"C7b: a plain agent runs its own agent-<name> identity SA")
+
+	// The identity SA: exists, automount-false, and mirrors the default SA's pull secrets.
+	var sa corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: agentIdentitySAName(name), Namespace: ns}, &sa))
+	require.NotNil(t, sa.AutomountServiceAccountToken)
+	assert.False(t, *sa.AutomountServiceAccountToken, "C7b: identity SA is automount-false by default")
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "regcred"}}, sa.ImagePullSecrets,
+		"C7b: identity SA mirrors the namespace default SA's imagePullSecrets")
 }
 
 // TestReconcile_IdentitySAConflict_ReadyFalse proves the m79.1 fix (m52 C11): when

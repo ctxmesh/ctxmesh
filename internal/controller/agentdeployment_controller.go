@@ -1681,6 +1681,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// spec.mountServiceAccountToken flips the SA's AutomountServiceAccountToken, which must
 	// reach a running pod — so it rolls a new revision like every other pod-template change.
 	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken, mountAPIToken(deploy))
+	// C7b (ADR 0090): every agent now runs its own identity SA. For a PROXY agent the SA + automount are
+	// ALREADY folded by statelayerProxyDigest ("|sa"), so proxyDig is non-empty. For a PLAIN agent
+	// (proxyDig==""), fold the SA + automount here — reusing proxyDig's SLOT (not a new digest field) so a
+	// proxy agent's revision name is byte-UNCHANGED (no needless re-roll), while a plain agent's changes to
+	// roll it off the namespace default SA onto agent-<name> ONCE (the M4 landmine: a serviceAccountName
+	// pod-spec change that doesn't move the revision name is silently dropped by the CreateOrUpdate guard).
+	identityDig := proxyDig
+	if identityDig == "" {
+		identityDig = universalIdentitySADigest(mountAPIToken(deploy))
+	}
 	// Runtime config (M65): a spec.runtime add/remove/change injects/removes the
 	// AGENT_RUNTIME env — a STRUCTURAL change that must roll the revision, so it
 	// folds into the combined digest like the other components.
@@ -1701,7 +1711,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// "" when no KBs are bound (symmetric with the other components; byte-compatible pre-M68).
 	kbDig := knowledgeBasesDigest(kbRes.roster)
 	combinedDigest := combinedBindingDigest(
-		toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, proxyDig, runtimeDig, guardrailDig, kbDig)
+		toolDigest, memDigest, regDigest, budgetDig, promptDig, tenantDig, identityDig, runtimeDig, guardrailDig, kbDig)
 
 	// Membership pod label: when the agent is a registry member, stamp the
 	// controller-owned registry-id label on the pod template so the pods carry
@@ -1712,17 +1722,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		templateLabels = map[string]string{registryIDLabel: membership.RegistryID}
 	}
 
-	// Per-agent identity SA (ADR 0052 §C6 RESOLUTION): the pod runs as "agent-<name>"
-	// exactly when it presents a projected token to the state-layer proxy, so
-	// TokenReview yields a cryptographic (ns,agent) identity. Empty otherwise (default
-	// SA, no drift). injectPodToken already feeds proxyDig, so enabling it rolls a new
-	// revision — and the "sa" version bump in statelayerProxyDigest re-rolls agents that
-	// were ALREADY proxy-attached onto the new SA (a real pod-spec change must roll a
-	// revision — the M4 silent-loss landmine).
-	var saName string
-	if injectPodToken {
-		saName = agentIdentitySAName(deploy.Name)
-	}
+	// Per-agent identity SA. C7b (ADR 0090): EVERY agent runs its OWN identity SA ("agent-<name>",
+	// zero-RBAC, automount-false), not just proxy/memory/OBO agents — so the automount-false hardening +
+	// a distinct TokenReview identity are UNIVERSAL (a plain agent no longer runs on the namespace shared
+	// `default` SA with an unused auto-mounted kube-API token co-resident with user code). The digest fold
+	// (identityDig, above) rolls a plain agent onto the SA once without re-rolling the proxy fleet.
+	saName := agentIdentitySAName(deploy.Name)
 
 	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject
 	// initContainer + shared emptyDir and override the user container's Command. Fold the launcher image
@@ -1755,6 +1760,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 func agentIdentitySAName(deployName string) string {
 	return "agent-" + deployName
 }
+
+// defaultServiceAccountName is the namespace's built-in default ServiceAccount — the source of the
+// imagePullSecrets that C7b (ADR 0090) mirrors onto each per-agent identity SA.
+const defaultServiceAccountName = "default"
 
 // C8 launcher-injection constants (ADR 0079).
 const (
@@ -1920,13 +1929,19 @@ func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
 	return nil, false
 }
 
-// ensureAgentIdentitySA reconciles the per-agent identity ServiceAccount the pod runs
-// as when it presents a projected token to the state-layer proxy (ADR 0052 §C6
-// RESOLUTION). saName == "" (a non-proxy agent) is a no-op: the pod keeps the namespace
-// default SA and nothing is created. The SA is IDENTITY-ONLY — no RoleBindings, no
-// imagePullSecrets — so it grants nothing; its sole purpose is a distinct TokenReview
-// subject (system:serviceaccount:<ns>:agent-<name>) the proxy scopes per-agent. Owned by
-// the AgentDeployment, so it is garbage-collected with the agent. Idempotent.
+// ensureAgentIdentitySA reconciles the per-agent identity ServiceAccount the pod runs as. C7b (ADR 0090):
+// EVERY agent gets one (agent-<name>), not just proxy/memory/OBO agents (saName == "" is a defensive
+// no-op). The SA is IDENTITY-ONLY (no RoleBindings) so it grants nothing intrinsic; its purpose is a
+// distinct TokenReview subject (system:serviceaccount:<ns>:agent-<name>) + the automount-false token
+// strip. Owned by the AgentDeployment, so it is garbage-collected with the agent. Idempotent.
+//
+// imagePullSecrets: it MIRRORS the namespace `default` SA's imagePullSecrets (C7b, ADR 0090). Patching
+// pull secrets onto the default SA is the canonical private-registry pattern; without mirroring, moving a
+// plain agent off the default SA would break image pulls fleet-wide (ImagePullBackOff → a deploy freeze).
+// Only the secret REFERENCES are copied (consumed by the kubelet, never visible to user code — zero
+// security delta; any pod could already reference those secrets). Annotations are NEVER copied — cloud
+// workload-identity trust policies (IRSA/GKE-WI) key on the SA NAME, so a copied annotation is
+// non-functional + a credential-grant smell (documented as an upgrade-guide callout instead).
 //
 // registryID, when non-empty, is stamped as the registryIDLabel LABEL on the SA — the
 // SERVER-TRUSTED source the state-layer proxy reads to derive the SHARED-scope memory
@@ -1942,10 +1957,21 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 	if saName == "" {
 		return nil
 	}
+	// Mirror the namespace default SA's imagePullSecrets (C7b, ADR 0090) — the private-registry compat
+	// floor. A missing default SA (unusual) ⇒ no mirror, not an error. Read once, before CreateOrUpdate.
+	var defaultPullSecrets []corev1.LocalObjectReference
+	defSA := &corev1.ServiceAccount{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: defaultServiceAccountName}, defSA); err == nil {
+		defaultPullSecrets = defSA.ImagePullSecrets
+	}
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: deploy.Namespace},
 	}
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		// Mirror the default SA's pull-secret REFERENCES (C7b) so a private-registry agent still pulls
+		// after moving off the default SA. Level-triggered: re-mirrored every reconcile/resync so a
+		// rotation converges (an explicit ServiceAccount watch for instant propagation is m52.C7b-watch).
+		sa.ImagePullSecrets = defaultPullSecrets
 		// Manage ONLY our registry label — never clobber labels another actor set.
 		if registryID != "" {
 			if sa.Labels == nil {
@@ -1968,10 +1994,10 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 		// that legitimately builds an in-cluster kube config. Reconciled here (idempotently) like
 		// the registry label so a toggle re-converges.
 		//
-		// COVERAGE: this only reaches agents that HAVE an identity SA (memory/proxy/OBO). A plain
-		// agent on the namespace's shared `default` SA is out of scope — toggling automount on a
-		// shared SA would affect every workload in the namespace; a universal identity SA is a
-		// separate follow-up.
+		// C7b (ADR 0090): this now reaches EVERY agent (each has its own identity SA), so the
+		// automount-false hardening is universal — a plain agent no longer runs on the shared `default`
+		// SA with an unused auto-mounted token. Toggling automount on the shared default SA (the old
+		// blocker) is avoided precisely because each agent has its OWN SA.
 		sa.AutomountServiceAccountToken = ptr.To(mountAPIToken(deploy))
 		return ctrl.SetControllerReference(deploy, sa, r.Scheme)
 	}); err != nil {
@@ -2416,6 +2442,17 @@ func statelayerProxyDigest(proxyURL string, injected, mountAPIToken bool) string
 	// unrelated restart. Default false ⇒ "automount=false" (byte-different from the pre-m79.4
 	// digest, so live proxy agents roll ONCE onto the hardened SA — a real spec change).
 	h := sha256.Sum256([]byte(proxyURL + "|sa" + "|automount=" + strconv.FormatBool(mountAPIToken)))
+	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// universalIdentitySADigest folds a PLAIN agent's per-agent identity SA (agent-<name>) + its automount
+// setting into the structural digest (C7b, ADR 0090). It is used ONLY when statelayerProxyDigest returned
+// "" (a non-proxy agent) — reusing that slot — so a proxy agent (whose SA is already folded there) is
+// never re-rolled, while a plain agent's revision name changes to roll it OFF the namespace default SA
+// onto agent-<name> once, and a spec.mountServiceAccountToken toggle rolls too. The fixed "identity-sa"
+// prefix makes it byte-distinct from the pre-C7b empty slot, so live plain agents roll exactly once.
+func universalIdentitySADigest(mountAPIToken bool) string {
+	h := sha256.Sum256([]byte("identity-sa|automount=" + strconv.FormatBool(mountAPIToken)))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 
