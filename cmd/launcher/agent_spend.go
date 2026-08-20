@@ -35,11 +35,11 @@ import (
 // per tick and snapshots them into the durable cost_rollups ledger (scope_type='agent'), giving a
 // per-agent daily/month-to-date spend series that survives a Valkey restart (forecast/chargeback).
 //
-// It writes ONLY to the DIRECT Valkey (TENANT_QUOTA_ADDR) — exactly like the per-user quota
-// (buildUserQuota): the state-layer-proxy path derives the TENANT from the pod token and has no
-// per-agent notion, so with no direct addr the per-agent rollup is simply OFF (a loud log, never a
-// blocked call). It holds NO caller token, reads nothing, and books nothing when the agent is
-// unnamed — an honest no-op, never a panic.
+// It books through the state-layer PROXY when STATELAYER_PROXY_URL is set (Q8: the proxy resolves the
+// per-agent identity {ns}/{name} SERVER-SIDE from this launcher's pod token and INCRBYFLOATs
+// agent:{ns}/{name}:spend, so per-agent rollup works in the M53 cutover default where the launcher holds
+// no direct Valkey path), else the DIRECT Valkey (TENANT_QUOTA_ADDR), else it is OFF (a loud log, never
+// a blocked call). It books nothing when the agent is unnamed — an honest no-op, never a panic.
 
 // agentSpendStore is the shared Valkey backing the per-agent durable-spend accumulator. An interface so
 // the booker unit-tests against a fake without a live Valkey (the tenantQuotaStore pattern).
@@ -99,16 +99,21 @@ func newAgentSpendAccountant(cfg gatewayConfig, logf func(string, ...any)) *agen
 	if scopeID == "" {
 		return nil // unnamed agent → not per-agent-attributable (honest, not a crash)
 	}
-	if cfg.QuotaAddr == "" {
-		logf("launcher: gateway: per-agent cost rollup OFF — no TENANT_QUOTA_ADDR " +
-			"(state-layer-proxy path has no per-agent notion)")
+	var store agentSpendStore
+	switch {
+	case cfg.StatelayerProxyURL != "":
+		// Proxy mode (Q8): the state-layer proxy derives the agent identity from this launcher's pod
+		// token and books onto agent:{ns}/{name}:spend server-side, so per-agent rollup works WITHOUT a
+		// direct Valkey path (the M53 cutover default). The scopeID we pass is ignored (the proxy
+		// derives it un-forgeably from the token); it is kept for the direct-Valkey path below.
+		store = newHTTPAgentSpendStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
+	case cfg.QuotaAddr != "":
+		store = newRedisAgentSpendStore(cfg.QuotaAddr)
+	default:
+		logf("launcher: gateway: per-agent cost rollup OFF — no STATELAYER_PROXY_URL / TENANT_QUOTA_ADDR")
 		return nil
 	}
-	return &agentSpendAccountant{
-		scopeID: scopeID,
-		store:   newRedisAgentSpendStore(cfg.QuotaAddr),
-		logf:    logf,
-	}
+	return &agentSpendAccountant{scopeID: scopeID, store: store, logf: logf}
 }
 
 // agentSpendScopeID is the "{ns}/{name}" identity used as the per-agent scope id — the SAME grammar as

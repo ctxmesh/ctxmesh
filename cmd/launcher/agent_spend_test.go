@@ -137,21 +137,30 @@ func TestAgentSpend_TenantKeyUntouched(t *testing.T) {
 	assert.NotEqual(t, tenantKey, agentKey)
 }
 
-// TestNewAgentSpendAccountant_Degradations proves the builder mirrors buildUserQuota's "no direct Valkey
-// → OFF" degradation and the unnamed-agent → OFF case (a nil-safe no-op, never a blocked call).
-func TestNewAgentSpendAccountant_Degradations(t *testing.T) {
-	// Named agent + a direct Valkey addr → a live booker.
+// TestNewAgentSpendAccountant_Backends proves the builder selects the right backend (Q8): a direct
+// Valkey addr → the redis booker; a state-layer-proxy URL → the proxy booker (per-agent rollup now
+// works in proxy mode); neither → OFF; an unnamed agent → OFF (a nil-safe no-op, never a blocked call).
+func TestNewAgentSpendAccountant_Backends(t *testing.T) {
+	// Named agent + a direct Valkey addr → a live redis booker.
 	live := gatewayConfig{AgentNamespace: "prod", AgentName: "foo", QuotaAddr: "127.0.0.1:6379"}
 	a := newAgentSpendAccountant(live, noopLog)
 	require.NotNil(t, a)
 	assert.Equal(t, "prod/foo", a.scopeID)
+	assert.IsType(t, &redisAgentSpendStore{}, a.store)
 
-	// No direct Valkey addr (state-layer-proxy-only path) → OFF (nil), never a crash.
+	// Q8: state-layer-proxy path → a LIVE booker via the proxy (the proxy resolves the agent identity
+	// server-side + books agent:{ns}/{name}:spend), NOT off.
 	proxyOnly := gatewayConfig{AgentNamespace: "prod", AgentName: "foo", StatelayerProxyURL: "http://proxy"}
-	off := newAgentSpendAccountant(proxyOnly, noopLog)
-	assert.Nil(t, off, "no TENANT_QUOTA_ADDR → per-agent rollup OFF (like the per-user quota)")
+	viaProxy := newAgentSpendAccountant(proxyOnly, noopLog)
+	require.NotNil(t, viaProxy, "Q8: proxy mode books per-agent spend through the proxy")
+	assert.Equal(t, "prod/foo", viaProxy.scopeID)
+	assert.IsType(t, &httpAgentSpendStore{}, viaProxy.store)
 
-	// Unnamed agent → OFF (nothing to key on) even with a Valkey addr.
+	// NEITHER a direct Valkey addr NOR a proxy URL → OFF (nil), never a crash.
+	noBackend := gatewayConfig{AgentNamespace: "prod", AgentName: "foo"}
+	assert.Nil(t, newAgentSpendAccountant(noBackend, noopLog), "no backend → per-agent rollup OFF")
+
+	// Unnamed agent → OFF (nothing to key on) even with a backend.
 	unnamed := newAgentSpendAccountant(gatewayConfig{QuotaAddr: "127.0.0.1:6379"}, noopLog)
 	assert.Nil(t, unnamed, "an unnamed agent is not per-agent-attributable → OFF")
 }

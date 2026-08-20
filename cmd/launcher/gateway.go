@@ -299,7 +299,11 @@ type gatewayProxy struct {
 	enforcer  *budget.Enforcer
 	estimator *budget.Estimator
 	client    *http.Client
-	tracer    trace.Tracer
+	// streamClient forwards the K2 (ADR 0086) streaming path. It has NO overall Timeout — a
+	// client-level deadline would abort a long SSE response mid-stream — so termination is driven
+	// by the request context (the m70.8 mid-call abort cancels fwdCtx). Same redirect refusal.
+	streamClient *http.Client
+	tracer       trace.Tracer
 	// caps is the per-process budget derived once from the config (the caps are
 	// static — the same for every request this launcher serves). Parsed at
 	// construction so a malformed cap fails fast at startup, not per request.
@@ -393,6 +397,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		enforcer:       budget.NewEnforcer(),
 		estimator:      budget.NewEstimator(),
 		client:         &http.Client{Timeout: gatewayRequestTimeout, CheckRedirect: refuseRedirect},
+		streamClient:   &http.Client{CheckRedirect: refuseRedirect}, // no overall timeout; ctx-driven (K2)
 		tracer:         tracer,
 		bffInternalURL: cfg.BFFInternalURL,
 		logf:           logf,
@@ -647,10 +652,18 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	// block/redact/auditOnly rules, refuses a block hit with a typed guardrail_blocked
 	// BEFORE forwarding, and forwards the SCRUBBED body on a redact hit. With no policy
 	// (guardrail nil) this is skipped entirely and the body streams unchanged.
+	// A recorded run is buffered-only (the fixture captures a single reassembled body), so it may
+	// never take the streaming path — streaming is allowed only for an eligible policy AND a
+	// non-recorded run. streaming is set true by the request guardrail when this stream:true call
+	// is permitted; serve() then routes it to the SSE hold-release path (K2, ADR 0086).
+	recording := gp.recorder != nil && recordRunIDFromRequest(r.Header) != ""
+	streaming := false
 	if pol.engine != nil {
-		if refused := gp.applyRequestGuardrail(w, span, r, pol); refused {
+		refused, isStream := gp.applyRequestGuardrail(w, span, r, pol, pol.streamEligible && !recording)
+		if refused {
 			return
 		}
+		streaming = isStream
 	}
 
 	// ── Real-kill cancel channel (m70.8) ───────────────────────────────────
@@ -706,6 +719,17 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 				r.Body = io.NopCloser(bytes.NewReader(nil))
 			}
 		}
+	}
+
+	// ── Streaming guarded path (K2, ADR 0086) ──────────────────────────────
+	// A permitted stream:true call goes to the SSE hold-release path: it forwards with streaming,
+	// scans the completion token-by-token, and releases clean tokens as they settle (blocking
+	// BEFORE an offending span is released). It books spend from the final usage chunk, so the
+	// tenant/user/agent accounting stays at parity with the buffered path. recording is false here
+	// by construction (allowStream required !recording), so record capture below is skipped.
+	if streaming {
+		gp.serveStreaming(fwdCtx, w, span, r, pol, caps, route, userHash)
+		return
 	}
 
 	// ── Forward to LiteLLM ─────────────────────────────────────────────────
@@ -771,6 +795,18 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actual := budget.PriceCall(resp.Header.Get(budget.LiteLLMCostHeader), body)
+	gp.bookSpend(ctx, span, caps, route, userHash, pol, actual)
+}
+
+// bookSpend runs the POST-CALL accounting for a priced completion — the SHARED path for both the
+// buffered (serve) and streaming (serveStreaming) responses, so per-tenant / per-user / per-agent
+// spend and the M8 budget enforcement stay byte-for-byte at parity across the two. An OUTPUT BLOCK
+// still books spend (the model already generated; ADR 0059 §7); the caller passes actual=$0 for an
+// unpriceable call. All the postCall sinks are nil-safe. Never call this on a non-200 upstream.
+func (gp *gatewayProxy) bookSpend(
+	ctx context.Context, span trace.Span, caps budget.Caps, route, userHash string,
+	pol *guardrailBundle, actual budget.Money,
+) {
 	gp.estimator.Observe(route, actual)
 	// M47: accrue the tenant's aggregate spend to the shared Valkey (nil-safe; only when a tenant budget
 	// is set). Runs even when the M8 per-agent budget is not enforced for this agent.

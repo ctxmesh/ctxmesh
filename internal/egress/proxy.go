@@ -80,8 +80,15 @@ type ProxyConfig struct {
 	// user (relayed across A2A, m30.3) while a different registry's capability is rejected. A
 	// standalone agent's boundary is unique to it, so this reduces to the per-agent check.
 	ExpectedBoundary string
-	// Routes maps a server name (the first path segment) to its real upstream + auth type.
+	// Routes maps a server name (the first path segment) to its real upstream + auth type. It is the
+	// STATIC route table (from the EGRESS_ROUTES env) — the source when RoutesHolder is nil (legacy /
+	// tests, byte-for-byte unchanged).
 	Routes RouteTable
+	// RoutesHolder, when non-nil, supersedes Routes with a hot-reloadable table the sidecar fsnotify-
+	// watches from the mounted EGRESS_ROUTES_FILE (J7): a remote-tool-URL edit updates the ConfigMap
+	// the holder reloads, so it takes effect on the running sidecar WITHOUT a revision roll. nil ⇒ the
+	// static Routes above.
+	RoutesHolder *RouteHolder
 	// Transport is the RoundTripper for the upstream forward (nil ⇒ http.DefaultTransport).
 	Transport http.RoundTripper
 	// Log is the structured logger.
@@ -249,11 +256,22 @@ func (p *Proxy) captureResponse(resp *http.Response) error {
 	return nil
 }
 
+// currentRoutes returns the live route table: the hot-reloadable RoutesHolder when one is wired AND
+// currently non-empty (J7 — a URL edit takes effect without a roll), else the static Routes (legacy /
+// tests). A holder that is wired but momentarily empty (e.g. an operator cleared the file) falls back
+// to the static table rather than serving nothing — a routes table is always required.
+func (p *Proxy) currentRoutes() RouteTable {
+	if t := p.cfg.RoutesHolder.Load(); len(t) > 0 {
+		return t
+	}
+	return p.cfg.Routes
+}
+
 // ServeHTTP resolves the route, verifies the capability, resolves the credential, and
 // forwards. It fails CLOSED: no/invalid capability, an unknown route, or an agent-scope
 // mismatch is rejected before any upstream call.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	route, remainder, ok := p.cfg.Routes.routeForPath(r.URL.Path)
+	route, remainder, ok := p.currentRoutes().routeForPath(r.URL.Path)
 	if !ok {
 		writeError(w, http.StatusNotFound, "no_route", "no egress route for this server")
 		return
@@ -477,13 +495,15 @@ func (p *Proxy) enforceToolPolicy(w http.ResponseWriter, r *http.Request, server
 func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, tool, runID string) bool {
 	limit := policy.MaxToolCallsPerRun
 	if limit <= 0 {
-		return true // no active ceiling — do not count.
+		p.recordToolCall(tool, "forwarded") // J9: count fan-out even with no active ceiling.
+		return true                         // no active ceiling — do not count against a limit.
 	}
 	if runID == "" {
 		// A verified runcap with no RunID under an active ceiling: an unattributable call cannot be
 		// bounded, so fail closed rather than let it bypass the ceiling.
 		p.cfg.Log.Info("egress: policy: tool call under an active fan-out ceiling has no run id — failing closed",
 			"server", server, "tool", tool)
+		p.recordToolCall(tool, "ceiling_denied") // J9
 		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
 		return false
 	}
@@ -492,9 +512,11 @@ func (p *Proxy) admitFanOut(w http.ResponseWriter, policy *ToolPolicy, server, t
 		// Terminal 403 (non-retryable) — stop the flood, do NOT invite a retry-after.
 		p.cfg.Log.Info("egress: policy: run exceeded its tool-call fan-out ceiling — 403",
 			"server", server, "tool", tool, "count", n, "limit", limit)
+		p.recordToolCall(tool, "ceiling_denied") // J9
 		writeError(w, http.StatusForbidden, "tool_call_ceiling_exceeded", "this run has exceeded its tool-call ceiling")
 		return false
 	}
+	p.recordToolCall(tool, "forwarded") // J9
 	return true
 }
 

@@ -35,6 +35,54 @@ func envValue(c corev1.Container, name string) (corev1.EnvVar, bool) {
 	return corev1.EnvVar{}, false
 }
 
+// TestEgressDigest_UrlEditDoesNotRoll proves the J7 headline: changing a route's real URL (same route
+// names) does NOT change the egress digest — a remote-tool-URL edit does not roll the revision (the URL
+// rides the hot-reloaded <agent>-egress-routes ConfigMap). Presence, image, boundary, and record mode
+// still roll (structural changes that must land in the pod template).
+func TestEgressDigest_UrlEditDoesNotRoll(t *testing.T) {
+	v1 := []toolmanifest.Route{{Name: "s", TargetURL: "https://v1.example", OAuth: true}}
+	v2 := []toolmanifest.Route{{Name: "s", TargetURL: "https://v2.example", OAuth: true}}
+	d1 := egressDigest("img", "bnd", v1, false)
+	require.NotEmpty(t, d1)
+	assert.Equal(t, d1, egressDigest("img", "bnd", v2, false),
+		"J7: a URL edit must NOT change the egress digest (no roll — the URL hot-reloads via the ConfigMap)")
+	assert.Empty(t, egressDigest("img", "bnd", nil, false), "no routes ⇒ empty digest (no sidecar)")
+	assert.NotEqual(t, d1, egressDigest("img2", "bnd", v1, false), "an image change still rolls")
+	assert.NotEqual(t, d1, egressDigest("img", "bnd", v1, true), "toggling record mode still rolls")
+	assert.NotEqual(t, d1, egressDigest("img", "bnd2", v1, false), "a boundary change still rolls")
+}
+
+// TestEgressSidecarContainer_RoutesFileSupersedesEnv proves J7's container wiring: given a routes mount
+// + EGRESS_ROUTES_FILE env, the sidecar carries EGRESS_ROUTES_FILE + the mount and NOT the static
+// EGRESS_ROUTES env; with no mount it falls back to the static env (dev/tests).
+func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
+	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", CredentialNamespace: "ns"}
+	mount := &corev1.VolumeMount{Name: egressRoutesVolumeName, MountPath: egressRoutesMountPath, ReadOnly: true}
+	env := []corev1.EnvVar{{Name: envEgressRoutesFile, Value: egressRoutesMountPath + "/" + egressRoutesConfigMapKey}}
+	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, mount, env)
+
+	_, hasStatic := envValue(c, "EGRESS_ROUTES")
+	assert.False(t, hasStatic, "with a routes mount, the static EGRESS_ROUTES env must NOT be set")
+	fileEnv, ok := envValue(c, envEgressRoutesFile)
+	require.True(t, ok, "EGRESS_ROUTES_FILE must be set")
+	assert.Nil(t, fileEnv.ValueFrom, "EGRESS_ROUTES_FILE must be static (Knative rejects valueFrom)")
+	var mounted bool
+	for _, m := range c.VolumeMounts {
+		if m.Name == egressRoutesVolumeName {
+			mounted = true
+		}
+	}
+	assert.True(t, mounted, "the routes ConfigMap must be mounted on the sidecar")
+
+	// Fallback: no mount ⇒ the static EGRESS_ROUTES env is used (legacy / dev).
+	c2 := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, nil, nil)
+	staticEnv, ok := envValue(c2, "EGRESS_ROUTES")
+	require.True(t, ok, "with no mount, the static EGRESS_ROUTES env is the fallback")
+	assert.Contains(t, staticEnv.Value, `"name":"s"`)
+	_, hasFile := envValue(c2, envEgressRoutesFile)
+	assert.False(t, hasFile, "no EGRESS_ROUTES_FILE when using the static env")
+}
+
 func TestEgressSidecarContainer(t *testing.T) {
 	cfg := OBOEgressConfig{
 		Enabled:                true,
@@ -43,7 +91,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, false, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, false, nil, nil, nil, nil)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -80,7 +128,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
 
 	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, nil, nil)
+	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, nil, nil, nil, nil)
 	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
 	require.True(t, ok)
 	assert.Equal(t, "https://token-service:8443", tsu.Value)
@@ -96,7 +144,7 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, true, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, true, nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
@@ -121,7 +169,7 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 		CapabilityAudience:     "aud",
 		CredentialNamespace:    "ae-credentials",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, false, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, false, nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar still carries RECORD_CAPABLE")
@@ -145,7 +193,7 @@ func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
 	}
 	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, mount, env)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, mount, env, nil, nil)
 
 	e, ok := envValue(c, envToolPolicyFile)
 	require.True(t, ok, "a tool-policy agent's sidecar carries TOOL_POLICY_FILE")
@@ -172,8 +220,10 @@ func TestEgressDigest(t *testing.T) {
 
 	base := egressDigest("img", "r:squad-a", routes, false)
 	assert.NotEmpty(t, base)
-	// A route URL change (the real URL lives in the sidecar env now) rolls the pod.
-	assert.NotEqual(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}, false))
+	// J7: a route URL change does NOT roll the pod — the real URL rides the hot-reloaded
+	// <agent>-egress-routes ConfigMap (excluded from the digest), so the edit takes effect live.
+	assert.Equal(t, base, egressDigest("img", "r:squad-a", []toolmanifest.Route{{Name: "scalekit", TargetURL: "https://b", OAuth: true}}, false),
+		"J7: a URL edit must not change the egress digest")
 	// A sidecar image change rolls the pod.
 	assert.NotEqual(t, base, egressDigest("img2", "r:squad-a", routes, false))
 	// A boundary (registry membership) change rolls the pod — the EGRESS_BOUNDARY env must land.

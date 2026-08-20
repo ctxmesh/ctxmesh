@@ -137,8 +137,17 @@ func TestM82_FrontsAllToolClasses_ThroughEgressSidecar(t *testing.T) {
 	}
 	// (2) The route table fronts ALL THREE tools. A remote tool (OBO or plain) keys on its SERVER
 	// segment (= RegistryRef); an in-pod sidecar tool keys on its ToolName. Both remotes' real URLs
-	// live in the route table, never the manifest; the OBO route preserves oauth=true.
-	routes := env["EGRESS_ROUTES"].Value
+	// live in the route table, never the manifest; the OBO route preserves oauth=true. J7: the routes
+	// are delivered via the hot-reloadable <agent>-egress-routes ConfigMap, so the sidecar carries
+	// EGRESS_ROUTES_FILE (not the static EGRESS_ROUTES env) and the URLs live in the ConfigMap.
+	_, hasStaticEnv := env["EGRESS_ROUTES"]
+	assert.False(t, hasStaticEnv, "J7: routes are delivered via the ConfigMap, not the static EGRESS_ROUTES env")
+	_, hasFileEnv := env["EGRESS_ROUTES_FILE"]
+	require.True(t, hasFileEnv, "J7: the sidecar carries EGRESS_ROUTES_FILE (the mounted routes path)")
+	var routesCM corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		client.ObjectKey{Name: egressRoutesConfigMapName(agent.Name), Namespace: ns}, &routesCM))
+	routes := routesCM.Data[egressRoutesConfigMapKey]
 	assert.Contains(t, routes, "m82-obo", "the OBO tool's server route is present")
 	assert.Contains(t, routes, oboURL, "the OBO real URL lives in the sidecar route table")
 	assert.Contains(t, routes, `"oauth":true`, "the OBO route preserves oauth so the sidecar injects the credential")
@@ -395,16 +404,15 @@ func TestM82_DeniedInPodTool_StructurallyNonDeployed(t *testing.T) {
 	assert.False(t, names["tool_b"], "the DENIED in-pod tool must NOT be advertised in the manifest")
 	assert.Len(t, m.Tools, 2, "exactly the two survivors are advertised")
 
-	// (4) The egress route table (on the sidecar) fronts only the two survivors — the denied tool has
-	//     no route either (it is gone from every derived artifact).
-	sidecar, ok := containerByName(containers, egressSidecarContainerName)
-	require.True(t, ok, "the always-on egress sidecar is present")
-	var routes string
-	for _, e := range sidecar.Env {
-		if e.Name == "EGRESS_ROUTES" {
-			routes = e.Value
-		}
-	}
+	// (4) The egress route table fronts only the two survivors — the denied tool has no route either
+	//     (it is gone from every derived artifact). J7: the routes live in the <agent>-egress-routes
+	//     ConfigMap (hot-reloadable), not the sidecar's static env.
+	_, sidecarPresent := containerByName(containers, egressSidecarContainerName)
+	require.True(t, sidecarPresent, "the always-on egress sidecar is present")
+	var routesCM corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		client.ObjectKey{Name: egressRoutesConfigMapName(agent.Name), Namespace: ns}, &routesCM))
+	routes := routesCM.Data[egressRoutesConfigMapKey]
 	assert.Contains(t, routes, "tool_a")
 	assert.Contains(t, routes, "tool_c")
 	assert.NotContains(t, routes, "tool_b", "the denied in-pod tool has no egress route")

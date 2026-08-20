@@ -163,6 +163,30 @@ type UserRateLimit struct {
 	MaxInFlight int32 `json:"maxInFlight,omitempty"`
 }
 
+// StreamingGuardrail opts a guarded agent into STREAMING (Server-Sent-Events) responses under a
+// weaker, EXPLICIT guarantee. By default a guarded agent is buffered-only: a stream:true request
+// is refused (guardrail_streaming_unsupported), because output-blocking cannot un-send tokens
+// already streamed to the client. When mode=Enabled AND the policy is provably stream-safe — every
+// OUTPUT detector is a bounded-length, content-consuming, non-empty match (no unbounded quantifier,
+// zero-width assertion, or over-cap window) AND there is no semanticJudge (which needs the whole
+// completion) — the gateway MAY stream: it holds a rolling window and releases tokens only once
+// they are provably clean, blocking BEFORE an offending span is released (ADR 0086).
+//
+// The guarantee is intentionally weaker than buffered blocking, so the operator opts in with eyes
+// open: buffered block is COMPLETION suppression (no byte of a violating completion is delivered);
+// streaming block is SPAN suppression (no byte of the matched span is delivered, but the clean
+// prefix before it already was, and the truncation reveals that a block tripped). A policy that is
+// NOT stream-safe stays buffered-only even with mode=Enabled — a fail-safe default, never a silent
+// weakening.
+type StreamingGuardrail struct {
+	// mode is Disabled (default — buffered-only, the M66 behavior) or Enabled (opt in to
+	// span-suppression streaming, applied only when the policy is stream-safe).
+	// +kubebuilder:validation:Enum=Disabled;Enabled
+	// +kubebuilder:default=Disabled
+	// +optional
+	Mode string `json:"mode,omitempty"`
+}
+
 // GuardrailPolicySpec defines the desired content-governance policy. All guardrail layers are
 // optional; omitting a section means that layer is not enforced.
 type GuardrailPolicySpec struct {
@@ -187,6 +211,12 @@ type GuardrailPolicySpec struct {
 	// userRateLimit configures per-end-user (OBO) rate and abuse limits.
 	// +optional
 	UserRateLimit *UserRateLimit `json:"userRateLimit,omitempty"`
+
+	// streaming opts the guarded agent into streaming responses under a weaker, explicit
+	// (span-suppression) guarantee. OFF by default (buffered-only, the M66 behavior); see
+	// StreamingGuardrail. Only takes effect when the policy is provably stream-safe.
+	// +optional
+	Streaming *StreamingGuardrail `json:"streaming,omitempty"`
 
 	// failMode controls behavior when the guardrail engine cannot run (e.g. sidecar crash,
 	// timeout). "closed" (default) denies the request; "open" allows it through — choose "open"
