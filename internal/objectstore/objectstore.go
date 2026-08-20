@@ -20,12 +20,12 @@ limitations under the License.
 // launcher store is content-addressed, GC'd, and carries async A2A payloads;
 // this store is durable, never-GC'd, and carries KB source documents.
 //
-// TODO(m52 Theme M): unify launcher-offload + durable-knowledge ObjectStore SPIs
-// once the two use cases are fully understood and the trade-offs are clearer.
-//
-// The MinIO implementation mirrors the launcher's minioStore client construction
-// (same OBJECT_STORE_ADDR env gate, same in-cluster cred env vars) but uses a
-// DISTINCT bucket (knowledgeBaseBucket) so the two stores coexist cleanly.
+// M13 (ADR 0085): the two stores share the MinIO CLIENT boilerplate (NewMinioClient
+// + EnsureBucket, below) but keep SEPARATE Put/Get SPIs by design — byte-blobs for
+// the memory-bounded async offload vs streamed objects + List/DeletePrefix for the
+// durable corpus (the shapes reflect the payloads, not an oversight). They use a
+// DISTINCT bucket (knowledgeBaseBucket) with the opposite lifecycle (never-GC'd),
+// so the two must never share a storage instance.
 package objectstore
 
 import (
@@ -188,6 +188,44 @@ type minioKBStore struct {
 	bucket string
 }
 
+// NewMinioClient builds a MinIO client for the in-cluster dev object store: plain HTTP (Secure:false —
+// the same no-TLS posture as the dev Valkey) with static V4 credentials. It is the SHARED construction both
+// object stores use — the durable KB store here (NewMinioStore) AND the launcher's ephemeral A2A-offload store
+// (cmd/launcher/minioStore) — so the client config lives in ONE place (M13). minio.New does not dial, so a bad
+// addr is the only error. The two stores keep SEPARATE Put/Get SPIs by design (see the package doc + ADR 0085):
+// the launcher's is buffered byte-blobs (small, memory-bounded async payloads), this one's is streamed objects
+// (25 MiB documents) + List/DeletePrefix — different shapes for different payloads; only this boilerplate is shared.
+func NewMinioClient(addr, accessKey, secretKey string) (*minio.Client, error) {
+	client, err := minio.New(addr, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build object-store client for %q: %w", addr, err)
+	}
+	return client, nil
+}
+
+// EnsureBucket idempotently creates bucket on client (BucketExists → MakeBucket), handling the concurrent-create
+// race by re-checking BucketExists after a MakeBucket failure. Shared by both object stores (M13) — they used
+// byte-identical copies of this logic. Bounded by the caller's ctx.
+func EnsureBucket(ctx context.Context, client *minio.Client, bucket string) error {
+	exists, err := client.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("check bucket %q: %w", bucket, err)
+	}
+	if exists {
+		return nil
+	}
+	if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		if exists2, exErr := client.BucketExists(ctx, bucket); exErr == nil && exists2 {
+			return nil // another caller won the BucketExists→MakeBucket race.
+		}
+		return fmt.Errorf("create bucket %q: %w", bucket, err)
+	}
+	return nil
+}
+
 // NewMinioStore builds a durable ObjectStore from OBJECT_STORE_ADDR and the
 // injected credentials. Returns (nil, nil) when OBJECT_STORE_ADDR is unset —
 // the caller registers an unconfigured state and serves honest 501 rather than
@@ -207,12 +245,9 @@ func NewMinioStore() (*minioKBStore, error) {
 	}
 	accessKey := os.Getenv("OBJECT_STORE_ACCESS_KEY")
 	secretKey := os.Getenv("OBJECT_STORE_SECRET_KEY")
-	client, err := minio.New(addr, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: false, // dev in-cluster: plain HTTP, no TLS (mirrors launcher posture).
-	})
+	client, err := NewMinioClient(addr, accessKey, secretKey) // M13: shared client construction.
 	if err != nil {
-		return nil, fmt.Errorf("build durable KB object-store client for %q: %w", addr, err)
+		return nil, fmt.Errorf("durable KB object store: %w", err)
 	}
 	return &minioKBStore{client: client, bucket: knowledgeBaseBucket}, nil
 }
@@ -221,21 +256,7 @@ func NewMinioStore() (*minioKBStore, error) {
 // bounded by the caller's context. A concurrent creator race is handled by
 // re-checking BucketExists after a MakeBucket failure.
 func (s *minioKBStore) ensureBucket(ctx context.Context) error {
-	exists, err := s.client.BucketExists(ctx, s.bucket)
-	if err != nil {
-		return fmt.Errorf("check KB bucket %q: %w", s.bucket, err)
-	}
-	if exists {
-		return nil
-	}
-	if err := s.client.MakeBucket(ctx, s.bucket, minio.MakeBucketOptions{}); err != nil {
-		// Handle the BucketExists→MakeBucket race — another caller won the race.
-		if exists2, exErr := s.client.BucketExists(ctx, s.bucket); exErr == nil && exists2 {
-			return nil
-		}
-		return fmt.Errorf("create KB bucket %q: %w", s.bucket, err)
-	}
-	return nil
+	return EnsureBucket(ctx, s.client, s.bucket) // M13: shared idempotent-create logic.
 }
 
 func (s *minioKBStore) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
