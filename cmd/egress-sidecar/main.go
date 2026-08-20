@@ -149,14 +149,16 @@ func run(log logr.Logger) error {
 	}
 
 	// Tool-call governance (M82, ADR 0074 §1): read + hold the resolved spec.runtime.toolPolicy the
-	// controller mounts at TOOL_POLICY_FILE. PLUMBING ONLY — the policy is parsed + held behind the
-	// holder's RWMutex and the sidecar fsnotify-WATCHES it for live reload, but it is NOT enforced
-	// yet (the proxy does not consult it; behavior stays PERMISSIVE). Absent/empty ⇒ nil policy
-	// (permissive, byte-compatible pre-M82). Enforcement is a later M82 task.
+	// controller mounts at TOOL_POLICY_FILE, and fsnotify-WATCH it for live reload. The proxy ENFORCES
+	// it (deny 403 / require-approval voucher / fan-out ceiling). Absent/empty ⇒ nil policy (permissive,
+	// the un-governed agent). A MALFORMED initial policy is a HARD startup error (C16, ADR 0087):
+	// starting permissive on a broken policy would silently disable configured governance.
 	policyHolder := &egress.PolicyHolder{}
 	toolPolicyFile := strings.TrimSpace(os.Getenv("TOOL_POLICY_FILE"))
 	if toolPolicyFile != "" {
-		loadInitialToolPolicy(policyHolder, toolPolicyFile, log)
+		if lErr := loadInitialToolPolicy(policyHolder, toolPolicyFile, log); lErr != nil {
+			return fmt.Errorf("loading TOOL_POLICY_FILE %q: %w", toolPolicyFile, lErr)
+		}
 	}
 
 	proxy := egress.NewProxy(egress.ProxyConfig{

@@ -60,6 +60,12 @@ Console login — OIDC/SSO via Dex (m19.5, ADR 0020):
   RBAC: a demo ClusterRoleBinding maps User "{{ .Values.auth.oidc.usernamePrefix }}{{ .Values.auth.oidc.staticUser.email }}"
         to the operator persona. Enterprise: map real IdP groups to the personas
         (bind the groups claim), and set auth.oidc.demoBinding=false.
+  SECURITY — MULTI-TENANT (C17): the demo binding above is CLUSTER-WIDE (single-tenant only).
+        For a multi-tenant install, bind the {operator,developer,viewer} personas PER-NAMESPACE
+        (a RoleBinding in each tenant namespace), NOT a ClusterRoleBinding. The caller-scoped authz
+        model (ADR 0011) — incl. the tenant-wide MCP catalog read — assumes a principal's RBAC is
+        confined to its own namespaces; a cluster-wide persona binding lets one tenant enumerate
+        another's resources by passing the victim's namespace. See specs tenancy-and-quotas §C17.
 {{- end }}
 {{- if .Values.auth.oidc.langfuse.enabled }}
   Langfuse SSO (m19.7): Langfuse is registered as a Dex client ({{ .Values.auth.oidc.langfuse.clientId }})

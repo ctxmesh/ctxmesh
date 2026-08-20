@@ -527,15 +527,22 @@ func buildUserQuota(policyJSON string, cfg gatewayConfig, logf func(string, ...a
 		uq.hasBudget = uq.budgetUSD > 0
 	}
 
-	// The per-user accumulator lives in the SAME shared Valkey the tenant quota uses. Without a direct
-	// address we cannot coordinate a per-user bucket across replicas — leave enforcement OFF (a visible
-	// misconfig), never silently block. (The state-layer-proxy path derives the TENANT from the pod
-	// token and has no per-user notion, so it is not usable here.)
-	if cfg.QuotaAddr == "" {
-		logf("launcher: gateway: userRateLimit configured but no TENANT_QUOTA_ADDR — per-user limits NOT enforced")
+	// The per-user accumulator lives in the SAME shared Valkey the tenant quota uses (direct mode) or is
+	// proxied through the state-layer proxy (proxy mode). Store selection mirrors newAgentSpendAccountant:
+	// the proxy takes precedence — the state-layer proxy now serves the per-user endpoints (M107 C20),
+	// passing the userHash in the request body (the pod token identifies the agent; the proxy stores the
+	// user hash the launcher resolved from the verified run capability). Without either address leave
+	// enforcement OFF (a visible misconfig), never silently block.
+	switch {
+	case cfg.StatelayerProxyURL != "":
+		uq.store = newHTTPUserStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
+	case cfg.QuotaAddr != "":
+		uq.store = newRedisUserStore(cfg.QuotaAddr)
+	default:
+		logf("launcher: gateway: userRateLimit configured but no STATELAYER_PROXY_URL / " +
+			"TENANT_QUOTA_ADDR — per-user limits NOT enforced")
 		return nil, nil
 	}
-	uq.store = newRedisUserStore(cfg.QuotaAddr)
 	return uq, nil
 }
 

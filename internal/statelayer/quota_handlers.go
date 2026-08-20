@@ -204,6 +204,184 @@ func (s *Server) handleQuotaReleaseSlot(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ── Per-USER (OBO) quota handlers (M107 C20) ────────────────────────────────────────────────────
+//
+// All five handlers share the same authentication posture as the tenant quota handlers: they call
+// authenticateAgentNamespace (requiring a real AGENT pod-identity — a non-agent SA gets 403 via
+// writeAgentAuthError). The userHash is supplied by the launcher in the request body or query:
+// the proxy CANNOT derive an end-user from a pod token (a pod token identifies the agent, not the
+// invoking user), so the launcher — the enforcement point — passes the already-hashed user id.
+// This is the SAME trust model as the direct-Valkey mode (cmd/launcher/user_quota.go): the launcher
+// is trusted to supply the correct userHash; the proxy stores it under the user:{hash}:* key space.
+
+// quotaUserRPMRequest carries the per-user RPM body fields.
+type quotaUserRPMRequest struct {
+	UserHash string `json:"userHash"`
+	Window   int64  `json:"window"`
+}
+
+// quotaUserSpendRequest carries the per-user spend body fields.
+type quotaUserSpendRequest struct {
+	UserHash string  `json:"userHash"`
+	DeltaUSD float64 `json:"deltaUSD"`
+}
+
+// quotaUserSlotRequest carries the per-user slot body fields.
+type quotaUserSlotRequest struct {
+	UserHash string `json:"userHash"`
+	Max      int    `json:"max"`
+}
+
+// quotaUserReleaseRequest carries the per-user release body fields.
+type quotaUserReleaseRequest struct {
+	UserHash string `json:"userHash"`
+}
+
+// handleQuotaUserRPM increments the invoking user's per-minute request counter.
+// The userHash comes from the launcher body (the proxy CANNOT derive an end-user from a pod
+// token — same trust model as direct-Valkey mode; the launcher is the enforcement point).
+func (s *Server) handleQuotaUserRPM(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.userQuota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "user quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	var req quotaUserRPMRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if req.UserHash == "" {
+		writeJSONError(w, http.StatusBadRequest, "userHash is required")
+		return
+	}
+	n, err := s.userQuota.IncrUserRPM(ctx, req.UserHash, req.Window)
+	if err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	writeJSON(w, quotaRPMResponse{Count: n})
+}
+
+// handleQuotaGetUserSpend returns the invoking user's accumulated monthly spend.
+// The userHash comes from the launcher query parameter (the proxy CANNOT derive an end-user
+// from a pod token — same trust model as direct-Valkey mode; the launcher is the enforcement point).
+func (s *Server) handleQuotaGetUserSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.userQuota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "user quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	userHash := r.URL.Query().Get("userHash")
+	if userHash == "" {
+		writeJSONError(w, http.StatusBadRequest, "userHash is required")
+		return
+	}
+	spent, err := s.userQuota.UserSpend(ctx, userHash)
+	if err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	writeJSON(w, quotaSpendResponse{SpentUSD: spent})
+}
+
+// handleQuotaAddUserSpend atomically adds a spend delta to the invoking user's monthly budget.
+// The userHash comes from the launcher body (the proxy CANNOT derive an end-user from a pod
+// token — same trust model as direct-Valkey mode; the launcher is the enforcement point).
+func (s *Server) handleQuotaAddUserSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.userQuota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "user quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	var req quotaUserSpendRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if req.UserHash == "" {
+		writeJSONError(w, http.StatusBadRequest, "userHash is required")
+		return
+	}
+	if err := s.userQuota.AddUserSpend(ctx, req.UserHash, req.DeltaUSD); err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleQuotaAcquireUserSlot acquires a concurrency slot for the invoking user.
+// The userHash comes from the launcher body (the proxy CANNOT derive an end-user from a pod
+// token — same trust model as direct-Valkey mode; the launcher is the enforcement point).
+func (s *Server) handleQuotaAcquireUserSlot(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.userQuota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "user quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	var req quotaUserSlotRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if req.UserHash == "" {
+		writeJSONError(w, http.StatusBadRequest, "userHash is required")
+		return
+	}
+	acquired, err := s.userQuota.AcquireUserSlot(ctx, req.UserHash, req.Max)
+	if err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	writeJSON(w, quotaSlotResponse{Acquired: acquired})
+}
+
+// handleQuotaReleaseUserSlot releases a held concurrency slot for the invoking user.
+// The userHash comes from the launcher body (the proxy CANNOT derive an end-user from a pod
+// token — same trust model as direct-Valkey mode; the launcher is the enforcement point).
+func (s *Server) handleQuotaReleaseUserSlot(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.userQuota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "user quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	var req quotaUserReleaseRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if req.UserHash == "" {
+		writeJSONError(w, http.StatusBadRequest, "userHash is required")
+		return
+	}
+	if err := s.userQuota.ReleaseUserSlot(ctx, req.UserHash); err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // decodeQuotaBody reads a capped JSON body into v, writing a 400 on a parse error.
 func decodeQuotaBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	body, err := readCappedBody(w, r)

@@ -606,8 +606,8 @@ func TestMemoryBinding_NoBindingNoEnv(t *testing.T) {
 		types.NamespacedName{Name: agentName, Namespace: namespace}, &deploy))
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
-	assert.Equal(t, agentName+"-"+hash, ksvc.Spec.Template.Name,
-		"no binding → bare spec-hash revision name (no combined digest suffix)")
+	assert.Equal(t, agentName+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
+		"no binding → spec-hash revision name (+ the C7b identity-SA suffix)")
 }
 
 // TestMemoryBinding_RevisionNameIdempotent verifies that re-reconciling with an

@@ -110,7 +110,8 @@ func TestExecModel_ServingDefault_KsvcUnchanged(t *testing.T) {
 
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
-	assert.Equal(t, name+"-"+hash, ksvc.Spec.Template.Name, "stable spec-hash revision name (no -h suffix)")
+	assert.Equal(t, name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
+		"stable spec-hash revision name (+ the C7b identity-SA suffix)")
 
 	ann := ksvc.Spec.Template.Annotations
 	assert.Equal(t, "0", ann["autoscaling.knative.dev/min-scale"])
