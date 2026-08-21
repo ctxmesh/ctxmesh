@@ -49,9 +49,6 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/auditlog"
 )
 
-// urlQueryEscape escapes a query-parameter value for the console deep-link.
-func urlQueryEscape(s string) string { return url.QueryEscape(s) }
-
 // evaluateApprovalWaiting is the per-run pass for an approvalWaiting condition. It lists the runs in the
 // policy's namespace currently paused on plan_approval, restricts them to the policy's selected agents,
 // FIRES a per-run notification for each NEW waiting run (dedup keyed (policy, condition, runID)), and
@@ -177,7 +174,7 @@ func (r *AlertPolicyReconciler) recordApprovalWaiting(
 ) {
 	log := logf.FromContext(ctx)
 
-	link := r.consoleRunLink(ap.Namespace, w.Agent, w.ID)
+	link := r.consoleRunLink(w.ID)
 	summary := strings.TrimSpace(w.Message)
 	msg := fmt.Sprintf("Run %s (%s/%s) is waiting for approval", w.ID, ap.Namespace, w.Agent)
 	if summary != "" {
@@ -232,14 +229,14 @@ func (r *AlertPolicyReconciler) recordApprovalWaiting(
 	r.notifyApprovalChannels(ctx, ap, cond, w, msg, link, now.Time)
 }
 
-// consoleRunLink builds the deep-link to the AUTHENTICATED console approval view for a waiting run. When
-// ConsoleURL is set it is an absolute URL; otherwise a relative path (still a pointer). It targets the
-// console's live approval surface (the playground), pre-scoped to the run's agent + namespace, so an
-// authenticated operator lands on the approve/deny action. It is NEVER the public share link and NEVER an
-// approve-magic-link — approval is resolved caller-scoped via POST /api/runs/{id}/resume, not this URL.
-func (r *AlertPolicyReconciler) consoleRunLink(namespace, agent, runID string) string {
-	path := fmt.Sprintf("/playground?agent=%s&ns=%s&run=%s",
-		urlQueryEscape(agent), urlQueryEscape(namespace), urlQueryEscape(runID))
+// consoleRunLink builds the deep-link to the AUTHENTICATED console approval view for a waiting run — the
+// per-run detail page /runs/:id (V5, M112), which loads the run by id and renders its requires_action +
+// the caller-scoped approve/deny. When ConsoleURL is set it is an absolute URL; otherwise a relative path
+// (still a pointer). It is NEVER the public share link and NEVER an approve-magic-link — approval is
+// resolved caller-scoped via POST /api/runs/{id}/resume, not this URL. (Superseded the m75.3 /playground
+// deep-link, which pre-dated a per-run-id detail route.)
+func (r *AlertPolicyReconciler) consoleRunLink(runID string) string {
+	path := "/runs/" + url.PathEscape(runID)
 	base := strings.TrimRight(strings.TrimSpace(r.ConsoleURL), "/")
 	if base == "" {
 		return path
