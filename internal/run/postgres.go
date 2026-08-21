@@ -1066,6 +1066,47 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]
 	return out, nil
 }
 
+// DescendantsRequiringAction — see the Store interface (L1 surfacing, ADR 0075 §4). Reads the
+// descendant rows (root_run_id = the true root) currently in requires_action and projects the pause,
+// unmarshaling the JSON action in Go (as the store already does elsewhere). Read-only. The
+// runs_root + runs_requires_action partial indexes cover the predicate.
+func (p *pgStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error) {
+	if rootRunID == "" {
+		return nil, nil
+	}
+	rows, err := p.db.QueryContext(context.Background(),
+		`SELECT id, agent, requires_action FROM runs WHERE root_run_id=$1 AND status=$2`,
+		rootRunID, string(StatusRequiresAction))
+	if err != nil {
+		return nil, fmt.Errorf("run: list descendants requiring action: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []DescendantAction
+	for rows.Next() {
+		var (
+			id     string
+			agent  string
+			action []byte
+		)
+		if err := rows.Scan(&id, &agent, &action); err != nil {
+			return nil, fmt.Errorf("run: descendants requiring action scan: %w", err)
+		}
+		if len(action) == 0 {
+			continue // requires_action with no action record — nothing to surface
+		}
+		var a Action
+		if err := json.Unmarshal(action, &a); err != nil {
+			return nil, fmt.Errorf("run: descendants requiring action unmarshal: %w", err)
+		}
+		out = append(out, DescendantAction{RunID: id, Agent: agent, Kind: a.Kind, Message: a.Message})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: descendants requiring action rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountRunOutcomes returns (failed, total) run counts for one (namespace, agent) over runs CREATED at or
 // after `since` (M84, AlertPolicy runFailureRate condition, ADR 0063 D2). It is the cpDB-native data
 // source the reconciler evaluates the runFailureRate SLO from: rate = failed/total over the condition's
