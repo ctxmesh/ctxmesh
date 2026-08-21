@@ -209,6 +209,11 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	// of waiting for the worker to observe the terminal status. Best-effort: a nil publisher (no
 	// STATELAYER_ADDR) or a Valkey blip degrades to today's soft cancel, never an error on the cancel path.
 	s.publishCancelMarker(r.Context(), rn.ID)
+	// Cancel the whole SUBTREE (L9, ADR 0091): a canceled supervisor/workflow's non-terminal descendants —
+	// delegate sub-runs, workflow nodes, and their nested descendants — must be cancelled too, else durable
+	// suspend/resume (L7) leaves them burning tokens with no consumer (the blocking long-poll that used to
+	// reap them is gone). Best-effort, like the control marker.
+	s.cancelCascade(rn.ID, "cancelled: ancestor run cancelled (subtree cascade)")
 	writeJSON(w, http.StatusOK, CreateRunResponse{ID: rn.ID, Status: string(updated.Status)})
 }
 
@@ -403,6 +408,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		}); uErr != nil {
 			s.log.Error(uErr, "run: could not persist requires_action", "run", runID)
 		}
+		s.surfaceDescendantRequiresAction(started)
 		return
 	}
 
@@ -416,6 +422,28 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 			return rn.Transition(run.StatusRequiresAction, now)
 		}); uErr != nil {
 			s.log.Error(uErr, "run: could not persist approval requires_action", "run", runID)
+		}
+		s.surfaceDescendantRequiresAction(started)
+		return
+	}
+
+	// Durable delegation (L7, ADR 0091): the supervisor delegated to sub-agent(s) and its managed loop
+	// SUSPENDED instead of blocking — the envelope carries the loop checkpoint + the delegate intents.
+	// Build the child run(s) and commit child-create + parent→waiting in ONE OCC-guarded transaction
+	// (SuspendOnDelegate) so a child already terminal at suspend can't strand the parent (the lost-wakeup
+	// guard is in the store). The worker is freed; the child's completion wakes (CompleteAndWake) and
+	// re-queues the supervisor, which the worker re-invokes carrying the checkpoint in the body (m108.3).
+	// A malformed marker is an honest `failed` — never a silent block and never a swallowed success.
+	if dw := parseDelegateWaiting(resp); dw != nil {
+		if sErr := s.suspendOnDelegate(started, dw, traceID, now); sErr != nil {
+			s.log.Error(sErr, "run: could not suspend supervisor on delegate", "run", runID)
+			if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
+				rn.TraceID = traceID
+				rn.Error = "delegate suspend failed: " + sErr.Error()
+				return rn.Transition(run.StatusFailed, now)
+			}); uErr != nil {
+				s.log.Error(uErr, "run: could not persist delegate-suspend failure", "run", runID)
+			}
 		}
 		return
 	}
@@ -465,6 +493,23 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	}
 }
 
+// surfaceDescendantRequiresAction is the L1-surfacing write (ADR 0075 §4): when a DESCENDANT sub-run
+// pauses in requires_action, append a breadcrumb event on the ROOT run's stream so a human watching the
+// root sees (and can navigate to) the nested HITL/consent pause — load-bearing under L7, where a
+// delegated subtree can now sit indefinitely `waiting` on a paused descendant. Best-effort: a root run
+// (no RootRunID) needs no breadcrumb (its own requires_action is directly visible), and a failed append
+// never fails the run — the descendant's own requires_action stays authoritative and
+// DescendantsRequiringAction backstops the point-in-time view.
+func (s *Server) surfaceDescendantRequiresAction(rn *run.Run) {
+	if rn == nil || rn.RootRunID == "" || rn.RootRunID == rn.ID {
+		return
+	}
+	if err := s.runStore.AppendEvent(rn.RootRunID, run.EventDescendantAction, rn.ID); err != nil {
+		s.log.Error(err, "run: could not surface descendant requires_action on the root",
+			"run", rn.ID, "root", rn.RootRunID)
+	}
+}
+
 // handleGetRun serves GET /api/runs/{id} — the run's current status + result (its Input + Messages).
 // CALLER-SCOPED (ADR 0011): the run's Input/Messages are the user's prompt + the model's answer, so a run
 // id must never be a cross-tenant read oracle. authorizeRunAccess proves the caller can read the run's
@@ -479,7 +524,19 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, runToDTO(rn))
+	dto := runToDTO(rn)
+	// L1 surfacing (ADR 0075 §4): on a ROOT run (the one the human watches), fold in any DESCENDANT
+	// sub-run paused in requires_action — a delegated HITL/consent pause the human must resolve.
+	// Descendant rows key on the true root's id, so this is empty for a mid-tree run (correct — the
+	// breadcrumb belongs on the root). Best-effort: a query error omits the field, never fails the read.
+	if rn.RootRunID == "" {
+		if descs, dErr := s.runStore.DescendantsRequiringAction(rn.ID); dErr != nil {
+			s.log.Error(dErr, "run: could not list descendants requiring action", "run", rn.ID)
+		} else {
+			dto.DescendantsRequiringAction = descs
+		}
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 // RunDetailDTO is the API projection of a run for GET /api/runs/{id}. It surfaces the standard run
@@ -530,6 +587,12 @@ type RunDetailDTO struct {
 	// record its model + tool I/O into a portable replay fixture. Surfaced so the console can badge a
 	// recorded run. Omitted (false) for a normal run.
 	Record bool `json:"record,omitempty"`
+
+	// DescendantsRequiringAction (L1 surfacing, ADR 0075 §4) lists any DESCENDANT sub-run currently
+	// paused in requires_action — a delegated HITL/consent pause the human watching THIS (root) run must
+	// resolve. Populated only on a root run; omitted/empty otherwise. Derive-don't-denormalize: computed
+	// on read from the descendants' authoritative status, not stored on the root.
+	DescendantsRequiringAction []run.DescendantAction `json:"descendantsRequiringAction,omitempty"`
 }
 
 // WorkflowNodeStatus is the per-node status entry in the RunDetailDTO.Nodes list (m67.9).

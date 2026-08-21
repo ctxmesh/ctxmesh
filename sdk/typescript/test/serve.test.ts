@@ -245,6 +245,15 @@ describe("parseBody — tolerant like the reference entrypoint", () => {
     expect(parseBody("raw text")).toEqual({ input: "raw text", approvals: [] });
     expect(parseBody('"just a string"')).toEqual({ input: "just a string", approvals: [] });
   });
+
+  it("extracts an L7 checkpoint envelope alongside input (ADR 0091)", () => {
+    const env = { version: 1, kind: "supervisor-loop", sha256: "x", payload: "{}" };
+    expect(parseBody(JSON.stringify({ input: "go", checkpoint: env }))).toEqual({
+      input: "go",
+      approvals: [],
+      checkpoint: env,
+    });
+  });
 });
 
 describe("envelope — the /invoke response shape", () => {
@@ -270,6 +279,21 @@ describe("envelope — the /invoke response shape", () => {
     expect(body["tools_called"]).toEqual(["search", "echo"]);
     expect(body["consent_required"]).toEqual(["scalekit"]);
     expect(body["approval_required"]).toEqual({ key: "wire-money", summary: "send $5" });
+  });
+
+  it("carries a delegate_waiting marker from a suspended ManagedResult (L7, ADR 0091)", () => {
+    const delegates = [
+      { sub_agent: "researcher", endpoint: "http://r/invoke", input: "find it", step: "1", call_id: "c1" },
+    ];
+    const body = envelope("agent-x", {
+      output: "",
+      steps: 1,
+      toolsCalled: [],
+      consentRequired: [],
+      delegateWaiting: { checkpoint: "opaque-payload", delegates },
+    });
+    expect(body["delegate_waiting"]).toEqual({ checkpoint: "opaque-payload", delegates });
+    expect(body["output"]).toBe("");
   });
 });
 

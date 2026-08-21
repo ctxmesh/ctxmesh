@@ -28,17 +28,21 @@ class KnowledgeStub:
     """Tiny in-process HTTP stub for POST /knowledge/search (the M68 wire contract)."""
 
     def __init__(self, results: Optional[List[Dict[str, Any]]] = None) -> None:
-        self.results = results if results is not None else [
-            {
-                "content": "The capital of France is Paris.",
-                "documentRef": "doc-42",
-                "chunkIndex": 0,
-                "startOffset": 0,
-                "endOffset": 40,
-                "mimeType": "text/plain",
-                "score": 0.97,
-            }
-        ]
+        self.results = (
+            results
+            if results is not None
+            else [
+                {
+                    "content": "The capital of France is Paris.",
+                    "documentRef": "doc-42",
+                    "chunkIndex": 0,
+                    "startOffset": 0,
+                    "endOffset": 40,
+                    "mimeType": "text/plain",
+                    "score": 0.97,
+                }
+            ]
+        )
         self.requests: List[Dict[str, Any]] = []
         self._force_status: Optional[int] = None
 
@@ -162,10 +166,12 @@ def test_search_raises_on_multiple_kbs_without_choice(monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv(
         "KNOWLEDGE_BASES",
-        json.dumps([
-            {"name": "kb-alpha", "namespace": "ns"},
-            {"name": "kb-beta", "namespace": "ns"},
-        ]),
+        json.dumps(
+            [
+                {"name": "kb-alpha", "namespace": "ns"},
+                {"name": "kb-beta", "namespace": "ns"},
+            ]
+        ),
     )
     cfg = PlaneConfig.for_test()
     kc = KnowledgeClient(cfg)
@@ -198,10 +204,12 @@ def test_search_raises_on_empty_query(monkeypatch):
 def test_available_returns_roster_names(monkeypatch):
     monkeypatch.setenv(
         "KNOWLEDGE_BASES",
-        json.dumps([
-            {"name": "docs", "namespace": "default"},
-            {"name": "wiki", "namespace": "public"},
-        ]),
+        json.dumps(
+            [
+                {"name": "docs", "namespace": "default"},
+                {"name": "wiki", "namespace": "public"},
+            ]
+        ),
     )
     cfg = PlaneConfig.for_test()
     kc = KnowledgeClient(cfg)
@@ -284,9 +292,7 @@ def test_knowledge_search_tool_absent_when_roster_empty(monkeypatch):
         assert "knowledge_search" not in [t.name for t in tools]
 
 
-def test_knowledge_search_tool_dispatches_to_client(
-    kb_stub: KnowledgeStub, monkeypatch
-):
+def test_knowledge_search_tool_dispatches_to_client(kb_stub: KnowledgeStub, monkeypatch):
     """A managed loop knowledge_search tool call dispatches to client.knowledge.search and
     returns results including provenance (documentRef/chunkIndex) so the model can cite."""
     from ctxmesh.managed import _dispatch_knowledge_search
@@ -363,9 +369,7 @@ def test_knowledge_search_dispatch_empty_query_returns_error(monkeypatch):
 # ── m68.11: citation/provenance in tool result ────────────────────────────────
 
 
-def test_knowledge_search_dispatch_result_carries_citation(
-    kb_stub: KnowledgeStub, monkeypatch
-):
+def test_knowledge_search_dispatch_result_carries_citation(kb_stub: KnowledgeStub, monkeypatch):
     """_dispatch_knowledge_search adds a 'citation' field ('<documentRef>#<chunkIndex>') to each
     result chunk (ADR 0061 governance #4 — attributable RAG, m68.11). Raw provenance fields are
     kept alongside the citation so consuming code can still parse them."""

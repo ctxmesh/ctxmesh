@@ -45,6 +45,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import jsonschema
 
+from ctxmesh import _checkpoint
 from ctxmesh._approval import approval_scope, pause_for_approval, voucher_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh._record import current_record_run_id, record_scope
@@ -53,11 +54,17 @@ from ctxmesh.errors import (
     ApprovalRequiredError,
     ConfigError,
     ConsentRequiredError,
+    DelegateWaitingError,
     EndpointError,
     GuardrailBlockedError,
 )
 from ctxmesh.knowledge import _auto_inject_names, _knowledge_enabled
-from ctxmesh.tools import DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME
+from ctxmesh.tools import (
+    DELEGATE_TOOL_NAME,
+    HANDOFF_TOOL_NAME,
+    KNOWLEDGE_SEARCH_TOOL_NAME,
+    SPAWN_ROOT_HEADER,
+)
 
 #: Module logger. A misconfig degrade (bad MAX_STEPS / unreadable PROMPT_FILE) logs a WARNING
 #: here so it surfaces in the pod's stderr instead of being silently wrong (OTH-3). With no
@@ -137,6 +144,28 @@ def _spawn_depth_from_headers(headers: Optional[Dict[str, str]]) -> int:
         return int(raw)
     except ValueError:
         return 0
+
+
+def _spawn_root_from_headers(headers: Optional[Dict[str, str]]) -> str:
+    """Read the spawn-tree root (X-Ctxmesh-Spawn-Root) from inbound *headers*, "" when absent.
+
+    The BFF stamps it ONLY on a durable-run invoke (internal/bff/invoke.go) — so its PRESENCE is how
+    the managed loop tells a durable run (which can be suspended + re-invoked) from the Playground's
+    synchronous invoke path (which cannot). L7 suspension is gated on it: a marker emitted on the
+    synchronous path is never enacted, so the loop must fall back to blocking there.
+    """
+    return _header_value(headers, SPAWN_ROOT_HEADER)
+
+
+def _delegate_suspend_enabled() -> bool:
+    """Whether L7 durable delegate suspension (ADR 0091) is enabled. On by default (transparent —
+    a supervisor need not opt in); an operator can force the legacy blocking path by setting
+    ``CTXMESH_DELEGATE_BLOCKING=1`` (the escape hatch)."""
+    return os.environ.get("CTXMESH_DELEGATE_BLOCKING", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _include_history_from_headers(headers: Optional[Dict[str, str]]) -> bool:
@@ -554,6 +583,13 @@ class ManagedResult:
     #: conversation and its turn ENDED here (a handoff is terminal for the agent's turn — it does
     #: not produce a further answer; the target agent continues with the user). ``None`` = none.
     handoff: Optional[Dict[str, str]] = None
+    #: When a depth-0 supervisor delegated and SUSPENDED (L7, ADR 0091), ``{"checkpoint": <opaque
+    #: payload>, "delegates": [{sub_agent, endpoint, input, step, call_id}]}``. Non-None ⇒ the run
+    #: is
+    #: NOT terminal: the BFF worker creates the sub-run(s) and parks this run ``waiting`` on them,
+    #: then
+    #: re-invokes it with the checkpoint when they finish. ``None`` = the run did not suspend.
+    delegate_waiting: Optional[Dict[str, Any]] = None
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -771,6 +807,7 @@ def run_managed_loop(
     on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
     approvals: Optional[Iterable[str]] = None,
     conversation_id: Optional[str] = None,
+    checkpoint: Optional[Any] = None,
 ) -> ManagedResult:
     """Run the config-driven tool-calling loop for one user turn.
 
@@ -778,6 +815,12 @@ def run_managed_loop(
     *config* supplies the system prompt, model route, and the ``max_steps`` bound.
     *user_input* is the inbound request text. *headers* (the launcher-injected
     request headers) bind the trace so the whole tree roots under ``agent.invoke``.
+
+    *checkpoint* (L7, ADR 0091) is the resume envelope the platform injects when re-invoking a
+    supervisor that SUSPENDED on a delegate: when present and verified, the loop restores its state
+    from it (skipping history/memory/knowledge re-injection) and continues from where it paused —
+    the suspended delegations' results are re-dispatched through the idempotent blocking delegate
+    path. A corrupt/version-skewed checkpoint is ignored and the turn runs fresh (fail-safe).
 
     Returns a :class:`ManagedResult` with the final completion, the step count,
     and the tools dispatched. Raises :class:`~ctxmesh.errors.ConfigError` if the
@@ -829,21 +872,54 @@ def run_managed_loop(
         else []
     )
 
-    # Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a per-run UNPREDICTABLE
-    # delimiter token, generated ONCE per run. Every tool result gets wrapped in it as untrusted
-    # DATA; the matching system-prompt instruction tells the model never to obey instructions found
-    # inside it. Always-on (a security default, not opt-in). Composes with M66's proxy scan.
-    spotlight_token = _new_spotlight_token()
-    messages: List[Dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": config.system_prompt + _spotlight_system_instruction(spotlight_token),
-        },
-        *history,
-        {"role": "user", "content": user_input},
-    ]
-    tools_called: List[str] = []
-    consent_required: List[str] = []
+    # L7 durable delegate suspension (ADR 0091): eligible only for a durable ROOT supervisor — the
+    # feature on (default), the inbound spawn-depth 0 (a non-root supervisor blocks — nested
+    # suspension
+    # is v1-deferred), AND a spawn-root header present (the synchronous Playground path has none,
+    # and a
+    # marker emitted there is never enacted — so it must fall back to blocking).
+    spawn_root = _spawn_root_from_headers(headers)
+    suspend_eligible = _delegate_suspend_enabled() and spawn_depth == 0 and bool(spawn_root)
+
+    # Restore from an L7 checkpoint (ADR 0091) when the platform re-invoked a suspended supervisor.
+    # verify_and_extract is fail-safe: a corrupt/version-skewed envelope yields None → run fresh.
+    restored = _checkpoint.verify_and_extract(checkpoint) if checkpoint is not None else None
+
+    if restored is not None:
+        # Resume: rebuild the exact loop state from the checkpoint. History/memory/knowledge are NOT
+        # re-injected (the checkpointed messages ARE the state); the spotlight token is REUSED (the
+        # system message embeds its instruction — a fresh token would silently break K1
+        # spotlighting).
+        spotlight_token = str(restored["spotlight_token"])
+        messages: List[Dict[str, Any]] = list(restored["messages"])
+        tools_called: List[str] = list(restored["tools_called"])
+        consent_required: List[str] = list(restored["consent_required"])
+        start_step = int(restored["step"]) + 1  # the suspended step is done; resume at the next
+        start_model_index = int(restored.get("model_index", 0))
+        start_tool_index = int(restored.get("tool_index", 0))
+        pending = restored.get("pending", [])
+    else:
+        # Fresh run (today's path). Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a
+        # per-run UNPREDICTABLE delimiter token, generated ONCE per run. Every tool result gets
+        # wrapped
+        # in it as untrusted DATA; the matching system-prompt instruction tells the model never to
+        # obey
+        # instructions inside it. Always-on (a security default). Composes with M66's proxy scan.
+        spotlight_token = _new_spotlight_token()
+        messages = [
+            {
+                "role": "system",
+                "content": config.system_prompt + _spotlight_system_instruction(spotlight_token),
+            },
+            *history,
+            {"role": "user", "content": user_input},
+        ]
+        tools_called = []
+        consent_required = []
+        start_step = 1
+        start_model_index = 0
+        start_tool_index = 0
+        pending = None
 
     # Bind the invoking user's run capability (ADR 0030 §3) from the inbound headers for
     # the whole turn, so every MCP tool call this loop dispatches relays it to the egress
@@ -860,18 +936,48 @@ def run_managed_loop(
     ):
         root.set_input(user_input)
 
-        # Opt-in long-term auto-retrieval (ADR 0045): prepend relevant agent memories to THIS
-        # turn's system prompt. Inside capability_scope so per-user retrieval is scoped to the
-        # caller. Best-effort — a memory hiccup never breaks the turn.
-        if config.use_agent_memory and client.config.longterm_wired:
-            _inject_agent_memory(client, messages, user_input, config)
+        if restored is not None:
+            # L7 resume (ADR 0091): the suspended delegations' results are re-dispatched through the
+            # IDEMPOTENT BLOCKING delegate path — the launcher's /delegate → /spawn finds the
+            # already-
+            # created child (same deterministic id) and its Await returns the terminal result on the
+            # first poll (no double-spawn, no budget re-charge — spawn_handler.go short-circuits an
+            # existing child). A still-running child degrades to a bounded blocking wait (the rare
+            # at-least-once race). Each result threads as this pending call's tool message, in
+            # order,
+            # spotlight-wrapped with the SAME per-run token — then the loop continues from
+            # start_step.
+            for p in pending or []:
+                content = _dispatch_delegate_one(
+                    client,
+                    str(p.get("sub_agent", "")),
+                    str(p.get("task", "")),
+                    str(p.get("step", "")),
+                    str(p.get("call_id", "")),
+                )
+                tools_called.append(DELEGATE_TOOL_NAME)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(p.get("call_id", "")),
+                        "name": DELEGATE_TOOL_NAME,
+                        "content": _spotlight_tool_content(content, spotlight_token),
+                    }
+                )
+        else:
+            # Opt-in long-term auto-retrieval (ADR 0045): prepend relevant agent memories to THIS
+            # turn's system prompt. Inside capability_scope so per-user retrieval is scoped to the
+            # caller. Best-effort — a memory hiccup never breaks the turn. Skipped on a RESUME (the
+            # checkpointed messages are the state — re-injecting would double the context).
+            if config.use_agent_memory and client.config.longterm_wired:
+                _inject_agent_memory(client, messages, user_input, config)
 
-        # Opt-in knowledge auto-inject (ADR 0061 #5, M10): for each KB whose binding set autoInject,
-        # prepend relevant chunks (with citations) as ephemeral <retrieved_context>. Inside
-        # capability_scope so a perUser KB's proxy retrieval is scoped to the caller (m80.4);
-        # best-effort — a retrieval hiccup never breaks the turn; never persisted to history.
-        if config.knowledge_auto_inject and _knowledge_enabled():
-            _inject_knowledge(client, messages, user_input, config)
+            # Opt-in knowledge auto-inject (ADR 0061 #5, M10): for each KB whose binding set
+            # autoInject, prepend relevant chunks (with citations) as ephemeral <retrieved_context>.
+            # Inside capability_scope so a perUser KB's proxy retrieval is scoped to the caller
+            # (m80.4); best-effort. Also skipped on a RESUME.
+            if config.knowledge_auto_inject and _knowledge_enabled():
+                _inject_knowledge(client, messages, user_input, config)
 
         try:
             return _drive_loop(
@@ -892,6 +998,25 @@ def run_managed_loop(
                 breaker,
                 on_step,
                 spotlight_token,
+                start_step=start_step,
+                spawn_root=spawn_root,
+                suspend_eligible=suspend_eligible,
+                model_index=start_model_index,
+                tool_index=start_tool_index,
+            )
+        except DelegateWaitingError as exc:
+            # L7 (ADR 0091): a depth-0 supervisor delegated and SUSPENDED. Surface the
+            # durable-suspend
+            # marker — the BFF worker creates the sub-run(s), parks this run `waiting` on them, and
+            # re-invokes it with the checkpoint when they finish. NOT a terminal outcome (no
+            # answer).
+            root.set_output("delegating (suspended)")
+            return ManagedResult(
+                output="",
+                steps=exc.steps,
+                tools_called=tools_called,
+                consent_required=consent_required,
+                delegate_waiting={"checkpoint": exc.checkpoint, "delegates": exc.delegates},
             )
         except ApprovalRequiredError as exc:
             # A step gated on human approval (pause_for_approval). Surface it as a
@@ -1460,12 +1585,24 @@ def _drive_loop(
     breaker: Optional["_CircuitBreaker"] = None,
     on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
     spotlight_token: str = "",
+    start_step: int = 1,
+    spawn_root: str = "",
+    suspend_eligible: bool = False,
+    model_index: int = 0,
+    tool_index: int = 0,
 ) -> ManagedResult:
     """The tool-calling loop body (extracted so run_managed_loop can wrap it in the
     capability/approval scopes + catch ApprovalRequiredError as a requires_action outcome).
 
     ``spotlight_token`` is the per-run spotlighting delimiter (K1): every role:"tool" content
-    appended here is wrapped in it as untrusted DATA (see ``_spotlight_tool_content``)."""
+    appended here is wrapped in it as untrusted DATA (see ``_spotlight_tool_content``).
+
+    ``start_step`` (L7, ADR 0091) is the first step number — 1 on a fresh run, or the resumed step
+    on a checkpoint restore. It bounds the loop as ``range(start_step, max_steps+1)`` so a resumed
+    supervisor keeps the SAME runaway budget (ADR 0013) rather than refreshing it each cycle.
+    ``suspend_eligible`` gates whether a depth-0 delegation SUSPENDS (durable) or blocks;
+    ``spawn_root`` is relayed on the suspend-signal delegate call. ``model_index``/``tool_index``
+    are the M78 step-frame channel counters, restored across a resume so fixture refs stay put."""
     # Structured-output repair counter (m65.5): counts corrective re-asks after a
     # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
     # the max_steps budget so repair turns have a clear, explicit allowance of their own.
@@ -1473,14 +1610,11 @@ def _drive_loop(
 
     # Step-visibility (M78, ADR 0071 §4/§C3): emit a `step` metadata frame at each step boundary
     # so the console can show "what step is my agent on right now". `emit` is a no-op unless a sink
-    # is wired (the SSE serve path). The per-channel indices are the 0-based interaction counters
-    # the (deferred) fixture stepper resolves against: model_index increments per model call, and
-    # tool_index per tool dispatch — matching the fixture's model/tool channel ordering (§2).
+    # is wired (the SSE serve path). The per-channel indices (model_index/tool_index) are 0-based
+    # interaction counters restored across an L7 resume so fixture refs stay in sequence.
     emit_step = on_step or (lambda _frame: None)
-    model_index = 0
-    tool_index = 0
 
-    for step in range(1, config.max_steps + 1):
+    for step in range(start_step, config.max_steps + 1):
         with client.trace.step(f"turn-{step}") as turn:
             # model.chat emits its own LLM span nested under this step.
             chat_opts: Dict[str, Any] = dict(config.model_opts)
@@ -1694,11 +1828,10 @@ def _drive_loop(
                         continue
                     dispatched_count += 1
 
-            # v1b fan-out (M64, ADR 0057): run THIS turn's delegate_to calls CONCURRENTLY (the spawn
-            # guard bounds the width; the rest come back denied fail-closed). Pre-compute results,
-            # then thread them into the append loop below in the model's original tool-call order.
-            # A delegate call the policy pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED
-            # here so it is never dispatched — its honest text is threaded from `blocked` below.
+            # v1b fan-out (M64, ADR 0057): THIS turn's delegate_to calls. A delegate call the policy
+            # pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED here so it is never
+            # dispatched —
+            # its honest text is threaded from `blocked` below.
             delegate_calls = [
                 (
                     c.get("id", ""),
@@ -1708,11 +1841,51 @@ def _drive_loop(
                 for c in resp.tool_calls
                 if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
             ]
-            delegate_results = (
-                _dispatch_delegate_batch(client, delegate_calls, str(step))
-                if delegate_calls
-                else {}
-            )
+            # L7 durable suspension (ADR 0091): at depth 0 (suspend_eligible), RECORD each
+            # delegation as
+            # intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await)
+            # instead
+            # of blocking. `pending_delegates` are suspended-on; the rest (an older launcher that
+            # blocks,
+            # or a launcher refusal) come back as normal results threaded inline — the mixed-version
+            # fallback. Not eligible ⇒ the M64 blocking batch, unchanged (also the depth>0 path).
+            pending_delegates: List[Dict[str, Any]] = []
+            delegate_results: Dict[str, str] = {}
+            if delegate_calls and suspend_eligible:
+                for cid, sub_agent, task in delegate_calls:
+                    sig = client.tools.delegate(
+                        sub_agent=sub_agent,
+                        task=task,
+                        step=str(step),
+                        call_id=cid,
+                        suspend=True,
+                        spawn_root=spawn_root,
+                        spawn_depth=spawn_depth,
+                    )
+                    if isinstance(sig, dict) and sig.get("suspend"):
+                        pending_delegates.append(
+                            {
+                                "call_id": cid,
+                                "sub_agent": sub_agent,
+                                "task": task,
+                                "endpoint": str(sig.get("endpoint", "")),
+                            }
+                        )
+                    else:
+                        # An older launcher blocked (no `suspend`), or a refusal — thread inline
+                        # as a normal result (like _dispatch_delegate_one's honest-text form).
+                        if isinstance(sig, dict) and sig.get("ok"):
+                            delegate_results[cid] = str(sig.get("answer", ""))
+                        else:
+                            err = "malformed response"
+                            if isinstance(sig, dict):
+                                err = str(sig.get("error", "unknown error"))
+                            delegate_results[cid] = (
+                                f"delegation to {sub_agent!r} did not succeed: {err}"
+                            )
+            elif delegate_calls:
+                delegate_results = _dispatch_delegate_batch(client, delegate_calls, str(step))
+            pending_ids = {p["call_id"] for p in pending_delegates}
 
             for call in resp.tool_calls:
                 name = _call_name(call)
@@ -1722,6 +1895,15 @@ def _drive_loop(
                 if call_id == handled_handoff_id and handled_handoff_id != "":
                     # A REFUSED handoff_to (M67): its refusal tool result was appended above; do
                     # not re-dispatch it (a successful handoff already returned from the loop).
+                    continue
+                if call_id in pending_ids:
+                    # L7 (ADR 0091): this delegation SUSPENDED — no tool result yet. Append no
+                    # message
+                    # (the assistant tool-call stays unanswered in `messages`); its result is
+                    # threaded
+                    # on resume when the sub-run is terminal. Not counted in tools_called here (the
+                    # resume re-dispatch counts it), so the tally isn't double-charged across
+                    # suspend.
                     continue
                 if call_id in blocked:
                     # Tool-use policy short-circuited this call (deny / sub-run-deny / skipped).
@@ -1804,10 +1986,82 @@ def _drive_loop(
                 # tool call in the model's original order (the same order the tool result was just
                 # appended), carrying the tool name; the ref points at this call's slot in the
                 # fixture's tool channel (0-based). No token counts for a tool step.
-                emit_step(
-                    _step_frame(step, "tool", channel_index=tool_index, tool=name)
-                )
+                emit_step(_step_frame(step, "tool", channel_index=tool_index, tool=name))
                 tool_index += 1
+
+            # L7 durable suspension (ADR 0091): after threading this turn's non-suspended results,
+            # if
+            # any delegations were recorded as pending, SUSPEND — serialize the loop state + raise,
+            # so
+            # run_managed_loop returns the delegate_waiting marker (the BFF worker enacts
+            # child-create +
+            # parent→waiting). A whole turn's fan-out collapses to ONE suspend.
+            if pending_delegates:
+                payload = _checkpoint.build_payload(
+                    messages=messages,
+                    step=step,
+                    pending=[
+                        {
+                            "call_id": p["call_id"],
+                            "step": str(step),
+                            "sub_agent": p["sub_agent"],
+                            "task": p["task"],
+                        }
+                        for p in pending_delegates
+                    ],
+                    tools_called=tools_called,
+                    consent_required=consent_required,
+                    spotlight_token=spotlight_token,
+                    model_index=model_index,
+                    tool_index=tool_index,
+                )
+                # Biggest-risk guard (Fable review): the delegate_waiting marker rides the /invoke
+                # response, capped at 4 MiB by the BFF's LimitReader — an oversized marker is
+                # silently
+                # TRUNCATED (→ no suspend enacted + a failed run while the SDK believes it
+                # suspended).
+                # Over threshold, fall back to BLOCKING dispatch for this turn (graceful M64
+                # degrade).
+                if len(payload.encode()) > _checkpoint.CHECKPOINT_MAX_BYTES:
+                    _log.warning(
+                        "L7: checkpoint %d bytes exceeds cap %d — falling back to blocking "
+                        "delegate dispatch for this turn",
+                        len(payload.encode()),
+                        _checkpoint.CHECKPOINT_MAX_BYTES,
+                    )
+                    blocking = _dispatch_delegate_batch(
+                        client,
+                        [(p["call_id"], p["sub_agent"], p["task"]) for p in pending_delegates],
+                        str(step),
+                    )
+                    for p in pending_delegates:
+                        tools_called.append(DELEGATE_TOOL_NAME)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": p["call_id"],
+                                "name": DELEGATE_TOOL_NAME,
+                                "content": _spotlight_tool_content(
+                                    blocking.get(p["call_id"], ""), spotlight_token
+                                ),
+                            }
+                        )
+                    continue  # proceed to the next model step with the results threaded inline
+                raise DelegateWaitingError(
+                    "supervisor suspended on delegate",
+                    checkpoint=payload,
+                    delegates=[
+                        {
+                            "sub_agent": p["sub_agent"],
+                            "endpoint": p["endpoint"],
+                            "input": p["task"],
+                            "step": str(step),
+                            "call_id": p["call_id"],
+                        }
+                        for p in pending_delegates
+                    ],
+                    steps=step,
+                )
 
     # Bound exceeded: the model kept calling tools past max_steps. Hard stop
     # rather than hang the pod (the mandatory runaway guard, ADR 0013).

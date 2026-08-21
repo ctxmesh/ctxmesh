@@ -34,9 +34,7 @@ def _synthesize_agent_invoke() -> tuple:
     ``traceparent`` exactly as the proxy forwards it to the user process.
     """
     tracer = _tracing.get_tracer()
-    with tracer.start_as_current_span(
-        "agent.invoke", kind=otel_trace.SpanKind.SERVER
-    ) as invoke:
+    with tracer.start_as_current_span("agent.invoke", kind=otel_trace.SpanKind.SERVER) as invoke:
         ctx = invoke.get_span_context()
         headers: dict = {}
         TraceContextTextMapPropagator().inject(headers)

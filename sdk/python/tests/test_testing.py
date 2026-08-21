@@ -26,9 +26,11 @@ def _offline_client(mem, disc, gw):
 
 def test_public_import_path_runs_an_agent_offline():
     """A custom handler served via ctxmesh.serve, driven entirely against ctxmesh.testing fakes."""
-    with MemoryStub() as mem, DiscoveryStub() as disc, GatewayStub(
-        content="hello from offline"
-    ) as gw:
+    with (
+        MemoryStub() as mem,
+        DiscoveryStub() as disc,
+        GatewayStub(content="hello from offline") as gw,
+    ):
         client = _offline_client(mem, disc, gw)
 
         def handler(req: InvokeRequest) -> str:

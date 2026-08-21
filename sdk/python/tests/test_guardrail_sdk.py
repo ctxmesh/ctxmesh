@@ -148,8 +148,10 @@ def test_managed_loop_guardrail_blocked_not_retried():
     """run_managed_loop with resilience.modelCall.maxRetries>0: a guardrail_blocked 403
     is attempted EXACTLY ONCE (no retry) and the loop returns an honest terminal
     ManagedResult with guardrail_blocked set and output mentioning the detector."""
-    with GuardrailBlockedGatewayStub(detector="jailbreak", scan_point="input") as gw, \
-            DiscoveryStub() as disc:
+    with (
+        GuardrailBlockedGatewayStub(detector="jailbreak", scan_point="input") as gw,
+        DiscoveryStub() as disc,
+    ):
         cfg = PlaneConfig.for_test(
             model_gateway_url=gw.base_url,
             discovery_base_url=disc.base_url,
@@ -168,17 +170,17 @@ def test_managed_loop_guardrail_blocked_not_retried():
             result = run_managed_loop(client, config, "trigger the guardrail")
 
         # The call was made EXACTLY ONCE — never retried.
-        assert gw.call_count == 1, (
-            f"expected exactly 1 call (no retry on guardrail_blocked), got {gw.call_count}"
-        )
+        assert (
+            gw.call_count == 1
+        ), f"expected exactly 1 call (no retry on guardrail_blocked), got {gw.call_count}"
         # The result is an honest terminal outcome, not a crash.
         assert result.guardrail_blocked is not None
         assert result.guardrail_blocked["detector"] == "jailbreak"
         assert result.guardrail_blocked["scan_point"] == "input"
         # The output text must mention the guardrail / detector so the console can display it.
-        assert "guardrail" in result.output.lower() or "jailbreak" in result.output.lower(), (
-            f"output should mention guardrail/detector, got: {result.output!r}"
-        )
+        assert (
+            "guardrail" in result.output.lower() or "jailbreak" in result.output.lower()
+        ), f"output should mention guardrail/detector, got: {result.output!r}"
 
 
 # ── test 3: normal EndpointError (502) STILL retries (regression for m65.7) ──
@@ -206,8 +208,8 @@ def test_managed_loop_transient_502_still_retries():
             result = run_managed_loop(client, config, "hello")
 
         # The stub returned 502 on call 1, then 200 on call 2. Retry must have fired.
-        assert gw.call_count == 2, (
-            f"expected 2 calls (1 fail + 1 retry success), got {gw.call_count}"
-        )
+        assert (
+            gw.call_count == 2
+        ), f"expected 2 calls (1 fail + 1 retry success), got {gw.call_count}"
         assert result.output == "recovered"
         assert result.guardrail_blocked is None, "a recovered 502 must not set guardrail_blocked"

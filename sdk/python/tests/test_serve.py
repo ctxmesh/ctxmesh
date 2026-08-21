@@ -85,9 +85,7 @@ def test_emit_token_streams_when_on_token_supplied(client):
         req.emit_token("lo")
         return "hello"
 
-    body = process_invoke(
-        client, handler, "agent-x", b'{"input":"q"}', {}, on_token=frames.append
-    )
+    body = process_invoke(client, handler, "agent-x", b'{"input":"q"}', {}, on_token=frames.append)
     assert frames == ["hel", "lo"]
     assert body["output"] == "hello"
 
@@ -108,9 +106,7 @@ def test_emit_step_streams_when_on_step_supplied(client):
         req.emit_step({"step": 1, "kind": "model", "tokens": {"prompt": 3, "completion": 2}})
         return "ok"
 
-    body = process_invoke(
-        client, handler, "agent-x", b'{"input":"q"}', {}, on_step=frames.append
-    )
+    body = process_invoke(client, handler, "agent-x", b'{"input":"q"}', {}, on_step=frames.append)
     assert frames == [{"step": 1, "kind": "model", "tokens": {"prompt": 3, "completion": 2}}]
     assert body["output"] == "ok"
 
@@ -155,12 +151,20 @@ def test_inbound_conversation_id_takes_precedence(client):
 
 # ── body parsing tolerance ─────────────────────────────────────────────────────────────
 def test_parse_body_variants():
-    assert _parse_body(b'{"input":"hello","approvals":["k1","k2"]}') == ("hello", ["k1", "k2"])
-    assert _parse_body(b"") == ("", [])
+    # (input, approvals, checkpoint) — checkpoint is None unless the platform injected one (L7).
+    assert _parse_body(b'{"input":"hello","approvals":["k1","k2"]}') == (
+        "hello",
+        ["k1", "k2"],
+        None,
+    )
+    assert _parse_body(b"") == ("", [], None)
     # Non-JSON is treated as the raw prompt (never a 500).
-    assert _parse_body(b"raw text") == ("raw text", [])
+    assert _parse_body(b"raw text") == ("raw text", [], None)
     # A JSON non-object degrades to its string form.
-    assert _parse_body(b'"just a string"') == ("just a string", [])
+    assert _parse_body(b'"just a string"') == ("just a string", [], None)
+    # An L7 resume envelope rides alongside input (the managed loop verifies it before trusting).
+    env = {"version": 1, "kind": "supervisor-loop", "sha256": "x", "payload": "{}"}
+    assert _parse_body(json.dumps({"input": "go", "checkpoint": env}).encode()) == ("go", [], env)
 
 
 # ── the full HTTP contract (real socket) ───────────────────────────────────────────────
@@ -243,9 +247,7 @@ def test_invoke_streams_sse_when_accepted(client):
         thread.join(timeout=5)
 
     frames = [
-        json.loads(line[len("data: ") :])
-        for line in text.splitlines()
-        if line.startswith("data: ")
+        json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")
     ]
     assert [f for f in frames if f["type"] == "token"] == [
         {"type": "token", "text": "a"},

@@ -907,9 +907,7 @@ def test_guarded_agent_no_on_token_uses_buffered(monkeypatch):
                 text="still buffered",
                 usage={},
                 model=route,
-                raw={
-                    "choices": [{"message": {"role": "assistant", "content": "still buffered"}}]
-                },
+                raw={"choices": [{"message": {"role": "assistant", "content": "still buffered"}}]},
             )
 
         stream_called = []
@@ -1291,8 +1289,13 @@ def test_managed_loop_refused_handoff_is_recoverable(monkeypatch):
         if calls["n"] == 1:
             raw = {
                 "choices": [
-                    {"message": {"role": "assistant", "content": None,
-                                 "tool_calls": [_handoff_call("attacker")]}}
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [_handoff_call("attacker")],
+                        }
+                    }
                 ]
             }
             return ChatResponse(text="", usage={}, model="tool-mock", raw=raw)
@@ -1416,8 +1419,10 @@ def test_structured_output_conforming_no_repair():
 def test_structured_output_repair_then_success():
     """output_schema set; model returns non-conforming JSON first, then conforming →
     exactly ONE repair turn happens; the final output is the conforming answer."""
-    with _SequentialGatewayStub([_NONCONFORMING_ANSWER, _CONFORMING_ANSWER]) as gw, \
-            _EmptyDiscoveryStub() as disc:
+    with (
+        _SequentialGatewayStub([_NONCONFORMING_ANSWER, _CONFORMING_ANSWER]) as gw,
+        _EmptyDiscoveryStub() as disc,
+    ):
         plane = PlaneConfig.for_test(
             discovery_base_url=disc.base_url, model_gateway_url=gw.base_url
         )
@@ -1723,9 +1728,7 @@ def test_tool_policy_require_approval_in_sub_run_fails_closed(monkeypatch):
             model_route="m",
             tool_policy={"default": "require-approval"},
         )
-        result = run_managed_loop(
-            client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"}
-        )
+        result = run_managed_loop(client, config, "go", headers={"X-Ctxmesh-Spawn-Depth": "1"})
 
     # THE load-bearing assertion: pause_for_approval was NOT called at all inside the sub-run.
     assert pause_calls == [], "a sub-run must NOT pause for approval (fail-closed)"
@@ -1792,8 +1795,9 @@ def test_tool_policy_parallel_limit_caps_dispatch(monkeypatch):
     assert result.tools_called == ["t1"]
     # The follow-up turn carried the two skip messages (honest, re-requestable).
     follow_up = json.loads(gw.requests[-1].body)
-    tool_msgs = {m["tool_call_id"]: m["content"] for m in follow_up["messages"]
-                 if m.get("role") == "tool"}
+    tool_msgs = {
+        m["tool_call_id"]: m["content"] for m in follow_up["messages"] if m.get("role") == "tool"
+    }
     assert "exceeds the tool parallel-limit of 1" in tool_msgs["c2"]
     assert "exceeds the tool parallel-limit of 1" in tool_msgs["c3"]
 
@@ -1830,9 +1834,10 @@ def test_resolve_tool_rule_unit():
     # No default → allow.
     assert _resolve_tool_rule({}, "x") == "allow"
     # A malformed/unrecognised override rule falls through to the default (never a silent widen).
-    assert _resolve_tool_rule(
-        {"default": "deny", "overrides": [{"name": "x", "rule": "bogus"}]}, "x"
-    ) == "deny"
+    assert (
+        _resolve_tool_rule({"default": "deny", "overrides": [{"name": "x", "rule": "bogus"}]}, "x")
+        == "deny"
+    )
 
 
 def test_forced_and_limit_unit():
@@ -2486,9 +2491,9 @@ def test_managed_loop_knowledge_auto_inject_is_ephemeral_not_persisted(gateway_s
             {"role": "user", "content": "how much PTO?"},
             {"role": "assistant", "content": "the answer is 42"},
         ]
-        assert all("<retrieved_context>" not in m["content"] for m in stored), (
-            "the ephemeral RAG block must NEVER be persisted to session history"
-        )
+        assert all(
+            "<retrieved_context>" not in m["content"] for m in stored
+        ), "the ephemeral RAG block must NEVER be persisted to session history"
 
 
 def test_managed_loop_no_auto_inject_kb_is_byte_for_byte_unchanged(gateway_stub, monkeypatch):

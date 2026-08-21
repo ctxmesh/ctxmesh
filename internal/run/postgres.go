@@ -191,22 +191,42 @@ func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 func (p *pgStore) Durable() bool { return true }
 
 func (p *pgStore) Create(r *Run) error {
-	ctx := context.Background()
+	inserted, err := insertRunTx(context.Background(), p.db, r)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return errors.New("run: id already exists")
+	}
+	return nil
+}
+
+// execer is the write half of *sql.DB / *sql.Tx (the pool or a transaction), so insertRunTx can run on
+// either — a bare Create on the pool, or a child upsert inside the L7 suspend transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertRunTx inserts a run row (ON CONFLICT (id) DO NOTHING) via any execer and reports whether a row
+// was actually inserted (false ⇒ the id already existed — the idempotent path SuspendOnDelegate relies on
+// for a re-issued delegate child). The 36-column insert lives HERE, shared by Create + the L7 delegate
+// suspend TX, so the two can never drift.
+func insertRunTx(ctx context.Context, ex execer, r *Run) (bool, error) {
 	msgs, err := json.Marshal(r.Messages)
 	if err != nil {
-		return fmt.Errorf("run: marshal messages: %w", err)
+		return false, fmt.Errorf("run: marshal messages: %w", err)
 	}
 	action, err := marshalAction(r.RequiresAction)
 	if err != nil {
-		return err
+		return false, err
 	}
 	waitOn, err := marshalWaitOn(r.WaitOn)
 	if err != nil {
-		return err
+		return false, err
 	}
 	nodeEndpoints, err := marshalNodeEndpoints(r.NodeEndpoints)
 	if err != nil {
-		return err
+		return false, err
 	}
 	const q = `INSERT INTO runs
 		(id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
@@ -217,7 +237,7 @@ func (p *pgStore) Create(r *Run) error {
 		 handoff_skip_history_replay, version, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,1,$35,$36)
 		ON CONFLICT (id) DO NOTHING`
-	res, err := p.db.ExecContext(ctx, q,
+	res, err := ex.ExecContext(ctx, q,
 		r.ID, r.Namespace, r.Agent, []byte(r.Input), r.ConversationID, r.TraceID,
 		string(r.Status), msgs, action, r.Error,
 		r.CallerUsername, r.Boundary, r.Endpoint, r.WorkerID, nullableTime(r.LeaseExpiresAt),
@@ -226,12 +246,10 @@ func (p *pgStore) Create(r *Run) error {
 		nodeEndpoints, r.IngestionRef, r.IngestionSpec, r.Outcome, r.ExportRef, r.ExportSpec,
 		r.HandoffSkipHistoryReplay, r.CreatedAt.UTC(), r.UpdatedAt.UTC())
 	if err != nil {
-		return fmt.Errorf("run: insert: %w", err)
+		return false, fmt.Errorf("run: insert: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("run: id already exists")
-	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (p *pgStore) Get(id string) (*Run, error) {
@@ -496,6 +514,107 @@ func (p *pgStore) Suspend(id string, waitOn []string, mode WaitMode, fn func(*Ru
 	})
 }
 
+// SuspendOnDelegate — see the Store interface. The L7 delegate suspend transaction (ADR 0091): child
+// upsert + parent checkpoint + suspend-or-requeue in ONE OCC-guarded, lock-ordered transaction, with the
+// lost-wakeup guard (an already-terminal child is never waited on). OCC-retried like CompleteAndWake.
+func (p *pgStore) SuspendOnDelegate(parentID string, children []*Run, mode WaitMode, fn func(*Run) error) (*Run, error) {
+	ctx := context.Background()
+	for range runStoreMaxRetries {
+		parent, err := p.trySuspendOnDelegate(ctx, parentID, children, mode, fn)
+		if errors.Is(err, errRunConflict) {
+			continue // an OCC loser on the parent version (a concurrent wake) — re-read and retry
+		}
+		if err != nil {
+			return nil, err
+		}
+		return parent, nil
+	}
+	return nil, errRunConflict
+}
+
+func (p *pgStore) trySuspendOnDelegate(
+	ctx context.Context, parentID string, children []*Run, mode WaitMode, fn func(*Run) error,
+) (*Run, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("run: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// (1) Upsert the delegate child run(s) inside the TX — idempotent (a re-issued delegate collapses to
+	// the same row via ON CONFLICT DO NOTHING). Whether a row was freshly inserted is irrelevant; step (3)
+	// re-reads the authoritative status under the lock either way.
+	for _, c := range children {
+		if _, err := insertRunTx(ctx, tx, c); err != nil {
+			return nil, err
+		}
+	}
+
+	// (2) Lock the parent + every child by ASCENDING id — the deadlock-free discipline CompleteAndWake uses,
+	// so a concurrent suspend/wake touching the same rows can never hold-and-wait in a cycle.
+	lockIDs := make([]string, 0, len(children)+1)
+	lockIDs = append(lockIDs, parentID)
+	for _, c := range children {
+		lockIDs = append(lockIDs, c.ID)
+	}
+	if err := lockRunsOrdered(ctx, tx, lockIDs); err != nil {
+		return nil, err
+	}
+
+	// (3) Re-read each child's CURRENT status under the lock; the wait set is only the NON-terminal children.
+	// An already-terminal child is NEVER added to WaitOn (the lost-wakeup race, ADR 0091 fork 2 — the #1
+	// footgun): a dead child fires no future CompleteAndWake, so parking on it would strand the parent forever.
+	waitOn := make([]string, 0, len(children))
+	for _, c := range children {
+		cur, _, err := p.getWithVersion(ctx, tx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !cur.Status.IsTerminal() {
+			waitOn = append(waitOn, c.ID)
+		}
+	}
+
+	// (4) Re-read the parent under the lock, checkpoint it (fn sets Cursor), then suspend-or-requeue.
+	parent, pv, err := p.getWithVersion(ctx, tx, parentID)
+	if err != nil {
+		return nil, err
+	}
+	parentOld := parent.Status
+	if fn != nil {
+		if err := fn(parent); err != nil {
+			return nil, err
+		}
+	}
+	now := p.clock()
+	if len(waitOn) == 0 {
+		// Every child is ALREADY terminal ⇒ the WaitAll wait is satisfied NOW. Collapse suspend+wake into
+		// this TX: running→waiting (release the lease) → queued (the immediately-met wait re-queues) — EXACTLY
+		// what a suspend followed by an instant CompleteAndWake would produce. Never park on an empty wait set.
+		if err := parent.Transition(StatusWaiting, now); err != nil {
+			return nil, err
+		}
+		parent.WorkerID, parent.LeaseExpiresAt = "", nil
+		if err := parent.Transition(StatusQueued, now); err != nil {
+			return nil, err
+		}
+	} else if err := parent.suspendToWaiting(waitOn, mode, now); err != nil {
+		return nil, err
+	}
+	if err := p.writeRunTx(ctx, tx, parent, pv); err != nil {
+		return nil, err
+	}
+	if parent.Status != parentOld {
+		if err := appendEventTx(ctx, tx, parentID, EventState, string(parent.Status), now); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("run: commit: %w", err)
+	}
+	return cloneRun(parent), nil
+}
+
 // CompleteAndWake is the transactional cross-run wake (ADR 0060 §3) — the load-bearing two-row
 // transaction. In ONE BeginTx it terminates the child and, if a `waiting` parent is parked on it,
 // re-queues that parent when the wait is satisfied.
@@ -550,7 +669,7 @@ func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply 
 	if parentID != "" {
 		lockIDs = append(lockIDs, parentID)
 	}
-	if _, err := lockRunsOrdered(ctx, tx, lockIDs); err != nil {
+	if err := lockRunsOrdered(ctx, tx, lockIDs); err != nil {
 		return nil, nil, err
 	}
 
@@ -612,6 +731,10 @@ func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply 
 					wokeParent = cloneRun(parent)
 				}
 			}
+		default:
+			// The parent is NOT `waiting` on this child — e.g. it was CANCELLED by a subtree cascade
+			// (L9, ADR 0091 fork 6) or already woken/terminal. The child still terminates (committed
+			// above); waking is a clean no-op, NEVER an error — a canceled parent is simply not re-queued.
 		}
 	}
 
@@ -712,9 +835,9 @@ func (p *pgStore) waitMet(ctx context.Context, r *Run) (bool, error) {
 // lockRunsOrdered acquires FOR UPDATE row locks on the given run ids in a single statement, ordered
 // by id, so all callers touching an overlapping set take the locks in the SAME order (deadlock-free).
 // It errors ErrNotFound if any id is missing (all rows must exist to lock the pair coherently).
-func lockRunsOrdered(ctx context.Context, tx *sql.Tx, ids []string) (int, error) {
+func lockRunsOrdered(ctx context.Context, tx *sql.Tx, ids []string) error {
 	if len(ids) == 0 {
-		return 0, nil
+		return nil
 	}
 	// Build ($1,$2,...) and lock in ascending id order (ORDER BY id) — the consistent lock order.
 	placeholders := make([]string, len(ids))
@@ -726,24 +849,24 @@ func lockRunsOrdered(ctx context.Context, tx *sql.Tx, ids []string) (int, error)
 	q := "SELECT id FROM runs WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY id FOR UPDATE"
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
-		return 0, fmt.Errorf("run: lock ordered: %w", err)
+		return fmt.Errorf("run: lock ordered: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	n := 0
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("run: lock scan: %w", err)
+			return fmt.Errorf("run: lock scan: %w", err)
 		}
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("run: lock iterate: %w", err)
+		return fmt.Errorf("run: lock iterate: %w", err)
 	}
 	if n != len(ids) {
-		return n, ErrNotFound // a row we needed to lock is gone
+		return ErrNotFound // a row we needed to lock is gone
 	}
-	return n, nil
+	return nil
 }
 
 func (p *pgStore) ClaimQueued(workerID string, lease time.Duration) (*Run, error) {
@@ -939,6 +1062,47 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run: list requires_action rows: %w", err)
+	}
+	return out, nil
+}
+
+// DescendantsRequiringAction — see the Store interface (L1 surfacing, ADR 0075 §4). Reads the
+// descendant rows (root_run_id = the true root) currently in requires_action and projects the pause,
+// unmarshaling the JSON action in Go (as the store already does elsewhere). Read-only. The
+// runs_root + runs_requires_action partial indexes cover the predicate.
+func (p *pgStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error) {
+	if rootRunID == "" {
+		return nil, nil
+	}
+	rows, err := p.db.QueryContext(context.Background(),
+		`SELECT id, agent, requires_action FROM runs WHERE root_run_id=$1 AND status=$2`,
+		rootRunID, string(StatusRequiresAction))
+	if err != nil {
+		return nil, fmt.Errorf("run: list descendants requiring action: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []DescendantAction
+	for rows.Next() {
+		var (
+			id     string
+			agent  string
+			action []byte
+		)
+		if err := rows.Scan(&id, &agent, &action); err != nil {
+			return nil, fmt.Errorf("run: descendants requiring action scan: %w", err)
+		}
+		if len(action) == 0 {
+			continue // requires_action with no action record — nothing to surface
+		}
+		var a Action
+		if err := json.Unmarshal(action, &a); err != nil {
+			return nil, fmt.Errorf("run: descendants requiring action unmarshal: %w", err)
+		}
+		out = append(out, DescendantAction{RunID: id, Agent: agent, Kind: a.Kind, Message: a.Message})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: descendants requiring action rows: %w", err)
 	}
 	return out, nil
 }

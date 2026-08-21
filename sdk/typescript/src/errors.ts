@@ -141,3 +141,34 @@ export class ApprovalRequiredError extends CtxmeshError {
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
+
+/**
+ * A root supervisor delegated and chose to SUSPEND rather than block (L7, ADR 0091).
+ *
+ * Raised inside the managed loop when a depth-0 durable supervisor issues `delegate_to` calls:
+ * instead of blocking for the sub-agents' lifetimes, the loop serializes its state (`checkpoint` —
+ * an opaque loop-state payload) and records the delegations (`delegates`). `runManagedLoop` turns
+ * it into a `delegate_waiting` OUTCOME the BFF worker enacts as one durable suspend transaction
+ * (child-create + parent→waiting). On resume the children's results are re-dispatched through the
+ * idempotent blocking delegate path and the loop continues from where it paused.
+ */
+export class DelegateWaitingError extends CtxmeshError {
+  /** The opaque loop-state payload (a JSON string) the BFF wraps in a hashed envelope. */
+  readonly checkpoint: string;
+  /** The delegations to enact: `[{sub_agent, endpoint, input, step, call_id}]`. */
+  readonly delegates: Array<Record<string, string>>;
+  /** The loop step at which the suspend occurred. */
+  readonly steps: number;
+
+  constructor(
+    message: string,
+    opts: { checkpoint: string; delegates: Array<Record<string, string>>; steps: number },
+  ) {
+    super(message);
+    this.name = "DelegateWaitingError";
+    this.checkpoint = opts.checkpoint;
+    this.delegates = opts.delegates;
+    this.steps = opts.steps;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
