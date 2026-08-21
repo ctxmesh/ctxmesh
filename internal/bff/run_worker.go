@@ -18,6 +18,7 @@ package bff
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -268,7 +269,39 @@ func (s *Server) executeClaimedRun(
 		return
 	}
 
-	s.executeRun(execCtx, rn.ID, rn.Endpoint, []byte(rn.Input))
+	// L7 resume (ADR 0091): when this run carries a valid supervisor-loop checkpoint (a woken `waiting`
+	// supervisor being re-claimed), inject it into the invoke BODY so the SDK's managed loop restores from
+	// it instead of re-running from the top. A cursor that is NOT a supervisor envelope (a fresh run, a
+	// workflow, a corrupt/version-skewed blob) leaves the body untouched → a full re-invoke (the fail-safe).
+	body := []byte(rn.Input)
+	if resumed, ok := resumeInvokeBody(body, rn.Cursor); ok {
+		body = resumed
+		s.log.Info("L7: resuming a suspended supervisor from its checkpoint", "run", rn.ID)
+	}
+	s.executeRun(execCtx, rn.ID, rn.Endpoint, body)
+}
+
+// resumeInvokeBody injects the L7 supervisor-loop checkpoint (ADR 0091) into an invoke body as a
+// platform `checkpoint` field, returning (body, true) when the cursor is a VALID supervisor envelope
+// (run.ParseSupervisorCheckpoint) AND the body is a JSON object. It returns (input, false) — a full
+// re-invoke, the fail-safe — for a non-supervisor cursor (a fresh run, a workflow's per-node cursor, a
+// corrupt / version-skewed blob) or a non-object body. The checkpoint is embedded as the envelope JSON
+// so the SDK RE-verifies it (defense in depth) before restoring; consent/OBO are re-derived server-side
+// (headers/store), NEVER from the blob. It NEVER disturbs the user's `input`/`approvals` fields.
+func resumeInvokeBody(input []byte, cursor string) ([]byte, bool) {
+	if _, ok := run.ParseSupervisorCheckpoint(cursor); !ok {
+		return input, false
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(input, &body); err != nil || body == nil {
+		return input, false // not a JSON object → full re-invoke (fail-safe)
+	}
+	body["checkpoint"] = json.RawMessage(cursor)
+	out, err := json.Marshal(body)
+	if err != nil {
+		return input, false
+	}
+	return out, true
 }
 
 // startHeartbeat renews the run's lease every lease/3 until the returned stop func is called or ctx
