@@ -34,7 +34,11 @@ type LoadState =
 
 export function ApprovalsPage() {
   const { namespace } = useNamespace();
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
+  // Initialise from the current namespace so the first render already shows the right state — no
+  // loading-skeleton flash before the "select a namespace" prompt when none is selected.
+  const [loadState, setLoadState] = useState<LoadState>(
+    namespace ? { kind: "loading" } : { kind: "no-namespace" },
+  );
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
@@ -151,7 +155,10 @@ export function ApprovalsPage() {
         <p className="text-sm text-muted-foreground">
           Runs paused awaiting plan approval in this namespace — click a run to
           review and approve or deny. Switch the namespace scope with the global
-          namespace selector.
+          namespace selector.{" "}
+          <span className="text-muted-foreground/80">
+            Mid-run step approvals are not shown here — open a run's detail page to act on those.
+          </span>
         </p>
       </div>
 

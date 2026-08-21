@@ -257,13 +257,29 @@ export function RunDetailPage() {
         )}
       </div>
 
+      {/* ── Back to the approval queue — the reviewer's exit after deciding ─── */}
+      {isApprovalPause && (
+        <Link
+          to="/approvals"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          ← Plan approvals
+        </Link>
+      )}
+
       {/* ── Approval panel — shown only when the run is paused for approval ─── */}
       {isApprovalPause && (
         <Card data-testid="run-approval-panel">
           <CardHeader>
-            <CardTitle className="text-base">Approval required</CardTitle>
+            <CardTitle className="text-base">
+              {detail.requiresAction?.kind === "plan_approval"
+                ? "Plan approval required"
+                : "Action required"}
+            </CardTitle>
             <CardDescription>
-              This run is paused awaiting your decision before it can continue.
+              {detail.requiresAction?.kind === "plan_approval"
+                ? "This workflow run is paused on its proposed plan. Approving lets it proceed; denying cancels the run permanently."
+                : "This run is paused on a mid-run step awaiting your decision. Approving lets it continue; denying cancels the run permanently."}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -273,12 +289,20 @@ export function RunDetailPage() {
               </div>
             )}
 
-            {/* Feedback from a previous approval attempt */}
+            {/* Feedback from a previous approval attempt + the exit back to the queue */}
             {approval.kind === "done" && (
-              <p className="text-sm text-success" role="status">
-                Decision submitted: {approval.decision === "approve" ? "Approved" : "Denied"}.
-                The run state will update momentarily.
-              </p>
+              <div className="space-y-2" role="status">
+                <p className="text-sm text-success">
+                  Decision submitted: {approval.decision === "approve" ? "Approved" : "Denied"}.
+                  The run state will update momentarily.
+                </p>
+                <Link
+                  to="/approvals"
+                  className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+                >
+                  Return to Plan approvals →
+                </Link>
+              </div>
             )}
             {approval.kind === "error" && (
               <p className="text-sm text-destructive" role="alert">
