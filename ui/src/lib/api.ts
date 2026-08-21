@@ -1952,6 +1952,18 @@ export interface RunShare {
   // NOTE: NO token — the backend never returns the token after creation
 }
 
+// ApprovalQueueItem mirrors the BFF's ApprovalQueueItem DTO (internal/bff/approvals_read.go).
+// Returned by GET /api/approvals?namespace= — the V5 "Plan approvals" queue: runs paused on
+// plan_approval awaiting a human decision. Token-free: RequiresAction.Key is NEVER surfaced here
+// (the run detail page owns the approve/deny path). rootRunId is present only for descendant sub-runs
+// (gives the spawn-tree context); message is the plan summary or absent.
+export interface ApprovalQueueItem {
+  runId: string;
+  agent: string;
+  rootRunId?: string;
+  message?: string;
+}
+
 // MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
 // Returned by GET /api/my/shares — the caller's own share links across ALL runs.
 // NOTE: there is no token field — the backend never returns the token after creation.
@@ -5238,6 +5250,28 @@ export const api = {
     const data = (await res.json()) as MySharesItem[] | { items?: MySharesItem[] };
     if (Array.isArray(data)) return data;
     return data.items ?? [];
+  },
+
+  // listApprovals fetches the plan-approval queue for a namespace (GET /api/approvals?namespace=).
+  // namespace is REQUIRED — the backend returns 400 without it. A 403 (the caller lacks
+  // `list workflows` in the namespace) throws a typed ApiError (isForbidden) so the page shows
+  // an honest forbidden state — never a fake empty list. Any other non-2xx throws too (retryable).
+  listApprovals: async (
+    namespace: string,
+    signal?: AbortSignal,
+  ): Promise<ApprovalQueueItem[]> => {
+    const qs = new URLSearchParams({ namespace });
+    const res = await apiFetch(`/api/approvals?${qs.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listApprovals failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as ApprovalQueueItem[];
   },
 
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).

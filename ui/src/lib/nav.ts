@@ -3,6 +3,7 @@ import {
   BookOpen,
   Boxes,
   Building2,
+  CheckSquare,
   Coins,
   Database,
   FlaskConical,
@@ -289,6 +290,19 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Share2,
         milestone: "M112",
         route: "/my-shares",
+      },
+      {
+        // Plan approvals (V5, M112) — the namespace-scoped queue of runs paused on
+        // plan_approval (workflow executor only), so a reviewer sees the pending inbox
+        // and deep-links each row to /runs/:id to approve/deny. Gated on `list workflows`
+        // in the namespace — a caller without that RBAC gets an honest 403, never an
+        // empty list. This is the honest name: the queue is plan_approval-scoped.
+        id: "approvals",
+        label: "Plan approvals",
+        icon: CheckSquare,
+        milestone: "M112",
+        route: "/approvals",
+        requiresCapability: { resource: "workflows", verb: "list" },
       },
       {
         id: "cost",
