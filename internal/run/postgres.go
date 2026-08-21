@@ -300,16 +300,29 @@ func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 	return true, nil
 }
 
-// getWithVersion loads a run + its OCC version from the given querier (the pool or a tx). A
-// missing row is ErrNotFound.
-func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
-	const sel = `SELECT namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
+// runRowScanner is satisfied by both *sql.Row and *sql.Rows, so getWithVersion (one row) and List (many
+// rows) share ONE scan + column list — the column ORDER must match runRowColumns exactly.
+type runRowScanner interface{ Scan(dest ...any) error }
+
+// runRowColumns is the ordered SELECT list for a full run row, shared by getWithVersion and List so the
+// two can never drift. cursorExpr is the SQL at the cursor position: `cursor` HYDRATES the checkpoint
+// (Get / worker claim / Update need it); `”` SKIPS the MB-scale L7 supervisor checkpoint on a list fill
+// (L12) — Postgres neither reads nor transfers it, and the column order is unchanged so ONE scan serves
+// both. It leads with `id` so a bulk List can carry the id per row (getWithVersion already knows it).
+func runRowColumns(cursorExpr string) string {
+	return `id, namespace, agent, input, conversation_id, trace_id, status, messages, requires_action, error,
 		caller_username, boundary, endpoint, worker_id, lease_expires_at,
 		parent_run_id, root_run_id, spawn_depth, output_schema, record,
-		workflow_ref, spec_snapshot, cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
+		workflow_ref, spec_snapshot, ` + cursorExpr + ` AS cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
 		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec,
-		handoff_skip_history_replay, version, created_at, updated_at
-		FROM runs WHERE id=$1`
+		handoff_skip_history_replay, version, created_at, updated_at`
+}
+
+// scanRunRow scans one full run row (columns in runRowColumns order) into a Run + its OCC version. A list
+// fill projects ” for cursor (L12), so r.Cursor is empty on those rows — the resume path reads the real
+// checkpoint only via getWithVersion (worker claim / Get). sql.ErrNoRows is returned BARE so a single-row
+// caller can map it to ErrNotFound; other scan failures are wrapped.
+func scanRunRow(sc runRowScanner) (*Run, int64, error) {
 	var (
 		r             Run
 		input         []byte
@@ -325,8 +338,8 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		created       time.Time
 		updated       time.Time
 	)
-	err := q.QueryRowContext(ctx, sel, id).Scan(
-		&r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
+	err := sc.Scan(
+		&r.ID, &r.Namespace, &r.Agent, &input, &r.ConversationID, &r.TraceID, &status,
 		&msgs, &action, &r.Error, &r.CallerUsername, &r.Boundary, &r.Endpoint, &r.WorkerID, &lease,
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema, &r.Record,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
@@ -334,11 +347,10 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		&r.HandoffSkipHistoryReplay, &version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return nil, 0, ErrNotFound
+		return nil, 0, err // bare — the single-row caller maps this to ErrNotFound
 	case err != nil:
-		return nil, 0, fmt.Errorf("run: select: %w", err)
+		return nil, 0, fmt.Errorf("run: scan run row: %w", err)
 	}
-	r.ID = id
 	r.Status = Status(status)
 	r.CreatedAt = created.UTC()
 	r.UpdatedAt = updated.UTC()
@@ -376,6 +388,21 @@ func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Ru
 		r.RequiresAction = &a
 	}
 	return &r, version, nil
+}
+
+// getWithVersion loads a run + its OCC version from the given querier (the pool or a tx). It hydrates the
+// full row INCLUDING the cursor (the resume path — worker claim / Get / Update round-trip — needs it). A
+// missing row is ErrNotFound.
+func (p *pgStore) getWithVersion(ctx context.Context, q querier, id string) (*Run, int64, error) {
+	sel := `SELECT ` + runRowColumns("cursor") + ` FROM runs WHERE id=$1`
+	r, version, err := scanRunRow(q.QueryRowContext(ctx, sel, id))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, 0, ErrNotFound
+	case err != nil:
+		return nil, 0, err
+	}
+	return r, version, nil
 }
 
 func (p *pgStore) Update(id string, fn func(*Run) error) (*Run, error) {
@@ -994,24 +1021,23 @@ func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, 
 
 func (p *pgStore) List() []*Run {
 	ctx := context.Background()
-	rows, err := p.db.QueryContext(ctx, `SELECT id FROM runs`)
+	// L12: a list fill never needs the (MB-scale, L7 supervisor-checkpoint) cursor — project '' for it so
+	// the bulk scan neither reads nor transfers every run's checkpoint (a console poll / a cancel-cascade
+	// walk would otherwise drag every suspended supervisor's ~MiB checkpoint into the BFF). The resume
+	// path (worker claim → getWithVersion) still hydrates the real cursor. One scan also replaces the old
+	// N+1 (SELECT id, then a per-id Get).
+	rows, err := p.db.QueryContext(ctx, `SELECT `+runRowColumns("''")+` FROM runs`)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = rows.Close() }()
-	var ids []string
+	out := make([]*Run, 0)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		r, _, err := scanRunRow(rows)
+		if err != nil {
 			return nil
 		}
-		ids = append(ids, id)
-	}
-	out := make([]*Run, 0, len(ids))
-	for _, id := range ids {
-		if r, err := p.Get(id); err == nil {
-			out = append(out, r)
-		}
+		out = append(out, r)
 	}
 	return out
 }
