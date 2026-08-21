@@ -11,7 +11,7 @@ import type { MySharesItem } from "@/lib/api";
 //   (a) lists caller's shares with correct status badges (live/revoked/expired)
 //   (b) clicking Revoke on a live share calls the revoke api method with (runId, shareId)
 //       and the page refreshes (row updates)
-//   (c) empty state renders "You have no active shares" when the list is empty
+//   (c) empty state renders "You haven't shared any runs" when the list is empty
 //   (d) error state renders a visible, retryable error
 //   (e) 403 surfaces the forbidden state
 
@@ -268,7 +268,7 @@ describe("MySharesPage — empty state (V13)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText("You have no active shares"),
+        screen.getByText("You haven't shared any runs"),
       ).toBeInTheDocument(),
     );
   });
@@ -310,7 +310,7 @@ describe("MySharesPage — error states (V13)", () => {
       ).toBeInTheDocument(),
     );
     expect(
-      screen.queryByText("You have no active shares"),
+      screen.queryByText("You haven't shared any runs"),
     ).toBeNull();
     // Forbidden is terminal — no Retry
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();

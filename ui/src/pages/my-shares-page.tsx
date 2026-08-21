@@ -154,11 +154,11 @@ export function MySharesPage() {
     },
     {
       id: "includeContent",
-      header: "Content",
+      header: "Shared content",
       hideOnMobile: true,
       cell: (s) => (
         <span className="text-sm text-muted-foreground">
-          {s.includeContent ? "Yes" : "No"}
+          {s.includeContent ? "Full transcript" : "Metadata only"}
         </span>
       ),
     },
@@ -218,9 +218,9 @@ export function MySharesPage() {
         ariaLabel="My Shares"
         empty={{
           icon: Share2,
-          title: "You have no active shares",
+          title: "You haven't shared any runs",
           description:
-            "Share links you create from run traces will appear here. You can revoke live ones from this page.",
+            "Share links are created from a run's trace view. Live links appear here (with revoked and expired ones kept for history) and can be revoked from this page.",
         }}
       />
     </div>
