@@ -188,3 +188,54 @@ func TestDelegate_MissingFieldsIsRefused(t *testing.T) {
 	assert.False(t, resp.OK)
 	assert.Equal(t, 0, fc.spawned)
 }
+
+// TestDelegate_SuspendSignalDepth0 — L7 (ADR 0091): at depth 0, a Suspend request budget-checks + resolves
+// the target endpoint and returns a suspend-SIGNAL — no spawn, no blocking await. The SDK collects these
+// and suspends once; the BFF worker creates the child at Endpoint inside the suspend transaction.
+func TestDelegate_SuspendSignalDepth0(t *testing.T) {
+	fc := &fakeSpawnClient{}
+	ds := newDelegate(t, fc, openBudget)
+	body := delegBody()
+	body.Suspend = true
+
+	resp := callDelegate(t, ds, "cap", body, nil) // no depth header ⇒ depth 0 (a root supervisor)
+
+	assert.True(t, resp.OK)
+	assert.True(t, resp.Suspend, "a depth-0 suspend request returns a suspend-signal")
+	assert.Equal(t, "http://researcher.team-ns.svc.cluster.local", resp.Endpoint, "roster endpoint resolved")
+	assert.Empty(t, resp.Answer)
+	assert.Equal(t, 0, fc.spawned, "the suspend path never spawns or blocks — the BFF creates the child")
+}
+
+// TestDelegate_SuspendAtDepthBlocks — a Suspend request at depth>0 falls THROUGH to the blocking path
+// (nested suspension is v1-deferred, fail-closed): the sub-run is spawned + awaited inline.
+func TestDelegate_SuspendAtDepthBlocks(t *testing.T) {
+	fc := &fakeSpawnClient{awaitRes: spawnedRunResult{Status: "succeeded", Answer: "inline answer"}}
+	ds := newDelegate(t, fc, openBudget)
+	body := delegBody()
+	body.Suspend = true
+
+	resp := callDelegate(t, ds, "cap", body, map[string]string{headerSpawnDepth: "1"}) // depth>0
+
+	assert.True(t, resp.OK)
+	assert.False(t, resp.Suspend, "a non-root supervisor never suspends in v1")
+	assert.Equal(t, "inline answer", resp.Answer)
+	assert.Equal(t, 1, fc.spawned, "depth>0 blocks: it spawns + awaits inline")
+}
+
+// TestDelegate_SuspendStillGuarded — the suspend path is gated by the SAME admission guard: a depth-0
+// suspend that would form a cycle (delegating to an ancestor) is refused as an honest tool result, never
+// resolved into a suspend-signal.
+func TestDelegate_SuspendStillGuarded(t *testing.T) {
+	fc := &fakeSpawnClient{}
+	ds := newDelegate(t, fc, openBudget)
+	body := delegBody()
+	body.SubAgent = "planner" // the supervisor itself — a cycle (self is in the ancestry)
+	body.Suspend = true
+
+	resp := callDelegate(t, ds, "cap", body, map[string]string{headerSpawnPath: "planner"})
+
+	assert.False(t, resp.OK, "a cyclic suspend is refused, not signalled")
+	assert.False(t, resp.Suspend)
+	assert.Contains(t, resp.Error, "spawn_cycle_detected")
+}

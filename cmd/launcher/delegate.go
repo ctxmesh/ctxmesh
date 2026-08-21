@@ -60,15 +60,26 @@ type delegateRequest struct {
 	Input    json.RawMessage `json:"input"`
 	Step     string          `json:"step"`   // supervisor loop iteration (idempotency)
 	CallID   string          `json:"callId"` // the model's tool-call id (idempotency)
+	// Suspend asks for the L7 durable-suspend path (ADR 0091): the launcher resolves + budget-checks the
+	// delegation and returns a suspend-SIGNAL (endpoint, no spawn, no block) so the SDK can collect the
+	// turn's delegations and SUSPEND once. Honored only at depth 0 (a root supervisor); a depth>0 request
+	// falls through to the blocking path — nested suspension is v1-deferred (fail-closed).
+	Suspend bool `json:"suspend,omitempty"`
 }
 
 // delegateResponse is what the SDK gets — the sub-run's answer, or an honest refusal/failure the model
-// receives as the tool result (ok=false + error).
+// receives as the tool result (ok=false + error), or (L7) a suspend-signal the SDK turns into a durable
+// suspend.
 type delegateResponse struct {
 	OK     bool   `json:"ok"`
 	SubRun string `json:"subRun,omitempty"`
 	Answer string `json:"answer,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Suspend + Endpoint are the L7 suspend-signal (ADR 0091): the launcher budget-checked and RESOLVED the
+	// target endpoint but did NOT spawn or block. The SDK collects these and suspends once; the BFF worker
+	// creates the child run at Endpoint inside the suspend transaction (m108.4b).
+	Suspend  bool   `json:"suspend,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // spawnedRunResult is the terminal outcome of a sub-run.
@@ -370,6 +381,17 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 	// From here an in-flight slot is held — release it once the sub-run is terminal (or on failure).
 	defer func() { _ = s.guard.Release(context.Background(), s.cfg.Scope, root) }()
 	_ = err // Admit returns (SpawnAdmitted, nil) here
+
+	// L7 durable suspend (ADR 0091): a depth-0 supervisor that intends to SUSPEND gets a resolve-only
+	// signal — the launcher has budget-checked (Admit above) and resolves the target endpoint, but does
+	// NOT spawn and does NOT block. The SDK collects the turn's signals and suspends ONCE (fan-out = one
+	// suspend); the BFF worker then creates the child run at this endpoint inside the suspend transaction.
+	// Nested suspension is deferred, so a depth>0 request falls THROUGH to the blocking path below —
+	// fail-closed: a non-root supervisor always blocks in v1.
+	if req.Suspend && depth == 0 {
+		writeDelegate(w, delegateResponse{OK: true, Suspend: true, Endpoint: s.targetURL(req.SubAgent)})
+		return
+	}
 
 	subRunID, err := s.client.Spawn(r.Context(), capToken, bffSpawnBody{
 		SubAgent: req.SubAgent, Endpoint: s.targetURL(req.SubAgent), Input: req.Input,
