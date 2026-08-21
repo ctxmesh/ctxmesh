@@ -237,6 +237,11 @@ func (a *langfuseAdapter) RecentRuns(ctx context.Context, limit int) ([]RunSumma
 // trace that represents a RUN (cmd/launcher; see a2a.go / proxy.go).
 const agentInvokeTraceName = "agent.invoke"
 
+// modelUnknownLabel is the cost-attribution bucket for a usage row whose Langfuse `model` field is empty
+// (a provider/adapter that did not report the model) — its own concept, distinct from the actor/health
+// "unknown" vocabularies.
+const modelUnknownLabel = "unknown"
+
 // traceStatusOK / traceStatusError are the coarse per-span/trace health projection of a Langfuse
 // observation Level ("ERROR" → error, else ok) — the SpanSummary.Status vocabulary the run inspector's
 // health dot and the dataset-export status tag (m69.2) share, so the two never drift.
@@ -732,7 +737,7 @@ func (a *langfuseAdapter) costSummaryFromDailyMetrics(ctx context.Context) (Cost
 			totalTokens += u.TotalUsage
 			model := u.Model
 			if model == "" {
-				model = "unknown"
+				model = modelUnknownLabel
 			}
 			byModel[model] += u.TotalCost
 		}

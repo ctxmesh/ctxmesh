@@ -393,3 +393,90 @@ func TestCreateShare_BadIDOrTraceID404(t *testing.T) {
 	rec := doShareRequest(t, s, http.MethodPost, "/api/runs/totally-unknown-id/shares", `{}`)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "an unknown id/traceId must return 404")
 }
+
+// TestMyShares_CallerScopedListWithStatus is V13: GET /api/my/shares returns ONLY the caller's shares
+// across all runs (another principal's are excluded — the caller-scoping boundary), newest-first, with a
+// derived live/revoked/expired status and NO token/hash.
+func TestMyShares_CallerScopedListWithStatus(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	s := shareTestServer(t, store, &captureAuditStore{}, seededDurableRunStore(t), nil) // caller resolves as alice@example.com
+	ctx := context.Background()
+	now := time.Now()
+
+	// alice's three shares across three runs: one live, one revoked, one expired.
+	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
+		ID: "a-live", TokenHash: "hash-live", RunID: "run-1", Namespace: "team-a", CreatedBy: "alice@example.com",
+		CreatedAt: now.Add(-1 * time.Minute), ExpiresAt: now.Add(time.Hour),
+	}))
+	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
+		ID: "a-revoked", TokenHash: "hash-revoked", RunID: "run-2", Namespace: "team-a", CreatedBy: "alice@example.com",
+		CreatedAt: now.Add(-2 * time.Minute), ExpiresAt: now.Add(time.Hour),
+	}))
+	require.NoError(t, store.Revoke(ctx, "a-revoked"))
+	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
+		ID: "a-expired", TokenHash: "hash-expired", RunID: "run-3", Namespace: "team-a", CreatedBy: "alice@example.com",
+		CreatedAt: now.Add(-3 * time.Minute), ExpiresAt: now.Add(-1 * time.Minute),
+	}))
+	// bob's share must NEVER appear in alice's list.
+	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
+		ID: "b-1", TokenHash: "hash-bob", RunID: "run-1", Namespace: "team-a", CreatedBy: "bob@example.com",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	rec := doShareRequest(t, s, http.MethodGet, "/api/my/shares", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var out []MySharesItem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 3, "only alice's three shares (bob's excluded)")
+	assert.Equal(t, "a-live", out[0].ID, "newest-first")
+	assert.Equal(t, "live", out[0].Status)
+	assert.Equal(t, "run-1", out[0].RunID, "the runId is carried so the console can drive the per-run revoke")
+	assert.Equal(t, "a-revoked", out[1].ID)
+	assert.Equal(t, "revoked", out[1].Status, "revoked takes precedence over expiry")
+	assert.Equal(t, "a-expired", out[2].ID)
+	assert.Equal(t, "expired", out[2].Status)
+	for _, item := range out {
+		assert.NotEqual(t, "b-1", item.ID, "another principal's share never appears")
+	}
+	// No token/hash may reach the client (the DTO has no such field; assert the wire bytes too).
+	assert.NotContains(t, rec.Body.String(), "hash-live")
+	assert.NotContains(t, rec.Body.String(), "hash-bob")
+}
+
+// TestMyShares_UnknownIdentityIs401 is the fail-closed guard: when the caller's identity cannot be
+// resolved (no SelfSubjectReview username), the handler refuses rather than list the unattributed
+// ("unknown") bucket — the boundary that keeps a caller from seeing shares that are not provably theirs.
+func TestMyShares_UnknownIdentityIs401(t *testing.T) {
+	store := sharedrun.NewMemStore()
+	require.NoError(t, store.Create(context.Background(), sharedrun.SharedRun{
+		ID: "orphan", TokenHash: "h", RunID: "run-1", Namespace: "team-a", CreatedBy: "unknown",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	// A server whose caller resolves to an EMPTY username (SelfSubjectReview yields no user).
+	agent := readyAgent("assistant", "team-a", "http://assistant.team-a.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).
+		WithInterceptorFuncs(ssrInterceptor("", nil)).Build()
+	s := NewServer(Options{
+		CallerClients:  newFakeFactory(c),
+		Scheme:         testScheme(t),
+		Auth:           AllowAll{},
+		Adapters:       Adapters{Invoke: &fakeInvokeAdapter{}},
+		Version:        "test",
+		Log:            logr.Discard(),
+		RunStore:       seededDurableRunStore(t),
+		SharedRunStore: store,
+		AuditStore:     &captureAuditStore{},
+	})
+
+	rec := doShareRequest(t, s, http.MethodGet, "/api/my/shares", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "an unresolved identity is refused, never listing the unknown bucket")
+}
+
+// TestMyShares_StoreNotConfiguredIs501 — without a share store the endpoint is an honest 501, like the
+// per-run share routes.
+func TestMyShares_StoreNotConfiguredIs501(t *testing.T) {
+	s := shareTestServer(t, nil, &captureAuditStore{}, seededDurableRunStore(t), nil)
+	rec := doShareRequest(t, s, http.MethodGet, "/api/my/shares", "")
+	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+}
