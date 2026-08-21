@@ -15,6 +15,7 @@ import {
   Network,
   PlugZap,
   ScrollText,
+  Share2,
   Shield,
   SlidersHorizontal,
   TestTube2,
@@ -57,7 +58,8 @@ export type Milestone =
   | "M70"
   | "M73"
   | "M74"
-  | "M76";
+  | "M76"
+  | "M112";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -276,6 +278,17 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: MessagesSquare,
         milestone: "M16",
         route: "/runs",
+      },
+      {
+        // My Shares (V13) — the caller's share links across all runs. Lets
+        // the caller see + revoke their own live share links from one place.
+        // Read-open: listing is caller-scoped (the BFF gates on the caller's
+        // own identity); revoke is a per-run DELETE, caller-scoped by design.
+        id: "my-shares",
+        label: "My Shares",
+        icon: Share2,
+        milestone: "M112",
+        route: "/my-shares",
       },
       {
         id: "cost",

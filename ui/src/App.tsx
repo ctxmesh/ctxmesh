@@ -49,6 +49,7 @@ import {
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
+import { MySharesPage } from "@/pages/my-shares-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
@@ -256,6 +257,8 @@ export function App() {
             <Route path="topology" element={<TopologyPage />} />
             {/* m16.8: runs browser — paginated + filterable global run history. */}
             <Route path="runs" element={<RunsPage />} />
+            {/* V13: My Shares — the caller's share links across all runs. */}
+            <Route path="my-shares" element={<MySharesPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />
