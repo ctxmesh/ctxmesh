@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { formatTokens } from "@/lib/format";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { TraceExplorer } from "@/components/dashboard/trace-explorer";
+import { FixtureStepper } from "@/components/dashboard/fixture-stepper";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type TraceDetailResponse } from "@/lib/api";
 import { ShareRunDialog } from "@/components/dashboard/share-run-dialog";
@@ -341,6 +342,10 @@ export function TracePage() {
 
       {/* ── Span tree ──────────────────────────────────────────────────────── */}
       <TraceExplorer spans={spans} />
+
+      {/* ── Recorded fixture stepper (O10a, ADR 0071 §5): the wire-exact recorded I/O — what
+          `dev --replay` re-serves in CI. Quiet unless this run has a readable recorded fixture. ── */}
+      <FixtureStepper runId={id} />
 
       {/* ── Langfuse link-out — the ONE forensics escape hatch (m16.7) ─────── */}
       {state.langfuseUrl && (
