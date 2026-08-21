@@ -124,6 +124,28 @@ spec:
               value: ""
             - name: OIDC_CLIENT_ID
               value: ""
+            # OBJECT_STORE_* (M78/ADR 0071 §2): the durable object store the BFF reads recorded
+            # fixtures from (GET /api/runs/{id}/fixture — the O10a console stepper) and writes KB
+            # documents to (M68). Unset ⇒ docStore nil ⇒ those endpoints 501 (honest feature-off).
+            # The addr points at the in-cluster MinIO (config/objectstore, which config/default ships);
+            # the creds come from the objectstore-dev Secret via secretKeyRef, OPTIONAL so a
+            # no-object-store install still starts cleanly. A production install points these at its own
+            # object store (a values override / overlay). The Helm chart carries the SAME env (the
+            # generator copies it verbatim → no drift).
+            - name: OBJECT_STORE_ADDR
+              value: agent-engine-objectstore.agent-engine-system.svc:9000
+            - name: OBJECT_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: objectstore-dev
+                  key: rootUser
+                  optional: true
+            - name: OBJECT_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: objectstore-dev
+                  key: rootPassword
+                  optional: true
           # Optional adapter creds (Langfuse/Prometheus). Absent → adapters nil →
           # their routes 501; the UI + /api/health still serve. No literals here.
           envFrom:

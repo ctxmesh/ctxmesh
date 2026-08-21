@@ -58,6 +58,7 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
+		authed.HandleFunc("GET /api/runs/{id}/fixture", s.handleGetRunFixture)
 		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
 		authed.HandleFunc("POST /api/runs/{id}/cancel", s.handleCancelRun)
 		return
