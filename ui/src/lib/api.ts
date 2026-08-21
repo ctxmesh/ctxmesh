@@ -1952,6 +1952,19 @@ export interface RunShare {
   // NOTE: NO token — the backend never returns the token after creation
 }
 
+// MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
+// Returned by GET /api/my/shares — the caller's own share links across ALL runs.
+// NOTE: there is no token field — the backend never returns the token after creation.
+export interface MySharesItem {
+  id: string;
+  runId: string;
+  namespace: string;
+  createdAt: string; // RFC3339
+  expiresAt: string; // RFC3339
+  status: "live" | "revoked" | "expired";
+  includeContent: boolean;
+}
+
 // SharedRunView is the public, unauthenticated projection (GET /api/shared/runs/{token}).
 // Always present: id, namespace, agent, status, timestamps, messageCount, messageRoles, errorCategory.
 // Present ONLY when includeContent=true: input, messages, error.
@@ -5186,6 +5199,25 @@ export const api = {
         res.status,
       );
     }
+  },
+
+  // listMyShares lists the caller's share links across ALL runs (GET /api/my/shares).
+  // Caller-scoped: the BFF reads shares by the authenticated caller's identity.
+  // NO token is returned — the backend never returns the token after creation.
+  listMyShares: async (signal?: AbortSignal): Promise<MySharesItem[]> => {
+    const res = await apiFetch(
+      "/api/my/shares",
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listMyShares failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as MySharesItem[] | { items?: MySharesItem[] };
+    if (Array.isArray(data)) return data;
+    return data.items ?? [];
   },
 
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).
