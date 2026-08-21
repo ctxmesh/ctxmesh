@@ -7,9 +7,9 @@ run's cursor. On resume the worker injects the ENVELOPE back into the invoke bod
 ``body["checkpoint"]``; this module re-verifies it (kind / version / hash — defense in depth; the
 worker already verified before injecting) and extracts the payload's fields.
 
-The payload carries ONLY loop state — never authorization (consent/approval/OBO), which is re-derived
-server-side on resume (ADR 0091 fork 3). Verification is fail-safe: a corrupt / version-skewed
-envelope or payload yields ``None`` and the caller runs fresh from the request input.
+The payload carries ONLY loop state — never authorization (consent/approval/OBO), which is
+re-derived server-side on resume (ADR 0091 fork 3). Verification is fail-safe: a corrupt /
+version-skewed envelope or payload yields ``None`` and the caller runs fresh from the request input.
 """
 
 from __future__ import annotations
@@ -26,14 +26,18 @@ _log = logging.getLogger("ctxmesh.checkpoint")
 _ENVELOPE_KIND = "supervisor-loop"
 _ENVELOPE_VERSION = 1
 
-#: The payload's OWN schema version (independent of the envelope — lets the SDK evolve the loop-state
-#: shape without touching the store's envelope contract). A resume rejects an unknown payload version.
+#: The payload's OWN schema version (independent of the envelope — lets the SDK evolve the
+#: loop-state
+#: shape without touching the store's envelope contract). A resume rejects an unknown payload
+#: version.
 PAYLOAD_VERSION = 1
 
 #: Cap on the serialized payload size. The ``delegate_waiting`` marker rides the /invoke response,
 #: which the BFF reads through a 4 MiB LimitReader (internal/bff/invoke.go) — an oversized marker is
-#: silently TRUNCATED, so the loop measures the payload and falls back to blocking dispatch above this
-#: threshold (a loud, graceful M64 degradation) rather than emitting a truncated, unparseable marker.
+#: silently TRUNCATED, so the loop measures the payload and falls back to blocking dispatch above
+#: this
+#: threshold (a loud, graceful M64 degradation) rather than emitting a truncated, unparseable
+#: marker.
 CHECKPOINT_MAX_BYTES = 1_500_000
 
 
@@ -74,7 +78,7 @@ def verify_and_extract(envelope: Any) -> Optional[Dict[str, Any]]:
     *envelope* is ``body["checkpoint"]`` as parsed from the invoke body — the worker injects the Go
     envelope as a raw JSON object, so it normally arrives as a ``dict`` (a JSON string is tolerated
     too). ``None`` is returned — never raised — for any envelope that is absent, malformed, of an
-    unknown kind/version, whose payload hash does not match, or whose payload is not a known version;
+    unknown kind/version, whose payload hash does not match, or whose payload is an unknown version;
     the caller then runs the turn fresh from the request input (the SDK mirror of the worker's
     full-re-invoke fail-safe).
     """
@@ -90,14 +94,18 @@ def verify_and_extract(envelope: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(env, dict):
         return None
     if env.get("kind") != _ENVELOPE_KIND or env.get("version") != _ENVELOPE_VERSION:
-        _log.warning("L7 checkpoint: unrecognized envelope kind/version — running fresh (fail-safe)")
+        _log.warning(
+            "L7 checkpoint: unrecognized envelope kind/version — running fresh (fail-safe)"
+        )
         return None
     payload_str = env.get("payload")
     if not isinstance(payload_str, str):
         return None
     digest = hashlib.sha256(payload_str.encode()).hexdigest()
     if digest != env.get("sha256"):
-        _log.warning("L7 checkpoint: payload hash mismatch (corruption) — running fresh (fail-safe)")
+        _log.warning(
+            "L7 checkpoint: payload hash mismatch (corruption) — running fresh (fail-safe)"
+        )
         return None
     try:
         fields = json.loads(payload_str)

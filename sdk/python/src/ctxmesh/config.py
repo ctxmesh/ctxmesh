@@ -114,9 +114,7 @@ class PlaneConfig:
         edge case). Tests set ``require_launcher=False`` (or pass an ``environ``
         that includes a marker) to build an offline config against a stub.
         """
-        env: Callable[[str], Optional[str]] = (
-            os.environ.get if environ is None else environ.get
-        )
+        env: Callable[[str], Optional[str]] = os.environ.get if environ is None else environ.get
 
         if require_launcher and not any(env(marker) for marker in _LAUNCHER_MARKERS):
             raise NotInPodError(

@@ -146,9 +146,7 @@ class TraceClient:
     ):
         self._config = config
         _tracing.install_propagator()
-        self._tracer: Tracer = _tracing.get_tracer(
-            span_processor=span_processor, endpoint=endpoint
-        )
+        self._tracer: Tracer = _tracing.get_tracer(span_processor=span_processor, endpoint=endpoint)
 
     # ── binding the inbound request (the invariant) ───────────────────────────
     def request_context(self, headers: Optional[Dict[str, str]]) -> _RequestContext:
@@ -178,9 +176,7 @@ class TraceClient:
                 ...  # steps/tools/llms nest under this AGENT span
         """
         if headers is not None:
-            with self.request_context(headers), self._span(
-                name, _semconv.KIND_AGENT
-            ) as handle:
+            with self.request_context(headers), self._span(name, _semconv.KIND_AGENT) as handle:
                 yield handle
         else:
             with self._span(name, _semconv.KIND_AGENT) as handle:
@@ -226,9 +222,7 @@ class TraceClient:
         attributes: Dict[str, Any] = {}
         if model:
             attributes[_semconv.LLM_MODEL_NAME] = model
-        return _SpanCM(
-            self, name, _semconv.KIND_LLM, attributes=attributes, input_value=input
-        )
+        return _SpanCM(self, name, _semconv.KIND_LLM, attributes=attributes, input_value=input)
 
     # ── internal span factory ─────────────────────────────────────────────────
     @contextmanager

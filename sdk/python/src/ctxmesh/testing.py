@@ -332,11 +332,7 @@ class DiscoveryStub(_BaseStub):
                 result = {
                     "jsonrpc": "2.0",
                     "id": msg.get("id"),
-                    "result": {
-                        "content": [
-                            {"type": "text", "text": json.dumps(self.tool_result)}
-                        ]
-                    },
+                    "result": {"content": [{"type": "text", "text": json.dumps(self.tool_result)}]},
                 }
                 # Exercise the SSE branch too: reply as text/event-stream.
                 sse = f"event: message\ndata: {json.dumps(result)}\n\n"
@@ -377,11 +373,15 @@ class GatewayStub(_BaseStub):
         force_status: Optional[int] = None,
     ) -> None:
         self.content = content
-        self.usage = usage if usage is not None else {
-            "prompt_tokens": 11,
-            "completion_tokens": 5,
-            "total_tokens": 16,
-        }
+        self.usage = (
+            usage
+            if usage is not None
+            else {
+                "prompt_tokens": 11,
+                "completion_tokens": 5,
+                "total_tokens": 16,
+            }
+        )
         self.model = model
         self.force_status = force_status
         super().__init__()

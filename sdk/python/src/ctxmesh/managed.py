@@ -45,11 +45,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import jsonschema
 
+from ctxmesh import _checkpoint
 from ctxmesh._approval import approval_scope, pause_for_approval, voucher_scope
 from ctxmesh._capability import capability_scope
 from ctxmesh._record import current_record_run_id, record_scope
 from ctxmesh.client import Client
-from ctxmesh import _checkpoint
 from ctxmesh.errors import (
     ApprovalRequiredError,
     ConfigError,
@@ -161,7 +161,11 @@ def _delegate_suspend_enabled() -> bool:
     """Whether L7 durable delegate suspension (ADR 0091) is enabled. On by default (transparent —
     a supervisor need not opt in); an operator can force the legacy blocking path by setting
     ``CTXMESH_DELEGATE_BLOCKING=1`` (the escape hatch)."""
-    return os.environ.get("CTXMESH_DELEGATE_BLOCKING", "").strip().lower() not in ("1", "true", "yes")
+    return os.environ.get("CTXMESH_DELEGATE_BLOCKING", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _include_history_from_headers(headers: Optional[Dict[str, str]]) -> bool:
@@ -580,8 +584,10 @@ class ManagedResult:
     #: not produce a further answer; the target agent continues with the user). ``None`` = none.
     handoff: Optional[Dict[str, str]] = None
     #: When a depth-0 supervisor delegated and SUSPENDED (L7, ADR 0091), ``{"checkpoint": <opaque
-    #: payload>, "delegates": [{sub_agent, endpoint, input, step, call_id}]}``. Non-None ⇒ the run is
-    #: NOT terminal: the BFF worker creates the sub-run(s) and parks this run ``waiting`` on them, then
+    #: payload>, "delegates": [{sub_agent, endpoint, input, step, call_id}]}``. Non-None ⇒ the run
+    #: is
+    #: NOT terminal: the BFF worker creates the sub-run(s) and parks this run ``waiting`` on them,
+    #: then
     #: re-invokes it with the checkpoint when they finish. ``None`` = the run did not suspend.
     delegate_waiting: Optional[Dict[str, Any]] = None
 
@@ -867,8 +873,10 @@ def run_managed_loop(
     )
 
     # L7 durable delegate suspension (ADR 0091): eligible only for a durable ROOT supervisor — the
-    # feature on (default), the inbound spawn-depth 0 (a non-root supervisor blocks — nested suspension
-    # is v1-deferred), AND a spawn-root header present (the synchronous Playground path has none, and a
+    # feature on (default), the inbound spawn-depth 0 (a non-root supervisor blocks — nested
+    # suspension
+    # is v1-deferred), AND a spawn-root header present (the synchronous Playground path has none,
+    # and a
     # marker emitted there is never enacted — so it must fall back to blocking).
     spawn_root = _spawn_root_from_headers(headers)
     suspend_eligible = _delegate_suspend_enabled() and spawn_depth == 0 and bool(spawn_root)
@@ -880,7 +888,8 @@ def run_managed_loop(
     if restored is not None:
         # Resume: rebuild the exact loop state from the checkpoint. History/memory/knowledge are NOT
         # re-injected (the checkpointed messages ARE the state); the spotlight token is REUSED (the
-        # system message embeds its instruction — a fresh token would silently break K1 spotlighting).
+        # system message embeds its instruction — a fresh token would silently break K1
+        # spotlighting).
         spotlight_token = str(restored["spotlight_token"])
         messages: List[Dict[str, Any]] = list(restored["messages"])
         tools_called: List[str] = list(restored["tools_called"])
@@ -891,8 +900,10 @@ def run_managed_loop(
         pending = restored.get("pending", [])
     else:
         # Fresh run (today's path). Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a
-        # per-run UNPREDICTABLE delimiter token, generated ONCE per run. Every tool result gets wrapped
-        # in it as untrusted DATA; the matching system-prompt instruction tells the model never to obey
+        # per-run UNPREDICTABLE delimiter token, generated ONCE per run. Every tool result gets
+        # wrapped
+        # in it as untrusted DATA; the matching system-prompt instruction tells the model never to
+        # obey
         # instructions inside it. Always-on (a security default). Composes with M66's proxy scan.
         spotlight_token = _new_spotlight_token()
         messages = [
@@ -927,12 +938,15 @@ def run_managed_loop(
 
         if restored is not None:
             # L7 resume (ADR 0091): the suspended delegations' results are re-dispatched through the
-            # IDEMPOTENT BLOCKING delegate path — the launcher's /delegate → /spawn finds the already-
+            # IDEMPOTENT BLOCKING delegate path — the launcher's /delegate → /spawn finds the
+            # already-
             # created child (same deterministic id) and its Await returns the terminal result on the
             # first poll (no double-spawn, no budget re-charge — spawn_handler.go short-circuits an
             # existing child). A still-running child degrades to a bounded blocking wait (the rare
-            # at-least-once race). Each result threads as this pending call's tool message, in order,
-            # spotlight-wrapped with the SAME per-run token — then the loop continues from start_step.
+            # at-least-once race). Each result threads as this pending call's tool message, in
+            # order,
+            # spotlight-wrapped with the SAME per-run token — then the loop continues from
+            # start_step.
             for p in pending or []:
                 content = _dispatch_delegate_one(
                     client,
@@ -991,9 +1005,11 @@ def run_managed_loop(
                 tool_index=start_tool_index,
             )
         except DelegateWaitingError as exc:
-            # L7 (ADR 0091): a depth-0 supervisor delegated and SUSPENDED. Surface the durable-suspend
+            # L7 (ADR 0091): a depth-0 supervisor delegated and SUSPENDED. Surface the
+            # durable-suspend
             # marker — the BFF worker creates the sub-run(s), parks this run `waiting` on them, and
-            # re-invokes it with the checkpoint when they finish. NOT a terminal outcome (no answer).
+            # re-invokes it with the checkpoint when they finish. NOT a terminal outcome (no
+            # answer).
             root.set_output("delegating (suspended)")
             return ManagedResult(
                 output="",
@@ -1583,10 +1599,10 @@ def _drive_loop(
 
     ``start_step`` (L7, ADR 0091) is the first step number — 1 on a fresh run, or the resumed step
     on a checkpoint restore. It bounds the loop as ``range(start_step, max_steps+1)`` so a resumed
-    supervisor keeps the SAME runaway budget (ADR 0013) rather than refreshing it each suspend cycle.
-    ``suspend_eligible`` gates whether a depth-0 delegation SUSPENDS (durable) or blocks; ``spawn_root``
-    is relayed on the suspend-signal delegate call. ``model_index``/``tool_index`` are the M78 step-frame
-    channel counters, restored across a resume so a recorded run's fixture refs stay in sequence."""
+    supervisor keeps the SAME runaway budget (ADR 0013) rather than refreshing it each cycle.
+    ``suspend_eligible`` gates whether a depth-0 delegation SUSPENDS (durable) or blocks;
+    ``spawn_root`` is relayed on the suspend-signal delegate call. ``model_index``/``tool_index``
+    are the M78 step-frame channel counters, restored across a resume so fixture refs stay put."""
     # Structured-output repair counter (m65.5): counts corrective re-asks after a
     # final-answer schema violation; bounded by _MAX_SCHEMA_REPAIR. Kept SEPARATE from
     # the max_steps budget so repair turns have a clear, explicit allowance of their own.
@@ -1813,7 +1829,8 @@ def _drive_loop(
                     dispatched_count += 1
 
             # v1b fan-out (M64, ADR 0057): THIS turn's delegate_to calls. A delegate call the policy
-            # pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED here so it is never dispatched —
+            # pre-pass short-circuited (deny/skip/sub-run) is EXCLUDED here so it is never
+            # dispatched —
             # its honest text is threaded from `blocked` below.
             delegate_calls = [
                 (
@@ -1824,9 +1841,12 @@ def _drive_loop(
                 for c in resp.tool_calls
                 if _call_name(c) == DELEGATE_TOOL_NAME and c.get("id", "") not in blocked
             ]
-            # L7 durable suspension (ADR 0091): at depth 0 (suspend_eligible), RECORD each delegation as
-            # intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await) instead
-            # of blocking. `pending_delegates` are suspended-on; the rest (an older launcher that blocks,
+            # L7 durable suspension (ADR 0091): at depth 0 (suspend_eligible), RECORD each
+            # delegation as
+            # intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await)
+            # instead
+            # of blocking. `pending_delegates` are suspended-on; the rest (an older launcher that
+            # blocks,
             # or a launcher refusal) come back as normal results threaded inline — the mixed-version
             # fallback. Not eligible ⇒ the M64 blocking batch, unchanged (also the depth>0 path).
             pending_delegates: List[Dict[str, Any]] = []
@@ -1852,14 +1872,17 @@ def _drive_loop(
                             }
                         )
                     else:
-                        # An older launcher blocked (no `suspend`), or a refusal — thread it inline as a
-                        # normal delegate result (mirrors _dispatch_delegate_one's honest-text contract).
-                        delegate_results[cid] = (
-                            str(sig.get("answer", ""))
-                            if isinstance(sig, dict) and sig.get("ok")
-                            else f"delegation to {sub_agent!r} did not succeed: "
-                            f"{sig.get('error', 'unknown error') if isinstance(sig, dict) else 'malformed response'}"
-                        )
+                        # An older launcher blocked (no `suspend`), or a refusal — thread inline
+                        # as a normal result (like _dispatch_delegate_one's honest-text form).
+                        if isinstance(sig, dict) and sig.get("ok"):
+                            delegate_results[cid] = str(sig.get("answer", ""))
+                        else:
+                            err = "malformed response"
+                            if isinstance(sig, dict):
+                                err = str(sig.get("error", "unknown error"))
+                            delegate_results[cid] = (
+                                f"delegation to {sub_agent!r} did not succeed: {err}"
+                            )
             elif delegate_calls:
                 delegate_results = _dispatch_delegate_batch(client, delegate_calls, str(step))
             pending_ids = {p["call_id"] for p in pending_delegates}
@@ -1874,10 +1897,13 @@ def _drive_loop(
                     # not re-dispatch it (a successful handoff already returned from the loop).
                     continue
                 if call_id in pending_ids:
-                    # L7 (ADR 0091): this delegation SUSPENDED — no tool result yet. Append no message
-                    # (the assistant tool-call stays unanswered in `messages`); its result is threaded
+                    # L7 (ADR 0091): this delegation SUSPENDED — no tool result yet. Append no
+                    # message
+                    # (the assistant tool-call stays unanswered in `messages`); its result is
+                    # threaded
                     # on resume when the sub-run is terminal. Not counted in tools_called here (the
-                    # resume re-dispatch counts it), so the tally isn't double-charged across suspend.
+                    # resume re-dispatch counts it), so the tally isn't double-charged across
+                    # suspend.
                     continue
                 if call_id in blocked:
                     # Tool-use policy short-circuited this call (deny / sub-run-deny / skipped).
@@ -1960,14 +1986,15 @@ def _drive_loop(
                 # tool call in the model's original order (the same order the tool result was just
                 # appended), carrying the tool name; the ref points at this call's slot in the
                 # fixture's tool channel (0-based). No token counts for a tool step.
-                emit_step(
-                    _step_frame(step, "tool", channel_index=tool_index, tool=name)
-                )
+                emit_step(_step_frame(step, "tool", channel_index=tool_index, tool=name))
                 tool_index += 1
 
-            # L7 durable suspension (ADR 0091): after threading this turn's non-suspended results, if
-            # any delegations were recorded as pending, SUSPEND — serialize the loop state + raise, so
-            # run_managed_loop returns the delegate_waiting marker (the BFF worker enacts child-create +
+            # L7 durable suspension (ADR 0091): after threading this turn's non-suspended results,
+            # if
+            # any delegations were recorded as pending, SUSPEND — serialize the loop state + raise,
+            # so
+            # run_managed_loop returns the delegate_waiting marker (the BFF worker enacts
+            # child-create +
             # parent→waiting). A whole turn's fan-out collapses to ONE suspend.
             if pending_delegates:
                 payload = _checkpoint.build_payload(
@@ -1989,13 +2016,16 @@ def _drive_loop(
                     tool_index=tool_index,
                 )
                 # Biggest-risk guard (Fable review): the delegate_waiting marker rides the /invoke
-                # response, capped at 4 MiB by the BFF's LimitReader — an oversized marker is silently
-                # TRUNCATED (→ no suspend enacted + a failed run while the SDK believes it suspended).
-                # Over threshold, fall back to BLOCKING dispatch for this turn (graceful M64 degrade).
+                # response, capped at 4 MiB by the BFF's LimitReader — an oversized marker is
+                # silently
+                # TRUNCATED (→ no suspend enacted + a failed run while the SDK believes it
+                # suspended).
+                # Over threshold, fall back to BLOCKING dispatch for this turn (graceful M64
+                # degrade).
                 if len(payload.encode()) > _checkpoint.CHECKPOINT_MAX_BYTES:
                     _log.warning(
-                        "L7: checkpoint %d bytes exceeds cap %d — falling back to blocking delegate "
-                        "dispatch for this turn",
+                        "L7: checkpoint %d bytes exceeds cap %d — falling back to blocking "
+                        "delegate dispatch for this turn",
                         len(payload.encode()),
                         _checkpoint.CHECKPOINT_MAX_BYTES,
                     )

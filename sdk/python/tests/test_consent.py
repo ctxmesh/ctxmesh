@@ -28,10 +28,10 @@ def test_ignores_non_consent_errors():
     # None of these should raise — the caller re-raises the original EndpointError.
     for exc in (
         EndpointError("x", status=500, body='{"error":"consent_required"}'),  # wrong status
-        EndpointError("x", status=403, body='{"error":"forbidden"}'),         # different code
-        EndpointError("x", status=403, body=None),                            # no body
-        EndpointError("x", status=403, body="not json at all"),               # malformed
-        EndpointError("x", status=None, body=None),                           # transport failure
+        EndpointError("x", status=403, body='{"error":"forbidden"}'),  # different code
+        EndpointError("x", status=403, body=None),  # no body
+        EndpointError("x", status=403, body="not json at all"),  # malformed
+        EndpointError("x", status=None, body=None),  # transport failure
     ):
         _raise_if_consent_required(exc)  # returns without raising
 

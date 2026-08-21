@@ -1,8 +1,8 @@
 """L7 durable delegate suspend/resume through the managed loop (ADR 0091, m108.5).
 
-These drive :func:`ctxmesh.run_managed_loop` against a fully-controlled fake client (a scripted model
-+ a scripted delegate) so the suspend seam, the resume re-dispatch, the eligibility gate, the
-mixed-version fallback, and the size guard are all exercised deterministically — no HTTP, no cluster.
+These drive :func:`ctxmesh.run_managed_loop` against a fully-controlled fake client (a scripted
+model + a scripted delegate) so the suspend seam, the resume re-dispatch, the eligibility gate, the
+mixed-version fallback, and the size guard are all exercised deterministically — no cluster needed.
 """
 
 import hashlib
@@ -71,7 +71,9 @@ class _FakeTools:
     def list(self):
         return [_FakeTool(DELEGATE_TOOL_NAME)]
 
-    def delegate(self, sub_agent, task, step, call_id, *, suspend=False, spawn_root="", spawn_depth=-1):
+    def delegate(
+        self, sub_agent, task, step, call_id, *, suspend=False, spawn_root="", spawn_depth=-1
+    ):
         self.delegate_calls.append(
             {"sub_agent": sub_agent, "step": step, "call_id": call_id, "suspend": suspend}
         )
@@ -116,7 +118,9 @@ def _delegate_turn(call_id="c1", sub_agent="researcher", task="find it"):
 
 
 def _final_turn(text="all done"):
-    return {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]}
+    return {
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]
+    }
 
 
 def _cfg():
@@ -136,7 +140,7 @@ def _envelope_from(checkpoint_payload: str) -> dict:
 # ── suspend ──────────────────────────────────────────────────────────────────────
 def test_depth0_delegate_suspends_and_emits_the_marker():
     """A depth-0 durable supervisor that delegates SUSPENDS: no final answer, a delegate_waiting
-    marker carrying a verifiable checkpoint + the delegate intent (endpoint resolved by the launcher)."""
+    marker carrying a verifiable checkpoint + the delegate intent (launcher-resolved endpoint)."""
     model = _FakeModel([_delegate_turn()])
     tools = _FakeTools(
         lambda *_a, suspend=False, **_k: (
@@ -145,7 +149,9 @@ def test_depth0_delegate_suspends_and_emits_the_marker():
             else {"ok": True, "answer": "should-not-block"}
         )
     )
-    result = run_managed_loop(_FakeClient(model, tools), _cfg(), "research X", headers=SUSPEND_HEADERS)
+    result = run_managed_loop(
+        _FakeClient(model, tools), _cfg(), "research X", headers=SUSPEND_HEADERS
+    )
 
     assert result.output == "", "a suspended run has no terminal answer"
     assert result.delegate_waiting is not None
@@ -176,7 +182,9 @@ def test_resume_rethreads_the_result_and_continues():
     idempotent blocking path (returning the terminal child's result), threads it, and finishes."""
     # First, produce a real checkpoint by suspending.
     suspend_model = _FakeModel([_delegate_turn()])
-    suspend_tools = _FakeTools(lambda *_a, **_k: {"ok": True, "suspend": True, "endpoint": "http://r/invoke"})
+    suspend_tools = _FakeTools(
+        lambda *_a, **_k: {"ok": True, "suspend": True, "endpoint": "http://r/invoke"}
+    )
     suspended = run_managed_loop(
         _FakeClient(suspend_model, suspend_tools), _cfg(), "research X", headers=SUSPEND_HEADERS
     )
@@ -206,7 +214,7 @@ def test_resume_rethreads_the_result_and_continues():
 
 
 def test_corrupt_checkpoint_runs_fresh():
-    """A checkpoint that fails verification is ignored (fail-safe) — the turn runs fresh from input."""
+    """A checkpoint that fails verification is ignored (fail-safe) — the turn runs fresh."""
     model = _FakeModel([_final_turn("fresh answer")])
     tools = _FakeTools(lambda *_a, **_k: {"ok": True, "answer": "x"})
     bad = {"version": 1, "kind": "supervisor-loop", "sha256": "deadbeef", "payload": "{}"}
@@ -219,8 +227,8 @@ def test_corrupt_checkpoint_runs_fresh():
 
 # ── eligibility gate + mixed-version ──────────────────────────────────────────────
 def test_no_spawn_root_blocks_instead_of_suspending():
-    """Without a spawn-root header (the synchronous Playground path), a delegation BLOCKS as in M64 —
-    never suspends (a marker there would be lost)."""
+    """Without a spawn-root header (the synchronous Playground path), a delegation BLOCKS as in
+    M64 — never suspends (a marker there would be lost)."""
     model = _FakeModel([_delegate_turn(), _final_turn("done via blocking")])
     tools = _FakeTools(lambda *_a, **_k: {"ok": True, "answer": "blocking sub-answer"})
     result = run_managed_loop(_FakeClient(model, tools), _cfg(), "go", headers={})  # no spawn-root
@@ -231,7 +239,7 @@ def test_no_spawn_root_blocks_instead_of_suspending():
 
 
 def test_old_launcher_blocking_response_threads_inline():
-    """Mixed-version fallback: an older launcher ignores `suspend` and returns a blocking {ok,answer};
+    """Mixed-version fallback: an old launcher ignores `suspend` and returns a blocking {ok,answer};
     the loop detects the missing `suspend` and threads it inline instead of suspending."""
     model = _FakeModel([_delegate_turn(), _final_turn("done despite old launcher")])
     # suspend=True was requested, but the launcher answers as if blocking (no `suspend` key).

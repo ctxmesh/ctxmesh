@@ -22,16 +22,16 @@ def _wrap(payload: str) -> dict:
 
 
 def _payload(**overrides) -> str:
-    base = dict(
-        messages=[{"role": "user", "content": "hi"}],
-        step=3,
-        pending=[{"call_id": "c1", "step": "3", "sub_agent": "researcher", "task": "find it"}],
-        tools_called=["delegate_to"],
-        consent_required=[],
-        spotlight_token="tok-123",
-        model_index=2,
-        tool_index=1,
-    )
+    base = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "step": 3,
+        "pending": [{"call_id": "c1", "step": "3", "sub_agent": "researcher", "task": "find it"}],
+        "tools_called": ["delegate_to"],
+        "consent_required": [],
+        "spotlight_token": "tok-123",
+        "model_index": 2,
+        "tool_index": 1,
+    }
     base.update(overrides)
     return _checkpoint.build_payload(**base)
 
@@ -60,13 +60,19 @@ def test_verify_is_fail_safe_on_every_bad_envelope():
     assert _checkpoint.verify_and_extract(42) is None, "non-dict → None"
 
     wrong_kind = dict(good, kind="workflow-cursor")
-    assert _checkpoint.verify_and_extract(wrong_kind) is None, "a workflow cursor is not a supervisor loop"
+    assert (
+        _checkpoint.verify_and_extract(wrong_kind) is None
+    ), "a workflow cursor is not a supervisor loop"
 
     wrong_version = dict(good, version=2)
-    assert _checkpoint.verify_and_extract(wrong_version) is None, "unknown envelope version → fail-safe"
+    assert (
+        _checkpoint.verify_and_extract(wrong_version) is None
+    ), "unknown envelope version → fail-safe"
 
     corrupt = dict(good, payload=good["payload"] + " tampered")
-    assert _checkpoint.verify_and_extract(corrupt) is None, "a hash mismatch (corruption) → fail-safe"
+    assert (
+        _checkpoint.verify_and_extract(corrupt) is None
+    ), "a hash mismatch (corruption) → fail-safe"
 
     no_payload = {"version": 1, "kind": "supervisor-loop", "sha256": "x"}
     assert _checkpoint.verify_and_extract(no_payload) is None, "a missing payload → None"

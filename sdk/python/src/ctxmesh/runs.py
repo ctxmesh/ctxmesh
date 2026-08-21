@@ -94,8 +94,11 @@ class RunsClient:
         if conversation_id:
             body["conversationId"] = conversation_id
         resp = _http.request(
-            "POST", self._url("/api/runs"),
-            body=_http.json_body(body), headers=self._headers(), expect=(200, 202),
+            "POST",
+            self._url("/api/runs"),
+            body=_http.json_body(body),
+            headers=self._headers(),
+            expect=(200, 202),
         )
         return Run._from_json(resp.json())
 
@@ -115,8 +118,11 @@ class RunsClient:
         """
         body = _http.json_body({"decision": decision}) if decision else None
         resp = _http.request(
-            "POST", self._url(f"/api/runs/{run_id}/resume"),
-            body=body, headers=self._headers(), expect=(200, 202),
+            "POST",
+            self._url(f"/api/runs/{run_id}/resume"),
+            body=body,
+            headers=self._headers(),
+            expect=(200, 202),
         )
         return Run._from_json(resp.json())
 

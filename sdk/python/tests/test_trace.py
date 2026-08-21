@@ -22,9 +22,7 @@ def _by_name(exporter: InMemorySpanExporter):
     return {s.name: s for s in exporter.get_finished_spans()}
 
 
-def test_step_emits_chain_span_with_io(
-    traced_client: Client, span_exporter: InMemorySpanExporter
-):
+def test_step_emits_chain_span_with_io(traced_client: Client, span_exporter: InMemorySpanExporter):
     with traced_client.trace.step("plan") as step:
         step.set_input("do research")
         step.set_output("a plan")
@@ -37,9 +35,7 @@ def test_step_emits_chain_span_with_io(
     assert plan.attributes["output.value"] == "a plan"
 
 
-def test_loop_root_emits_agent_span(
-    traced_client: Client, span_exporter: InMemorySpanExporter
-):
+def test_loop_root_emits_agent_span(traced_client: Client, span_exporter: InMemorySpanExporter):
     with traced_client.trace.loop("research") as root:
         root.set_output("done")
 
@@ -62,9 +58,7 @@ def test_tool_emits_tool_span_with_name_and_io(
     assert span.attributes["output.value"] == '{"hits":3}'
 
 
-def test_llm_emits_llm_span_with_model(
-    traced_client: Client, span_exporter: InMemorySpanExporter
-):
+def test_llm_emits_llm_span_with_model(traced_client: Client, span_exporter: InMemorySpanExporter):
     messages = [{"role": "user", "content": "hi"}]
     with traced_client.trace.llm(model="gpt-4o-mini", input=messages) as span_h:
         span_h.set_output("hello")
@@ -75,9 +69,7 @@ def test_llm_emits_llm_span_with_model(
     assert span.attributes["output.value"] == "hello"
 
 
-def test_tool_and_llm_nest_under_step(
-    traced_client: Client, span_exporter: InMemorySpanExporter
-):
+def test_tool_and_llm_nest_under_step(traced_client: Client, span_exporter: InMemorySpanExporter):
     with traced_client.trace.step("plan") as step:
         step.set_input("q")
         with traced_client.trace.tool("search", {"q": "x"}) as t:
@@ -97,9 +89,7 @@ def test_tool_and_llm_nest_under_step(
     assert spans["llm"].context.trace_id == spans["plan"].context.trace_id
 
 
-def test_nested_steps_form_a_tree(
-    traced_client: Client, span_exporter: InMemorySpanExporter
-):
+def test_nested_steps_form_a_tree(traced_client: Client, span_exporter: InMemorySpanExporter):
     with traced_client.trace.loop("root"):
         with traced_client.trace.step("outer"):
             with traced_client.trace.step("inner"):
