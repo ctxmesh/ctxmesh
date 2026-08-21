@@ -315,11 +315,9 @@ func TestApprovalWaiting_OnlySelectedAgents(t *testing.T) {
 // relative path) when ConsoleURL is unset.
 func TestApprovalWaiting_RelativeLinkWhenNoConsoleURL(t *testing.T) {
 	r := &AlertPolicyReconciler{} // ConsoleURL empty
-	link := r.consoleRunLink("ns1", "agent-a", "run-1")
+	link := r.consoleRunLink("run-1")
 	assert.True(t, strings.HasPrefix(link, "/"), "empty ConsoleURL ⇒ a relative path, got %q", link)
-	assert.Contains(t, link, "run-1")
-	assert.Contains(t, link, "ns1")
-	assert.Contains(t, link, "agent-a")
+	assert.Equal(t, "/runs/run-1", link, "the deep-link targets the per-run detail page /runs/:id, keyed by run id")
 }
 
 // TestApprovalWaiting_NilRunsSafe asserts a nil run lister disables the eval without panicking.
