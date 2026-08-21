@@ -1011,7 +1011,7 @@ func TestPostgresStore_ListWaitingApproval(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, err := s.ListWaitingApproval(ctx, "ns-a")
+	got, err := s.ListWaitingApproval(ctx, "ns-a", 0) // 0 = unbounded
 	require.NoError(t, err)
 
 	byID := map[string]WaitingApproval{}
@@ -1026,7 +1026,7 @@ func TestPostgresStore_ListWaitingApproval(t *testing.T) {
 	assert.Equal(t, "agent-b", byID["wa-2"].Agent)
 
 	// An empty namespace returns nothing (not an error).
-	empty, err := s.ListWaitingApproval(ctx, "ns-empty")
+	empty, err := s.ListWaitingApproval(ctx, "ns-empty", 0)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }

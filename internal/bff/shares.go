@@ -131,11 +131,14 @@ func (s *Server) registerShareRoutes(authed *http.ServeMux) {
 		authed.HandleFunc("POST /api/runs/{id}/shares", s.handleCreateShare)
 		authed.HandleFunc("GET /api/runs/{id}/shares", s.handleListShares)
 		authed.HandleFunc("DELETE /api/runs/{id}/shares/{shareId}", s.handleRevokeShare)
+		// V13 (M112): the caller-scoped "my active shares" view — the caller's shares across ALL runs.
+		authed.HandleFunc("GET /api/my/shares", s.handleMyShares)
 		return
 	}
 	authed.Handle("POST /api/runs/{id}/shares", notImplemented("run shares"))
 	authed.Handle("GET /api/runs/{id}/shares", notImplemented("run shares"))
 	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", notImplemented("run shares"))
+	authed.Handle("GET /api/my/shares", notImplemented("run shares"))
 }
 
 // authorizeRunAccess is the caller-scoped authorization gate for a single run (ADR 0011). Every user-facing
@@ -442,6 +445,78 @@ func (s *Server) handleRevokeShare(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// MySharesItem is the token-FREE "my active shares" DTO (GET /api/my/shares, V13). Unlike ShareSummary
+// (the per-run manage list, where the run is the URL), it carries RunID + Namespace so the console can
+// group by run and drive the EXISTING per-run revoke (DELETE /api/runs/{runId}/shares/{id}) from one
+// place, plus a derived Status (live | revoked | expired) so the UI honestly badges "what did I expose?".
+// It NEVER carries the token or its hash.
+type MySharesItem struct {
+	ID             string    `json:"id"`
+	RunID          string    `json:"runId"`
+	Namespace      string    `json:"namespace"`
+	CreatedAt      time.Time `json:"createdAt"`
+	ExpiresAt      time.Time `json:"expiresAt"`
+	Status         string    `json:"status"` // "live" | "revoked" | "expired"
+	IncludeContent bool      `json:"includeContent"`
+}
+
+// shareStatus derives the honest lifecycle status of a share at time now — revoked takes precedence over
+// expiry (a link revoked before it expired is "revoked", not "expired").
+func shareStatus(rec sharedrun.SharedRun, now time.Time) string {
+	switch {
+	case rec.Revoked:
+		return "revoked"
+	case !now.Before(rec.ExpiresAt):
+		return "expired"
+	default:
+		return "live"
+	}
+}
+
+// handleMyShares serves GET /api/my/shares — the caller-scoped "my active shares" view (V13): every share
+// the CALLER minted across all runs, so they can review + revoke their live links from one place. There is
+// no single run to authorize against here, so the caller-scoping (ADR 0011) IS the identity: the list is
+// keyed on the caller's VALIDATED username (auditActor → a token-validating SelfSubjectReview), the same
+// value Create stored as CreatedBy. An unresolved identity ("unknown") is refused (401) so the unattributed
+// bucket is never listed — fail-closed, not a cross-principal leak. The token/hash never reaches the client.
+func (s *Server) handleMyShares(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	if s.sharedRunStore == nil {
+		writeError(w, http.StatusNotImplemented, "share store not configured: set CONTROLPLANE_DSN to enable share links")
+		return
+	}
+	actor := s.auditActor(r.Context(), caller)
+	if actor == "" || actor == actorUnknown {
+		writeError(w, http.StatusUnauthorized, "could not resolve your identity")
+		return
+	}
+
+	recs, err := s.sharedRunStore.ListByCreator(r.Context(), actor)
+	if err != nil {
+		s.log.Error(err, "share: could not list my shares", "actor", actor)
+		writeError(w, http.StatusInternalServerError, "failed to list your share links")
+		return
+	}
+
+	now := time.Now()
+	out := make([]MySharesItem, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, MySharesItem{
+			ID:             rec.ID,
+			RunID:          rec.RunID,
+			Namespace:      rec.Namespace,
+			CreatedAt:      rec.CreatedAt,
+			ExpiresAt:      rec.ExpiresAt,
+			Status:         shareStatus(rec, now),
+			IncludeContent: rec.IncludeContent,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // hashShareToken computes the SHA-256 (hex) of a share token — the ONLY representation of the token the

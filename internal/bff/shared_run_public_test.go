@@ -62,6 +62,10 @@ func (f *fakeSharedRunStore) ListForRun(context.Context, string) ([]sharedrun.Sh
 	return nil, nil
 }
 
+func (f *fakeSharedRunStore) ListByCreator(context.Context, string) ([]sharedrun.SharedRun, error) {
+	return nil, nil
+}
+
 // publicReadTestServer builds a minimal Server for the UNAUTHENTICATED public read: no caller clients, no
 // auth wiring beyond the anonymous route. Only the share store + run store matter. The run store is seeded
 // via the returned handles so a test can control run existence.

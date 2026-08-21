@@ -48,6 +48,12 @@ const (
 	// the CRD list the API server would have enforced (ADR 0011). NO BFF-SA grant — SSAR is a
 	// self-check the caller's token authorizes; the BFF never gains list rights it doesn't hold.
 	resourceAgentDeployments = "agentdeployments"
+	// resourceWorkflows is the CRD plural resource name GET /api/approvals authorizes against (M112,
+	// V5): plan_approval pauses are raised ONLY by the workflow executor, so every queue row is a
+	// workflow run — the caller's RBAC on `list workflows` in the namespace gates the approval queue as
+	// a PERSONA gate (one SSAR, never per-row). v1alpha1/v1beta1 share the group `agents.ctxmesh.ai`
+	// and an SSAR keys on group+resource (not version), so authorizeStore's group is correct here.
+	resourceWorkflows = "workflows"
 )
 
 // authorizeStore runs a caller-scoped SelfSubjectAccessReview for a store-backed

@@ -242,6 +242,56 @@ func TestStore_ListForRun(t *testing.T) {
 	})
 }
 
+// TestStore_ListByCreator is the caller-scoped "my shares" contract (V13): a principal's shares across
+// EVERY run, newest-first, revoked/expired included — and ONLY that principal's (another creator's are
+// excluded, the caller-scoping boundary).
+func TestStore_ListByCreator(t *testing.T) {
+	eachStore(t, func(t *testing.T, s sharedrun.Store) {
+		ctx := context.Background()
+		base := time.Now()
+
+		// alice minted three shares across two different runs (one later revoked).
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "a-old", TokenHash: hashToken("ta-old"), RunID: "run-1", Namespace: "ns", CreatedBy: "alice",
+			CreatedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
+		}))
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "a-new", TokenHash: hashToken("ta-new"), RunID: "run-2", Namespace: "ns", CreatedBy: "alice",
+			CreatedAt: base, ExpiresAt: base.Add(time.Hour),
+		}))
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "a-revoked", TokenHash: hashToken("ta-rev"), RunID: "run-3", Namespace: "ns", CreatedBy: "alice",
+			CreatedAt: base.Add(-2 * time.Hour), ExpiresAt: base.Add(time.Hour),
+		}))
+		require.NoError(t, s.Revoke(ctx, "a-revoked"))
+		// bob minted one — it must NEVER appear in alice's list (the caller-scoping boundary).
+		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
+			ID: "b-1", TokenHash: hashToken("tb-1"), RunID: "run-1", Namespace: "ns", CreatedBy: "bob",
+			CreatedAt: base, ExpiresAt: base.Add(time.Hour),
+		}))
+
+		list, err := s.ListByCreator(ctx, "alice")
+		require.NoError(t, err)
+		require.Len(t, list, 3, "all of alice's shares across every run (incl. revoked, V13)")
+		assert.Equal(t, "a-new", list[0].ID, "newest-first ordering")
+		assert.Equal(t, "a-old", list[1].ID)
+		assert.Equal(t, "a-revoked", list[2].ID)
+		assert.True(t, list[2].Revoked, "the revoked row is included and flagged")
+		for _, rec := range list {
+			assert.Equal(t, "alice", rec.CreatedBy, "another principal's shares never appear in a caller's list")
+		}
+
+		// bob sees only his own; an unknown principal sees nothing.
+		bob, err := s.ListByCreator(ctx, "bob")
+		require.NoError(t, err)
+		require.Len(t, bob, 1)
+		assert.Equal(t, "b-1", bob[0].ID)
+		none, err := s.ListByCreator(ctx, "nobody")
+		require.NoError(t, err)
+		assert.Empty(t, none, "a principal with no shares gets an empty list")
+	})
+}
+
 // TestStore_Create_Validates: missing required fields are rejected before any write.
 func TestStore_Create_Validates(t *testing.T) {
 	eachStore(t, func(t *testing.T, s sharedrun.Store) {

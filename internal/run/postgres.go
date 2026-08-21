@@ -1042,12 +1042,16 @@ func (p *pgStore) List() []*Run {
 	return out
 }
 
-// WaitingApproval is the projection of a plan_approval-paused run the AlertPolicy approvalWaiting
-// condition notifies about (M75, ADR 0069 §3): just the id, the target agent, and the approval summary.
+// WaitingApproval is the projection of a plan_approval-paused run — the AlertPolicy approvalWaiting
+// notification (M75, ADR 0069 §3) AND the V5 console approval queue (M112). RootRunID gives a paused
+// DESCENDANT sub-run its tree context; CallerUsername is the run's creator, used ONLY by the BFF's
+// inline-workflow owner filter (V5) — it must never be sent to a client.
 type WaitingApproval struct {
-	ID      string
-	Agent   string
-	Message string
+	ID             string
+	Agent          string
+	Message        string
+	RootRunID      string
+	CallerUsername string
 }
 
 // ListWaitingApproval returns the runs in the given namespace currently paused in requires_action with
@@ -1055,10 +1059,18 @@ type WaitingApproval struct {
 // rows for the namespace and filters on the JSON action kind in Go (mirroring how the store already
 // unmarshals requires_action). Read-only; it never mutates a run. A query/scan error is returned so the
 // caller (the reconciler) can log + skip — a bad read must never wedge the reconcile.
-func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]WaitingApproval, error) {
-	rows, err := p.db.QueryContext(ctx,
-		`SELECT id, agent, requires_action FROM runs WHERE namespace=$1 AND status=$2`,
-		namespace, string(StatusRequiresAction))
+func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]WaitingApproval, error) {
+	// Take the most-recently-updated requires_action rows first and bound the scan (a busy namespace can
+	// accumulate many) — limit<=0 is unbounded (the reconciler notification path). The plan_approval kind
+	// filter is applied in Go (the action is JSON), so the returned count is within the scanned window.
+	q := `SELECT id, agent, root_run_id, caller_username, requires_action
+		FROM runs WHERE namespace=$1 AND status=$2 ORDER BY updated_at DESC`
+	args := []any{namespace, string(StatusRequiresAction)}
+	if limit > 0 {
+		q += " LIMIT $3"
+		args = append(args, limit)
+	}
+	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("run: list requires_action: %w", err)
 	}
@@ -1067,11 +1079,13 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]
 	var out []WaitingApproval
 	for rows.Next() {
 		var (
-			id     string
-			agent  string
-			action []byte
+			id             string
+			agent          string
+			rootRunID      string
+			callerUsername string
+			action         []byte
 		)
-		if err := rows.Scan(&id, &agent, &action); err != nil {
+		if err := rows.Scan(&id, &agent, &rootRunID, &callerUsername, &action); err != nil {
 			return nil, fmt.Errorf("run: list requires_action scan: %w", err)
 		}
 		if len(action) == 0 {
@@ -1084,7 +1098,9 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string) ([]
 		if a.Kind != ActionPlanApproval {
 			continue // a different pause (consent / mid-run approval) — not a plan_approval wait
 		}
-		out = append(out, WaitingApproval{ID: id, Agent: agent, Message: a.Message})
+		out = append(out, WaitingApproval{
+			ID: id, Agent: agent, Message: a.Message, RootRunID: rootRunID, CallerUsername: callerUsername,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run: list requires_action rows: %w", err)

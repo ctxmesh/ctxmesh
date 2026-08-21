@@ -34,6 +34,7 @@ import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
+import { RunDetailPage } from "@/pages/run-detail-page";
 import { AuditPage } from "@/pages/audit-page";
 import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
@@ -49,6 +50,8 @@ import {
 import { SecretBindingsPage } from "@/pages/secret-bindings-page";
 import { TopologyPage } from "@/pages/topology-page";
 import { TracePage } from "@/pages/trace-page";
+import { MySharesPage } from "@/pages/my-shares-page";
+import { ApprovalsPage } from "@/pages/approvals-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
@@ -256,6 +259,12 @@ export function App() {
             <Route path="topology" element={<TopologyPage />} />
             {/* m16.8: runs browser — paginated + filterable global run history. */}
             <Route path="runs" element={<RunsPage />} />
+            {/* V5, M112: per-run detail page — approval deep-link target + My Shares link target. */}
+            <Route path="runs/:id" element={<RunDetailPage />} />
+            {/* V13: My Shares — the caller's share links across all runs. */}
+            <Route path="my-shares" element={<MySharesPage />} />
+            {/* V5, M112: Plan approvals — namespace-scoped queue of runs paused on plan_approval. */}
+            <Route path="approvals" element={<ApprovalsPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}
             <Route path="traces/:id" element={<TracePage />} />
