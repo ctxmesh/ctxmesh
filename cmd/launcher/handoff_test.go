@@ -37,7 +37,7 @@ func newHandoffDelegate(t *testing.T, client spawnClient, roster []string) *dele
 	mr := miniredis.RunT(t)
 	guard := NewSpawnGuard(newRedisSpawnStore(mr.Addr()))
 	cfg := delegateConfig{SelfName: "planner", Namespace: "team-ns", Scope: "t1", Roster: roster, Budget: openBudget}
-	return newDelegateServer(cfg, guard, client)
+	return newDelegateServer(cfg, guard, client, nil)
 }
 
 func callHandoff(t *testing.T, ds *delegateServer, capToken string, body handoffRequest) handoffResponse {
