@@ -42,15 +42,15 @@ func TestResolveSteps_HappyPath(t *testing.T) {
 
 	assert.True(t, got[0].Recorded)
 	assert.Equal(t, "text/event-stream", got[0].ContentType)
-	assert.Equal(t, "data: chunk-A\n\n", string(got[0].Response), "SSE framing preserved byte-exact")
+	assert.Equal(t, "data: chunk-A\n\n", got[0].Response, "SSE framing preserved byte-exact")
 
 	assert.True(t, got[1].Recorded)
 	assert.Equal(t, "search", got[1].ToolName)
 	assert.Equal(t, "call_a", got[1].CallID)
-	assert.Equal(t, `{"hits":1}`, string(got[1].Response))
+	assert.Equal(t, `{"hits":1}`, got[1].Response)
 
 	assert.True(t, got[2].Recorded)
-	assert.Equal(t, `{"answer":"done"}`, string(got[2].Response))
+	assert.Equal(t, `{"answer":"done"}`, got[2].Response)
 }
 
 // TestResolveSteps_ModelCountMismatchGapsNeverMisjoins is the load-bearing property: MergeFixtures
@@ -93,14 +93,14 @@ func TestResolveSteps_ToolByNameOccurrence(t *testing.T) {
 
 	assert.True(t, got[0].Recorded)
 	assert.Equal(t, "c1", got[0].CallID)
-	assert.Equal(t, "search-1", string(got[0].Response))
+	assert.Equal(t, "search-1", got[0].Response)
 
 	assert.False(t, got[1].Recorded, "a launcher-plane tool is a gap, never mis-joined to a captured tool")
 	assert.Contains(t, got[1].GapReason, "not captured")
 
 	assert.True(t, got[2].Recorded)
 	assert.Equal(t, "c3", got[2].CallID, "the 2nd 'search' step resolves to the 2nd recorded 'search'")
-	assert.Equal(t, "search-2", string(got[2].Response))
+	assert.Equal(t, "search-2", got[2].Response)
 
 	assert.True(t, got[3].Recorded)
 	assert.Equal(t, "c2", got[3].CallID)
@@ -131,8 +131,8 @@ func TestResolveSteps_MergedFixtureAlignment(t *testing.T) {
 	got := ResolveSteps(merged, steps)
 
 	require.Len(t, got, 3)
-	assert.Equal(t, "m0", string(got[0].Response))
+	assert.Equal(t, "m0", got[0].Response)
 	assert.True(t, got[1].Recorded)
-	assert.Equal(t, "t0", string(got[1].Response))
-	assert.Equal(t, "m1", string(got[2].Response))
+	assert.Equal(t, "t0", got[1].Response)
+	assert.Equal(t, "m1", got[2].Response)
 }

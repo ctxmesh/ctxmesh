@@ -105,10 +105,10 @@ func TestGetRunFixture_RecordedRun(t *testing.T) {
 	require.Len(t, dto.Steps, 3)
 	assert.True(t, dto.Steps[0].Recorded)
 	assert.Equal(t, "text/event-stream", dto.Steps[0].ContentType)
-	assert.Equal(t, "data: hello\n\n", string(dto.Steps[0].Response), "SSE framing byte-exact")
+	assert.Equal(t, "data: hello\n\n", dto.Steps[0].Response, "SSE framing byte-exact")
 	assert.Equal(t, "search", dto.Steps[1].ToolName)
 	assert.Equal(t, "c1", dto.Steps[1].CallID)
-	assert.Equal(t, `{"answer":"done"}`, string(dto.Steps[2].Response))
+	assert.Equal(t, `{"answer":"done"}`, dto.Steps[2].Response)
 }
 
 // TestGetRunFixture_NotRecorded: a run with no fixture is an honest recorded:false (200) — the

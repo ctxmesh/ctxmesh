@@ -54,15 +54,17 @@ type StepDescriptor struct {
 // StepIO is a step joined to its recorded wire I/O for the stepper. Recorded=false is a GAP: the
 // console renders "recording gap for this step" + GapReason, never a mis-joined panel.
 type StepIO struct {
-	Kind        string          `json:"kind"`
-	ToolName    string          `json:"toolName,omitempty"`
-	Recorded    bool            `json:"recorded"`
-	GapReason   string          `json:"gapReason,omitempty"`
-	CallID      string          `json:"callId,omitempty"`
-	Request     json.RawMessage `json:"request,omitempty"`
-	Response    []byte          `json:"response,omitempty"`
-	ContentType string          `json:"contentType,omitempty"`
-	StatusCode  int             `json:"statusCode,omitempty"`
+	Kind      string          `json:"kind"`
+	ToolName  string          `json:"toolName,omitempty"`
+	Recorded  bool            `json:"recorded"`
+	GapReason string          `json:"gapReason,omitempty"`
+	CallID    string          `json:"callId,omitempty"`
+	Request   json.RawMessage `json:"request,omitempty"`
+	// Response is the VERBATIM recorded response bytes as text (fixtures are text — model completions,
+	// SSE frames, tool JSON — so the console renders them directly; ADR 0071 captures text responses).
+	Response    string `json:"response,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
+	StatusCode  int    `json:"statusCode,omitempty"`
 }
 
 // ResolveSteps joins an ordered list of step descriptors (from the run's EventStep stream) to the
@@ -106,7 +108,7 @@ func ResolveSteps(f *Fixture, steps []StepDescriptor) []StepIO {
 				m := f.Model[modelCursor]
 				io.Recorded = true
 				io.Request = m.Request
-				io.Response = m.ResponseBytes
+				io.Response = string(m.ResponseBytes)
 				io.ContentType = m.ContentType
 				io.StatusCode = m.StatusCode
 			}
@@ -118,7 +120,7 @@ func ResolveSteps(f *Fixture, steps []StepDescriptor) []StepIO {
 				io.Recorded = true
 				io.CallID = ti.CallID
 				io.Request = ti.Request
-				io.Response = ti.ResponseBytes
+				io.Response = string(ti.ResponseBytes)
 				io.ContentType = ti.ContentType
 			} else {
 				io.GapReason = "not captured (a launcher-plane/synthetic tool, or a dropped capture)"
