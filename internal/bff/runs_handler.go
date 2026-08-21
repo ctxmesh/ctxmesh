@@ -425,6 +425,27 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		return
 	}
 
+	// Durable delegation (L7, ADR 0091): the supervisor delegated to sub-agent(s) and its managed loop
+	// SUSPENDED instead of blocking — the envelope carries the loop checkpoint + the delegate intents.
+	// Build the child run(s) and commit child-create + parent→waiting in ONE OCC-guarded transaction
+	// (SuspendOnDelegate) so a child already terminal at suspend can't strand the parent (the lost-wakeup
+	// guard is in the store). The worker is freed; the child's completion wakes (CompleteAndWake) and
+	// re-queues the supervisor, which the worker re-invokes carrying the checkpoint in the body (m108.3).
+	// A malformed marker is an honest `failed` — never a silent block and never a swallowed success.
+	if dw := parseDelegateWaiting(resp); dw != nil {
+		if sErr := s.suspendOnDelegate(started, dw, traceID, now); sErr != nil {
+			s.log.Error(sErr, "run: could not suspend supervisor on delegate", "run", runID)
+			if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
+				rn.TraceID = traceID
+				rn.Error = "delegate suspend failed: " + sErr.Error()
+				return rn.Transition(run.StatusFailed, now)
+			}); uErr != nil {
+				s.log.Error(uErr, "run: could not persist delegate-suspend failure", "run", runID)
+			}
+		}
+		return
+	}
+
 	// Handoff (m67.6, ADR 0060 §5): the agent TRANSFERRED the conversation via handoff_to. The BFF
 	// handoff edge (POST /api/internal/handoff) ALREADY terminated this run (succeeded + HandedOffTo)
 	// and created the target's new run WHILE this /invoke was in flight — so there is no answer to
