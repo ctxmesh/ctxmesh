@@ -17,9 +17,11 @@ limitations under the License.
 package run
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 )
@@ -165,6 +167,13 @@ type Store interface {
 	// TRUE root's id, so keying on a mid-tree run returns nothing (only the root the human watches
 	// surfaces the subtree's pauses). Read-only; a nil slice + nil error means "none paused".
 	DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error)
+
+	// ListWaitingApproval returns the runs in namespace currently paused in requires_action with
+	// Kind == plan_approval (M75 AlertPolicy approvalWaiting + the M112 V5 console approval queue),
+	// most-recently-updated first. limit>0 bounds the scan (0 = unbounded). The projection carries
+	// RootRunID (tree context for a paused descendant) + CallerUsername (the BFF's inline-workflow
+	// owner filter — never sent to a client). Read-only; a nil slice means "none waiting".
+	ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]WaitingApproval, error)
 }
 
 // DescendantAction is the L1-surfacing projection of a descendant sub-run paused in requires_action
@@ -585,6 +594,43 @@ func (m *memStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAct
 			Kind:    r.RequiresAction.Kind,
 			Message: r.RequiresAction.Message,
 		})
+	}
+	return out, nil
+}
+
+// ListWaitingApproval — see the Store interface (M75 approvalWaiting + M112 V5 queue). The mem twin
+// mirrors the pgStore: plan_approval-only, newest-updated first, limit>0 bounds the result.
+func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, limit int) ([]WaitingApproval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	type row struct {
+		wa      WaitingApproval
+		updated time.Time
+	}
+	var rows []row
+	for _, e := range m.entries {
+		r := e.run
+		if r.Namespace != namespace || r.Status != StatusRequiresAction || r.RequiresAction == nil {
+			continue
+		}
+		if r.RequiresAction.Kind != ActionPlanApproval {
+			continue
+		}
+		rows = append(rows, row{
+			wa: WaitingApproval{
+				ID: r.ID, Agent: r.Agent, Message: r.RequiresAction.Message,
+				RootRunID: r.RootRunID, CallerUsername: r.CallerUsername,
+			},
+			updated: r.UpdatedAt,
+		})
+	}
+	slices.SortFunc(rows, func(a, b row) int { return b.updated.Compare(a.updated) }) // newest first
+	out := make([]WaitingApproval, 0, len(rows))
+	for _, rw := range rows {
+		out = append(out, rw.wa)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
