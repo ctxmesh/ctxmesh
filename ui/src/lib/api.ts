@@ -2366,6 +2366,39 @@ export interface StepMeta {
   tokens?: { prompt?: number; completion?: number };
 }
 
+// RunFixtureStep is one step of a recorded run joined to its wire-exact recorded I/O (O10a, ADR
+// 0071 §5). `recorded: false` is a GAP — the join could not confidently back this step with a
+// recorded interaction (a capture drop, or a synthetic launcher-plane tool never captured); the
+// console shows `gapReason`, never fabricated I/O. `response` is verbatim recorded text (incl. SSE
+// framing); `request` is the raw recorded request JSON.
+export interface RunFixtureStep {
+  kind: "model" | "tool";
+  toolName?: string;
+  recorded: boolean;
+  gapReason?: string;
+  callId?: string;
+  request?: unknown;
+  response?: string;
+  contentType?: string;
+  statusCode?: number;
+}
+
+// RunFixture is GET /api/runs/{id}/fixture — a recorded run's step timeline joined to its wire-exact
+// fixture I/O (the O10a stepper: "what you see is what CI replays"). `recorded: false` ⇒ the run was
+// not recorded (the steps are all gaps).
+export interface RunFixture {
+  runId: string;
+  agent: string;
+  recorded: boolean;
+  steps: RunFixtureStep[];
+}
+
+// getRunFixture fetches a run's recorded-fixture step view. 403/404 (caller-scoped, ADR 0011) and 501
+// (no object store configured) surface as a typed ApiError the stepper renders honestly.
+export function getRunFixture(runId: string, signal?: AbortSignal): Promise<RunFixture> {
+  return getJSON<RunFixture>(`/api/runs/${encodeURIComponent(runId)}/fixture`, signal);
+}
+
 // formatRunStep renders a `step` run event's Data into a compact live step-visibility label
 // (M78, ADR 0071 §4). It handles BOTH forms of the EventStep Data (BACKWARD-COMPAT):
 //   - the NEW step-metadata JSON object → "Step N · <kind> · <tool> · ↑P ↓C"
