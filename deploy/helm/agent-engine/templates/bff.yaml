@@ -120,6 +120,20 @@ spec:
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.issuer | quote }}{{ else }}""{{ end }}
         - name: OIDC_CLIENT_ID
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}""{{ end }}
+        - name: OBJECT_STORE_ADDR
+          value: agent-engine-objectstore.agent-engine-system.svc:9000
+        - name: OBJECT_STORE_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: rootUser
+              name: agent-engine-objectstore-dev
+              optional: true
+        - name: OBJECT_STORE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: rootPassword
+              name: agent-engine-objectstore-dev
+              optional: true
         envFrom:
         - secretRef:
             name: bff-adapters
