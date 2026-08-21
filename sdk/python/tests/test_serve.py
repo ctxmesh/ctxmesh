@@ -155,12 +155,16 @@ def test_inbound_conversation_id_takes_precedence(client):
 
 # ── body parsing tolerance ─────────────────────────────────────────────────────────────
 def test_parse_body_variants():
-    assert _parse_body(b'{"input":"hello","approvals":["k1","k2"]}') == ("hello", ["k1", "k2"])
-    assert _parse_body(b"") == ("", [])
+    # (input, approvals, checkpoint) — checkpoint is None unless the platform injected one (L7).
+    assert _parse_body(b'{"input":"hello","approvals":["k1","k2"]}') == ("hello", ["k1", "k2"], None)
+    assert _parse_body(b"") == ("", [], None)
     # Non-JSON is treated as the raw prompt (never a 500).
-    assert _parse_body(b"raw text") == ("raw text", [])
+    assert _parse_body(b"raw text") == ("raw text", [], None)
     # A JSON non-object degrades to its string form.
-    assert _parse_body(b'"just a string"') == ("just a string", [])
+    assert _parse_body(b'"just a string"') == ("just a string", [], None)
+    # An L7 resume envelope rides alongside input (the managed loop verifies it before trusting).
+    env = {"version": 1, "kind": "supervisor-loop", "sha256": "x", "payload": "{}"}
+    assert _parse_body(json.dumps({"input": "go", "checkpoint": env}).encode()) == ("go", [], env)
 
 
 # ── the full HTTP contract (real socket) ───────────────────────────────────────────────
