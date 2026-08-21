@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -1239,6 +1240,63 @@ func (s *Server) terminalTransition(runID string, apply func(*run.Run) error) er
 		return err
 	}
 	_, err = s.runStore.Update(runID, apply)
+	return err
+}
+
+// workerIDCtxKey carries the executing run-worker's id on the exec context so a run's terminal write
+// can be FENCED on the worker still holding the lease (L10, the D3 zombie guard). It is a purely
+// internal signal (never a header), unlike the header-attaching ctx values in invoke.go.
+type workerIDCtxKey struct{}
+
+// contextWithWorkerID stamps the run-worker's id on ctx (executeClaimedRun) so executeRun's terminal
+// writes can be fenced on this worker still holding the lease. An INLINE (non-worker) execution — the
+// create/resume/spawn/workflow-node `go executeRun` paths — carries no worker id, so the fence is a
+// no-op there (those runs are not lease-fenced; their terminal write is unconditional as before).
+func contextWithWorkerID(ctx context.Context, workerID string) context.Context {
+	return context.WithValue(ctx, workerIDCtxKey{}, workerID)
+}
+
+// workerIDFromContext returns the run-worker id carried on ctx, or "" for an inline execution.
+func workerIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(workerIDCtxKey{}).(string)
+	return id
+}
+
+// errRunNotHeld signals that a FENCED terminal write was skipped because the executing worker no
+// longer holds the run's lease — a peer RECLAIMED it (D3). terminalTransitionFenced swallows it: an
+// evicted zombie MUST NOT clobber a peer-owned run's state. (A genuine agent failure runs on a
+// still-held lease, so its fence passes and the run legitimately fails — fail-safe, not fail-open.)
+var errRunNotHeld = errors.New("run: terminal write fenced — lease reclaimed by a peer")
+
+// terminalTransitionFenced is terminalTransition FENCED on the executing worker still holding the
+// run's lease (L10). The zombie problem (ADR 0091 L7 review): when a peer reclaims a run (D3), M104's
+// lease-loss cancel aborts the evicted worker's in-flight invoke; that abort surfaces as an invoke
+// error, and the UNFENCED terminal write would then mark the peer-RECLAIMED, legitimately-`running`
+// run `failed` (a legal running→failed), clobbering the peer that is now re-running it. L7 amplifies
+// this — every suspend/resume wave adds a claim cycle and a zombie window.
+//
+// The fence: when ctx carries a worker id (the worker exec path; contextWithWorkerID), re-check the
+// run's CURRENT worker_id inside the transition apply and skip the write when it no longer matches.
+// This is race-free — Update/CompleteAndWake run apply on the row read under `FOR UPDATE` (pg) / the
+// store lock (mem), so a peer's reclaim that changed worker_id is always seen. A skipped write is
+// logged, never surfaced as a run failure (the peer owns the run and terminates it authoritatively).
+// An inline execution (no worker id on ctx) is exactly terminalTransition — unconditional as before.
+func (s *Server) terminalTransitionFenced(ctx context.Context, runID string, apply func(*run.Run) error) error {
+	workerID := workerIDFromContext(ctx)
+	if workerID == "" {
+		return s.terminalTransition(runID, apply)
+	}
+	err := s.terminalTransition(runID, func(rn *run.Run) error {
+		if rn.WorkerID != workerID {
+			return errRunNotHeld
+		}
+		return apply(rn)
+	})
+	if errors.Is(err, errRunNotHeld) {
+		s.log.Info("run: terminal write fenced — a peer reclaimed the run's lease (L10)",
+			"run", runID, "worker", workerID)
+		return nil
+	}
 	return err
 }
 

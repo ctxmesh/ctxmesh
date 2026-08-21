@@ -389,7 +389,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 		if errors.As(err, &ie) {
 			reason = ie.Error()
 		}
-		_ = s.terminalTransition(runID, func(rn *run.Run) error {
+		_ = s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 			rn.TraceID = traceID
 			rn.Error = reason
 			return rn.Transition(run.StatusFailed, now)
@@ -438,7 +438,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	if dw := parseDelegateWaiting(resp); dw != nil {
 		if sErr := s.suspendOnDelegate(started, dw, traceID, now); sErr != nil {
 			s.log.Error(sErr, "run: could not suspend supervisor on delegate", "run", runID)
-			if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
+			if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 				rn.TraceID = traceID
 				rn.Error = "delegate suspend failed: " + sErr.Error()
 				return rn.Transition(run.StatusFailed, now)
@@ -471,7 +471,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// assistant message. executeRun is shared with the durable worker, so this covers that path too.
 	if verr := validateTerminalOutput(started.OutputSchema, output); verr != nil {
 		s.log.Info("run: terminal output rejected by outputSchema", "run", runID, "reason", verr.Error())
-		if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
+		if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 			rn.TraceID = traceID
 			rn.Error = verr.Error()
 			return rn.Transition(run.StatusFailed, now)
@@ -485,7 +485,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// closes live subscribers), then persist it + succeed. m31.4 adds token-level events during
 	// the loop; here the whole answer arrives as one message.
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
-	if uErr := s.terminalTransition(runID, func(rn *run.Run) error {
+	if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 		rn.TraceID = traceID
 		rn.Messages = append(rn.Messages, run.Message{Role: roleAssistant, Content: output})
 		return rn.Transition(run.StatusSucceeded, now)
