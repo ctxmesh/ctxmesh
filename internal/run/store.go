@@ -123,6 +123,16 @@ type Store interface {
 	// is empty, or on an illegal transition. A status change auto-emits its `state` event.
 	Suspend(id string, waitOn []string, mode WaitMode, fn func(*Run) error) (*Run, error)
 
+	// SuspendOnDelegate is the L7 delegate suspend transaction (ADR 0091): in ONE OCC-guarded transaction
+	// it upserts the delegate CHILD run(s) (idempotent, ON CONFLICT DO NOTHING), checkpoints the parent
+	// (fn sets Cursor under the row lock), and — checking each child's CURRENT status under the lock —
+	// either suspends the parent to `waiting` on the NON-terminal children (releasing its lease) OR, when
+	// EVERY child is already terminal (the WaitAll wait is satisfied NOW — the lost-wakeup race), re-queues
+	// the parent directly so the pool re-claims + resumes it. It NEVER parks the parent on an empty /
+	// already-satisfied wait set that no future child transition would wake. mode is WaitAll for a
+	// delegate fan-out (v1). Returns the parent copy. Idempotent + OCC-safe against a concurrent wake.
+	SuspendOnDelegate(parentID string, children []*Run, mode WaitMode, fn func(*Run) error) (*Run, error)
+
 	// CompleteAndWake terminates a CHILD run (via apply, which must transition it to a terminal state)
 	// and, in the SAME transaction, wakes a `waiting` PARENT that is waiting on it — flipping the
 	// parent waiting→queued when the wait condition is met — so the existing worker pool re-claims it
@@ -210,6 +220,65 @@ func (m *memStore) Suspend(id string, waitOn []string, mode WaitMode, fn func(*R
 	e.run = working
 	if working.Status != oldStatus {
 		m.appendLocked(e, EventState, string(working.Status))
+	}
+	return cloneRun(working), nil
+}
+
+// SuspendOnDelegate is the mem twin of the pgStore L7 delegate suspend transaction (ADR 0091). The single
+// map lock (m.mu) IS the transaction boundary: child upsert + parent checkpoint + suspend/requeue apply
+// together. The lost-wakeup guard (an already-terminal child is never waited on) is identical.
+func (m *memStore) SuspendOnDelegate(parentID string, children []*Run, mode WaitMode, fn func(*Run) error) (*Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// (1) Upsert the delegate child run(s) — idempotent (a re-issued delegate leaves the existing row).
+	for _, c := range children {
+		if _, ok := m.entries[c.ID]; !ok {
+			m.entries[c.ID] = &entry{run: cloneRun(c), subs: map[int]*subscriber{}}
+		}
+	}
+
+	// (2) The wait set is only the NON-terminal children (the lost-wakeup guard — never park on a dead child).
+	waitOn := make([]string, 0, len(children))
+	for _, c := range children {
+		ce, ok := m.entries[c.ID]
+		if !ok {
+			return nil, ErrNotFound
+		}
+		if !ce.run.Status.IsTerminal() {
+			waitOn = append(waitOn, c.ID)
+		}
+	}
+
+	// (3) Checkpoint the parent (fn sets Cursor) + suspend-or-requeue.
+	pe, ok := m.entries[parentID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	oldStatus := pe.run.Status
+	working := cloneRun(pe.run)
+	if fn != nil {
+		if err := fn(working); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	if len(waitOn) == 0 {
+		// All children terminal ⇒ the WaitAll wait is met now: running→waiting→queued (release the lease),
+		// never park on an empty wait set (ADR 0091 fork 2).
+		if err := working.Transition(StatusWaiting, now); err != nil {
+			return nil, err
+		}
+		working.WorkerID, working.LeaseExpiresAt = "", nil
+		if err := working.Transition(StatusQueued, now); err != nil {
+			return nil, err
+		}
+	} else if err := working.suspendToWaiting(waitOn, mode, now); err != nil {
+		return nil, err
+	}
+	pe.run = working
+	if working.Status != oldStatus {
+		m.appendLocked(pe, EventState, string(working.Status))
 	}
 	return cloneRun(working), nil
 }
