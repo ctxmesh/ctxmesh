@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -29,6 +30,11 @@ import (
 
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 )
+
+// ErrNoFixture is returned (wrapped) by GetRun when a run has NO recorded fixture blobs — nothing was
+// recorded for it, or the run id is wrong. A caller (the BFF stepper endpoint) uses errors.Is to tell
+// this "not recorded" case (an honest empty result) apart from a real object-store I/O failure.
+var ErrNoFixture = errors.New("replay: no fixture recorded for this run")
 
 // FixtureStore assembles a recorded Fixture into the DURABLE object store and reads it back (ADR
 // 0071 §2). It reuses the durable KB object-store SPI (internal/objectstore.ObjectStore — the
@@ -172,8 +178,7 @@ func (s *FixtureStore) GetRun(ctx context.Context, runID string) (*Fixture, erro
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf(
-			"replay: no fixture blobs found for run %q (object-store prefix %q) — nothing was recorded for "+
-				"this run, or the run id is wrong", runID, prefix)
+			"replay: no fixture blobs for run %q (object-store prefix %q): %w", runID, prefix, ErrNoFixture)
 	}
 	// Deterministic order so a re-download is byte-stable (the model channel is re-indexed on merge).
 	slices.Sort(keys)
