@@ -92,4 +92,13 @@ type Store interface {
 	// revoked rows are included so "what did I expose?" is honestly answered; the UI badges them).
 	// The TokenHash on these records must NEVER reach the client.
 	ListForRun(ctx context.Context, runID string) ([]SharedRun, error)
+
+	// ListByCreator returns ALL shares minted by createdBy across EVERY run (including revoked/expired),
+	// newest-first — the caller-scoped "my active shares" view (V13, GET /api/my/shares). createdBy is the
+	// authenticated principal (the same value Create stored as CreatedBy); the BFF derives it from the
+	// caller's VALIDATED identity (auditActor → SelfSubjectReview), never a client-supplied value, so a
+	// caller only ever sees their OWN shares — this is the caller-scoping (ADR 0011) for a cross-run list
+	// that has no single run to authorize against. The BFF refuses an unresolved ("unknown") identity so
+	// the unattributed bucket is never listed. As with ListForRun, TokenHash must NEVER reach the client.
+	ListByCreator(ctx context.Context, createdBy string) ([]SharedRun, error)
 }

@@ -107,3 +107,18 @@ func (s *memStore) ListForRun(_ context.Context, runID string) ([]SharedRun, err
 	slices.SortFunc(out, func(a, b SharedRun) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	return out, nil
 }
+
+func (s *memStore) ListByCreator(_ context.Context, createdBy string) ([]SharedRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []SharedRun
+	for _, rec := range s.data {
+		// V13: the caller's shares across ALL runs, revoked/expired included (the UI badges status).
+		if rec.CreatedBy == createdBy {
+			out = append(out, rec)
+		}
+	}
+	// Newest-first, mirroring the pgStore ORDER BY created_at DESC.
+	slices.SortFunc(out, func(a, b SharedRun) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	return out, nil
+}
