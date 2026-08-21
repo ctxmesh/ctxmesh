@@ -731,6 +731,10 @@ func (p *pgStore) tryCompleteAndWake(ctx context.Context, childID string, apply 
 					wokeParent = cloneRun(parent)
 				}
 			}
+		default:
+			// The parent is NOT `waiting` on this child — e.g. it was CANCELLED by a subtree cascade
+			// (L9, ADR 0091 fork 6) or already woken/terminal. The child still terminates (committed
+			// above); waking is a clean no-op, NEVER an error — a canceled parent is simply not re-queued.
 		}
 	}
 

@@ -150,3 +150,33 @@ func TestSuspendOnDelegate_MixedTerminal(t *testing.T) {
 		})
 	}
 }
+
+// TestCompleteAndWake_CanceledParentIsNoOp is L9's companion rule (ADR 0091 fork 6): a child completing
+// while its parent has been CANCELLED (by a subtree cascade) must be a clean no-op — the child terminates,
+// the canceled parent is NOT re-queued, and no error surfaces.
+func TestCompleteAndWake_CanceledParentIsNoOp(t *testing.T) {
+	for name, s := range suspendStores(t) {
+		t.Run(name, func(t *testing.T) {
+			mkRunningWithLease(t, s, "sup-c")
+			child := New("child-c", "team", "child", nil, "", t0)
+			child.ParentRunID = "sup-c"
+			_, err := s.SuspendOnDelegate("sup-c", []*Run{child}, WaitAll, nil)
+			require.NoError(t, err) // parent parked `waiting` on child-c
+
+			// A subtree cascade cancels the parent while the child is still in flight (waiting→cancelled).
+			_, err = s.Update("sup-c", func(r *Run) error { return r.Transition(StatusCancelled, t0) })
+			require.NoError(t, err)
+
+			// The child now completes → CompleteAndWake must NO-OP the parent (never error, never re-queue).
+			_, err = s.Update("child-c", func(r *Run) error { return r.Transition(StatusRunning, t0) })
+			require.NoError(t, err)
+			gotChild, woke, err := s.CompleteAndWake("child-c", func(r *Run) error { return r.Transition(StatusSucceeded, t0) })
+			require.NoError(t, err, "completing a child of a CANCELED parent must not error")
+			assert.Equal(t, StatusSucceeded, gotChild.Status, "the child still terminates")
+			assert.Nil(t, woke, "a canceled parent is NOT woken/re-queued")
+
+			got, _ := s.Get("sup-c")
+			assert.Equal(t, StatusCancelled, got.Status, "the parent stays cancelled")
+		})
+	}
+}
