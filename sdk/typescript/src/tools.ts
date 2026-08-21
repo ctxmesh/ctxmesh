@@ -63,6 +63,14 @@ const DELEGATE_TIMEOUT_MS = 600_000;
 /** Handoff is not awaited — it just relays to the BFF. */
 const HANDOFF_TIMEOUT_MS = 30_000;
 
+/**
+ * The spawn-tree position headers (mirrors internal/bff/invoke.go). Relayed on a /delegate call so
+ * the launcher's depth gate (L7 suspension is depth-0 only) + spawn guard key on the AUTHORITATIVE
+ * root rather than defaulting to depth 0 / root "" for every SDK-driven delegation.
+ */
+export const SPAWN_ROOT_HEADER = "X-Ctxmesh-Spawn-Root";
+export const SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth";
+
 /** The manifest returned when a managed agent has NO tools bound. */
 const EMPTY_MANIFEST: Record<string, unknown> = { tools: [] };
 
@@ -520,6 +528,7 @@ export class ToolsClient {
     task: string,
     step?: string,
     callId?: string,
+    opts: { suspend?: boolean; spawnRoot?: string; spawnDepth?: number } = {},
   ): Promise<Record<string, unknown>> {
     if (!this.config.delegateEnabled) {
       throw new ConfigError(
@@ -528,9 +537,20 @@ export class ToolsClient {
       );
     }
     const url = `${this.config.delegateBaseUrl}/delegate`;
-    const body = JSON.stringify({ subAgent, input: task, step, callId });
+    // `suspend` (L7, ADR 0091) asks the launcher, at depth 0, for a durable-suspend SIGNAL (resolved
+    // endpoint, no spawn/await) instead of a blocking await. An older launcher ignores the flag and
+    // blocks — the managed loop detects the missing `suspend` and threads the result inline.
+    const payload: Record<string, unknown> = { subAgent, input: task, step, callId };
+    if (opts.suspend) payload["suspend"] = true;
+    const body = JSON.stringify(payload);
     const headers = mcpHeaders(undefined);
     headers["Content-Type"] = "application/json";
+    // Relay the spawn-tree position (m108.6): the launcher's depth gate + guard key are otherwise
+    // blind to SDK-driven delegations (they default to depth 0 / root ""). Only relayed when known.
+    if (opts.spawnDepth !== undefined && opts.spawnDepth >= 0) {
+      headers[SPAWN_DEPTH_HEADER] = String(opts.spawnDepth);
+    }
+    if (opts.spawnRoot) headers[SPAWN_ROOT_HEADER] = opts.spawnRoot;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DELEGATE_TIMEOUT_MS);
