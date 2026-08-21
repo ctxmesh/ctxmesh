@@ -48,6 +48,12 @@ const (
 	EventToken EventKind = "token"
 	// EventStep — a loop step / tool-call boundary (m31.4); Data is a short label.
 	EventStep EventKind = "step"
+	// EventDescendantAction — L1 surfacing (ADR 0075 §4): a DESCENDANT sub-run entered
+	// requires_action (a delegated HITL/consent pause). Appended to the ROOT run's stream (never the
+	// descendant's own) so a human watching the root sees a nested pause it must resolve; Data is the
+	// paused descendant's run id. Derive-don't-denormalize: the authoritative pause lives on the
+	// descendant — this is a VISIBILITY breadcrumb, not a second source of truth.
+	EventDescendantAction EventKind = "descendant-requires-action"
 )
 
 // Event is one item on a run's event stream. Seq is monotonic per run (1-based) so a client can
@@ -151,6 +157,25 @@ type Store interface {
 	// longer waiting, so the sweep skips it) and bounded in frequency by its caller (~30s). Returns the
 	// ids it re-queued.
 	SweepWaiting() ([]string, error)
+
+	// DescendantsRequiringAction returns the DESCENDANT sub-runs of rootRunID currently paused in
+	// requires_action (L1 surfacing, ADR 0075 §4) — derive-don't-denormalize: a `root_run_id=$1 AND
+	// status='requires_action'` read, so a human watching a root run can see (and navigate to) a
+	// delegated HITL/consent pause anywhere in its subtree. Descendant rows carry root_run_id = the
+	// TRUE root's id, so keying on a mid-tree run returns nothing (only the root the human watches
+	// surfaces the subtree's pauses). Read-only; a nil slice + nil error means "none paused".
+	DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error)
+}
+
+// DescendantAction is the L1-surfacing projection of a descendant sub-run paused in requires_action
+// (ADR 0075 §4): just enough for the root's watcher to render + link to the nested pause — the run id,
+// its agent, the pause kind (consent / approval / plan_approval), and the human-facing message. The
+// authoritative Action still lives on the descendant run (this is a visibility breadcrumb).
+type DescendantAction struct {
+	RunID   string     `json:"runId"`
+	Agent   string     `json:"agent"`
+	Kind    ActionKind `json:"kind"`
+	Message string     `json:"message,omitempty"`
 }
 
 // subBuffer bounds a subscriber's live channel; a consumer slower than this is dropped (its
@@ -534,6 +559,29 @@ func (m *memStore) List() []*Run {
 		out = append(out, cloneRun(e.run))
 	}
 	return out
+}
+
+// DescendantsRequiringAction — see the Store interface (L1 surfacing, ADR 0075 §4).
+func (m *memStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error) {
+	if rootRunID == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []DescendantAction
+	for _, e := range m.entries {
+		r := e.run
+		if r.RootRunID != rootRunID || r.Status != StatusRequiresAction || r.RequiresAction == nil {
+			continue
+		}
+		out = append(out, DescendantAction{
+			RunID:   r.ID,
+			Agent:   r.Agent,
+			Kind:    r.RequiresAction.Kind,
+			Message: r.RequiresAction.Message,
+		})
+	}
+	return out, nil
 }
 
 func (m *memStore) AppendEvent(id string, kind EventKind, data string) error {
