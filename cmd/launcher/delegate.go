@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -276,9 +277,13 @@ func (dr delegateRuntime) buildServer() *http.Server {
 	}
 	guard := NewSpawnGuard(dr.spawnStore())
 	client := newHTTPSpawnClient(dr.BFFURL)
+	// The run-capability verifier (same public key the gateway uses) recovers a root supervisor's own run
+	// id as the spawn-tree root when the spawn-root header did not propagate (L11). nil when the key is
+	// absent/bad ⇒ the advisory guard degrades to the scope bucket, never failing a delegation.
+	verifier := buildCapVerifier(func(f string, a ...any) { log.Printf(f, a...) })
 	return &http.Server{
 		Addr:    fmt.Sprintf(":%d", dr.Port),
-		Handler: newDelegateServer(dr.cfg, guard, client).handler(),
+		Handler: newDelegateServer(dr.cfg, guard, client, verifier).handler(),
 	}
 }
 
@@ -297,10 +302,35 @@ type delegateServer struct {
 	cfg    delegateConfig
 	guard  *SpawnGuard
 	client spawnClient
+	// verifier recovers THIS run's id from the run capability as the spawn-tree ROOT fallback (L11) when
+	// the X-Ctxmesh-Spawn-Root header did not propagate to /delegate. nil ⇒ the fallback is disabled and
+	// the advisory guard keys on the scope bucket as before (the BFF's server-side budget stays
+	// authoritative, C19) — so a missing/bad capability public key never breaks a delegation.
+	verifier *runcap.Verifier
 }
 
-func newDelegateServer(cfg delegateConfig, guard *SpawnGuard, client spawnClient) *delegateServer {
-	return &delegateServer{cfg: cfg, guard: guard, client: client}
+func newDelegateServer(
+	cfg delegateConfig, guard *SpawnGuard, client spawnClient, verifier *runcap.Verifier,
+) *delegateServer {
+	return &delegateServer{cfg: cfg, guard: guard, client: client, verifier: verifier}
+}
+
+// selfRunID recovers THIS run's id from the VERIFIED run capability — the authoritative spawn-tree root
+// for a ROOT supervisor whose X-Ctxmesh-Spawn-Root header did not reach /delegate (L11: an SDK-driven
+// delegation historically relayed no spawn headers, so the guard degraded to root "" and every tree
+// double-counted in ONE scope bucket). Returns "" when the token can't be verified (no verifier, or a
+// bad/expired token): the advisory counter then keys on the scope bucket as before and NEVER fails the
+// delegation — the BFF's server-side spawn budget is authoritative (C19). Verifying (not merely reading
+// the `run` claim) keeps this security-adjacent partition key from being agent-forgeable.
+func (s *delegateServer) selfRunID(capToken string) string {
+	if s.verifier == nil || capToken == "" {
+		return ""
+	}
+	verified, err := s.verifier.Verify(capToken)
+	if err != nil {
+		return ""
+	}
+	return verified.RunID
 }
 
 // targetURL resolves a roster member's cluster-local ksvc URL (the A2A convention).
@@ -365,7 +395,14 @@ func (s *delegateServer) handleDelegate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Spawn-tree context (from the run-worker's headers; first-hop defaults for a root supervisor).
+	// L11: when the spawn-root header did not propagate (an SDK-driven delegation historically relayed
+	// none), key the advisory guard on THIS run's own identity — the authoritative tree root for a root
+	// supervisor — recovered from the VERIFIED run capability, instead of degrading to the scope-global
+	// "" bucket where every tree double-counts. The BFF's server-side spawn budget stays authoritative.
 	root := strings.TrimSpace(r.Header.Get(headerSpawnRoot))
+	if root == "" {
+		root = s.selfRunID(capToken)
+	}
 	depth := headerInt(r, headerSpawnDepth, 0)
 	ancestry := splitPath(r.Header.Get(headerSpawnPath), s.cfg.SelfName)
 
