@@ -108,3 +108,25 @@ class ApprovalRequiredError(CtxmeshError):
         super().__init__(message)
         self.key = key
         self.summary = summary
+
+
+class DelegateWaitingError(CtxmeshError):
+    """A root supervisor delegated and chose to SUSPEND rather than block (L7, ADR 0091).
+
+    Raised inside the managed loop when a depth-0 durable supervisor issues one or more
+    ``delegate_to`` calls: instead of blocking a worker for the sub-agents' lifetimes, the loop
+    serializes its state (``checkpoint`` — an opaque loop-state payload) and records the delegations
+    (``delegates``). :func:`run_managed_loop` turns it into a ``delegate_waiting`` OUTCOME the BFF
+    worker enacts as one durable suspend transaction (child-create + parent→waiting). When the
+    children finish, the supervisor is re-invoked with the checkpoint and continues from where it
+    paused — the children's results are re-dispatched through the idempotent blocking delegate path.
+    """
+
+    def __init__(self, message: str, *, checkpoint: str, delegates: list, steps: int = 0):
+        super().__init__(message)
+        #: The opaque loop-state payload (a JSON string) the BFF wraps in a hashed envelope.
+        self.checkpoint = checkpoint
+        #: The delegations to enact: ``[{sub_agent, endpoint, input, step, call_id}]``.
+        self.delegates = delegates
+        #: The loop step at which the suspend occurred (for the outcome's step count).
+        self.steps = steps

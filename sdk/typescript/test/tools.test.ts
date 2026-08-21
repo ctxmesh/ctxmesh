@@ -594,6 +594,40 @@ describe("ToolsClient.delegate", () => {
     const req = plane.delegate.requests[0];
     expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
   });
+
+  it("relays suspend + spawn headers on an L7 suspend-signal request (ADR 0091)", async () => {
+    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
+    const client = new ToolsClient(config);
+
+    await client.delegate("researcher", "find it", "3", "c1", {
+      suspend: true,
+      spawnRoot: "root-9",
+      spawnDepth: 0,
+    });
+
+    const req = plane.delegate.requests[0];
+    expect(req?.json()).toMatchObject({
+      subAgent: "researcher",
+      input: "find it",
+      step: "3",
+      callId: "c1",
+      suspend: true,
+    });
+    expect(req?.headers["x-ctxmesh-spawn-root"]).toBe("root-9");
+    expect(req?.headers["x-ctxmesh-spawn-depth"]).toBe("0"); // depth 0 IS relayed (a root supervisor)
+  });
+
+  it("omits suspend + spawn headers on a plain delegate (byte-for-byte the M64 call)", async () => {
+    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
+    const client = new ToolsClient(config);
+
+    await client.delegate("researcher", "task");
+
+    const req = plane.delegate.requests[0];
+    expect(req?.json()).not.toHaveProperty("suspend");
+    expect(req?.headers["x-ctxmesh-spawn-root"]).toBeUndefined();
+    expect(req?.headers["x-ctxmesh-spawn-depth"]).toBeUndefined();
+  });
 });
 
 // ── handoff() ────────────────────────────────────────────────────────────────

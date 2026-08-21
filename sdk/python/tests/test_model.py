@@ -234,7 +234,6 @@ def test_content_null_empty_tool_calls_raises():
         stub.__exit__(None, None, None)
 
 
-
 # ── m32.7: streaming token source ─────────────────────────────────────────────
 
 from ctxmesh import _http  # noqa: E402

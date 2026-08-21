@@ -72,6 +72,12 @@ _HANDOFF_ENDPOINT = "http://127.0.0.1:2994/handoff"
 #: generous — a sub-agent may itself do several tool round-trips.
 _DELEGATE_TIMEOUT = 600.0
 
+#: The spawn-tree position headers (mirrors internal/bff/invoke.go). Relayed on a /delegate call so
+#: the launcher's depth gate (L7 suspension is depth-0 only) + spawn guard key on the authoritative
+#: root, rather than defaulting to depth 0 / root "" for every SDK-driven delegation.
+SPAWN_ROOT_HEADER = "X-Ctxmesh-Spawn-Root"
+SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth"
+
 #: A handoff is NOT awaited (the transfer terminates this turn) — the launcher only relays to the
 #: BFF, terminates A, and queues B, so this is a short round-trip.
 _HANDOFF_TIMEOUT = 30.0
@@ -434,7 +440,17 @@ class ToolsClient:
         except (json.JSONDecodeError, TypeError):
             return raw_text
 
-    def delegate(self, sub_agent: str, task: str, step: str, call_id: str) -> Dict[str, Any]:
+    def delegate(
+        self,
+        sub_agent: str,
+        task: str,
+        step: str,
+        call_id: str,
+        *,
+        suspend: bool = False,
+        spawn_root: str = "",
+        spawn_depth: int = -1,
+    ) -> Dict[str, Any]:
         """Delegate a subtask to a roster sub-agent via the launcher-local endpoint (M64, ADR 0057).
 
         The launcher applies the spawn guard, starts the sub-agent as a durable SUB-RUN, waits for
@@ -443,14 +459,37 @@ class ToolsClient:
         ``step`` + ``call_id`` are the idempotency key — a reclaimed supervisor re-issuing the same
         call resolves the SAME sub-run. A denial or a failure comes back as ``ok=false`` (an outcome
         the model reads), never an exception — the loop threads it as the tool result.
+
+        *suspend* (L7, ADR 0091) asks the launcher, at depth 0, for a durable-suspend SIGNAL instead
+        of a blocking await: the launcher budget-checks + resolves the target endpoint and returns
+        ``{"ok": true, "suspend": true, "endpoint": ...}`` WITHOUT spawning or blocking — the caller
+        (the managed loop) then suspends and the BFF worker creates the sub-run. An older launcher
+        that doesn't know the flag simply blocks and returns a normal ``{ok, answer}`` — the caller
+        detects the missing ``suspend`` and threads that result inline (graceful mixed-version
+        fallback). *spawn_root* / *spawn_depth* relay this run's spawn-tree position so the
+        launcher's depth gate (suspension is depth-0 only) + spawn guard key on the true root.
         """
-        body = json.dumps(
-            {"subAgent": sub_agent, "input": task, "step": step, "callId": call_id}
-        ).encode()
+        payload: Dict[str, Any] = {
+            "subAgent": sub_agent,
+            "input": task,
+            "step": step,
+            "callId": call_id,
+        }
+        if suspend:
+            payload["suspend"] = True
+        body = json.dumps(payload).encode()
         headers = {"Content-Type": "application/json"}
         capability = current_capability()
         if capability:
             headers[CAPABILITY_HEADER] = capability
+        # Relay the spawn-tree position (m108.5): the launcher's depth gate + guard key are
+        # otherwise
+        # blind to SDK-driven delegations (they default to depth 0 / root ""), making the depth-0
+        # suspension gate vacuous. Only relayed when known (a root supervisor passes spawn_depth=0).
+        if spawn_depth >= 0:
+            headers[SPAWN_DEPTH_HEADER] = str(spawn_depth)
+        if spawn_root:
+            headers[SPAWN_ROOT_HEADER] = spawn_root
         resp = _http.request(
             "POST",
             _DELEGATE_ENDPOINT,

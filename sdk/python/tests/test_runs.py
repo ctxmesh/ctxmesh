@@ -48,13 +48,24 @@ def test_create_posts_run_and_parses_id(monkeypatch):
 
 
 def test_get_parses_messages_and_requires_action(monkeypatch):
-    rec = _Recorder([
-        _resp(200, {
-            "id": "run-1", "status": "requires_action", "traceId": "tr-1",
-            "messages": [{"role": "assistant", "content": "awaiting"}],
-            "requiresAction": {"kind": "approval", "key": "send-email", "message": "Send it?"},
-        })
-    ])
+    rec = _Recorder(
+        [
+            _resp(
+                200,
+                {
+                    "id": "run-1",
+                    "status": "requires_action",
+                    "traceId": "tr-1",
+                    "messages": [{"role": "assistant", "content": "awaiting"}],
+                    "requiresAction": {
+                        "kind": "approval",
+                        "key": "send-email",
+                        "message": "Send it?",
+                    },
+                },
+            )
+        ]
+    )
     monkeypatch.setattr(_http, "request", rec.request)
 
     run = RunsClient("https://c").get("run-1")
@@ -89,10 +100,22 @@ def test_cancel_posts(monkeypatch):
 def test_stream_parses_sse_frames(monkeypatch):
     # A realistic BFF SSE stream: two token frames, a message, then the terminal state.
     lines = [
-        "id:1", "event:token", "data:Hel", "",
-        "id:2", "event:token", "data:lo", "",
-        "id:3", "event:message", "data:Hello", "",
-        "id:4", "event:state", "data:succeeded", "",
+        "id:1",
+        "event:token",
+        "data:Hel",
+        "",
+        "id:2",
+        "event:token",
+        "data:lo",
+        "",
+        "id:3",
+        "event:message",
+        "data:Hello",
+        "",
+        "id:4",
+        "event:state",
+        "data:succeeded",
+        "",
     ]
 
     def fake_stream(method, url, *, body=None, headers=None, timeout=30.0):
@@ -113,12 +136,20 @@ def test_stream_parses_sse_frames(monkeypatch):
 
 def test_run_sugar_creates_then_polls_to_terminal(monkeypatch):
     # create → queued; then get → running, then succeeded (poll stops on terminal).
-    rec = _Recorder([
-        _resp(202, {"id": "run-1", "status": "queued"}),
-        _resp(200, {"id": "run-1", "status": "running"}),
-        _resp(200, {"id": "run-1", "status": "succeeded",
-                    "messages": [{"role": "assistant", "content": "done"}]}),
-    ])
+    rec = _Recorder(
+        [
+            _resp(202, {"id": "run-1", "status": "queued"}),
+            _resp(200, {"id": "run-1", "status": "running"}),
+            _resp(
+                200,
+                {
+                    "id": "run-1",
+                    "status": "succeeded",
+                    "messages": [{"role": "assistant", "content": "done"}],
+                },
+            ),
+        ]
+    )
     monkeypatch.setattr(_http, "request", rec.request)
 
     final = RunsClient("https://c").run(agent="a", input={"input": "x"}, poll_interval=0.0)
@@ -129,11 +160,19 @@ def test_run_sugar_creates_then_polls_to_terminal(monkeypatch):
 
 
 def test_run_sugar_returns_on_requires_action(monkeypatch):
-    rec = _Recorder([
-        _resp(202, {"id": "run-1", "status": "queued"}),
-        _resp(200, {"id": "run-1", "status": "requires_action",
-                    "requiresAction": {"kind": "consent_required", "servers": ["gh"]}}),
-    ])
+    rec = _Recorder(
+        [
+            _resp(202, {"id": "run-1", "status": "queued"}),
+            _resp(
+                200,
+                {
+                    "id": "run-1",
+                    "status": "requires_action",
+                    "requiresAction": {"kind": "consent_required", "servers": ["gh"]},
+                },
+            ),
+        ]
+    )
     monkeypatch.setattr(_http, "request", rec.request)
 
     run = RunsClient("https://c").run(agent="a", input={}, poll_interval=0.0)

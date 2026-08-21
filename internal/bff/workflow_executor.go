@@ -364,7 +364,7 @@ func (s *Server) failExhaustedNode(runID string, cur *agentsv1beta1.WorkflowStep
 	if reason == "" {
 		reason = fmt.Sprintf("node %q sub-run ended %s", cur.Name, failed.Status)
 	}
-	s.cancelCascade(runID)
+	s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
 	s.failWorkflow(runID, fmt.Sprintf("workflow node %q failed after %d attempt(s): %s", cur.Name, prog.Attempts+1, reason))
 }
 
@@ -601,7 +601,7 @@ func (s *Server) reserveNodeSpawn(runID string, rn *run.Run) bool {
 		return false
 	}
 	if !ok {
-		s.cancelCascade(runID)
+		s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
 		s.failWorkflow(runID, fmt.Sprintf("workflow node launch denied: total spawn budget (%d) exhausted", spec.Budget.MaxTotalSpawns))
 		return false
 	}
@@ -746,7 +746,7 @@ func (s *Server) resumeMapNode(
 			if reason == "" {
 				reason = fmt.Sprintf("item %d sub-run ended %s", i, child.Status)
 			}
-			s.cancelCascade(runID)
+			s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
 			s.failWorkflow(runID, fmt.Sprintf("workflow map node %q item %d failed: %s", cur.Name, i, reason))
 			return nil, false, true
 		}
@@ -795,7 +795,7 @@ func (s *Server) resumeMapNodeAny(
 		if child.Status == run.StatusSucceeded {
 			// FIRST success wins: its output (a single-element list) is the map's output; cancel the rest.
 			out := decodeNodeOutput(child)
-			s.cancelCascade(runID)
+			s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
 			list, err := json.Marshal([]json.RawMessage{out})
 			if err != nil {
 				s.failWorkflow(runID, fmt.Sprintf("workflow map node %q: encoding winning item %d output: %v", cur.Name, i, err))
@@ -939,7 +939,7 @@ func (s *Server) resumeLoopNode(
 		if reason == "" {
 			reason = fmt.Sprintf("iteration %d sub-run ended %s", lp.Iteration, child.Status)
 		}
-		s.cancelCascade(runID)
+		s.cancelCascade(runID, "cancelled: sibling node failed (workflow fail-fast)")
 		s.failWorkflow(runID, fmt.Sprintf("workflow loop node %q iteration %d failed: %s", cur.Name, lp.Iteration, reason))
 		return nil, false, true
 	}
@@ -1181,24 +1181,46 @@ func (s *Server) failWorkflow(runID, reason string) {
 	}
 }
 
-// cancelCascade cancels the workflow run's NON-TERMINAL child sub-runs (ADR 0060 fail-fast consequence): when
-// a node fails (or the workflow is cancelled/expired), any siblings still running/queued/waiting are cancelled
-// so no orphaned node keeps executing. Store-level: children are runs whose ParentRunID == the workflow run.
-// Best-effort + idempotent (a child already terminal is skipped).
-func (s *Server) cancelCascade(workflowRunID string) {
+// cancelCascade cancels the ENTIRE SUBTREE rooted at rootID — every non-terminal DESCENDANT (L9, ADR 0091),
+// not just its direct children. Durable suspend/resume (L7) removed the blocking long-poll that used to reap a
+// canceled parent's nested-blocking descendants, so a depth-1 cancel would leak grandchildren burning tokens
+// with no consumer. It BFS-walks ParentRunID edges (via List) so it reaches waiting/requires_action descendants
+// too (every non-terminal state → cancelled is a legal transition). `reason` is stamped on each cancelled run's
+// Error. rootID itself is NOT cancelled here — the caller already transitioned it (a fail-fast node / a user
+// cancel); only its descendants are. Best-effort + idempotent (a descendant already terminal is skipped).
+func (s *Server) cancelCascade(rootID, reason string) {
+	// Index non-root runs by parent for an O(1) frontier walk over the subtree.
+	childrenOf := map[string][]*run.Run{}
 	for _, r := range s.runStore.List() {
-		if r.ParentRunID != workflowRunID || r.Status.IsTerminal() {
-			continue
+		if r.ParentRunID != "" {
+			childrenOf[r.ParentRunID] = append(childrenOf[r.ParentRunID], r)
 		}
-		if _, err := s.runStore.Update(r.ID, func(x *run.Run) error {
-			if x.Status.IsTerminal() {
-				return nil // raced to terminal — nothing to cancel
+	}
+	seen := map[string]bool{rootID: true}
+	for frontier := []string{rootID}; len(frontier) > 0; {
+		var next []string
+		for _, pid := range frontier {
+			for _, c := range childrenOf[pid] {
+				if seen[c.ID] {
+					continue // cycle guard (lineage should be acyclic, but never loop)
+				}
+				seen[c.ID] = true
+				next = append(next, c.ID) // recurse even into a terminal node — it may have live children
+				if c.Status.IsTerminal() {
+					continue
+				}
+				if _, err := s.runStore.Update(c.ID, func(x *run.Run) error {
+					if x.Status.IsTerminal() {
+						return nil // raced to terminal — nothing to cancel
+					}
+					x.Error = reason
+					return x.Transition(run.StatusCancelled, time.Now())
+				}); err != nil {
+					s.log.Info("cancel-cascade skipped a descendant", "root", rootID, "run", c.ID, "err", err.Error())
+				}
 			}
-			x.Error = "cancelled: sibling node failed (workflow fail-fast)"
-			return x.Transition(run.StatusCancelled, time.Now())
-		}); err != nil {
-			s.log.Info("workflow: cancel-cascade skipped a child", "workflow", workflowRunID, "child", r.ID, "err", err.Error())
 		}
+		frontier = next
 	}
 }
 

@@ -78,6 +78,11 @@ class InvokeRequest:
     #: Approval keys the caller granted for this run (human-in-the-loop resume, m32.4);
     #: already bound via ``request_scope`` so ``pause_for_approval`` proceeds instead of pausing.
     approvals: list = field(default_factory=list)
+    #: The L7 resume envelope (ADR 0091), present only when the platform re-invokes a supervisor
+    #: that
+    #: SUSPENDED on a delegate: the stock managed loop verifies it and continues from the checkpoint
+    #: instead of starting fresh. ``None`` on every ordinary run. A custom handler may ignore it.
+    checkpoint: Optional[Any] = None
     #: The conversation/thread id for this run: the inbound ``X-Conversation-Id`` (a console
     #: chat / A2A hop) or, for an autonomous run with no session, a freshly minted per-run id.
     conversation_id: Optional[str] = None
@@ -94,19 +99,21 @@ class InvokeRequest:
 
 
 def _parse_body(raw: bytes) -> tuple:
-    """Parse the /invoke body into ``(input, approvals)``. Tolerant like the reference
-    entrypoint: non-JSON is treated as the raw prompt text (never a 500)."""
+    """Parse the /invoke body into ``(input, approvals, checkpoint)``. Tolerant like the reference
+    entrypoint: non-JSON is treated as the raw prompt text (never a 500). *checkpoint* is the
+    platform-owned L7 resume envelope (ADR 0091) the worker injects on a suspended supervisor's
+    re-invoke — ``None`` on a fresh run; the managed loop re-verifies it before trusting it."""
     approvals: list = []
     try:
         body = json.loads(raw or b"{}")
     except json.JSONDecodeError:
-        return raw.decode(errors="replace"), approvals
+        return raw.decode(errors="replace"), approvals, None
     if not isinstance(body, dict):
-        return str(body), approvals
+        return str(body), approvals, None
     raw_approvals = body.get("approvals")
     if isinstance(raw_approvals, list):
         approvals = [str(a) for a in raw_approvals]
-    return str(body.get("input", "")), approvals
+    return str(body.get("input", "")), approvals, body.get("checkpoint")
 
 
 def _autonomous_conversation_id(headers: Mapping[str, str]) -> Optional[str]:
@@ -140,6 +147,11 @@ def _envelope(agent_name: str, result: HandlerResult) -> Dict[str, Any]:
         # does not append an empty answer over the recorded handoff outcome (and the console can
         # render the transfer).
         body["handoff"] = result.handoff
+    if result.delegate_waiting:
+        # The supervisor SUSPENDED on a delegate (L7, ADR 0091): carry the loop checkpoint + the
+        # delegate intents so the BFF worker enacts child-create + parent→waiting in one
+        # transaction.
+        body["delegate_waiting"] = result.delegate_waiting
     return body
 
 
@@ -161,20 +173,19 @@ def process_invoke(
     the managed loop, which re-binds them. Errors from the handler propagate (the HTTP layer maps
     them to a 502 / SSE ``error`` frame) — never swallowed.
     """
-    user_input, approvals = _parse_body(raw_body)
+    user_input, approvals, checkpoint = _parse_body(raw_body)
     conversation_id = _autonomous_conversation_id(headers)
     req = InvokeRequest(
         input=user_input,
         headers=dict(headers),
         approvals=approvals,
+        checkpoint=checkpoint,
         conversation_id=conversation_id,
         client=client,
         emit_token=on_token or (lambda _text: None),
         emit_step=on_step or (lambda _frame: None),
     )
-    with client.trace.request_context(headers), client.request_scope(
-        headers, approvals=approvals
-    ):
+    with client.trace.request_context(headers), client.request_scope(headers, approvals=approvals):
         result = handler(req)
     return _envelope(agent_name, result)
 
@@ -193,6 +204,7 @@ def _managed_handler(config: ManagedConfig) -> Handler:
             conversation_id=req.conversation_id,
             on_token=req.emit_token,
             on_step=req.emit_step,
+            checkpoint=req.checkpoint,
         )
 
     return handle

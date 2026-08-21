@@ -42,19 +42,26 @@ import type { ValidateFunction } from "ajv";
 import { capabilityScope } from "./_capability.js";
 import { currentRecordRunId, recordScope } from "./_record.js";
 import { approvalScope, pauseForApproval, voucherScope } from "./_approval.js";
+import * as checkpoint from "./_checkpoint.js";
 import * as semconv from "./_semconv.js";
 import { Client } from "./client.js";
 import {
   ApprovalRequiredError,
   ConfigError,
   ConsentRequiredError,
+  DelegateWaitingError,
   EndpointError,
   GuardrailBlockedError,
 } from "./errors.js";
 import { autoInjectNames } from "./knowledge.js";
 import type { ChatResponse, ToolCall } from "./model.js";
 import type { Tool } from "./tools.js";
-import { DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "./tools.js";
+import {
+  DELEGATE_TOOL_NAME,
+  HANDOFF_TOOL_NAME,
+  KNOWLEDGE_SEARCH_TOOL_NAME,
+  SPAWN_ROOT_HEADER,
+} from "./tools.js";
 
 /**
  * A sane default bound: enough for a few tool round-trips, low enough that a runaway (a
@@ -115,6 +122,26 @@ function spawnDepthFromHeaders(headers: Record<string, string> | undefined): num
   if (!raw) return 0;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Read the spawn-tree root (X-Ctxmesh-Spawn-Root) from inbound headers, "" when absent. The BFF stamps
+ * it ONLY on a durable-run invoke — so its PRESENCE distinguishes a durable run (suspendable +
+ * re-invokable) from the synchronous Playground path (which cannot suspend). L7 suspension is gated on
+ * it: a marker emitted on the synchronous path is never enacted, so the loop falls back to blocking.
+ */
+function spawnRootFromHeaders(headers: Record<string, string> | undefined): string {
+  return headerValue(headers, SPAWN_ROOT_HEADER);
+}
+
+/**
+ * Whether L7 durable delegate suspension (ADR 0091) is enabled. On by default (transparent — a
+ * supervisor need not opt in); an operator forces the legacy blocking path with
+ * `CTXMESH_DELEGATE_BLOCKING=1` (the escape hatch).
+ */
+function delegateSuspendEnabled(): boolean {
+  const v = (process.env["CTXMESH_DELEGATE_BLOCKING"] ?? "").trim().toLowerCase();
+  return v !== "1" && v !== "true" && v !== "yes";
 }
 
 /**
@@ -416,6 +443,12 @@ export interface ManagedResult {
   guardrailBlocked?: { detector: string; scanPoint: string };
   /** When the agent called handoff_to (M67), the transfer outcome. */
   handoff?: Record<string, string>;
+  /**
+   * When a depth-0 supervisor delegated and SUSPENDED (L7, ADR 0091), `{checkpoint, delegates}`.
+   * Present ⇒ the run is NOT terminal: the BFF worker creates the sub-run(s) and parks this run
+   * `waiting` on them, then re-invokes it with the checkpoint when they finish.
+   */
+  delegateWaiting?: { checkpoint: string; delegates: Array<Record<string, string>> };
 }
 
 /**
@@ -960,6 +993,12 @@ export interface RunManagedLoopOptions {
   onStep?: (frame: StepFrame) => void;
   approvals?: Iterable<string>;
   conversationId?: string;
+  /**
+   * The L7 resume envelope (ADR 0091) the platform injects when re-invoking a supervisor that
+   * SUSPENDED on a delegate: when present and verified, the loop restores its state and continues
+   * from where it paused. A corrupt/version-skewed checkpoint is ignored and the turn runs fresh.
+   */
+  checkpoint?: unknown;
 }
 
 /**
@@ -1000,18 +1039,58 @@ export async function runManagedLoop(
     ? await loadHistory(client, conversationId, config.maxHistoryMessages)
     : [];
 
-  // Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a per-run UNPREDICTABLE
-  // delimiter token, generated ONCE per run. Every tool result gets wrapped in it as untrusted
-  // DATA; the matching system-prompt instruction tells the model never to obey instructions found
-  // inside it. Always-on (a security default, not opt-in). Composes with M66's proxy scan.
-  const spotlightToken = newSpotlightToken();
-  const messages: Array<Record<string, unknown>> = [
-    { role: "system", content: config.systemPrompt + spotlightSystemInstruction(spotlightToken) },
-    ...history,
-    { role: "user", content: userInput },
-  ];
-  const toolsCalled: string[] = [];
-  const consentRequired: string[] = [];
+  // L7 durable delegate suspension (ADR 0091): eligible only for a durable ROOT supervisor — the
+  // feature on (default), inbound spawn-depth 0 (a non-root supervisor blocks — nested suspension is
+  // v1-deferred), AND a spawn-root header present (the synchronous Playground path has none, and a
+  // marker emitted there is never enacted — so it must fall back to blocking).
+  const spawnRoot = spawnRootFromHeaders(headers);
+  const suspendEligible = delegateSuspendEnabled() && spawnDepth === 0 && Boolean(spawnRoot);
+
+  // Restore from an L7 checkpoint when the platform re-invoked a suspended supervisor. verifyAndExtract
+  // is fail-safe: a corrupt/version-skewed envelope yields null → run fresh.
+  const restored =
+    opts.checkpoint !== undefined && opts.checkpoint !== null
+      ? checkpoint.verifyAndExtract(opts.checkpoint)
+      : null;
+
+  let spotlightToken: string;
+  let messages: Array<Record<string, unknown>>;
+  let toolsCalled: string[];
+  let consentRequired: string[];
+  let startStep: number;
+  let startModelIndex: number;
+  let startToolIndex: number;
+  let pending: checkpoint.PendingDelegate[] | null;
+
+  if (restored !== null) {
+    // Resume: rebuild the exact loop state. History/memory/knowledge are NOT re-injected (the
+    // checkpointed messages ARE the state); the spotlight token is REUSED (the system message embeds
+    // its instruction — a fresh token would silently break K1 spotlighting).
+    spotlightToken = restored.spotlight_token;
+    messages = restored.messages;
+    toolsCalled = [...restored.tools_called];
+    consentRequired = [...restored.consent_required];
+    startStep = restored.step + 1; // the suspended step is done; resume at the next
+    startModelIndex = restored.model_index;
+    startToolIndex = restored.tool_index;
+    pending = restored.pending;
+  } else {
+    // Fresh run (today's path). Prompt-injection spotlighting (Theme K / K1, ADR 0059 Fork-4): a
+    // per-run UNPREDICTABLE delimiter token, generated ONCE per run. Every tool result is wrapped in it
+    // as untrusted DATA; the system-prompt instruction tells the model never to obey what's inside.
+    spotlightToken = newSpotlightToken();
+    messages = [
+      { role: "system", content: config.systemPrompt + spotlightSystemInstruction(spotlightToken) },
+      ...history,
+      { role: "user", content: userInput },
+    ];
+    toolsCalled = [];
+    consentRequired = [];
+    startStep = 1;
+    startModelIndex = 0;
+    startToolIndex = 0;
+    pending = null;
+  }
   // Per-call step holder: the approval/guardrail catch reports the step at which the loop
   // broke. Threaded (not module-scoped) so concurrent runs never observe each other's step.
   const stepHolder = { value: 0 };
@@ -1026,16 +1105,34 @@ export async function runManagedLoop(
       client.trace.loop("managed-agent", headers, async (root) => {
         root.setInput(userInput);
 
-        if (config.useAgentMemory && client.config.longtermWired) {
-          await injectAgentMemory(client, messages, userInput, config);
-        }
+        if (restored !== null) {
+          // L7 resume (ADR 0091): the suspended delegations' results are re-dispatched through the
+          // IDEMPOTENT BLOCKING delegate path — the launcher's /delegate → /spawn finds the already-
+          // created terminal child (same deterministic id) and its await returns on the first poll (no
+          // double-spawn, no budget re-charge). Each threads as this pending call's tool message, in
+          // order, spotlight-wrapped with the SAME per-run token — then the loop continues from startStep.
+          for (const p of pending ?? []) {
+            const content = await dispatchDelegateOne(client, p.sub_agent, p.task, p.step, p.call_id);
+            toolsCalled.push(DELEGATE_TOOL_NAME);
+            messages.push({
+              role: "tool",
+              tool_call_id: p.call_id,
+              name: DELEGATE_TOOL_NAME,
+              content: spotlightToolContent(content, spotlightToken),
+            });
+          }
+        } else {
+          if (config.useAgentMemory && client.config.longtermWired) {
+            await injectAgentMemory(client, messages, userInput, config);
+          }
 
-        // Opt-in knowledge auto-inject (ADR 0061 governance #5, M10): for each KB whose binding set
-        // autoInject, prepend relevant chunks (with citations) as ephemeral <retrieved_context>. Inside
-        // capabilityScope so a perUser KB's launcher proxy retrieval is scoped to the caller (m80.4).
-        // Best-effort — a retrieval hiccup never breaks the turn; never persisted to session history.
-        if (config.knowledgeAutoInject.length && client.config.knowledgeEnabled) {
-          await injectKnowledge(client, messages, userInput, config);
+          // Opt-in knowledge auto-inject (ADR 0061 governance #5, M10): for each KB whose binding set
+          // autoInject, prepend relevant chunks (with citations) as ephemeral <retrieved_context>. Inside
+          // capabilityScope so a perUser KB's launcher proxy retrieval is scoped to the caller (m80.4).
+          // Best-effort — a retrieval hiccup never breaks the turn; never persisted to session history.
+          if (config.knowledgeAutoInject.length && client.config.knowledgeEnabled) {
+            await injectKnowledge(client, messages, userInput, config);
+          }
         }
 
         try {
@@ -1052,8 +1149,26 @@ export async function runManagedLoop(
             stepHolder,
             spotlightToken,
             breaker,
+            startStep,
+            spawnRoot,
+            suspendEligible,
+            modelIndex: startModelIndex,
+            toolIndex: startToolIndex,
           });
         } catch (err) {
+          if (err instanceof DelegateWaitingError) {
+            // L7 (ADR 0091): a depth-0 supervisor delegated and SUSPENDED. Surface the durable-suspend
+            // marker — the BFF worker creates the sub-run(s), parks this run `waiting` on them, and
+            // re-invokes it with the checkpoint when they finish. NOT terminal (no answer).
+            root.setOutput("delegating (suspended)");
+            return {
+              output: "",
+              steps: err.steps,
+              toolsCalled,
+              consentRequired,
+              delegateWaiting: { checkpoint: err.checkpoint, delegates: err.delegates },
+            };
+          }
           if (err instanceof ApprovalRequiredError) {
             root.setOutput(`approval required: ${err.summary}`);
             return {
@@ -1104,6 +1219,20 @@ interface DriveState {
   spotlightToken: string;
   /** O5: the per-run tool circuit breaker, or null when unconfigured (the loop is then unchanged). */
   breaker: CircuitBreaker | null;
+  /**
+   * L7 (ADR 0091): the first step number — 1 on a fresh run, or the resumed step on a checkpoint
+   * restore. Bounds the loop as `startStep..maxSteps` so a resumed supervisor keeps the SAME runaway
+   * budget (ADR 0013) rather than refreshing it each suspend cycle.
+   */
+  startStep: number;
+  /** L7: the spawn-tree root relayed on the suspend-signal delegate call (guard/depth keying). */
+  spawnRoot: string;
+  /** L7: whether a depth-0 delegation SUSPENDS (durable) or blocks. */
+  suspendEligible: boolean;
+  /** M78 step-frame model-channel counter, restored across an L7 resume so fixture refs stay in order. */
+  modelIndex: number;
+  /** M78 step-frame tool-channel counter, restored across an L7 resume. */
+  toolIndex: number;
 }
 
 /** The tool-calling loop body — extracted so the caller wraps it in the scopes + catch. */
@@ -1124,15 +1253,17 @@ async function driveLoop(
   // (deferred) fixture stepper resolves against: modelIndex increments per model call, toolIndex per
   // tool dispatch — matching the fixture's model/tool channel ordering (§2).
   const emitStep = state.onStep ?? ((_frame: StepFrame): void => undefined);
-  let modelIndex = 0;
-  let toolIndex = 0;
+  // M78 channel counters — restored across an L7 resume (state.modelIndex/toolIndex) so a recorded
+  // run's fixture refs stay in sequence across suspend/resume; 0 on a fresh run.
+  let modelIndex = state.modelIndex;
+  let toolIndex = state.toolIndex;
 
   // O4: compile the outputSchema ONCE per run (null when absent/uncompilable → no in-loop
   // validation). schemaRepairs counts corrective re-asks, bounded SEPARATELY from maxSteps.
   const outputValidator = compileOutputSchema(config.outputSchema);
   let schemaRepairs = 0;
 
-  for (let step = 1; step <= config.maxSteps; step += 1) {
+  for (let step = state.startStep; step <= config.maxSteps; step += 1) {
     state.stepHolder.value = step;
     const result = await client.trace.step(`turn-${step}`, async (turn) => {
       const chatOpts: Record<string, unknown> = { ...config.modelOpts };
@@ -1306,6 +1437,40 @@ async function driveLoop(
         }
       }
 
+      // L7 durable suspension (ADR 0091): at depth 0 (suspendEligible), RECORD each delegation as
+      // intent (ask the launcher for a suspend-signal = resolved endpoint, no spawn/await) instead of
+      // blocking. `pendingDelegates` are suspended-on; the rest (an older launcher that blocks, or a
+      // refusal) come back as normal results threaded inline — the mixed-version fallback.
+      const pendingDelegates: Array<{ callId: string; subAgent: string; task: string; endpoint: string }> = [];
+      const suspendInline = new Map<string, string>();
+      if (state.suspendEligible) {
+        for (const call of resp.toolCalls) {
+          const id = callId(call);
+          if (callName(call) !== DELEGATE_TOOL_NAME || blocked.has(id)) continue;
+          const args = parseArguments(call.function?.arguments);
+          const subAgent = String(args["sub_agent"] ?? "");
+          const task = String(args["task"] ?? "");
+          const sig = await client.tools.delegate(subAgent, task, String(step), id, {
+            suspend: true,
+            spawnRoot: state.spawnRoot,
+            spawnDepth: state.spawnDepth,
+          });
+          if (sig && sig["suspend"]) {
+            pendingDelegates.push({ callId: id, subAgent, task, endpoint: String(sig["endpoint"] ?? "") });
+          } else {
+            suspendInline.set(
+              id,
+              sig && sig["ok"]
+                ? String(sig["answer"] ?? "")
+                : `delegation to ${JSON.stringify(subAgent)} did not succeed: ${
+                    (sig && sig["error"]) ?? "unknown error"
+                  }`,
+            );
+          }
+        }
+      }
+      const pendingIds = new Set(pendingDelegates.map((p) => p.callId));
+
       // Dispatch each call and append a role:"tool" result.
       for (const call of resp.toolCalls) {
         const name = callName(call);
@@ -1315,13 +1480,25 @@ async function driveLoop(
         if (id === handledHandoffId && handledHandoffId !== "") {
           continue;
         }
+        if (pendingIds.has(id)) {
+          // L7: this delegation SUSPENDED — no tool result yet (its result threads on resume). Append
+          // no message + don't count it here (the resume re-dispatch counts it), so the tally isn't
+          // double-charged across suspend.
+          continue;
+        }
         let content: string;
         if (blocked.has(id)) {
           content = blocked.get(id)!;
         } else if (!toolNames.has(name)) {
           content = `error: tool ${JSON.stringify(name)} is not bound to this agent`;
         } else if (name === DELEGATE_TOOL_NAME) {
-          content = await dispatchDelegate(client, args, String(step), id, state.toolsCalled);
+          if (suspendInline.has(id)) {
+            // Mixed-version fallback: an older launcher blocked; thread its result inline.
+            content = suspendInline.get(id)!;
+            state.toolsCalled.push(DELEGATE_TOOL_NAME);
+          } else {
+            content = await dispatchDelegate(client, args, String(step), id, state.toolsCalled);
+          }
         } else if (name === KNOWLEDGE_SEARCH_TOOL_NAME) {
           content = await dispatchKnowledgeSearch(client, args);
           state.toolsCalled.push(KNOWLEDGE_SEARCH_TOOL_NAME);
@@ -1374,6 +1551,62 @@ async function driveLoop(
         toolIndex += 1;
       }
 
+      // L7 (ADR 0091): after threading this turn's non-suspended results, if any delegations were
+      // recorded as pending, SUSPEND — serialize the loop state + throw, so runManagedLoop returns the
+      // delegate_waiting marker (the BFF worker enacts child-create + parent→waiting). A whole turn's
+      // fan-out collapses to ONE suspend.
+      if (pendingDelegates.length > 0) {
+        const payload = checkpoint.buildPayload({
+          messages,
+          step,
+          pending: pendingDelegates.map((p) => ({
+            call_id: p.callId,
+            step: String(step),
+            sub_agent: p.subAgent,
+            task: p.task,
+          })),
+          tools_called: state.toolsCalled,
+          consent_required: state.consentRequired,
+          spotlight_token: state.spotlightToken,
+          model_index: modelIndex,
+          tool_index: toolIndex,
+        });
+        // Biggest-risk guard (Fable review): the delegate_waiting marker rides the /invoke response,
+        // capped at 4 MiB by the BFF's LimitReader — an oversized marker is silently TRUNCATED (→ no
+        // suspend enacted + a failed run while the SDK believes it suspended). Over threshold, fall
+        // back to BLOCKING dispatch for this turn (graceful M64 degrade) instead of suspending.
+        const payloadBytes = Buffer.byteLength(payload, "utf8");
+        if (payloadBytes > checkpoint.CHECKPOINT_MAX_BYTES) {
+          warn(
+            `L7: checkpoint ${payloadBytes} bytes exceeds cap ${checkpoint.CHECKPOINT_MAX_BYTES} — ` +
+              `falling back to blocking delegate dispatch for this turn`,
+          );
+          for (const p of pendingDelegates) {
+            const content = await dispatchDelegateOne(client, p.subAgent, p.task, String(step), p.callId);
+            state.toolsCalled.push(DELEGATE_TOOL_NAME);
+            messages.push({
+              role: "tool",
+              tool_call_id: p.callId,
+              name: DELEGATE_TOOL_NAME,
+              content: spotlightToolContent(content, state.spotlightToken),
+            });
+          }
+          // fall through: continue the loop (return { done: false })
+        } else {
+          throw new DelegateWaitingError("supervisor suspended on delegate", {
+            checkpoint: payload,
+            delegates: pendingDelegates.map((p) => ({
+              sub_agent: p.subAgent,
+              endpoint: p.endpoint,
+              input: p.task,
+              step: String(step),
+              call_id: p.callId,
+            })),
+            steps: step,
+          });
+        }
+      }
+
       return { done: false as const };
     });
 
@@ -1389,7 +1622,31 @@ async function driveLoop(
 
 // ── synthetic tool dispatch (delegate / handoff / knowledge_search) ─────────────
 
-/** Dispatch a single delegate_to call (M64, ADR 0057). */
+/**
+ * Summon ONE roster sub-agent as a durable sub-run (blocking) and return its result as the tool
+ * content. A denial/failure returns as text the model can act on — not an exception. Shared by the
+ * append-loop blocking path and the L7 resume re-dispatch (where the already-terminal child returns
+ * instantly via the launcher's existing-child short-circuit). Does NOT push toolsCalled — the caller
+ * records it.
+ */
+async function dispatchDelegateOne(
+  client: Client,
+  subAgent: string,
+  task: string,
+  step: string,
+  callIdArg: string,
+): Promise<string> {
+  const sa = subAgent.trim();
+  if (!sa) return "error: delegate_to requires a 'sub_agent'";
+  return client.trace.tool(DELEGATE_TOOL_NAME, { sub_agent: sa, task }, async (span) => {
+    const resp = await client.tools.delegate(sa, task, step, callIdArg);
+    span.setOutput(resp);
+    if (resp["ok"]) return String(resp["answer"] ?? "");
+    return `delegation to ${JSON.stringify(sa)} did not succeed: ${resp["error"] ?? "unknown error"}`;
+  });
+}
+
+/** Dispatch a single delegate_to call (M64, ADR 0057) + record it in toolsCalled. */
 async function dispatchDelegate(
   client: Client,
   args: Record<string, unknown>,
@@ -1397,18 +1654,8 @@ async function dispatchDelegate(
   callIdArg: string,
   toolsCalled: string[],
 ): Promise<string> {
-  const subAgent = String(args["sub_agent"] ?? "").trim();
-  const task = String(args["task"] ?? "");
   toolsCalled.push(DELEGATE_TOOL_NAME);
-  if (!subAgent) return "error: delegate_to requires a 'sub_agent'";
-  return client.trace.tool(DELEGATE_TOOL_NAME, { sub_agent: subAgent, task }, async (span) => {
-    const resp = await client.tools.delegate(subAgent, task, step, callIdArg);
-    span.setOutput(resp);
-    if (resp["ok"]) return String(resp["answer"] ?? "");
-    return `delegation to ${JSON.stringify(subAgent)} did not succeed: ${
-      resp["error"] ?? "unknown error"
-    }`;
-  });
+  return dispatchDelegateOne(client, String(args["sub_agent"] ?? ""), String(args["task"] ?? ""), step, callIdArg);
 }
 
 /** Dispatch a handoff_to call (M67, ADR 0060 §5): TRANSFER the conversation + END the turn. */

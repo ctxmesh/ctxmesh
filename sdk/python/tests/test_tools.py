@@ -10,7 +10,7 @@ from ctxmesh import agent
 from ctxmesh._capability import CAPABILITY_HEADER
 from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
-from ctxmesh.tools import Tool
+from ctxmesh.tools import SPAWN_DEPTH_HEADER, SPAWN_ROOT_HEADER, Tool
 
 from .launcher_stub import DiscoveryStub
 
@@ -368,6 +368,61 @@ def test_delegate_posts_and_relays_capability(client, monkeypatch):
     assert (
         captured["headers"][CAPABILITY_HEADER] == "cap-token"
     ), "the parent capability is relayed (OBO)"
+
+
+def test_delegate_suspend_flag_and_spawn_headers(client, monkeypatch):
+    """delegate(suspend=True, spawn_root, spawn_depth) (L7, ADR 0091) sets `suspend` in the body and
+    relays the spawn-tree position headers, and returns the launcher's suspend-signal verbatim."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "suspend": True, "endpoint": "http://researcher.ns/invoke"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(body=json.loads(body), headers=headers)
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
+
+    out = client.tools.delegate(
+        sub_agent="researcher",
+        task="find it",
+        step="3",
+        call_id="c1",
+        suspend=True,
+        spawn_root="root-9",
+        spawn_depth=0,
+    )
+
+    assert out == {"ok": True, "suspend": True, "endpoint": "http://researcher.ns/invoke"}
+    assert captured["body"]["suspend"] is True
+    assert captured["headers"][SPAWN_ROOT_HEADER] == "root-9"
+    assert captured["headers"][SPAWN_DEPTH_HEADER] == "0", "depth 0 IS relayed (a root supervisor)"
+
+
+def test_delegate_without_suspend_omits_flag_and_headers(client, monkeypatch):
+    """A plain delegate (no suspend, unknown spawn position) is byte-for-byte the M64 blocking call:
+    no `suspend` key, no spawn headers — so existing behavior is unchanged."""
+    captured = {}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "answer": "a"}
+
+    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
+        captured.update(body=json.loads(body), headers=headers)
+        return _Resp()
+
+    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: None)
+
+    client.tools.delegate(sub_agent="r", task="t", step="1", call_id="c1")
+
+    assert "suspend" not in captured["body"]
+    assert SPAWN_ROOT_HEADER not in captured["headers"]
+    assert SPAWN_DEPTH_HEADER not in captured["headers"]
 
 
 # ── handoff_to (M67, ADR 0060 §5) ──────────────────────────────────────────────
