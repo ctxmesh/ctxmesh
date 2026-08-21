@@ -36,10 +36,10 @@ def test_detects_structured_approval_required():
 def test_ignores_non_approval_errors():
     for exc in (
         EndpointError("x", status=500, body='{"error":"approval_required"}'),  # wrong status
-        EndpointError("x", status=403, body='{"error":"consent_required"}'),   # a different 403
-        EndpointError("x", status=403, body=None),                             # no body
-        EndpointError("x", status=403, body="not json"),                       # malformed
-        EndpointError("x", status=None, body=None),                            # transport failure
+        EndpointError("x", status=403, body='{"error":"consent_required"}'),  # a different 403
+        EndpointError("x", status=403, body=None),  # no body
+        EndpointError("x", status=403, body="not json"),  # malformed
+        EndpointError("x", status=None, body=None),  # transport failure
     ):
         _raise_if_approval_required(exc)  # returns without raising
 

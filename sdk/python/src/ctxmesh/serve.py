@@ -78,7 +78,8 @@ class InvokeRequest:
     #: Approval keys the caller granted for this run (human-in-the-loop resume, m32.4);
     #: already bound via ``request_scope`` so ``pause_for_approval`` proceeds instead of pausing.
     approvals: list = field(default_factory=list)
-    #: The L7 resume envelope (ADR 0091), present only when the platform re-invokes a supervisor that
+    #: The L7 resume envelope (ADR 0091), present only when the platform re-invokes a supervisor
+    #: that
     #: SUSPENDED on a delegate: the stock managed loop verifies it and continues from the checkpoint
     #: instead of starting fresh. ``None`` on every ordinary run. A custom handler may ignore it.
     checkpoint: Optional[Any] = None
@@ -148,7 +149,8 @@ def _envelope(agent_name: str, result: HandlerResult) -> Dict[str, Any]:
         body["handoff"] = result.handoff
     if result.delegate_waiting:
         # The supervisor SUSPENDED on a delegate (L7, ADR 0091): carry the loop checkpoint + the
-        # delegate intents so the BFF worker enacts child-create + parent→waiting in one transaction.
+        # delegate intents so the BFF worker enacts child-create + parent→waiting in one
+        # transaction.
         body["delegate_waiting"] = result.delegate_waiting
     return body
 
@@ -183,9 +185,7 @@ def process_invoke(
         emit_token=on_token or (lambda _text: None),
         emit_step=on_step or (lambda _frame: None),
     )
-    with client.trace.request_context(headers), client.request_scope(
-        headers, approvals=approvals
-    ):
+    with client.trace.request_context(headers), client.request_scope(headers, approvals=approvals):
         result = handler(req)
     return _envelope(agent_name, result)
 

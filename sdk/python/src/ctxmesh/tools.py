@@ -72,9 +72,9 @@ _HANDOFF_ENDPOINT = "http://127.0.0.1:2994/handoff"
 #: generous — a sub-agent may itself do several tool round-trips.
 _DELEGATE_TIMEOUT = 600.0
 
-#: The spawn-tree position headers (mirrors internal/bff/invoke.go). Relayed on a /delegate call so the
-#: launcher's depth gate (L7 suspension is depth-0 only) + spawn guard key on the AUTHORITATIVE root
-#: rather than defaulting to depth 0 / root "" for every SDK-driven delegation.
+#: The spawn-tree position headers (mirrors internal/bff/invoke.go). Relayed on a /delegate call so
+#: the launcher's depth gate (L7 suspension is depth-0 only) + spawn guard key on the authoritative
+#: root, rather than defaulting to depth 0 / root "" for every SDK-driven delegation.
 SPAWN_ROOT_HEADER = "X-Ctxmesh-Spawn-Root"
 SPAWN_DEPTH_HEADER = "X-Ctxmesh-Spawn-Depth"
 
@@ -466,8 +466,8 @@ class ToolsClient:
         (the managed loop) then suspends and the BFF worker creates the sub-run. An older launcher
         that doesn't know the flag simply blocks and returns a normal ``{ok, answer}`` — the caller
         detects the missing ``suspend`` and threads that result inline (graceful mixed-version
-        fallback). *spawn_root* / *spawn_depth* relay this run's spawn-tree position so the launcher's
-        depth gate (suspension is depth-0 only) and spawn guard key on the AUTHORITATIVE root.
+        fallback). *spawn_root* / *spawn_depth* relay this run's spawn-tree position so the
+        launcher's depth gate (suspension is depth-0 only) + spawn guard key on the true root.
         """
         payload: Dict[str, Any] = {
             "subAgent": sub_agent,
@@ -482,7 +482,8 @@ class ToolsClient:
         capability = current_capability()
         if capability:
             headers[CAPABILITY_HEADER] = capability
-        # Relay the spawn-tree position (m108.5): the launcher's depth gate + guard key are otherwise
+        # Relay the spawn-tree position (m108.5): the launcher's depth gate + guard key are
+        # otherwise
         # blind to SDK-driven delegations (they default to depth 0 / root ""), making the depth-0
         # suspension gate vacuous. Only relayed when known (a root supervisor passes spawn_depth=0).
         if spawn_depth >= 0:
