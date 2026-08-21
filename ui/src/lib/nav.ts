@@ -3,6 +3,7 @@ import {
   BookOpen,
   Boxes,
   Building2,
+  CheckSquare,
   Coins,
   Database,
   FlaskConical,
@@ -15,6 +16,7 @@ import {
   Network,
   PlugZap,
   ScrollText,
+  Share2,
   Shield,
   SlidersHorizontal,
   TestTube2,
@@ -57,7 +59,8 @@ export type Milestone =
   | "M70"
   | "M73"
   | "M74"
-  | "M76";
+  | "M76"
+  | "M112";
 
 // The golden CRD resources the console probes capabilities for — the plural
 // names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
@@ -276,6 +279,30 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: MessagesSquare,
         milestone: "M16",
         route: "/runs",
+      },
+      {
+        // My Shares (V13) — the caller's share links across all runs. Lets
+        // the caller see + revoke their own live share links from one place.
+        // Read-open: listing is caller-scoped (the BFF gates on the caller's
+        // own identity); revoke is a per-run DELETE, caller-scoped by design.
+        id: "my-shares",
+        label: "My Shares",
+        icon: Share2,
+        milestone: "M112",
+        route: "/my-shares",
+      },
+      {
+        // Plan approvals (V5, M112) — the namespace-scoped queue of runs paused on
+        // plan_approval (workflow executor only), so a reviewer sees the pending inbox
+        // and deep-links each row to /runs/:id to approve/deny. Gated on `list workflows`
+        // in the namespace — a caller without that RBAC gets an honest 403, never an
+        // empty list. This is the honest name: the queue is plan_approval-scoped.
+        id: "approvals",
+        label: "Plan approvals",
+        icon: CheckSquare,
+        milestone: "M112",
+        route: "/approvals",
+        requiresCapability: { resource: "workflows", verb: "list" },
       },
       {
         id: "cost",

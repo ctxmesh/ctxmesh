@@ -727,6 +727,10 @@ func (s *Server) Handler() http.Handler {
 		// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
 		// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
 		authed.HandleFunc("GET /api/alerts", s.handleListAlerts)
+		// Plan-approvals queue (M112, V5): the runs in a namespace paused on plan_approval —
+		// a reviewer's pending inbox, each row deep-linking to /runs/:id. Persona gate: one
+		// caller-scoped SSAR on `workflows` (plan_approval is workflow-only), never per-row.
+		authed.HandleFunc("GET /api/approvals", s.handleApprovals)
 		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
 		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
 		// gate â no per-row leak). nil store â 501. ?tenant= required.
@@ -1154,6 +1158,7 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
 		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
 		authed.Handle("GET /api/alerts", notImplemented("caller-scoped alerts feed"))
+		authed.Handle("GET /api/approvals", notImplemented("caller-scoped approval queue"))
 		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
 		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
 		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))

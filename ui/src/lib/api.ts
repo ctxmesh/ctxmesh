@@ -1952,6 +1952,31 @@ export interface RunShare {
   // NOTE: NO token — the backend never returns the token after creation
 }
 
+// ApprovalQueueItem mirrors the BFF's ApprovalQueueItem DTO (internal/bff/approvals_read.go).
+// Returned by GET /api/approvals?namespace= — the V5 "Plan approvals" queue: runs paused on
+// plan_approval awaiting a human decision. Token-free: RequiresAction.Key is NEVER surfaced here
+// (the run detail page owns the approve/deny path). rootRunId is present only for descendant sub-runs
+// (gives the spawn-tree context); message is the plan summary or absent.
+export interface ApprovalQueueItem {
+  runId: string;
+  agent: string;
+  rootRunId?: string;
+  message?: string;
+}
+
+// MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
+// Returned by GET /api/my/shares — the caller's own share links across ALL runs.
+// NOTE: there is no token field — the backend never returns the token after creation.
+export interface MySharesItem {
+  id: string;
+  runId: string;
+  namespace: string;
+  createdAt: string; // RFC3339
+  expiresAt: string; // RFC3339
+  status: "live" | "revoked" | "expired";
+  includeContent: boolean;
+}
+
 // SharedRunView is the public, unauthenticated projection (GET /api/shared/runs/{token}).
 // Always present: id, namespace, agent, status, timestamps, messageCount, messageRoles, errorCategory.
 // Present ONLY when includeContent=true: input, messages, error.
@@ -2328,7 +2353,10 @@ export interface RunHandle {
 
 // RunAction mirrors the BFF run.Action: what a requires_action run is waiting on.
 export interface RunAction {
-  kind: "consent_required" | "approval";
+  // plan_approval is the workflow PLAN gate (m67.7); approval is the mid-run HITL step gate
+  // (M32); consent_required is an MCP account connect. plan_approval + approval are both
+  // resolved by POST /api/runs/{id}/resume {decision} (the run-detail approve/deny surface, V5).
+  kind: "consent_required" | "approval" | "plan_approval";
   // servers names the MCP servers needing consent (consent_required).
   servers?: string[];
   // key is the approval key the resume must carry back (approval, m32.4).
@@ -2337,14 +2365,31 @@ export interface RunAction {
   message?: string;
 }
 
+// DescendantRequiringAction is one sub-run paused awaiting action (M108 L1-surfacing).
+// Surfaced in RunDetail.descendantsRequiringAction so the operator can navigate
+// into the subtree's own /runs/:runId to approve/deny from there.
+export interface DescendantRequiringAction {
+  runId: string;
+  // agent is the sub-agent ref (ns/name) that owns the paused sub-run.
+  agent?: string;
+  kind: RunAction["kind"];
+  message?: string;
+}
+
 // RunDetail mirrors the BFF run DTO (GET /api/runs/{id}) — the structured final state the
 // SSE stream does not carry (traceId, requiresAction). Read on stream close / requires_action.
 export interface RunDetail {
   id: string;
   status: string;
+  // agent + namespace identify the run's owning agent (present on the BFF RunDetailDTO).
+  agent?: string;
+  namespace?: string;
   traceId?: string;
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
+  // descendantsRequiringAction lists nested sub-runs currently paused awaiting
+  // an action (M108 L1-surfacing). Each entry links to its own /runs/:runId.
+  descendantsRequiringAction?: DescendantRequiringAction[];
   error?: string;
   // Workflow instance fields (m67.9, ADR 0060). Present only for workflow instance runs.
   workflowRef?: string;
@@ -5186,6 +5231,47 @@ export const api = {
         res.status,
       );
     }
+  },
+
+  // listMyShares lists the caller's share links across ALL runs (GET /api/my/shares).
+  // Caller-scoped: the BFF reads shares by the authenticated caller's identity.
+  // NO token is returned — the backend never returns the token after creation.
+  listMyShares: async (signal?: AbortSignal): Promise<MySharesItem[]> => {
+    const res = await apiFetch(
+      "/api/my/shares",
+      { headers: { Accept: "application/json" }, signal },
+    );
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listMyShares failed (${res.status})`),
+        res.status,
+      );
+    }
+    const data = (await res.json()) as MySharesItem[] | { items?: MySharesItem[] };
+    if (Array.isArray(data)) return data;
+    return data.items ?? [];
+  },
+
+  // listApprovals fetches the plan-approval queue for a namespace (GET /api/approvals?namespace=).
+  // namespace is REQUIRED — the backend returns 400 without it. A 403 (the caller lacks
+  // `list workflows` in the namespace) throws a typed ApiError (isForbidden) so the page shows
+  // an honest forbidden state — never a fake empty list. Any other non-2xx throws too (retryable).
+  listApprovals: async (
+    namespace: string,
+    signal?: AbortSignal,
+  ): Promise<ApprovalQueueItem[]> => {
+    const qs = new URLSearchParams({ namespace });
+    const res = await apiFetch(`/api/approvals?${qs.toString()}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `listApprovals failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as ApprovalQueueItem[];
   },
 
   // getSharedRun fetches the public shared-run view (GET /api/shared/runs/{token}).

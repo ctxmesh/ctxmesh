@@ -124,3 +124,37 @@ func (s *pgStore) ListForRun(ctx context.Context, runID string) ([]SharedRun, er
 	}
 	return out, nil
 }
+
+// ListByCreator returns ALL shares minted by createdBy across every run (including revoked/expired),
+// newest first — the caller-scoped "my shares" view (V13). Served by the (created_by, created_at DESC)
+// index (migration 0019) so it does not full-scan at multi-tenant scale.
+func (s *pgStore) ListByCreator(ctx context.Context, createdBy string) ([]SharedRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content
+		FROM shared_runs
+		WHERE created_by = $1
+		ORDER BY created_at DESC`,
+		createdBy)
+	if err != nil {
+		return nil, fmt.Errorf("sharedrun: list shares by creator: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SharedRun
+	for rows.Next() {
+		var rec SharedRun
+		if sErr := rows.Scan(
+			&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.CreatedBy,
+			&rec.CreatedAt, &rec.ExpiresAt, &rec.Revoked, &rec.IncludeContent,
+		); sErr != nil {
+			return nil, fmt.Errorf("sharedrun: list by creator scan: %w", sErr)
+		}
+		rec.CreatedAt = rec.CreatedAt.UTC()
+		rec.ExpiresAt = rec.ExpiresAt.UTC()
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sharedrun: list by creator rows: %w", err)
+	}
+	return out, nil
+}
