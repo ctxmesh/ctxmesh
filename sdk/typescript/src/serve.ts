@@ -65,6 +65,12 @@ export interface InvokeRequest {
   headers: Record<string, string>;
   /** Approval keys the caller granted for this run (HITL resume, m32.4) — already bound. */
   approvals: string[];
+  /**
+   * The L7 resume envelope (ADR 0091), present only when the platform re-invokes a supervisor that
+   * SUSPENDED on a delegate: the stock managed loop verifies it and continues from the checkpoint
+   * instead of starting fresh. `undefined` on every ordinary run. A custom handler may ignore it.
+   */
+  checkpoint?: unknown;
   /** The conversation/thread id: the inbound `X-Conversation-Id`, or a minted per-run id. */
   conversationId?: string;
   /** The SDK client — its capability + approvals are already bound for the handler's life. */
@@ -79,8 +85,16 @@ export interface InvokeRequest {
   emitStep: (frame: StepFrame) => void;
 }
 
-/** Parse the /invoke body into `{input, approvals}`. Tolerant: non-JSON is the raw prompt. */
-export function parseBody(raw: Buffer | string): { input: string; approvals: string[] } {
+/**
+ * Parse the /invoke body into `{input, approvals, checkpoint}`. Tolerant: non-JSON is the raw prompt.
+ * *checkpoint* is the platform-owned L7 resume envelope (ADR 0091) the worker injects on a suspended
+ * supervisor's re-invoke — `undefined` on a fresh run; the managed loop re-verifies it before trusting.
+ */
+export function parseBody(raw: Buffer | string): {
+  input: string;
+  approvals: string[];
+  checkpoint?: unknown;
+} {
   const approvals: string[] = [];
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
   let body: unknown;
@@ -97,7 +111,7 @@ export function parseBody(raw: Buffer | string): { input: string; approvals: str
   if (Array.isArray(rawApprovals)) {
     for (const a of rawApprovals) approvals.push(String(a));
   }
-  return { input: String(obj["input"] ?? ""), approvals };
+  return { input: String(obj["input"] ?? ""), approvals, checkpoint: obj["checkpoint"] };
 }
 
 /**
@@ -129,6 +143,11 @@ export function envelope(agentName: string, result: HandlerResult): Record<strin
   if (managed.approvalRequired) body["approval_required"] = managed.approvalRequired;
   if (managed.guardrailBlocked) body["guardrail_blocked"] = managed.guardrailBlocked;
   if (managed.handoff) body["handoff"] = managed.handoff;
+  if (managed.delegateWaiting) {
+    // The supervisor SUSPENDED on a delegate (L7, ADR 0091): carry the loop checkpoint + delegate
+    // intents so the BFF worker enacts child-create + parent→waiting in one transaction.
+    body["delegate_waiting"] = managed.delegateWaiting;
+  }
   return body;
 }
 
@@ -149,12 +168,13 @@ export async function processInvoke(
   headers: Record<string, string>,
   opts: { onToken?: (text: string) => void; onStep?: (frame: StepFrame) => void } = {},
 ): Promise<Record<string, unknown>> {
-  const { input, approvals } = parseBody(rawBody);
+  const { input, approvals, checkpoint } = parseBody(rawBody);
   const conversationId = autonomousConversationId(headers);
   const req: InvokeRequest = {
     input,
     headers: { ...headers },
     approvals,
+    checkpoint,
     conversationId,
     client,
     emitToken: opts.onToken ?? (() => undefined),
@@ -208,6 +228,7 @@ function managedHandler(config: ManagedConfig): Handler {
       conversationId: req.conversationId,
       onToken: req.emitToken,
       onStep: req.emitStep,
+      checkpoint: req.checkpoint,
     });
 }
 
