@@ -556,7 +556,12 @@ func (m *memStore) List() []*Run {
 	defer m.mu.Unlock()
 	out := make([]*Run, 0, len(m.entries))
 	for _, e := range m.entries {
-		out = append(out, cloneRun(e.run))
+		r := cloneRun(e.run)
+		// L12: a list fill does not carry the (MB-scale, L7 supervisor-checkpoint) cursor — list consumers
+		// (the cancel-cascade walk) never read it, and this keeps the observable List contract identical to
+		// the durable store, which projects '' for cursor to avoid dragging every checkpoint across the wire.
+		r.Cursor = ""
+		out = append(out, r)
 	}
 	return out
 }

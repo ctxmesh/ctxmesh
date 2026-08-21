@@ -88,7 +88,7 @@ func newDelegate(t *testing.T, client spawnClient, budget SpawnBudget) *delegate
 	mr := miniredis.RunT(t)
 	guard := NewSpawnGuard(newRedisSpawnStore(mr.Addr()))
 	cfg := delegateConfig{SelfName: "planner", Namespace: "team-ns", Scope: "t1", Budget: budget}
-	return newDelegateServer(cfg, guard, client)
+	return newDelegateServer(cfg, guard, client, nil)
 }
 
 func callDelegate(
