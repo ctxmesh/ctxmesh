@@ -210,6 +210,12 @@ func (s *Server) executeClaimedRun(
 	execCtx, cancelExec := context.WithCancel(execCtx)
 	defer cancelExec()
 
+	// L10: stamp this worker's id on the exec context so executeRun's terminal writes are FENCED on
+	// this worker still holding the lease. If a peer reclaims the run (D3) while our invoke is
+	// in-flight, our late terminal write (a failure from the lease-loss cancel, or even a straggling
+	// success) must NOT clobber the peer-owned run — the fence sees the changed worker_id and skips it.
+	execCtx = contextWithWorkerID(execCtx, workerID)
+
 	// Renew the lease periodically while executing. If the lease is DEFINITIVELY lost (a peer
 	// reclaimed us) the heartbeat cancels execCtx (D3) so we stop; a transient heartbeat error just
 	// stops renewing and the run continues here, the idempotency key bounding any duplicate
