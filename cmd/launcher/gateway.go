@@ -397,7 +397,7 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 		enforcer:       budget.NewEnforcer(),
 		estimator:      budget.NewEstimator(),
 		client:         &http.Client{Timeout: gatewayRequestTimeout, CheckRedirect: refuseRedirect},
-		streamClient:   &http.Client{CheckRedirect: refuseRedirect}, // no overall timeout; ctx-driven (K2)
+		streamClient:   newStreamClient(), // no overall timeout (K2); a header + idle deadline (K9)
 		tracer:         tracer,
 		bffInternalURL: cfg.BFFInternalURL,
 		logf:           logf,

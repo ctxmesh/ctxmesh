@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ctxmesh/agent-engine/internal/gateway/budget"
 	"go.opentelemetry.io/otel/trace"
@@ -49,7 +50,27 @@ const (
 	// maxSSELine caps a single SSE line the scanner will buffer (one chunk's JSON) — mirrors the
 	// buffered response cap so a hostile/huge upstream line can't exhaust memory.
 	maxSSELine = maxGatewayRespBody
+	// streamResponseHeaderTimeout (K9) bounds how long the upstream may take to send the RESPONSE
+	// HEADERS on the streaming path — an upstream that connects but never responds fails HERE instead
+	// of hanging the stream. NOT a total timeout (a long SSE body is legit, ADR 0086).
+	streamResponseHeaderTimeout = 60 * time.Second
 )
+
+// streamIdleTimeout (K9) bounds the GAP between upstream SSE chunks — a stalled-but-connected upstream
+// that stops sending mid-stream is aborted after this idle window (reset on every chunk). It is
+// per-idle-gap, NEVER a total cap, so a long-but-active stream is unaffected. A var (not a const) so a
+// test can shorten it.
+var streamIdleTimeout = 120 * time.Second
+
+// newStreamClient builds the K2 streaming forward client (ADR 0086): no overall Timeout — a client
+// deadline would cut a legit long SSE stream — but a ResponseHeaderTimeout (K9) so an upstream that
+// connects and never responds fails cleanly. The per-idle-chunk deadline is enforced in
+// serveStreaming's scan loop (a Transport read deadline can't span the streamed body).
+func newStreamClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = streamResponseHeaderTimeout
+	return &http.Client{CheckRedirect: refuseRedirect, Transport: tr}
+}
 
 // serveStreaming runs the streaming guarded path. It writes an SSE response to w. All spend
 // accounting still runs (from the final usage chunk); a mid-stream block still books spend because
@@ -58,7 +79,14 @@ func (gp *gatewayProxy) serveStreaming(
 	ctx context.Context, w http.ResponseWriter, span trace.Span, r *http.Request,
 	pol *guardrailBundle, caps budget.Caps, route, userHash string,
 ) {
-	resp, err := gp.forwardStream(ctx, r)
+	// K9: a derived, idle-cancellable context so a stalled-but-connected upstream (one that goes silent
+	// mid-stream and never cancels) is aborted rather than hanging the stream. The idle timer below
+	// cancels streamCtx → the resp.Body read errors → the scan loop ends cleanly (the client keeps what
+	// it already streamed + a [DONE]). streamResponseHeaderTimeout (on the Transport) covers the
+	// never-responds case; this covers the goes-silent-mid-stream case.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	resp, err := gp.forwardStream(streamCtx, r)
 	if err != nil {
 		http.Error(w, "gateway upstream error: "+err.Error(), http.StatusBadGateway)
 		return
@@ -95,9 +123,16 @@ func (gp *gatewayProxy) serveStreaming(
 	blocked := false
 	var blockDec guardrailDecision
 
+	// K9 idle deadline: armed now (covers the gap between response headers and the first data chunk)
+	// and RESET on every upstream line below (so a long-but-active stream never trips it). A stalled
+	// upstream trips it → cancelStream → the read errors → the loop ends.
+	idle := time.AfterFunc(streamIdleTimeout, cancelStream)
+	defer idle.Stop()
+
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
 	for sc.Scan() {
+		idle.Reset(streamIdleTimeout) // upstream is alive — push the idle deadline out
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, sseDataPrefix) {
 			continue // blank separators, comments, event: lines — not our data frames
@@ -128,6 +163,13 @@ func (gp *gatewayProxy) serveStreaming(
 				break
 			}
 		}
+	}
+
+	// K9: distinguish a stalled-upstream idle abort (OUR streamCtx cancelled, the parent ctx NOT) from
+	// a normal upstream end or a client disconnect (parent ctx cancelled) — log the stall so a hung
+	// upstream is observable, not silent. The client still gets a clean close ([DONE]) below.
+	if streamCtx.Err() != nil && ctx.Err() == nil {
+		gp.logf("launcher: gateway: streaming upstream stalled (no data for %s) — aborted (K9)", streamIdleTimeout)
 	}
 
 	if !blocked {

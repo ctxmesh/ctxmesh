@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,6 +103,45 @@ func TestServeStreaming_BlocksSeededSpanMidStream(t *testing.T) {
 	assert.NotContains(t, out, "secret1234", "the offending span never appears on the wire")
 	assert.Contains(t, out, finishReasonContentFilter, "a content_filter frame closes the stream")
 	assert.Contains(t, out, "[DONE]")
+}
+
+// TestServeStreaming_StalledUpstreamAbortsOnIdle (K9): a stalled-but-connected upstream — one that
+// sends response headers + a chunk, then goes silent forever (never sends more, never cancels) — must
+// be ABORTED after the idle deadline, not hang the stream. Proves serveStreaming RETURNS (the client
+// gets a clean close), rather than blocking in sc.Scan() indefinitely.
+func TestServeStreaming_StalledUpstreamAbortsOnIdle(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 50 * time.Millisecond // a short idle deadline for the test
+	defer func() { streamIdleTimeout = old }()
+
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\","+
+			"\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi \"},\"finish_reason\":null}]}\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		<-release // STALL: hold the connection open + silent (never send more, never [DONE])
+	}))
+	defer up.Close()
+	defer close(release) // released last (LIFO) so up.Close() finds no in-flight handler
+
+	gp, _ := newGuardedProxy(t, up.URL, streamBlockPolicy(`apikey\d{6}`)) // pattern irrelevant — it stalls first
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doInvokeBody(gp, streamReqBody) }()
+
+	select {
+	case rr := <-done:
+		assert.Equal(t, http.StatusOK, rr.Code)
+		out := rr.Body.String()
+		assert.Equal(t, "hi ", collectStreamContent(out), "the pre-stall content is released")
+		assert.Contains(t, out, "[DONE]", "the client stream is closed cleanly, not hung")
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveStreaming HUNG on a stalled upstream — the K9 idle deadline did not abort the read")
+	}
 }
 
 // TestServeStreaming_CleanStreamFlows: a clean completion streams through unchanged and terminates
