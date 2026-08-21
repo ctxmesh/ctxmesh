@@ -34,6 +34,7 @@ import { ModelRoutesPage } from "@/pages/model-routes-page";
 import { PlaceholderPage } from "@/pages/placeholder-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
+import { RunDetailPage } from "@/pages/run-detail-page";
 import { AuditPage } from "@/pages/audit-page";
 import { AlertsPage } from "@/pages/alerts-page";
 import { TeamsPage } from "@/pages/teams-page";
@@ -257,6 +258,8 @@ export function App() {
             <Route path="topology" element={<TopologyPage />} />
             {/* m16.8: runs browser — paginated + filterable global run history. */}
             <Route path="runs" element={<RunsPage />} />
+            {/* V5, M112: per-run detail page — approval deep-link target + My Shares link target. */}
+            <Route path="runs/:id" element={<RunDetailPage />} />
             {/* V13: My Shares — the caller's share links across all runs. */}
             <Route path="my-shares" element={<MySharesPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer

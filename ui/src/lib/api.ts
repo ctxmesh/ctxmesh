@@ -2341,7 +2341,10 @@ export interface RunHandle {
 
 // RunAction mirrors the BFF run.Action: what a requires_action run is waiting on.
 export interface RunAction {
-  kind: "consent_required" | "approval";
+  // plan_approval is the workflow PLAN gate (m67.7); approval is the mid-run HITL step gate
+  // (M32); consent_required is an MCP account connect. plan_approval + approval are both
+  // resolved by POST /api/runs/{id}/resume {decision} (the run-detail approve/deny surface, V5).
+  kind: "consent_required" | "approval" | "plan_approval";
   // servers names the MCP servers needing consent (consent_required).
   servers?: string[];
   // key is the approval key the resume must carry back (approval, m32.4).
@@ -2350,14 +2353,31 @@ export interface RunAction {
   message?: string;
 }
 
+// DescendantRequiringAction is one sub-run paused awaiting action (M108 L1-surfacing).
+// Surfaced in RunDetail.descendantsRequiringAction so the operator can navigate
+// into the subtree's own /runs/:runId to approve/deny from there.
+export interface DescendantRequiringAction {
+  runId: string;
+  // agent is the sub-agent ref (ns/name) that owns the paused sub-run.
+  agent?: string;
+  kind: RunAction["kind"];
+  message?: string;
+}
+
 // RunDetail mirrors the BFF run DTO (GET /api/runs/{id}) — the structured final state the
 // SSE stream does not carry (traceId, requiresAction). Read on stream close / requires_action.
 export interface RunDetail {
   id: string;
   status: string;
+  // agent + namespace identify the run's owning agent (present on the BFF RunDetailDTO).
+  agent?: string;
+  namespace?: string;
   traceId?: string;
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
+  // descendantsRequiringAction lists nested sub-runs currently paused awaiting
+  // an action (M108 L1-surfacing). Each entry links to its own /runs/:runId.
+  descendantsRequiringAction?: DescendantRequiringAction[];
   error?: string;
   // Workflow instance fields (m67.9, ADR 0060). Present only for workflow instance runs.
   workflowRef?: string;
