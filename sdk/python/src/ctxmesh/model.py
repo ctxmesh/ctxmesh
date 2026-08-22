@@ -203,12 +203,22 @@ class ModelClient:
         body_opts = dict(opts)
         raw_timeout = body_opts.pop("timeout", None)
         timeout = raw_timeout if isinstance(raw_timeout, (int, float)) else _CHAT_TIMEOUT
-        payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        # Ask the gateway for a terminal usage chunk (stream_options.include_usage) so the LLM
+        # span carries real token counts for pricing — mirrors the launcher gateway's
+        # ensureStreamUsage. Harmless to a gateway/mock that ignores it (usage stays absent).
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         payload.update(body_opts)
 
         with self._trace.llm(name=f"chat {model}", model=model, input=messages) as span:
             span.set_attribute(_semconv.LLM_MODEL_NAME, model)
             acc: List[str] = []
+            usage: Dict[str, Any] = {}
+            resolved_model = model
             for line in _http.stream(
                 "POST",
                 f"{base_url}/chat/completions",
@@ -216,11 +226,25 @@ class ModelClient:
                 headers=self._headers(),
                 timeout=timeout,
             ):
-                delta = _sse_delta(line)
-                if delta:
-                    acc.append(delta)
-                    yield delta
+                obj = _sse_obj(line)
+                if not isinstance(obj, dict):
+                    continue
+                if isinstance(obj.get("usage"), dict):
+                    usage = obj["usage"]
+                if isinstance(obj.get("model"), str) and obj["model"]:
+                    resolved_model = obj["model"]
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                content = (choices[0].get("delta") or {}).get("content")
+                if isinstance(content, str) and content:
+                    acc.append(content)
+                    yield content
+            # Re-stamp with the gateway-RESOLVED provider model (not the route alias) so the trace
+            # store can price it, and copy the token counts the include_usage chunk carried.
+            span.set_attribute(_semconv.LLM_MODEL_NAME, resolved_model)
             span.set_output("".join(acc))
+            _stamp_usage(span, usage)
 
     def stream_completion(
         self,
@@ -250,12 +274,20 @@ class ModelClient:
         body_opts = dict(opts)
         raw_timeout = body_opts.pop("timeout", None)
         timeout = raw_timeout if isinstance(raw_timeout, (int, float)) else _CHAT_TIMEOUT
-        payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        # include_usage → the gateway emits a terminal usage chunk so the span (and the returned
+        # ChatResponse) carry real token counts for pricing; mirrors chat() + the launcher gateway.
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         payload.update(body_opts)
 
         content_parts: List[str] = []
         tool_acc: Dict[int, Dict[str, Any]] = {}
         usage: Dict[str, Any] = {}
+        resolved_model = model
         with self._trace.llm(name=f"chat {model}", model=model, input=messages) as span:
             span.set_attribute(_semconv.LLM_MODEL_NAME, model)
             for line in _http.stream(
@@ -270,6 +302,8 @@ class ModelClient:
                     continue
                 if isinstance(obj.get("usage"), dict):
                     usage = obj["usage"]
+                if isinstance(obj.get("model"), str) and obj["model"]:
+                    resolved_model = obj["model"]
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
@@ -284,10 +318,13 @@ class ModelClient:
             message: Dict[str, Any] = {"role": "assistant", "content": text or None}
             if tool_acc:
                 message["tool_calls"] = [tool_acc[i] for i in sorted(tool_acc)]
+            # Re-stamp the RESOLVED provider model (not the route alias) so the trace store can
+            # price it; the returned ChatResponse carries it too.
+            span.set_attribute(_semconv.LLM_MODEL_NAME, resolved_model)
             span.set_output(text)
             _stamp_usage(span, usage)
         raw = {"choices": [{"message": message}]}
-        return ChatResponse(text=text, usage=usage, model=model, raw=raw)
+        return ChatResponse(text=text, usage=usage, model=resolved_model, raw=raw)
 
     def _headers(self) -> Dict[str, str]:
         # The gateway (LiteLLM / budget proxy) is OpenAI-compatible and expects a
