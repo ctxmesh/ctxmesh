@@ -263,7 +263,7 @@ export function App() {
             <Route path="runs/:id" element={<RunDetailPage />} />
             {/* V13: My Shares — the caller's share links across all runs. */}
             <Route path="my-shares" element={<MySharesPage />} />
-            {/* V5, M112: Plan approvals — namespace-scoped queue of runs paused on plan_approval. */}
+            {/* V5/V15, M112-M113: Approvals — namespace-scoped unified queue of runs paused on plan_approval OR mid-run approval. */}
             <Route path="approvals" element={<ApprovalsPage />} />
             {/* m16.7: native trace page — full one-trace view with TraceExplorer
                 + Langfuse link-out demotion + FeedbackPanel (m16.9). */}

@@ -17,10 +17,16 @@ limitations under the License.
 package bff
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
+	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
 // ApprovalQueueItem is one row of the V5 "Plan approvals" queue (GET /api/approvals, M112). Token-free:
@@ -30,22 +36,32 @@ import (
 type ApprovalQueueItem struct {
 	RunID     string `json:"runId"`
 	Agent     string `json:"agent"`
+	Namespace string `json:"namespace"`
+	// Kind is the pause kind — "plan_approval" (workflow PLAN gate) or "approval" (mid-run STEP gate) —
+	// so the console badges plan-vs-step in the unified queue (V15).
+	Kind      string `json:"kind"`
 	RootRunID string `json:"rootRunId,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// WaitingSince is when the run entered requires_action (RFC3339) — the console renders it as a
+	// relative "waiting X ago" so a reviewer can triage the queue by age (M113).
+	WaitingSince string `json:"waitingSince,omitempty"`
 }
 
-// handleApprovals serves GET /api/approvals?namespace=&limit= — the V5 console "Plan approvals" queue:
-// the runs in a namespace paused on plan_approval, so a reviewer sees the pending inbox and deep-links
-// each row to its /runs/:id detail page to approve/deny. Scoped to plan_approval (all ListWaitingApproval
-// returns — plan_approval is raised ONLY by the workflow executor); a unified inbox that also surfaces
-// the mid-run `approval` kind is carded (m52.V15). Caller-scoping (ADR 0011):
+// handleApprovals serves GET /api/approvals?namespace=&limit= — the V5 console UNIFIED "Approvals" queue
+// (M113/V15): the runs in a namespace paused on plan_approval (workflow PLAN gate) OR the mid-run
+// `approval` (M32 HITL STEP gate), so a reviewer sees a COMPLETE pending inbox and deep-links each row to
+// its /runs/:id detail page to approve/deny. `consent_required` is EXCLUDED (owner-only — the invoking user
+// connects their account, not a reviewer). Caller-scoping (ADR 0011):
 //
-//   - PERSONA gate, never per-row: ONE SSAR `list workflows` in the namespace (every row is a workflow
-//     run) — a denial is an honest 403, never a silently-empty list. Per-row authz would be O(N) caller
-//     API calls and a response-time oracle over the count of runs the caller cannot see.
-//   - Inline-workflow owner filter: a CR-less inline workflow run (Agent == inlineWorkflowAgentLabel) has
-//     no backing CR, so a workflows-lister who is NOT its creator must not see it (would disclose the
-//     creator's plan summary and dead-link the detail page, which 404s for a non-creator). Resolve the
+//   - PERSONA gate, per-KIND, never per-row: at most TWO SSARs — `list workflows` gates the plan_approval
+//     rows (workflow runs), `list agentdeployments` gates the approval rows (agent runs). A caller with one
+//     grant sees that kind; with both, both; with NEITHER → an honest 403 (never a silently-empty list).
+//     O(1) SSARs regardless of row count — per-row authz would be O(N) caller API calls + a response-time
+//     oracle. The store is then asked ONLY for the kinds the caller is authorized for, so an unauthorized
+//     kind's rows are never even read (no leak, no oracle on which kinds exist).
+//   - Inline-workflow owner filter (kind-agnostic): a CR-less inline run (Agent == inlineWorkflowAgentLabel)
+//     has no backing CR, so a workflows-lister who is NOT its creator must not see it (would disclose the
+//     creator's plan summary + dead-link the detail page, which 404s for a non-creator). Resolve the
 //     caller's username ONCE and drop non-owned inline rows — a field filter, no per-row API calls.
 //     Fail-closed: an unresolved identity owns nothing, so every inline row is dropped.
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
@@ -59,14 +75,37 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persona gate (never per-row): one SSAR on `workflows` in the namespace.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceWorkflows, namespace, ""); err != nil {
+	// Per-kind persona gate (never per-row): each approval kind is gated by its own CRD's list grant.
+	// INVARIANT (verified, Fable M113 review): kind is a faithful proxy for the run's backing resource —
+	// plan_approval is raised ONLY on workflow instance runs (→ `workflows`), and mid-run `approval` ONLY
+	// on agent runs, which are always AgentDeployment-named (direct, workflow-node, and delegate children
+	// all reference standing agent CRs) (→ `agentdeployments`). If a future change raises `approval` on a
+	// non-agent-backed run, THIS gate must change with it.
+	allowPlan, err := s.storeGrantAllowed(r.Context(), caller, resourceWorkflows, namespace)
+	if err != nil {
 		s.writeAuthzError(w, err, "read the approval queue")
 		return
 	}
+	allowStep, err := s.storeGrantAllowed(r.Context(), caller, resourceAgentDeployments, namespace)
+	if err != nil {
+		s.writeAuthzError(w, err, "read the approval queue")
+		return
+	}
+	if !allowPlan && !allowStep {
+		// Neither grant → an honest 403, never a silently-empty list (ADR 0011).
+		s.writeAuthzError(w, authz.ErrForbidden, "read the approval queue")
+		return
+	}
+	var kinds []run.ActionKind
+	if allowPlan {
+		kinds = append(kinds, run.ActionPlanApproval)
+	}
+	if allowStep {
+		kinds = append(kinds, run.ActionApproval)
+	}
 
 	limit := parseListLimit(r.URL.Query().Get("limit"))
-	waiting, err := s.runStore.ListWaitingApproval(r.Context(), namespace, limit)
+	waiting, err := s.runStore.ListWaitingApproval(r.Context(), namespace, kinds, limit)
 	if err != nil {
 		s.log.Error(err, "approvals: list waiting-approval runs failed", "namespace", namespace)
 		writeError(w, http.StatusInternalServerError, "failed to read the approval queue")
@@ -80,12 +119,33 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		if wa.Agent == inlineWorkflowAgentLabel && (callerName == "" || wa.CallerUsername != callerName) {
 			continue // a CR-less inline run is visible only to its creator
 		}
-		out = append(out, ApprovalQueueItem{
+		item := ApprovalQueueItem{
 			RunID:     wa.ID,
 			Agent:     wa.Agent,
+			Namespace: wa.Namespace,
+			Kind:      string(wa.Kind),
 			RootRunID: wa.RootRunID,
 			Message:   wa.Message,
-		})
+		}
+		if !wa.WaitingSince.IsZero() {
+			item.WaitingSince = wa.WaitingSince.UTC().Format(time.RFC3339)
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// storeGrantAllowed runs ONE caller-scoped SSAR (list `resource` in namespace) and reports whether it is
+// allowed — the per-kind persona gate for the unified approvals queue. A Forbidden is a clean "not this
+// kind" (false, nil); any OTHER error (a real API failure) is surfaced so the handler 500s rather than
+// silently dropping a kind. Never per-row, never a BFF-SA read (ADR 0011).
+func (s *Server) storeGrantAllowed(ctx context.Context, caller client.Client, resource, namespace string) (bool, error) {
+	err := s.authorizeStore(ctx, caller, authz.VerbList, resource, namespace, "")
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, authz.ErrForbidden) {
+		return false, nil
+	}
+	return false, err
 }

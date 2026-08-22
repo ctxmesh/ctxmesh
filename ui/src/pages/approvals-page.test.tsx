@@ -13,18 +13,21 @@ vi.mock("@/lib/namespace", () => ({
   useNamespace: () => ({ namespace: nsRef.current }),
 }));
 
-// ApprovalsPage (V5, M112) — the namespace-scoped plan-approval queue.
+// ApprovalsPage (V15, M113) — the namespace-scoped unified approval inbox.
 //
 // Coverage:
 //   • rows render with a link to /runs/{runId}
 //   • the request carries ?namespace=<selected ns>
 //   • a 403 renders the forbidden state (not a fake empty list)
 //   • the empty state renders on []
+//   • new M113 columns: namespace, kind badge (plan_approval / approval), waitingSince
 
 function item_(over: Partial<ApprovalQueueItem> = {}): ApprovalQueueItem {
   return {
     runId: "run-abc123",
     agent: "my-agent",
+    namespace: "team-a",
+    kind: "plan_approval",
     ...over,
   };
 }
@@ -73,8 +76,18 @@ afterEach(() => {
 
 // ── Basic rendering ────────────────────────────────────────────────────────────
 
-describe("ApprovalsPage — basic rendering (V5, M112)", () => {
-  it("renders approvals-page and approvals-table with row data + run links", async () => {
+describe("ApprovalsPage — basic rendering (V15, M113)", () => {
+  it('renders "Approvals" title (unified inbox, not "Plan approvals")', async () => {
+    installFetch(() => ({ ok: true, body: [] }));
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    expect(screen.getByRole("heading", { name: "Approvals" })).toBeInTheDocument();
+    // The old "Plan approvals" title must be gone
+    expect(screen.queryByRole("heading", { name: "Plan approvals" })).toBeNull();
+  });
+
+  it("renders approvals-page and approvals table with row data + run links", async () => {
     installFetch(() => ({
       ok: true,
       body: [
@@ -87,7 +100,7 @@ describe("ApprovalsPage — basic rendering (V5, M112)", () => {
 
     expect(await screen.findByTestId("approvals-page")).toBeInTheDocument();
     // The table is rendered (aria-label)
-    expect(screen.getByRole("table", { name: "Plan approvals" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Approvals" })).toBeInTheDocument();
     // Run IDs appear as links
     const runAbcLink = screen.getByRole("link", { name: "run-abc" });
     expect(runAbcLink).toBeInTheDocument();
@@ -116,6 +129,98 @@ describe("ApprovalsPage — basic rendering (V5, M112)", () => {
     // rootRunId links to its own run detail page
     const rootLink = screen.getByRole("link", { name: "run-root" });
     expect(rootLink).toHaveAttribute("href", "/runs/run-root");
+  });
+});
+
+// ── M113: namespace column ─────────────────────────────────────────────────────
+
+describe("ApprovalsPage — namespace column (M113)", () => {
+  it("renders the namespace column value from item.namespace", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [item_({ runId: "run-ns-test", namespace: "production" })],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    expect(screen.getByText("production")).toBeInTheDocument();
+  });
+});
+
+// ── M113: kind badge ──────────────────────────────────────────────────────────
+
+describe("ApprovalsPage — kind badge (M113)", () => {
+  it('shows "Plan gate" badge for plan_approval kind', async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [item_({ runId: "run-plan", kind: "plan_approval" })],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    expect(screen.getByText("Plan gate")).toBeInTheDocument();
+  });
+
+  it('shows "Step approval" badge for approval kind', async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [item_({ runId: "run-step", kind: "approval" })],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    expect(screen.getByText("Step approval")).toBeInTheDocument();
+  });
+
+  it("renders both badge kinds when the queue has mixed items", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [
+        item_({ runId: "run-plan", kind: "plan_approval" }),
+        item_({ runId: "run-step", kind: "approval" }),
+      ],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    expect(screen.getByText("Plan gate")).toBeInTheDocument();
+    expect(screen.getByText("Step approval")).toBeInTheDocument();
+  });
+});
+
+// ── M113: waiting since column ─────────────────────────────────────────────────
+
+describe("ApprovalsPage — waitingSince column (M113)", () => {
+  it('renders "—" when waitingSince is absent', async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [item_({ runId: "run-no-wait" })], // no waitingSince
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    // The "—" dash for the waiting-since cell
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("renders a relative time string for a waitingSince timestamp", async () => {
+    // Use a timestamp 2 hours in the past
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    installFetch(() => ({
+      ok: true,
+      body: [item_({ runId: "run-wait", waitingSince: twoHoursAgo })],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("approvals-page");
+    // formatRelativeTime returns "2h ago" for ~2 hours
+    expect(screen.getByText(/\dh ago/)).toBeInTheDocument();
   });
 });
 

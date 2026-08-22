@@ -3,16 +3,19 @@ import { Link } from "react-router-dom";
 import { CheckSquare } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { Badge } from "@/components/ui/badge";
 import { useNamespace } from "@/lib/namespace";
 import { api, ApiError, type ApprovalQueueItem } from "@/lib/api";
+import { formatRelativeTime, formatDateTime } from "@/lib/format";
 
-// ApprovalsPage — the V5 "Plan approvals" queue (M112).
+// ApprovalsPage — the V15 unified "Approvals" inbox (M113).
 //
 // Backend: GET /api/approvals?namespace=<ns>
 //   • namespace is REQUIRED — the backend returns 400 without it.
 //   • The queue is namespace-scoped and persona-gated: a caller without
 //     `list workflows` in the namespace gets a 403, never an empty list.
 //   • Namespace comes from the GLOBAL namespace selector (same as alerts-page).
+//   • Items carry kind ("plan_approval" | "approval") for badge display.
 //
 // 403-forbidden discipline (mirrors alerts-page):
 //   • 403 (caller lacks `list workflows`): ApiError.isForbidden →
@@ -24,7 +27,7 @@ import { api, ApiError, type ApprovalQueueItem } from "@/lib/api";
 //
 // data-testid contract:
 //   approvals-page  — root container
-//   approvals-table — the DataTable (via aria-label="Plan approvals")
+//   approvals-table — the DataTable (via aria-label="Approvals")
 
 type LoadState =
   | { kind: "loading" }
@@ -107,6 +110,44 @@ export function ApprovalsPage() {
       cell: (item) => <span className="text-sm font-medium">{item.agent}</span>,
     },
     {
+      id: "namespace",
+      header: "Namespace",
+      hideOnMobile: true,
+      cell: (item) => (
+        <span className="font-mono text-xs text-muted-foreground">{item.namespace}</span>
+      ),
+    },
+    {
+      // kind badge: "Plan gate" for plan_approval, "Step approval" for approval.
+      // Orients the reviewer: a plan gate blocks execution start; a step gate
+      // blocks a privileged action mid-flight.
+      id: "kind",
+      header: "Kind",
+      cell: (item) =>
+        item.kind === "plan_approval" ? (
+          <Badge variant="default">Plan gate</Badge>
+        ) : (
+          <Badge variant="secondary">Step approval</Badge>
+        ),
+    },
+    {
+      id: "waitingSince",
+      header: "Waiting since",
+      hideOnMobile: true,
+      cell: (item) => {
+        if (!item.waitingSince) {
+          return <span className="text-sm text-muted-foreground">—</span>;
+        }
+        const rel = formatRelativeTime(item.waitingSince);
+        const abs = formatDateTime(item.waitingSince);
+        return (
+          <span className="text-sm text-muted-foreground" title={abs}>
+            {rel || "—"}
+          </span>
+        );
+      },
+    },
+    {
       id: "message",
       header: "Message",
       cell: (item) => {
@@ -151,14 +192,11 @@ export function ApprovalsPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-6" data-testid="approvals-page">
       <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Plan approvals</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Approvals</h2>
         <p className="text-sm text-muted-foreground">
-          Runs paused awaiting plan approval in this namespace — click a run to
-          review and approve or deny. Switch the namespace scope with the global
-          namespace selector.{" "}
-          <span className="text-muted-foreground/80">
-            Mid-run step approvals are not shown here — open a run's detail page to act on those.
-          </span>
+          Runs paused awaiting approval in this namespace — click a run to review and approve or
+          deny. Includes both workflow plan gates and mid-run step approvals. Switch the namespace
+          scope with the global namespace selector.
         </p>
       </div>
 
@@ -168,20 +206,20 @@ export function ApprovalsPage() {
         rowKey={(item) => item.runId}
         loading={loadState.kind === "loading"}
         error={error}
-        ariaLabel="Plan approvals"
+        ariaLabel="Approvals"
         empty={
           loadState.kind === "no-namespace"
             ? {
                 icon: CheckSquare,
                 title: "Select a namespace",
                 description:
-                  "Choose a namespace from the selector above to see the runs awaiting plan approval there.",
+                  "Choose a namespace from the selector above to see the runs awaiting approval there.",
               }
             : {
                 icon: CheckSquare,
                 title: "No runs are awaiting approval.",
                 description:
-                  "When a workflow run pauses for plan approval it will appear here. Approve or deny from the run's detail page.",
+                  "When a run pauses for plan approval or a mid-run step approval it will appear here. Approve or deny from the run's detail page.",
               }
         }
       />
