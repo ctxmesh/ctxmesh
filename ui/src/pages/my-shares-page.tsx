@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Share2 } from "lucide-react";
 
-import { DataTable, type Column, type DataTableError } from "@/components/kit";
+import { DataTable, type Column, type DataTableError, useToast } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type MySharesItem } from "@/lib/api";
@@ -61,6 +61,7 @@ export function MySharesPage() {
   // Track which share IDs are in the process of being revoked (optimistic disable).
   const [revoking, setRevoking] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
+  const { toast } = useToast();
 
   const load = useCallback(() => {
     abortRef.current?.abort();
@@ -95,10 +96,17 @@ export function MySharesPage() {
     api
       .revokeRunShare(item.runId, item.id)
       .then(() => {
+        toast({ variant: "success", title: "Share revoked" });
         load();
       })
-      .catch(() => {
-        // Re-enable the button on failure so the user can retry.
+      .catch((err: unknown) => {
+        // Surface the failure (V16 P3: a silent .catch left the user thinking the link was revoked when it
+        // wasn't) and re-enable the button so the user can retry.
+        toast({
+          variant: "error",
+          title: "Revoke failed",
+          description: err instanceof Error ? err.message : "could not revoke the share link",
+        });
         setRevoking((prev) => {
           const next = new Set(prev);
           next.delete(item.id);
@@ -137,6 +145,15 @@ export function MySharesPage() {
             ? `${s.runId.slice(0, 8)}…${s.runId.slice(-4)}`
             : s.runId}
         </Link>
+      ),
+    },
+    {
+      id: "agent",
+      header: "Agent",
+      // The agent is snapshotted at mint (V16) so the caller recognizes which run a link points at without
+      // opening it. Empty for pre-M115 shares (minted before the column existed) — shown as "—".
+      cell: (s) => (
+        <span className="text-sm">{s.agent || <span className="text-muted-foreground">—</span>}</span>
       ),
     },
     {

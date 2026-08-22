@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+import { ToastProvider } from "@/components/kit";
 import { MySharesPage } from "@/pages/my-shares-page";
 import type { MySharesItem } from "@/lib/api";
 
@@ -20,6 +21,7 @@ function share(over: Partial<MySharesItem> = {}): MySharesItem {
     id: "share-1",
     runId: "run-abc",
     namespace: "team-a",
+    agent: "support-bot",
     createdAt: "2026-08-01T10:00:00Z",
     expiresAt: "2026-08-08T10:00:00Z",
     status: "live",
@@ -56,15 +58,17 @@ function installFetch(
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={["/my-shares"]}>
-      <Routes>
-        <Route path="/my-shares" element={<MySharesPage />} />
-        <Route
-          path="/runs/:id"
-          element={<div data-testid="run-page-stub" />}
-        />
-      </Routes>
-    </MemoryRouter>,
+    <ToastProvider>
+      <MemoryRouter initialEntries={["/my-shares"]}>
+        <Routes>
+          <Route path="/my-shares" element={<MySharesPage />} />
+          <Route
+            path="/runs/:id"
+            element={<div data-testid="run-page-stub" />}
+          />
+        </Routes>
+      </MemoryRouter>
+    </ToastProvider>,
   );
 }
 
@@ -150,6 +154,23 @@ describe("MySharesPage — lists shares with status badges (V13)", () => {
     // Revoke buttons only appear for live shares
     expect(screen.queryByRole("button", { name: /Revoke/i })).toBeNull();
   });
+
+  // V16 (F1): the Agent column lets a caller recognize which run a link points at.
+  it("shows the agent name in the Agent column, and '—' when absent (pre-M115 shares)", async () => {
+    installFetch(() => ({
+      ok: true,
+      body: [
+        share({ id: "s1", agent: "research-bot" }),
+        share({ id: "s2", agent: "" }), // a pre-M115 share with no snapshotted agent
+      ],
+    }));
+
+    renderPage();
+
+    await screen.findByTestId("my-shares-page");
+    const agentCell = screen.getByText("research-bot");
+    expect(agentCell.closest("td")).not.toBeNull();
+  });
 });
 
 // ── (b) Revoke action: calls revokeRunShare(runId, shareId) and refreshes ─────
@@ -199,6 +220,31 @@ describe("MySharesPage — Revoke action (V13)", () => {
     // After refresh, the Revoke button is gone (the share is now revoked)
     await waitFor(() => {
       expect(screen.queryByTestId("revoke-share-live")).toBeNull();
+    });
+  });
+
+  // V16 (F6): a failed revoke must surface a toast (the old silent .catch left the user believing the link
+  // was revoked when it wasn't) and re-enable the button for a retry.
+  it("surfaces an error toast when the revoke fails, and re-enables the button", async () => {
+    installFetch((_url, method) => {
+      if (method === "DELETE") {
+        return { ok: false, status: 500, body: { error: "revoke boom" } };
+      }
+      return { ok: true, body: [share({ id: "s1", runId: "run-1", status: "live" })] };
+    });
+
+    renderPage();
+
+    const revokeBtn = await screen.findByTestId("revoke-s1");
+    fireEvent.click(revokeBtn);
+
+    // The failure toast is visible…
+    await waitFor(() => {
+      expect(screen.getByText("Revoke failed")).toBeInTheDocument();
+    });
+    // …and the button is re-enabled (not stuck in "Revoking…") so the user can retry.
+    await waitFor(() => {
+      expect(screen.getByTestId("revoke-s1")).not.toBeDisabled();
     });
   });
 
