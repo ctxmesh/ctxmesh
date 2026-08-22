@@ -40,3 +40,4 @@ KIND_CHAIN = OpenInferenceSpanKindValues.CHAIN.value  # "CHAIN"  — a reasoning
 KIND_AGENT = OpenInferenceSpanKindValues.AGENT.value  # "AGENT"  — the loop root
 KIND_TOOL = OpenInferenceSpanKindValues.TOOL.value  # "TOOL"   — a tool call
 KIND_LLM = OpenInferenceSpanKindValues.LLM.value  # "LLM"    — a model call
+KIND_RETRIEVER = OpenInferenceSpanKindValues.RETRIEVER.value  # "RETRIEVER" — a KB/RAG retrieval

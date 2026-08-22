@@ -68,6 +68,7 @@ const (
 const (
 	kbPhaseFailed    = "Failed"
 	kbPhaseIngesting = "Ingesting"
+	kbPhasePending   = "Pending" // validated, awaiting its first ingestion outcome
 )
 
 // Ingestion Run terminal-status wire values (run.Status string values). The controller compares against these
@@ -318,6 +319,15 @@ func (r *KnowledgeBaseReconciler) reconcileCorpusStatus(
 			if projected {
 				return ctrl.Result{}, nil // the run is terminal-failed → phase Failed written; stop polling.
 			}
+			return ctrl.Result{RequeueAfter: ingestingRequeue}, nil
+		}
+		// A Pending (validated, not-yet-terminal) KB must ALSO poll the corpus-status channel (m117.1 /
+		// m52.G7a). The INLINE ingest path (RUN_WORKER_DISPATCH=false) runs AS THE CALLER, who cannot
+		// update knowledgebases/status (the controller owns it, ADR 0061) — so it cannot flip us to
+		// Ingesting, and there is no CRD event when a completed ingest writes its corpus-status row off
+		// on cpDB. Without polling, a fully-ingested KB would sit Pending forever. A never-ingested KB
+		// simply re-polls cheaply (one cpDB read per interval) until its first ingest writes a row.
+		if kb.Status.Phase == kbPhasePending || kb.Status.Phase == "" {
 			return ctrl.Result{RequeueAfter: ingestingRequeue}, nil
 		}
 		return ctrl.Result{}, nil
