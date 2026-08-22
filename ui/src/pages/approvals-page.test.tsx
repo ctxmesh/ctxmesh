@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { ApprovalsPage } from "@/pages/approvals-page";
@@ -246,6 +246,33 @@ describe("ApprovalsPage — namespace param (V5, M112)", () => {
     expect(await screen.findByText("Select a namespace")).toBeInTheDocument();
     // No request is fired for the required-namespace endpoint (no 400 error surfaced).
     expect(captured.length).toBe(0);
+  });
+});
+
+// ── V16 (M115): manual refresh ─────────────────────────────────────────────────
+
+describe("ApprovalsPage — manual refresh (V16, M115)", () => {
+  it("the Refresh button refetches the queue", async () => {
+    const captured = installFetch(() => ({ ok: true, body: [] }));
+
+    renderPage();
+
+    await waitFor(() => expect(captured.length).toBe(1));
+    const btn = await screen.findByTestId("approvals-refresh");
+    fireEvent.click(btn);
+    await waitFor(() => expect(captured.length).toBe(2));
+    // The refetch still carries the selected namespace.
+    expect(captured[1]).toContain("namespace=team-a");
+  });
+
+  it("the Refresh button is disabled when no namespace is selected", async () => {
+    nsRef.current = "";
+    installFetch(() => ({ ok: true, body: [] }));
+
+    renderPage();
+
+    await screen.findByText("Select a namespace");
+    expect(screen.getByTestId("approvals-refresh")).toBeDisabled();
   });
 });
 
