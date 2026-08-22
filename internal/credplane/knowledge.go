@@ -17,6 +17,7 @@ limitations under the License.
 package credplane
 
 import (
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -83,6 +84,16 @@ func resolveIntEnv(name string, defVal int) int {
 		return defVal
 	}
 	return v
+}
+
+// sanitizeScore clamps a non-JSON-encodable similarity score (NaN / ±Inf — e.g. a cosine over a zero-norm
+// stored embedding) to 0. Without this, json.Encode fails on the response; the handler's writeJSON used to
+// swallow that error and send a silent 200 + empty body (m52.G7 — knowledge search returned 200/0-bytes).
+func sanitizeScore(s float64) float64 {
+	if math.IsNaN(s) || math.IsInf(s, 0) {
+		return 0
+	}
+	return s
 }
 
 // WithKnowledge enables the managed-RAG retrieval endpoint over the given knowledge store + embedder. When either
@@ -243,8 +254,11 @@ func (s *Server) handleKnowledgeSearch(w http.ResponseWriter, r *http.Request) {
 			StartOffset: sc.Chunk.StartOffset,
 			EndOffset:   sc.Chunk.EndOffset,
 			MimeType:    sc.Chunk.MimeType,
-			Score:       sc.Score,
-			Truncated:   truncated,
+			// Sanitize the score: a NaN/Inf cosine (e.g. a zero-norm stored embedding) is not JSON-encodable,
+			// and json.Encode would fail — previously swallowed by writeJSON → a silent 200 + empty body
+			// (m52.G7). Clamp to 0 so the response always encodes; writeJSON now also surfaces encode errors.
+			Score:     sanitizeScore(sc.Score),
+			Truncated: truncated,
 		})
 		docRefsSeen[sc.Chunk.DocumentRef] = true
 	}
