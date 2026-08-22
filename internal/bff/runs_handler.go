@@ -80,9 +80,15 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	rn, err := s.runStore.Get(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
+	// Caller-scoped authz (ADR 0011) BEFORE any branch — approve, deny, AND the workflow plan gate all
+	// MUTATE the run, so all three must be gated. allowOwner=true matches handleCancelRun (the identical
+	// "act on a paused run" surface): the run's creator, or a caller with RBAC on its backing
+	// agent/workflow CR, may resume/approve/deny; anyone else is denied. (Before M113 this handler
+	// authorized nothing — the deny + plan-gate paths mutated on a bare bearer, and only the approve path
+	// was incidentally gated via resolveAgentEndpoint; the V5 approvals queue that broadcasts paused run
+	// ids to namespace listers made that latent cross-tenant hole exploitable, so it is closed here.)
+	rn, ok := s.authorizeRunAccess(w, r, caller, id, true)
+	if !ok {
 		return
 	}
 	if rn.Status != run.StatusRequiresAction {

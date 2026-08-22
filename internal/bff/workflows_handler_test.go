@@ -90,6 +90,15 @@ func newAgentFakeClient(t *testing.T, objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 }
 
+// newAgentFakeClientAs is newAgentFakeClient whose SelfSubjectReview resolves to `username`, so a run
+// created through it is OWNED by that principal — needed for the caller-scoped resume gate (M113), which
+// authorizes an inline (CR-less) workflow run via ownership (there is no backing CR to RBAC against).
+func newAgentFakeClientAs(t *testing.T, username string, objs ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).
+		WithInterceptorFuncs(ssrInterceptor(username, nil)).Build()
+}
+
 // postWorkflowRun POSTs to POST /api/workflows/{name}/runs and returns the recorder.
 func postWorkflowRun(t *testing.T, s *Server, name string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -584,7 +593,9 @@ func mustGetRun(t *testing.T, s *Server, id string) *run.Run {
 // and the executor runs the graph (node 1 launches). Full HTTP round-trip through the resume endpoint.
 func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a", "agent-b")
-	cl := newAgentFakeClient(t, objs...)
+	// The caller OWNS the run (create stamps CallerUsername), so the M113 resume gate authorizes via
+	// ownership — an inline workflow run has no backing CR to RBAC against.
+	cl := newAgentFakeClientAs(t, "dev@example.com", objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
@@ -625,7 +636,8 @@ func TestPlanApprovalResume_Approve_RunsGraph(t *testing.T) {
 // terminates it (cancelled, "plan rejected") and launches NO node.
 func TestPlanApprovalResume_Deny_TerminatesRejected(t *testing.T) {
 	objs := registryWithMembers(t, "agent-a")
-	cl := newAgentFakeClient(t, objs...)
+	// Owner-authorized client so the M113 resume gate authorizes this inline run via ownership.
+	cl := newAgentFakeClientAs(t, "dev@example.com", objs...)
 	s := newWorkflowHandlerServer(t, cl)
 
 	spec := agentsv1beta1.WorkflowSpec{
