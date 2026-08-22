@@ -408,9 +408,9 @@ export function EvalsPage() {
                     <p className="font-mono text-xs text-muted-foreground">
                       dataset: {suite.datasetRef}
                     </p>
-                    {suite.scorers.length > 0 && (
+                    {(suite.scorers?.length ?? 0) > 0 && (
                       <p className="text-xs text-muted-foreground">
-                        scorers: {suite.scorers.join(", ")}
+                        scorers: {suite.scorers!.join(", ")}
                       </p>
                     )}
                   </div>
