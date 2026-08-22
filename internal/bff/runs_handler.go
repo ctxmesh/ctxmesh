@@ -107,9 +107,10 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// The resume decision (human-in-the-loop, m32.4). Absent ⇒ approve — the consent path has
 	// nothing to deny (the user connected their account); a deny is meaningful only for an approval.
 	isApproval := rn.RequiresAction != nil && rn.RequiresAction.Kind == run.ActionApproval
-	if isApproval && parseResumeDecision(r) == "deny" {
+	decision := parseResume(r)
+	if isApproval && decision.decision == "deny" {
 		updated, err := s.runStore.Update(id, func(x *run.Run) error {
-			x.Error = "approval denied"
+			x.Error = denyError("approval denied", decision.reason)
 			return x.Transition(run.StatusCancelled, time.Now())
 		})
 		if err != nil {
@@ -810,9 +811,10 @@ func lastEventID(r *http.Request) int {
 // resolves it (there is no single agent endpoint for a graph). Caller-scoped (the caller already passed
 // callerClient in handleResumeRun). rn is the loaded run (status requires_action, kind plan_approval).
 func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *run.Run) {
-	if parseResumeDecision(r) == "deny" {
+	decision := parseResume(r)
+	if decision.decision == "deny" {
 		updated, err := s.runStore.Update(rn.ID, func(x *run.Run) error {
-			x.Error = "plan rejected"
+			x.Error = denyError("plan rejected", decision.reason)
 			return x.Transition(run.StatusCancelled, time.Now())
 		})
 		if err != nil {
@@ -855,20 +857,45 @@ func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: rn.ID, Status: string(run.StatusRunning)})
 }
 
-// parseResumeDecision reads an optional {"decision":"approve"|"deny"} from the resume body
-// (best-effort; a missing/blank/malformed body ⇒ "" ⇒ treated as approve). Bounded read.
-func parseResumeDecision(r *http.Request) string {
+// resumeDecision is the parsed resume body: the decision plus an optional human-supplied reason (V16 —
+// surfaced on a deny so the denial is explainable on the run detail, not just the bare "approval denied").
+type resumeDecision struct {
+	decision string // "approve" | "deny" | "" (blank ⇒ approve)
+	reason   string // optional free-text reason (trimmed; capped when stored)
+}
+
+// parseResume reads an optional {"decision":"approve"|"deny","reason":"…"} from the resume body
+// (best-effort; a missing/blank/malformed body ⇒ zero value ⇒ treated as approve). Bounded read (4KB),
+// so the reason is inherently size-bounded before storage; denyError caps it further.
+func parseResume(r *http.Request) resumeDecision {
 	if r.Body == nil {
-		return ""
+		return resumeDecision{}
 	}
 	var body struct {
 		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10))
 	if err := dec.Decode(&body); err != nil {
-		return ""
+		return resumeDecision{}
 	}
-	return strings.ToLower(strings.TrimSpace(body.Decision))
+	return resumeDecision{
+		decision: strings.ToLower(strings.TrimSpace(body.Decision)),
+		reason:   strings.TrimSpace(body.Reason),
+	}
+}
+
+// denyError composes the stored run error for a denied resume: the base string plus the optional
+// human-supplied reason (V16). The reason is capped so a large body can't bloat the run row.
+func denyError(base, reason string) string {
+	if reason == "" {
+		return base
+	}
+	const maxReason = 500
+	if len(reason) > maxReason {
+		reason = reason[:maxReason]
+	}
+	return base + ": " + reason
 }
 
 // approvalToolPrefix is the stable prefix the managed loop uses for a TOOL-approval key:

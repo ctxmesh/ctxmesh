@@ -88,6 +88,10 @@ func openKnowledgePG(t *testing.T) knowledge.Store {
 			content_hash text NOT NULL, embedding_model text NOT NULL, embedding_dim int NOT NULL,
 			embedding vector(1536) NOT NULL, ingestion_run_id text NOT NULL DEFAULT '',
 			created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+			-- content_tsv mirrors migration 0018 (hybrid retrieval, ADR 0084): EnsureCorpus creates a per-partition
+			-- GIN index over this generated column, so this stale fixture must carry it or the ensure/ingest fails
+			-- with "column content_tsv does not exist" (found in m115.1 real-pg verification, 2026-08-22).
+			content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
 			PRIMARY KEY (knowledge_base, id),
 			UNIQUE (namespace, knowledge_base, subject, embedding_model, document_ref, content_hash)
 		) PARTITION BY LIST (knowledge_base)`)
