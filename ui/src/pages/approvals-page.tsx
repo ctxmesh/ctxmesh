@@ -187,7 +187,7 @@ export function ApprovalsPage() {
     },
     {
       id: "rootRunId",
-      header: "Tree context",
+      header: "Part of",
       hideOnMobile: true,
       cell: (item) => {
         if (!item.rootRunId) {
@@ -195,7 +195,7 @@ export function ApprovalsPage() {
         }
         return (
           <span className="text-xs text-muted-foreground">
-            in tree{" "}
+            part of{" "}
             <Link
               to={`/runs/${encodeURIComponent(item.rootRunId)}`}
               className="font-mono text-primary underline-offset-2 hover:underline"

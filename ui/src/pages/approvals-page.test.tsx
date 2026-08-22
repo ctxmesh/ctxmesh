@@ -125,7 +125,7 @@ describe("ApprovalsPage — basic rendering (V15, M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("in tree")).toBeInTheDocument();
+    expect(screen.getByText("part of")).toBeInTheDocument();
     // rootRunId links to its own run detail page
     const rootLink = screen.getByRole("link", { name: "run-root" });
     expect(rootLink).toHaveAttribute("href", "/runs/run-root");
