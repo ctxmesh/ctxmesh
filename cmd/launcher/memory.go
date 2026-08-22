@@ -291,6 +291,14 @@ func buildMemoryHTTPServer(
 	if !cfg.MemoryEnabled() && ltProxy == nil && kbProxy == nil {
 		return nil
 	}
+	// The :2998 listener ALSO serves the long-term-memory and knowledge (RAG) proxies, not just session
+	// memory. A knowledge-only (or LT-only) agent has no session-memory backend, so loadMemoryConfig
+	// returned a ZERO memoryConfig (Port 0) — binding ":0" (a random port) instead of 2998, so the in-pod
+	// SDK's localhost:2998 got "connection refused" and RAG-in-chat silently retrieved nothing (M117).
+	// Default the port here so the listener is reachable whenever ANY of the three proxies is active.
+	if cfg.Memory.Port == 0 {
+		cfg.Memory.Port = defaultMemoryPort
+	}
 	// Build the direct-Valkey store only when a backend addr is wired. When ONLY the state-layer proxy
 	// is set (phase 3, no MEMORY_BACKEND_ADDR), store stays nil and newMemoryServer forwards instead.
 	var store MemoryStore

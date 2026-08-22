@@ -69,6 +69,22 @@ def test_llm_emits_llm_span_with_model(traced_client: Client, span_exporter: InM
     assert span.attributes["output.value"] == "hello"
 
 
+def test_retriever_emits_retriever_span_with_query(
+    traced_client: Client, span_exporter: InMemorySpanExporter
+):
+    # M117 / ADR 0061: a KB/RAG retrieval appears as a RETRIEVER span (the "trace grew a retrieval
+    # span" evidence). The query is the input; the hit count + sources are recorded on the handle.
+    with traced_client.trace.retriever("knowledge.retrieve", query="capital of France?") as span_h:
+        span_h.set_attribute("retrieval.document_count", 2)
+        span_h.set_output("geo.md#3\ngeo.md#4")
+
+    span = _by_name(span_exporter)["knowledge.retrieve"]
+    assert span.attributes["openinference.span.kind"] == "RETRIEVER"
+    assert span.attributes["input.value"] == "capital of France?"
+    assert span.attributes["retrieval.document_count"] == 2
+    assert span.attributes["output.value"] == "geo.md#3\ngeo.md#4"
+
+
 def test_tool_and_llm_nest_under_step(traced_client: Client, span_exporter: InMemorySpanExporter):
     with traced_client.trace.step("plan") as step:
         step.set_input("q")

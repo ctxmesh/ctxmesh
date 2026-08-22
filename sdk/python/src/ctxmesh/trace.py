@@ -205,6 +205,15 @@ class TraceClient:
             input_value=input,
         )
 
+    def retriever(self, name: str = "knowledge.retrieve", *, query: Any = None) -> "_SpanCM":
+        """A knowledge/RAG retrieval — an OpenInference ``RETRIEVER`` span with the query as input.
+
+        Wraps a KB search (auto-inject or the ``knowledge_search`` tool) so the retrieval appears as
+        a ``RETRIEVER`` node in the trace — the "the trace grew a retrieval span" evidence (M117,
+        ADR 0061). Add the hit count / documents on the handle via ``set_attribute`` after the call.
+        """
+        return _SpanCM(self, name, _semconv.KIND_RETRIEVER, input_value=query)
+
     def llm(
         self,
         name: str = "llm",

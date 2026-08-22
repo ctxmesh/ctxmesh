@@ -1193,3 +1193,20 @@ func assertJSONError(t *testing.T, body []byte) {
 		t.Errorf("error body is not {\"error\":...}: %s", body)
 	}
 }
+
+// TestBuildMemoryHTTPServer_KnowledgeOnlyBindsDefaultPort (M117): a knowledge-only agent has no
+// session-memory backend, so loadMemoryConfig returns a zero memoryConfig (Port 0). The :2998 listener
+// also serves the knowledge (RAG) proxy, so it MUST still bind the default memory port — else it binds
+// ":0" (a random port) and the in-pod SDK's localhost:2998 gets "connection refused" (RAG-in-chat
+// silently retrieved nothing).
+func TestBuildMemoryHTTPServer_KnowledgeOnlyBindsDefaultPort(t *testing.T) {
+	_, tp := newTestTracer(t)
+	cfg := Config{} // no memory backend → cfg.Memory.Port == 0
+	srv := buildMemoryHTTPServer(cfg, tp.Tracer(tracerName), nil, &knowledgeProxy{})
+	if srv == nil {
+		t.Fatal("buildMemoryHTTPServer returned nil for a knowledge-only agent (kbProxy set)")
+	}
+	if want := fmt.Sprintf(":%d", defaultMemoryPort); srv.Addr != want {
+		t.Errorf("Addr = %q, want %q (the knowledge listener must bind the default memory port)", srv.Addr, want)
+	}
+}
