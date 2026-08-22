@@ -74,14 +74,17 @@ import (
 // mutation reaches the reconciler.
 type approvalRunLister struct {
 	store interface {
-		ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]run.WaitingApproval, error)
+		ListWaitingApproval(
+			ctx context.Context, namespace string, kinds []run.ActionKind, limit int,
+		) ([]run.WaitingApproval, error)
 	}
 }
 
 func (a approvalRunLister) ListWaitingApproval(
 	ctx context.Context, namespace string,
 ) ([]controller.WaitingApprovalRun, error) {
-	waiting, err := a.store.ListWaitingApproval(ctx, namespace, 0) // 0 = unbounded (the notification path)
+	// plan_approval only, unbounded (the AlertPolicy notification path).
+	waiting, err := a.store.ListWaitingApproval(ctx, namespace, []run.ActionKind{run.ActionPlanApproval}, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -552,7 +555,9 @@ func main() {
 	// if the shared store failed to build, approval-waiting eval is simply disabled (Runs stays nil).
 	var approvalRuns controller.ApprovalRunLister
 	if lister, ok := ctrlRunStore.(interface {
-		ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]run.WaitingApproval, error)
+		ListWaitingApproval(
+			ctx context.Context, namespace string, kinds []run.ActionKind, limit int,
+		) ([]run.WaitingApproval, error)
 	}); ok && ctrlRunStore != nil {
 		approvalRuns = approvalRunLister{store: lister}
 	}

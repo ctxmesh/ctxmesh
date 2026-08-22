@@ -12,6 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { api, ApiError, type RunDetail } from "@/lib/api";
+import { formatRelativeTime, formatDateTime } from "@/lib/format";
 
 // RunDetailPage — per-run detail view (V5, M112). Route: /runs/:id
 //
@@ -255,6 +256,18 @@ export function RunDetailPage() {
             </Link>
           </p>
         )}
+
+        {/* Waiting since — shown when the run is paused; updatedAt reflects the pause transition */}
+        {isApprovalPause && detail.updatedAt && (() => {
+          const rel = formatRelativeTime(detail.updatedAt);
+          const abs = formatDateTime(detail.updatedAt);
+          return rel ? (
+            <p className="mt-3 text-sm text-muted-foreground" data-testid="run-waiting-since">
+              Waiting since{" "}
+              <span className="font-medium text-foreground" title={abs}>{rel}</span>
+            </p>
+          ) : null;
+        })()}
       </div>
 
       {/* ── Back to the approval queue — the reviewer's exit after deciding ─── */}
@@ -263,9 +276,43 @@ export function RunDetailPage() {
           to="/approvals"
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
-          ← Plan approvals
+          ← Approvals
         </Link>
       )}
+
+      {/* ── Original request — the context a reviewer needs to judge the plan ─── */}
+      {/* M112-UX-review P2: a plan must not be judged with only the plan summary.        */}
+      {/* Render the first user message from detail.messages (role==="user"), or          */}
+      {/* detail.input as a fallback. Placed ABOVE the approval panel so it reads first. */}
+      {isApprovalPause && (() => {
+        const firstUserMsg = detail.messages?.find((m) => m.role === "user")?.content;
+        const rawInput =
+          typeof detail.input === "string"
+            ? detail.input
+            : detail.input != null
+              ? JSON.stringify(detail.input, null, 2)
+              : undefined;
+        const requestText = firstUserMsg ?? rawInput;
+        if (!requestText) return null;
+        return (
+          <Card data-testid="run-original-request">
+            <CardHeader>
+              <CardTitle className="text-base">Original request</CardTitle>
+              <CardDescription>
+                The original input that triggered this run — evaluate the plan against this ask.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div
+                className="max-h-48 overflow-y-auto rounded-md border bg-muted/40 p-4 text-sm"
+                style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+              >
+                {requestText}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* ── Approval panel — shown only when the run is paused for approval ─── */}
       {isApprovalPause && (
@@ -300,7 +347,7 @@ export function RunDetailPage() {
                   to="/approvals"
                   className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
                 >
-                  Return to Plan approvals →
+                  Return to Approvals →
                 </Link>
               </div>
             )}

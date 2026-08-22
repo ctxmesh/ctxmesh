@@ -56,7 +56,7 @@ func TestListWaitingApproval_FieldsLimitOrdering(t *testing.T) {
 			mkPause(t, s, "c1", "ns", "", ActionConsentRequired, t0.Add(time.Minute)) // excluded
 			mkPause(t, s, "other", "ns-other", "", ActionPlanApproval, t0)            // other ns
 
-			all, err := s.ListWaitingApproval(ctx, "ns", 0) // 0 = unbounded
+			all, err := s.ListWaitingApproval(ctx, "ns", []ActionKind{ActionPlanApproval}, 0) // 0 = unbounded
 			require.NoError(t, err)
 			require.Len(t, all, 2, "only the two plan_approval runs in ns (consent + other-ns excluded)")
 			assert.Equal(t, "p2", all[0].ID, "newest-updated first")
@@ -69,8 +69,12 @@ func TestListWaitingApproval_FieldsLimitOrdering(t *testing.T) {
 			assert.Equal(t, "root-x", byID["p1"].RootRunID, "the tree root is projected (descendant context)")
 			assert.Equal(t, "alice", byID["p1"].CallerUsername, "the creator is projected (inline-owner filter)")
 			assert.Equal(t, "m-p1", byID["p1"].Message)
+			// M113: the queue DTO carries namespace + the pause time (updated_at) for triage.
+			assert.Equal(t, "ns", byID["p1"].Namespace, "the namespace is projected")
+			assert.True(t, byID["p1"].WaitingSince.Equal(t0), "WaitingSince is the run's pause transition (updated_at)")
+			assert.True(t, byID["p2"].WaitingSince.Equal(t0.Add(2*time.Minute)), "newest waits-since is latest")
 
-			one, err := s.ListWaitingApproval(ctx, "ns", 1) // bounded
+			one, err := s.ListWaitingApproval(ctx, "ns", []ActionKind{ActionPlanApproval}, 1) // bounded
 			require.NoError(t, err)
 			require.Len(t, one, 1, "the limit bounds the result")
 			assert.Equal(t, "p2", one[0].ID, "the newest survives the limit")

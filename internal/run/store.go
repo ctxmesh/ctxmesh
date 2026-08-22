@@ -168,12 +168,14 @@ type Store interface {
 	// surfaces the subtree's pauses). Read-only; a nil slice + nil error means "none paused".
 	DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error)
 
-	// ListWaitingApproval returns the runs in namespace currently paused in requires_action with
-	// Kind == plan_approval (M75 AlertPolicy approvalWaiting + the M112 V5 console approval queue),
-	// most-recently-updated first. limit>0 bounds the scan (0 = unbounded). The projection carries
-	// RootRunID (tree context for a paused descendant) + CallerUsername (the BFF's inline-workflow
-	// owner filter — never sent to a client). Read-only; a nil slice means "none waiting".
-	ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]WaitingApproval, error)
+	// ListWaitingApproval returns the runs in namespace currently paused in requires_action whose Kind is
+	// in `kinds` (M75 approvalWaiting passes {plan_approval}; the M113 V5 unified console queue passes the
+	// caller-authorized subset of {plan_approval, approval} — consent_required is owner-only, never here),
+	// most-recently-updated first. limit>0 bounds the scan (0 = unbounded). The projection carries Kind
+	// (the plan-vs-step badge), Namespace, WaitingSince (the pause time), RootRunID (tree context for a
+	// paused descendant), and CallerUsername (the BFF's inline-workflow owner filter — never sent to a
+	// client). Read-only; a nil/empty `kinds` returns nothing.
+	ListWaitingApproval(ctx context.Context, namespace string, kinds []ActionKind, limit int) ([]WaitingApproval, error)
 }
 
 // DescendantAction is the L1-surfacing projection of a descendant sub-run paused in requires_action
@@ -598,9 +600,12 @@ func (m *memStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAct
 	return out, nil
 }
 
-// ListWaitingApproval — see the Store interface (M75 approvalWaiting + M112 V5 queue). The mem twin
-// mirrors the pgStore: plan_approval-only, newest-updated first, limit>0 bounds the result.
-func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, limit int) ([]WaitingApproval, error) {
+// ListWaitingApproval — see the Store interface (M75 approvalWaiting + M113 V5 unified queue). The mem
+// twin mirrors the pgStore: filter to the given kinds, newest-updated first, limit>0 bounds the result.
+func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, kinds []ActionKind, limit int) ([]WaitingApproval, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type row struct {
@@ -613,13 +618,14 @@ func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, limi
 		if r.Namespace != namespace || r.Status != StatusRequiresAction || r.RequiresAction == nil {
 			continue
 		}
-		if r.RequiresAction.Kind != ActionPlanApproval {
+		if !slices.Contains(kinds, r.RequiresAction.Kind) {
 			continue
 		}
 		rows = append(rows, row{
 			wa: WaitingApproval{
-				ID: r.ID, Agent: r.Agent, Message: r.RequiresAction.Message,
+				ID: r.ID, Agent: r.Agent, Message: r.RequiresAction.Message, Kind: r.RequiresAction.Kind,
 				RootRunID: r.RootRunID, CallerUsername: r.CallerUsername,
+				Namespace: r.Namespace, WaitingSince: r.UpdatedAt.UTC(),
 			},
 			updated: r.UpdatedAt,
 		})
