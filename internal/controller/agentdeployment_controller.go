@@ -1295,6 +1295,16 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 	env = append(env, kbRes.env...)
+	// The launcher's knowledge proxy (:2998 /knowledge/search) proxies to the token-service, so a KB
+	// agent needs TOKEN_SERVICE_URL exactly like a long-term-memory agent (M117 / ADR 0061 Fork 3). The
+	// long-term-memory block above injects it only when memory is on; a knowledge-ONLY agent got nothing,
+	// so newKnowledgeProxy fail-closed ("TOKEN_SERVICE_URL unset — disabling") → :2998 never listened →
+	// the in-pod auto-inject retrieval got "connection refused" → no RAG. Inject it here too when
+	// knowledge is enabled (guarded against a duplicate the memory/OBO path may already have set).
+	if len(kbRes.env) > 0 && r.OBOEgress.TokenServiceURL != "" &&
+		!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
+	}
 
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
