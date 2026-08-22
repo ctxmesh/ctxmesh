@@ -43,6 +43,10 @@ export function ApprovalsPage() {
   const [loadState, setLoadState] = useState<LoadState>(
     namespace ? { kind: "loading" } : { kind: "no-namespace" },
   );
+  // refreshing drives the manual Refresh button's spinner. The manual refresh is SILENT (it does not blank
+  // the table with a skeleton — matching the background poll); the spinner is the only feedback (V16 close-
+  // gate UX finding: a non-silent manual refresh flashed a skeleton over already-visible rows).
+  const [refreshing, setRefreshing] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // load fetches the queue. `silent` (used by the poll) refreshes the rows IN PLACE — it does not flip to
@@ -58,6 +62,7 @@ export function ApprovalsPage() {
       // state is the honest UX, not an error.
       if (!namespace) {
         setLoadState({ kind: "no-namespace" });
+        setRefreshing(false);
         return;
       }
       const controller = new AbortController();
@@ -79,10 +84,19 @@ export function ApprovalsPage() {
             message: err instanceof Error ? err.message : "request failed",
             forbidden: err instanceof ApiError && err.isForbidden,
           });
+        })
+        .finally(() => {
+          if (silent) setRefreshing(false);
         });
     },
     [namespace],
   );
+
+  // Manual refresh: refresh IN PLACE (silent — no skeleton flash) with a button spinner for feedback.
+  const manualRefresh = useCallback(() => {
+    setRefreshing(true);
+    load(true);
+  }, [load]);
 
   useEffect(() => {
     load();
@@ -222,13 +236,13 @@ export function ApprovalsPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => load()}
-          disabled={loadState.kind === "loading" || loadState.kind === "no-namespace"}
+          onClick={manualRefresh}
+          disabled={loadState.kind === "loading" || loadState.kind === "no-namespace" || refreshing}
           data-testid="approvals-refresh"
           className="shrink-0"
         >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Refresh
+          <RefreshCw className={`mr-2 h-4 w-4${refreshing ? " animate-spin" : ""}`} />
+          {refreshing ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
 
