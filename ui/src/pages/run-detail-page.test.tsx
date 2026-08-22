@@ -249,6 +249,53 @@ describe("RunDetailPage (V5, M112)", () => {
       expect(parsed.decision).toBe("deny");
     });
 
+    // V16 (m115.4): a reason typed into the textarea is sent with a deny.
+    it("sends the typed reason with a deny", async () => {
+      stubFetch({ run: APPROVAL_RUN });
+      renderPage(APPROVAL_RUN.id);
+
+      const reason = await screen.findByTestId("run-deny-reason");
+      fireEvent.change(reason, { target: { value: "scope too broad" } });
+      fireEvent.click(screen.getByTestId("run-deny-btn"));
+
+      const fetchMock = vi.mocked(globalThis.fetch);
+      const resumeCall = fetchMock.mock.calls.find(
+        ([url]) =>
+          typeof url === "string" &&
+          url.includes(`/api/runs/${encodeURIComponent(APPROVAL_RUN.id)}/resume`),
+      );
+      expect(resumeCall).toBeDefined();
+      const parsed = JSON.parse(resumeCall![1]?.body as string) as {
+        decision: string;
+        reason?: string;
+      };
+      expect(parsed.decision).toBe("deny");
+      expect(parsed.reason).toBe("scope too broad");
+    });
+
+    // Approve ignores the reason field even if text was typed.
+    it("does NOT send a reason on approve", async () => {
+      stubFetch({ run: APPROVAL_RUN });
+      renderPage(APPROVAL_RUN.id);
+
+      const reason = await screen.findByTestId("run-deny-reason");
+      fireEvent.change(reason, { target: { value: "typed but approving" } });
+      fireEvent.click(screen.getByTestId("run-approve-btn"));
+
+      const fetchMock = vi.mocked(globalThis.fetch);
+      const resumeCall = fetchMock.mock.calls.find(
+        ([url]) =>
+          typeof url === "string" &&
+          url.includes(`/api/runs/${encodeURIComponent(APPROVAL_RUN.id)}/resume`),
+      );
+      const parsed = JSON.parse(resumeCall![1]?.body as string) as {
+        decision: string;
+        reason?: string;
+      };
+      expect(parsed.decision).toBe("approve");
+      expect(parsed.reason).toBeUndefined();
+    });
+
     it("disables both buttons while the decision is in flight", async () => {
       // Never resolve the resume fetch so the submitting state stays
       vi.stubGlobal(

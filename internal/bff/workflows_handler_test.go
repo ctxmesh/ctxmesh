@@ -659,6 +659,33 @@ func TestPlanApprovalResume_Deny_TerminatesRejected(t *testing.T) {
 	}
 }
 
+// TestPlanApprovalResume_Deny_WithReason is V16 (m115.4): an optional reason on a plan deny is appended to
+// the stored "plan rejected" error so the rejection is explainable on the run detail.
+func TestPlanApprovalResume_Deny_WithReason(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	cl := newAgentFakeClientAs(t, "dev@example.com", objs...)
+	s := newWorkflowHandlerServer(t, cl)
+
+	spec := agentsv1beta1.WorkflowSpec{
+		RegistryRef: "reg",
+		Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+	}
+	runID := driveToGate(t, s, spec)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/resume",
+		bytes.NewReader([]byte(`{"decision":"deny","reason":"plan scope too broad"}`)))
+	req.Header.Set("Authorization", "Bearer developer-persona-token")
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rn := mustGetRun(t, s, runID)
+	assert.Equal(t, run.StatusCancelled, rn.Status)
+	assert.Equal(t, "plan rejected: plan scope too broad", rn.Error,
+		"the human-supplied reason is appended to the stored error")
+}
+
 // TestPlanApprovalResume_NoGate_UsesSingleAgentPath: a non-workflow run in requires_action is NOT routed
 // through the plan-approval path (regression guard: the workflow branch only triggers for a workflow
 // instance whose action kind is plan_approval).
