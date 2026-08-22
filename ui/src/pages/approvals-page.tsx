@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { CheckSquare } from "lucide-react";
+import { CheckSquare, RefreshCw } from "lucide-react";
 
 import { DataTable, type Column, type DataTableError } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { useNamespace } from "@/lib/namespace";
 import { api, ApiError, type ApprovalQueueItem } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
@@ -44,40 +45,58 @@ export function ApprovalsPage() {
   );
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    // The queue is namespace-scoped and the backend REQUIRES a namespace (unlike the
-    // cluster-wide alerts feed). When none is selected (the default "all" scope), prompt
-    // the user to pick one rather than firing a request that 400s — a select-a-namespace
-    // state is the honest UX, not an error.
-    if (!namespace) {
-      setLoadState({ kind: "no-namespace" });
-      return;
-    }
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
+  // load fetches the queue. `silent` (used by the poll) refreshes the rows IN PLACE — it does not flip to
+  // the loading skeleton, and a failed silent refresh keeps the current rows rather than blowing the table
+  // away with an error (a background poll must never disrupt what the reviewer is looking at). A manual load
+  // (the Refresh button / initial mount) is non-silent: it shows loading + surfaces errors normally.
+  const load = useCallback(
+    (silent = false) => {
+      abortRef.current?.abort();
+      // The queue is namespace-scoped and the backend REQUIRES a namespace (unlike the
+      // cluster-wide alerts feed). When none is selected (the default "all" scope), prompt
+      // the user to pick one rather than firing a request that 400s — a select-a-namespace
+      // state is the honest UX, not an error.
+      if (!namespace) {
+        setLoadState({ kind: "no-namespace" });
+        return;
+      }
+      const controller = new AbortController();
+      abortRef.current = controller;
+      if (!silent) setLoadState({ kind: "loading" });
 
-    api
-      .listApprovals(namespace, controller.signal)
-      .then((items) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
+      api
+        .listApprovals(namespace, controller.signal)
+        .then((items) => {
+          if (controller.signal.aborted) return;
+          setLoadState({ kind: "ready", items });
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted) return;
+          // A background poll must not disrupt the view — keep the current rows on a silent failure.
+          if (silent) return;
+          setLoadState({
+            kind: "error",
+            message: err instanceof Error ? err.message : "request failed",
+            forbidden: err instanceof ApiError && err.isForbidden,
+          });
         });
-      });
-  }, [namespace]);
+    },
+    [namespace],
+  );
 
   useEffect(() => {
     load();
     return () => abortRef.current?.abort();
   }, [load]);
+
+  // A ~30s background poll so a row a colleague already resolved isn't clicked blind (V16). Silent (no
+  // skeleton flash), and only while a namespace is selected — the interval resets when the namespace changes
+  // (load's identity changes) and is torn down on unmount.
+  useEffect(() => {
+    if (!namespace) return;
+    const id = window.setInterval(() => load(true), 30_000);
+    return () => window.clearInterval(id);
+  }, [load, namespace]);
 
   const items = loadState.kind === "ready" ? loadState.items : [];
 
@@ -191,13 +210,26 @@ export function ApprovalsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6" data-testid="approvals-page">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Approvals</h2>
-        <p className="text-sm text-muted-foreground">
-          Runs paused awaiting approval in this namespace — click a run to review and approve or
-          deny. Includes both workflow plan gates and mid-run step approvals. Switch the namespace
-          scope with the global namespace selector.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Approvals</h2>
+          <p className="text-sm text-muted-foreground">
+            Runs paused awaiting approval in this namespace — click a run to review and approve or
+            deny. Includes both workflow plan gates and mid-run step approvals. Switch the namespace
+            scope with the global namespace selector. Auto-refreshes every 30s.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => load()}
+          disabled={loadState.kind === "loading" || loadState.kind === "no-namespace"}
+          data-testid="approvals-refresh"
+          className="shrink-0"
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh
+        </Button>
       </div>
 
       <DataTable<ApprovalQueueItem>
