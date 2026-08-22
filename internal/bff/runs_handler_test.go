@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,9 +29,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -240,6 +245,53 @@ func TestResumeRun_NotAwaitingAction(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer developer-persona-token")
 	s.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// TestResumeRun_Unauthorized403 is the M113 caller-scoped resume gate (closing the pre-V15 hole Fable
+// flagged): a caller who is NEITHER the run's creator NOR RBAC-authorized on its backing agent cannot
+// approve/deny it — the deny path must not cancel another tenant's paused run on a bare bearer.
+func TestResumeRun_Unauthorized403(t *testing.T) {
+	agent := readyAgent("sk", "prod", "http://sk.prod.svc.cluster.local")
+	// The caller's RBAC FORBIDS reading the backing agent (and the SSR identity won't match the run's
+	// creator), so authorizeRunAccess denies. (Get is forbidden only for the AgentDeployment so the run
+	// store + other reads still work.)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+					return apierrors.NewForbidden(
+						k8sschema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"},
+						key.Name, errors.New("forbidden"))
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	s := newInvokeServer(t, newFakeFactory(c), &fakeInvokeAdapter{})
+
+	// Seed a paused mid-run approval run owned by ANOTHER principal, directly (create would hit the
+	// forbidden Get). This is exactly the deny-path target Fable flagged.
+	rn := run.New("run-victim", "prod", "sk", json.RawMessage(`{}`), "", time.Now())
+	rn.CallerUsername = "alice@example.com"
+	require.NoError(t, s.runStore.Create(rn))
+	_, err := s.runStore.Update("run-victim", func(x *run.Run) error {
+		if err := x.Transition(run.StatusRunning, time.Now()); err != nil {
+			return err
+		}
+		x.RequiresAction = &run.Action{Kind: run.ActionApproval, Key: "tool:x", Message: "approve the step"}
+		return x.Transition(run.StatusRequiresAction, time.Now())
+	})
+	require.NoError(t, err)
+
+	// A different caller tries to DENY (cancel) it → forbidden, and the run is UNCHANGED.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/run-victim/resume", bytes.NewReader([]byte(`{"decision":"deny"}`)))
+	req.Header.Set("Authorization", "Bearer intruder-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a non-owner without RBAC on the backing agent cannot resume/deny")
+
+	got, gErr := s.runStore.Get("run-victim")
+	require.NoError(t, gErr)
+	assert.Equal(t, run.StatusRequiresAction, got.Status, "the unauthorized deny did NOT cancel the run")
 }
 
 // approvalInvokeAdapter models a human-in-the-loop agent (m32.4): the first invoke pauses for

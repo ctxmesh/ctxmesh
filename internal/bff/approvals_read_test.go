@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -25,11 +26,28 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
+
+// perResourceAuthorizer answers the per-kind persona gate: allowed iff allow[a.Resource]. It records the
+// SSAR resources it saw so a test can assert the queue gates on `workflows` (plan) + `agentdeployments`
+// (mid-run approval), O(1), never per-row.
+type perResourceAuthorizer struct {
+	allow map[string]bool
+	seen  []string
+}
+
+func (p *perResourceAuthorizer) Authorize(_ context.Context, _ client.Client, a authz.Action) error {
+	p.seen = append(p.seen, a.Resource)
+	if p.allow[a.Resource] {
+		return nil
+	}
+	return authz.ErrForbidden
+}
 
 // newApprovalsServer builds a caller-scoped BFF server whose caller resolves (SelfSubjectReview) to
 // approvalsCaller, with the given persona authorizer and a mem run store as the queue source.
@@ -92,43 +110,69 @@ func TestApprovals_MissingNamespaceIs400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, code)
 }
 
-// TestApprovals_PersonaDeniedIs403 — a caller without `list workflows` gets 403, never a leaked/empty list.
-func TestApprovals_PersonaDeniedIs403(t *testing.T) {
+// TestApprovals_NeitherGrantIs403 — a caller with NEITHER `list workflows` NOR `list agentdeployments`
+// gets 403, never a leaked/empty list.
+func TestApprovals_NeitherGrantIs403(t *testing.T) {
 	store := run.NewMemStore()
 	seedPause(t, store, "wf-1", "team-a", "wf-agent", "bob", run.ActionPlanApproval, "approve the plan")
 	s := newApprovalsServer(t, &recordingAuthorizer{err: authz.ErrForbidden}, store)
 
 	_, code, _ := getApprovals(t, s, "namespace=team-a")
-	assert.Equal(t, http.StatusForbidden, code, "no workflows persona ⇒ 403, never a leaked queue")
+	assert.Equal(t, http.StatusForbidden, code, "neither list grant ⇒ 403, never a leaked queue")
 }
 
-// TestApprovals_GatesOnListWorkflows — the persona SSAR is exactly `list workflows`, scoped to the
-// requested namespace, run EXACTLY ONCE (never per-row).
-func TestApprovals_GatesOnListWorkflows(t *testing.T) {
-	store := run.NewMemStore()
-	seedPause(t, store, "wf-1", "team-a", "wf-agent", "bob", run.ActionPlanApproval, "approve the plan")
-	seedPause(t, store, "wf-2", "team-a", "wf-agent2", "carol", run.ActionPlanApproval, "approve too")
-	rec := &recordingAuthorizer{}
-	s := newApprovalsServer(t, rec, store)
+// TestApprovals_PerKindGate proves the mixed-queue persona gate: `list workflows` unlocks plan_approval
+// rows and `list agentdeployments` unlocks mid-run approval rows — each independently, O(1) SSARs, never
+// per-row. A caller with one grant sees ONLY that kind; the store is never even asked for the other.
+func TestApprovals_PerKindGate(t *testing.T) {
+	seed := func() run.Store {
+		store := run.NewMemStore()
+		seedPause(t, store, "wf-plan", "team-a", "wf-agent", "bob", run.ActionPlanApproval, "approve the plan")
+		seedPause(t, store, "agent-step", "team-a", "agent-x", "bob", run.ActionApproval, "approve the step")
+		return store
+	}
 
-	_, code, _ := getApprovals(t, s, "namespace=team-a")
-	require.Equal(t, http.StatusOK, code)
-	assert.Equal(t, authz.VerbList, rec.last.Verb)
-	assert.Equal(t, resourceWorkflows, rec.last.Resource, "the SSAR resource is workflows")
-	assert.Equal(t, "team-a", rec.last.Namespace, "scoped to the requested namespace")
-	assert.Equal(t, 1, rec.count, "exactly one persona gate, never per-row")
+	t.Run("workflows-only sees plan_approval, not mid-run approval", func(t *testing.T) {
+		auth := &perResourceAuthorizer{allow: map[string]bool{resourceWorkflows: true}}
+		s := newApprovalsServer(t, auth, seed())
+		items, code, _ := getApprovals(t, s, "namespace=team-a")
+		require.Equal(t, http.StatusOK, code)
+		require.Len(t, items, 1)
+		assert.Equal(t, "wf-plan", items[0].RunID)
+		assert.Equal(t, string(run.ActionPlanApproval), items[0].Kind)
+		assert.Contains(t, auth.seen, resourceWorkflows)
+		assert.Contains(t, auth.seen, resourceAgentDeployments, "both grants are probed (O(1) SSARs)")
+	})
+
+	t.Run("agentdeployments-only sees mid-run approval, not plan_approval", func(t *testing.T) {
+		auth := &perResourceAuthorizer{allow: map[string]bool{resourceAgentDeployments: true}}
+		s := newApprovalsServer(t, auth, seed())
+		items, code, _ := getApprovals(t, s, "namespace=team-a")
+		require.Equal(t, http.StatusOK, code)
+		require.Len(t, items, 1)
+		assert.Equal(t, "agent-step", items[0].RunID)
+		assert.Equal(t, string(run.ActionApproval), items[0].Kind)
+	})
+
+	t.Run("both grants see the unified queue", func(t *testing.T) {
+		auth := &perResourceAuthorizer{allow: map[string]bool{resourceWorkflows: true, resourceAgentDeployments: true}}
+		s := newApprovalsServer(t, auth, seed())
+		items, code, _ := getApprovals(t, s, "namespace=team-a")
+		require.Equal(t, http.StatusOK, code)
+		require.Len(t, items, 2, "both plan_approval and mid-run approval are listed")
+	})
 }
 
-// TestApprovals_ListsPlanApprovalAndFiltersInline is the core V5 contract: the queue lists plan_approval
-// rows (not consent / mid-run approval), excludes a CR-less inline run the caller does NOT own (owner
-// filter), includes an inline run the caller DOES own, and never leaks the approval Key.
-func TestApprovals_ListsPlanApprovalAndFiltersInline(t *testing.T) {
+// TestApprovals_UnifiedQueueFiltersInlineAndConsent is the core V5/V15 contract: with BOTH grants the
+// queue is a unified inbox (plan_approval AND mid-run approval), still EXCLUDES consent + other namespaces,
+// applies the CR-less inline owner filter, carries namespace + waiting-since, and never leaks the Key.
+func TestApprovals_UnifiedQueueFiltersInlineAndConsent(t *testing.T) {
 	store := run.NewMemStore()
-	// A normal workflow plan-approval pause → listed.
+	// A workflow plan-approval pause → listed.
 	seedPause(t, store, "wf-plan", "team-a", "wf-agent", "bob", run.ActionPlanApproval, "approve the plan")
-	// A consent pause → excluded (not plan_approval).
+	// A consent pause → EXCLUDED (owner-only, never a reviewer surface).
 	seedPause(t, store, "consent", "team-a", "wf-agent", "bob", run.ActionConsentRequired, "connect account")
-	// A mid-run approval pause → excluded (kind approval, not plan_approval).
+	// A mid-run approval pause → LISTED (the unified inbox, V15).
 	seedPause(t, store, "midrun", "team-a", "agent-x", "bob", run.ActionApproval, "approve the step")
 	// An inline-workflow plan-approval owned by the CALLER → listed.
 	seedPause(t, store, "inline-mine", "team-a", inlineWorkflowAgentLabel, approvalsCaller, run.ActionPlanApproval, "my inline plan")
@@ -137,6 +181,7 @@ func TestApprovals_ListsPlanApprovalAndFiltersInline(t *testing.T) {
 	// A plan-approval in a DIFFERENT namespace → excluded (the queue is namespace-scoped).
 	seedPause(t, store, "other-ns", "team-b", "wf-agent", "bob", run.ActionPlanApproval, "other-ns plan")
 
+	// recordingAuthorizer{} allows all → both kind grants.
 	s := newApprovalsServer(t, &recordingAuthorizer{}, store)
 	items, code, raw := getApprovals(t, s, "namespace=team-a")
 	require.Equal(t, http.StatusOK, code)
@@ -146,12 +191,12 @@ func TestApprovals_ListsPlanApprovalAndFiltersInline(t *testing.T) {
 		ids[it.RunID] = true
 	}
 	assert.True(t, ids["wf-plan"], "a workflow plan-approval pause is listed")
+	assert.True(t, ids["midrun"], "a mid-run approval IS in the unified queue (V15)")
 	assert.True(t, ids["inline-mine"], "the caller's OWN inline plan-approval is listed")
 	assert.False(t, ids["inline-theirs"], "another principal's inline run is filtered out (owner filter)")
-	assert.False(t, ids["consent"], "a consent pause is not an approval")
-	assert.False(t, ids["midrun"], "a mid-run approval is out of scope for the plan-approvals queue")
+	assert.False(t, ids["consent"], "a consent pause is owner-only, never in the reviewer queue")
 	assert.False(t, ids["other-ns"], "a run in another namespace is not in this namespace's queue")
-	assert.Len(t, items, 2)
+	assert.Len(t, items, 3)
 	assert.NotContains(t, raw, "secret-approval-key", "the approval Key must never reach the client")
 
 	// M113: each row carries the namespace + a waiting-since timestamp (triage signal).

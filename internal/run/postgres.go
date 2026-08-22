@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1050,6 +1051,7 @@ type WaitingApproval struct {
 	ID             string
 	Agent          string
 	Message        string
+	Kind           ActionKind
 	RootRunID      string
 	CallerUsername string
 	Namespace      string
@@ -1060,22 +1062,24 @@ type WaitingApproval struct {
 	WaitingSince time.Time
 }
 
-// ListWaitingApproval returns the runs in the given namespace currently paused in requires_action with
-// RequiresAction.Kind == plan_approval (M75, ADR 0069 §3). It reads the partial-indexed requires_action
-// rows for the namespace and filters on the JSON action kind in Go (mirroring how the store already
-// unmarshals requires_action). Read-only; it never mutates a run. A query/scan error is returned so the
-// caller (the reconciler) can log + skip — a bad read must never wedge the reconcile.
-func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, limit int) ([]WaitingApproval, error) {
-	// Take the most-recently-updated requires_action rows first and bound the scan (a busy namespace can
-	// accumulate many) — limit<=0 is unbounded (the reconciler notification path). The plan_approval kind
-	// filter is applied in Go (the action is JSON), so the returned count is within the scanned window.
+// ListWaitingApproval returns the runs in the given namespace currently paused in requires_action whose
+// RequiresAction.Kind is in `kinds` (M75 approvalWaiting passes {plan_approval}; the M112/M113 V5 console
+// queue passes the caller-authorized subset of {plan_approval, approval} — never consent_required, which is
+// owner-only). It reads the partial-indexed requires_action rows for the namespace and filters kind in Go
+// (the action is JSON). Read-only; a query/scan error is returned so a caller can log + skip.
+func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, kinds []ActionKind, limit int) ([]WaitingApproval, error) {
+	if len(kinds) == 0 {
+		return nil, nil // no authorized kinds ⇒ nothing to read (the BFF 403s before this)
+	}
+	// Most-recently-updated first. The kind filter is applied in Go (the action is JSON), so the SQL
+	// LIMIT must NOT be applied here — a pre-filter LIMIT would let consent/denied-kind rows consume the
+	// window and return a silently-SHORT page while more of the caller's entitled rows exist (a partial
+	// list masquerading as complete — the ADR-0011 trap). The scan is over one namespace's requires_action
+	// rows (the runs_requires_action partial index; a small paused-run set), and the display limit is
+	// applied AFTER the kind filter, below.
 	q := `SELECT id, agent, root_run_id, caller_username, updated_at, requires_action
 		FROM runs WHERE namespace=$1 AND status=$2 ORDER BY updated_at DESC`
 	args := []any{namespace, string(StatusRequiresAction)}
-	if limit > 0 {
-		q += " LIMIT $3"
-		args = append(args, limit)
-	}
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("run: list requires_action: %w", err)
@@ -1102,16 +1106,20 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, lim
 		if err := json.Unmarshal(action, &a); err != nil {
 			return nil, fmt.Errorf("run: list requires_action unmarshal: %w", err)
 		}
-		if a.Kind != ActionPlanApproval {
-			continue // a different pause (consent / mid-run approval) — not a plan_approval wait
+		if !slices.Contains(kinds, a.Kind) {
+			continue // a pause kind the caller did not ask for / is not authorized for
 		}
 		out = append(out, WaitingApproval{
-			ID: id, Agent: agent, Message: a.Message, RootRunID: rootRunID, CallerUsername: callerUsername,
-			Namespace: namespace, WaitingSince: updated.UTC(),
+			ID: id, Agent: agent, Message: a.Message, Kind: a.Kind, RootRunID: rootRunID,
+			CallerUsername: callerUsername, Namespace: namespace, WaitingSince: updated.UTC(),
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run: list requires_action rows: %w", err)
+	}
+	// Apply the display limit AFTER the kind filter so the page is accurate (never silently short).
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
