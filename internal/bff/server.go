@@ -115,6 +115,11 @@ type Server struct {
 	// nil ⇒ the share endpoints return 501 (CONTROLPLANE_DSN unset), never a panic.
 	sharedRunStore sharedrun.Store
 
+	// recipeOverlay holds the OPERATOR recipe ConfigMap overlay (S1) — hot-reloaded from a mounted volume
+	// by StartRecipeOverlayWatcher when RECIPES_OVERLAY_DIR is set, and merged over the embedded defaults
+	// in GET /api/recipes. Zero value / nil ⇒ embedded-only (fail-closed). See recipes_overlay.go.
+	recipeOverlay *recipeOverlayHolder
+
 	// sharedRunLimiter is the per-IP token-bucket that bounds the UNAUTHENTICATED public read
 	// (GET /api/shared/runs/{token}, m75.2). 256-bit tokens make brute force moot, but the endpoint is
 	// anonymous so it is not left unbounded — over budget → 429 (a non-oracle status). Always non-nil
@@ -559,6 +564,7 @@ func NewServer(opts Options) *Server {
 		publishedArtifactStore:   opts.PublishedArtifactStore,
 		sharedRunStore:           opts.SharedRunStore,
 		sharedRunLimiter:         newIPRateLimiter(sharedRunRatePerIP, sharedRunBurstPerIP),
+		recipeOverlay:            &recipeOverlayHolder{}, // empty until StartRecipeOverlayWatcher loads it (S1)
 		agentMemoryStore:         opts.AgentMemoryStore,
 		auditStore:               opts.AuditStore,
 		alertStore:               opts.AlertStore,
