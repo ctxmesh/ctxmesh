@@ -102,6 +102,8 @@ spec:
         - name: RUN_WORKER_DISPATCH
           value: "true"
 {{- end }}
+        - name: RECIPES_OVERLAY_DIR
+          value: /etc/agent-engine/recipes
         - name: STATELAYER_ADDR
           value: {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: PLATFORM_GENERATION_MODELS
@@ -173,12 +175,19 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-        volumeMounts: []
+        volumeMounts:
+        - mountPath: /etc/agent-engine/recipes
+          name: recipe-overlay
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: agent-engine-bff
       terminationGracePeriodSeconds: 10
-      volumes: []
+      volumes:
+      - configMap:
+          name: agent-engine-recipes
+          optional: true
+        name: recipe-overlay
 {{- end }}
