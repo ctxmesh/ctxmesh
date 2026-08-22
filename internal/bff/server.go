@@ -1597,6 +1597,16 @@ var agentOriginAPIAllowlist = []string{
 	"GET /api/namespaces",
 	"GET /api/agents/{ns}/{name}",
 	"POST /api/invoke",
+	// Durable chat (ADR 0093): the chatbox drives each turn as a durable run so it is
+	// observable (Runs list + native trace + cost) instead of a fire-and-forget /invoke.
+	// EXACTLY these four run endpoints — create, detail, the SSE stream, and resume (the
+	// ADR 0031 consent continue). The runs LIST (GET /api/runs) stays absent, as do cancel
+	// /fixture. All four are authorizeRunAccess-gated (ADR 0011): this widens the surface,
+	// not the authority.
+	"POST /api/runs",
+	"GET /api/runs/{id}",
+	"GET /api/runs/{id}/events",
+	"POST /api/runs/{id}/resume",
 	"POST /api/mcp/oauth/grant",
 	"GET /api/mcp/oauth/callback",
 	"GET /api/mcp/oauth/client-metadata",

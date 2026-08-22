@@ -324,6 +324,48 @@ def test_stream_completion_assembles_streamed_tool_calls(monkeypatch):
     assert json.loads(calls[0]["function"]["arguments"]) == {"text": "hi"}
 
 
+def test_stream_completion_requests_and_captures_usage_and_model(monkeypatch):
+    # m116/G11: a streamed turn must (a) REQUEST the terminal usage chunk via
+    # stream_options.include_usage, (b) copy the token counts onto the ChatResponse, and
+    # (c) resolve the real PROVIDER model from the chunks (not the route alias) so the trace
+    # store can price the turn. Without this a real Haiku run traced tokens=0/cost=0.
+    captured: dict = {}
+
+    def fake_stream(method, url, *, body=None, headers=None, timeout=None):
+        captured["body"] = json.loads(body)
+        return iter(
+            _lines(
+                'data: {"model":"claude-haiku-4-5","choices":[{"delta":{"content":"Hi"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}',  # noqa: E501
+                "data: [DONE]",
+            )
+        )
+
+    monkeypatch.setattr(_http, "stream", fake_stream)
+    client = agent.from_config(PlaneConfig.for_test(model_gateway_url="http://gw"))
+    tokens, resp = _drain(
+        client.model.stream_completion("route-alias", [{"role": "user", "content": "hi"}])
+    )
+    assert tokens == ["Hi"]
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+    assert resp.usage == {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}
+    assert resp.model == "claude-haiku-4-5", "resolves the provider model, not the route alias"
+
+
+def test_model_stream_requests_usage_chunk(monkeypatch):
+    # The pure-delta stream() path also requests the usage chunk so its LLM span carries tokens.
+    captured: dict = {}
+
+    def fake_stream(method, url, *, body=None, headers=None, timeout=None):
+        captured["body"] = json.loads(body)
+        return iter(_lines('data: {"choices":[{"delta":{"content":"x"}}]}', "data: [DONE]"))
+
+    monkeypatch.setattr(_http, "stream", fake_stream)
+    client = agent.from_config(PlaneConfig.for_test(model_gateway_url="http://gw"))
+    assert list(client.model.stream("m", [{"role": "user", "content": "hi"}])) == ["x"]
+    assert captured["body"]["stream_options"] == {"include_usage": True}
+
+
 def test_accumulate_tool_calls_ignores_malformed():
     acc = {}
     _accumulate_tool_calls(acc, None)

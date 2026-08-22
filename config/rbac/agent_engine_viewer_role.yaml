@@ -41,6 +41,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases # M116: console Knowledge Bases surface + caller-scoped list (was 403 for all roles)
   - guardrailpolicies
   # alertpolicies mirrors guardrailpolicies (an agent-scoped policy CRD, M70/ADR 0063 D2): a
   # read-only viewer sees the fired-alert feed (GET /api/alerts gates on a caller-scoped SSAR
@@ -65,6 +66,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:

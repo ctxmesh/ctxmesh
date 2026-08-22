@@ -128,6 +128,52 @@ function installFetch(opts: DetailOpts = {}) {
         const r = opts.invoke ?? { ok: true, body: { traceId: "tr-1", response: "Order shipped." } };
         return j(r.body, r.ok, r.status ?? (r.ok ? 200 : 400));
       }
+      // Durable run path (ADR 0093): ChatPanel converges chat onto createRun → stream → getRun.
+      // The mock derives the run's outcome from opts.invoke (its {traceId, response,
+      // consentRequired}) so the existing chat tests keep expressing intent the same way.
+      const invokeIntent = opts.invoke ?? { ok: true, body: { traceId: "tr-1", response: "Order shipped." } };
+      const invokeBody = (invokeIntent.body ?? {}) as {
+        traceId?: string;
+        response?: string;
+        consentRequired?: string[];
+      };
+      if (url === "/api/runs" && method === "POST") {
+        // A viewer-can't-run (or other create failure) surfaces here as a non-2xx create.
+        if (invokeIntent.ok === false) {
+          return j(invokeBody, false, invokeIntent.status ?? 403);
+        }
+        return j({ id: "run-1", status: "queued" }, true, 202);
+      }
+      const runDetailPath = url.split("?")[0];
+      if (runDetailPath.endsWith("/events")) {
+        // Stream the response as one completed message, then the terminal state.
+        const answer = invokeBody.response ?? "Order shipped.";
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: sseBody([
+            `event:message\ndata:${JSON.stringify(answer)}\n\n`,
+            "event:state\ndata:succeeded\n\n",
+          ]),
+        } as unknown as Response);
+      }
+      if (runDetailPath.match(/\/api\/runs\/[^/]+$/) && method === "GET") {
+        // The finalized run detail — carries the traceId + (optionally) a consent pause.
+        const consent = invokeBody.consentRequired;
+        const requiresAction =
+          consent && consent.length > 0
+            ? { kind: "consent_required" as const, servers: consent }
+            : undefined;
+        return j({
+          id: "run-1",
+          status: requiresAction ? "requires_action" : "succeeded",
+          traceId: invokeBody.traceId ?? "tr-1",
+          messages: [{ role: "assistant", content: invokeBody.response ?? "Order shipped." }],
+          requiresAction,
+        });
+      }
+      if (runDetailPath.match(/\/api\/runs\/[^/]+\/resume/) && method === "POST")
+        return j({ id: "run-1", status: "running" });
       if (url === "/api/runs") return j({ runs: [] });
 
       // m15.11: per-agent runs (GET .../runs)
@@ -364,20 +410,22 @@ describe("AgentDetailPage (landing page)", () => {
     expect(logCall.url).toContain("follow=true");
   });
 
-  it("Chat → POST /api/invoke → traceId link → clicking it opens the run inspector", async () => {
+  it("Chat → durable POST /api/runs → traceId link → clicking it opens the run inspector (ADR 0093)", async () => {
     const calls = installFetch();
     renderAt();
     await screen.findByTestId("chat-panel");
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "where is my order" } });
     fireEvent.click(screen.getByTestId("chat-send"));
-    // The invoke POST fired, carrying the plain message as {input} + a conversationId.
-    await waitFor(() => expect(calls.some((c) => c.url === "/api/invoke" && c.method === "POST")).toBe(true));
-    const invoke = calls.find((c) => c.url === "/api/invoke" && c.method === "POST")!;
-    const sent = JSON.parse(invoke.body);
+    // The chat converges on the DURABLE run path (createRun), NOT the synchronous /invoke — so
+    // every chat turn is a first-class, observable run. It carries {input} + a conversationId.
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/runs" && c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.url === "/api/invoke")).toBeUndefined();
+    const create = calls.find((c) => c.url === "/api/runs" && c.method === "POST")!;
+    const sent = JSON.parse(create.body);
     expect(sent.input).toEqual({ input: "where is my order" });
     expect(typeof sent.conversationId).toBe("string");
     expect(sent.conversationId.length).toBeGreaterThan(0);
-    // The agent turn renders the response.
+    // The agent turn renders the response (streamed live + finalized).
     expect(await screen.findByTestId("chat-turn-agent")).toHaveTextContent("Order shipped.");
     // The inspector does NOT auto-open — the trace id is a link the user clicks to open it.
     expect(screen.queryByTestId("run-inspector")).toBeNull();
@@ -429,16 +477,19 @@ describe("AgentDetailPage (landing page)", () => {
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "first" } });
     fireEvent.click(screen.getByTestId("chat-send"));
     await waitFor(() =>
-      expect(calls.filter((c) => c.url === "/api/invoke" && c.method === "POST").length).toBe(1),
+      expect(calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length).toBe(1),
     );
+    // The first turn must fully finalize before the second can send (the busy guard).
+    await screen.findByTestId("open-trace");
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "second" } });
     fireEvent.click(screen.getByTestId("chat-send"));
     await waitFor(() =>
-      expect(calls.filter((c) => c.url === "/api/invoke" && c.method === "POST").length).toBe(2),
+      expect(calls.filter((c) => c.url === "/api/runs" && c.method === "POST").length).toBe(2),
     );
-    const invokes = calls.filter((c) => c.url === "/api/invoke" && c.method === "POST");
-    const ids = invokes.map((c) => JSON.parse(c.body).conversationId);
-    // Both turns rode the SAME conversationId (the thread the agent scopes memory to).
+    const creates = calls.filter((c) => c.url === "/api/runs" && c.method === "POST");
+    const ids = creates.map((c) => JSON.parse(c.body).conversationId);
+    // Both turns rode the SAME conversationId (the thread the agent scopes memory to) — two
+    // distinct durable runs sharing one conversation id (the isolation story, ADR 0093).
     expect(ids[0]).toBe(ids[1]);
     // Both user turns are on screen.
     expect(screen.getAllByTestId("chat-turn-user")).toHaveLength(2);

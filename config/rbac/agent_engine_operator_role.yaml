@@ -42,6 +42,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases # M116: console Knowledge Bases surface + caller-scoped list (was 403 for all roles)
   - guardrailpolicies
   # alertpolicies is an agent-scoped policy CRD (M70, ADR 0063 D2) — the structural analog of
   # guardrailpolicies, so it mirrors it across the personas. It ALSO backs the fired-alert feed:
@@ -78,9 +79,24 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
   - get
   - list
   - watch
+# MCP-server registration (POST /api/mcpservers) creates the tool's egress NetworkPolicy
+# with the CALLER's client (ADR 0011), so a builder self-serves it in their namespace.
+# (Caller-created NetworkPolicy is a design smell — m52.G9 tracks moving it controller-
+# side; until then the builder needs this. An auth-less MCP needs no Secret, so `secrets`
+# create is deliberately NOT granted here — least privilege.)
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - delete

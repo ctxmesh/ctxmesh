@@ -1591,8 +1591,8 @@ export interface EvalSuiteSummary {
   namespace: string;
   /** datasetRef is the reference to the evaluation dataset (name or URI). */
   datasetRef: string;
-  /** scorers is the list of scorer names to run. */
-  scorers: string[];
+  /** scorers is the list of scorer names to run. Omitted by the API when empty (Go omitempty) → optional. */
+  scorers?: string[];
   /** gate/threshold: the pass/fail gate condition name and threshold value. */
   gate?: string;
   threshold?: number;
@@ -1603,7 +1603,8 @@ export interface EvalSuiteDetail {
   name: string;
   namespace: string;
   datasetRef: string;
-  scorers: string[];
+  /** Omitted by the API when empty (Go omitempty) → optional. */
+  scorers?: string[];
   gate?: string;
   threshold?: number;
   ready: boolean;
