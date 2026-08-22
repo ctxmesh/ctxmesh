@@ -287,6 +287,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   verbs:
@@ -319,6 +320,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
@@ -570,6 +572,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   - tenants
@@ -591,6 +594,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
@@ -668,6 +672,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   - tenants
@@ -689,6 +694,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
