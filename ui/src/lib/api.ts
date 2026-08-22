@@ -1975,6 +1975,7 @@ export interface MySharesItem {
   id: string;
   runId: string;
   namespace: string;
+  agent: string; // the run's agent, snapshotted at mint (V16) — "" for pre-M115 shares
   createdAt: string; // RFC3339
   expiresAt: string; // RFC3339
   status: "live" | "revoked" | "expired";
@@ -2398,6 +2399,11 @@ export interface RunDetail {
   input?: unknown;
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
+  // parentRunId / rootRunId give the spawn-tree lineage (from RunDetailDTO, omitempty). A root run has
+  // neither (or rootRunId === its own id); a sub-run carries both so the console can offer a back-to-parent
+  // nav (V16, M115). rootRunId is the tree root the human watches (where descendantsRequiringAction lives).
+  parentRunId?: string;
+  rootRunId?: string;
   // descendantsRequiringAction lists nested sub-runs currently paused awaiting
   // an action (M108 L1-surfacing). Each entry links to its own /runs/:runId.
   descendantsRequiringAction?: DescendantRequiringAction[];
@@ -3211,12 +3217,16 @@ export const api = {
   resumeRun: async (
     id: string,
     decision?: "approve" | "deny",
+    reason?: string, // optional free-text reason, surfaced on a deny (V16, m115.4)
     signal?: AbortSignal,
   ): Promise<RunHandle> => {
+    const payload: { decision?: string; reason?: string } = {};
+    if (decision) payload.decision = decision;
+    if (reason && reason.trim()) payload.reason = reason.trim();
     const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/resume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: decision ? JSON.stringify({ decision }) : undefined,
+      body: Object.keys(payload).length ? JSON.stringify(payload) : undefined,
       signal,
     });
     if (!res.ok) {

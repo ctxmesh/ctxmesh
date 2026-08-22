@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { api, ApiError, type RunDetail } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
@@ -87,6 +88,9 @@ export function RunDetailPage() {
   const { id = "" } = useParams();
   const [state, setState] = React.useState<PageState>({ kind: "loading" });
   const [approval, setApproval] = React.useState<ApprovalState>({ kind: "idle" });
+  // Optional free-text reason a reviewer can attach when DENYING (V16, m115.4) — stored on the run so the
+  // denial is explainable. Ignored on approve.
+  const [denyReason, setDenyReason] = React.useState("");
 
   // fetch (or re-fetch) the run
   const load = React.useCallback(
@@ -130,7 +134,8 @@ export function RunDetailPage() {
     if (!id) return;
     setApproval({ kind: "submitting", decision });
     try {
-      await api.resumeRun(id, decision);
+      // The reason is only meaningful on a deny; approve ignores it.
+      await api.resumeRun(id, decision, decision === "deny" ? denyReason : undefined);
       setApproval({ kind: "done", decision });
       // Re-fetch so the status badge updates (run is now running or cancelled).
       load();
@@ -205,9 +210,22 @@ export function RunDetailPage() {
     (detail.requiresAction?.kind === "approval" ||
       detail.requiresAction?.kind === "plan_approval") &&
     detail.status === "requires_action";
+  // isApprovalRun is the DURABLE "this run is/was an approval" signal (any status) — requiresAction
+  // persists across resolve (deny → cancelled, approve → running both keep it), so a run a colleague
+  // already resolved still shows the "← Approvals" nav-out on a fresh deep-link (V16 F7a: the old gate
+  // was isApprovalPause, leaving a resolved run with no way back to the queue).
+  const isApprovalRun =
+    detail.requiresAction?.kind === "approval" ||
+    detail.requiresAction?.kind === "plan_approval";
   const isSubmitting = approval.kind === "submitting";
   const hasDescendants =
     (detail.descendantsRequiringAction?.length ?? 0) > 0;
+  const descendantCount = detail.descendantsRequiringAction?.length ?? 0;
+  // The tree parent to navigate back to (V16 F3): the immediate parent, else the tree root — but never a
+  // self-link on a root run (rootRunId can equal the run's own id).
+  const parentTarget =
+    detail.parentRunId ||
+    (detail.rootRunId && detail.rootRunId !== detail.id ? detail.rootRunId : "");
 
   return (
     <div
@@ -270,14 +288,32 @@ export function RunDetailPage() {
         })()}
       </div>
 
-      {/* ── Back to the approval queue — the reviewer's exit after deciding ─── */}
-      {isApprovalPause && (
-        <Link
-          to="/approvals"
-          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          ← Approvals
-        </Link>
+      {/* ── Nav-out row — the reviewer's exit (V16 F7a/F3) ─────────────────── */}
+      {/* "← Approvals" shows for ANY approval run (not only while paused) so a run a colleague already   */}
+      {/* resolved, reached by deep-link, still has a way back to the queue. "← Parent run" shows for a    */}
+      {/* sub-run so the reviewer can climb back to the tree root (where nested approvals are overviewed). */}
+      {(isApprovalRun || parentTarget) && (
+        <div className="flex flex-wrap items-center gap-4">
+          {isApprovalRun && (
+            <Link
+              to="/approvals"
+              data-testid="run-back-approvals"
+              className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+            >
+              ← Approvals
+            </Link>
+          )}
+          {parentTarget && (
+            <Link
+              to={`/runs/${encodeURIComponent(parentTarget)}`}
+              data-testid="run-back-parent"
+              className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+            >
+              {/* Accurate label: the immediate parent when known, else the tree root (the fallback target). */}
+              {detail.parentRunId ? "← Parent run" : "← Root run"}
+            </Link>
+          )}
+        </div>
       )}
 
       {/* ── Original request — the context a reviewer needs to judge the plan ─── */}
@@ -357,6 +393,24 @@ export function RunDetailPage() {
               </p>
             )}
 
+            {/* Optional reason — recorded on the run when denying (V16, m115.4). */}
+            {approval.kind !== "done" && (
+              <div className="space-y-1">
+                <label htmlFor="deny-reason" className="text-xs font-medium text-muted-foreground">
+                  Reason (optional — recorded if you deny)
+                </label>
+                <Textarea
+                  id="deny-reason"
+                  data-testid="run-deny-reason"
+                  rows={2}
+                  value={denyReason}
+                  onChange={(e) => setDenyReason(e.target.value)}
+                  placeholder="Why are you denying this? (shown on the run)"
+                  disabled={isSubmitting}
+                />
+              </div>
+            )}
+
             <div className="flex gap-3">
               <Button
                 data-testid="run-approve-btn"
@@ -386,10 +440,16 @@ export function RunDetailPage() {
       {hasDescendants && (
         <Card data-testid="run-nested-approvals">
           <CardHeader>
-            <CardTitle className="text-base">Nested approvals</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base">
+              Nested approvals
+              <Badge variant="secondary" data-testid="nested-approvals-count">
+                {descendantCount}
+              </Badge>
+            </CardTitle>
             <CardDescription>
-              One or more sub-runs within this run are also paused awaiting approval.
-              Click a run to review and act on it.
+              {descendantCount} sub-run{descendantCount === 1 ? "" : "s"} within this run{" "}
+              {descendantCount === 1 ? "is" : "are"} also paused awaiting approval. Click a run to
+              review and act on it.
             </CardDescription>
           </CardHeader>
           <CardContent>

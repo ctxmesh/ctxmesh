@@ -362,6 +362,27 @@ func TestResumeRun_ApprovalDenied(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
 	assert.Equal(t, run.StatusCancelled, got.Status, "a denied approval cancels the run")
+	assert.Equal(t, "approval denied", got.Error, "no reason ⇒ the bare base error (backward-compatible)")
+}
+
+// TestResumeRun_ApprovalDenied_WithReason is V16 (m115.4): an optional reason on the deny is stored on the
+// run so the denial is explainable on the run detail (not just the bare "approval denied").
+func TestResumeRun_ApprovalDenied_WithReason(t *testing.T) {
+	agent := readyAgent("mailer", "prod", "http://mailer.prod.svc.cluster.local")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
+	s := newInvokeServer(t, newFakeFactory(c), approvalInvokeAdapter{})
+
+	created := createRun(t, s, InvokeRequest{Agent: "mailer", Namespace: "prod", Input: json.RawMessage(`{"input":"email the customer"}`)})
+	pollRun(t, s, created.ID, func(st run.Status) bool {
+		return st != run.StatusQueued && st != run.StatusRunning
+	})
+
+	rec := resumeRun(t, s, created.ID, `{"decision":"deny","reason":"not authorized to email customers"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	got := pollRun(t, s, created.ID, func(st run.Status) bool { return st.IsTerminal() })
+	assert.Equal(t, run.StatusCancelled, got.Status)
+	assert.Equal(t, "approval denied: not authorized to email customers", got.Error,
+		"the human-supplied reason is appended to the stored error")
 }
 
 func TestCancelRun(t *testing.T) {

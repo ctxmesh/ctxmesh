@@ -148,6 +148,7 @@ func TestCreateShare_MintReturnsTokenOnce_StoresHashOnly(t *testing.T) {
 	assert.Equal(t, hashShareToken(resp.Token), got.TokenHash)
 	assert.NotEqual(t, resp.Token, got.TokenHash, "the token itself is never stored")
 	assert.Equal(t, "run-share-1", got.RunID)
+	assert.Equal(t, "assistant", got.Agent, "V16: the mint snapshots the run's agent onto the share")
 	assert.True(t, got.IncludeContent)
 
 	// The audit row recorded the create WITHOUT the token.
@@ -405,7 +406,7 @@ func TestMyShares_CallerScopedListWithStatus(t *testing.T) {
 
 	// alice's three shares across three runs: one live, one revoked, one expired.
 	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
-		ID: "a-live", TokenHash: "hash-live", RunID: "run-1", Namespace: "team-a", CreatedBy: "alice@example.com",
+		ID: "a-live", TokenHash: "hash-live", RunID: "run-1", Namespace: "team-a", Agent: "support-bot", CreatedBy: "alice@example.com",
 		CreatedAt: now.Add(-1 * time.Minute), ExpiresAt: now.Add(time.Hour),
 	}))
 	require.NoError(t, store.Create(ctx, sharedrun.SharedRun{
@@ -432,6 +433,7 @@ func TestMyShares_CallerScopedListWithStatus(t *testing.T) {
 	assert.Equal(t, "a-live", out[0].ID, "newest-first")
 	assert.Equal(t, "live", out[0].Status)
 	assert.Equal(t, "run-1", out[0].RunID, "the runId is carried so the console can drive the per-run revoke")
+	assert.Equal(t, "support-bot", out[0].Agent, "V16: the agent is carried so the caller recognizes the run")
 	assert.Equal(t, "a-revoked", out[1].ID)
 	assert.Equal(t, "revoked", out[1].Status, "revoked takes precedence over expiry")
 	assert.Equal(t, "a-expired", out[2].ID)

@@ -333,6 +333,7 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		TokenHash:      tokenHash,
 		RunID:          rn.ID,
 		Namespace:      rn.Namespace,
+		Agent:          rn.Agent, // V16: snapshot the agent so "my shares" is recognizable (cross-DB join impossible)
 		CreatedBy:      createdBy,
 		CreatedAt:      now,
 		ExpiresAt:      expiresAt,
@@ -456,6 +457,7 @@ type MySharesItem struct {
 	ID             string    `json:"id"`
 	RunID          string    `json:"runId"`
 	Namespace      string    `json:"namespace"`
+	Agent          string    `json:"agent"` // V16: the run's agent (snapshotted at mint) so the caller recognizes the run
 	CreatedAt      time.Time `json:"createdAt"`
 	ExpiresAt      time.Time `json:"expiresAt"`
 	Status         string    `json:"status"` // "live" | "revoked" | "expired"
@@ -510,6 +512,7 @@ func (s *Server) handleMyShares(w http.ResponseWriter, r *http.Request) {
 			ID:             rec.ID,
 			RunID:          rec.RunID,
 			Namespace:      rec.Namespace,
+			Agent:          rec.Agent,
 			CreatedAt:      rec.CreatedAt,
 			ExpiresAt:      rec.ExpiresAt,
 			Status:         shareStatus(rec, now),

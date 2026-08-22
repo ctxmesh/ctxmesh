@@ -46,6 +46,10 @@ type SharedRun struct {
 	RunID string `json:"runId"`
 	// Namespace is the run's namespace, captured at mint time (the run's owning tenant).
 	Namespace string `json:"namespace"`
+	// Agent is the run's agent name, captured at mint time (V16, M115): the "my shares" list lives in the
+	// control-plane DB while runs live in the runstore DB, so a list-time join is impossible — the agent is
+	// snapshotted here so a caller can recognize which run a link points at. Empty for pre-M115 shares.
+	Agent string `json:"agent"`
 	// CreatedBy is the authenticated principal who minted this share (the audit paper trail).
 	CreatedBy string `json:"createdBy"`
 	// CreatedAt / ExpiresAt bound the link's life. ExpiresAt is required (default 7d, capped 90d at mint).

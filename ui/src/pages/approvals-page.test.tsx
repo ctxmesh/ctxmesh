@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { ApprovalsPage } from "@/pages/approvals-page";
@@ -125,7 +125,7 @@ describe("ApprovalsPage — basic rendering (V15, M113)", () => {
     renderPage();
 
     await screen.findByTestId("approvals-page");
-    expect(screen.getByText("in tree")).toBeInTheDocument();
+    expect(screen.getByText("part of")).toBeInTheDocument();
     // rootRunId links to its own run detail page
     const rootLink = screen.getByRole("link", { name: "run-root" });
     expect(rootLink).toHaveAttribute("href", "/runs/run-root");
@@ -246,6 +246,68 @@ describe("ApprovalsPage — namespace param (V5, M112)", () => {
     expect(await screen.findByText("Select a namespace")).toBeInTheDocument();
     // No request is fired for the required-namespace endpoint (no 400 error surfaced).
     expect(captured.length).toBe(0);
+  });
+});
+
+// ── V16 (M115): manual refresh ─────────────────────────────────────────────────
+
+describe("ApprovalsPage — manual refresh (V16, M115)", () => {
+  it("the Refresh button refetches the queue", async () => {
+    const captured = installFetch(() => ({ ok: true, body: [] }));
+
+    renderPage();
+
+    await waitFor(() => expect(captured.length).toBe(1));
+    const btn = await screen.findByTestId("approvals-refresh");
+    fireEvent.click(btn);
+    await waitFor(() => expect(captured.length).toBe(2));
+    // The refetch still carries the selected namespace.
+    expect(captured[1]).toContain("namespace=team-a");
+  });
+
+  it("the Refresh button is disabled when no namespace is selected", async () => {
+    nsRef.current = "";
+    installFetch(() => ({ ok: true, body: [] }));
+
+    renderPage();
+
+    await screen.findByText("Select a namespace");
+    expect(screen.getByTestId("approvals-refresh")).toBeDisabled();
+  });
+
+  // The manual refresh is SILENT: it must NOT blank the table with a skeleton (the close-gate UX finding).
+  // While the refresh is in flight the existing rows stay visible and the button shows a "Refreshing…" spinner.
+  it("manual refresh keeps rows visible (no skeleton flash) and spins the button", async () => {
+    let call = 0;
+    let resolveRefresh: (() => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => {
+        call += 1;
+        const rowsResponse = {
+          ok: true,
+          status: 200,
+          json: async () => [item_({ runId: "run-keep" })],
+          text: async () => "[]",
+        } as Response;
+        if (call === 1) return Promise.resolve(rowsResponse); // initial load: one row
+        // The refresh fetch stays pending until we resolve it, so the "refreshing" state is observable.
+        return new Promise<Response>((res) => {
+          resolveRefresh = () => res(rowsResponse);
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole("link", { name: "run-keep" });
+
+    fireEvent.click(screen.getByTestId("approvals-refresh"));
+
+    // Mid-refresh: the button spins AND the existing row is still on screen (no skeleton took its place).
+    await waitFor(() => expect(screen.getByText("Refreshing…")).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "run-keep" })).toBeInTheDocument();
+
+    resolveRefresh?.();
   });
 });
 
