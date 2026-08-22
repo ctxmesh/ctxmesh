@@ -37,6 +37,11 @@ func TestRestrictAgentOriginAPI(t *testing.T) {
 		{"GET", "/api/traces/abc123/detail"},
 		{"GET", "/api/authconfig"},
 		{"GET", "/api/whoami"},
+		// Durable chat (ADR 0093): exactly these four run endpoints for observable chat turns.
+		{"POST", "/api/runs"},               // create a chat-turn run
+		{"GET", "/api/runs/abc123"},         // its detail (finalize)
+		{"GET", "/api/runs/abc123/events"},  // its SSE token stream
+		{"POST", "/api/runs/abc123/resume"}, // ADR 0031 consent continue
 	}
 	for _, tc := range allowed {
 		if code := call(tc.m, tc.p, true); code != http.StatusOK || !reached {
@@ -50,7 +55,9 @@ func TestRestrictAgentOriginAPI(t *testing.T) {
 		{"GET", "/api/modelroutes"},
 		{"GET", "/api/agentregistries"},
 		{"GET", "/api/topology"},
-		{"GET", "/api/runs"},
+		{"GET", "/api/runs"},                    // the runs LIST stays absent (ADR 0093)
+		{"POST", "/api/runs/abc123/cancel"},     // cancel stays absent
+		{"GET", "/api/runs/abc123/fixture"},     // record fixture stays absent
 		{"GET", "/api/agents"},                  // the agents LIST
 		{"DELETE", "/api/agents/default/foo"},   // a mutation on the detail path
 		{"PUT", "/api/agents/default/foo"},      // a mutation on the detail path

@@ -287,6 +287,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   verbs:
@@ -319,12 +320,22 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -570,6 +581,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   - tenants
@@ -591,12 +603,22 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -668,6 +690,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases
   - guardrailpolicies
   - alertpolicies
   - tenants
@@ -689,6 +712,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
