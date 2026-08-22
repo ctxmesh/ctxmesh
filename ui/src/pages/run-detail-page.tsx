@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
 import { api, ApiError, type RunDetail } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
@@ -87,6 +88,9 @@ export function RunDetailPage() {
   const { id = "" } = useParams();
   const [state, setState] = React.useState<PageState>({ kind: "loading" });
   const [approval, setApproval] = React.useState<ApprovalState>({ kind: "idle" });
+  // Optional free-text reason a reviewer can attach when DENYING (V16, m115.4) — stored on the run so the
+  // denial is explainable. Ignored on approve.
+  const [denyReason, setDenyReason] = React.useState("");
 
   // fetch (or re-fetch) the run
   const load = React.useCallback(
@@ -130,7 +134,8 @@ export function RunDetailPage() {
     if (!id) return;
     setApproval({ kind: "submitting", decision });
     try {
-      await api.resumeRun(id, decision);
+      // The reason is only meaningful on a deny; approve ignores it.
+      await api.resumeRun(id, decision, decision === "deny" ? denyReason : undefined);
       setApproval({ kind: "done", decision });
       // Re-fetch so the status badge updates (run is now running or cancelled).
       load();
@@ -385,6 +390,24 @@ export function RunDetailPage() {
               <p className="text-sm text-destructive" role="alert">
                 {approval.message}
               </p>
+            )}
+
+            {/* Optional reason — recorded on the run when denying (V16, m115.4). */}
+            {approval.kind !== "done" && (
+              <div className="space-y-1">
+                <label htmlFor="deny-reason" className="text-xs font-medium text-muted-foreground">
+                  Reason (optional — recorded if you deny)
+                </label>
+                <Textarea
+                  id="deny-reason"
+                  data-testid="run-deny-reason"
+                  rows={2}
+                  value={denyReason}
+                  onChange={(e) => setDenyReason(e.target.value)}
+                  placeholder="Why are you denying this? (shown on the run)"
+                  disabled={isSubmitting}
+                />
+              </div>
             )}
 
             <div className="flex gap-3">

@@ -3217,12 +3217,16 @@ export const api = {
   resumeRun: async (
     id: string,
     decision?: "approve" | "deny",
+    reason?: string, // optional free-text reason, surfaced on a deny (V16, m115.4)
     signal?: AbortSignal,
   ): Promise<RunHandle> => {
+    const payload: { decision?: string; reason?: string } = {};
+    if (decision) payload.decision = decision;
+    if (reason && reason.trim()) payload.reason = reason.trim();
     const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/resume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: decision ? JSON.stringify({ decision }) : undefined,
+      body: Object.keys(payload).length ? JSON.stringify(payload) : undefined,
       signal,
     });
     if (!res.ok) {
