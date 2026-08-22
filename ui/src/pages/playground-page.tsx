@@ -19,11 +19,11 @@ import { FormField } from "@/components/config/form-field";
 import {
   api,
   ApiError,
-  formatRunStep,
-  openRunStream,
   type CreatedObject,
+  type RunDetail,
   type WorkflowNodeStatus,
 } from "@/lib/api";
+import { useDurableRun } from "@/lib/use-durable-run";
 import {
   isValidHttpUrl,
   MCP_OAUTH_MESSAGE,
@@ -99,12 +99,39 @@ export function PlaygroundPage() {
   // still enforces, so the 403 paths below stay live even if this is optimistic.
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
-  // The active run's SSE stream canceller (m32.8) — aborts on New-run / cancel / unmount.
-  const streamCancelRef = useRef<(() => void) | null>(null);
   // The active inline-consent wait's teardown (OTH-2): onConnect registers a window `message`
   // listener + a popup-close poll interval; this holds their cleanup so the unmount effect can
   // clear them even if the user navigates away with the popup still open (they'd leak otherwise).
   const connectCleanupRef = useRef<(() => void) | null>(null);
+
+  // The durable run engine (ADR 0093) — the SAME create-or-resume → stream → finalize engine the
+  // console ChatPanel uses (this page previously duplicated it in onRun + onApprove). It owns the
+  // SSE stream lifecycle (aborted on New-run / cancel / unmount); the callbacks project its
+  // live/finalized state into this page's richer `Run` union (traceId, consent/approval,
+  // workflow nodes) so the define/run/export chrome is unchanged.
+  const runEngine = useDurableRun({
+    onForbidden: () => reprobe(),
+    onFinalized: (detail) => setRun(finalizedRun(detail)),
+    onFinalizeError: (err) => setRun(errorRun(err)),
+  });
+
+  // Mirror the durable engine's LIVE stream state (running + accumulated tokens + step label)
+  // into the `Run` union so the "Streaming…" panel + Cancel keep working exactly as before.
+  useEffect(() => {
+    if (runEngine.status === "streaming" || runEngine.status === "creating") {
+      setRun({
+        kind: "running",
+        runId: runEngine.runId ?? "",
+        response: runEngine.responseText,
+        step: runEngine.step || undefined,
+      });
+    } else if (runEngine.status === "error") {
+      setRun({ kind: "error", message: runEngine.error ?? "The run failed." });
+    } else if (runEngine.status === "forbidden") {
+      setRun({ kind: "error", message: runEngine.error ?? "Forbidden.", forbidden: true });
+    }
+    // Only react to the durable-run transitions; `done` is handled by onFinalized.
+  }, [runEngine.status, runEngine.responseText, runEngine.step, runEngine.error, runEngine.runId]);
 
   // Identity pickers + deep link (DX-5): the checklist "Run" step and create→run land here
   // with ?agent=<name>&ns=<namespace>; pre-fill so the user never re-types. The namespace +
@@ -153,21 +180,21 @@ export function PlaygroundPage() {
     return () => ctrl.abort();
   }, [namespace]);
 
-  // Unmount cleanup (OTH-2): abort an in-flight run SSE stream and tear down any active
-  // inline-consent wait (the `message` listener + popup-close poll). Without this the fetch
-  // stream keeps reading and the listener/interval outlive the page — real leaks the old
-  // "aborts on unmount" comment claimed but never implemented (there was no effect at all).
+  // Unmount cleanup (OTH-2): tear down any active inline-consent wait (the `message` listener +
+  // popup-close poll). The durable run engine owns aborting its own in-flight SSE stream on
+  // unmount, so we only clear the consent wait here.
   useEffect(() => {
     return () => {
-      streamCancelRef.current?.();
       connectCleanupRef.current?.();
     };
   }, []);
 
-  // Run invokes the DEFINED agent by name. The agent must already be deployed
-  // (the run resolves its endpoint server-side); the Playground's define form is
-  // the same identity used for export. Input is parsed as JSON so the browser
-  // sends a real object (a malformed input is caught before the round-trip).
+  // Run invokes the DEFINED agent by name via the shared durable run engine (ADR 0093 — the
+  // SAME create → stream → finalize the console chat uses). The agent must already be deployed
+  // (the run resolves its endpoint server-side); the Playground's define form is the same
+  // identity used for export. Input is parsed as JSON so the browser sends a real object (a
+  // malformed input is caught before the round-trip). The engine streams tokens + finalizes;
+  // this page projects the finalized detail via onFinalized → finalizedRun().
   async function onRun() {
     // Run invokes an EXISTING, already-deployed agent BY NAME — so it needs only a valid
     // agent name (+ valid JSON input below). Image / scaling / budget are define/export-time
@@ -188,157 +215,19 @@ export function PlaygroundPage() {
       setRun({ kind: "error", message: "Input must be valid JSON." });
       return;
     }
-    // Stream the run (ADR 0034, m32.8): create it, then consume its SSE event stream —
-    // tokens render live; a requires_action pause (consent/approval) or a terminal close
-    // is finalized by reading the structured run state.
-    let runId: string;
-    try {
-      runId = (
-        await api.createRun({
-          agent: form.name.trim(),
-          namespace: namespace.trim(),
-          input: parsedInput,
-        })
-      ).id;
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      setRun(errorRun(err));
-      return;
-    }
-
-    setRun({ kind: "running", runId, response: "" });
-    let acc = "";
-    let step = "";
-    let finalized = false;
-    const finalize = () => {
-      if (finalized) return;
-      finalized = true;
-      stopStream();
-      void finalizeRun(runId, acc);
-    };
-    const cancelStream = openRunStream(runId, {
-      onEvent: (kind, data) => {
-        if (kind === "token") {
-          acc += data;
-          setRun({ kind: "running", runId, response: acc, step });
-        } else if (kind === "message") {
-          acc = data;
-          setRun({ kind: "running", runId, response: acc, step });
-        } else if (kind === "step") {
-          // Live step-visibility (M78, ADR 0071 §4): show "what step is my agent on right now".
-          // formatRunStep handles BOTH the new JSON metadata and the legacy plain-label Data.
-          const label = formatRunStep(data);
-          if (label) {
-            step = label;
-            setRun({ kind: "running", runId, response: acc, step });
-          }
-        } else if (kind === "state" && data === "requires_action") {
-          // requires_action is NOT terminal, so the stream stays open — stop it and finalize.
-          finalize();
-        }
-      },
-      onClose: finalize,
-      onError: (message, status) => {
-        finalized = true;
-        setRun({ kind: "error", message, status });
-      },
-      onForbidden: (message) => {
-        finalized = true;
-        reprobe();
-        setRun({ kind: "error", message, forbidden: true });
-      },
+    await runEngine.start({
+      agent: form.name.trim(),
+      namespace: namespace.trim(),
+      input: parsedInput,
     });
-    streamCancelRef.current = cancelStream;
   }
 
-  // finalizeRun reads the structured run state after the stream ends (or pauses at
-  // requires_action) and renders the outcome — the SSE stream carries tokens but not the
-  // traceId / requiresAction / workflow nodes, which live on the run object.
-  async function finalizeRun(runId: string, streamed: string) {
-    try {
-      const detail = await api.getRun(runId);
-      const ra = detail.requiresAction;
-      const lastMessage = detail.messages?.length
-        ? detail.messages[detail.messages.length - 1].content
-        : streamed;
-      if (detail.status === "failed") {
-        setRun({ kind: "error", message: detail.error || "The run failed." });
-        return;
-      }
-      // Derive failed node: when the run failed, the node at currentNode is the failed one.
-      // The BFF exposes nodes with their stored status; we overlay "failed" for the
-      // current node when the run itself is failed (UI-side derivation per m67.15).
-      const nodes = detail.nodes?.map((n) => {
-        if (detail.status === "failed" && n.name === detail.currentNode && n.status !== "done") {
-          return { ...n, status: "failed" as const };
-        }
-        return n;
-      });
-      setRun({
-        kind: "done",
-        traceId: detail.traceId ?? "",
-        response: lastMessage,
-        runStatus: detail.status,
-        consentRequired: ra?.kind === "consent_required" ? ra.servers : undefined,
-        approval:
-          ra?.kind === "approval"
-            ? { runId, key: ra.key ?? "", summary: ra.message ?? "" }
-            : undefined,
-        workflowRef: detail.workflowRef,
-        currentNode: detail.currentNode,
-        nodes,
-      });
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      setRun(errorRun(err));
-    }
-  }
-
-  // onApprove / onDeny resolve a human-in-the-loop pause (m32.4): approve re-invokes (the run
-  // resumes and streams to completion), deny cancels it. Approve re-streams from the same run.
-  async function onApprove(runId: string) {
-    try {
-      await api.resumeRun(runId, "approve");
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      setRun(errorRun(err));
-      return;
-    }
-    setRun({ kind: "running", runId, response: "" });
-    let acc = "";
-    let step = "";
-    let finalized = false;
-    const finalize = () => {
-      if (finalized) return;
-      finalized = true;
-      stopStream();
-      void finalizeRun(runId, acc);
-    };
-    const cancelStream = openRunStream(runId, {
-      onEvent: (kind, data) => {
-        if (kind === "token") {
-          acc += data;
-          setRun({ kind: "running", runId, response: acc, step });
-        } else if (kind === "message") {
-          acc = data;
-        } else if (kind === "step") {
-          // Live step-visibility (M78, ADR 0071 §4) — same parse-with-fallback as the run path.
-          const label = formatRunStep(data);
-          if (label) {
-            step = label;
-            setRun({ kind: "running", runId, response: acc, step });
-          }
-        } else if (kind === "state" && data === "requires_action") {
-          finalize();
-        }
-      },
-      onClose: finalize,
-      onError: (message, status) => {
-        finalized = true;
-        setRun({ kind: "error", message, status });
-      },
-    });
-    streamCancelRef.current = cancelStream;
+  // onApprove / onDeny resolve a human-in-the-loop pause (m32.4). Approve RESUMES the same run
+  // (the engine re-streams to completion). Deny resolves it to a terminal "denied" state
+  // directly (no re-stream). Both go through POST /api/runs/{id}/resume.
+  async function onApprove(_runId: string) {
+    // The engine resumes the run it is currently holding (the paused run == _runId).
+    await runEngine.resume("approve");
   }
 
   async function onDeny(runId: string) {
@@ -351,20 +240,11 @@ export function PlaygroundPage() {
     }
   }
 
-  // onCancel stops a streaming run: cancel the SSE, then cancel the run server-side.
-  async function onCancel(runId: string) {
-    stopStream();
-    try {
-      await api.cancelRun(runId);
-    } catch {
-      // best-effort — the run may already be terminal; the UI resets regardless.
-    }
+  // onCancel stops a streaming run: the engine cancels its SSE stream + the run server-side,
+  // then resets to idle.
+  async function onCancel(_runId: string) {
+    await runEngine.cancel();
     setRun({ kind: "idle" });
-  }
-
-  function stopStream() {
-    streamCancelRef.current?.();
-    streamCancelRef.current = null;
   }
 
   // onConnect runs the INLINE per-user consent (ADR 0031, m26.2): begin the OAuth grant
@@ -976,6 +856,44 @@ function WorkflowGraphSection({
       </ol>
     </div>
   );
+}
+
+// finalizedRun projects a finalized RunDetail (from the shared durable engine, ADR 0093) into
+// this page's richer `Run` union — the traceId + response + consent/approval affordances +
+// workflow nodes the "Run result" panel renders. A failed run maps to the error state (no trace
+// panel). This is exactly the projection the page's old inline finalizeRun did, now fed by the
+// hook's onFinalized callback.
+function finalizedRun(detail: RunDetail): Run {
+  if (detail.status === "failed") {
+    return { kind: "error", message: detail.error || "The run failed." };
+  }
+  const ra = detail.requiresAction;
+  const lastMessage = detail.messages?.length
+    ? detail.messages[detail.messages.length - 1].content
+    : "";
+  // Derive failed node: when the run failed, the node at currentNode is the failed one. The BFF
+  // exposes nodes with their stored status; we overlay "failed" for the current node when the run
+  // itself is failed (UI-side derivation per m67.15).
+  const nodes = detail.nodes?.map((n) => {
+    if (detail.status === "failed" && n.name === detail.currentNode && n.status !== "done") {
+      return { ...n, status: "failed" as const };
+    }
+    return n;
+  });
+  return {
+    kind: "done",
+    traceId: detail.traceId ?? "",
+    response: lastMessage,
+    runStatus: detail.status,
+    consentRequired: ra?.kind === "consent_required" ? ra.servers : undefined,
+    approval:
+      ra?.kind === "approval"
+        ? { runId: detail.id, key: ra.key ?? "", summary: ra.message ?? "" }
+        : undefined,
+    workflowRef: detail.workflowRef,
+    currentNode: detail.currentNode,
+    nodes,
+  };
 }
 
 // errorRun / errorExport map a thrown error to the respective error state,

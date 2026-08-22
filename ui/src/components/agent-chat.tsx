@@ -7,6 +7,8 @@ import { ChatMarkdown } from "@/components/chat-markdown";
 import { ForbiddenInline } from "@/components/kit";
 import { api, ApiError } from "@/lib/api";
 import { useCapabilities } from "@/lib/capabilities";
+import { useDevMode } from "@/lib/dev-mode";
+import { useDurableRun } from "@/lib/use-durable-run";
 import { RES_AGENTS } from "@/lib/nav";
 import { extractAgentOutput } from "@/lib/agent-output";
 import {
@@ -27,11 +29,21 @@ function mcpCallbackOrigin(): string {
 
 // ChatPanel — a turn-by-turn chat with a deployed agent, threaded on the framework's OWN
 // conversationId → the memory plane: one stable id per chat session lets a memory-bound
-// agent hold context across turns (state-layer.md). Under the hood each message is still one
-// traced /invoke (ADR 0011) — the chat just threads them with a shared X-Conversation-Id
-// (m29.5) so the stock managed loop replays prior turns (m29.6). Each agent turn keeps the
+// agent hold context across turns (state-layer.md).
+//
+// Under the hood each turn is now a DURABLE, observable run (ADR 0093): createRun →
+// openRunStream → finalize (via getRun), exactly as the Playground does — so every chat
+// turn appears in the Runs list, loads its native trace, is cost-attributed, and is
+// shareable/approvable. Tokens stream LIVE into the turn (a UX upgrade over the old
+// wait-for-the-whole-response). Session threading is preserved by forwarding the shared
+// X-Conversation-Id on the create path (the isolation story is literally true — two chat
+// sessions are two distinct runs sharing a conversation id). Each agent turn keeps the
 // trace-id link (opens the run inspector ON DEMAND) and the inline per-user Connect banner
-// (ADR 0031) — connecting re-sends the same message in place.
+// (ADR 0031) — connecting now RESUMES the same run rather than firing a second invisible call.
+//
+// Dev-mode (`agent-engine dev --ui`) has no cluster/run store — only /api/invoke works there —
+// so the OLD synchronous invoke path is kept as a fallback, gated on the GET /api/devmode probe
+// (ADR 0093 §2). On a real cluster the durable path is used.
 //
 // Extracted from the agent-detail page (m37) so the SAME chat drives both the console's
 // agent-detail chat tab AND the standalone per-agent chatbox surface.
@@ -40,13 +52,16 @@ type ChatTurn = {
   role: "user" | "agent";
   text: string;
   // agent turns carry the user input that produced them, so a post-connect resume
-  // re-invokes the SAME message without appending a duplicate user turn.
+  // re-runs the SAME message without appending a duplicate user turn.
   sourceText?: string;
+  // runId is the durable run backing this agent turn (ADR 0093) — the connect CTA RESUMES it
+  // (same run) instead of creating a new one. Absent in the dev-mode /invoke fallback.
+  runId?: string;
   traceId?: string;
   consentRequired?: string[];
   pending?: boolean;
   error?: string;
-  // a forbidden invoke (viewer without invoke rights) gets the ForbiddenInline treatment —
+  // a forbidden run (viewer without invoke rights) gets the ForbiddenInline treatment —
   // the API is the real gate, not the SPA's create capability.
   forbidden?: boolean;
 };
@@ -77,6 +92,9 @@ export function ChatPanel({
 }) {
   const { can, reprobe } = useCapabilities();
   const canRun = can(RES_AGENTS, "create");
+  // Dev-mode (ADR 0021) has no cluster run store — only /api/invoke is served there; a real
+  // cluster gets the durable run path (ADR 0093 §2). Gate on the server-confirmed probe.
+  const devMode = useDevMode();
   const [conversationId, setConversationId] = React.useState(newConversationId);
   const [turns, setTurns] = React.useState<ChatTurn[]>([]);
   const [draft, setDraft] = React.useState("");
@@ -92,6 +110,84 @@ export function ChatPanel({
   // Teardown for an active inline-consent wait (OTH-2): the `message` listener + popup-close
   // poll leak past this component if the user closes the chat with the consent popup still open.
   const connectCleanupRef = React.useRef<(() => void) | null>(null);
+  // The agent turn the durable run currently projects into — the newest pending turn. The hook
+  // holds ONE run's state; this ref maps it onto the right turn as tokens stream / it finalizes.
+  const activeTurnRef = React.useRef<number | null>(null);
+
+  // The durable run engine (ADR 0093) — shared with the Playground. Its callbacks project the
+  // finalized run onto the active turn (traceId, consent CTA, forbidden). Streamed tokens are
+  // projected via the state-effect below. A forbidden run reprobes the RBAC-aware chrome.
+  const run = useDurableRun({
+    onForbidden: () => reprobe(),
+    onFinalized: (detail) => {
+      const turnId = activeTurnRef.current;
+      if (turnId === null) return;
+      const ra = detail.requiresAction;
+      const consentRequired =
+        ra?.kind === "consent_required" ? ra.servers ?? [] : undefined;
+      const lastMessage = detail.messages?.length
+        ? detail.messages[detail.messages.length - 1].content
+        : "";
+      const failed = detail.status === "failed";
+      setTurns((ts) =>
+        ts.map((t) =>
+          t.id === turnId
+            ? {
+                ...t,
+                pending: false,
+                runId: detail.id,
+                // Keep the streamed text if the finalized message is empty (e.g. a
+                // consent pause carries no assistant content yet).
+                text: lastMessage || t.text,
+                traceId: detail.traceId,
+                consentRequired: consentRequired && consentRequired.length > 0 ? consentRequired : undefined,
+                error: failed ? detail.error || "The run failed." : undefined,
+                forbidden: false,
+              }
+            : t,
+        ),
+      );
+    },
+    onFinalizeError: (err) => projectRunError(activeTurnRef.current, err),
+  });
+
+  // Project the durable run's LIVE stream (tokens + pre-stream failures) onto the active turn.
+  // This is the streaming UX upgrade: tokens land in the turn's `text` as they arrive (the
+  // pending dots stay until the first token). A pre-stream 403/error is projected too.
+  React.useEffect(() => {
+    const turnId = activeTurnRef.current;
+    if (turnId === null) return;
+    if (run.status === "streaming") {
+      setTurns((ts) =>
+        ts.map((t) =>
+          t.id === turnId
+            ? {
+                ...t,
+                // Keep the pending dots until the first token, then show the live text.
+                pending: run.responseText === "",
+                text: run.responseText,
+                error: undefined,
+                forbidden: false,
+              }
+            : t,
+        ),
+      );
+    } else if (run.status === "forbidden" || run.status === "error") {
+      setTurns((ts) =>
+        ts.map((t) =>
+          t.id === turnId
+            ? {
+                ...t,
+                pending: false,
+                error: run.error ?? "run failed",
+                forbidden: run.status === "forbidden",
+              }
+            : t,
+        ),
+      );
+    }
+    // Only react to the durable-run stream/failure transitions.
+  }, [run.status, run.responseText, run.error]);
 
   const busy = connecting !== null || turns.some((t) => t.pending);
 
@@ -114,49 +210,71 @@ export function ChatPanel({
     return idRef.current;
   }
 
-  // runInvoke drives ONE traced /invoke for the given agent turn, threading the
-  // conversationId. Reused by the initial send and the post-connect resume so a resumed
-  // turn updates IN PLACE rather than appending a duplicate.
-  async function runInvoke(text: string, agentTurnId: number) {
+  // projectRunError writes a thrown error onto the given turn (used by the dev-mode /invoke
+  // fallback and by a finalize-time failure). A forbidden error reprobes the chrome.
+  function projectRunError(turnId: number | null, err: unknown) {
+    if (turnId === null) return;
+    const forbidden = err instanceof ApiError && err.isForbidden;
+    if (forbidden) reprobe();
+    setTurns((ts) =>
+      ts.map((t) =>
+        t.id === turnId
+          ? {
+              ...t,
+              pending: false,
+              error: err instanceof Error ? err.message : "run failed",
+              forbidden,
+            }
+          : t,
+      ),
+    );
+  }
+
+  // runTurn drives ONE turn's invocation, threading the conversationId. On a real cluster this
+  // is a DURABLE run (ADR 0093): createRun → stream → finalize, so the turn becomes an
+  // observable run. In dev-mode (no run store) it falls back to the synchronous /invoke. The
+  // active-turn ref lets the durable engine's stream/finalize callbacks target THIS turn.
+  async function runTurn(text: string, agentTurnId: number) {
+    activeTurnRef.current = agentTurnId;
     setTurns((ts) =>
       ts.map((t) => (t.id === agentTurnId ? { ...t, pending: true, error: undefined } : t)),
     );
-    try {
-      const res = await api.invoke({
-        agent: name,
-        namespace: ns,
-        input: { input: text },
-        conversationId,
-      });
-      setTurns((ts) =>
-        ts.map((t) =>
-          t.id === agentTurnId
-            ? {
-                ...t,
-                pending: false,
-                text: res.response,
-                traceId: res.traceId,
-                consentRequired: res.consentRequired,
-              }
-            : t,
-        ),
-      );
-    } catch (err) {
-      const forbidden = err instanceof ApiError && err.isForbidden;
-      if (forbidden) reprobe();
-      setTurns((ts) =>
-        ts.map((t) =>
-          t.id === agentTurnId
-            ? {
-                ...t,
-                pending: false,
-                error: err instanceof Error ? err.message : "run failed",
-                forbidden,
-              }
-            : t,
-        ),
-      );
+    if (devMode) {
+      // Dev-mode fallback (ADR 0093 §2): the old synchronous /invoke — unchanged.
+      try {
+        const res = await api.invoke({
+          agent: name, // TODO(ADR 0093): handoff-pointer — later turns could omit agent so handoffs stick
+          namespace: ns,
+          input: { input: text },
+          conversationId,
+        });
+        setTurns((ts) =>
+          ts.map((t) =>
+            t.id === agentTurnId
+              ? {
+                  ...t,
+                  pending: false,
+                  text: res.response,
+                  traceId: res.traceId,
+                  consentRequired: res.consentRequired,
+                }
+              : t,
+          ),
+        );
+      } catch (err) {
+        projectRunError(agentTurnId, err);
+      }
+      return;
     }
+    // Cluster: a durable, observable run (ADR 0093). Pin the agent on EVERY turn (current
+    // behavior — keep it). TODO(ADR 0093): handoff-pointer — later turns could omit agent so
+    // a mid-chat handoff sticks (deliberately NOT done here — it risks the single-agent chatbox).
+    await run.start({
+      agent: name,
+      namespace: ns,
+      input: { input: text },
+      conversationId,
+    });
   }
 
   async function send() {
@@ -170,7 +288,7 @@ export function ChatPanel({
       { id: agentId, role: "agent", text: "", pending: true, sourceText: text },
     ]);
     setDraft("");
-    await runInvoke(text, agentId);
+    await runTurn(text, agentId);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -181,11 +299,51 @@ export function ChatPanel({
     }
   }
 
+  // resumeTurn continues the turn's SAME durable run after the user connects their account
+  // (ADR 0093): RESUME the run (POST /api/runs/{id}/resume) + re-open the stream — NOT a new
+  // createRun, so the connect-and-continue stays ONE run. In dev-mode there is no run to
+  // resume, so we re-invoke the same message in place (the old behavior).
+  async function resumeTurn(text: string, agentTurnId: number, runId?: string) {
+    activeTurnRef.current = agentTurnId;
+    setTurns((ts) =>
+      ts.map((t) => (t.id === agentTurnId ? { ...t, pending: true, error: undefined } : t)),
+    );
+    if (devMode || !runId) {
+      // Dev-mode (or a turn with no durable run) → re-invoke the same message in place.
+      try {
+        const res = await api.invoke({
+          agent: name,
+          namespace: ns,
+          input: { input: text },
+          conversationId,
+        });
+        setTurns((ts) =>
+          ts.map((t) =>
+            t.id === agentTurnId
+              ? {
+                  ...t,
+                  pending: false,
+                  text: res.response,
+                  traceId: res.traceId,
+                  consentRequired: res.consentRequired,
+                }
+              : t,
+          ),
+        );
+      } catch (err) {
+        projectRunError(agentTurnId, err);
+      }
+      return;
+    }
+    // Cluster: resume the SAME run (consent connect-and-continue → no decision).
+    await run.resume();
+  }
+
   // onConnect runs the INLINE per-user consent (ADR 0031): begin the OAuth grant for the
   // named server, open the provider consent in a POPUP so the chat stays on screen, then
-  // re-send the SAME message when it completes so the fresh credential is injected. The
+  // RESUME the same run (ADR 0093) when it completes so the fresh credential is injected. The
   // token never touches the SPA (server-side exchange). Popup blocked → redirect fallback.
-  async function onConnect(server: string, text: string, agentTurnId: number) {
+  async function onConnect(server: string, text: string, agentTurnId: number, runId?: string) {
     setConnectError(null);
     setConnecting(server);
     let authorizationURL: string;
@@ -230,7 +388,7 @@ export function ChatPanel({
       done = true;
       teardown();
       setConnecting(null);
-      void runInvoke(text, agentTurnId); // resume the same turn with the fresh credential
+      void resumeTurn(text, agentTurnId, runId); // continue the SAME run with the fresh credential
     }
     function onMessage(e: MessageEvent) {
       // Accept the relay from our own origin OR the canonical console origin (ADR 0040) — the popup's
@@ -249,6 +407,8 @@ export function ChatPanel({
   }
 
   function newChat() {
+    run.reset();
+    activeTurnRef.current = null;
     setTurns([]);
     setConversationId(newConversationId());
     setConnectError(null);
@@ -309,7 +469,7 @@ export function ChatPanel({
                   <div className="space-y-2">
                     <p className="font-medium">Connect your account to continue</p>
                     <p className="text-muted-foreground">
-                      This message needs your own credentials. Connect, and it re-sends
+                      This message needs your own credentials. Connect, and it continues
                       automatically.
                     </p>
                     <div className="flex flex-wrap gap-2">
@@ -319,7 +479,7 @@ export function ChatPanel({
                           size="sm"
                           variant="outline"
                           disabled={connecting !== null}
-                          onClick={() => void onConnect(server, t.sourceText ?? "", t.id)}
+                          onClick={() => void onConnect(server, t.sourceText ?? "", t.id, t.runId)}
                           data-testid={`connect-${server}`}
                         >
                           {connecting === server ? "Connecting…" : `Connect ${server}`}
