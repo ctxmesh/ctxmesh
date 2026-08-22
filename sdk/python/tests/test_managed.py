@@ -940,9 +940,15 @@ class _DelSpan:
     def set_output(self, v):
         self.out = v
 
+    def set_attribute(self, k, v):
+        self.__dict__.setdefault("attrs", {})[k] = v
+
 
 class _DelTrace:
     def tool(self, name, input=None):
+        return _DelSpan()
+
+    def retriever(self, name="knowledge.retrieve", *, query=None):
         return _DelSpan()
 
 
@@ -2348,10 +2354,12 @@ class _FakeKnowledge:
 
 
 class _FakeClient:
-    """Minimal client carrying just a .knowledge — enough for the _inject_knowledge unit."""
+    """Minimal client carrying a .knowledge + a no-op .trace — enough for the _inject_knowledge unit
+    (the retrieval is wrapped in a RETRIEVER span, M117)."""
 
     def __init__(self, knowledge):
         self.knowledge = knowledge
+        self.trace = _DelTrace()
 
 
 def _kb_config(names, top_k=5, threshold=0.5) -> ManagedConfig:

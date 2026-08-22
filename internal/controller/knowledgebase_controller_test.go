@@ -826,6 +826,82 @@ func TestKnowledgeBase_StatusProjection_IngestingRequeue(t *testing.T) {
 		"reconcile must return RequeueAfter > 0 while status is Ingesting and no terminal row is found")
 }
 
+// TestKnowledgeBase_StatusProjection_PendingPollsForCorpusStatus (M117 / m52.G7a): the INLINE ingest
+// path (RUN_WORKER_DISPATCH=false) runs AS THE CALLER, who cannot update knowledgebases/status, so it
+// can NEVER flip the KB to Ingesting. A Pending (validated) KB with no terminal row yet must therefore
+// STILL requeue to poll the corpus-status channel — else a completed inline ingest would sit Pending
+// forever (the bug the M116 audit hit).
+func TestKnowledgeBase_StatusProjection_PendingPollsForCorpusStatus(t *testing.T) {
+	const ns = "default"
+	const name = "kb-pending-poll"
+
+	fakeKnowledge := &fakeCorpusStore{GetStatusFound: false} // no terminal row yet
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	// First reconcile: validate → phase Pending; found=false + Pending → must requeue (poll), NOT stop.
+	result, err := r.Reconcile(testCtx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	})
+	require.NoError(t, err)
+	assert.Positive(t, result.RequeueAfter,
+		"a Pending KB with no terminal corpus-status row must requeue to poll (the caller can't flip Ingesting)")
+}
+
+// TestKnowledgeBase_StatusProjection_PendingProjectsReady (M117 / m52.G7a): when a completed inline
+// ingest has written a terminal corpus-status row, the controller must project phase=Ready onto a KB
+// that is still merely Pending (never flipped to Ingesting), WITHOUT needing the caller's status flip.
+func TestKnowledgeBase_StatusProjection_PendingProjectsReady(t *testing.T) {
+	const ns = "default"
+	const name = "kb-pending-ready"
+
+	fakeKnowledge := &fakeCorpusStore{
+		GetStatusFound: true,
+		GetStatusResult: knowledge.CorpusStatus{
+			Phase:         "Ready",
+			ChunkCount:    3,
+			DocumentCount: 3,
+		},
+	}
+	r := newKBReconcilerWith(fakeKnowledge, nil)
+
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       validKBSpec(),
+	}
+	require.NoError(t, k8sClient.Create(testCtx, kb))
+	t.Cleanup(func() {
+		var cur agentsv1beta1.KnowledgeBase
+		if err := k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &cur); err == nil {
+			controllerutil.RemoveFinalizer(&cur, kbFinalizer)
+			_ = k8sClient.Update(testCtx, &cur)
+		}
+		_ = k8sClient.Delete(testCtx, kb)
+	})
+
+	// One reconcile: validate → Pending, then project the terminal corpus-status → Ready (no flip needed).
+	reconcileKB(t, r, name, ns)
+
+	var live agentsv1beta1.KnowledgeBase
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &live))
+	assert.Equal(t, "Ready", live.Status.Phase,
+		"a Pending KB must project phase=Ready from the corpus-status channel without an Ingesting flip")
+	assert.Equal(t, int32(3), live.Status.ChunkCount)
+}
+
 // TestKnowledgeBase_StuckIngesting_SafetyNetProjectsFailed (M80, ADR 0061 Fork 2): the controller safety-net.
 // When the KB is stuck at phase Ingesting, NO corpus-status row exists (an out-of-band ingestion failure that
 // never wrote the status channel), but the referenced ingestionRunRef run is terminal-`failed`, the reconcile

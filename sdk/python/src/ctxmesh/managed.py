@@ -268,26 +268,36 @@ def _inject_knowledge(
     Best-effort: any retrieval failure (per KB) is swallowed so the turn proceeds without the extra
     context. NEVER persisted — it mutates the in-memory ``messages[0]`` only, like memory."""
     lines: List[str] = []
-    for kb_name in config.knowledge_auto_inject:
-        try:
-            hits = client.knowledge.search(
-                user_input,
-                knowledge_base=kb_name,
-                top_k=config.knowledge_top_k,
-                threshold=config.knowledge_threshold,
-            )
-        except Exception:  # noqa: BLE001 — best-effort; a retrieval hiccup must never break the turn
-            continue
-        for hit in hits or []:
-            if not isinstance(hit, dict):
+    doc_refs: List[str] = []
+    # Wrap the auto-inject retrieval in a RETRIEVER span so it appears in the run's trace tree
+    # (M117 / ADR 0061 beat: "the trace grew a retrieval span"). One span per turn covering all
+    # auto-inject KBs; the query is the span input, the retrieved source refs + count its output.
+    with client.trace.retriever("knowledge.retrieve", query=user_input) as span:
+        for kb_name in config.knowledge_auto_inject:
+            try:
+                hits = client.knowledge.search(
+                    user_input,
+                    knowledge_base=kb_name,
+                    top_k=config.knowledge_top_k,
+                    threshold=config.knowledge_threshold,
+                )
+            except Exception:  # noqa: BLE001 — best-effort; a retrieval hiccup must never break the turn
                 continue
-            content = hit.get("content")
-            if not content:
-                continue
-            doc_ref = hit.get("documentRef", "")
-            chunk_idx = hit.get("chunkIndex", 0)
-            citation = f" [source: {doc_ref}#{chunk_idx}]" if doc_ref else ""
-            lines.append(f"- {content}{citation}")
+            for hit in hits or []:
+                if not isinstance(hit, dict):
+                    continue
+                content = hit.get("content")
+                if not content:
+                    continue
+                doc_ref = hit.get("documentRef", "")
+                chunk_idx = hit.get("chunkIndex", 0)
+                citation = f" [source: {doc_ref}#{chunk_idx}]" if doc_ref else ""
+                lines.append(f"- {content}{citation}")
+                if doc_ref:
+                    doc_refs.append(f"{doc_ref}#{chunk_idx}")
+        span.set_attribute("retrieval.document_count", len(lines))
+        span.set_attribute("knowledge.bases", ", ".join(config.knowledge_auto_inject))
+        span.set_output("\n".join(doc_refs) if doc_refs else f"{len(lines)} chunk(s), no citations")
     if not lines:
         return
     block = "\n".join(lines)
