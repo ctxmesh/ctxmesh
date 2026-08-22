@@ -42,6 +42,7 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  - knowledgebases # M116: console Knowledge Bases surface + caller-scoped list (was 403 for all roles)
   - guardrailpolicies
   # alertpolicies is an agent-scoped policy CRD (M70, ADR 0063 D2) — the structural analog of
   # guardrailpolicies, so it mirrors it across the personas. It ALSO backs the fired-alert feed:
@@ -78,6 +79,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:

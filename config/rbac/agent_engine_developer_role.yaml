@@ -42,6 +42,10 @@ rules:
   - workflows
   - agentscalingpolicies
   - evalsuites
+  # knowledgebases is a v1beta1 CRD an author owns (RAG grounding, M68); the console
+  # Knowledge Bases surface + the BFF caller-scoped list authorize on this grant — without
+  # it every /api/knowledgebases call fail-closes to 403 (M116 fix).
+  - knowledgebases
   - guardrailpolicies
   # alertpolicies mirrors guardrailpolicies (an agent-scoped policy CRD, M70/ADR 0063 D2): an
   # author defines alerting for their agents, and the grant also passes the GET /api/alerts SSAR.
@@ -78,6 +82,7 @@ rules:
   - workflows/status
   - agentscalingpolicies/status
   - evalsuites/status
+  - knowledgebases/status
   - guardrailpolicies/status
   - alertpolicies/status
   verbs:
