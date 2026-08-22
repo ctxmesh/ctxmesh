@@ -309,6 +309,62 @@ describe("RunDetailPage (V5, M112)", () => {
       expect(screen.getByText(/default\/sub-agent/)).toBeInTheDocument();
       expect(screen.getByText(/Sub-run needs approval too/)).toBeInTheDocument();
     });
+
+    // V16 (M115): a pending-count badge orients the reviewer on how many sub-runs still wait.
+    it("badges the pending descendant count", async () => {
+      stubFetch({ run: RUN_WITH_DESCENDANTS });
+      renderPage(RUN_WITH_DESCENDANTS.id);
+
+      const badge = await screen.findByTestId("nested-approvals-count");
+      expect(badge).toHaveTextContent("2");
+    });
+  });
+
+  // ── V16 (M115): nav-out — resolved-run back-link + back-to-parent ──────────────
+
+  describe("V16 nav-out (M115)", () => {
+    // F7a: a run a colleague already resolved, reached by deep-link, still has a way back to the queue —
+    // the "← Approvals" link is gated on the DURABLE approval signal (requiresAction kind), not on the
+    // transient requires_action status.
+    it("shows '← Approvals' on a RESOLVED approval run (no approval panel)", async () => {
+      const RESOLVED_APPROVAL: RunDetail = {
+        id: "run-resolved",
+        status: "cancelled",
+        requiresAction: { kind: "approval", message: "approval denied" },
+      };
+      stubFetch({ run: RESOLVED_APPROVAL });
+      renderPage(RESOLVED_APPROVAL.id);
+
+      const back = await screen.findByTestId("run-back-approvals");
+      expect(back).toHaveAttribute("href", "/approvals");
+      // …but the approve/deny panel must NOT render (the run is no longer paused).
+      expect(screen.queryByTestId("run-approval-panel")).toBeNull();
+    });
+
+    // F3: a sub-run offers a back-to-parent nav (to the tree root where nested approvals are overviewed).
+    it("shows '← Parent run' for a sub-run, linking to its parent/root", async () => {
+      const SUB_RUN: RunDetail = {
+        id: "run-sub",
+        status: "running",
+        parentRunId: "run-parent-001",
+        rootRunId: "run-parent-001",
+      };
+      stubFetch({ run: SUB_RUN });
+      renderPage(SUB_RUN.id);
+
+      const back = await screen.findByTestId("run-back-parent");
+      expect(back).toHaveAttribute("href", "/runs/run-parent-001");
+    });
+
+    // A plain root run (no approval, no lineage) shows neither nav-out link.
+    it("shows no nav-out on a plain non-approval root run", async () => {
+      stubFetch({ run: BASE_RUN });
+      renderPage(BASE_RUN.id);
+
+      await screen.findByTestId("run-detail-header");
+      expect(screen.queryByTestId("run-back-approvals")).toBeNull();
+      expect(screen.queryByTestId("run-back-parent")).toBeNull();
+    });
   });
 
   // ── (c) Non-paused run — no approval panel ────────────────────────────────

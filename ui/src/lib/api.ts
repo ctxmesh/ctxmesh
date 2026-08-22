@@ -2399,6 +2399,11 @@ export interface RunDetail {
   input?: unknown;
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
+  // parentRunId / rootRunId give the spawn-tree lineage (from RunDetailDTO, omitempty). A root run has
+  // neither (or rootRunId === its own id); a sub-run carries both so the console can offer a back-to-parent
+  // nav (V16, M115). rootRunId is the tree root the human watches (where descendantsRequiringAction lives).
+  parentRunId?: string;
+  rootRunId?: string;
   // descendantsRequiringAction lists nested sub-runs currently paused awaiting
   // an action (M108 L1-surfacing). Each entry links to its own /runs/:runId.
   descendantsRequiringAction?: DescendantRequiringAction[];
