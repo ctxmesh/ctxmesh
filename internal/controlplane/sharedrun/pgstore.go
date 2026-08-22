@@ -50,9 +50,9 @@ func (s *pgStore) Create(ctx context.Context, rec SharedRun) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO shared_runs
-			(id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8)`,
-		rec.ID, rec.TokenHash, rec.RunID, rec.Namespace, rec.CreatedBy,
+			(id, token_hash, run_id, namespace, agent, created_by, created_at, expires_at, revoked, include_content)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9)`,
+		rec.ID, rec.TokenHash, rec.RunID, rec.Namespace, rec.Agent, rec.CreatedBy,
 		createdAt.UTC(), rec.ExpiresAt.UTC(), rec.IncludeContent); err != nil {
 		return fmt.Errorf("sharedrun: create share for run %s: %w", rec.RunID, err)
 	}
@@ -64,11 +64,11 @@ func (s *pgStore) Create(ctx context.Context, rec SharedRun) error {
 func (s *pgStore) GetByTokenHash(ctx context.Context, tokenHash string) (*SharedRun, bool, error) {
 	var rec SharedRun
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content
+		SELECT id, token_hash, run_id, namespace, agent, created_by, created_at, expires_at, revoked, include_content
 		FROM shared_runs
 		WHERE token_hash = $1`,
 		tokenHash).Scan(
-		&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.CreatedBy,
+		&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.Agent, &rec.CreatedBy,
 		&rec.CreatedAt, &rec.ExpiresAt, &rec.Revoked, &rec.IncludeContent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
@@ -96,7 +96,7 @@ func (s *pgStore) Revoke(ctx context.Context, id string) error {
 // revoked rows are included so the UI can badge them and give an honest "what did I expose?" view).
 func (s *pgStore) ListForRun(ctx context.Context, runID string) ([]SharedRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content
+		SELECT id, token_hash, run_id, namespace, agent, created_by, created_at, expires_at, revoked, include_content
 		FROM shared_runs
 		WHERE run_id = $1
 		ORDER BY created_at DESC`,
@@ -110,7 +110,7 @@ func (s *pgStore) ListForRun(ctx context.Context, runID string) ([]SharedRun, er
 	for rows.Next() {
 		var rec SharedRun
 		if sErr := rows.Scan(
-			&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.CreatedBy,
+			&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.Agent, &rec.CreatedBy,
 			&rec.CreatedAt, &rec.ExpiresAt, &rec.Revoked, &rec.IncludeContent,
 		); sErr != nil {
 			return nil, fmt.Errorf("sharedrun: list shares scan: %w", sErr)
@@ -130,7 +130,7 @@ func (s *pgStore) ListForRun(ctx context.Context, runID string) ([]SharedRun, er
 // index (migration 0019) so it does not full-scan at multi-tenant scale.
 func (s *pgStore) ListByCreator(ctx context.Context, createdBy string) ([]SharedRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, token_hash, run_id, namespace, created_by, created_at, expires_at, revoked, include_content
+		SELECT id, token_hash, run_id, namespace, agent, created_by, created_at, expires_at, revoked, include_content
 		FROM shared_runs
 		WHERE created_by = $1
 		ORDER BY created_at DESC`,
@@ -144,7 +144,7 @@ func (s *pgStore) ListByCreator(ctx context.Context, createdBy string) ([]Shared
 	for rows.Next() {
 		var rec SharedRun
 		if sErr := rows.Scan(
-			&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.CreatedBy,
+			&rec.ID, &rec.TokenHash, &rec.RunID, &rec.Namespace, &rec.Agent, &rec.CreatedBy,
 			&rec.CreatedAt, &rec.ExpiresAt, &rec.Revoked, &rec.IncludeContent,
 		); sErr != nil {
 			return nil, fmt.Errorf("sharedrun: list by creator scan: %w", sErr)

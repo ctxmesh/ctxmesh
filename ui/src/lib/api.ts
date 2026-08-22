@@ -1975,6 +1975,7 @@ export interface MySharesItem {
   id: string;
   runId: string;
   namespace: string;
+  agent: string; // the run's agent, snapshotted at mint (V16) — "" for pre-M115 shares
   createdAt: string; // RFC3339
   expiresAt: string; // RFC3339
   status: "live" | "revoked" | "expired";

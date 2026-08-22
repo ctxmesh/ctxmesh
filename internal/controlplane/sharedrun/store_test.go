@@ -74,6 +74,7 @@ func TestStore_Create_GetByTokenHash(t *testing.T) {
 			TokenHash:      h,
 			RunID:          "run-abc",
 			Namespace:      "team-a",
+			Agent:          "support-bot",
 			CreatedBy:      "alice",
 			ExpiresAt:      time.Now().Add(time.Hour),
 			IncludeContent: true,
@@ -86,6 +87,7 @@ func TestStore_Create_GetByTokenHash(t *testing.T) {
 		assert.Equal(t, "share-1", got.ID)
 		assert.Equal(t, "run-abc", got.RunID)
 		assert.Equal(t, "team-a", got.Namespace)
+		assert.Equal(t, "support-bot", got.Agent, "V16: the agent is snapshotted at mint and round-trips")
 		assert.Equal(t, "alice", got.CreatedBy)
 		assert.True(t, got.IncludeContent)
 		assert.False(t, got.Revoked)
@@ -250,13 +252,14 @@ func TestStore_ListByCreator(t *testing.T) {
 		ctx := context.Background()
 		base := time.Now()
 
-		// alice minted three shares across two different runs (one later revoked).
+		// alice minted three shares across two different runs (one later revoked). Distinct agents prove the
+		// V16 snapshot survives the ListByCreator scan.
 		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
-			ID: "a-old", TokenHash: hashToken("ta-old"), RunID: "run-1", Namespace: "ns", CreatedBy: "alice",
+			ID: "a-old", TokenHash: hashToken("ta-old"), RunID: "run-1", Namespace: "ns", Agent: "triage-bot", CreatedBy: "alice",
 			CreatedAt: base.Add(-time.Hour), ExpiresAt: base.Add(time.Hour),
 		}))
 		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
-			ID: "a-new", TokenHash: hashToken("ta-new"), RunID: "run-2", Namespace: "ns", CreatedBy: "alice",
+			ID: "a-new", TokenHash: hashToken("ta-new"), RunID: "run-2", Namespace: "ns", Agent: "research-bot", CreatedBy: "alice",
 			CreatedAt: base, ExpiresAt: base.Add(time.Hour),
 		}))
 		require.NoError(t, s.Create(ctx, sharedrun.SharedRun{
@@ -274,7 +277,9 @@ func TestStore_ListByCreator(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, list, 3, "all of alice's shares across every run (incl. revoked, V13)")
 		assert.Equal(t, "a-new", list[0].ID, "newest-first ordering")
+		assert.Equal(t, "research-bot", list[0].Agent, "V16: the agent snapshot survives ListByCreator")
 		assert.Equal(t, "a-old", list[1].ID)
+		assert.Equal(t, "triage-bot", list[1].Agent)
 		assert.Equal(t, "a-revoked", list[2].ID)
 		assert.True(t, list[2].Revoked, "the revoked row is included and flagged")
 		for _, rec := range list {
