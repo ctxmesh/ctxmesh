@@ -161,7 +161,15 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 // (consent_required / no_credential / internal) is carried in the body's error field, so the
 // client distinguishes "the RPC failed" (non-200 / transport) from "the answer is an error".
 func writeJSON(w http.ResponseWriter, v any) {
+	// Marshal FIRST so an encode failure (e.g. a NaN/Inf score, m52.G7) surfaces as a visible 500 instead
+	// of a silent 200 + empty body — the latter reads as success to the caller and is undebuggable (it took
+	// a direct probe to find the knowledge-search 200/0-bytes). Only write the 200 once we have bytes.
+	b, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, `{"error":"internal: response encode failed"}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(b)
 }
