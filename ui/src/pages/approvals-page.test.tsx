@@ -274,6 +274,41 @@ describe("ApprovalsPage — manual refresh (V16, M115)", () => {
     await screen.findByText("Select a namespace");
     expect(screen.getByTestId("approvals-refresh")).toBeDisabled();
   });
+
+  // The manual refresh is SILENT: it must NOT blank the table with a skeleton (the close-gate UX finding).
+  // While the refresh is in flight the existing rows stay visible and the button shows a "Refreshing…" spinner.
+  it("manual refresh keeps rows visible (no skeleton flash) and spins the button", async () => {
+    let call = 0;
+    let resolveRefresh: (() => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => {
+        call += 1;
+        const rowsResponse = {
+          ok: true,
+          status: 200,
+          json: async () => [item_({ runId: "run-keep" })],
+          text: async () => "[]",
+        } as Response;
+        if (call === 1) return Promise.resolve(rowsResponse); // initial load: one row
+        // The refresh fetch stays pending until we resolve it, so the "refreshing" state is observable.
+        return new Promise<Response>((res) => {
+          resolveRefresh = () => res(rowsResponse);
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole("link", { name: "run-keep" });
+
+    fireEvent.click(screen.getByTestId("approvals-refresh"));
+
+    // Mid-refresh: the button spins AND the existing row is still on screen (no skeleton took its place).
+    await waitFor(() => expect(screen.getByText("Refreshing…")).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "run-keep" })).toBeInTheDocument();
+
+    resolveRefresh?.();
+  });
 });
 
 // ── Empty state ────────────────────────────────────────────────────────────────

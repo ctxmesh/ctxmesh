@@ -309,7 +309,8 @@ export function RunDetailPage() {
               data-testid="run-back-parent"
               className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
             >
-              ← Parent run
+              {/* Accurate label: the immediate parent when known, else the tree root (the fallback target). */}
+              {detail.parentRunId ? "← Parent run" : "← Root run"}
             </Link>
           )}
         </div>
