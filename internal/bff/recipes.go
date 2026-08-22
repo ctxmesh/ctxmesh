@@ -97,6 +97,14 @@ func (s *Server) handleListRecipes(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
+	// Merge the operator ConfigMap overlay over the embedded defaults (S1). Nil-safe: no holder / an
+	// empty overlay serves the embedded gallery unchanged (fail-closed).
+	if s.recipeOverlay != nil {
+		if overlay := s.recipeOverlay.load(); len(overlay) > 0 {
+			recipes = mergeRecipes(recipes, overlay)
+		}
+	}
+
 	summaries := make([]RecipeSummary, 0, len(recipes))
 	for _, r := range recipes {
 		summaries = append(summaries, RecipeSummary(r))
