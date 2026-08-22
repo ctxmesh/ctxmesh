@@ -86,3 +86,17 @@ rules:
   - get
   - list
   - watch
+# MCP-server registration (POST /api/mcpservers) creates the tool's egress NetworkPolicy
+# with the CALLER's client (ADR 0011), so a builder self-serves it in their namespace.
+# (Caller-created NetworkPolicy is a design smell — m52.G9 tracks moving it controller-
+# side; until then the builder needs this. An auth-less MCP needs no Secret, so `secrets`
+# create is deliberately NOT granted here — least privilege.)
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - delete
