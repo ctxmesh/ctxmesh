@@ -292,13 +292,13 @@ export const NAV_SECTIONS: NavSection[] = [
         route: "/my-shares",
       },
       {
-        // Plan approvals (V5, M112) — the namespace-scoped queue of runs paused on
-        // plan_approval (workflow executor only), so a reviewer sees the pending inbox
-        // and deep-links each row to /runs/:id to approve/deny. Gated on `list workflows`
-        // in the namespace — a caller without that RBAC gets an honest 403, never an
-        // empty list. This is the honest name: the queue is plan_approval-scoped.
+        // Approvals (V5, M112; unified inbox M113) — the namespace-scoped queue of runs
+        // paused on plan_approval (workflow plan gate) OR approval (mid-run HITL step gate).
+        // A reviewer sees all pending approvals and deep-links each row to /runs/:id to
+        // approve/deny. Gated on `list workflows` in the namespace — a caller without that
+        // RBAC gets an honest 403, never an empty list.
         id: "approvals",
-        label: "Plan approvals",
+        label: "Approvals",
         icon: CheckSquare,
         milestone: "M112",
         route: "/approvals",
