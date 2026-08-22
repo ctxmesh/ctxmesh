@@ -1,0 +1,40 @@
+# Example: operator recipe overlay (S1).
+#
+# A cluster operator adds custom starter recipes to the console gallery by creating a ConfigMap named
+# `agent-engine-recipes` in the BFF's namespace. The BFF mounts it read-only at /etc/agent-engine/recipes
+# (optional:true — absent ⇒ the embedded gallery serves, fail-closed) and hot-reloads it, merging the
+# operator recipes OVER the Go-embedded defaults in GET /api/recipes — no console-image redeploy.
+#
+#   - Each ConfigMap KEY is a `*.yaml` recipe file (same shape as the embedded recipes).
+#   - An operator recipe whose `name` matches an embedded default OVERRIDES it (in place).
+#   - Each recipe's `spec` is validated (expand.Expand) at load; a bad recipe is skipped with a log,
+#     never breaking the gallery. `name` + `title` are required.
+#   - This ConfigMap is NOT kustomize-managed — create it out-of-band (kubectl apply / GitOps). The
+#     literal name `agent-engine-recipes` is what the BFF volume references.
+#
+# Apply into the BFF namespace, e.g.:
+#   kubectl -n agent-engine-system apply -f recipes-configmap-example.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-engine-recipes
+  namespace: agent-engine-system
+data:
+  acme-support.yaml: |
+    name: acme-support
+    title: Acme Support Agent
+    description: Our internal support assistant, wired to the Acme model route and MCP tools.
+    icon: life-buoy
+    spec: |
+      name: acme-support
+      runtime: managed
+      systemPrompt: |
+        You are Acme's support agent. Answer from the Acme knowledge base; escalate anything you cannot resolve.
+      model:
+        route: default
+      resources:
+        cpu: 250m
+        memory: 256Mi
+      scaling:
+        min: 0
+        max: 3
