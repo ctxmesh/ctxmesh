@@ -19,6 +19,7 @@ package bff
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ctxmesh/agent-engine/internal/controlplane/authz"
 )
@@ -30,8 +31,12 @@ import (
 type ApprovalQueueItem struct {
 	RunID     string `json:"runId"`
 	Agent     string `json:"agent"`
+	Namespace string `json:"namespace"`
 	RootRunID string `json:"rootRunId,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// WaitingSince is when the run entered requires_action (RFC3339) — the console renders it as a
+	// relative "waiting X ago" so a reviewer can triage the queue by age (M113).
+	WaitingSince string `json:"waitingSince,omitempty"`
 }
 
 // handleApprovals serves GET /api/approvals?namespace=&limit= — the V5 console "Plan approvals" queue:
@@ -80,12 +85,17 @@ func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		if wa.Agent == inlineWorkflowAgentLabel && (callerName == "" || wa.CallerUsername != callerName) {
 			continue // a CR-less inline run is visible only to its creator
 		}
-		out = append(out, ApprovalQueueItem{
+		item := ApprovalQueueItem{
 			RunID:     wa.ID,
 			Agent:     wa.Agent,
+			Namespace: wa.Namespace,
 			RootRunID: wa.RootRunID,
 			Message:   wa.Message,
-		})
+		}
+		if !wa.WaitingSince.IsZero() {
+			item.WaitingSince = wa.WaitingSince.UTC().Format(time.RFC3339)
+		}
+		out = append(out, item)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

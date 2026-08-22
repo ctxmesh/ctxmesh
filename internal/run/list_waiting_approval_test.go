@@ -69,6 +69,10 @@ func TestListWaitingApproval_FieldsLimitOrdering(t *testing.T) {
 			assert.Equal(t, "root-x", byID["p1"].RootRunID, "the tree root is projected (descendant context)")
 			assert.Equal(t, "alice", byID["p1"].CallerUsername, "the creator is projected (inline-owner filter)")
 			assert.Equal(t, "m-p1", byID["p1"].Message)
+			// M113: the queue DTO carries namespace + the pause time (updated_at) for triage.
+			assert.Equal(t, "ns", byID["p1"].Namespace, "the namespace is projected")
+			assert.True(t, byID["p1"].WaitingSince.Equal(t0), "WaitingSince is the run's pause transition (updated_at)")
+			assert.True(t, byID["p2"].WaitingSince.Equal(t0.Add(2*time.Minute)), "newest waits-since is latest")
 
 			one, err := s.ListWaitingApproval(ctx, "ns", 1) // bounded
 			require.NoError(t, err)

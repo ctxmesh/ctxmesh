@@ -1052,6 +1052,12 @@ type WaitingApproval struct {
 	Message        string
 	RootRunID      string
 	CallerUsername string
+	Namespace      string
+	// WaitingSince is when the run entered requires_action (its pause transition = the row's
+	// updated_at) — the "waiting since" triage signal the V5 console queue renders (M113). For a
+	// currently-paused run the last transition IS the pause, so updated_at is the honest wait-start
+	// (more accurate than created_at, which is run-start).
+	WaitingSince time.Time
 }
 
 // ListWaitingApproval returns the runs in the given namespace currently paused in requires_action with
@@ -1063,7 +1069,7 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, lim
 	// Take the most-recently-updated requires_action rows first and bound the scan (a busy namespace can
 	// accumulate many) — limit<=0 is unbounded (the reconciler notification path). The plan_approval kind
 	// filter is applied in Go (the action is JSON), so the returned count is within the scanned window.
-	q := `SELECT id, agent, root_run_id, caller_username, requires_action
+	q := `SELECT id, agent, root_run_id, caller_username, updated_at, requires_action
 		FROM runs WHERE namespace=$1 AND status=$2 ORDER BY updated_at DESC`
 	args := []any{namespace, string(StatusRequiresAction)}
 	if limit > 0 {
@@ -1083,9 +1089,10 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, lim
 			agent          string
 			rootRunID      string
 			callerUsername string
+			updated        time.Time
 			action         []byte
 		)
-		if err := rows.Scan(&id, &agent, &rootRunID, &callerUsername, &action); err != nil {
+		if err := rows.Scan(&id, &agent, &rootRunID, &callerUsername, &updated, &action); err != nil {
 			return nil, fmt.Errorf("run: list requires_action scan: %w", err)
 		}
 		if len(action) == 0 {
@@ -1100,6 +1107,7 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, lim
 		}
 		out = append(out, WaitingApproval{
 			ID: id, Agent: agent, Message: a.Message, RootRunID: rootRunID, CallerUsername: callerUsername,
+			Namespace: namespace, WaitingSince: updated.UTC(),
 		})
 	}
 	if err := rows.Err(); err != nil {

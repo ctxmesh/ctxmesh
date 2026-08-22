@@ -620,6 +620,7 @@ func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, limi
 			wa: WaitingApproval{
 				ID: r.ID, Agent: r.Agent, Message: r.RequiresAction.Message,
 				RootRunID: r.RootRunID, CallerUsername: r.CallerUsername,
+				Namespace: r.Namespace, WaitingSince: r.UpdatedAt.UTC(),
 			},
 			updated: r.UpdatedAt,
 		})

@@ -153,4 +153,10 @@ func TestApprovals_ListsPlanApprovalAndFiltersInline(t *testing.T) {
 	assert.False(t, ids["other-ns"], "a run in another namespace is not in this namespace's queue")
 	assert.Len(t, items, 2)
 	assert.NotContains(t, raw, "secret-approval-key", "the approval Key must never reach the client")
+
+	// M113: each row carries the namespace + a waiting-since timestamp (triage signal).
+	for _, it := range items {
+		assert.Equal(t, "team-a", it.Namespace, "the row carries its namespace")
+		assert.NotEmpty(t, it.WaitingSince, "the row carries a waiting-since timestamp for triage")
+	}
 }
