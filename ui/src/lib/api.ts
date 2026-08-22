@@ -1953,15 +1953,19 @@ export interface RunShare {
 }
 
 // ApprovalQueueItem mirrors the BFF's ApprovalQueueItem DTO (internal/bff/approvals_read.go).
-// Returned by GET /api/approvals?namespace= — the V5 "Plan approvals" queue: runs paused on
-// plan_approval awaiting a human decision. Token-free: RequiresAction.Key is NEVER surfaced here
-// (the run detail page owns the approve/deny path). rootRunId is present only for descendant sub-runs
-// (gives the spawn-tree context); message is the plan summary or absent.
+// Returned by GET /api/approvals?namespace= — the V15 unified "Approvals" inbox: runs paused on
+// plan_approval (workflow plan gate) OR approval (mid-run HITL step gate). Token-free:
+// RequiresAction.Key is NEVER surfaced here (the run detail page owns the approve/deny path).
+// rootRunId is present only for descendant sub-runs (gives the spawn-tree context); message is the
+// plan summary or absent. namespace, kind, and waitingSince added in M113 (unified queue).
 export interface ApprovalQueueItem {
   runId: string;
   agent: string;
+  namespace: string;
+  kind: "plan_approval" | "approval";
   rootRunId?: string;
   message?: string;
+  waitingSince?: string; // RFC3339 — when the run entered requires_action
 }
 
 // MySharesItem mirrors the BFF's MySharesItem DTO (internal/bff/shares.go).
@@ -2385,6 +2389,13 @@ export interface RunDetail {
   agent?: string;
   namespace?: string;
   traceId?: string;
+  // createdAt / updatedAt are RFC3339 timestamps from RunDetailDTO (M113). updatedAt reflects the
+  // last state transition — for a requires_action run it is the pause time ("waiting since").
+  createdAt?: string; // RFC3339
+  updatedAt?: string; // RFC3339
+  // input is the original request payload (json.RawMessage from RunDetailDTO). Used to surface
+  // the reviewer's "Original request" context when messages is absent (M113 P2 finding).
+  input?: unknown;
   messages?: { role: string; content: string }[];
   requiresAction?: RunAction;
   // descendantsRequiringAction lists nested sub-runs currently paused awaiting

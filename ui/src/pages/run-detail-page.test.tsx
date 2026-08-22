@@ -6,7 +6,7 @@ import { RunDetailPage } from "@/pages/run-detail-page";
 import { ToastProvider } from "@/components/kit";
 import type { RunDetail } from "@/lib/api";
 
-// RunDetailPage tests (V5, M112).
+// RunDetailPage tests (V5, M112; M113 additions).
 //
 // Coverage:
 //   (a) A plan_approval (requires_action=approval + status=requires_action) run
@@ -14,6 +14,8 @@ import type { RunDetail } from "@/lib/api";
 //   (b) descendantsRequiringAction renders as navigable links to /runs/:descId.
 //   (c) A non-paused run renders its summary WITHOUT the approval panel.
 //   (d) Loading skeleton shows; not-found / generic error states render correctly.
+//   (e) M113: Original request context (messages[0] or input) renders for paused runs.
+//   (f) M113: Waiting-since renders from updatedAt for paused runs.
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -34,6 +36,32 @@ const APPROVAL_RUN: RunDetail = {
     key: "internal-resume-token-never-shown",
     message: "Please approve: agent wants to send email to user@example.com",
   },
+};
+
+// APPROVAL_RUN_WITH_CONTEXT — paused run that carries messages + updatedAt (M113).
+const APPROVAL_RUN_WITH_CONTEXT: RunDetail = {
+  id: "run-context-xyz",
+  status: "requires_action",
+  agent: "default/planner",
+  namespace: "default",
+  updatedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(), // 30 min ago
+  messages: [
+    { role: "user", content: "Please draft a summary of Q3 sales." },
+    { role: "assistant", content: "I will now draft the Q3 sales summary…" },
+  ],
+  requiresAction: {
+    kind: "plan_approval",
+    key: "internal-token",
+    message: "Agent will access the sales DB.",
+  },
+};
+
+// APPROVAL_RUN_INPUT_ONLY — paused run with no messages but an input field (M113 fallback).
+const APPROVAL_RUN_INPUT_ONLY: RunDetail = {
+  id: "run-input-only",
+  status: "requires_action",
+  input: { task: "analyse the report" },
+  requiresAction: { kind: "plan_approval" },
 };
 
 const RUN_WITH_DESCENDANTS: RunDetail = {
@@ -356,6 +384,72 @@ describe("RunDetailPage (V5, M112)", () => {
       // It also shows the "Not allowed to read this run" title we pass in.
       await screen.findByRole("alert");
       expect(screen.getByText(/not allowed to read this run/i)).toBeInTheDocument();
+    });
+  });
+
+  // ── (e) M113: Original request context ───────────────────────────────────────
+
+  describe("M113 — original request context for paused runs", () => {
+    it("renders the first user message as the original request when messages are present", async () => {
+      stubFetch({ run: APPROVAL_RUN_WITH_CONTEXT });
+      renderPage(APPROVAL_RUN_WITH_CONTEXT.id);
+
+      await screen.findByTestId("run-original-request");
+      // The first user message content is shown
+      expect(
+        screen.getByText("Please draft a summary of Q3 sales."),
+      ).toBeInTheDocument();
+      // The assistant message is NOT the one shown (only the user message)
+      expect(
+        screen.queryByText("I will now draft the Q3 sales summary…"),
+      ).toBeNull();
+    });
+
+    it("falls back to detail.input when messages is absent", async () => {
+      stubFetch({ run: APPROVAL_RUN_INPUT_ONLY });
+      renderPage(APPROVAL_RUN_INPUT_ONLY.id);
+
+      await screen.findByTestId("run-original-request");
+      // The input object is JSON-stringified and shown
+      expect(screen.getByText(/analyse the report/)).toBeInTheDocument();
+    });
+
+    it("does NOT render original-request section for non-paused runs", async () => {
+      stubFetch({ run: BASE_RUN });
+      renderPage(BASE_RUN.id);
+
+      await screen.findByTestId("run-detail-header");
+      expect(screen.queryByTestId("run-original-request")).toBeNull();
+    });
+
+    it("does NOT render original-request when paused but no messages/input", async () => {
+      stubFetch({ run: APPROVAL_RUN }); // APPROVAL_RUN has no messages or input
+      renderPage(APPROVAL_RUN.id);
+
+      await screen.findByTestId("run-approval-panel");
+      expect(screen.queryByTestId("run-original-request")).toBeNull();
+    });
+  });
+
+  // ── (f) M113: Waiting-since in header ────────────────────────────────────────
+
+  describe("M113 — waiting-since in header", () => {
+    it("renders waiting-since for a paused run with updatedAt", async () => {
+      stubFetch({ run: APPROVAL_RUN_WITH_CONTEXT });
+      renderPage(APPROVAL_RUN_WITH_CONTEXT.id);
+
+      const waitingEl = await screen.findByTestId("run-waiting-since");
+      // Should contain "Waiting since" + a relative time
+      expect(waitingEl).toHaveTextContent(/Waiting since/);
+      expect(waitingEl).toHaveTextContent(/ago/);
+    });
+
+    it("does NOT render waiting-since for a non-paused run", async () => {
+      stubFetch({ run: BASE_RUN });
+      renderPage(BASE_RUN.id);
+
+      await screen.findByTestId("run-detail-header");
+      expect(screen.queryByTestId("run-waiting-since")).toBeNull();
     });
   });
 });
