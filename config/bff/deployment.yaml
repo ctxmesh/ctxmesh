@@ -64,6 +64,11 @@ spec:
           env:
             - name: PROVIDER_CONNECT_ENABLED
               value: "true"
+            # RECIPES_OVERLAY_DIR (S1): the mounted operator-recipes ConfigMap dir. Set ⇒ the BFF
+            # hot-reloads custom recipes from here and merges them over the embedded gallery in
+            # GET /api/recipes. Matches the recipe-overlay volumeMount below.
+            - name: RECIPES_OVERLAY_DIR
+              value: /etc/agent-engine/recipes
             # STATELAYER_ADDR (M49): the shared state-layer Valkey the launcher tenant enforcer writes
             # usage to — the BFF reads it (read-only) for the Tenants live usage-vs-cap surface. Absent ⇒
             # the /api/tenants/{name}/usage endpoint 501s.
@@ -211,7 +216,21 @@ spec:
               # user-only; the code-level proof is the m80.2 bounded-buffering heap test +
               # this bounded-peak analysis.)
               memory: 512Mi
-          volumeMounts: []
-      volumes: []
+          volumeMounts:
+            # Operator recipe overlay (S1): a read-only ConfigMap of custom recipes merged over the
+            # Go-embedded gallery in GET /api/recipes. Mount the DIRECTORY (no subPath — a subPath copies
+            # the file and never hot-reloads). readOnly + compatible with readOnlyRootFilesystem.
+            - name: recipe-overlay
+              mountPath: /etc/agent-engine/recipes
+              readOnly: true
+      volumes:
+        # optional:true — a cluster that provides no `agent-engine-recipes` ConfigMap still schedules the
+        # pod (the mount dir is empty ⇒ the embedded gallery serves, fail-closed). The operator creates
+        # this ConfigMap out-of-band (keys are *.yaml recipe files); it is NOT kustomize-managed, so its
+        # name is a fixed literal (no prefix rewrite).
+        - name: recipe-overlay
+          configMap:
+            name: agent-engine-recipes
+            optional: true
       serviceAccountName: bff
       terminationGracePeriodSeconds: 10

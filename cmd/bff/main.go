@@ -410,6 +410,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 
 	maybeStartOnlineScorer(ctx, srv, adapters)
 	maybeStartCostRollupWorker(ctx, srv)
+	maybeStartRecipeOverlay(ctx, srv)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -465,6 +466,18 @@ func maybeStartCostRollupWorker(ctx context.Context, srv *bff.Server) {
 	}
 	srv.StartCostRollupWorker(ctx, cfg)
 	log.Info("cost-rollup worker started (ADR 0063 D1)", "valKeyAddr", cfg.ValKeyAddr)
+}
+
+// maybeStartRecipeOverlay (S1): when a recipes ConfigMap is mounted (RECIPES_OVERLAY_DIR set), hot-reload
+// the operator's custom recipes from that dir and merge them over the Go-embedded defaults in
+// GET /api/recipes. Opt-in — absent env ⇒ embedded-only (fail-closed). No k8s-client read → no RBAC.
+func maybeStartRecipeOverlay(ctx context.Context, srv *bff.Server) {
+	overlayDir := strings.TrimSpace(os.Getenv("RECIPES_OVERLAY_DIR"))
+	if overlayDir == "" {
+		return
+	}
+	go srv.StartRecipeOverlayWatcher(overlayDir, ctx.Done())
+	ctrl.Log.WithName("bff.recipe-overlay").Info("operator recipe overlay enabled", "dir", overlayDir)
 }
 
 // providerConnectEnabled resolves the connect-a-provider kill-switch from its
