@@ -1575,12 +1575,33 @@ export interface EvalScore {
   stringValue?: string;
 }
 
+// GateResult is one AgentDeployment's offline eval-gate outcome for a suite — the
+// read-time projection of that agent's status.gate (ADR 0094). `pending` when the
+// agent references the suite but no gate has run yet (no fake 0.0 score). `score` /
+// `threshold` are decimal STRINGS (parse before comparing); `scoredRevision` MAY lag
+// the agent's current revision (badge "stale").
+export interface GateResult {
+  agent: string;
+  decision?: string;
+  phase?: string;
+  reason?: string;
+  score?: string;
+  scoredRevision?: string;
+  threshold?: string;
+  pending: boolean;
+}
+
 // EvalSuiteResults mirrors GET /api/evalsuites/{ns}/{name}/results. The honest
-// contract: `conditions` is the controller's gate outcome; `scores` is only
-// present when `scoresAvailable=true`; when false, `scoresUnavailableReason`
-// explains why (e.g. "Langfuse not configured"). NEVER fabricate scores.
+// contract: `conditions` is the controller's gate outcome (empty today — no EvalSuite
+// reconciler); `gateResults` is the real per-agent offline gate outcome projected from
+// the gating AgentDeployments (ADR 0094), or `gateResultsAvailable=false` with a reason
+// when the caller cannot list agents; `scores` is only present when
+// `scoresAvailable=true`. NEVER fabricate scores.
 export interface EvalSuiteResults {
   conditions: EvalCondition[];
+  gateResults: GateResult[];
+  gateResultsAvailable: boolean;
+  gateResultsUnavailableReason?: string;
   scoresAvailable: boolean;
   scores?: EvalScore[];
   scoresUnavailableReason?: string;
