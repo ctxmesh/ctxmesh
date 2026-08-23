@@ -30,6 +30,7 @@ import {
   api,
   ApiError,
   type EvalCondition,
+  type GateResult,
   type EvalGatedMetricResponse,
   type EvalScore,
   type EvalSuiteDetail,
@@ -537,22 +538,47 @@ function ResultsPanel({ results, suiteName }: ResultsPanelProps) {
     );
   }
 
-  const { conditions, scoresAvailable, scores, scoresUnavailableReason } =
-    results.results;
+  const {
+    conditions,
+    gateResults,
+    gateResultsAvailable,
+    gateResultsUnavailableReason,
+    scoresAvailable,
+    scores,
+    scoresUnavailableReason,
+  } = results.results;
 
   return (
     <div className="space-y-4" data-testid={`eval-results-panel-${suiteName}`}>
-      {/* Gate outcome from conditions */}
+      {/* Gate outcome — the real per-agent offline gate result (ADR 0094), projected
+          from the AgentDeployments that gate on this suite. */}
       <div>
         <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
           Gate outcome
         </h4>
-        {conditions.length === 0 ? (
+        {!gateResultsAvailable ? (
+          // RBAC / list degrade — surface CALMLY, never a silently-empty panel.
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid={`eval-gate-unavailable-${suiteName}`}
+          >
+            {gateResultsUnavailableReason ?? "Gate results unavailable."}
+          </p>
+        ) : gateResults.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No conditions reported yet.
+            No agents gate on this suite yet.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2" data-testid={`eval-gate-results-${suiteName}`}>
+            {gateResults.map((g: GateResult, i: number) => (
+              <GateResultRow key={i} result={g} />
+            ))}
+          </div>
+        )}
+        {/* CRD status.conditions (empty today — no EvalSuite reconciler); shown only
+            if a future reconciler ever writes them, never fabricated. */}
+        {conditions.length > 0 && (
+          <div className="mt-2 space-y-2">
             {conditions.map((c: EvalCondition, i: number) => (
               <ConditionRow key={i} condition={c} />
             ))}
@@ -586,6 +612,66 @@ function ResultsPanel({ results, suiteName }: ResultsPanelProps) {
             {scoresUnavailableReason
               ? scoresUnavailableReason
               : "Scores unavailable."}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// GateResultRow renders one AgentDeployment's offline eval-gate outcome (ADR 0094):
+// the agent, its real weighted-mean score vs threshold, the decision, a "pending" chip
+// when no gate has run yet, and the scored revision. Never a fake 0.0 — pending shows
+// no number.
+function GateResultRow({ result }: { result: GateResult }) {
+  const promoted = result.decision === "promoted";
+  const blocked = result.decision === "blocked";
+  return (
+    <div
+      className="flex items-start gap-2 text-sm"
+      data-testid={`eval-gate-result-${result.agent}`}
+    >
+      {result.pending ? (
+        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : promoted ? (
+        <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+      ) : blocked ? (
+        <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+      ) : (
+        <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      )}
+      <div>
+        <span className="font-mono text-xs font-medium">{result.agent}</span>
+        {result.pending ? (
+          <Badge variant="outline" className="ml-2 text-[10px]">
+            pending
+          </Badge>
+        ) : (
+          <>
+            {result.score && (
+              <span className="ml-2 text-xs font-medium">
+                score {result.score}
+                {result.threshold && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    / threshold {result.threshold}
+                  </span>
+                )}
+              </span>
+            )}
+            {result.decision && (
+              <Badge
+                variant={blocked ? "destructive" : "secondary"}
+                className="ml-2 text-[10px]"
+              >
+                {result.decision}
+              </Badge>
+            )}
+          </>
+        )}
+        {result.scoredRevision && !result.pending && (
+          <p className="text-xs text-muted-foreground">
+            scored revision {result.scoredRevision}
           </p>
         )}
       </div>

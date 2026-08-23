@@ -185,7 +185,22 @@ type EvalSuiteResultsResponse struct {
 	// Conditions is the controller's gate outcome from status.Conditions.
 	// ONLY the gate/pass/block/threshold outcome the reconciler wrote — never
 	// fabricated per-scorer scores. Empty slice [] when not yet reconciled.
+	// NB: there is no EvalSuite reconciler today, so this is truthfully always [];
+	// the real gate outcome lives per-agent in GateResults below (m121.1, ADR 0094).
 	Conditions []EvalSuiteConditionDTO `json:"conditions"`
+	// GateResults is the read-time projection of the offline eval-gate outcome from
+	// each AgentDeployment that gates on this suite (spec.evalSuiteRef == this suite).
+	// The gate runs on the AgentDeployment reconcile and writes status.gate THERE
+	// (per-agent, per-revision — the single source of truth); this handler aggregates
+	// it caller-scoped rather than mirroring it onto the suite (ADR 0094). Never nil
+	// on the wire ([] when no agents gate on this suite, or GateResultsAvailable=false).
+	GateResults []GateResultDTO `json:"gateResults"`
+	// GateResultsAvailable is false when the caller cannot list AgentDeployments in the
+	// namespace (RBAC) — an EXPLICIT degrade, never a silently-empty list (Fable, m121.1).
+	GateResultsAvailable bool `json:"gateResultsAvailable"`
+	// GateResultsUnavailableReason explains why GateResults could not be aggregated
+	// (e.g. "forbidden: cannot list agentdeployments"). Empty when available.
+	GateResultsUnavailableReason string `json:"gateResultsUnavailableReason,omitempty"`
 	// ScoresAvailable is true when Langfuse scores are present in this response.
 	ScoresAvailable bool `json:"scoresAvailable"`
 	// Scores is the Langfuse scorer result list. Only populated when scoresAvailable
@@ -194,6 +209,32 @@ type EvalSuiteResultsResponse struct {
 	// ScoresUnavailableReason explains why scores are absent. Empty when
 	// scoresAvailable is true.
 	ScoresUnavailableReason string `json:"scoresUnavailableReason,omitempty"`
+}
+
+// GateResultDTO is one AgentDeployment's offline eval-gate outcome for a suite — the
+// read-time projection of that agent's status.gate (m121.1, ADR 0094). Pending=true
+// when the agent references the suite but no gate has run yet (empty status.gate) —
+// rendered "pending", never a fake 0.0 score.
+type GateResultDTO struct {
+	// Agent is the AgentDeployment name that gates on this suite.
+	Agent string `json:"agent"`
+	// Decision is the gate decision (e.g. "promoted", "blocked"). Empty ⇒ pending.
+	Decision string `json:"decision,omitempty"`
+	// Phase is the gate phase (e.g. "awaiting-promotion").
+	Phase string `json:"phase,omitempty"`
+	// Reason is the machine-readable gate reason.
+	Reason string `json:"reason,omitempty"`
+	// Score is the weighted-mean score as a decimal STRING (e.g. "0.9182") — never
+	// coerced to a float here; the UI parses it. Empty ⇒ no score yet.
+	Score string `json:"score,omitempty"`
+	// ScoredRevision is the AgentVersion the score was computed against. It MAY lag
+	// the agent's current revision — the UI badges "stale"; this handler never claims
+	// freshness.
+	ScoredRevision string `json:"scoredRevision,omitempty"`
+	// Threshold is the suite threshold the score was gated against (decimal string).
+	Threshold string `json:"threshold,omitempty"`
+	// Pending is true when the agent references the suite but no gate has run yet.
+	Pending bool `json:"pending"`
 }
 
 // --- adapter helpers --------------------------------------------------------
@@ -650,55 +691,86 @@ func (s *Server) handleGetEvalSuiteResults(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Project the CRD status.conditions — the controller's gate outcome. These are
-	// the ONLY result signals the CRD actually stores. Never fabricate scorer numbers.
-	conditions := newEvalSuiteConditionDTOs(es.Status.Conditions)
+	// The base response carries the two ALWAYS-computed halves: the CRD
+	// status.conditions (the ONLY result signal the CRD stores — never fabricated),
+	// and the read-time projection of each gating agent's offline gate outcome
+	// (ADR 0094 — the gate truth lives on the AgentDeployment, not this suite). The
+	// Langfuse online-scores half is layered on below.
+	resp := EvalSuiteResultsResponse{
+		Conditions: newEvalSuiteConditionDTOs(es.Status.Conditions),
+		Scores:     []FeedbackScore{},
+	}
+	resp.GateResults, resp.GateResultsAvailable, resp.GateResultsUnavailableReason =
+		s.gateResultsForSuite(r.Context(), caller, ns, name)
 
 	// Langfuse scores: honest degrade when the adapter is absent or traceId missing.
 	traceID := strings.TrimSpace(r.URL.Query().Get("traceId"))
 
-	if s.adapters.Langfuse == nil {
-		// Langfuse not configured: return the CRD-status half honestly with a reason.
-		writeJSON(w, http.StatusOK, EvalSuiteResultsResponse{
-			Conditions:              conditions,
-			ScoresAvailable:         false,
-			Scores:                  []FeedbackScore{},
-			ScoresUnavailableReason: "langfuse not configured",
-		})
-		return
+	switch {
+	case s.adapters.Langfuse == nil:
+		resp.ScoresUnavailableReason = "langfuse not configured"
+	case traceID == "":
+		resp.ScoresUnavailableReason = "traceId not supplied"
+	default:
+		scores, err := s.adapters.Langfuse.TraceScores(r.Context(), traceID)
+		if err != nil {
+			// Upstream Langfuse failure: degrade honestly, still return the other halves.
+			s.log.Error(err, "fetch eval suite scores failed", "namespace", ns, "name", name, "traceID", traceID)
+			resp.ScoresUnavailableReason = fmt.Sprintf("langfuse error: %v", err)
+		} else {
+			if scores == nil {
+				scores = []FeedbackScore{}
+			}
+			resp.ScoresAvailable = true
+			resp.Scores = scores
+		}
 	}
 
-	if traceID == "" {
-		// No traceId: cannot fetch Langfuse scores but conditions are still useful.
-		writeJSON(w, http.StatusOK, EvalSuiteResultsResponse{
-			Conditions:              conditions,
-			ScoresAvailable:         false,
-			Scores:                  []FeedbackScore{},
-			ScoresUnavailableReason: "traceId not supplied",
-		})
-		return
-	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	scores, err := s.adapters.Langfuse.TraceScores(r.Context(), traceID)
+// gateResultsForSuite projects the offline eval-gate outcome of every AgentDeployment
+// that gates on this suite (spec.evalSuiteRef == name), caller-scoped (ADR 0011). The
+// gate runs on the AgentDeployment reconcile and writes status.gate THERE (per-agent,
+// per-revision) — this is a read-time projection, NOT a mirrored copy (ADR 0094).
+//
+// Degrades EXPLICITLY (Fable, m121.1): a caller who cannot LIST agentdeployments gets
+// available=false + a reason, never a silently-empty slice (that silent-empty is the
+// exact "results empty" bug this fixes, reintroduced). `spec.evalSuiteRef` is not a
+// server-side selectable field for a CRD, so this is a namespace list + client-side
+// match; matching is same-namespace only (a suite ref is namespace-local).
+func (s *Server) gateResultsForSuite(ctx context.Context, caller AgentReader, ns, name string) ([]GateResultDTO, bool, string) {
+	list, err := listAgentDeployments(ctx, caller, client.InNamespace(ns))
 	if err != nil {
-		// Upstream Langfuse failure: degrade honestly, still return CRD conditions.
-		s.log.Error(err, "fetch eval suite scores failed", "namespace", ns, "name", name, "traceID", traceID)
-		writeJSON(w, http.StatusOK, EvalSuiteResultsResponse{
-			Conditions:              conditions,
-			ScoresAvailable:         false,
-			Scores:                  []FeedbackScore{},
-			ScoresUnavailableReason: fmt.Sprintf("langfuse error: %v", err),
+		if apierrors.IsForbidden(err) {
+			return []GateResultDTO{}, false, "forbidden: cannot list agentdeployments in this namespace"
+		}
+		s.log.Error(err, "gate-results: list agentdeployments failed", "namespace", ns, "suite", name)
+		return []GateResultDTO{}, false, fmt.Sprintf("list agentdeployments failed: %v", err)
+	}
+	out := make([]GateResultDTO, 0)
+	for i := range list.Items {
+		a := &list.Items[i]
+		if a.Spec.EvalSuiteRef != name {
+			continue
+		}
+		// status.gate is a pointer: nil (or empty) ⇒ the agent references the suite but
+		// no gate has run yet ⇒ pending (rendered "pending", never a fake 0.0 score).
+		g := a.Status.Gate
+		if g == nil {
+			out = append(out, GateResultDTO{Agent: a.Name, Pending: true})
+			continue
+		}
+		out = append(out, GateResultDTO{
+			Agent:          a.Name,
+			Decision:       g.Decision,
+			Phase:          g.Phase,
+			Reason:         g.Reason,
+			Score:          g.Score,
+			ScoredRevision: g.ScoredRevision,
+			Threshold:      g.Threshold,
+			Pending:        g.Score == "" && g.Decision == "",
 		})
-		return
 	}
-
-	if scores == nil {
-		scores = []FeedbackScore{}
-	}
-
-	writeJSON(w, http.StatusOK, EvalSuiteResultsResponse{
-		Conditions:      conditions,
-		ScoresAvailable: true,
-		Scores:          scores,
-	})
+	return out, true, ""
 }

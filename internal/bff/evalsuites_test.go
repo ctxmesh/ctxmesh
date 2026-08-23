@@ -811,6 +811,61 @@ func TestEvalSuiteResultsReturnsCRDConditions(t *testing.T) {
 	assert.Equal(t, "traceId not supplied", body.ScoresUnavailableReason)
 }
 
+// TestEvalSuiteResultsGateResultsAggregatesFromAgents proves the read-time projection
+// (ADR 0094, m121.1): the offline gate outcome lives per-agent on AgentDeployment
+// status.gate, and /results aggregates it caller-scoped for every agent gating on this
+// suite — a gated agent surfaces its real score, an un-gated one is pending, and an
+// agent on a DIFFERENT suite is excluded. GateResultsAvailable=true on a successful list.
+func TestEvalSuiteResultsGateResultsAggregatesFromAgents(t *testing.T) {
+	es := mockEvalSuite("my-suite", esNS)
+	gated := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-gated", Namespace: esNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
+		Status: agentsv1alpha1.AgentDeploymentStatus{Gate: &agentsv1alpha1.GateStatus{
+			Decision: "promoted", Phase: "awaiting-promotion", Reason: "AwaitingHumanPromotion",
+			Score: "0.9182", ScoredRevision: "agent-gated-abc", Threshold: "0.0000",
+		}},
+	}
+	pending := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-pending", Namespace: esNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "my-suite"},
+		// no status.gate yet
+	}
+	other := &agentsv1alpha1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-other", Namespace: esNS},
+		Spec:       agentsv1alpha1.AgentDeploymentSpec{EvalSuiteRef: "different-suite"},
+		Status: agentsv1alpha1.AgentDeploymentStatus{Gate: &agentsv1alpha1.GateStatus{
+			Score: "0.5000", Decision: "blocked",
+		}},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithStatusSubresource(es).WithObjects(es, gated, pending, other).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	body, code, raw := getEvalSuiteResults(t, s, esNS, "my-suite", "")
+	require.Equal(t, http.StatusOK, code, "body: %s", raw)
+	require.NotNil(t, body)
+	assert.True(t, body.GateResultsAvailable, "list succeeded ⇒ available")
+	assert.Empty(t, body.GateResultsUnavailableReason)
+	require.Len(t, body.GateResults, 2, "only the two agents on my-suite (not different-suite)")
+
+	byAgent := map[string]GateResultDTO{}
+	for _, g := range body.GateResults {
+		byAgent[g.Agent] = g
+	}
+	g := byAgent["agent-gated"]
+	assert.Equal(t, "0.9182", g.Score)
+	assert.Equal(t, "promoted", g.Decision)
+	assert.Equal(t, "agent-gated-abc", g.ScoredRevision)
+	assert.Equal(t, "0.0000", g.Threshold)
+	assert.False(t, g.Pending)
+	p := byAgent["agent-pending"]
+	assert.True(t, p.Pending, "an agent with no gate run yet is pending")
+	assert.Empty(t, p.Score, "pending ⇒ no fake 0.0 score")
+	_, hasOther := byAgent["agent-other"]
+	assert.False(t, hasOther, "an agent gating on a different suite must be excluded")
+}
+
 // TestEvalSuiteResultsWithLangfuseScores proves that when Langfuse is wired AND
 // traceId is supplied, real Langfuse scores appear in the response alongside the
 // CRD conditions. Never fabricated — scoresAvailable:true only when real scores exist.
