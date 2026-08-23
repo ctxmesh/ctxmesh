@@ -1165,6 +1165,34 @@ func (p *pgStore) DescendantsRequiringAction(rootRunID string) ([]DescendantActi
 	return out, nil
 }
 
+// Subtree — see the Store interface (M124 orchestration view). Reads every run in the tree
+// (root_run_id = rootRunID; a root run has root_run_id == id) ordered by created_at, reusing the same
+// column projection + scanRunRow as Get. Read-only.
+func (p *pgStore) Subtree(rootRunID string) ([]*Run, error) {
+	if rootRunID == "" {
+		return nil, nil
+	}
+	sel := `SELECT ` + runRowColumns("cursor") + ` FROM runs WHERE root_run_id=$1 ORDER BY created_at ASC, id ASC`
+	rows, err := p.db.QueryContext(context.Background(), sel, rootRunID)
+	if err != nil {
+		return nil, fmt.Errorf("run: subtree: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*Run
+	for rows.Next() {
+		r, _, err := scanRunRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("run: subtree scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: subtree rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountRunOutcomes returns (failed, total) run counts for one (namespace, agent) over runs CREATED at or
 // after `since` (M84, AlertPolicy runFailureRate condition, ADR 0063 D2). It is the cpDB-native data
 // source the reconciler evaluates the runFailureRate SLO from: rate = failed/total over the condition's
