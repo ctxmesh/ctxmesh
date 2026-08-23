@@ -58,6 +58,13 @@ spec:
             # state-layer proxy. Missing from the M53 ACL → NOPERM → spawn_guard_unavailable → delegation
             # fails closed. Added M119 (the delegation run-tree was never live-exercised on this ACL).
             - "~spawn:*"
+            # per-AGENT durable cost keys (m84.6, ADR 0063 D1): the launcher's gateway books each
+            # completion's spend onto agent:{ns}/{name}:spend:{YYYY-MM} via the state-layer proxy's
+            # /quota/agent-spend, and the BFF cost-rollup worker snapshots them into cost_rollups
+            # (scope_type='agent') → the Cost surface. Missing from the M53/M119 ACL → NOPERM → the
+            # agent-spend write 502s and is swallowed → cost_rollups stays empty → the Cost surface
+            # shows $0. Added M122 (the cost pipeline was never live-exercised on this ACL).
+            - "~agent:*"
             - "+@all"
             - "-flushall"
             - "-flushdb"

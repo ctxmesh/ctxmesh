@@ -801,7 +801,10 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode != http.StatusOK {
 		return
 	}
-	actual := budget.PriceCall(resp.Header.Get(budget.LiteLLMCostHeader), body)
+	// A non-guardrailed stream:true call is buffered here (serve routes to serveStreaming only under an
+	// active policy), so `body` may be the raw SSE stream — usageBodyForPricing extracts the usage chunk
+	// so streaming agents book spend (m122.1); a plain completion body passes through unchanged.
+	actual := budget.PriceCall(resp.Header.Get(budget.LiteLLMCostHeader), usageBodyForPricing(body))
 	gp.bookSpend(ctx, span, caps, route, userHash, pol, actual)
 }
 
