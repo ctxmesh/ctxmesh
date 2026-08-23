@@ -25,8 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 )
@@ -83,5 +83,20 @@ func TestReconcile_SupervisorSpawnGuard_ProxyVsDirect(t *testing.T) {
 		env := supervisorKsvcEnv(t, newReconciler(), "sup-direct", "sup-direct-reg", "sup-direct-team")
 		assert.Equal(t, "true", env["DELEGATE_ENABLED"])
 		assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "proxy-less: the guard uses direct Valkey")
+	})
+
+	// M119: a supervisor needs the capability public key so the spawn guard's verifier can recover THIS
+	// run's id as the spawn-tree ROOT (L11) when the spawn-root header doesn't propagate — a root
+	// supervisor's first delegation. Without it, rootRunID is empty and the spawn store rejects it
+	// (400 "rootRunId is required") → spawn_guard_unavailable → every delegation fails closed.
+	t.Run("capability public key injected for the spawn-root verifier (M119)", func(t *testing.T) {
+		r := newReconciler()
+		r.OBOEgress.CapabilityPublicKeyB64 = "dGVzdC1wdWJrZXk="
+		r.OBOEgress.CapabilityAudience = "ctxmesh-credential-plane"
+		env := supervisorKsvcEnv(t, r, "sup-cap", "sup-cap-reg", "sup-cap-team")
+		assert.Equal(t, "true", env["DELEGATE_ENABLED"])
+		assert.Equal(t, "dGVzdC1wdWJrZXk=", env["MCP_CAPABILITY_PUBLIC_KEY"],
+			"the spawn-root verifier needs the cap public key")
+		assert.Equal(t, "ctxmesh-credential-plane", env["MCP_CAPABILITY_AUDIENCE"])
 	})
 }

@@ -172,6 +172,7 @@ spec:
         - ~mem:*
         - ~tenant:*
         - ~a2a:seen:*
+        - ~spawn:*
         - +@all
         - -flushall
         - -flushdb
