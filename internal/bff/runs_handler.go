@@ -918,19 +918,40 @@ func approvalToolName(key string) (string, bool) {
 }
 
 // withApprovals merges the granted approval keys into the run's input JSON as an `approvals` array,
-// so the re-invoked agent's pause_for_approval(key) proceeds (m32.4). A non-object input is left
-// unchanged (the agent gets no approvals and pauses again — honest, not a silent success).
+// so the re-invoked agent's pause_for_approval(key) proceeds (m32.4). An OBJECT input gets the keys as
+// a sibling; a NON-object input (the common console case — `input` is a plain string, so rn.Input is
+// the JSON scalar "…") is WRAPPED as {"input":<original>,"approvals":[…]} so the grant still rides the
+// re-invoke. The SDK's _parse_body reads `input` from an object body identically to a bare string, so
+// the agent sees the same prompt but now proceeds instead of re-pausing forever. (Before m120.2 a
+// string-input run's approve was a silent no-op → the durable-run HITL-approve path re-paused every
+// resume; it had never been live-exercised.)
 func withApprovals(input []byte, keys []string) []byte {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(input, &m); err != nil || m == nil {
-		return input
-	}
-	b, err := json.Marshal(keys)
+	keysJSON, err := json.Marshal(keys)
 	if err != nil {
 		return input
 	}
-	m["approvals"] = b
-	out, err := json.Marshal(m)
+	// Object input (a structured /invoke envelope): merge the approvals as a sibling key.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(input, &m); err == nil && m != nil {
+		m["approvals"] = keysJSON
+		out, mErr := json.Marshal(m)
+		if mErr != nil {
+			return input
+		}
+		return out
+	}
+	// Non-object input (a bare prompt): use it verbatim as the `input` field when it is already valid
+	// JSON (a scalar string/number/array), else quote plain text into a JSON string. Fail-closed: on any
+	// marshal error, return the input unchanged (the agent re-pauses — honest, never a silent allow).
+	inputField := json.RawMessage(input)
+	if !json.Valid(input) {
+		q, qErr := json.Marshal(string(input))
+		if qErr != nil {
+			return input
+		}
+		inputField = json.RawMessage(q)
+	}
+	out, err := json.Marshal(map[string]json.RawMessage{"input": inputField, "approvals": keysJSON})
 	if err != nil {
 		return input
 	}
