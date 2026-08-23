@@ -99,3 +99,30 @@ func TestDescendantsRequiringAction(t *testing.T) {
 		})
 	}
 }
+
+// TestSubtree covers the M124 orchestration-tree read: Subtree(root) returns the root plus every
+// descendant sub-run (delegate children), and excludes runs in a different tree.
+func TestSubtree(t *testing.T) {
+	s := NewMemStore()
+	require.NoError(t, s.Create(New("root", "default", "supervisor", nil, "", t0)))
+	for _, id := range []string{"d1", "d2"} {
+		r := New(id, "default", "member-"+id, nil, "", t0)
+		r.ParentRunID = "root"
+		r.RootRunID = "root"
+		require.NoError(t, s.Create(r))
+	}
+	// A run in a DIFFERENT tree — must be excluded.
+	require.NoError(t, s.Create(New("other", "default", "x", nil, "", t0)))
+
+	tree, err := s.Subtree("root")
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range tree {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["root"], "the root is part of its own subtree")
+	assert.True(t, ids["d1"])
+	assert.True(t, ids["d2"])
+	assert.False(t, ids["other"], "a different tree's run must be excluded")
+	assert.Len(t, tree, 3)
+}

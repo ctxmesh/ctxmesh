@@ -57,6 +57,7 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 	if s.adapters.Invoke != nil && s.callerClients != nil {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+		authed.HandleFunc("GET /api/runs/{id}/tree", s.handleRunTree)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
 		authed.HandleFunc("GET /api/runs/{id}/fixture", s.handleGetRunFixture)
 		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
@@ -545,6 +546,84 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// RunTreeNodeDTO is one run in an orchestration tree (M124): a supervisor and each specialist it
+// delegated to. Input is the (sub-)task this agent was handed; Output is its result (last assistant
+// message). ParentRunID assembles the tree; the timestamps order the delegation timeline.
+type RunTreeNodeDTO struct {
+	ID          string    `json:"id"`
+	Agent       string    `json:"agent"`
+	Status      string    `json:"status"`
+	ParentRunID string    `json:"parentRunId,omitempty"`
+	RootRunID   string    `json:"rootRunId,omitempty"`
+	Input       string    `json:"input,omitempty"`
+	Output      string    `json:"output,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// RunTreeResponse is the GET /api/runs/{id}/tree body: the tree ROOT id + every run in it (the
+// supervisor + its delegate sub-runs), so the console can render "who orchestrated what" — the task,
+// its decomposition across agents, each agent's result, and the composition. Nodes[] is [] never null.
+type RunTreeResponse struct {
+	RootID string           `json:"rootId"`
+	Nodes  []RunTreeNodeDTO `json:"nodes"`
+}
+
+// handleRunTree serves GET /api/runs/{id}/tree — the orchestration run-tree rooted at this run's TRUE
+// root (a supervisor delegates to specialists as child sub-runs; ADR 0091). CALLER-SCOPED (ADR 0011):
+// authorizeRunAccess proves the caller can read the run's agent through their OWN RBAC before we serve
+// any node — a run id must never be a cross-tenant read oracle. The subtree read keys on the true root
+// id, so opening ANY run in the tree returns the whole tree.
+func (s *Server) handleRunTree(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	rn, ok := s.authorizeRunAccess(w, r, caller, r.PathValue("id"), true)
+	if !ok {
+		return
+	}
+	rootID := rn.RootRunID
+	if rootID == "" {
+		rootID = rn.ID // a root run carries no RootRunID; the tree is keyed by its own id.
+	}
+	subtree, err := s.runStore.Subtree(rootID)
+	if err != nil {
+		s.log.Error(err, "run: load subtree", "root", rootID)
+		writeError(w, http.StatusInternalServerError, "failed to load the run tree")
+		return
+	}
+	nodes := make([]RunTreeNodeDTO, 0, len(subtree))
+	for _, n := range subtree {
+		nodes = append(nodes, RunTreeNodeDTO{
+			ID:          n.ID,
+			Agent:       n.Agent,
+			Status:      string(n.Status),
+			ParentRunID: n.ParentRunID,
+			RootRunID:   n.RootRunID,
+			Input:       runTreeText(n.Input),
+			Output:      lastAssistantMessage(n),
+			CreatedAt:   n.CreatedAt,
+			UpdatedAt:   n.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, RunTreeResponse{RootID: rootID, Nodes: nodes})
+}
+
+// runTreeText renders a run's Input as a human string for the tree node — a bare JSON string scalar is
+// unquoted (the common case: the sub-task the supervisor handed the agent); anything else is returned
+// as-is. Never fails.
+func runTreeText(input json.RawMessage) string {
+	s := strings.TrimSpace(string(input))
+	if len(s) >= 2 && s[0] == '"' {
+		var unquoted string
+		if err := json.Unmarshal([]byte(s), &unquoted); err == nil {
+			return unquoted
+		}
+	}
+	return s
 }
 
 // RunDetailDTO is the API projection of a run for GET /api/runs/{id}. It surfaces the standard run

@@ -2405,6 +2405,27 @@ export interface DescendantRequiringAction {
 
 // RunDetail mirrors the BFF run DTO (GET /api/runs/{id}) — the structured final state the
 // SSE stream does not carry (traceId, requiresAction). Read on stream close / requires_action.
+// RunTreeNode is one run in an orchestration tree (M124): a supervisor and each specialist it delegated
+// to. `input` is the (sub-)task this agent was handed; `output` is its result; `parentRunId` assembles
+// the tree.
+export interface RunTreeNode {
+  id: string;
+  agent: string;
+  status: string;
+  parentRunId?: string;
+  rootRunId?: string;
+  input?: string;
+  output?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// RunTree mirrors GET /api/runs/{id}/tree — the tree root + every run in it (supervisor + delegates).
+export interface RunTree {
+  rootId: string;
+  nodes: RunTreeNode[];
+}
+
 export interface RunDetail {
   id: string;
   status: string;
@@ -3231,6 +3252,19 @@ export const api = {
       );
     }
     return (await res.json()) as RunDetail;
+  },
+
+  // getRunTree returns the orchestration run-tree rooted at this run's root (a supervisor + the
+  // specialists it delegated to). GET /api/runs/{id}/tree (M124).
+  getRunTree: async (id: string, signal?: AbortSignal): Promise<RunTree> => {
+    const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}/tree`, { signal });
+    if (!res.ok) {
+      throw new ApiError(
+        await errorMessage(res, `get run tree failed (${res.status})`),
+        res.status,
+      );
+    }
+    return (await res.json()) as RunTree;
   },
 
   // resumeRun re-enters a run paused in requires_action (POST /api/runs/{id}/resume).
