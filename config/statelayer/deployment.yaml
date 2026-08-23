@@ -53,6 +53,11 @@ spec:
             - "~mem:*"
             - "~tenant:*"
             - "~a2a:seen:*"
+            # spawn-tree counters for delegate-to spawn-guard enforcement (M64/M94, ADR 0057/0088):
+            # the launcher's spawn guard reads/writes spawn:{ns}:{scope}:{root}:{inflight|count} via the
+            # state-layer proxy. Missing from the M53 ACL → NOPERM → spawn_guard_unavailable → delegation
+            # fails closed. Added M119 (the delegation run-tree was never live-exercised on this ACL).
+            - "~spawn:*"
             - "+@all"
             - "-flushall"
             - "-flushdb"
