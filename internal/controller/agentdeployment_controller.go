@@ -1441,6 +1441,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			} else if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
 				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
 			}
+			// The delegate spawn guard needs the run-capability verifier to recover THIS supervisor's run id
+			// as the spawn-tree ROOT when the X-Ctxmesh-Spawn-Root header doesn't propagate (L11) — the case
+			// for a ROOT supervisor's FIRST delegation. Without the capability public key the verifier is nil,
+			// rootRunID is empty, and the state-layer spawn store rejects it (400 "rootRunId is required") →
+			// every delegation fails closed with spawn_guard_unavailable (M119). The per-user-memory block
+			// only injects this key for perUser agents, so a plain supervisor got nothing. Inject it (+ the
+			// audience) on the supervisor's main container whenever the platform provides it.
+			if r.OBOEgress.CapabilityPublicKeyB64 != "" &&
+				!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+				env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
+				if r.OBOEgress.CapabilityAudience != "" &&
+					!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+					env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
+				}
+			}
 		}
 
 		// Blob offload (m7.6b): a registry member participates in the async A2A
