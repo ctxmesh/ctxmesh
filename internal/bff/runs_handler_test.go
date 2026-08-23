@@ -764,3 +764,43 @@ func TestExecuteRun_MalformedSchemaFailsClosed(t *testing.T) {
 	assert.Contains(t, got.Error, "not a valid JSON Schema")
 	assert.Empty(t, got.Messages)
 }
+
+// TestWithApprovals covers the durable-run HITL-approve grant injection (m120.2). The critical case
+// is a NON-object input (the console sends `input` as a plain string, so rn.Input is the JSON scalar
+// "…"): before m120.2 that no-op'd and the run re-paused on every resume. withApprovals must WRAP it
+// so the granted key rides the re-invoke and the SDK's pause_for_approval(key) proceeds.
+func TestWithApprovals(t *testing.T) {
+	keys := []string{"tool:echo"}
+
+	t.Run("string input is wrapped so the grant rides the re-invoke", func(t *testing.T) {
+		// rn.Input for a console prompt is the JSON scalar "hello there" (json.RawMessage).
+		out := withApprovals([]byte(`"hello there"`), keys)
+		var got struct {
+			Input     string   `json:"input"`
+			Approvals []string `json:"approvals"`
+		}
+		require.NoError(t, json.Unmarshal(out, &got))
+		assert.Equal(t, "hello there", got.Input, "the original prompt must survive the wrap")
+		assert.Equal(t, keys, got.Approvals, "the granted approval key must be present")
+	})
+
+	t.Run("object input merges approvals as a sibling key", func(t *testing.T) {
+		out := withApprovals([]byte(`{"input":"hi","conversation_id":"c1"}`), keys)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(out, &got))
+		assert.Equal(t, "hi", got["input"])
+		assert.Equal(t, "c1", got["conversation_id"], "existing fields are preserved")
+		assert.Equal(t, []any{"tool:echo"}, got["approvals"])
+	})
+
+	t.Run("plain (non-JSON) text is quoted into a JSON string input", func(t *testing.T) {
+		out := withApprovals([]byte(`plain prompt`), keys)
+		var got struct {
+			Input     string   `json:"input"`
+			Approvals []string `json:"approvals"`
+		}
+		require.NoError(t, json.Unmarshal(out, &got))
+		assert.Equal(t, "plain prompt", got.Input)
+		assert.Equal(t, keys, got.Approvals)
+	})
+}
