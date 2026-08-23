@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -244,5 +245,43 @@ func TestStreamEligibility_Matrix(t *testing.T) {
 	t.Run("no policy → not eligible", func(t *testing.T) {
 		b := build(t, "")
 		assert.False(t, b.streamEligible)
+	})
+}
+
+// TestUsageBodyForPricing covers the m122.1 fix: a non-guardrailed stream:true call is buffered by
+// serve(), so the accounting body is the raw SSE stream. usageBodyForPricing must extract the final
+// usage chunk (else streaming agents book $0 and the Cost surface stays empty). A plain JSON body and
+// a usage-less SSE body pass through unchanged.
+func TestUsageBodyForPricing(t *testing.T) {
+	t.Run("SSE body → the usage chunk JSON is extracted", func(t *testing.T) {
+		sse := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":14,\"completion_tokens\":4,\"total_tokens\":18}}\n\n" +
+			"data: [DONE]\n\n"
+		got := usageBodyForPricing([]byte(sse))
+		var env struct {
+			Usage *struct {
+				TotalTokens int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(got, &env); err != nil {
+			t.Fatalf("extracted body is not JSON: %v (%s)", err, got)
+		}
+		if env.Usage == nil || env.Usage.TotalTokens != 18 {
+			t.Fatalf("want total_tokens 18, got %s", got)
+		}
+	})
+
+	t.Run("plain JSON completion body passes through unchanged", func(t *testing.T) {
+		body := []byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"total_tokens":9}}`)
+		if got := usageBodyForPricing(body); !bytes.Equal(got, body) {
+			t.Fatalf("plain body must be unchanged, got %s", got)
+		}
+	})
+
+	t.Run("SSE body with no usage chunk returns the original (falls back to $0)", func(t *testing.T) {
+		sse := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+		if got := usageBodyForPricing(sse); !bytes.Equal(got, sse) {
+			t.Fatalf("usage-less SSE must return the original body")
+		}
 	})
 }

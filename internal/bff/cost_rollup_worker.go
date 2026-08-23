@@ -80,6 +80,12 @@ func (s *Server) StartCostRollupWorker(ctx context.Context, cfg CostRollupConfig
 // logged and skipped inside rollupOnce (a transient Valkey/DB blip must not stop the reconciler; the next
 // tick self-heals — idempotent upserts make missed ticks safe).
 func (s *Server) costRollupLoop(ctx context.Context, cfg CostRollupConfig) {
+	// Snapshot ONCE on start (m122.1): without this a fresh BFF leaves cost_rollups empty — hence the
+	// Cost surface shows $0 — for up to a full Interval (default 1h) even though Valkey already holds
+	// booked spend. The upserts are idempotent, so an on-start snapshot is safe and just makes the Cost
+	// surface reflect reality promptly after a (re)deploy.
+	s.rollupOnce(ctx, cfg, time.Now().UTC())
+
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
