@@ -510,12 +510,12 @@ function OrchestrationTree({ runId }: { runId: string }) {
     return () => controller.abort();
   }, [runId]);
 
-  if (!tree || tree.nodes.length <= 1) return null; // not a delegation — nothing to orchestrate.
+  if (!tree || tree.nodes.length <= 1) return null; // not orchestrated — nothing to show.
 
-  const root = tree.nodes.find((n) => n.id === tree.rootId);
-  const children = tree.nodes.filter((n) => n.id !== tree.rootId && (n.parentRunId ?? "") === tree.rootId);
-  // Fallback: if parentRunId wasn't stamped, treat every non-root node as a direct delegate.
-  const delegates = children.length > 0 ? children : tree.nodes.filter((n) => n.id !== tree.rootId);
+  // Show every agent the platform ran (the root run is the page itself; steps/delegates are the nodes),
+  // in execution order. Neutral for both a workflow pipeline and a supervisor's dynamic delegation.
+  const steps = tree.nodes.filter((n) => n.id !== tree.rootId);
+  const nodes = steps.length > 0 ? steps : tree.nodes;
 
   return (
     <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="run-orchestration">
@@ -523,30 +523,27 @@ function OrchestrationTree({ runId }: { runId: string }) {
         Orchestration
       </h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        A supervisor broke this task down and delegated it to {delegates.length} specialist
-        {delegates.length === 1 ? "" : "s"} — here's who did what, then it composed the answer.
+        The platform ran {nodes.length} agent{nodes.length === 1 ? "" : "s"} to complete this — here's who
+        did what, in order, and how the work flowed between them.
       </p>
       <div className="mt-4 space-y-3">
-        {root && <OrchestrationNode node={root} role="supervisor" />}
-        <div className="ml-3 space-y-3 border-l-2 border-muted pl-4">
-          {delegates.map((c) => (
-            <OrchestrationNode key={c.id} node={c} role="delegate" />
-          ))}
-        </div>
+        {nodes.map((n, i) => (
+          <OrchestrationNode key={n.id} node={n} step={i + 1} />
+        ))}
       </div>
     </div>
   );
 }
 
-function OrchestrationNode({ node, role }: { node: RunTreeNode; role: "supervisor" | "delegate" }) {
+function OrchestrationNode({ node, step }: { node: RunTreeNode; step: number }) {
   return (
     <div
       data-testid={`orchestration-node-${node.agent}`}
       className="rounded-md border bg-background p-3"
     >
       <div className="flex items-center gap-2">
-        <Badge variant={role === "supervisor" ? "default" : "secondary"} className="text-[10px]">
-          {role}
+        <Badge variant="secondary" className="text-[10px]">
+          Step {step}
         </Badge>
         <span className="text-sm font-medium">{node.agent}</span>
         <Badge variant={statusVariant(node.status)} className="ml-auto text-[10px]">
