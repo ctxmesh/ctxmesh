@@ -52,6 +52,19 @@ const RESULTS_WITH_SCORES = {
       lastTransitionTime: "2026-07-11T10:00:00Z",
     },
   ],
+  gateResults: [
+    {
+      agent: "prod-agent",
+      decision: "promoted",
+      phase: "awaiting-promotion",
+      reason: "AwaitingHumanPromotion",
+      score: "0.9182",
+      scoredRevision: "prod-agent-abc",
+      threshold: "0.8000",
+      pending: false,
+    },
+  ],
+  gateResultsAvailable: true,
   scoresAvailable: true,
   scores: [
     { scorer: "exact-match", value: 0.9 },
@@ -69,6 +82,8 @@ const RESULTS_NO_SCORES = {
       lastTransitionTime: "2026-07-11T10:00:00Z",
     },
   ],
+  gateResults: [],
+  gateResultsAvailable: true,
   scoresAvailable: false,
   scoresUnavailableReason: "Langfuse not configured",
 };
@@ -236,9 +251,15 @@ describe("EvalsPage", () => {
       expect(screen.getByTestId("eval-results-panel-my-eval")).toBeInTheDocument();
     });
 
-    // Gate outcome from conditions
+    // Gate outcome from conditions (secondary — only when the CRD status carries them)
     expect(screen.getByText("GatePassed")).toBeInTheDocument();
     expect(screen.getByText("(ThresholdMet)")).toBeInTheDocument();
+
+    // Real per-agent gate result (ADR 0094) — the primary gate view: agent, score,
+    // threshold, decision.
+    expect(screen.getByTestId("eval-gate-result-prod-agent")).toBeInTheDocument();
+    expect(screen.getByText(/score 0\.9182/)).toBeInTheDocument();
+    expect(screen.getByText("promoted")).toBeInTheDocument();
 
     // Real scores shown (scoresAvailable=true)
     expect(screen.getByText("exact-match")).toBeInTheDocument();

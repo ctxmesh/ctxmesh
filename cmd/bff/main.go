@@ -65,6 +65,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/prompt"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
@@ -342,21 +343,26 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
 
 	srv := bff.NewServer(bff.Options{
-		TokenServiceURL:             strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
-		TokenServiceHTTPClient:      tsHTTPClient,
-		GrantStore:                  grantStore,
-		TenantUsage:                 tenantUsage,
-		RunControl:                  runControl,
-		RunStore:                    runStore,
-		DocStore:                    docStore,
-		KnowledgeStore:              knowledgeStore,
-		DatasetStore:                datasetStore,
-		OnlineStore:                 onlineStore,
-		OnlineResolver:              onlineResolver,
-		RollupStore:                 rollupStore,
-		Embedder:                    ingestEmbedder,
-		ConvStore:                   convStore,
-		PromptStore:                 promptStore,
+		TokenServiceURL:        strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
+		TokenServiceHTTPClient: tsHTTPClient,
+		GrantStore:             grantStore,
+		TenantUsage:            tenantUsage,
+		RunControl:             runControl,
+		RunStore:               runStore,
+		DocStore:               docStore,
+		KnowledgeStore:         knowledgeStore,
+		DatasetStore:           datasetStore,
+		OnlineStore:            onlineStore,
+		OnlineResolver:         onlineResolver,
+		RollupStore:            rollupStore,
+		Embedder:               ingestEmbedder,
+		ConvStore:              convStore,
+		PromptStore:            promptStore,
+		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
+		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
+		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
+		// authorises private repos; empty ⇒ public repos only. Git stays the source of truth.
+		PromptResolver:              prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
 		ToolRegistryStore:           toolStore,
 		NamespaceTenantStore:        nsTenantStore,
 		PublishedArtifactStore:      publishedArtifactStore,
