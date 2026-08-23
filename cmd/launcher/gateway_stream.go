@@ -305,6 +305,44 @@ func parseStreamChunk(data []byte) (streamChunk, bool) {
 	return c, true
 }
 
+// usageBodyForPricing returns the JSON that PriceCall should price a completion from. A normal
+// (buffered) completion body is priced directly. BUT a non-guardrailed stream:true call is buffered by
+// serve() (it only routes to serveStreaming when a guardrail policy is active, K2/ADR 0086), so `body`
+// is then the raw SSE stream — which PriceCall's JSON parse silently reads as $0, so streaming agents
+// booked NO spend (the Cost surface stayed empty; m122.1). When the body is SSE-framed, scan its data
+// frames for the final usage chunk and return that chunk's JSON (parity with serveStreaming's own
+// usageBody capture); a non-SSE body is returned unchanged. No usage chunk ⇒ return body (PriceCall
+// falls back to $0, the honest conservative outcome).
+func usageBodyForPricing(body []byte) []byte {
+	if !bytes.Contains(body, []byte(sseDataPrefix)) {
+		return body // a normal JSON completion body — price as-is.
+	}
+	var usage []byte
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, sseDataPrefix) {
+			continue
+		}
+		data := strings.TrimSpace(line[len(sseDataPrefix):])
+		if data == sseDone {
+			break
+		}
+		chunk, ok := parseStreamChunk([]byte(data))
+		if !ok {
+			continue
+		}
+		if len(chunk.Usage) > 0 && !bytes.Equal(chunk.Usage, []byte("null")) {
+			usage = append([]byte(nil), data...) // the final usage chunk prices the call
+		}
+	}
+	if usage != nil {
+		return usage
+	}
+	return body
+}
+
 // streamTemplate carries the envelope fields (id/model/created/object) captured from the upstream
 // chunks so the synthesized downstream chunks are wire-compatible.
 type streamTemplate struct {
