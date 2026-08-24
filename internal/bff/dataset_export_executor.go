@@ -261,7 +261,7 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 	}
 
 	// (3) All pages done → record the terminal outcome ON THE RUN + succeed.
-	s.completeExport(runID, spec, ds.ID, cursor)
+	s.completeExport(ctx, runID, spec, ds.ID, cursor)
 }
 
 // exportOneTrace fetches ONE trace's detail from Langfuse, extracts its input + output (the ROOT span's payload —
@@ -368,7 +368,7 @@ func (s *Server) persistExportCursor(runID string, cursor *exportCursor) error {
 }
 
 // completeExport records the terminal SUCCESS outcome on the run + transitions it to `succeeded`.
-func (s *Server) completeExport(runID string, spec ExportSpec, datasetID string, cursor *exportCursor) {
+func (s *Server) completeExport(ctx context.Context, runID string, spec ExportSpec, datasetID string, cursor *exportCursor) {
 	outcome := ExportOutcome{
 		Reason:    exportSucceeded,
 		DatasetID: datasetID,
@@ -385,7 +385,7 @@ func (s *Server) completeExport(runID string, spec ExportSpec, datasetID string,
 	cursorJSON, _ := cursor.marshal()
 
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, string(outcomeJSON))
-	if uErr := s.terminalTransition(runID, func(r *run.Run) error {
+	if uErr := s.terminalTransitionFenced(ctx, runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // idempotent — a raced cancel/complete
 		}

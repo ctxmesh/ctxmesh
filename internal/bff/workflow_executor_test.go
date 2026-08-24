@@ -17,6 +17,7 @@ limitations under the License.
 package bff
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"testing"
@@ -78,6 +79,37 @@ func seedWorkflowRun(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec, i
 	return r.ID
 }
 
+// TestWorkflowFence_PeerReclaimedRunNotClobbered is the F-3 fix (M125/ADR 0097): the workflow
+// executor's state writes are fenced on the executing worker still holding the lease, so a STALE
+// worker (whose lease a peer reclaimed) cannot clobber the peer-owned run. This exercises the
+// cursorFenceCtx → terminalTransitionFenced wiring the executor's completeWorkflow now uses.
+func TestWorkflowFence_PeerReclaimedRunNotClobbered(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	r := run.New("wf-fence", "prod", "the-workflow", json.RawMessage(`{}`), "conv", time.Now())
+	r.Status = run.StatusRunning
+	r.WorkerID = "peer-B" // a peer holds the lease
+	require.NoError(t, s.runStore.Create(r))
+
+	// A STALE worker (reclaimed by peer-B) attempts a terminal write via the cursor fence — must be skipped.
+	err := s.terminalTransitionFenced(cursorFenceCtx(&workflowCursor{workerID: "stale-A"}), r.ID, func(x *run.Run) error {
+		return x.Transition(run.StatusSucceeded, time.Now())
+	})
+	require.NoError(t, err) // the fence swallows errRunNotHeld → nil
+	got, err := s.runStore.Get(r.ID)
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusRunning, got.Status, "F-3: a stale worker must NOT clobber a peer-owned run")
+	assert.Equal(t, "peer-B", got.WorkerID)
+
+	// The lease-HOLDING worker applies.
+	err = s.terminalTransitionFenced(cursorFenceCtx(&workflowCursor{workerID: "peer-B"}), r.ID, func(x *run.Run) error {
+		return x.Transition(run.StatusSucceeded, time.Now())
+	})
+	require.NoError(t, err)
+	got, err = s.runStore.Get(r.ID)
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusSucceeded, got.Status, "F-3: the lease-holding worker's write applies")
+}
+
 // step is a small builder for a WorkflowStep.
 func stepNode(name, agentRef string) agentsv1beta1.WorkflowStep {
 	return agentsv1beta1.WorkflowStep{Name: name, AgentRef: agentRef}
@@ -137,7 +169,7 @@ func drive(t *testing.T, s *Server, wfRunID string) {
 		return nil
 	})
 	require.NoError(t, err)
-	s.executeWorkflow(wfRunID)
+	s.executeWorkflow(context.Background(), wfRunID)
 }
 
 // getRun fetches a run (test convenience).
@@ -351,7 +383,7 @@ func TestWorkflowExecutor_PlanApprovalGate_ApprovedRunsGraph(t *testing.T) {
 	require.NoError(t, err)
 
 	// Advance 2: with the gate satisfied the graph runs — node "one" launches + the run parks waiting.
-	s.executeWorkflow(wfID)
+	s.executeWorkflow(context.Background(), wfID)
 	rn := getRun(t, s, wfID)
 	assert.Equal(t, run.StatusWaiting, rn.Status, "the approved plan runs — the run parks on node 1")
 	child := inFlightChild(t, s, wfID)
@@ -1029,7 +1061,7 @@ func TestWorkflowExecutor_QueuedRun_NodeLaunchFailure_RecordsFailed(t *testing.T
 
 	// Call executeWorkflow directly on the QUEUED run (exactly the in-process path). Without the opening
 	// transition this would attempt queued→failed (illegal) and orphan the run in queued.
-	s.executeWorkflow(r.ID)
+	s.executeWorkflow(context.Background(), r.ID)
 
 	fin := getRun(t, s, r.ID)
 	// CRITICAL assertion: the run must record `failed`, NOT be orphaned in `queued`.

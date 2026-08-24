@@ -931,7 +931,7 @@ func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *
 
 	// Drive the executor in-process (a low-frequency human action — the single-agent resume path drives
 	// executeRun in-process the same way, independent of dispatch mode) so the approved graph starts now.
-	go s.executeWorkflow(rn.ID)
+	go s.executeWorkflow(context.Background(), rn.ID) // inline resume — no worker lease to fence
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: rn.ID, Status: string(run.StatusRunning)})
 }
