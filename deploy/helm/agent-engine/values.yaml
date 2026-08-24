@@ -283,10 +283,14 @@ bff:
     worker:
       # Concurrent claim loops per worker pod.
       concurrency: 4
-      # KEDA autoscale bounds on the queued-run backlog. Dev: 0 (scale-to-zero). The
-      # production overlay sets minReplicaCount: 2 (a WARM pool — avoid a scale-from-0
-      # cold start on an interactive run; a drain never zeroes the pool, ADR 0051 Fork-C).
-      minReplicaCount: 0
+      # KEDA autoscale bounds on the queued-run backlog. minReplicaCount is ALSO the
+      # Deployment's warm floor (run-worker.yaml seeds replicas from it), so the durable
+      # path always has >=1 live worker claiming runs — a fresh install's workflows
+      # complete instead of queuing (Gate A / ADR 0095 dec-3), and a KEDA-absent cluster
+      # still processes. Set 0 to opt into scale-to-zero. The production overlay raises it
+      # to 2 (a WARM pool — avoid a scale-from-0 cold start; a drain never zeroes the pool,
+      # ADR 0051 Fork-C).
+      minReplicaCount: 1
       maxReplicaCount: 10
   # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
   # leaves generation using the caller's connected-provider model unpinned — the
