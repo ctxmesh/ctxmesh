@@ -52,6 +52,7 @@ rules:
   resources:
   - validatingwebhookconfigurations
   verbs:
+  - create
   - get
   - list
   - update
