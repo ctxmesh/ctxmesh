@@ -335,14 +335,35 @@ func (s *Server) startHeartbeat(
 			case <-hbCtx.Done():
 				return
 			case <-ticker.C:
-				if err := s.runStore.Heartbeat(runID, workerID, lease); err != nil {
-					// A DEFINITIVE lease loss (a peer reclaimed this run) ⇒ stop executing so we do
-					// not append duplicate events (D3). A transient error / ErrNotFound just stops
-					// renewing (the run continues under at-least-once, as before).
-					if errors.Is(err, run.ErrLeaseLost) && onLeaseLost != nil {
+				err := s.runStore.Heartbeat(runID, workerID, lease)
+				switch {
+				case err == nil:
+					// renewed — keep holding the lease.
+				case errors.Is(err, run.ErrLeaseLost):
+					// DEFINITIVE loss: a peer reclaimed this run (its worker_id changed) — or our own
+					// run went terminal. Either way stop renewing + cancel exec (D3) so a zombie stops
+					// appending duplicate events into the reclaiming worker's stream. If our run already
+					// finished, the cancel is a harmless no-op (execCtx is already done).
+					if onLeaseLost != nil {
 						onLeaseLost()
 					}
 					return
+				case errors.Is(err, run.ErrNotFound):
+					// The run row is gone (deleted / reaped): nothing for a peer to reclaim, so cancelling
+					// is duplicate-safe and stops wasted spend on a run that can no longer commit. Stop.
+					if onLeaseLost != nil {
+						onLeaseLost()
+					}
+					return
+				default:
+					// F-2 (M125/ADR 0097): a TRANSIENT error (a DB blip / pool-exhaustion hiccup, F-8) must
+					// NOT stop renewal. Stopping lets the lease EXPIRE -> a peer falsely reclaims a run we
+					// still hold -> DUPLICATE execution (the pre-M125 bug). Log + keep renewing next tick;
+					// the run's own exec timeout bounds it. (A time-based self-fence for a lease-long DB
+					// outage — ADR 0097 F-2 stage 2 — is a follow-on; stage 1 is strictly safer than the
+					// old "stop on first error".)
+					s.log.Error(err, "run-worker: heartbeat renew failed (transient) — keeping the lease, will retry",
+						"run", runID, "worker", workerID)
 				}
 			}
 		}
