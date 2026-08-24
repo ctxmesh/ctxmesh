@@ -161,6 +161,12 @@ func run(log logr.Logger) error {
 		}
 	}
 
+	// F3 (M126/Gate C): bound the upstream tool forward so a hung MCP server cannot wedge the run's
+	// managed loop. ResponseHeaderTimeout catches "connects but never responds"; env-tunable and
+	// defaulted HIGHER than the model gateway's 60s (tool latency profiles are wider — a legit
+	// synchronous-JSON MCP tool may compute a while before responding).
+	toolTransport := http.DefaultTransport.(*http.Transport).Clone()
+	toolTransport.ResponseHeaderTimeout = egressResponseHeaderTimeout()
 	proxy := egress.NewProxy(egress.ProxyConfig{
 		Verifier:         runcap.NewVerifier(pub, audience, nil),
 		Resolver:         resolver,
@@ -172,6 +178,7 @@ func run(log logr.Logger) error {
 		Log:              log,
 		Recorder:         recorder,
 		Policy:           policyHolder,
+		Transport:        toolTransport,
 	})
 
 	mux := http.NewServeMux()
@@ -301,4 +308,16 @@ func delegatingHTTPClient(log logr.Logger) (*http.Client, error) {
 		return nil, err
 	}
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: delegationTimeout}, nil
+}
+
+// egressResponseHeaderTimeout resolves the F3 upstream-response-header timeout from
+// EGRESS_RESPONSE_HEADER_TIMEOUT (e.g. "120s","2m"); blank/invalid ⇒ 120s.
+func egressResponseHeaderTimeout() time.Duration {
+	const def = 120 * time.Second
+	if v := strings.TrimSpace(os.Getenv("EGRESS_RESPONSE_HEADER_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
 }

@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -213,6 +214,15 @@ func NewProxy(cfg ProxyConfig) *Proxy {
 		// capture, never fails the forward.
 		ModifyResponse: p.captureResponse,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			// F3 (M126/Gate C): a hung MCP server (connects but never responds) surfaces here as a
+			// transport timeout (ResponseHeaderTimeout on the cloned Transport) — fail the tool call as a
+			// TYPED 504 tool_timeout the managed loop can react to, not the opaque 502 that read as unreachable.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				cfg.Log.Error(err, "egress: MCP server did not respond in time — failing the tool call (typed timeout)")
+				writeError(w, http.StatusGatewayTimeout, "tool_timeout", "the MCP server did not respond within the egress timeout")
+				return
+			}
 			cfg.Log.Error(err, "egress: upstream forward failed")
 			writeError(w, http.StatusBadGateway, "upstream_unreachable", "could not reach the MCP server")
 		},
