@@ -728,6 +728,16 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ── F1 (M126): stream the NON-guardrailed interposed class VERBATIM ─────
+	// A budget/tenant/record-off agent's stream:true call previously fell through to the buffered
+	// forward below (a 60s abort, a 4MiB truncation, and $0 spend on truncation). Route it through the
+	// verbatim relay instead. A guardrailed call already set `streaming` (serveStreaming, below); a
+	// recorded run stays buffered — the recorded stream:true 60s/4MiB wall is carded m52.G19.
+	if !streaming && pol.engine == nil && recordRunID == "" && requestIsStream(r) {
+		gp.serveStreamingVerbatim(fwdCtx, w, span, r, pol, caps, route, userHash)
+		return
+	}
+
 	// ── Streaming guarded path (K2, ADR 0086) ──────────────────────────────
 	// A permitted stream:true call goes to the SSE hold-release path: it forwards with streaming,
 	// scans the completion token-by-token, and releases clean tokens as they settle (blocking
