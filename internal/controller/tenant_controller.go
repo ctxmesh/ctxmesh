@@ -644,6 +644,7 @@ func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alp
 	// syncMembershipMirror — the K8s status write below is the authoritative record either way.
 	r.syncStorageState(ctx, tenant.Name, hardCapExceeded)
 
+	tenant.Status.ObservedGeneration = tenant.Generation
 	return r.Status().Update(ctx, tenant)
 }
 

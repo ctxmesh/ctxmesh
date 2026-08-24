@@ -199,7 +199,7 @@ type KnowledgeBaseStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=kb
+// +kubebuilder:resource:scope=Namespaced,shortName=kb,categories={agents}
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Chunks",type="integer",JSONPath=".status.chunkCount"
 // +kubebuilder:printcolumn:name="Validated",type="string",JSONPath=".status.conditions[?(@.type=='Validated')].status"

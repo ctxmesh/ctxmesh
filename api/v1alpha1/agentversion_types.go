@@ -40,6 +40,9 @@ type AgentVersionSpec struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
+// +kubebuilder:resource:categories={agents}
+// +kubebuilder:printcolumn:name="Deployment",type="string",JSONPath=".spec.deploymentName"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // AgentVersion is the Schema for the agentversions API.
 // Each AgentVersion is an immutable, controller-created snapshot of an

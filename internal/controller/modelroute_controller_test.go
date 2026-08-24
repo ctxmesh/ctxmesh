@@ -168,6 +168,11 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	require.NotNil(t, readyCond, "ModelRoute must have a Ready condition after reconcile")
 	assert.Equal(t, metav1.ConditionTrue, readyCond.Status,
 		"mock route must be Ready=True (all providers are mock, no bindings needed)")
+
+	// P2-3 (M127): the controller stamps top-level status.observedGeneration so kstatus /
+	// `kubectl get -o` can detect a stale status. It must equal the object's generation.
+	assert.Equal(t, updated.Generation, updated.Status.ObservedGeneration,
+		"controller must set status.observedGeneration to the reconciled generation")
 }
 
 // TestModelRoute_RealProviderRendered verifies a route with a non-mock provider:

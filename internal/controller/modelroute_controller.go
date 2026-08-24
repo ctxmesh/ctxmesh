@@ -229,6 +229,7 @@ func (r *ModelRouteReconciler) renderAndSync(ctx context.Context) (ctrl.Result, 
 			message = "route rendered into the gateway config"
 		}
 
+		mr.Status.ObservedGeneration = mr.Generation
 		apimeta.SetStatusCondition(&mr.Status.Conditions, metav1.Condition{
 			Type:               conditionReady,
 			Status:             condStatus,

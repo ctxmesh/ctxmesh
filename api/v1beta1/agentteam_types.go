@@ -134,6 +134,11 @@ type AgentTeamSpec struct {
 
 // AgentTeamStatus defines the observed state of an AgentTeam.
 type AgentTeamStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// registry echoes the resolved registryRef (the trust boundary), for convenience in listings.
 	// +optional
 	Registry string `json:"registry,omitempty"`
@@ -157,7 +162,7 @@ type AgentTeamStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=at
+// +kubebuilder:resource:scope=Namespaced,shortName=at,categories={agents}
 // +kubebuilder:printcolumn:name="Registry",type="string",JSONPath=".spec.registryRef"
 // +kubebuilder:printcolumn:name="Supervisor",type="string",JSONPath=".spec.supervisor.agentRef"
 // +kubebuilder:printcolumn:name="Members",type="string",JSONPath=".status.members"

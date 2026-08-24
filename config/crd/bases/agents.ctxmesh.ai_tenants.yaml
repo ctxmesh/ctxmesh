@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: Tenant
     listKind: TenantList
     plural: tenants
@@ -269,6 +271,12 @@ spec:
                   memberNamespaces is the count of namespaces actually reconciled for this
                   tenant (contested namespaces are excluded).
                 format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
                 type: integer
               totalCorpusBytes:
                 description: |-
@@ -538,6 +546,12 @@ spec:
                   memberNamespaces is the count of namespaces actually reconciled for this
                   tenant (contested namespaces are excluded).
                 format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
                 type: integer
               totalCorpusBytes:
                 description: |-

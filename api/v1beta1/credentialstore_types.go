@@ -72,7 +72,7 @@ type CredentialStoreList struct {
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:resource:scope=Cluster,shortName=clustercredstore
+// +kubebuilder:resource:scope=Cluster,shortName=clustercredstore,categories={agents}
 
 // ClusterCredentialStore is the v1beta1 schema — a field-identical graduation of the cluster-scoped
 // v1alpha1 ClusterCredentialStore (ADR 0037, M34); it reuses the same CredentialStore spec/status.
