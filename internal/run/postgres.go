@@ -304,6 +304,21 @@ func (p *pgStore) ReserveSpawn(rootRunID string, maxTotal int) (bool, error) {
 	return true, nil
 }
 
+// CountQueued returns the number of runs currently in the `queued` state — the durable
+// backlog awaiting a worker. It backs the run-pipeline queue-depth metric (M128/Gate E),
+// scrape-time-cheap via the partial `runs_queued` index. It is NOT part of the Store
+// interface (an optional capability the metrics collector type-asserts) so a hot store
+// need not implement it.
+func (p *pgStore) CountQueued() (int, error) {
+	var n int
+	err := p.db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM runs WHERE status = 'queued'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("run: count queued: %w", err)
+	}
+	return n, nil
+}
+
 // runRowScanner is satisfied by both *sql.Row and *sql.Rows, so getWithVersion (one row) and List (many
 // rows) share ONE scan + column list — the column ORDER must match runRowColumns exactly.
 type runRowScanner interface{ Scan(dest ...any) error }

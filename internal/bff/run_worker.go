@@ -109,6 +109,9 @@ func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) func(
 	for i := range cfg.Concurrency {
 		workerID := fmt.Sprintf("%s-%d", host, i)
 		wg.Go(func() {
+			// Metrics (M128): count this loop live for the dead-worker-pool alert.
+			s.metrics.incWorkerActive()
+			defer s.metrics.decWorkerActive()
 			s.runWorkerLoop(ctx, workerID, cfg)
 		})
 	}
@@ -252,6 +255,18 @@ func (s *Server) deadLetterPoison(rn *run.Run) {
 func (s *Server) executeClaimedRun(
 	ctx context.Context, workerID string, rn *run.Run, lease, drainGrace time.Duration,
 ) {
+	// Metrics (M128/Gate E): time this execution segment and record the outcome when the run
+	// reaches a TERMINAL state in THIS claim. Registered first so it runs LAST (after the lease
+	// release + heartbeat-stop defers), by which point the terminal status is committed. A run
+	// that SUSPENDS to `waiting` (HITL / child-wait) is not counted here — it is observed when a
+	// later claim drives it terminal, so the histogram measures active execution, not HITL waits.
+	execStart := time.Now()
+	defer func() {
+		if fin, err := s.runStore.Get(rn.ID); err == nil && fin != nil && fin.Status.IsTerminal() {
+			s.metrics.observeRun(string(fin.Status), time.Since(execStart).Seconds())
+		}
+	}()
+
 	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
 	if rn.CallerUsername != "" {
 		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID); ok {

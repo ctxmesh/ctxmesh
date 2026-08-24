@@ -61,6 +61,10 @@ spec:
     port: 9090
     protocol: TCP
     targetPort: 9090
+  - name: metrics
+    port: 9092
+    protocol: TCP
+    targetPort: 9092
   selector:
     app.kubernetes.io/name: agent-engine
     control-plane: bff
@@ -161,6 +165,9 @@ spec:
         ports:
         - containerPort: 9090
           name: http
+          protocol: TCP
+        - containerPort: 9092
+          name: metrics
           protocol: TCP
         readinessProbe:
           httpGet:

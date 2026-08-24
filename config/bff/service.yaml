@@ -20,3 +20,8 @@ spec:
       port: 9090
       targetPort: 9090
       protocol: TCP
+    # Private run-pipeline metrics (M128/Gate E) — a ServiceMonitor scrape target.
+    - name: metrics
+      port: 9092
+      targetPort: 9092
+      protocol: TCP

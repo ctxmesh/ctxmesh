@@ -499,11 +499,36 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		}
 	}()
 
+	// Private metrics listener (M128/Gate E): the run-pipeline SLIs on METRICS_ADDR
+	// (default :9090), OFF the public edge (ADR 0041) — a separate mux/server so /metrics
+	// never rides the SPA/api listener. METRICS_ADDR="off" disables it.
+	// Default :9092 — a DISTINCT port from the public BFF listener (:9090) so the two never
+	// collide (the metrics surface is private; ADR 0041).
+	metricsAddr := strings.TrimSpace(os.Getenv("METRICS_ADDR"))
+	if metricsAddr == "" {
+		metricsAddr = ":9092"
+	}
+	var metricsSrv *http.Server
+	if metricsAddr != "off" {
+		mmux := http.NewServeMux()
+		mmux.Handle("/metrics", srv.MetricsHandler())
+		metricsSrv = &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Info("BFF metrics listening", "addr", metricsAddr)
+			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				log.Error(serveErr, "metrics listener failed")
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
 		httpErr := httpSrv.Shutdown(shutdownCtx)
 		// F-1: wait (bounded) for the worker loops to release their leases before exiting, so a peer
 		// reclaims promptly instead of after a full lease-TTL. The D4 drain grace ran concurrently with
