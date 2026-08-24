@@ -116,6 +116,19 @@ upgrade. PRODUCTION: BYO a managed key by pre-creating that Secret and setting
 namespace (and the key with it), so a reinstall generates a NEW key and every persisted
 OBO grant becomes invalid (mass re-consent).
 {{- end }}
+{{- if eq .Values.profile "production" }}
+
+Security posture (GA Gate A → Gate E / M128, ADR 0096) — DEFERRED enforcements:
+  - Tenant-label admission enforcement is OFF (acknowledged via
+    security.tenantLabelEnforcement). Cross-tenant namespace-label repointing is prevented
+    today ONLY by RBAC (no tenant principal should hold namespace-UPDATE). The
+    ValidatingWebhook that enforces it in-cluster ships default-ON in M128.
+{{- if not .Values.controllerManager.oboEgress.enabled }}
+  - Per-user OBO egress is OFF in production: the encrypted sidecar->token-service transport
+    (CA wiring) ships in M128. Enable per-user OBO then, or run it in a non-production profile
+    meanwhile (dev OBO works over plain HTTP).
+{{- end }}
+{{- end }}
 
 This chart's control-plane + CRD templates are generated from
 `kustomize build config/default` (no-drift with `make deploy`).
