@@ -115,6 +115,12 @@ spec:
             # .yaml) and routes grants there. Default renders "" (no drift).
             - name: MCP_CREDENTIAL_NAMESPACE
               value: ""
+            # TOKEN_SERVICE_URL — the credential-plane token-service the BFF delegates MCP grant writes
+            # to (ADR 0029) and the launcher's KB/OBO proxies mint against. The in-cluster Service DNS;
+            # the chart derives it from tokenService.tls.required (https under prod) + the install ns.
+            # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
+            - name: TOKEN_SERVICE_URL
+              value: http://agent-engine-token-service.agent-engine-system.svc:8443
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).

@@ -992,7 +992,7 @@ spec:
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | quote }}
         - name: TOKEN_SERVICE_URL
-          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}
+          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: DEV_DATA_PLANE
           value: {{ .Values.devDataPlane.enabled | quote }}
         envFrom:
