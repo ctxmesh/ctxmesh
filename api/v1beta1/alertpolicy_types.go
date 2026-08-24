@@ -131,9 +131,10 @@ type AlertPolicySpec struct {
 	Route AlertRoute `json:"route"`
 }
 
-// AlertConditionStatus records the per-condition firing state, stamped by the reconciler each
-// evaluation cycle (m70.4). The name matches AlertCondition.name so callers can correlate.
-type AlertConditionStatus struct {
+// AlertRuleState records the per-condition firing state, stamped by the reconciler each evaluation
+// cycle (m70.4; renamed from AlertConditionStatus at GA Gate D, ADR 0100/M127, to free the conventional
+// status.conditions path for the standard []metav1.Condition below). The name matches AlertCondition.name.
+type AlertRuleState struct {
 	// name matches the AlertCondition.name this status entry corresponds to.
 	Name string `json:"name"`
 
@@ -156,9 +157,19 @@ type AlertConditionStatus struct {
 // AlertPolicyStatus defines the observed state of an AlertPolicy. Populated by the reconciler
 // (m70.4 evaluation, not this skeleton task m70.3).
 type AlertPolicyStatus struct {
-	// conditions reflects the per-spec-condition firing state. Keyed by AlertCondition.name.
+	// ruleStates reflects the per-spec-condition firing state, keyed by AlertCondition.name. (This was
+	// status.conditions pre-GA — moved off the conventional path, ADR 0100/M127.)
 	// +optional
-	Conditions []AlertConditionStatus `json:"conditions,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	RuleStates []AlertRuleState `json:"ruleStates,omitempty"`
+
+	// conditions is the STANDARD status-condition list (Ready, ...) that kubectl wait / kstatus / GitOps
+	// health read (ADR 0100/M127). Ready reflects the policy is admitted + evaluating.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// observedGeneration is the .metadata.generation most recently reconciled.
 	// +optional
@@ -169,7 +180,7 @@ type AlertPolicyStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=ap
-// +kubebuilder:printcolumn:name="Conditions",type="integer",JSONPath=".spec.conditions[*].name",priority=1
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // AlertPolicy defines a set of threshold rules that fire notifications to console or webhook channels

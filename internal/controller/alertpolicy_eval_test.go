@@ -181,13 +181,13 @@ func reconcileAPEval(t *testing.T, r *AlertPolicyReconciler, name, namespace str
 	require.NoError(t, err, "alertpolicy eval reconcile must not error")
 }
 
-func apConditionStatus(t *testing.T, name, namespace, condName string) *agentsv1beta1.AlertConditionStatus {
+func apConditionStatus(t *testing.T, name, namespace, condName string) *agentsv1beta1.AlertRuleState {
 	t.Helper()
 	var ap agentsv1beta1.AlertPolicy
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &ap))
-	for i := range ap.Status.Conditions {
-		if ap.Status.Conditions[i].Name == condName {
-			return &ap.Status.Conditions[i]
+	for i := range ap.Status.RuleStates {
+		if ap.Status.RuleStates[i].Name == condName {
+			return &ap.Status.RuleStates[i]
 		}
 	}
 	return nil

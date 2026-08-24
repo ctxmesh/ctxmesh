@@ -217,6 +217,19 @@ func (r *AlertPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	// Ready (M127/ADR 0100): the STANDARD status-condition kubectl wait / kstatus / GitOps health read.
+	// A successfully-reconciled policy is admitted + evaluating. SetStatusCondition is idempotent and
+	// reports whether it changed, folding into the guarded status write below.
+	if apimeta.SetStatusCondition(&ap.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Evaluating",
+		Message:            "the alert policy is admitted and evaluating its rules",
+		ObservedGeneration: ap.Generation,
+	}) {
+		changed = true
+	}
+
 	if changed {
 		if err := r.Status().Update(ctx, &ap); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating AlertPolicy status: %w", err)
@@ -616,8 +629,8 @@ func (r *AlertPolicyReconciler) applyConditionResult(
 	now metav1.Time,
 ) bool {
 	idx := -1
-	for i := range ap.Status.Conditions {
-		if ap.Status.Conditions[i].Name == cond.Name {
+	for i := range ap.Status.RuleStates {
+		if ap.Status.RuleStates[i].Name == cond.Name {
 			idx = i
 			break
 		}
@@ -626,37 +639,37 @@ func (r *AlertPolicyReconciler) applyConditionResult(
 	// First time we see this condition: seed an entry. A brand-new condition that is already firing is a
 	// false→true transition (prior state was "not firing").
 	if idx == -1 {
-		ap.Status.Conditions = append(ap.Status.Conditions, agentsv1beta1.AlertConditionStatus{
+		ap.Status.RuleStates = append(ap.Status.RuleStates, agentsv1beta1.AlertRuleState{
 			Name:   cond.Name,
 			Firing: false,
 		})
-		idx = len(ap.Status.Conditions) - 1
+		idx = len(ap.Status.RuleStates) - 1
 	}
 
-	prev := ap.Status.Conditions[idx]
+	prev := ap.Status.RuleStates[idx]
 	changed := false
 
 	switch {
 	case firing && !prev.Firing:
 		// false→true: fire once.
-		ap.Status.Conditions[idx].Firing = true
-		ap.Status.Conditions[idx].LastValue = value
-		ap.Status.Conditions[idx].LastTransitionTime = now
+		ap.Status.RuleStates[idx].Firing = true
+		ap.Status.RuleStates[idx].LastValue = value
+		ap.Status.RuleStates[idx].LastTransitionTime = now
 		r.recordFired(ctx, ap, cond, value, now)
 		changed = true
 
 	case !firing && prev.Firing:
 		// true→false: resolve the open alert.
-		ap.Status.Conditions[idx].Firing = false
-		ap.Status.Conditions[idx].LastValue = value
-		ap.Status.Conditions[idx].LastTransitionTime = now
+		ap.Status.RuleStates[idx].Firing = false
+		ap.Status.RuleStates[idx].LastValue = value
+		ap.Status.RuleStates[idx].LastTransitionTime = now
 		r.resolveOpen(ctx, ap, cond)
 		changed = true
 
 	case firing && prev.Firing:
 		// Still firing (dedup — no new alert). Refresh lastValue if it moved, without a transition stamp.
 		if value != "" && value != prev.LastValue {
-			ap.Status.Conditions[idx].LastValue = value
+			ap.Status.RuleStates[idx].LastValue = value
 			changed = true
 		}
 	}
