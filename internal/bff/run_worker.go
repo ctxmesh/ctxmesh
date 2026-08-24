@@ -34,7 +34,10 @@ const (
 	defaultRunWorkerConcurrency = 4
 	// poisonRedeliveryCap bounds how many times a run may be RECLAIMED (a prior holder died
 	// mid-hold) before it is dead-lettered instead of re-reclaimed forever (F-5, M125/ADR 0097).
-	poisonRedeliveryCap         = 5
+	poisonRedeliveryCap = 5
+	// reclaimInterval time-gates how often a worker loop probes reclaim FIRST (before the queue) so an
+	// abandoned run makes progress even under sustained backlog (F-4, M125/ADR 0097).
+	reclaimInterval             = 5 * time.Second
 	defaultRunWorkerLease       = 2 * runExecTimeout
 	defaultRunWorkerPollBackoff = time.Second
 	// defaultRunWorkerDrainGrace bounds how long a draining worker (SIGTERM → pool ctx cancelled)
@@ -129,11 +132,19 @@ func (s *Server) sweepWaitingLoop(ctx context.Context) {
 // On no work it backs off; on a claim error it logs and backs off (a transient DB blip must not
 // spin the loop hot).
 func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWorkerConfig) {
+	var lastReclaim time.Time
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		rn, err := s.claimNext(workerID, cfg.Lease)
+		// F-4 (M125/ADR 0097): periodically probe reclaim FIRST (before the queue) so an abandoned run
+		// makes progress even under sustained backlog — the pre-M125 code reclaimed only when the queue
+		// was EMPTY, starving reclaim exactly when the system is busiest. Time-gated to bound reclaim QPS.
+		reclaimFirst := time.Since(lastReclaim) > reclaimInterval
+		if reclaimFirst {
+			lastReclaim = time.Now()
+		}
+		rn, err := s.claimNext(workerID, cfg.Lease, reclaimFirst)
 		switch {
 		case errors.Is(err, run.ErrNoQueuedRun):
 			if !sleepCtx(ctx, cfg.PollBackoff) {
@@ -159,7 +170,17 @@ func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWork
 
 // claimNext prefers a fresh queued run, then falls back to reclaiming an expired-lease running run
 // (a dead worker's). Both return ErrNoQueuedRun when there is nothing to do.
-func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, error) {
+func (s *Server) claimNext(workerID string, lease time.Duration, reclaimFirst bool) (*run.Run, error) {
+	// F-4: on the periodic reclaim-first tick, rescue an abandoned run BEFORE draining the queue so
+	// reclaim doesn't starve under backlog. A hit returns immediately; an empty reclaimable set falls
+	// through to the queue (the common case).
+	if reclaimFirst {
+		if reclaimed, rErr := s.reclaim(workerID, lease); rErr == nil {
+			return reclaimed, nil
+		} else if !errors.Is(rErr, run.ErrNoQueuedRun) {
+			return nil, rErr
+		}
+	}
 	rn, err := s.runStore.ClaimQueued(workerID, lease)
 	if err == nil {
 		return rn, nil
@@ -167,11 +188,18 @@ func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, erro
 	if !errors.Is(err, run.ErrNoQueuedRun) {
 		return nil, err
 	}
-	reclaimed, rErr := s.runStore.ClaimReclaimable(workerID, lease)
-	if rErr == nil {
+	// Queue empty → reclaim (also the sole reclaim path on non-reclaim-first ticks).
+	return s.reclaim(workerID, lease)
+}
+
+// reclaim re-leases the oldest abandoned (expired-lease) run + logs it (F-5's attempts increment
+// lives in the store). ErrNoQueuedRun ⇒ nothing to reclaim.
+func (s *Server) reclaim(workerID string, lease time.Duration) (*run.Run, error) {
+	reclaimed, err := s.runStore.ClaimReclaimable(workerID, lease)
+	if err == nil {
 		s.log.Info("run-worker: reclaimed an abandoned run (resume-on-pod-loss)", "run", reclaimed.ID, "worker", workerID)
 	}
-	return reclaimed, rErr
+	return reclaimed, err
 }
 
 // deadLetterPoison fails a run reclaimed past poisonRedeliveryCap (a prior holder died mid-hold each
