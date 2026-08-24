@@ -237,6 +237,10 @@ bff:
     # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
     repository: bff
     tag: ""
+  # COST_ROLLUP_ENABLED (M124/Gate A, audit G11e): "1" (default ON) starts the cost-rollup worker so
+  # a fresh install aggregates per-agent spend into cost_rollups (→ /api/cost + chargeback). A STRING,
+  # quoted; the gate is exactly "1" (cmd/bff/main.go). "0" disables it.
+  costRollupEnabled: "1"
   # The canonical, browser-reachable console origin (ADR 0040) — e.g.
   # "https://console.agents.example.com". Used as the ONE MCP-consent redirect_uri
   # registered with providers + the trusted cross-origin relay target, so "Connect"
