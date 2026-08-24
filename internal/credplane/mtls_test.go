@@ -141,3 +141,39 @@ func TestMTLSEnforced(t *testing.T) {
 	_, err = noCert.Resolve(context.Background(), testNS, "", testServer, "u-a")
 	require.Error(t, err, "a caller without a platform client cert must be rejected by mTLS")
 }
+
+// TestE1ServerAuth proves the E-1 posture (M128/Gate E, ADR 0102 §3): the token-service presents
+// its serving cert but does NOT require a client cert, and an E-1 client (no client cert) reaches
+// it over server-AUTHENTICATED TLS — the wire is confidential + the server is verified against the
+// platform CA, while client identity stays the app-layer run capability (ADR 0030).
+func TestE1ServerAuth(t *testing.T) {
+	const serverName = "token-service"
+	pki := genPKI(t, serverName)
+
+	srvTLS, err := credplane.ServerTLSConfigServerAuth(pki.serverCertPEM, pki.serverKeyPEM)
+	require.NoError(t, err)
+	require.Equal(t, tls.NoClientCert, srvTLS.ClientAuth, "E-1 server must not require a client cert")
+
+	ts := httptest.NewUnstartedServer(credplane.NewServer(&mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "OK"}}, logr.Discard()).Handler())
+	ts.TLS = srvTLS
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+
+	// An E-1 client (no client cert) reaches the server-auth token-service.
+	cliTLS, err := credplane.ServerAuthClientTLSConfig(pki.caPEM, serverName)
+	require.NoError(t, err)
+	c := credplane.NewClient(ts.URL, &http.Client{Transport: &http.Transport{TLSClientConfig: cliTLS}, Timeout: 5 * time.Second})
+	got, err := c.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	require.NoError(t, err, "E-1: a client with no client cert reaches the server-auth token-service")
+	require.Equal(t, "OK", got.Value)
+
+	// E-1 still AUTHENTICATES the server — a client that doesn't trust the platform CA is rejected
+	// (this is what closes the x509 break + the plaintext-in-transit exposure).
+	badPool := x509.NewCertPool()
+	bad := credplane.NewClient(ts.URL, &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: badPool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
+		Timeout:   5 * time.Second,
+	})
+	_, err = bad.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	require.Error(t, err, "E-1 authenticates the SERVER — an untrusted CA must be rejected")
+}

@@ -231,29 +231,50 @@ func run(log logr.Logger) error {
 	// points the env at an OPTIONAL cert Secret mount, so an install that has not provisioned
 	// platform certs degrades to plain HTTP (dev) instead of crash-looping — the operator
 	// drops in the Secret to switch mTLS on with no manifest change.
-	mtls := certFile != "" && keyFile != "" && caFile != "" && filesExist(certFile, keyFile, caFile)
-	// SEC-5: fail CLOSED when TLS is required. The credential plane dispenses third-party
-	// user credentials — a SILENT downgrade to plain HTTP in production is unacceptable. A
-	// production install sets TOKEN_SERVICE_TLS_REQUIRED=true (enforced by the Helm
-	// production guard); if the certs aren't provisioned, refuse to start rather than serve
-	// the credential API unauthenticated over HTTP.
+	// TLS postures (M128/Gate E, ADR 0102 §3):
+	//   - serving = a serving cert+key is provisioned → the wire is encrypted + the server is verifiable.
+	//   - E-2 (mutual): a client CA is ALSO provisioned → REQUIRE + verify a client cert.
+	//   - E-1 (server-auth): serving cert, no client CA → present the serving cert, don't require a client
+	//     cert (client identity is the app-layer run capability, ADR 0030). The honest GA bar.
+	serving := certFile != "" && keyFile != "" && filesExist(certFile, keyFile)
+	clientCAPresent := caFile != "" && filesExist(caFile)
+	// clientAuth knob: default = require iff a client CA is provisioned (NEVER downgrade an operator who
+	// deployed mutual material — ADR 0102 §3); TOKEN_SERVICE_CLIENT_AUTH=require|none forces it.
+	requireClient := clientCAPresent
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_AUTH"))) {
+	case "require":
+		requireClient = true
+	case "none":
+		requireClient = false
+	}
+	if requireClient && !clientCAPresent {
+		return fmt.Errorf("TOKEN_SERVICE_CLIENT_AUTH=require but no client CA is provisioned " +
+			"(missing/absent TOKEN_SERVICE_CLIENT_CA_FILE) — refusing to start a mutual-mTLS server without a client CA")
+	}
+	// SEC-5: fail CLOSED when TLS is required. The credential plane dispenses third-party user
+	// credentials — a SILENT downgrade to plain HTTP in production is unacceptable. Production sets
+	// TOKEN_SERVICE_TLS_REQUIRED=true; E-1 (server-auth) SATISFIES it — the wire is encrypted.
 	tlsRequired := strings.EqualFold(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_REQUIRED")), "true")
-	if tlsRequired && !mtls {
-		return fmt.Errorf("TOKEN_SERVICE_TLS_REQUIRED=true but mTLS is not configured " +
-			"(missing/absent TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE/CLIENT_CA_FILE) — refusing to serve " +
-			"the credential API unauthenticated over HTTP")
+	if tlsRequired && !serving {
+		return fmt.Errorf("TOKEN_SERVICE_TLS_REQUIRED=true but no serving cert is provisioned " +
+			"(missing/absent TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE) — refusing to serve the credential API over plain HTTP")
 	}
 	var certWatcher *certwatcher.CertWatcher
-	if mtls {
-		tlsCfg, watcher, err := serverMTLS(certFile, keyFile, caFile)
+	if serving {
+		tlsCfg, watcher, err := serverTLS(certFile, keyFile, caFile, requireClient)
 		if err != nil {
 			return err
 		}
 		srv.TLSConfig = tlsCfg
 		certWatcher = watcher
+		posture := "server-auth (E-1)"
+		if requireClient {
+			posture = "mutual-mTLS (E-2)"
+		}
+		log.Info("token-service TLS enabled", "posture", posture)
 	} else {
-		log.Info("WARNING: token-service running WITHOUT mTLS (no TOKEN_SERVICE_TLS_* files) — " +
-			"the credential API is unauthenticated; provision platform certs before production (ADR 0030 §1)")
+		log.Info("WARNING: token-service running WITHOUT TLS (no TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE) — " +
+			"the credential API is unauthenticated; provision platform certs before production (ADR 0030 §1 / ADR 0102 §3)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -271,9 +292,9 @@ func run(log logr.Logger) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("token-service listening", "addr", listenAddr, "mtls", mtls, "credentialNamespace", credentialNS)
+		log.Info("token-service listening", "addr", listenAddr, "tls", serving, "credentialNamespace", credentialNS)
 		var err error
-		if mtls {
+		if serving {
 			err = srv.ListenAndServeTLS("", "") // certs come from TLSConfig
 		} else {
 			err = srv.ListenAndServe()
@@ -306,20 +327,32 @@ func orgScopedFromLabels(labels map[string]string) bool {
 		labels[mcpScopeLabel] == scopeOrgValue
 }
 
-// serverMTLS loads the mTLS server config from mounted cert/key/CA files.
-// serverMTLS builds the token-service's server TLS config AND a CertWatcher that hot-reloads
-// the SERVING cert on rotation (M128/Gate E, ADR 0102 §1): the platform cert-controller
-// rotates the serving leaf ~every 90d, and a one-shot load would then serve a stale/expired
-// cert until a pod restart. GetCertificate (from the watcher) is consulted at each TLS
-// handshake, so a rotated cert is picked up with no restart + no dropped established
-// connections. The client CA (mTLS verification) is loaded once into the base config. The
-// caller MUST Start the returned watcher with a context.
-func serverMTLS(certFile, keyFile, caFile string) (*tls.Config, *certwatcher.CertWatcher, error) {
-	certPEM, keyPEM, caPEM, err := readTriple(certFile, keyFile, caFile)
+// serverTLS builds the token-service's server TLS config (E-1 server-auth OR E-2 mutual, per
+// requireClient) AND a CertWatcher that hot-reloads the SERVING cert on rotation (M128/Gate E,
+// ADR 0102 §1/§3): the platform cert-controller rotates the serving leaf ~every 90d, and a
+// one-shot load would then serve a stale/expired cert until a pod restart. GetCertificate (from
+// the watcher) is consulted at each TLS handshake, so a rotated cert is picked up with no restart
+// + no dropped established connections. When requireClient (E-2), the client CA is loaded once for
+// mutual verification. The caller MUST Start the returned watcher with a context.
+func serverTLS(certFile, keyFile, caFile string, requireClient bool) (*tls.Config, *certwatcher.CertWatcher, error) {
+	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("read tls cert: %w", err)
 	}
-	cfg, err := credplane.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read tls key: %w", err)
+	}
+	var cfg *tls.Config
+	if requireClient {
+		caPEM, rErr := os.ReadFile(caFile)
+		if rErr != nil {
+			return nil, nil, fmt.Errorf("read client CA: %w", rErr)
+		}
+		cfg, err = credplane.ServerTLSConfig(certPEM, keyPEM, caPEM) // E-2 mutual (RequireAndVerifyClientCert)
+	} else {
+		cfg, err = credplane.ServerTLSConfigServerAuth(certPEM, keyPEM) // E-1 server-auth (NoClientCert)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -332,19 +365,6 @@ func serverMTLS(certFile, keyFile, caFile string) (*tls.Config, *certwatcher.Cer
 	cfg.Certificates = nil
 	cfg.GetCertificate = watcher.GetCertificate
 	return cfg, watcher, nil
-}
-
-func readTriple(certFile, keyFile, caFile string) (cert, key, ca []byte, err error) {
-	if cert, err = os.ReadFile(certFile); err != nil {
-		return nil, nil, nil, fmt.Errorf("read tls cert: %w", err)
-	}
-	if key, err = os.ReadFile(keyFile); err != nil {
-		return nil, nil, nil, fmt.Errorf("read tls key: %w", err)
-	}
-	if ca, err = os.ReadFile(caFile); err != nil {
-		return nil, nil, nil, fmt.Errorf("read client CA: %w", err)
-	}
-	return cert, key, ca, nil
 }
 
 func envOr(key, fallback string) string {
