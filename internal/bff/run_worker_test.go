@@ -52,7 +52,8 @@ func (f *leaseHeartbeatStore) callCount() int64 { return atomic.LoadInt64(&f.cal
 // lease loss (run.ErrLeaseLost) OR a gone row (run.ErrNotFound — nothing left to reclaim, so cancel
 // is duplicate-safe) fires onLeaseLost, so the worker cancels execution + stops appending duplicate
 // events; a TRANSIENT error does NOT cancel — a mere DB blip must not abort a run the worker may
-// still legitimately hold (and, F-2, it keeps renewing rather than letting the lease expire).
+// still legitimately hold IMMEDIATELY (its transient behaviour — keep renewing within the lease, then
+// self-fence — is covered by TransientKeepsRenewing + SelfFencesAfterLeaseOutage).
 func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -60,7 +61,6 @@ func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 		wantCancel bool
 	}{
 		{"lease lost cancels exec", run.ErrLeaseLost, true},
-		{"transient error does not cancel", errors.New("db blip"), false},
 		{"not-found cancels (row gone, nothing to reclaim)", run.ErrNotFound, true},
 	}
 	for _, tc := range cases {
@@ -89,21 +89,58 @@ func TestStartHeartbeat_TransientKeepsRenewing(t *testing.T) {
 	store := &leaseHeartbeatStore{hbErr: errors.New("transient db blip")}
 	s := &Server{runStore: store, log: logr.Discard()}
 	lostCh := make(chan struct{}, 1)
-	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 30*time.Millisecond, // interval 10ms
+	// lease 300ms (interval 100ms) — the observation window (250ms) is SHORTER than the lease, so the
+	// F4 self-fence does not fire; we prove renewal keeps retrying through transient errors (F-2).
+	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 300*time.Millisecond,
 		func() { lostCh <- struct{}{} })
 	defer stop()
 
-	time.Sleep(60 * time.Millisecond) // ~5 ticks
+	time.Sleep(250 * time.Millisecond) // ~2 ticks, < lease
 	stop()
 
-	if c := store.callCount(); c < 3 {
-		t.Fatalf("F-2: heartbeat must KEEP renewing through transient errors (>=3 calls), got %d", c)
+	if c := store.callCount(); c < 2 {
+		t.Fatalf("F-2: heartbeat must KEEP renewing through transient errors (>=2 calls), got %d", c)
 	}
 	select {
 	case <-lostCh:
-		t.Fatal("F-2: onLeaseLost must NOT fire on a transient error")
+		t.Fatal("F-2: onLeaseLost must NOT fire on a transient error within the lease window")
 	default:
 	}
+}
+
+// TestStartHeartbeat_SelfFencesAfterLeaseOutage is the F4 self-fence (M126/ADR 0098): a SUSTAINED
+// inability to renew (a DB outage longer than one lease) means we can no longer prove we hold the
+// lease — a peer will reclaim it — so the worker self-cancels (onLeaseLost) instead of running in
+// parallel with the reclaiming peer. This restores the invariant the lease/timeout decoupling loses.
+func TestStartHeartbeat_SelfFencesAfterLeaseOutage(t *testing.T) {
+	store := &leaseHeartbeatStore{hbErr: errors.New("db unreachable")}
+	s := &Server{runStore: store, log: logr.Discard()}
+	lostCh := make(chan struct{}, 1)
+	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 60*time.Millisecond, // interval 20ms
+		func() { lostCh <- struct{}{} })
+	defer stop()
+
+	select {
+	case <-lostCh: // self-fenced after ~one lease of no renewal — correct
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("F4: the heartbeat must SELF-FENCE (onLeaseLost) after a lease-long renewal outage")
+	}
+}
+
+// TestRunExecTimeout_Configurable is the F4 config half (M126/ADR 0098): the per-advance execution
+// timeout is env-tunable (default 10m — the fixed 90s killed long multi-step / streamed turns),
+// clamped to a max ceiling so a truly-wedged run still dies.
+func TestRunExecTimeout_Configurable(t *testing.T) {
+	t.Setenv("RUN_EXEC_TIMEOUT", "")
+	t.Setenv("RUN_EXEC_MAX_TIMEOUT", "")
+	assert.Equal(t, 10*time.Minute, runExecTimeout(), "default")
+	t.Setenv("RUN_EXEC_TIMEOUT", "3m")
+	assert.Equal(t, 3*time.Minute, runExecTimeout(), "env override")
+	t.Setenv("RUN_EXEC_TIMEOUT", "2h")
+	t.Setenv("RUN_EXEC_MAX_TIMEOUT", "60m")
+	assert.Equal(t, 60*time.Minute, runExecTimeout(), "clamped to the max ceiling")
+	t.Setenv("RUN_EXEC_TIMEOUT", "garbage")
+	assert.Equal(t, 10*time.Minute, runExecTimeout(), "invalid → default")
 }
 
 // TestPoisonRun_DeadLetteredNotReReclaimed is the F-5 fix (M125/ADR 0097): a run reclaimed past the

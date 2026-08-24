@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +30,30 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
-// runExecTimeout bounds a single run's execution in phase 1 (the hot, in-process driver). M32
-// replaces this in-process goroutine with a durable worker path; the run object + state machine
-// (ADR 0034) are unchanged by that swap.
-const runExecTimeout = 90 * time.Second
+// runExecTimeout bounds ONE run advance — the agent's whole managed loop for a turn (all model +
+// tool steps until it answers or suspends). Configurable per deployment (F4, M126/ADR 0098): the
+// fixed 90s killed long multi-step / streamed turns with `context deadline exceeded` — a hard
+// ceiling on the durable long-run story (ADR 0093). Env RUN_EXEC_TIMEOUT (default 10m), clamped to
+// RUN_EXEC_MAX_TIMEOUT (default 60m) so a truly-wedged run still dies. Workflow/ingestion/export
+// advances do not flow through executeRun (short by construction), so this is the plain/supervisor knob.
+func runExecTimeout() time.Duration {
+	const def, defMax = 10 * time.Minute, 60 * time.Minute
+	t := envDuration("RUN_EXEC_TIMEOUT", def)
+	if m := envDuration("RUN_EXEC_MAX_TIMEOUT", defMax); t > m {
+		t = m
+	}
+	return t
+}
+
+// envDuration reads a time.Duration from an env var (e.g. "10m", "90s"); blank/invalid ⇒ def.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // jsonNullLiteral is the JSON `null` token, checked when distinguishing an absent/null optional field
 // from a present one in a raw-message body (e.g. the handoff marker detection).
@@ -349,7 +370,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 // worker. A structured consent_required (m25.9) becomes requires_action; any other agent failure is
 // an honest `failed` (never a swallowed success). Every terminal state is persisted to the store.
 func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input []byte) {
-	ctx, cancel := context.WithTimeout(ctx, runExecTimeout)
+	ctx, cancel := context.WithTimeout(ctx, runExecTimeout())
 	defer cancel()
 
 	started, err := s.runStore.Update(runID, func(rn *run.Run) error {
