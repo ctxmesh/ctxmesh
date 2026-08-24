@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,18 +34,25 @@ import (
 
 // leaseHeartbeatStore embeds run.Store (nil — only Heartbeat is exercised by startHeartbeat) and
 // returns a configured error from Heartbeat, so the D3 onLeaseLost wiring is tested in isolation.
+// calls counts Heartbeat invocations (F-2: prove a transient error KEEPS renewing).
 type leaseHeartbeatStore struct {
 	run.Store
 	hbErr error
+	calls int64
 }
 
-func (f *leaseHeartbeatStore) Heartbeat(_, _ string, _ time.Duration) error { return f.hbErr }
+func (f *leaseHeartbeatStore) Heartbeat(_, _ string, _ time.Duration) error {
+	atomic.AddInt64(&f.calls, 1)
+	return f.hbErr
+}
 
-// TestStartHeartbeat_CancelsExecOnLeaseLost proves D3: a DEFINITIVE lease loss (run.ErrLeaseLost)
-// fires onLeaseLost (so the worker cancels execution + stops appending duplicate events), while a
-// transient heartbeat error or ErrNotFound does NOT — a mere DB blip must not abort a run the
-// worker may still legitimately hold (the at-least-once guarantee is preserved except on a proven
-// hand-off to another worker).
+func (f *leaseHeartbeatStore) callCount() int64 { return atomic.LoadInt64(&f.calls) }
+
+// TestStartHeartbeat_CancelsExecOnLeaseLost proves D3 + the F-2 fix (M125/ADR 0097): a DEFINITIVE
+// lease loss (run.ErrLeaseLost) OR a gone row (run.ErrNotFound — nothing left to reclaim, so cancel
+// is duplicate-safe) fires onLeaseLost, so the worker cancels execution + stops appending duplicate
+// events; a TRANSIENT error does NOT cancel — a mere DB blip must not abort a run the worker may
+// still legitimately hold (and, F-2, it keeps renewing rather than letting the lease expire).
 func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -53,7 +61,7 @@ func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 	}{
 		{"lease lost cancels exec", run.ErrLeaseLost, true},
 		{"transient error does not cancel", errors.New("db blip"), false},
-		{"not-found does not cancel", run.ErrNotFound, false},
+		{"not-found cancels (row gone, nothing to reclaim)", run.ErrNotFound, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,6 +77,32 @@ func TestStartHeartbeat_CancelsExecOnLeaseLost(t *testing.T) {
 				assert.False(t, tc.wantCancel, "onLeaseLost did NOT fire but should have for %v", tc.hbErr)
 			}
 		})
+	}
+}
+
+// TestStartHeartbeat_TransientKeepsRenewing is the core F-2 fix (M125/ADR 0097): a transient
+// Heartbeat error must NOT stop renewal — the pre-M125 code returned on the FIRST error, letting the
+// lease expire so a peer falsely reclaimed a run the worker still held (DUPLICATE execution). Here a
+// store that returns a transient error on EVERY tick must be called repeatedly (renewal continues)
+// and must never fire onLeaseLost.
+func TestStartHeartbeat_TransientKeepsRenewing(t *testing.T) {
+	store := &leaseHeartbeatStore{hbErr: errors.New("transient db blip")}
+	s := &Server{runStore: store, log: logr.Discard()}
+	lostCh := make(chan struct{}, 1)
+	stop := s.startHeartbeat(context.Background(), "worker-a", "run-1", 30*time.Millisecond, // interval 10ms
+		func() { lostCh <- struct{}{} })
+	defer stop()
+
+	time.Sleep(60 * time.Millisecond) // ~5 ticks
+	stop()
+
+	if c := store.callCount(); c < 3 {
+		t.Fatalf("F-2: heartbeat must KEEP renewing through transient errors (>=3 calls), got %d", c)
+	}
+	select {
+	case <-lostCh:
+		t.Fatal("F-2: onLeaseLost must NOT fire on a transient error")
+	default:
 	}
 }
 
