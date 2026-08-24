@@ -18,6 +18,7 @@ package statelayer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -357,4 +358,36 @@ func TestUserQuotaProxy_BooksPerUserKey(t *testing.T) {
 	// The per-TENANT aggregate is untouched — per-user spend is a separate enforcement bucket.
 	tenantSpend, _ := mr.Get(quotaSpendKey("tenant-x"))
 	assert.Empty(t, tenantSpend, "per-user spend must NOT touch the tenant aggregate key")
+}
+
+// TestQuotaAgentAndConvSpend_ReadBack is the F2 statelayer half (M126/ADR 0099): the new GET
+// /quota/agent-spend + the /quota/conv-spend pair let the launcher ENFORCE per-agent / per-conversation
+// budget caps that are real across replicas + survive restarts (the in-memory Enforcer re-armed on every
+// roll). Proves accrue→read-back round-trips and per-conversation isolation.
+func TestQuotaAgentAndConvSpend_ReadBack(t *testing.T) {
+	s, _ := newQuotaProxy(t, map[string]string{"tok": "prod"}, map[string]string{"prod": "acme"}, nil)
+
+	// Agent spend: accrue (POST, Q8) then READ BACK (GET, F2).
+	require.Equal(t, http.StatusNoContent, do(t, s, "POST", "/quota/agent-spend", "tok", `{"deltaUSD":0.25}`, nil).Code)
+	rec := do(t, s, "GET", "/quota/agent-spend", "tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got quotaSpendResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.InDelta(t, 0.25, got.SpentUSD, 1e-9, "F2: agent spend reads back")
+
+	// Conversation spend: keyed on the launcher-supplied conversation id.
+	require.Equal(t, http.StatusNoContent, do(t, s, "POST", "/quota/conv-spend?conversation=c1", "tok", `{"deltaUSD":0.10}`, nil).Code)
+	rec = do(t, s, "GET", "/quota/conv-spend?conversation=c1", "tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.InDelta(t, 0.10, got.SpentUSD, 1e-9, "F2: conv spend reads back")
+
+	// A DIFFERENT conversation is isolated (0).
+	rec = do(t, s, "GET", "/quota/conv-spend?conversation=other", "tok", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Zero(t, got.SpentUSD, "F2: a different conversation has its own bucket")
+
+	// conversation is required.
+	assert.Equal(t, http.StatusBadRequest, do(t, s, "GET", "/quota/conv-spend", "tok", "", nil).Code)
 }
