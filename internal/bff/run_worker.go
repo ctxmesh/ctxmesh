@@ -32,6 +32,9 @@ import (
 // long an idle worker waits before re-checking an empty queue.
 const (
 	defaultRunWorkerConcurrency = 4
+	// poisonRedeliveryCap bounds how many times a run may be RECLAIMED (a prior holder died
+	// mid-hold) before it is dead-lettered instead of re-reclaimed forever (F-5, M125/ADR 0097).
+	poisonRedeliveryCap         = 5
 	defaultRunWorkerLease       = 2 * runExecTimeout
 	defaultRunWorkerPollBackoff = time.Second
 	// defaultRunWorkerDrainGrace bounds how long a draining worker (SIGTERM → pool ctx cancelled)
@@ -144,6 +147,12 @@ func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWork
 			}
 			continue
 		}
+		// F-5 (M125/ADR 0097): a poison run (reclaimed past the cap — a prior holder died mid-hold each
+		// time) is DEAD-LETTERED, not re-reclaimed, so one bad run can't crash-loop the whole pool.
+		if rn.Attempts > poisonRedeliveryCap {
+			s.deadLetterPoison(rn)
+			continue
+		}
 		s.executeClaimedRun(ctx, workerID, rn, cfg.Lease, cfg.DrainGrace)
 	}
 }
@@ -163,6 +172,29 @@ func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, erro
 		s.log.Info("run-worker: reclaimed an abandoned run (resume-on-pod-loss)", "run", reclaimed.ID, "worker", workerID)
 	}
 	return reclaimed, rErr
+}
+
+// deadLetterPoison fails a run reclaimed past poisonRedeliveryCap (a prior holder died mid-hold each
+// time — a poison payload, or a bug an executor trips) instead of reclaiming it AGAIN and killing the
+// next worker forever (F-5, M125/ADR 0097). It terminates the run through the normal terminal path
+// (waking a `waiting` parent), and cascades a workflow instance's descendants so children don't
+// orphan-run. We hold the run's lease (just reclaimed it), so the write is exclusive.
+func (s *Server) deadLetterPoison(rn *run.Run) {
+	reason := fmt.Sprintf("poison: max redeliveries (%d) exceeded — a prior worker died mid-run each time", poisonRedeliveryCap)
+	s.log.Error(errors.New(reason), "run-worker: dead-lettering a poison run", "run", rn.ID, "attempts", rn.Attempts)
+	if err := s.terminalTransition(rn.ID, func(r *run.Run) error {
+		if r.Status.IsTerminal() {
+			return fmt.Errorf("already %s", r.Status)
+		}
+		r.Error = reason
+		return r.Transition(run.StatusFailed, time.Now())
+	}); err != nil {
+		s.log.Error(err, "run-worker: dead-letter transition failed", "run", rn.ID)
+		return
+	}
+	if rn.IsWorkflowInstance() {
+		s.cancelCascade(rn.ID, "cancelled: workflow dead-lettered (poison: max redeliveries)")
+	}
 }
 
 // executeClaimedRun drives a run claimed (or reclaimed) by a worker. It rebuilds the OBO execution

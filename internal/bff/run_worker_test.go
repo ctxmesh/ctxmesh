@@ -106,6 +106,37 @@ func TestStartHeartbeat_TransientKeepsRenewing(t *testing.T) {
 	}
 }
 
+// TestPoisonRun_DeadLetteredNotReReclaimed is the F-5 fix (M125/ADR 0097): a run reclaimed past the
+// cap (a prior holder died mid-hold each time) is DEAD-LETTERED, not re-reclaimed forever — so one
+// poison run can't crash-loop the whole pool. Proves: reclaim increments Attempts; over-cap →
+// dead-letter to `failed`; the dead-lettered run is terminal, so the pool moves on (survives).
+func TestPoisonRun_DeadLetteredNotReReclaimed(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	r := run.New("poison-1", "prod", "agent", json.RawMessage(`{}`), "conv", time.Now())
+	r.Status = run.StatusRunning
+	r.WorkerID = "dead-worker"
+	past := time.Now().Add(-time.Hour)
+	r.LeaseExpiresAt = &past
+	r.Attempts = poisonRedeliveryCap // one more reclaim tips it over the cap
+	require.NoError(t, s.runStore.Create(r))
+
+	// claimNext reclaims the abandoned run → Attempts increments past the cap.
+	rn, err := s.claimNext("w1", time.Minute)
+	require.NoError(t, err)
+	require.Greater(t, rn.Attempts, poisonRedeliveryCap, "reclaim must increment Attempts over the cap")
+
+	// The loop dead-letters it instead of executing (the runWorkerLoop cap gate).
+	s.deadLetterPoison(rn)
+	got, err := s.runStore.Get(rn.ID)
+	require.NoError(t, err)
+	assert.Equal(t, run.StatusFailed, got.Status, "a poison run is dead-lettered to failed")
+	assert.Contains(t, got.Error, "poison", "the failure reason names the poison cap")
+
+	// The pool SURVIVES: the dead-lettered run is terminal, so it is no longer reclaimable.
+	_, err = s.claimNext("w2", time.Minute)
+	assert.ErrorIs(t, err, run.ErrNoQueuedRun, "the dead-lettered run must not be re-reclaimed")
+}
+
 // TestRunWorker_DrainsQueue is the worker-path contract (m32.2): in dispatch mode a created run
 // stays `queued` (no inline execution), and once the worker pool is started it claims the run and
 // drives it to a terminal success — proving the run API dispatches to the worker, not the request.

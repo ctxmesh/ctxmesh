@@ -233,6 +233,10 @@ type Run struct {
 	// the lease so a dead worker's run can be reclaimed and resumed (m32.3).
 	WorkerID       string     `json:"-"`
 	LeaseExpiresAt *time.Time `json:"-"`
+	// Attempts counts how many times this run has been RECLAIMED (a prior holder died mid-hold) — the
+	// poison signal (F-5, M125/ADR 0097). Past a cap the worker dead-letters it instead of re-reclaiming
+	// forever. NOT incremented on a normal ClaimQueued (a workflow is legitimately claimed many times).
+	Attempts int `json:"-"`
 	// OutputSchema is the agent's spec.runtime.outputSchema, pinned at create time (raw JSON Schema
 	// text). m65.4 validates the run's terminal answer against it. Empty ⇒ no schema, no validation.
 	// Pinned so an operator editing the schema mid-run does not retroactively change validation.

@@ -156,6 +156,9 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome        text NOT NULL DEFAULT '
 -- exported + cases appended + a coded reason). Defaults ('') describe a non-export run, so old rows load unchanged.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS export_ref  text NOT NULL DEFAULT '';
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS export_spec text NOT NULL DEFAULT '';
+-- Poison redelivery cap (F-5, M125/ADR 0097): incremented on each RECLAIM (a prior holder died mid-hold);
+-- past the cap the worker dead-letters the run instead of crash-looping the pool. Default 0 (fresh run).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
 -- Claim the oldest queued run fast (the worker's FOR UPDATE SKIP LOCKED path, m32.2).
 CREATE INDEX IF NOT EXISTS runs_queued ON runs (created_at) WHERE status = 'queued';
 -- Sweep waiting runs (the belt-and-braces reconciler, ADR 0060 §3) — a small partial index.
@@ -316,7 +319,7 @@ func runRowColumns(cursorExpr string) string {
 		parent_run_id, root_run_id, spawn_depth, output_schema, record,
 		workflow_ref, spec_snapshot, ` + cursorExpr + ` AS cursor, wait_on, wait_mode, handed_off_to, handoff_source_run_id,
 		node_endpoints, ingestion_ref, ingestion_spec, outcome, export_ref, export_spec,
-		handoff_skip_history_replay, version, created_at, updated_at`
+		handoff_skip_history_replay, attempts, version, created_at, updated_at`
 }
 
 // scanRunRow scans one full run row (columns in runRowColumns order) into a Run + its OCC version. A list
@@ -345,7 +348,7 @@ func scanRunRow(sc runRowScanner) (*Run, int64, error) {
 		&r.ParentRunID, &r.RootRunID, &r.SpawnDepth, &outputSchema, &r.Record,
 		&r.WorkflowRef, &r.SpecSnapshot, &r.Cursor, &waitOn, &waitMode, &r.HandedOffTo, &r.HandoffSourceRunID,
 		&nodeEndpoints, &r.IngestionRef, &r.IngestionSpec, &r.Outcome, &r.ExportRef, &r.ExportSpec,
-		&r.HandoffSkipHistoryReplay, &version, &created, &updated)
+		&r.HandoffSkipHistoryReplay, &r.Attempts, &version, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, 0, err // bare — the single-row caller maps this to ErrNotFound
@@ -994,7 +997,7 @@ func (p *pgStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run, 
 	// Re-lease the oldest running run whose lease has expired (its worker is presumed dead). FOR
 	// UPDATE SKIP LOCKED so two live workers never reclaim the same run. It stays `running` (no
 	// state change, no version bump) — the worker resumes it from its last checkpoint.
-	const claim = `UPDATE runs SET worker_id=$1, lease_expires_at=$2, updated_at=$3
+	const claim = `UPDATE runs SET worker_id=$1, lease_expires_at=$2, updated_at=$3, attempts = attempts + 1
 		WHERE id = (
 			SELECT id FROM runs
 			WHERE status=$4 AND lease_expires_at IS NOT NULL AND lease_expires_at < $5
