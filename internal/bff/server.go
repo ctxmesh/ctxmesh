@@ -18,6 +18,7 @@ package bff
 
 import (
 	"bytes"
+	"errors"
 	"html"
 	"io/fs"
 	"net/http"
@@ -628,6 +629,27 @@ func NewServer(opts Options) *Server {
 			"resolves as unattended (org/public only) until the platform capability key + egress sidecar are deployed (ADR 0030).")
 	}
 	return s
+}
+
+// CapabilityMintingEnabled reports whether the BFF/worker can mint run capabilities — true iff a
+// valid platform capability private seed was configured (MCP_CAPABILITY_PRIVATE_KEY decoded into a
+// signer). The start-up fail-closed guard (OBOMintingPrecondition, ADR 0095 §2) reads it.
+func (s *Server) CapabilityMintingEnabled() bool { return s.capabilitySigner != nil }
+
+// OBOMintingPrecondition is the start-up fail-closed guard (M124/Gate A, ADR 0095 §2): when the
+// operator intends per-user OBO (MCP_OBO_REQUIRED=true — the chart wires it from oboEgress.enabled)
+// but run-capability minting is disabled, it returns an error so the BFF/worker REFUSES to start.
+// Otherwise every OBO tool call silently downgrades to the shared org/public credential and reports
+// success — a per-user→shared-credential escalation (audit SEC P0-2). A no-OBO install (the
+// default) is unaffected: mintingEnabled is irrelevant unless the operator asked for OBO.
+func OBOMintingPrecondition(oboRequired, mintingEnabled bool) error {
+	if oboRequired && !mintingEnabled {
+		return errors.New("MCP_OBO_REQUIRED=true but run-capability minting is DISABLED " +
+			"(MCP_CAPABILITY_PRIVATE_KEY unset or invalid) — refusing to serve: per-user OBO would " +
+			"silently downgrade to the shared org/public credential (ADR 0095 §2). Provide a valid " +
+			"capability private seed (the keygen hook provisions one by default) or unset MCP_OBO_REQUIRED.")
+	}
+	return nil
 }
 
 // lockedCredentials reports whether grant Secrets are consolidated into the RBAC-locked

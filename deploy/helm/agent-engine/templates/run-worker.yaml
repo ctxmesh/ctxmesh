@@ -62,6 +62,11 @@ spec:
             # is OFF here — the front-end BFF is what dispatches (RUN_WORKER_DISPATCH).
             - name: RUN_WORKER_CONCURRENCY
               value: {{ .Values.bff.runStore.worker.concurrency | quote }}
+            # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): the worker re-mints run capabilities, so it
+            # fails CLOSED the same as the BFF — when OBO egress is enabled but the capability seed is
+            # absent, refuse to start rather than let sub-runs silently use the shared org/public credential.
+            - name: MCP_OBO_REQUIRED
+              value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
           envFrom:
             # The worker runs the SAME bff binary, so it needs the SAME operator env the
             # BFF gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at
