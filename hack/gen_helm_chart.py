@@ -232,13 +232,9 @@ EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
     '          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}'
 )
-MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE = (
-    '        - name: MCP_CAPABILITY_PUBLIC_KEY\n' '          value: ""'
-)
-MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM = (
-    "        - name: MCP_CAPABILITY_PUBLIC_KEY\n"
-    '          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}'
-)
+# MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
+# bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
+# secretKeyRef block VERBATIM from kustomize — no value substitution, no drift, no committed key.
 MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE = (
     '        - name: MCP_CAPABILITY_AUDIENCE\n' '          value: ""'
 )
@@ -429,7 +425,7 @@ def substitute(doc: str) -> str:
     doc = doc.replace(DISCOVERY_IMAGE_ENV_KUSTOMIZE, DISCOVERY_IMAGE_ENV_HELM)
     doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
     doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
-    doc = doc.replace(MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE, MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM)
+    # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
     doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)

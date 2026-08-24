@@ -80,14 +80,20 @@ componentPodDisruptionBudgets:
   enabled: false
   minAvailable: 1
 
+# GA Gate A capability keypair (M124, ADR 0095). A post-install/upgrade Helm hook (bff
+# -ensure-capability-key) generates the platform Ed25519 keypair into the bff-capability Secret iff
+# absent (NEVER re-keys) so OBO works out-of-box. Set false to BYO (pre-create the bff-capability Secret;
+# production should BYO a managed key — the generated key is a getting-started default).
+capabilityKey:
+  generate: true
+
 # GA Gate A install preflight (M124, ADR 0095). A post-install/upgrade Helm hook Job runs
 # `bff -preflight` to FAIL LOUD on an incoherent config (empty required env, a mismatched capability
 # keypair, an unreachable control-plane store) instead of the platform silently degrading at runtime.
-# Default OFF for now so the default render == kustomize (no-drift) and the chart stays installable
-# before the env-defaulting lands; m124.3 flips this ON (with the OBO/KB/cost env derived, so a correct
-# install PASSES it) + excludes Helm hooks from the no-drift diff. Machinery is built + tested (m124.5).
+# ON by default now that the env is derived (Fork 2) + the keypair is provisioned (Fork 1) — a correct
+# install PASSES it; a wrong one fails at install. Helm hooks are excluded from the no-drift diff (Fork 3).
 preflight:
-  enabled: false
+  enabled: true
 
 # Horizontal-scale dials for the stateless request-servers (M50 hardening). The
 # gateway (config-rendered LiteLLM proxy) and token-service (credential-plane
