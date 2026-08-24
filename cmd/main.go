@@ -61,6 +61,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/pki"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/promql"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -128,6 +129,37 @@ var (
 // (a static "true" the chart/kustomize sets). One const so the several os.Getenv()=="true" gates
 // share a spelling (goconst).
 const envValueTrue = "true"
+
+// Platform PKI constants (M128/Gate E, ADR 0102): the in-process cert-controller's
+// artifact contract — the serving-cert Secret, the webhook Service (the cert SAN + the
+// VWC clientConfig target), and the default local cert dir the controller-runtime webhook
+// server reads (certwatcher hot-reload). These are GA-frozen wire contract (ADR 0102 §Consequences).
+const (
+	webhookCertSecretName = "agent-engine-webhook-server-cert"
+	webhookServiceName    = "webhook-service"
+	defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
+)
+
+// Platform cert-controller RBAC (M128/Gate E, ADR 0102): the in-process rotator manages its
+// own CA + serving-cert Secret and injects the caBundle into the tenant-label VWC. secrets
+// create/update is already granted elsewhere for the manager; the VWC verbs are new here.
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
+
+// managerNamespace resolves the manager's install namespace (where the cert Secret lives +
+// the webhook Service resolves): POD_NAMESPACE (downward API) first, then the ServiceAccount
+// namespace file, then the install default. Used by the cert-controller (ADR 0102).
+func managerNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "agent-engine-system"
+}
 
 // statelayerProxylessWarning returns a startup warning (and true) when the controller is proxy-less
 // (STATELAYER_PROXY_URL unset) — an UNSUPPORTED combination with the default network isolation (C21,
@@ -235,6 +267,14 @@ func main() {
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
+	}
+
+	// Platform PKI (M128/Gate E, ADR 0102): when the tenant-label webhook is enabled but no
+	// external cert path is supplied, default to the standard local cert dir. The in-process
+	// cert-controller (below) writes the serving cert THERE and controller-runtime's certwatcher
+	// hot-reloads it — no cert-manager, no external cert, no first-boot Secret-mount race.
+	if webhookCertPath == "" && os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
+		webhookCertPath = defaultWebhookCertDir
 	}
 
 	if len(webhookCertPath) > 0 {
@@ -651,8 +691,28 @@ func main() {
 				"refusing to enable the tenant-label webhook without the controller SA (would deny the controller itself)")
 			os.Exit(1)
 		}
+
+		// Platform PKI (M128/Gate E, ADR 0102): the in-process cert-controller generates + rotates
+		// the CA + the webhook serving cert (no cert-manager), writing them into webhookCertPath so
+		// the webhook server can serve TLS. certReady closes once the cert is bootstrapped — m128.5
+		// gates the VWC creation on it so a fail-closed webhook is never wired before its cert exists.
+		if _, err := pki.SetupWebhookCertRotator(mgr, pki.WebhookCertConfig{
+			Namespace:          managerNamespace(),
+			ServiceName:        webhookServiceName,
+			CertDir:            webhookCertPath,
+			SecretName:         webhookCertSecretName,
+			CAName:             "agent-engine-ca",
+			CAOrganization:     "agent-engine",
+			CADuration:         5 * 365 * 24 * time.Hour, // ADR 0102: CA ~5y
+			ServerCertDuration: 90 * 24 * time.Hour,      // ADR 0102: leaf ~90d, rotates ahead of expiry
+			// ValidatingWebhookName is set in m128.5 (the VWC) so the rotator injects its caBundle.
+		}); err != nil {
+			setupLog.Error(err, "unable to set up the webhook cert-controller (M128/ADR 0102)")
+			os.Exit(1)
+		}
+
 		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
-		setupLog.Info("tenant-label ValidatingWebhook registered (opt-in; activate via config/webhook + certs)")
+		setupLog.Info("tenant-label ValidatingWebhook + in-process cert-controller registered (M128/Gate E)")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

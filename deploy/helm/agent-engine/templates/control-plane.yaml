@@ -369,10 +369,28 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - update
   - watch
 - apiGroups:
   - agents.ctxmesh.ai
@@ -965,6 +983,10 @@ spec:
         command:
         - /manager
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: STATELAYER_PROXY_URL
           value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
         - name: CONSOLE_URL
@@ -1008,6 +1030,9 @@ spec:
         - containerPort: 8081
           name: health
           protocol: TCP
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP
         readinessProbe:
           httpGet:
             path: /readyz
@@ -1027,14 +1052,18 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-        volumeMounts: []
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: agent-engine-controller-manager
       terminationGracePeriodSeconds: 10
-      volumes: []
+      volumes:
+      - emptyDir: {}
+        name: webhook-certs
 ---
 apiVersion: apps/v1
 kind: Deployment
