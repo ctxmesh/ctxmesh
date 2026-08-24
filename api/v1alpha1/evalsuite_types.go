@@ -126,7 +126,7 @@ type EvalSuiteStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=es
+// +kubebuilder:resource:scope=Namespaced,shortName=es,categories={agents}
 // +kubebuilder:printcolumn:name="Gate",type="string",JSONPath=".spec.gate"
 // +kubebuilder:printcolumn:name="Threshold",type="string",JSONPath=".spec.threshold"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

@@ -1048,7 +1048,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
-	// PromptVersion's git pointer → prompt content, materialise it into the
+	// prompt version's git pointer → prompt content (the version is a Postgres-resident
+	// record since ADR 0044 retired the PromptVersion CRD), materialise it into the
 	// <agent>-prompt ConfigMap, mount it read-only into the user container, and
 	// inject PROMPT_FILE + PROMPT_VERSION as STATIC env (no valueFrom — the m5.7
 	// Knative ksvc landmine). The prompt folds into the combined binding digest

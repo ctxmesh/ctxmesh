@@ -13,13 +13,31 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentDeployment
     listKind: AgentDeploymentList
     plural: agentdeployments
     singular: agentdeployment
   scope: Namespaced
   versions:
-  - deprecated: true
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.latestVersion
+      name: Version
+      type: string
+    - jsonPath: .status.gate.phase
+      name: Gate
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -362,7 +380,10 @@ spec:
                     maxLength: 253
                     type: string
                   enabled:
-                    description: enabled turns on long-term memory for the agent.
+                    default: false
+                    description: |-
+                      enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                      need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                     type: boolean
                   perUser:
                     description: |-
@@ -370,8 +391,6 @@ spec:
                       caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                       isolation means one user's remembered facts never surface in another user's retrieved context.
                     type: boolean
-                required:
-                - enabled
                 type: object
               mountServiceAccountToken:
                 description: |-
@@ -405,10 +424,11 @@ spec:
                 type: integer
               promptRef:
                 description: |-
-                  promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                  prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                  revision with the new prompt without an image rebuild. When omitted, the
-                  image-bundled prompt is used (PRD §7).
+                  promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                  prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                  records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                  controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                  the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                 maxLength: 253
                 type: string
               record:
@@ -1002,7 +1022,23 @@ spec:
     storage: false
     subresources:
       status: {}
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.latestVersion
+      name: Version
+      type: string
+    - jsonPath: .status.gate.phase
+      name: Gate
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: |-
@@ -1337,7 +1373,10 @@ spec:
                     maxLength: 253
                     type: string
                   enabled:
-                    description: enabled turns on long-term memory for the agent.
+                    default: false
+                    description: |-
+                      enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                      need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                     type: boolean
                   perUser:
                     description: |-
@@ -1345,8 +1384,6 @@ spec:
                       caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                       isolation means one user's remembered facts never surface in another user's retrieved context.
                     type: boolean
-                required:
-                - enabled
                 type: object
               mountServiceAccountToken:
                 description: |-
@@ -1380,10 +1417,11 @@ spec:
                 type: integer
               promptRef:
                 description: |-
-                  promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                  prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                  revision with the new prompt without an image rebuild. When omitted, the
-                  image-bundled prompt is used (PRD §7).
+                  promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                  prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                  records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                  controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                  the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                 maxLength: 253
                 type: string
               record:
@@ -1987,6 +2025,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentRegistry
     listKind: AgentRegistryList
     plural: agentregistries
@@ -2222,6 +2262,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -2452,6 +2498,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -2470,6 +2522,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentScalingPolicy
     listKind: AgentScalingPolicyList
     plural: agentscalingpolicies
@@ -2700,6 +2754,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -2930,6 +2990,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -2948,6 +3014,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentTeam
     listKind: AgentTeamList
     plural: agentteams
@@ -3177,6 +3245,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
               registry:
                 description: registry echoes the resolved registryRef (the trust boundary),
                   for convenience in listings.
@@ -3199,13 +3273,22 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentVersion
     listKind: AgentVersionList
     plural: agentversions
     singular: agentversion
   scope: Namespaced
   versions:
-  - deprecated: true
+  - additionalPrinterColumns:
+    - jsonPath: .spec.deploymentName
+      name: Deployment
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -3557,7 +3640,10 @@ spec:
                         maxLength: 253
                         type: string
                       enabled:
-                        description: enabled turns on long-term memory for the agent.
+                        default: false
+                        description: |-
+                          enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                          need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                         type: boolean
                       perUser:
                         description: |-
@@ -3565,8 +3651,6 @@ spec:
                           caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                           isolation means one user's remembered facts never surface in another user's retrieved context.
                         type: boolean
-                    required:
-                    - enabled
                     type: object
                   mountServiceAccountToken:
                     description: |-
@@ -3600,10 +3684,11 @@ spec:
                     type: integer
                   promptRef:
                     description: |-
-                      promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                      prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                      revision with the new prompt without an image rebuild. When omitted, the
-                      image-bundled prompt is used (PRD §7).
+                      promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                      prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                      records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                      controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                      the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                     maxLength: 253
                     type: string
                   record:
@@ -3985,6 +4070,7 @@ spec:
         type: object
     served: true
     storage: false
+    subresources: {}
   - name: v1beta1
     schema:
       openAPIV3Schema:
@@ -4334,7 +4420,10 @@ spec:
                         maxLength: 253
                         type: string
                       enabled:
-                        description: enabled turns on long-term memory for the agent.
+                        default: false
+                        description: |-
+                          enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                          need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                         type: boolean
                       perUser:
                         description: |-
@@ -4342,8 +4431,6 @@ spec:
                           caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                           isolation means one user's remembered facts never surface in another user's retrieved context.
                         type: boolean
-                    required:
-                    - enabled
                     type: object
                   mountServiceAccountToken:
                     description: |-
@@ -4377,10 +4464,11 @@ spec:
                     type: integer
                   promptRef:
                     description: |-
-                      promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                      prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                      revision with the new prompt without an image rebuild. When omitted, the
-                      image-bundled prompt is used (PRD §7).
+                      promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                      prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                      records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                      controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                      the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                     maxLength: 253
                     type: string
                   record:
@@ -4772,6 +4860,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AlertPolicy
     listKind: AlertPolicyList
     plural: alertpolicies
@@ -5078,6 +5168,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: ClusterCredentialStore
     listKind: ClusterCredentialStoreList
     plural: clustercredentialstores
@@ -5748,6 +5840,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: CredentialStore
     listKind: CredentialStoreList
     plural: credentialstores
@@ -6416,6 +6510,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: EvalSuite
     listKind: EvalSuiteList
     plural: evalsuites
@@ -6873,6 +6969,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: GuardrailPolicy
     listKind: GuardrailPolicyList
     plural: guardrailpolicies
@@ -7235,6 +7333,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: KnowledgeBase
     listKind: KnowledgeBaseList
     plural: knowledgebases
@@ -7563,6 +7663,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: MCPToolBinding
     listKind: MCPToolBindingList
     plural: mcptoolbindings
@@ -7730,6 +7832,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -7900,6 +8008,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -7918,6 +8032,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: ModelRoute
     listKind: ModelRouteList
     plural: modelroutes
@@ -8122,6 +8238,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -8330,6 +8452,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -8348,6 +8476,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: SecretBinding
     listKind: SecretBindingList
     plural: secretbindings
@@ -8662,6 +8792,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: Tenant
     listKind: TenantList
     plural: tenants
@@ -8923,6 +9055,12 @@ spec:
                   memberNamespaces is the count of namespaces actually reconciled for this
                   tenant (contested namespaces are excluded).
                 format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
                 type: integer
               totalCorpusBytes:
                 description: |-
@@ -9193,6 +9331,12 @@ spec:
                   tenant (contested namespaces are excluded).
                 format: int32
                 type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
               totalCorpusBytes:
                 description: |-
                   totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
@@ -9218,6 +9362,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: Workflow
     listKind: WorkflowList
     plural: workflows

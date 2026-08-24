@@ -164,8 +164,11 @@ type KnowledgeBaseRef struct {
 // pods hold no DB credentials, ADR 0045 Amд 1); the launcher exposes memory.remember / memory.search_agent
 // that proxy there with the capability token.
 type LongTermMemorySpec struct {
-	// enabled turns on long-term memory for the agent.
-	Enabled bool `json:"enabled"`
+	// enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+	// need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 
 	// perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
 	// caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
@@ -291,10 +294,11 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	EvalSuiteRef string `json:"evalSuiteRef,omitempty"`
 
-	// promptRef optionally names a PromptVersion (same namespace) whose git-backed
-	// prompt is injected into the agent. Swapping promptRef rolls a new Knative
-	// revision with the new prompt without an image rebuild. When omitted, the
-	// image-bundled prompt is used (PRD §7).
+	// promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+	// prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+	// records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+	// controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+	// the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	PromptRef string `json:"promptRef,omitempty"`
@@ -747,6 +751,12 @@ type AgentDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:categories={agents}
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="URL",type="string",JSONPath=".status.url"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.latestVersion"
+// +kubebuilder:printcolumn:name="Gate",type="string",JSONPath=".status.gate.phase"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="metadata.name must be at most 44 characters: the controller appends a 19-character revision-name suffix and Knative revision names are DNS-1035 labels capped at 63 characters"
 
 // AgentDeployment is the Schema for the agentdeployments API.

@@ -246,7 +246,7 @@ type WorkflowStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=wf
+// +kubebuilder:resource:scope=Namespaced,shortName=wf,categories={agents}
 // +kubebuilder:printcolumn:name="Registry",type="string",JSONPath=".spec.registryRef"
 // +kubebuilder:printcolumn:name="Steps",type="integer",JSONPath=".spec.steps[*]",priority=1
 // +kubebuilder:printcolumn:name="Validated",type="string",JSONPath=".status.conditions[?(@.type=='Validated')].status"
