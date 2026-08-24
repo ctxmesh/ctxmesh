@@ -104,11 +104,9 @@ func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) func(
 	var wg sync.WaitGroup
 	for i := range cfg.Concurrency {
 		workerID := fmt.Sprintf("%s-%d", host, i)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s.runWorkerLoop(ctx, workerID, cfg)
-		}()
+		})
 	}
 	// SweepWaiting goroutine (m67.4, ADR 0060 §3): periodically re-queues waiting runs whose children
 	// are all-terminal — the belt-and-braces for the crash window + in-mem-store across restart.

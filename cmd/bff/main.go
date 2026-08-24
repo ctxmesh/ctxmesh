@@ -98,7 +98,7 @@ func main() {
 		os.Exit(runEnsureCapabilityKey(context.Background()))
 	}
 	if preflightUp {
-		os.Exit(runPreflight(context.Background(), log))
+		os.Exit(runPreflight(context.Background()))
 	}
 
 	if err := run(addr, staticDir, version, log); err != nil {
@@ -111,7 +111,8 @@ func main() {
 // (failing the Helm post-install hook) with actionable messages on any misconfiguration — so the
 // "correct-when-configured, silent-when-not" failures the GA audit found surface at install, not at
 // runtime (M124/Gate A, ADR 0095). The OBO-specific env is required only when OBO egress is enabled.
-func runPreflight(ctx context.Context, log logr.Logger) int {
+func runPreflight(ctx context.Context) int {
+	log := ctrl.Log.WithName("bff.preflight")
 	oboOn := strings.EqualFold(os.Getenv("MCP_OBO_EGRESS_ENABLED"), "true")
 	required := map[string]string{
 		// Always needed for a functional install (all derivable/defaulted by the chart, m124.3):

@@ -43,11 +43,7 @@ func Apply(db *sql.DB, envKey string, defaultMaxOpen int) {
 		}
 	}
 	db.SetMaxOpenConns(maxOpen)
-	idle := maxOpen
-	if idle > maxIdleCap {
-		idle = maxIdleCap
-	}
-	db.SetMaxIdleConns(idle)
+	db.SetMaxIdleConns(min(maxOpen, maxIdleCap))
 	db.SetConnMaxLifetime(connMaxLifetime)
 	db.SetConnMaxIdleTime(connMaxIdleTime)
 }
