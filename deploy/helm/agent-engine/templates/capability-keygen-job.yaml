@@ -1,0 +1,127 @@
+{{- /*
+GA Gate A capability keygen (M124, ADR 0095) — a post-install/upgrade Helm hook that runs
+`bff -ensure-capability-key` to provision the platform Ed25519 capability keypair into the
+bff-capability Secret so OBO works out-of-box, generate-iff-absent, NEVER re-keying an existing install
+(which would invalidate every user's OBO grant). post-install,pre-upgrade (NOT pre-install): the chart
+carries its own Namespace, which only exists in the main-apply phase on a no-`-n` install. On a fresh
+install the hook rollout-restarts the consumers so their pods pick up the env at container start.
+
+Hand-maintained (not gen_helm_chart-generated) + hook-annotated → excluded from the no-drift diff.
+Its SA gets a NARROW Role — the sanctioned exception to the BFF SA's rules:[] (ADR 0011): create the
+one Secret + get/patch it + rollout-restart the named consumers. Nothing else.
+
+Weights: SA/Role/RB at -5 (before the Job), the keygen Job at 0 (BEFORE the preflight Job at weight 5,
+so the preflight validates the just-generated key). Gate with capabilityKey.generate=false to BYO.
+*/ -}}
+{{- if .Values.capabilityKey.generate }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-engine-keygen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: keygen
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-engine-keygen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: keygen
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  # create is un-nameable at authz time; get/patch are pinned to the one Secret. (ADR 0095/0011.)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames: ["bff-capability"]
+  # rollout-restart the named consumers only, so they pick up the freshly-provisioned key.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+    resourceNames: ["agent-engine-bff", "agent-engine-controller-manager", "run-worker"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-engine-keygen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: keygen
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-engine-keygen
+subjects:
+  - kind: ServiceAccount
+    name: agent-engine-keygen
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-engine-capability-keygen
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/component: keygen
+  annotations:
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-engine
+        app.kubernetes.io/component: keygen
+    spec:
+      restartPolicy: Never
+      serviceAccountName: agent-engine-keygen
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keygen
+          image: {{ printf "%s:%s" .Values.bff.image.repository (.Values.bff.image.tag | default .Chart.AppVersion) }}
+          imagePullPolicy: IfNotPresent
+          args: ["-ensure-capability-key"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+{{- end }}

@@ -986,7 +986,11 @@ spec:
         - name: EGRESS_SIDECAR_IMAGE
           value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
         - name: MCP_CAPABILITY_PUBLIC_KEY
-          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}
+          valueFrom:
+            secretKeyRef:
+              key: MCP_CAPABILITY_PUBLIC_KEY
+              name: bff-capability
+              optional: true
         - name: MCP_CAPABILITY_AUDIENCE
           value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE

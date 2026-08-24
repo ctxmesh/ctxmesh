@@ -45,20 +45,22 @@ spec:
           args: ["-preflight"]
           env:
             # Mirror the control-plane OBO/KB/cost config so the check validates what the platform runs.
+            # NB: MCP_CAPABILITY_PUBLIC_KEY is NOT set here explicitly — it comes from envFrom bff-capability
+            # (the keygen hook's Secret). An explicit env entry would SHADOW envFrom and false the
+            # keypair-coherence check.
             - name: MCP_OBO_EGRESS_ENABLED
               value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
             - name: EGRESS_SIDECAR_IMAGE
               value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
-            - name: MCP_CAPABILITY_PUBLIC_KEY
-              value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}
             - name: MCP_CREDENTIAL_NAMESPACE
-              value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+              value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
             - name: TOKEN_SERVICE_URL
-              value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}
+              value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
             - name: COST_ROLLUP_ENABLED
-              value: {{ .Values.bff.costRollupEnabled | default "" | quote }}
-          # CONTROLPLANE_DSN (pinged) + MCP_CAPABILITY_PRIVATE_KEY (keypair-coherence check) come from the
-          # same operator Secrets the BFF reads; optional so `helm template` renders before they exist.
+              value: {{ .Values.bff.costRollupEnabled | quote }}
+          # CONTROLPLANE_DSN (pinged) + the capability keypair (MCP_CAPABILITY_PRIVATE/PUBLIC_KEY, coherence
+          # check) come from the bff-capability + bff-adapters Secrets the BFF reads; optional so
+          # `helm template` renders before they exist.
           envFrom:
             - secretRef:
                 name: bff-adapters

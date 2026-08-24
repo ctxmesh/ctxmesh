@@ -97,8 +97,16 @@ spec:
             value: "false"
           - name: EGRESS_SIDECAR_IMAGE
             value: ""
+          # MCP_CAPABILITY_PUBLIC_KEY — read from the bff-capability Secret (the keygen hook generates
+          # both keys there; the BFF signs with the private seed, the controller injects this public key
+          # into agent egress-sidecars to VERIFY capabilities). optional: absent Secret ⇒ unset env,
+          # byte-identical to the legacy "" (no OBO). Provisioned by `bff -ensure-capability-key` (M124).
           - name: MCP_CAPABILITY_PUBLIC_KEY
-            value: ""
+            valueFrom:
+              secretKeyRef:
+                name: bff-capability
+                key: MCP_CAPABILITY_PUBLIC_KEY
+                optional: true
           - name: MCP_CAPABILITY_AUDIENCE
             value: ""
           - name: MCP_CREDENTIAL_NAMESPACE
