@@ -182,6 +182,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /quota/spend", s.handleQuotaGetSpend)
 	mux.HandleFunc("POST /quota/spend", s.handleQuotaAddSpend)
 	mux.HandleFunc("POST /quota/agent-spend", s.handleQuotaAddAgentSpend) // Q8: per-agent breakdown in proxy mode.
+	mux.HandleFunc("GET /quota/agent-spend", s.handleQuotaGetAgentSpend)  // F2: read for per-agent cap enforcement.
+	mux.HandleFunc("GET /quota/conv-spend", s.handleQuotaGetConvSpend)    // F2: per-conversation cap.
+	mux.HandleFunc("POST /quota/conv-spend", s.handleQuotaAddConvSpend)   // F2.
 	mux.HandleFunc("POST /quota/slot", s.handleQuotaAcquireSlot)
 	mux.HandleFunc("DELETE /quota/slot", s.handleQuotaReleaseSlot)
 	// Per-USER (OBO) quota endpoints (M107 C20) — pod-identity authenticated (agent gate),

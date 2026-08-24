@@ -42,6 +42,13 @@ type QuotaStore interface {
 	// which keys the per-TENANT aggregate — this is what makes per-agent chargeback work in proxy mode,
 	// where the launcher holds no direct Valkey path.
 	AddAgentSpend(ctx context.Context, scopeID string, deltaUSD float64) error
+	// AgentSpend returns the per-AGENT accumulated monthly spend in USD (0 when unset) — the READ half of
+	// AddAgentSpend, so the launcher can ENFORCE a per-agent cap across replicas (F2, M126/ADR 0099).
+	AgentSpend(ctx context.Context, scopeID string) (float64, error)
+	// ConvSpend / AddConvSpend track a per-CONVERSATION budget (a single entity, NOT a recurring window)
+	// with a sliding TTL so the unbounded conversation keyspace self-expires (F2, M126/ADR 0099).
+	ConvSpend(ctx context.Context, convID string) (float64, error)
+	AddConvSpend(ctx context.Context, convID string, deltaUSD float64) error
 	// AcquireSlot increments the tenant's in-flight counter, returning false (and rolling
 	// back) when it would exceed maxSlots.
 	AcquireSlot(ctx context.Context, tenantID string, maxSlots int) (bool, error)
@@ -71,6 +78,10 @@ func quotaInflightKey(tenantID string) string { return "tenant:" + tenantID + ":
 func agentSpendKey(scopeID string) string {
 	return "agent:" + scopeID + ":spend:" + quotaSpendWindow()
 }
+
+// convSpendKey scopes a per-conversation budget to the conversation id (a single entity, NOT a recurring
+// monthly window). MUST match cmd/launcher's convSpendKey. Grammar: conv:{convID}:spend
+func convSpendKey(convID string) string { return "conv:" + convID + ":spend" }
 
 // UserQuotaStore is the per-user (OBO) model-quota accumulator over the credentialed
 // Valkey (M107, C20). It is the proxy-side analogue of the launcher's userQuotaStore
@@ -158,6 +169,31 @@ func (s *redisQuotaStore) AddAgentSpend(ctx context.Context, scopeID string, del
 	}
 	// Same self-expiring TTL as the tenant ledger (~2 periods); best-effort.
 	return s.rdb.Expire(ctx, key, 62*24*time.Hour).Err()
+}
+
+func (s *redisQuotaStore) AgentSpend(ctx context.Context, scopeID string) (float64, error) {
+	v, err := s.rdb.Get(ctx, agentSpendKey(scopeID)).Float64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return v, err
+}
+
+func (s *redisQuotaStore) ConvSpend(ctx context.Context, convID string) (float64, error) {
+	v, err := s.rdb.Get(ctx, convSpendKey(convID)).Float64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return v, err
+}
+
+func (s *redisQuotaStore) AddConvSpend(ctx context.Context, convID string, deltaUSD float64) error {
+	key := convSpendKey(convID)
+	if err := s.rdb.IncrByFloat(ctx, key, deltaUSD).Err(); err != nil {
+		return err
+	}
+	// Sliding ~30d TTL (refreshed on every add) so a stale conversation key self-expires; best-effort.
+	return s.rdb.Expire(ctx, key, 30*24*time.Hour).Err()
 }
 
 func (s *redisQuotaStore) AddSpend(ctx context.Context, tenantID string, deltaUSD float64) error {
