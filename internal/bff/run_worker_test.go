@@ -121,7 +121,7 @@ func TestPoisonRun_DeadLetteredNotReReclaimed(t *testing.T) {
 	require.NoError(t, s.runStore.Create(r))
 
 	// claimNext reclaims the abandoned run → Attempts increments past the cap.
-	rn, err := s.claimNext("w1", time.Minute)
+	rn, err := s.claimNext("w1", time.Minute, false)
 	require.NoError(t, err)
 	require.Greater(t, rn.Attempts, poisonRedeliveryCap, "reclaim must increment Attempts over the cap")
 
@@ -133,8 +133,36 @@ func TestPoisonRun_DeadLetteredNotReReclaimed(t *testing.T) {
 	assert.Contains(t, got.Error, "poison", "the failure reason names the poison cap")
 
 	// The pool SURVIVES: the dead-lettered run is terminal, so it is no longer reclaimable.
-	_, err = s.claimNext("w2", time.Minute)
+	_, err = s.claimNext("w2", time.Minute, false)
 	assert.ErrorIs(t, err, run.ErrNoQueuedRun, "the dead-lettered run must not be re-reclaimed")
+}
+
+// TestReclaimUnderBacklog is the F-4 fix (M125/ADR 0097): the pre-M125 worker reclaimed an
+// abandoned run ONLY when the queue was empty, so under sustained backlog a dead worker's run
+// starved — the worst time. Now a periodic reclaim-first tick rescues it even with the queue full.
+func TestReclaimUnderBacklog(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	// A QUEUED run (the backlog).
+	q := run.New("queued-1", "prod", "agent", json.RawMessage(`{}`), "conv", time.Now())
+	q.Status = run.StatusQueued
+	require.NoError(t, s.runStore.Create(q))
+	// An ABANDONED running run (its worker died — expired lease).
+	ab := run.New("abandoned-1", "prod", "agent", json.RawMessage(`{}`), "conv2", time.Now().Add(-time.Minute))
+	ab.Status = run.StatusRunning
+	ab.WorkerID = "dead"
+	past := time.Now().Add(-time.Hour)
+	ab.LeaseExpiresAt = &past
+	require.NoError(t, s.runStore.Create(ab))
+
+	// reclaim-first tick: rescues the abandoned run EVEN THOUGH the queue is non-empty.
+	got, err := s.claimNext("w1", time.Minute, true)
+	require.NoError(t, err)
+	assert.Equal(t, "abandoned-1", got.ID, "F-4: reclaim-first rescues an abandoned run under backlog")
+
+	// the queued run was untouched — a normal (non-reclaim-first) tick still drains it.
+	got, err = s.claimNext("w2", time.Minute, false)
+	require.NoError(t, err)
+	assert.Equal(t, "queued-1", got.ID, "the queued run still drains on a normal tick")
 }
 
 // TestRunWorker_DrainsQueue is the worker-path contract (m32.2): in dispatch mode a created run
