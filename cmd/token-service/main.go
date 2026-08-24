@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -242,12 +243,14 @@ func run(log logr.Logger) error {
 			"(missing/absent TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE/CLIENT_CA_FILE) — refusing to serve " +
 			"the credential API unauthenticated over HTTP")
 	}
+	var certWatcher *certwatcher.CertWatcher
 	if mtls {
-		tlsCfg, err := serverMTLS(certFile, keyFile, caFile)
+		tlsCfg, watcher, err := serverMTLS(certFile, keyFile, caFile)
 		if err != nil {
 			return err
 		}
 		srv.TLSConfig = tlsCfg
+		certWatcher = watcher
 	} else {
 		log.Info("WARNING: token-service running WITHOUT mTLS (no TOKEN_SERVICE_TLS_* files) — " +
 			"the credential API is unauthenticated; provision platform certs before production (ADR 0030 §1)")
@@ -255,6 +258,16 @@ func run(log logr.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// Hot-reload the serving cert on rotation (M128/ADR 0102): the watcher runs until ctx is
+	// cancelled (shutdown); a watch error is logged, not fatal — the last-good cert keeps serving.
+	if certWatcher != nil {
+		go func() {
+			if err := certWatcher.Start(ctx); err != nil {
+				log.Error(err, "token-service: cert watcher stopped")
+			}
+		}()
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -294,12 +307,31 @@ func orgScopedFromLabels(labels map[string]string) bool {
 }
 
 // serverMTLS loads the mTLS server config from mounted cert/key/CA files.
-func serverMTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
+// serverMTLS builds the token-service's server TLS config AND a CertWatcher that hot-reloads
+// the SERVING cert on rotation (M128/Gate E, ADR 0102 §1): the platform cert-controller
+// rotates the serving leaf ~every 90d, and a one-shot load would then serve a stale/expired
+// cert until a pod restart. GetCertificate (from the watcher) is consulted at each TLS
+// handshake, so a rotated cert is picked up with no restart + no dropped established
+// connections. The client CA (mTLS verification) is loaded once into the base config. The
+// caller MUST Start the returned watcher with a context.
+func serverMTLS(certFile, keyFile, caFile string) (*tls.Config, *certwatcher.CertWatcher, error) {
 	certPEM, keyPEM, caPEM, err := readTriple(certFile, keyFile, caFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return credplane.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	cfg, err := credplane.ServerTLSConfig(certPEM, keyPEM, caPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	watcher, err := certwatcher.New(certFile, keyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("token-service: init cert watcher: %w", err)
+	}
+	// GetCertificate takes precedence over the static Certificates at handshake time; clearing
+	// Certificates makes the watcher the single source of the live serving cert.
+	cfg.Certificates = nil
+	cfg.GetCertificate = watcher.GetCertificate
+	return cfg, watcher, nil
 }
 
 func readTriple(certFile, keyFile, caFile string) (cert, key, ca []byte, err error) {

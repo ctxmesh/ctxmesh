@@ -67,6 +67,13 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
+          # POD_NAMESPACE (downward API): the manager's install namespace — the platform
+          # cert-controller (M128/Gate E, ADR 0102) puts its CA + serving-cert Secret here and
+          # derives the webhook Service SAN from it. Inert when the tenant-label webhook is off.
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
           # STATELAYER_PROXY_URL (M53, ADR 0050 §8 phase 3 — the cutover default): every
           # agent's memory + quota + async-dedup route through the state-layer proxy
           # (which holds the Valkey credential + derives tenant/namespace from the pod
@@ -133,6 +140,13 @@ spec:
         - containerPort: 8081
           name: health
           protocol: TCP
+        # Webhook serving port (M128/Gate E, ADR 0102): the tenant-label ValidatingWebhook's
+        # TLS listener. The in-process cert-controller writes the serving cert into the
+        # webhook-certs volume; controller-runtime serves + hot-reloads from it. Inert (no
+        # listener) when ENABLE_TENANT_LABEL_WEBHOOK is off — the default.
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
@@ -160,7 +174,15 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+          # Webhook serving certs (M128/Gate E, ADR 0102): an emptyDir the in-process
+          # cert-controller writes the CA + serving cert into (readOnlyRootFilesystem=true, so
+          # the cert dir MUST be a writable mount). controller-runtime's certwatcher reads +
+          # hot-reloads from here. Empty + harmless when the webhook is off (the default).
+          - name: webhook-certs
+            mountPath: /tmp/k8s-webhook-server/serving-certs
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
