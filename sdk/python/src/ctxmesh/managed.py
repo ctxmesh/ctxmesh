@@ -600,6 +600,12 @@ class ManagedResult:
     #: then
     #: re-invokes it with the checkpoint when they finish. ``None`` = the run did not suspend.
     delegate_waiting: Optional[Dict[str, Any]] = None
+    #: How the loop terminated (M129/Gate F, ADR 0103). ``"completed"`` = the model stopped
+    #: calling tools on its own (natural convergence). ``"budget_exhausted_composed"`` =
+    #: ``max_steps`` was hit and the loop forced a final tools-DISABLED composition from the
+    #: results so far (a squeezed-out partial, not a guard-slam and not a hang). Machine-honest so
+    #: the console / evals / callers can tell a budget-forced answer from a natural one.
+    finish_reason: str = "completed"
 
 
 #: The permissive parameters schema advertised when a tool has no discovered
@@ -2073,12 +2079,51 @@ def _drive_loop(
                     steps=step,
                 )
 
-    # Bound exceeded: the model kept calling tools past max_steps. Hard stop
-    # rather than hang the pod (the mandatory runaway guard, ADR 0013).
+    # Bound exceeded: the model kept calling tools past max_steps. Rather than DISCARD all the
+    # (paid-for) tool/delegation results with a hard raise — the "guard-slam" that made live
+    # model-driven supervision look broken (audit F2) — force ONE final tools-DISABLED composition
+    # turn (M129/Gate F, ADR 0103): the model composes its best answer from the results gathered so
+    # far and states anything left unfinished. Deterministic termination with a composed answer.
+    # The hard error stays ONLY as the backstop-behind-the-backstop, if composition itself fails.
+    _log.info(
+        "managed loop hit max_steps=%d; forcing a final composition turn (ADR 0103)",
+        config.max_steps,
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "You have reached your tool/delegation budget for this run and may not call any "
+                "more tools. Compose your FINAL answer now from the results gathered above. If "
+                "anything was left unfinished, say so explicitly."
+            ),
+        }
+    )
+    try:
+        # compose_opts carries NO tools (config.model_opts never includes them — the loop adds them
+        # per-turn), so the model can only produce text. Reuse the same resilience wrapper.
+        compose_opts: Dict[str, Any] = dict(config.model_opts)
+        with client.trace.step("compose-final") as turn:
+            resp = _chat_with_resilience(
+                client, config, config.model_route, messages, compose_opts, on_token, spawn_depth
+            )
+            turn.set_output(resp.text)
+            root.set_output(resp.text)
+        if threaded:
+            _persist_turn(client, conversation_id, user_input, resp.text, message_id)
+        return ManagedResult(
+            output=resp.text,
+            steps=config.max_steps,
+            tools_called=tools_called,
+            consent_required=consent_required,
+            finish_reason="budget_exhausted_composed",
+        )
+    except Exception as exc:  # noqa: BLE001 — composition backstop failed; fall through to the hard error.
+        _log.warning("forced composition turn failed after max_steps: %s", exc)
     raise ConfigError(
         f"managed loop exceeded max_steps={config.max_steps} without a final "
-        f"completion (the model kept calling tools). Tools called so far: "
-        f"{tools_called!r}."
+        f"completion (the model kept calling tools, and the forced composition turn also failed). "
+        f"Tools called so far: {tools_called!r}."
     )
 
 
