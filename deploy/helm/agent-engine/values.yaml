@@ -80,6 +80,15 @@ componentPodDisruptionBudgets:
   enabled: false
   minAvailable: 1
 
+# GA Gate A install preflight (M124, ADR 0095). A post-install/upgrade Helm hook Job runs
+# `bff -preflight` to FAIL LOUD on an incoherent config (empty required env, a mismatched capability
+# keypair, an unreachable control-plane store) instead of the platform silently degrading at runtime.
+# Default OFF for now so the default render == kustomize (no-drift) and the chart stays installable
+# before the env-defaulting lands; m124.3 flips this ON (with the OBO/KB/cost env derived, so a correct
+# install PASSES it) + excludes Helm hooks from the no-drift diff. Machinery is built + tested (m124.5).
+preflight:
+  enabled: false
+
 # Horizontal-scale dials for the stateless request-servers (M50 hardening). The
 # gateway (config-rendered LiteLLM proxy) and token-service (credential-plane
 # reader) are stateless, so >1 replica is plain HA. Set these ALONGSIDE

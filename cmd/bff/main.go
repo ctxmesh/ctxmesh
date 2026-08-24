@@ -65,20 +65,24 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/preflight"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
 func main() {
 	var (
-		addr      string
-		staticDir string
-		version   string
+		addr        string
+		staticDir   string
+		version     string
+		preflightUp bool
 	)
 	flag.StringVar(&addr, "addr", ":9090", "The address the BFF listens on.")
 	flag.StringVar(&staticDir, "static-dir", "ui/dist",
 		"Directory of the built Vite SPA (dist/). Empty disables static serving.")
 	flag.StringVar(&version, "version", "dev", "Version string reported by /api/health.")
+	flag.BoolVar(&preflightUp, "preflight", false,
+		"Run install config-coherence checks (fail LOUD on misconfig) and exit — the Helm post-install hook / GA Gate A (ADR 0095).")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -86,10 +90,58 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	log := ctrl.Log.WithName("bff")
 
+	if preflightUp {
+		os.Exit(runPreflight(context.Background(), log))
+	}
+
 	if err := run(addr, staticDir, version, log); err != nil {
 		log.Error(err, "BFF exited with error")
 		os.Exit(1)
 	}
+}
+
+// runPreflight validates that the install is coherently configured and returns a non-zero exit code
+// (failing the Helm post-install hook) with actionable messages on any misconfiguration — so the
+// "correct-when-configured, silent-when-not" failures the GA audit found surface at install, not at
+// runtime (M124/Gate A, ADR 0095). The OBO-specific env is required only when OBO egress is enabled.
+func runPreflight(ctx context.Context, log logr.Logger) int {
+	oboOn := strings.EqualFold(os.Getenv("MCP_OBO_EGRESS_ENABLED"), "true")
+	required := map[string]string{
+		// Always needed for a functional install (all derivable/defaulted by the chart, m124.3):
+		"TOKEN_SERVICE_URL":        os.Getenv("TOKEN_SERVICE_URL"),
+		"MCP_CREDENTIAL_NAMESPACE": os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
+		"COST_ROLLUP_ENABLED":      os.Getenv("COST_ROLLUP_ENABLED"),
+	}
+	if oboOn {
+		// OBO tool calls additionally need the sidecar image + the capability public key:
+		required["EGRESS_SIDECAR_IMAGE"] = os.Getenv("EGRESS_SIDECAR_IMAGE")
+		required["MCP_CAPABILITY_PUBLIC_KEY"] = os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")
+	}
+	cfg := preflight.Config{
+		RequiredEnv:           required,
+		CapabilityPrivateSeed: os.Getenv("MCP_CAPABILITY_PRIVATE_KEY"),
+		CapabilityPublicKey:   os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
+		ControlPlaneDSN:       os.Getenv("CONTROLPLANE_DSN"),
+	}
+	ping := func(ctx context.Context, dsn string) error {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		db, err := controlplane.Connect(cctx, dsn) // sql.Open("pgx") + PingContext
+		if err != nil {
+			return err
+		}
+		return db.Close()
+	}
+	errs := preflight.Check(ctx, cfg, ping)
+	if len(errs) == 0 {
+		log.Info("preflight OK — install configuration is coherent")
+		return 0
+	}
+	for _, e := range errs {
+		log.Error(e, "preflight FAILED")
+	}
+	fmt.Fprintf(os.Stderr, "\npreflight FAILED with %d problem(s) — fix the above and reinstall. See GA Gate A / ADR 0095.\n", len(errs))
+	return 1
 }
 
 func run(addr, staticDir, version string, log logr.Logger) error {
