@@ -634,7 +634,7 @@ func (s *Server) completeIngestion(ctx context.Context, runID string, spec Inges
 	cursorJSON, _ := cursor.marshal()
 
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, string(outcomeJSON))
-	if uErr := s.terminalTransition(runID, func(r *run.Run) error {
+	if uErr := s.terminalTransitionFenced(ctx, runID, func(r *run.Run) error {
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // idempotent — a raced cancel/complete
 		}
