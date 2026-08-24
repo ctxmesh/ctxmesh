@@ -163,7 +163,7 @@ func digestTools() string {
 // with hex-only components makes cross-presence collisions impossible.
 func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	toolD := digestTools()
-	memD := memoryBindingDigest(true, memoryDefaultAddr)
+	memD := memoryDigest(true, memoryDefaultAddr)
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 	require.NotEmpty(t, toolD)
 	require.NotEmpty(t, memD)
@@ -243,8 +243,8 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	}, true)
 	require.NotEqual(t, toolD1, toolD2, "precondition: image change flips the tool digest")
 
-	memD1 := memoryBindingDigest(true, memoryDefaultAddr)
-	memD2 := memoryBindingDigest(true, "other-valkey.ns.svc:6380")
+	memD1 := memoryDigest(true, memoryDefaultAddr)
+	memD2 := memoryDigest(true, "other-valkey.ns.svc:6380")
 	require.NotEqual(t, memD1, memD2, "precondition: addr change flips the memory digest")
 
 	regD1 := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
@@ -325,7 +325,7 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 // resolved addr, registry digest hashes the resolved membership).
 func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	toolD := digestTools()
-	memD := memoryBindingDigest(true, memoryDefaultAddr)
+	memD := memoryDigest(true, memoryDefaultAddr)
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 
 	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
@@ -387,18 +387,18 @@ func TestRegistryMembershipDigest_Component(t *testing.T) {
 	assert.NotEqual(t, d, registryMembershipDigest(base, "worker", []string{"a", "b"}), "allowedCallers flip")
 }
 
-// TestMemoryBindingDigest_Component pins the memory component's own contract:
-// no binding → empty; addr changes flip it; deterministic.
-func TestMemoryBindingDigest_Component(t *testing.T) {
-	assert.Equal(t, "", memoryBindingDigest(false, ""), "no binding → empty component")
-	assert.Equal(t, "", memoryBindingDigest(false, memoryDefaultAddr),
-		"hasBinding is the gate — addr alone must not produce a digest")
+// TestMemoryDigest_Component pins the memory component's own contract:
+// no memory → empty; addr changes flip it; deterministic.
+func TestMemoryDigest_Component(t *testing.T) {
+	assert.Equal(t, "", memoryDigest(false, ""), "no memory → empty component")
+	assert.Equal(t, "", memoryDigest(false, memoryDefaultAddr),
+		"hasMemory is the gate — addr alone must not produce a digest")
 
-	d1 := memoryBindingDigest(true, memoryDefaultAddr)
-	d2 := memoryBindingDigest(true, "my-valkey.ns.svc:6380")
+	d1 := memoryDigest(true, memoryDefaultAddr)
+	d2 := memoryDigest(true, "my-valkey.ns.svc:6380")
 	assert.NotEmpty(t, d1)
 	assert.NotEqual(t, d1, d2, "different addrs → different components")
-	assert.Equal(t, d1, memoryBindingDigest(true, memoryDefaultAddr), "deterministic")
+	assert.Equal(t, d1, memoryDigest(true, memoryDefaultAddr), "deterministic")
 }
 
 // TestBudgetDigest_Component pins the M8 budget component's own contract:

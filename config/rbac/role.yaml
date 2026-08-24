@@ -50,7 +50,6 @@ rules:
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
-  - memorybindings
   - modelroutes
   - workflows
   verbs:
@@ -88,7 +87,6 @@ rules:
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status
-  - memorybindings/status
   - modelroutes/status
   - tenants/status
   - workflows/status

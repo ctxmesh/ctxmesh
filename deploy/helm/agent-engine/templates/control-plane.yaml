@@ -281,7 +281,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -314,7 +313,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status
@@ -388,7 +386,6 @@ rules:
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
-  - memorybindings
   - modelroutes
   - workflows
   verbs:
@@ -426,7 +423,6 @@ rules:
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status
-  - memorybindings/status
   - modelroutes/status
   - tenants/status
   - workflows/status
@@ -575,7 +571,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -597,7 +592,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status
@@ -684,7 +678,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -706,7 +699,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status

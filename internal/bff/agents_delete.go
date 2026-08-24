@@ -39,8 +39,8 @@ const agentDeploymentOwnerKind = "AgentDeployment"
 //
 // Owned children (those with an ownerReference to this AgentDeployment) are
 // garbage-collected by Kubernetes automatically and are NOT touched here. Independent
-// references (MCPToolBinding, AgentScalingPolicy, MemoryBinding whose agentRef
-// names this agent but who carry NO ownerReference) are intentionally LEFT IN PLACE —
+// references (MCPToolBinding, AgentScalingPolicy whose agentRef names this agent
+// but who carry NO ownerReference) are intentionally LEFT IN PLACE —
 // orphan pruning is deferred out of scope (ADR 0017). The caller must use
 // GET /api/agents/{ns}/{name}/references to preview the impact before deleting.
 //
@@ -105,8 +105,8 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 
 // handleAgentReferences serves GET /api/agents/{ns}/{name}/references — the
 // delete-impact preview (ADR 0017). Using the CALLER-SCOPED client it lists the
-// three reference kinds (MCPToolBinding, AgentScalingPolicy, MemoryBinding) in
-// the namespace and selects those whose spec.agentRef equals the agent name.
+// two reference kinds (MCPToolBinding, AgentScalingPolicy) in the namespace and
+// selects those whose spec.agentRef equals the agent name.
 //
 // For each referencing object it classifies:
 //   - ownedByAgent: true — the object carries an ownerReference whose Kind is
@@ -227,23 +227,9 @@ func collectAgentReferences(ctx context.Context, cl client.Client, ns, name stri
 		})
 	}
 
-	// MemoryBinding — references the agent via spec.agentRef.
-	memList, err := listMemoryBindings(ctx, cl, inNS...)
-	if err != nil {
-		return out, err
-	}
-	for i := range memList.Items {
-		obj := &memList.Items[i]
-		if obj.Spec.AgentRef != name {
-			continue
-		}
-		owned := hasOwnerRef(obj.OwnerReferences, agentDeploymentOwnerKind, name)
-		out.References = append(out.References, AgentReferenceEntry{
-			Kind:         "MemoryBinding",
-			Name:         obj.Name,
-			OwnedByAgent: owned,
-		})
-	}
+	// Session memory is a FOLDED spec field (ADR 0101 — the MemoryBinding CRD was
+	// retired), so it is deleted with the AgentDeployment itself and is not an
+	// independent reference to preview here.
 
 	// Tally the summary counts.
 	for _, ref := range out.References {

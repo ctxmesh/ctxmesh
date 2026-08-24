@@ -96,8 +96,8 @@ export class MemoryClient {
     if (!this.config.memoryWired) {
       throw new ConfigError(
         "memory is not wired for this agent: the launcher did not inject " +
-          "MEMORY_PORT/MEMORY_BACKEND_ADDR (no MemoryBinding). Bind memory " +
-          "to the agent to use client.memory.*",
+          "MEMORY_PORT/MEMORY_BACKEND_ADDR (no spec.sessionMemory). Configure " +
+          "sessionMemory on the agent to use client.memory.*",
       );
     }
   }
