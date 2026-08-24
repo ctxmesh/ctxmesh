@@ -569,6 +569,7 @@ func (m *memStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run,
 	exp := now.Add(lease)
 	pick.run.WorkerID = workerID
 	pick.run.LeaseExpiresAt = &exp
+	pick.run.Attempts++ // F-5: increment on reclaim (parity with the pg store)
 	return cloneRun(pick.run), nil
 }
 
