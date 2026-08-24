@@ -17,6 +17,8 @@ limitations under the License.
 package budget
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -142,7 +144,7 @@ func convCaps() Caps {
 func TestEnforcer_UnderBudgetAllows(t *testing.T) {
 	e := NewEnforcer()
 	caps := convCaps()
-	dec := e.PreCall(caps, mustMoney(t, "0.10"))
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.10"))
 	assert.True(t, dec.Allowed, "well under cap → allowed")
 }
 
@@ -151,10 +153,10 @@ func TestEnforcer_HardBreachRefusesBeforeCall(t *testing.T) {
 	caps := convCaps()
 
 	// Book $0.95 of actual spend.
-	_, _, _, _ = e.PostCall(caps, mustMoney(t, "0.95"))
+	_, _, _, _ = e.PostCall(context.Background(), caps, mustMoney(t, "0.95"))
 
 	// Next call estimated at $0.10 ⇒ 0.95 + 0.10 = 1.05 > 1.00 ⇒ refuse.
-	dec := e.PreCall(caps, mustMoney(t, "0.10"))
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.10"))
 	require.False(t, dec.Allowed, "spent+estimate over cap → refuse")
 	assert.Equal(t, DimensionConversation, dec.Dimension)
 	assert.Equal(t, "0.950000", dec.Spent.String(), "reports real already-spent, not incl. estimate")
@@ -166,12 +168,12 @@ func TestEnforcer_SoftBreachOneShotAlert(t *testing.T) {
 	caps := convCaps() // soft = $0.80
 
 	// First call $0.50 → still ok, no alert.
-	_, _, st, alert := e.PostCall(caps, mustMoney(t, "0.50"))
+	_, _, st, alert := e.PostCall(context.Background(), caps, mustMoney(t, "0.50"))
 	assert.Equal(t, StateOK, st)
 	assert.Nil(t, alert)
 
 	// Second call $0.40 → total $0.90 ≥ soft $0.80 → soft state, alert fires ONCE.
-	_, _, st, alert = e.PostCall(caps, mustMoney(t, "0.40"))
+	_, _, st, alert = e.PostCall(context.Background(), caps, mustMoney(t, "0.40"))
 	assert.Equal(t, StateSoft, st)
 	require.NotNil(t, alert, "crossing soft fires an alert")
 	assert.Equal(t, DimensionConversation, alert.Dimension)
@@ -179,7 +181,7 @@ func TestEnforcer_SoftBreachOneShotAlert(t *testing.T) {
 	assert.Equal(t, "0.800000", alert.SoftUSD.String())
 
 	// Third call keeps it in soft but must NOT re-alert (one-shot).
-	_, _, st, alert = e.PostCall(caps, mustMoney(t, "0.05"))
+	_, _, st, alert = e.PostCall(context.Background(), caps, mustMoney(t, "0.05"))
 	assert.Equal(t, StateSoft, st)
 	assert.Nil(t, alert, "soft alert is one-shot")
 }
@@ -189,11 +191,11 @@ func TestEnforcer_PostCallExceededState(t *testing.T) {
 	caps := convCaps()
 	// A call that lands exactly on the cap → exceeded state (the NEXT PreCall
 	// refuses), and no soft alert (exceeded supersedes soft).
-	_, _, st, alert := e.PostCall(caps, mustMoney(t, "1.00"))
+	_, _, st, alert := e.PostCall(context.Background(), caps, mustMoney(t, "1.00"))
 	assert.Equal(t, StateExceeded, st)
 	assert.Nil(t, alert)
 
-	dec := e.PreCall(caps, mustMoney(t, "0.000001"))
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.000001"))
 	assert.False(t, dec.Allowed, "already at cap → next call refused")
 }
 
@@ -202,8 +204,8 @@ func TestEnforcer_AgentDimensionTrips(t *testing.T) {
 	agentCap := mustMoney(t, "0.20")
 	caps := Caps{AgentName: "ag", AgentCap: &agentCap, SoftPct: 80}
 
-	_, _, _, _ = e.PostCall(caps, mustMoney(t, "0.15"))
-	dec := e.PreCall(caps, mustMoney(t, "0.10")) // 0.15+0.10 > 0.20
+	_, _, _, _ = e.PostCall(context.Background(), caps, mustMoney(t, "0.15"))
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.10")) // 0.15+0.10 > 0.20
 	require.False(t, dec.Allowed)
 	assert.Equal(t, DimensionAgent, dec.Dimension)
 }
@@ -216,8 +218,8 @@ func TestEnforcer_BothCapsConversationTripsFirst(t *testing.T) {
 		ConversationID: "c1", AgentName: "ag",
 		ConvCap: &convCap, AgentCap: &agentCap, SoftPct: 80,
 	}
-	_, _, _, _ = e.PostCall(caps, mustMoney(t, "0.45"))
-	dec := e.PreCall(caps, mustMoney(t, "0.10"))
+	_, _, _, _ = e.PostCall(context.Background(), caps, mustMoney(t, "0.45"))
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.10"))
 	require.False(t, dec.Allowed)
 	// Both dimensions trip; the response deterministically names conversation.
 	assert.Equal(t, DimensionConversation, dec.Dimension)
@@ -258,8 +260,8 @@ func TestEnforcer_ConcurrentPostCallNoRace(t *testing.T) {
 			defer wg.Done()
 			for range perG {
 				// Interleave PreCall + PostCall as the real proxy does.
-				_ = e.PreCall(caps, each)
-				_, _, _, _ = e.PostCall(caps, each)
+				_ = e.PreCall(context.Background(), caps, each)
+				_, _, _, _ = e.PostCall(context.Background(), caps, each)
 			}
 		}()
 	}
@@ -317,4 +319,49 @@ func TestEstimator_FloorThenLastObserved(t *testing.T) {
 	// A tiny observed cost below the floor is floored up.
 	e.Observe("route-a", mustMoney(t, "0.0000005"))
 	assert.Equal(t, "0.000001", e.Estimate("route-a").String(), "estimate never drops below the floor")
+}
+
+// fakeSpendBackend is a SpendBackend test double: it serves configured spend + optional read errors,
+// and records the conversation deltas booked.
+type fakeSpendBackend struct {
+	conv, agent       Money
+	convErr, agentErr error
+	added             []Money
+}
+
+func (f *fakeSpendBackend) AgentSpent(context.Context) (Money, error) { return f.agent, f.agentErr }
+func (f *fakeSpendBackend) ConvSpent(context.Context, string) (Money, error) {
+	return f.conv, f.convErr
+}
+func (f *fakeSpendBackend) AddConvSpend(_ context.Context, _ string, d Money) error {
+	f.added = append(f.added, d)
+	f.conv = f.conv.Add(d)
+	return nil
+}
+
+// TestEnforcer_BackendEnforcesAndFailsClosed is the F2 fix (M126/ADR 0099): a proxy-backed Enforcer
+// enforces the per-conversation cap against the DURABLE cross-replica total (not per-replica memory),
+// FAILS CLOSED on a backend read error, and books the conversation spend durably.
+func TestEnforcer_BackendEnforcesAndFailsClosed(t *testing.T) {
+	cap := mustMoney(t, "1.00")
+	caps := Caps{ConvCap: &cap, ConversationID: "c1", SoftPct: 80}
+
+	// Durable total $0.90; a $0.05 estimate stays under $1.00 → allowed.
+	be := &fakeSpendBackend{conv: mustMoney(t, "0.90")}
+	e := NewEnforcerWithBackend(be, nil)
+	require.True(t, e.PreCall(context.Background(), caps, mustMoney(t, "0.05")).Allowed)
+
+	// $0.90 + $0.15 > $1.00 → refused (the cross-replica total enforces, unlike a fresh per-replica $0).
+	dec := e.PreCall(context.Background(), caps, mustMoney(t, "0.15"))
+	require.False(t, dec.Allowed)
+	require.Equal(t, DimensionConversation, dec.Dimension)
+
+	// A backend READ ERROR must FAIL CLOSED (refuse), never allow on a stale/zero local total.
+	beErr := &fakeSpendBackend{convErr: errors.New("proxy unreachable")}
+	require.False(t, NewEnforcerWithBackend(beErr, nil).
+		PreCall(context.Background(), caps, mustMoney(t, "0.01")).Allowed, "fail closed on a backend read error")
+
+	// PostCall books the CONVERSATION spend durably (the per-agent key is booked by the Q8 accountant).
+	e.PostCall(context.Background(), caps, mustMoney(t, "0.10"))
+	require.Len(t, be.added, 1, "conv spend booked to the backend exactly once")
 }
