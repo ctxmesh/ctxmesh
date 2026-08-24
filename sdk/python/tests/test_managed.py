@@ -35,7 +35,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 from ctxmesh import ManagedConfig, agent, mint_conversation_id, run_managed_loop
 from ctxmesh.config import PlaneConfig, RunContext
-from ctxmesh.errors import ConfigError
 from ctxmesh.managed import _PERMISSIVE_PARAMETERS, _tool_schema
 from ctxmesh.tools import Tool
 
@@ -255,17 +254,21 @@ def test_managed_loop_dispatches_tool_and_returns_final(tool_gateway, echo_disco
     assert echo_discovery.mcp_calls[0]["arguments"] == TOOL_ARGS
 
 
-def test_managed_loop_max_steps_guard_trips_on_runaway(runaway_gateway, echo_discovery):
-    """A model that never stops calling tools must hit the bound, not hang."""
+def test_managed_loop_max_steps_forces_composition(runaway_gateway, echo_discovery):
+    """A model that never stops calling tools must TERMINATE at the bound with a forced,
+    tools-disabled composition (M129/Gate F, ADR 0103) — not a guard-slam raise that discards
+    the paid-for tool/delegation results, and not a hang. The terminal reason is machine-honest."""
     client = agent.from_config(_plane(runaway_gateway, echo_discovery))
     config = ManagedConfig(
         system_prompt="loop forever",
         model_route="tool-mock",
         max_steps=3,
     )
-    with pytest.raises(ConfigError) as exc:
-        run_managed_loop(client, config, "go")
-    assert "max_steps=3" in str(exc.value)
+    result = run_managed_loop(client, config, "go")
+    assert result.finish_reason == "budget_exhausted_composed", (
+        "hitting max_steps must force a composed answer, not raise"
+    )
+    assert result.steps == 3, "the composed answer is reported at the max_steps bound"
 
 
 def test_managed_loop_surfaces_approval_then_resumes(tool_gateway, echo_discovery, monkeypatch):
