@@ -126,6 +126,14 @@ spec:
             # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
             - name: TOKEN_SERVICE_URL
               value: http://agent-engine-token-service.agent-engine-system.svc:8443
+            # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2) — the fail-CLOSED switch for per-user OBO.
+            # "false" (default) keeps a no-OBO install unaffected. The Helm chart templates it from
+            # controllerManager.oboEgress.enabled: when the operator enables OBO egress, the BFF/worker
+            # REFUSE to start if run-capability minting is disabled (MCP_CAPABILITY_PRIVATE_KEY unset),
+            # so OBO can't silently downgrade to the shared org/public credential. Default "false" ==
+            # the chart default (no drift).
+            - name: MCP_OBO_REQUIRED
+              value: "false"
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).

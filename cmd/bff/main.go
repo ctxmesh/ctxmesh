@@ -451,6 +451,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 
+	// Fail CLOSED on a missing security-critical key (M124/Gate A, ADR 0095 §2): when the operator
+	// intends per-user OBO (MCP_OBO_REQUIRED — the chart wires it from oboEgress.enabled) but run-
+	// capability minting is disabled, REFUSE to serve. Else OBO tool calls silently downgrade to the
+	// shared org/public credential reporting success. Placed before the run-worker pool starts, so a
+	// durable worker (same process) refuses too. A no-OBO install (the default) is unaffected.
+	if err := bff.OBOMintingPrecondition(envTrue(os.Getenv("MCP_OBO_REQUIRED")), srv.CapabilityMintingEnabled()); err != nil {
+		return err
+	}
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Handler(),

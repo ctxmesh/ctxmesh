@@ -157,6 +157,19 @@ COST_ROLLUP_ENABLED_ENV_HELM = (
     "          value: {{ .Values.bff.costRollupEnabled | quote }}"
 )
 
+# MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): config/bff hardcodes "false" (no-OBO install
+# unaffected). Templated from controllerManager.oboEgress.enabled — when the operator turns ON OBO
+# egress, the BFF/worker fail CLOSED at start-up if capability minting is disabled (else per-user OBO
+# silently downgrades to the shared org/public credential). Default (enabled=false) renders "false"
+# == kustomize (no drift). Stays a quoted string (envTrue parses it).
+MCP_OBO_REQUIRED_ENV_KUSTOMIZE = (
+    '        - name: MCP_OBO_REQUIRED\n' '          value: "false"'
+)
+MCP_OBO_REQUIRED_ENV_HELM = (
+    "        - name: MCP_OBO_REQUIRED\n"
+    "          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}"
+)
+
 # TOKEN_SERVICE_TLS_REQUIRED (SEC-5): config/token-service hardcodes "false" (dev degrades
 # to HTTP). The chart templates it from tokenService.tls.required; true ⇒ the token-service
 # refuses to start without mTLS. values.yaml ships false so the DEFAULT render == kustomize.
@@ -429,6 +442,7 @@ def substitute(doc: str) -> str:
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
     doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
+    doc = doc.replace(MCP_OBO_REQUIRED_ENV_KUSTOMIZE, MCP_OBO_REQUIRED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
