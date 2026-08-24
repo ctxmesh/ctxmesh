@@ -56,16 +56,16 @@ controllerManager:
     collector: ""
     discovery: ""
 
-  # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into
-  # agents with remote OBO tools so tool calls are made as the end-user. Default OFF. A WORKING OBO
-  # install needs the whole block: enabled=true + the sidecar image + the platform capability PUBLIC
-  # key (safe to expose in values — it only VERIFIES capabilities, never signs) + its audience + the
-  # token-service URL. The locked credential namespace is SHARED with the BFF via
-  # bff.mcp.credentialNamespace (they must be the same namespace), so it is not repeated here.
+  # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into agents
+  # with remote OBO tools so tool calls are made as the end-user. For a WORKING OBO install set
+  # enabled=true + sidecarImage. The capability PUBLIC key is NO LONGER set here — it comes from the
+  # bff-capability Secret (provisioned by the keygen hook, capabilityKey.generate; M124/ADR 0095).
+  # tokenServiceURL + the credential namespace are DERIVED by default (token-service Service DNS + the
+  # install ns); leave them empty unless overriding. Setting the retired capabilityPublicKey is a hard
+  # error (the tombstone in templates/capability-keygen-job.yaml) — put the key in the Secret instead.
   oboEgress:
     enabled: false
     sidecarImage: ""
-    capabilityPublicKey: ""
     capabilityAudience: ""
     tokenServiceURL: ""
 
