@@ -179,6 +179,10 @@ type TenantSpec struct {
 	// is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
 	// isolation (same-tenant + platform only).
 	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	PeerTenants []string `json:"peerTenants,omitempty"`
 }
 
@@ -208,6 +212,7 @@ type TenantStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=tnt
 // +kubebuilder:printcolumn:name="Namespaces",type="integer",JSONPath=".status.memberNamespaces"
