@@ -20,9 +20,14 @@ metadata:
     app.kubernetes.io/component: run-worker
     app.kubernetes.io/managed-by: Helm
 spec:
-  # Replicas are owned by KEDA (the ScaledObject below); start at 0 (scale-to-zero in
-  # dev; the production overlay's minReplicaCount keeps a warm pool).
-  replicas: 0
+  # Warm floor: seed the Deployment at the worker's minReplicaCount so at least that many
+  # workers claim runs from t=0 — before KEDA's HPA reconciles, and even if KEDA is absent
+  # (otherwise a fresh durable-path install queues runs forever). KEDA (the ScaledObject
+  # below) then scales ABOVE the floor on the queued-run backlog. Default floor is 1 (any
+  # durable-path install gets a live worker — Gate A / ADR 0095 dec-3); the production
+  # overlay raises it to 2 (a warm pool, ADR 0051 Fork-C); set worker.minReplicaCount=0 to
+  # opt back into scale-to-zero.
+  replicas: {{ .Values.bff.runStore.worker.minReplicaCount }}
   selector:
     matchLabels:
       control-plane: run-worker
