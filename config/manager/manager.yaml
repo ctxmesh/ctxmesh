@@ -104,7 +104,7 @@ spec:
           - name: MCP_CREDENTIAL_NAMESPACE
             value: ""
           - name: TOKEN_SERVICE_URL
-            value: ""
+            value: http://agent-engine-token-service.agent-engine-system.svc:8443
           # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
           # controller inject the DEV-ONLY object-store + Langfuse feedback creds into agent pods;
           # gen_helm_chart templates it to {{ .Values.devDataPlane.enabled }}, so a

@@ -228,12 +228,18 @@ MCP_CAPABILITY_AUDIENCE_ENV_HELM = (
     "        - name: MCP_CAPABILITY_AUDIENCE\n"
     '          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}'
 )
+# TOKEN_SERVICE_URL (M124/Gate A): config now hardcodes the in-cluster token-service Service DNS (the
+# controller + BFF both delegate MCP grant writes / mint KB+OBO tokens against it — ADR 0029). The chart
+# DERIVES it from the install namespace + tokenService.tls.required (https under `profile: production`,
+# which SEC-5 requires). Default render (tls.required=false, ns=agent-engine-system) reproduces the
+# kustomize literal EXACTLY (unquoted) → no drift. Un-set env silently disabled KB retrieval (audit G13).
 TOKEN_SERVICE_URL_ENV_KUSTOMIZE = (
-    '        - name: TOKEN_SERVICE_URL\n' '          value: ""'
+    "        - name: TOKEN_SERVICE_URL\n"
+    "          value: http://agent-engine-token-service.agent-engine-system.svc:8443"
 )
 TOKEN_SERVICE_URL_ENV_HELM = (
     "        - name: TOKEN_SERVICE_URL\n"
-    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}'
+    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}'
 )
 
 # OPS-2 — the dev-data-plane gate on the manager. config/manager hardcodes "true" (== the kustomize

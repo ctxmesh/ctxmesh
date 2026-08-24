@@ -116,6 +116,8 @@ spec:
           value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
           value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+        - name: TOKEN_SERVICE_URL
+          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER
