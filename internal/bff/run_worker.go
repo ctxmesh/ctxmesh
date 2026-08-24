@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -88,20 +89,32 @@ const sweepWaitingInterval = 30 * time.Second
 // re-queues `waiting` runs whose children have all gone terminal — the belt-and-braces safety net
 // for the crash window between CompleteAndWake and the actual wake (and the sole wake path for the
 // in-mem store across a restart). The goroutine is ctx-cancellable and terminates with the worker pool.
-func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) {
+func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) func() {
 	cfg = cfg.withDefaults()
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		host = "run-worker"
 	}
 	s.log.Info("run-worker pool starting (ADR 0034)", "concurrency", cfg.Concurrency, "lease", cfg.Lease)
+	// F-1 (M125/ADR 0097): join the worker loops on a WaitGroup so the shutdown path can wait for
+	// each in-flight run to release its lease (inline, in executeClaimedRun) BEFORE the process
+	// exits — else SIGKILL at terminationGracePeriod leaves leases held and a peer waits a full
+	// lease-TTL to reclaim. The returned Wait MUST be called time-bounded (a non-ctx-honoring
+	// executor can outlast the drain grace).
+	var wg sync.WaitGroup
 	for i := range cfg.Concurrency {
 		workerID := fmt.Sprintf("%s-%d", host, i)
-		go s.runWorkerLoop(ctx, workerID, cfg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.runWorkerLoop(ctx, workerID, cfg)
+		}()
 	}
 	// SweepWaiting goroutine (m67.4, ADR 0060 §3): periodically re-queues waiting runs whose children
 	// are all-terminal — the belt-and-braces for the crash window + in-mem-store across restart.
+	// Left OUT of the WaitGroup (idempotent — nothing to drain on shutdown).
 	go s.sweepWaitingLoop(ctx)
+	return wg.Wait
 }
 
 // sweepWaitingLoop runs SweepWaiting on a ~30s tick until ctx is cancelled. It logs swept run ids at
@@ -269,6 +282,17 @@ func (s *Server) executeClaimedRun(
 	// blip does NOT cancel (see startHeartbeat) — a run we may still hold is not aborted on a DB hiccup.
 	execCtx, cancelExec := context.WithCancel(execCtx)
 	defer cancelExec()
+	// F-1 (M125/ADR 0097): release the lease INLINE on this (WaitGroup-joined) loop goroutine when we
+	// exit under a cancelled pool ctx (a drain), so a peer reclaims PROMPTLY and the process does not
+	// exit before the release lands. ReleaseLease is scoped to worker_id+running ⇒ a finished /
+	// suspended / reclaimed run is a safe no-op.
+	defer func() {
+		if ctx.Err() != nil {
+			if err := s.runStore.ReleaseLease(rn.ID, workerID); err != nil {
+				s.log.Error(err, "run-worker: release lease on drain failed", "run", rn.ID, "worker", workerID)
+			}
+		}
+	}()
 
 	// L10: stamp this worker's id on the exec context so executeRun's terminal writes are FENCED on
 	// this worker still holding the lease. If a peer reclaims the run (D3) while our invoke is
@@ -301,10 +325,7 @@ func (s *Server) executeClaimedRun(
 			case <-time.After(drainGrace):
 				s.log.Info("run-worker: draining — handing off an unfinished run for prompt reclaim (D4)",
 					"run", rn.ID, "worker", workerID)
-				cancelExec()
-				if err := s.runStore.ReleaseLease(rn.ID, workerID); err != nil {
-					s.log.Error(err, "run-worker: release lease on drain failed", "run", rn.ID, "worker", workerID)
-				}
+				cancelExec() // the lease is released inline on the loop goroutine after the executor returns (F-1)
 			}
 		}
 	}()

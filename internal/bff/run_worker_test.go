@@ -137,6 +137,26 @@ func TestPoisonRun_DeadLetteredNotReReclaimed(t *testing.T) {
 	assert.ErrorIs(t, err, run.ErrNoQueuedRun, "the dead-lettered run must not be re-reclaimed")
 }
 
+// TestStartRunWorkers_WaitJoinsOnDrain is the F-1 fix (M125/ADR 0097): StartRunWorkers returns a
+// Wait the shutdown path calls so the process does not exit before the worker loops finish (each
+// releasing its in-flight lease inline). Here Wait() must return promptly once the pool ctx is
+// cancelled — proving the WaitGroup joins the loops rather than the old fire-and-forget goroutines.
+func TestStartRunWorkers_WaitJoinsOnDrain(t *testing.T) {
+	s := &Server{runStore: run.NewMemStore(), log: logr.Discard()}
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := s.StartRunWorkers(ctx, RunWorkerConfig{Concurrency: 3, PollBackoff: 10 * time.Millisecond})
+	require.NotNil(t, wait, "StartRunWorkers must return a Wait func for the drain join")
+
+	cancel() // drain
+	done := make(chan struct{})
+	go func() { wait(); close(done) }()
+	select {
+	case <-done: // the loops exited + the WaitGroup joined
+	case <-time.After(2 * time.Second):
+		t.Fatal("F-1: Wait() must return after the pool ctx is cancelled (loops joined, not orphaned)")
+	}
+}
+
 // TestReclaimUnderBacklog is the F-4 fix (M125/ADR 0097): the pre-M125 worker reclaimed an
 // abandoned run ONLY when the queue was empty, so under sustained backlog a dead worker's run
 // starved — the worst time. Now a periodic reclaim-first tick rescues it even with the queue full.
