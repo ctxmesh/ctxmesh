@@ -990,7 +990,7 @@ spec:
         - name: MCP_CAPABILITY_AUDIENCE
           value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: DEV_DATA_PLANE
@@ -1202,7 +1202,7 @@ spec:
       containers:
       - env:
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_TLS_CERT_FILE
           value: /etc/token-service/tls/tls.crt
         - name: TOKEN_SERVICE_TLS_KEY_FILE

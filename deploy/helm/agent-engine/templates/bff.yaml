@@ -106,6 +106,8 @@ spec:
           value: /etc/agent-engine/recipes
         - name: STATELAYER_ADDR
           value: {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}
+        - name: COST_ROLLUP_ENABLED
+          value: {{ .Values.bff.costRollupEnabled | quote }}
         - name: PLATFORM_GENERATION_MODELS
           value: {{ .Values.bff.generation.platformModels | quote }}
         - name: MCP_ENABLED
@@ -115,7 +117,7 @@ spec:
         - name: CONSOLE_URL
           value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: OIDC_ENABLED

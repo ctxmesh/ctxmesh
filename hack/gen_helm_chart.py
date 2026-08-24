@@ -131,12 +131,30 @@ CONSOLE_URL_ENV_HELM = (
 # no extra namespace/RBAC). The chart templates it from `bff.mcp.credentialNamespace`;
 # setting it renders the dedicated namespace + RBAC (templates/mcp-credentials.yaml) and
 # routes grants there. values.yaml ships "" so the DEFAULT render == kustomize (no drift).
+# MCP_CREDENTIAL_NAMESPACE (M124/Gate A): config now hardcodes the install namespace so grant Secrets
+# live in ONE locked namespace the token-service already has RBAC for (config/token-service/role.yaml) —
+# a fresh install routes grants coherently instead of the legacy per-request-namespace path. The chart
+# DERIVES the env from bff.mcp.credentialNamespace ELSE the install namespace, but the *value* stays ""
+# (values.yaml) so templates/mcp-credentials.yaml's gate stays OFF — no extra Namespace/Role renders,
+# no drift + no broad-RBAC regression. Default render (value "", ns=agent-engine-system) == the literal.
 MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE = (
-    '        - name: MCP_CREDENTIAL_NAMESPACE\n' '          value: ""'
+    "        - name: MCP_CREDENTIAL_NAMESPACE\n" "          value: agent-engine-system"
 )
 MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
     "        - name: MCP_CREDENTIAL_NAMESPACE\n"
-    "          value: {{ .Values.bff.mcp.credentialNamespace | quote }}"
+    "          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}"
+)
+
+# COST_ROLLUP_ENABLED (M124/Gate A, audit G11e): config/bff hardcodes "1" so the cost-rollup worker
+# runs by default (→ cost_rollups → /api/cost + chargeback). Templated from bff.costRollupEnabled;
+# default "1" renders == kustomize (no drift). BFF-only literal (do NOT add to the run-worker — same
+# binary, two rollup writers). The gate is exactly "1" (cmd/bff/main.go), so it stays a quoted string.
+COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
+    '        - name: COST_ROLLUP_ENABLED\n' '          value: "1"'
+)
+COST_ROLLUP_ENABLED_ENV_HELM = (
+    "        - name: COST_ROLLUP_ENABLED\n"
+    "          value: {{ .Values.bff.costRollupEnabled | quote }}"
 )
 
 # TOKEN_SERVICE_TLS_REQUIRED (SEC-5): config/token-service hardcodes "false" (dev degrades
@@ -414,6 +432,7 @@ def substitute(doc: str) -> str:
     doc = doc.replace(MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE, MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM)
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
+    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)

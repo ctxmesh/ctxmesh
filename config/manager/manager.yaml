@@ -102,7 +102,7 @@ spec:
           - name: MCP_CAPABILITY_AUDIENCE
             value: ""
           - name: MCP_CREDENTIAL_NAMESPACE
-            value: ""
+            value: agent-engine-system
           - name: TOKEN_SERVICE_URL
             value: http://agent-engine-token-service.agent-engine-system.svc:8443
           # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
