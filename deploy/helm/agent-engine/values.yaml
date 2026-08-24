@@ -13,6 +13,23 @@
 # renders leniently, preserving the lean single-replica dev default + no-drift.
 profile: ""
 
+# Security enforcement acknowledgments (GA Gate A, ADR 0096). These have NO effect
+# under the default (dev) profile; under `profile: production` the HA guards
+# (templates/ha-profile-guards.yaml) require an EXPLICIT operator choice so a
+# reduced/deferred security posture can never ship SILENTLY.
+security:
+  # Tenant-label admission enforcement. The tenant-label ValidatingWebhook (which
+  # forbids a non-controller principal from repointing a namespace's tenant label — a
+  # cross-tenant boundary move) needs webhook-serving-cert infra that ships in Gate E
+  # (M128, ADR 0096). Until then a production install must EXPLICITLY acknowledge that
+  # admission enforcement is off by setting this to the exact string
+  # "unenforced-UNSAFE-acknowledged". Compensating control: repointing the label
+  # requires namespace-UPDATE RBAC, which no tenant principal holds in a sane tenancy
+  # model — the webhook is defence-in-depth against RBAC misconfiguration. Empty here
+  # (dev) → the production guard is dormant; the shipped values-production.yaml sets
+  # the acknowledgment so the reduced posture is visible in the operator's own diff.
+  tenantLabelEnforcement: ""
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (agent-engine-system) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
