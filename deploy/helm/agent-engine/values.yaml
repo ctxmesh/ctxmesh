@@ -226,6 +226,14 @@ prometheus:
       port: http-usermetric
       # Scrape interval for the queue-proxy request metrics.
       interval: 15s
+  # Run-pipeline SLIs (M128/Gate E): a PodMonitor scraping the BFF + run-worker `metrics` port
+  # (:9092) + a PrometheusRule with the dead-worker-pool alert. OFF by default (needs the
+  # Prometheus Operator CRDs). Enable on a monitored cluster to alert on a stalled run pipeline.
+  runPipeline:
+    enabled: false
+    interval: 30s
+    # Fire when NO run-worker claim loop is live for this long (the pool is dead / crash-looping).
+    deadPoolFor: 5m
 networkPolicy:
   # Install the NetworkPolicy that restricts /metrics ingress to namespaces
   # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).

@@ -80,6 +80,10 @@ type Server struct {
 	// store; M32 swaps a durable backend behind the same seam. Always non-nil (defaulted).
 	runStore run.Store
 
+	// metrics is the run-pipeline Prometheus exporter (M128/Gate E), served on a private
+	// listener off the public edge (ADR 0041). Non-nil after NewServer.
+	metrics *Metrics
+
 	// convStore holds the conversation → active-agent pointer (M67, ADR 0060 §5). Handoff (handoff_to)
 	// terminates A's run and sets this pointer to B, so the conversation's NEXT turn routes to B. Always
 	// non-nil (defaulted to a mem twin) — durable Postgres when a run-store DSN is set, so a handoff
@@ -628,8 +632,20 @@ func NewServer(opts Options) *Server {
 		opts.Log.Info("mcp: MCP_CAPABILITY_PRIVATE_KEY not set — run capabilities are NOT minted; a tool call " +
 			"resolves as unattended (org/public only) until the platform capability key + egress sidecar are deployed (ADR 0030).")
 	}
+	// Run-pipeline metrics (M128/Gate E): a dedicated registry served on the private
+	// metrics listener. The run store reports queue depth at scrape time when it
+	// implements CountQueued (the durable Postgres store does; a hot store omits it).
+	var queued queuedCounter
+	if qc, ok := s.runStore.(queuedCounter); ok {
+		queued = qc
+	}
+	s.metrics = newMetrics(queued)
 	return s
 }
+
+// MetricsHandler serves the run-pipeline Prometheus exporter. It is mounted on a
+// PRIVATE listener (METRICS_ADDR), never the public edge (ADR 0041, M128/Gate E).
+func (s *Server) MetricsHandler() http.Handler { return s.metrics.Handler() }
 
 // CapabilityMintingEnabled reports whether the BFF/worker can mint run capabilities — true iff a
 // valid platform capability private seed was configured (MCP_CAPABILITY_PRIVATE_KEY decoded into a

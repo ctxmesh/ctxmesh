@@ -53,6 +53,11 @@ spec:
             - name: http
               containerPort: 9090
               protocol: TCP
+            # Private run-pipeline metrics (M128/Gate E) — the exporter listens on
+            # :9092 (METRICS_ADDR default), off the public :9090 edge (ADR 0041).
+            - name: metrics
+              containerPort: 9092
+              protocol: TCP
           # Non-secret feature flags. PROVIDER_CONNECT_ENABLED is the ADR 0015
           # connect-a-provider kill-switch: "true" (the default) exposes the
           # POST/GET /api/providers endpoints; "false" on a hardened install makes
