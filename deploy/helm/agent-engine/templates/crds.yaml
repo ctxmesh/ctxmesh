@@ -9,6 +9,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: agentdeployments.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -2021,6 +2022,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: agentregistries.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -2518,6 +2520,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: agentscalingpolicies.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -3010,6 +3013,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: agentteams.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -3269,6 +3273,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: agentversions.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -4856,6 +4861,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: alertpolicies.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -5164,6 +5170,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: clustercredentialstores.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -5836,6 +5843,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: credentialstores.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -6506,6 +6514,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: evalsuites.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -6965,6 +6974,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: guardrailpolicies.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -7329,6 +7339,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: knowledgebases.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -7659,6 +7670,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: mcptoolbindings.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -8028,6 +8040,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: modelroutes.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -8472,6 +8485,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: secretbindings.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -8788,6 +8802,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: tenants.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai
@@ -9358,6 +9373,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+    helm.sh/resource-policy: keep
   name: workflows.agents.ctxmesh.ai
 spec:
   group: agents.ctxmesh.ai

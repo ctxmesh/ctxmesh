@@ -1,6 +1,15 @@
 # This kustomization.yaml is not intended to be run by itself,
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
+
+# helm.sh/resource-policy: keep protects the CRDs — and therefore every custom resource
+# they own — from a `helm uninstall`: deleting a CRD cascade-deletes ALL its CRs, so an
+# accidental uninstall would nuke every AgentDeployment/Tenant/ModelRoute/etc. The
+# annotation is helm-only (inert for `make deploy`/kustomize), so it lives safely in this
+# shared base and keeps the no-drift contract (both sides carry it). M128/Gate E, ADR 0102.
+commonAnnotations:
+  helm.sh/resource-policy: keep
+
 resources:
 - bases/agents.ctxmesh.ai_agentdeployments.yaml
 - bases/agents.ctxmesh.ai_agentversions.yaml
