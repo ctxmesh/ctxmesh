@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,9 +37,15 @@ func (f *fakeSecret) SetPublicKey(_ context.Context, _, _, pub string) error {
 	return nil
 }
 
-type fakeDeploy struct{ restarted []string }
+type fakeDeploy struct {
+	restarted []string
+	err       error // if set, RolloutRestart returns it
+}
 
 func (d *fakeDeploy) RolloutRestart(_ context.Context, _, name string) error {
+	if d.err != nil {
+		return d.err
+	}
 	d.restarted = append(d.restarted, name)
 	return nil
 }
@@ -108,6 +115,30 @@ func TestEnsure_PublicOnly_FailsLoud(t *testing.T) {
 	_, err := EnsureCapabilityKey(context.Background(), sec, &fakeDeploy{}, "ns", consumers, log.Log)
 	if err == nil {
 		t.Fatal("public-only Secret is incoherent — expected an error")
+	}
+}
+
+func TestEnsure_ExistsButEmpty_FailsLoud(t *testing.T) {
+	// A BYO operator created bff-capability with the wrong key names / a placeholder → neither key present.
+	sec := &fakeSecret{priv: "", pub: "", exists: true}
+	dep := &fakeDeploy{}
+	changed, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	if err == nil {
+		t.Fatal("an existing-but-empty Secret must fail loud, not pass as provisioned")
+	}
+	if changed || sec.created {
+		t.Fatalf("must not overwrite/regenerate an existing Secret; changed=%v created=%v", changed, sec.created)
+	}
+}
+
+func TestEnsure_RestartFailure_FailsLoud(t *testing.T) {
+	// Key generated, but a consumer restart fails (RBAC drift / apiserver error): the hook must FAIL,
+	// not swallow it (a key-less consumer = silently-broken OBO — the thing Gate A kills).
+	sec := &fakeSecret{exists: false}
+	dep := &fakeDeploy{err: errors.New("forbidden")}
+	_, err := EnsureCapabilityKey(context.Background(), sec, dep, "ns", consumers, log.Log)
+	if err == nil {
+		t.Fatal("a rollout-restart failure must fail the hook loud")
 	}
 }
 

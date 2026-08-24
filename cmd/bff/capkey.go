@@ -79,8 +79,10 @@ func (o *clientSecretOps) Create(ctx context.Context, ns, name, priv, pub string
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			// Never GC on `helm uninstall`-of-a-single-resource / hook cleanup — keep the key so an
-			// upgrade/reinstall doesn't re-key and invalidate every OBO grant (ADR 0095).
+			// resource-policy:keep is INERT here (this Secret is client-go-created, never Helm-managed, so
+			// Helm would never delete it) — kept only as a signal + in case it's ever Helm-adopted. The
+			// never-re-key guarantee comes from the get-before-create logic, NOT this annotation. NB: what
+			// actually destroys the key is `helm uninstall` deleting the chart-owned Namespace (see NOTES).
 			Annotations: map[string]string{"helm.sh/resource-policy": "keep"},
 			Labels:      map[string]string{"app.kubernetes.io/name": "agent-engine", "app.kubernetes.io/managed-by": "agent-engine-keygen"},
 		},

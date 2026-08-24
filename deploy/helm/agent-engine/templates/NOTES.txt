@@ -107,6 +107,15 @@ Check readiness:
   kubectl -n {{ .Values.namespace }} rollout status deploy/agent-engine-bff
 {{- end }}
   kubectl get crds | grep agents.ctxmesh.ai
+{{- if .Values.capabilityKey.generate }}
+
+Capability key (OBO): a platform Ed25519 keypair was generated into the
+`bff-capability` Secret ({{ .Values.namespace }}) on install and is NEVER re-keyed on
+upgrade. PRODUCTION: BYO a managed key by pre-creating that Secret and setting
+`capabilityKey.generate=false`; and BACK UP the Secret — `helm uninstall` deletes this
+namespace (and the key with it), so a reinstall generates a NEW key and every persisted
+OBO grant becomes invalid (mass re-consent).
+{{- end }}
 
 This chart's control-plane + CRD templates are generated from
 `kustomize build config/default` (no-drift with `make deploy`).

@@ -35,8 +35,9 @@ type SecretOps interface {
 	// Get returns the private-seed + public-key values and whether the Secret exists. A missing Secret
 	// is (─,─,false,nil), NOT an error.
 	Get(ctx context.Context, ns, name string) (privB64, pubB64 string, exists bool, err error)
-	// Create writes a new Secret with both keys (stringData) + the resource-policy:keep annotation.
-	// An AlreadyExists error (a race with a parallel hook) must be surfaced so the caller re-Gets.
+	// Create writes a new Secret with both keys (stringData). An AlreadyExists error (a race with a
+	// parallel hook) is surfaced and the caller treats it as already-provisioned — the winning hook owns
+	// the restart. (A rare priv-only race is completed by the next pre-upgrade run.)
 	Create(ctx context.Context, ns, name, privB64, pubB64 string) error
 	// SetPublicKey patches ONLY the public key onto an existing Secret (a BYO-private-only operator);
 	// it must never touch the private seed.
@@ -53,6 +54,7 @@ type DeployOps interface {
 //   - absent            → generate a fresh pair, Create it;
 //   - private-only (BYO)→ derive the public key from the seed, patch only the public key;
 //   - both present      → no-op (NEVER re-key);
+//
 // and, if it changed the Secret, rollout-restarts the consumers so their pods pick up the env at start
 // (on a fresh install the Deployments race the post-install hook and resolve env only at container
 // start — without the restart a pod that started key-less stays key-less forever).
@@ -95,6 +97,12 @@ func EnsureCapabilityKey(ctx context.Context, sec SecretOps, dep DeployOps, ns s
 		// Public-only is incoherent (nothing can sign) — loud, but do not fabricate a private key.
 		return false, fmt.Errorf("%s has a public key but no private seed — it cannot sign capabilities; provide the matching MCP_CAPABILITY_PRIVATE_KEY or delete the Secret to regenerate", SecretName)
 
+	case priv == "" && pub == "":
+		// Exists but EMPTY (e.g. a BYO operator created it with the wrong data-key names, or a placeholder).
+		// Do NOT silently pass it off as provisioned — that is exactly the silent-when-not failure this
+		// milestone kills. We also cannot generate INTO it (never-overwrite), so fail loud.
+		return false, fmt.Errorf("%s exists but contains neither MCP_CAPABILITY_PRIVATE_KEY nor MCP_CAPABILITY_PUBLIC_KEY — populate it with a keypair (or delete it so the keygen regenerates); the platform cannot mint capabilities without a key", SecretName)
+
 	default:
 		// Both present → the never-re-key invariant: do nothing.
 		log.Info("bff-capability already provisioned — no change", "secret", SecretName)
@@ -102,10 +110,13 @@ func EnsureCapabilityKey(ctx context.Context, sec SecretOps, dep DeployOps, ns s
 
 	if changed {
 		for _, name := range consumers {
+			// FAIL LOUD: a consumer that did NOT restart keeps running with the pre-keygen (empty) env and
+			// OBO is silently dead. A non-NotFound restart error aborts the hook (with backoffLimit:0 so it
+			// fails the install rather than retrying-to-a-no-op). NotFound is tolerated by the adapter (nil).
 			if rErr := dep.RolloutRestart(ctx, ns, name); rErr != nil {
-				// Best-effort: a consumer that's absent/failed to restart shouldn't fail the hook, but log loud.
-				log.Error(rErr, "rollout-restart failed — the consumer may need a manual restart to pick up the key", "deployment", name)
+				return true, fmt.Errorf("rollout-restart %s (needed to pick up the new capability key): %w", name, rErr)
 			}
+			log.Info("requested rollout-restart to pick up the capability key", "deployment", name)
 		}
 	}
 	return changed, nil

@@ -13,6 +13,11 @@ one Secret + get/patch it + rollout-restart the named consumers. Nothing else.
 Weights: SA/Role/RB at -5 (before the Job), the keygen Job at 0 (BEFORE the preflight Job at weight 5,
 so the preflight validates the just-generated key). Gate with capabilityKey.generate=false to BYO.
 */ -}}
+{{- /* Tombstone: controllerManager.oboEgress.capabilityPublicKey was RETIRED (M124) — the public key now
+       lives in the bff-capability Secret. Fail loud rather than silently ignore an operator's override. */ -}}
+{{- if .Values.controllerManager.oboEgress.capabilityPublicKey }}
+{{- fail "controllerManager.oboEgress.capabilityPublicKey is RETIRED (M124/ADR 0095) — the capability public key is provisioned in the bff-capability Secret by the keygen hook (capabilityKey.generate) or BYO by pre-creating that Secret. Remove this value." }}
+{{- end }}
 {{- if .Values.capabilityKey.generate }}
 apiVersion: v1
 kind: ServiceAccount
@@ -48,10 +53,13 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "patch"]
     resourceNames: ["bff-capability"]
-  # rollout-restart the named consumers only, so they pick up the freshly-provisioned key.
+  # rollout-restart the named consumers only, so they pick up the freshly-provisioned key. NOTE: k8s
+  # `patch` on a Deployment is full-spec mutation (not just the restart annotation), so this SA can in
+  # principle re-image these 3 Deployments — an accepted, bounded risk (a narrow, name-pinned, in-namespace
+  # exception per ADR 0095/0011; the SA/Role persist between hook runs by design for ordering).
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "patch"]
+    verbs: ["patch"]
     resourceNames: ["agent-engine-bff", "agent-engine-controller-manager", "run-worker"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -88,7 +96,10 @@ metadata:
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: 1
+  # backoffLimit 0: a failed keygen (e.g. a rollout-restart that couldn't reach a consumer) must FAIL the
+  # install loudly, not retry — the in-Job retry would hit "already provisioned" and no-op to a false
+  # success, re-silencing a key-less consumer (the recovery is a `helm upgrade` re-run, not a Job retry).
+  backoffLimit: 0
   activeDeadlineSeconds: 120
   template:
     metadata:

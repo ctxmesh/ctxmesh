@@ -62,7 +62,7 @@ func Check(ctx context.Context, cfg Config, ping PingDSN) []error {
 			errs = append(errs, err)
 		}
 	} else if cfg.CapabilityPrivateSeed != "" || cfg.CapabilityPublicKey != "" {
-		errs = append(errs, fmt.Errorf("capability keypair is HALF-configured (only the %s is set) — OBO needs BOTH the private seed (BFF/token-service) and the derived public key (controller→sidecars)", halfName(cfg)))
+		errs = append(errs, fmt.Errorf("capability keypair is HALF-configured (only the %s is set) — OBO needs BOTH the private seed (BFF/run-worker sign) and the derived public key (controller→sidecars verify)", halfName(cfg)))
 	}
 
 	// 3. Control-plane store must be reachable.

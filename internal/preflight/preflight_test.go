@@ -23,8 +23,8 @@ func TestCheck_CoherentConfig_NoErrors(t *testing.T) {
 	priv, pub := realPair(t)
 	cfg := Config{
 		RequiredEnv: map[string]string{
-			"TOKEN_SERVICE_URL":       "http://ts.svc:8443",
-			"EGRESS_SIDECAR_IMAGE":    "dev.local/egress-sidecar:x",
+			"TOKEN_SERVICE_URL":         "http://ts.svc:8443",
+			"EGRESS_SIDECAR_IMAGE":      "dev.local/egress-sidecar:x",
 			"MCP_CAPABILITY_PUBLIC_KEY": pub,
 			"MCP_CREDENTIAL_NAMESPACE":  "agent-engine-system",
 			"COST_ROLLUP_ENABLED":       "1",
