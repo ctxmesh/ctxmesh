@@ -647,7 +647,7 @@ func OBOMintingPrecondition(oboRequired, mintingEnabled bool) error {
 		return errors.New("MCP_OBO_REQUIRED=true but run-capability minting is DISABLED " +
 			"(MCP_CAPABILITY_PRIVATE_KEY unset or invalid) — refusing to serve: per-user OBO would " +
 			"silently downgrade to the shared org/public credential (ADR 0095 §2). Provide a valid " +
-			"capability private seed (the keygen hook provisions one by default) or unset MCP_OBO_REQUIRED.")
+			"capability private seed (the keygen hook provisions one by default) or unset MCP_OBO_REQUIRED")
 	}
 	return nil
 }
