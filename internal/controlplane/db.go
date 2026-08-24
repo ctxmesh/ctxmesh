@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"io/fs"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // pgx stdlib driver ("pgx"), as internal/run + internal/credstore use
+	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
+
+	"github.com/ctxmesh/agent-engine/internal/dbpool"
 )
 
 // migrationsFS embeds the control-plane schema. goose applies these in order (0001_, 0002_, …). The
@@ -43,6 +45,7 @@ func OpenDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: open postgres: %w", err)
 	}
+	dbpool.Apply(db, "CONTROLPLANE_MAX_OPEN_CONNS", 10) // F-8: bound the pool (was unbounded), ADR 0097
 	if err := Migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -59,6 +62,7 @@ func Connect(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: open postgres: %w", err)
 	}
+	dbpool.Apply(db, "CONTROLPLANE_MAX_OPEN_CONNS", 10) // F-8: bound the pool (was unbounded), ADR 0097
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("controlplane: ping postgres: %w", err)

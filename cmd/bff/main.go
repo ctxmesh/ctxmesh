@@ -64,6 +64,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/dbpool"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
 	"github.com/ctxmesh/agent-engine/internal/preflight"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
@@ -293,6 +294,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		if dbErr != nil {
 			return fmt.Errorf("open run-store postgres: %w", dbErr)
 		}
+		dbpool.Apply(db, "RUN_STORE_MAX_OPEN_CONNS", 15) // F-8: bound the run-store pool (ADR 0097)
 		defer func() { _ = db.Close() }()
 		runStore, err = runstore.NewPostgresStore(context.Background(), db)
 		if err != nil {
