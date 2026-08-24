@@ -38,8 +38,12 @@ const (
 	poisonRedeliveryCap = 5
 	// reclaimInterval time-gates how often a worker loop probes reclaim FIRST (before the queue) so an
 	// abandoned run makes progress even under sustained backlog (F-4, M125/ADR 0097).
-	reclaimInterval             = 5 * time.Second
-	defaultRunWorkerLease       = 2 * runExecTimeout
+	reclaimInterval = 5 * time.Second
+	// defaultRunWorkerLease is FIXED (F4/ADR 0098 decouples it from runExecTimeout — post-M125 the
+	// heartbeat, not lease>timeout, prevents false reclaim; deriving 2×a 10m timeout would make the
+	// pool-wide lease 20m and throw away M125's prompt reclaim). The self-fence in startHeartbeat
+	// bounds the sustained-outage duplicate-execution window a long turn would otherwise open.
+	defaultRunWorkerLease       = 180 * time.Second
 	defaultRunWorkerPollBackoff = time.Second
 	// defaultRunWorkerDrainGrace bounds how long a draining worker (SIGTERM → pool ctx cancelled)
 	// lets an in-flight run keep going before it hands the run off — cancels it + releases its lease
@@ -409,6 +413,7 @@ func (s *Server) startHeartbeat(
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		lastRenewed := time.Now() // F4/ADR 0098 self-fence clock
 		for {
 			select {
 			case <-hbCtx.Done():
@@ -417,7 +422,7 @@ func (s *Server) startHeartbeat(
 				err := s.runStore.Heartbeat(runID, workerID, lease)
 				switch {
 				case err == nil:
-					// renewed — keep holding the lease.
+					lastRenewed = time.Now() // renewed — keep holding the lease.
 				case errors.Is(err, run.ErrLeaseLost):
 					// DEFINITIVE loss: a peer reclaimed this run (its worker_id changed) — or our own
 					// run went terminal. Either way stop renewing + cancel exec (D3) so a zombie stops
@@ -435,12 +440,21 @@ func (s *Server) startHeartbeat(
 					}
 					return
 				default:
-					// F-2 (M125/ADR 0097): a TRANSIENT error (a DB blip / pool-exhaustion hiccup, F-8) must
-					// NOT stop renewal. Stopping lets the lease EXPIRE -> a peer falsely reclaims a run we
-					// still hold -> DUPLICATE execution (the pre-M125 bug). Log + keep renewing next tick;
-					// the run's own exec timeout bounds it. (A time-based self-fence for a lease-long DB
-					// outage — ADR 0097 F-2 stage 2 — is a follow-on; stage 1 is strictly safer than the
-					// old "stop on first error".)
+					// F-2 (M125/ADR 0097): a TRANSIENT error (a DB blip / pool-exhaustion hiccup, F-8) must NOT
+					// stop renewal — stopping lets the lease EXPIRE → a peer falsely reclaims → DUPLICATE execution.
+					// BUT (F4 self-fence, ADR 0098): if we have not renewed for a FULL lease interval (a sustained
+					// DB outage), we can no longer prove we hold the lease — a peer WILL reclaim it once it can
+					// reach the DB. Cancel exec so we don't run in parallel with the reclaiming peer. (The narrow
+					// window where our terminal write could clobber before the peer reclaims is self-mitigated —
+					// the same DB outage fails that write too; the full cause-suppression is carded m52.G17.)
+					if time.Since(lastRenewed) > lease {
+						s.log.Error(err, "run-worker: heartbeat could not renew for a full lease — self-fencing (stopping execution)",
+							"run", runID, "worker", workerID, "lease", lease)
+						if onLeaseLost != nil {
+							onLeaseLost()
+						}
+						return
+					}
 					s.log.Error(err, "run-worker: heartbeat renew failed (transient) — keeping the lease, will retry",
 						"run", runID, "worker", workerID)
 				}
