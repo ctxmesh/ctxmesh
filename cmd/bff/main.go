@@ -472,6 +472,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// waitWorkers (F-1, M125/ADR 0097) joins the run-worker loops on shutdown so held leases are released
+	// before the process exits (else a peer waits a full lease-TTL to reclaim). nil when no pool runs.
+	var waitWorkers func()
 	// Run-worker pool (ADR 0034, m32.2): RUN_WORKER_CONCURRENCY>0 runs N claim loops in THIS process
 	// that drain the durable queue. A dedicated worker Deployment sets this (with serving idle); the
 	// front-end BFF can also run a few. Stops claiming when the shutdown signal fires.
@@ -479,7 +482,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		if runStore == nil {
 			return errors.New("RUN_WORKER_CONCURRENCY requires a durable run store (set RUN_STORE_DSN)")
 		}
-		srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
+		waitWorkers = srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
 		log.Info("run-worker pool started (ADR 0034)", "concurrency", n)
 	}
 
@@ -500,7 +503,21 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		log.Info("shutdown signal received")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		httpErr := httpSrv.Shutdown(shutdownCtx)
+		// F-1: wait (bounded) for the worker loops to release their leases before exiting, so a peer
+		// reclaims promptly instead of after a full lease-TTL. The D4 drain grace ran concurrently with
+		// the HTTP shutdown above; the bound guards against a non-ctx-honoring executor outlasting it.
+		if waitWorkers != nil {
+			done := make(chan struct{})
+			go func() { waitWorkers(); close(done) }()
+			select {
+			case <-done:
+				log.Info("run-worker pool drained (leases released)")
+			case <-time.After(15 * time.Second): // ~drain grace (10s) + buffer
+				log.Info("run-worker drain timed out; exiting anyway")
+			}
+		}
+		return httpErr
 	case serveErr := <-errCh:
 		return serveErr
 	}
