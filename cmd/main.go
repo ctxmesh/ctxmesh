@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -143,7 +144,7 @@ const (
 // Platform cert-controller RBAC (M128/Gate E, ADR 0102): the in-process rotator manages its
 // own CA + serving-cert Secret and injects the caBundle into the tenant-label VWC. secrets
 // create/update is already granted elsewhere for the manager; the VWC verbs are new here.
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
 
 // managerNamespace resolves the manager's install namespace (where the cert Secret lives +
@@ -696,7 +697,7 @@ func main() {
 		// the CA + the webhook serving cert (no cert-manager), writing them into webhookCertPath so
 		// the webhook server can serve TLS. certReady closes once the cert is bootstrapped — m128.5
 		// gates the VWC creation on it so a fail-closed webhook is never wired before its cert exists.
-		if _, err := pki.SetupWebhookCertRotator(mgr, pki.WebhookCertConfig{
+		certReady, err := pki.SetupWebhookCertRotator(mgr, pki.WebhookCertConfig{
 			Namespace:          managerNamespace(),
 			ServiceName:        webhookServiceName,
 			CertDir:            webhookCertPath,
@@ -705,13 +706,36 @@ func main() {
 			CAOrganization:     "agent-engine",
 			CADuration:         5 * 365 * 24 * time.Hour, // ADR 0102: CA ~5y
 			ServerCertDuration: 90 * 24 * time.Hour,      // ADR 0102: leaf ~90d, rotates ahead of expiry
-			// ValidatingWebhookName is set in m128.5 (the VWC) so the rotator injects its caBundle.
-		}); err != nil {
+			// The rotator keeps this VWC's caBundle current on rotation (M128/Gate E, ADR 0102 — no cert-manager).
+			ValidatingWebhookName: enginewebhook.TenantLabelVWCName,
+		})
+		if err != nil {
 			setupLog.Error(err, "unable to set up the webhook cert-controller (M128/ADR 0102)")
 			os.Exit(1)
 		}
 
 		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
+
+		// The manager OWNS the tenant-label VWC (ADR 0102 §2): create it only AFTER the cert is ready,
+		// so there is no uncertified-VWC window and the namespace/exemption are correct for ANY install
+		// namespace (no chart templating). The cert-controller maintains the caBundle thereafter.
+		vwcNS := managerNamespace()
+		if addErr := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-certReady:
+			}
+			if err := enginewebhook.ApplyTenantLabelVWC(ctx, mgr.GetClient(), vwcNS, webhookServiceName, nil); err != nil {
+				setupLog.Error(err, "applying the manager-owned tenant-label VWC (M128/ADR 0102)")
+				return err
+			}
+			setupLog.Info("tenant-label VWC applied (manager-owned; cert-controller maintains the caBundle)")
+			return nil
+		})); addErr != nil {
+			setupLog.Error(addErr, "unable to register the tenant-label VWC applier")
+			os.Exit(1)
+		}
 		setupLog.Info("tenant-label ValidatingWebhook + in-process cert-controller registered (M128/Gate E)")
 	}
 

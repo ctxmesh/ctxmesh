@@ -1,15 +1,24 @@
-# Tenant-label ValidatingWebhook (C14) — opt-in
+# Tenant-label ValidatingWebhook (audit P1-3, M128/Gate E) — enable-able (no cert-manager)
 
-Closes audit P1-3's label-spoof: only the Tenant controller's ServiceAccount may set or change the
-`agents.ctxmesh.ai/tenant` namespace label (a principal with `update namespaces` otherwise labels their own
-namespace into a victim tenant and is treated as intra-tenant by the victim's NetworkPolicy selectors).
+Closes the tenant-label spoof: only the Tenant controller's ServiceAccount may set/change/**remove** the
+`agents.ctxmesh.ai/tenant` namespace label (ownership-not-entitlement, ADR 0102). A principal with
+`namespace write` otherwise labels their own namespace into a victim tenant and is treated as intra-tenant
+by the victim's NetworkPolicy selectors. Handler: `internal/webhook/tenant_label.go` (+ tests).
 
-The **logic** ships + is unit-tested (`internal/webhook/tenant_label.go`, `..._test.go`). Activation is a
-**user-gated deploy step** — the base install wires no webhook cert infra:
+**Gate E (M128, [ADR 0102](../../../agent-brain/decisions/0102-ga-gate-e-platform-pki-tenant-webhook-and-egress-tls.md)) removed the cert-manager dependency.** When enabled, the manager's
+in-process cert-controller (`open-policy-agent/cert-controller`) generates + rotates the serving cert and
+the manager OWNS the ValidatingWebhookConfiguration — created programmatically only after the cert is ready
+(`internal/webhook/tenant_vwc.go`: matchConditions-scoped to tenant-labeled writes, system-ns-exempt by the
+immutable `kubernetes.io/metadata.name` label, `failurePolicy: Fail`, CREATE+UPDATE). No static VWC manifest.
 
-1. Install cert-manager (or mount serving certs) + a `Certificate` for the webhook Service.
-2. Set `ENABLE_TENANT_LABEL_WEBHOOK=true` + `TENANT_WEBHOOK_CONTROLLER_SA=<controller SA username>` on the
-   controller-manager Deployment.
-3. Wire this dir into `config/default/kustomization.yaml` (with the cert-manager caBundle injection).
+## Enable it
 
-Carded: m52.C14.
+1. Set `ENABLE_TENANT_LABEL_WEBHOOK=true` + `TENANT_WEBHOOK_CONTROLLER_SA=system:serviceaccount:<ns>:agent-engine-controller-manager`
+   on the controller-manager Deployment (the manager then runs the cert-controller + registers
+   `/validate-tenant-label` + creates the VWC after the cert is ready).
+2. Wire `service.yaml` here into `config/default/kustomization.yaml` (the webhook Service; the VWC is
+   manager-created, not a manifest).
+
+**Default-ON** (enable by default + retire the `security.tenantLabelEnforcement` acknowledgment) is pending
+the live blast-radius / cert-kill / uninstall-writable / no-wedge verification on a cluster — the M128
+acceptance (accept-m128.sh Section D). See the M128 board.
