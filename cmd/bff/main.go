@@ -76,6 +76,7 @@ func main() {
 		staticDir   string
 		version     string
 		preflightUp bool
+		ensureKey   bool
 	)
 	flag.StringVar(&addr, "addr", ":9090", "The address the BFF listens on.")
 	flag.StringVar(&staticDir, "static-dir", "ui/dist",
@@ -83,6 +84,8 @@ func main() {
 	flag.StringVar(&version, "version", "dev", "Version string reported by /api/health.")
 	flag.BoolVar(&preflightUp, "preflight", false,
 		"Run install config-coherence checks (fail LOUD on misconfig) and exit — the Helm post-install hook / GA Gate A (ADR 0095).")
+	flag.BoolVar(&ensureKey, "ensure-capability-key", false,
+		"Generate the platform capability keypair into bff-capability iff absent (never re-key), restart consumers, and exit — the Helm keygen hook / GA Gate A (ADR 0095).")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -90,6 +93,9 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	log := ctrl.Log.WithName("bff")
 
+	if ensureKey {
+		os.Exit(runEnsureCapabilityKey(context.Background()))
+	}
 	if preflightUp {
 		os.Exit(runPreflight(context.Background(), log))
 	}
