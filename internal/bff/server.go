@@ -856,10 +856,10 @@ func (s *Server) Handler() http.Handler {
 		// RBAC grant; SelfSubjectAccessReview is a self-check the caller's token authorizes).
 		// The Go 1.22 ServeMux treats "GET /api/templates" as distinct from POST + DELETE above.
 		authed.HandleFunc("GET /api/templates", s.handleTemplates)
-		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding,
-		// AgentScalingPolicy, and MemoryBinding in the namespace that reference the
-		// named agent by spec.agentRef, classifying each as GC'd (owned) or orphan
-		// (independent reference). The Go 1.22 ServeMux treats this sub-path pattern
+		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding and
+		// AgentScalingPolicy in the namespace that reference the named agent by
+		// spec.agentRef, classifying each as GC'd (owned) or orphan (independent
+		// reference). The Go 1.22 ServeMux treats this sub-path pattern
 		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
 		// detail GET above.
 		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
@@ -1033,23 +1033,8 @@ func (s *Server) Handler() http.Handler {
 			authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("MCP tool binding update"))
 		}
 		authed.HandleFunc("DELETE /api/mcptoolbindings/{ns}/{name}", s.handleDeleteMCPToolBinding)
-		// MemoryBinding CRUD (m17.6): direct edit of memory backend bindings for
-		// AgentDeployments. Five endpoints following the list contract + SSA.
-		// agentRef is NOT CRD-immutable (no oldSelf XValidation) — a PUT that
-		// changes agentRef is accepted and applied by the API server. The BFF does
-		// not enforce immutability because the CRD does not.
-		// The scheme is needed for SSA (ensureGVK); when absent the write routes
-		// serve 501 honestly.
-		authed.HandleFunc("GET /api/memorybindings", s.handleListMemoryBindings)
-		authed.HandleFunc("GET /api/memorybindings/{ns}/{name}", s.handleGetMemoryBinding)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/memorybindings", s.handleCreateMemoryBinding)
-			authed.HandleFunc("PUT /api/memorybindings/{ns}/{name}", s.handleUpdateMemoryBinding)
-		} else {
-			authed.Handle("POST /api/memorybindings", notImplemented("memory binding create"))
-			authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("memory binding update"))
-		}
-		authed.HandleFunc("DELETE /api/memorybindings/{ns}/{name}", s.handleDeleteMemoryBinding)
+		// (MemoryBinding CRUD retired in M127/ADR 0101 — session memory is now the
+		// folded AgentDeployment.spec.sessionMemory field, authored via the agent form.)
 		// AgentScalingPolicy CRUD (m17.6): direct edit of elastic scaling rules for
 		// AgentDeployments. Five endpoints following the list contract + SSA.
 		// CRD XValidations (max>=min, schedule required when trigger=schedule) are
@@ -1156,11 +1141,6 @@ func (s *Server) Handler() http.Handler {
 		authed.Handle("POST /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding create"))
 		authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding update"))
 		authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding delete"))
-		authed.Handle("GET /api/memorybindings", notImplemented("caller-scoped memory binding list"))
-		authed.Handle("GET /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding detail"))
-		authed.Handle("POST /api/memorybindings", notImplemented("caller-scoped memory binding create"))
-		authed.Handle("PUT /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding update"))
-		authed.Handle("DELETE /api/memorybindings/{ns}/{name}", notImplemented("caller-scoped memory binding delete"))
 		authed.Handle("GET /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy list"))
 		authed.Handle("GET /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy detail"))
 		authed.Handle("POST /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy create"))

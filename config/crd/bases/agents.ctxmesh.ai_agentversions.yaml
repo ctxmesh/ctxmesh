@@ -323,7 +323,7 @@ spec:
                     items:
                       description: |-
                         KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
                         The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -690,10 +690,9 @@ spec:
                     type: object
                   sessionMemory:
                     description: |-
-                      sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-                      agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-                      (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-                      deprecation window; this field wins when both are present.
+                      sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+                      the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+                      selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
                     properties:
                       backend:
                         description: |-
@@ -1101,7 +1100,7 @@ spec:
                     items:
                       description: |-
                         KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
                         The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -1468,10 +1467,9 @@ spec:
                     type: object
                   sessionMemory:
                     description: |-
-                      sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-                      agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-                      (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-                      deprecation window; this field wins when both are present.
+                      sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+                      the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+                      selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
                     properties:
                       backend:
                         description: |-

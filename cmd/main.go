@@ -447,13 +447,6 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
 	}
-	if err := (&controller.MemoryBindingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "memorybinding")
-		os.Exit(1)
-	}
 	if err := (&controller.AgentRegistryReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

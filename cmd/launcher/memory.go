@@ -18,7 +18,7 @@ package main
 
 // The :2998 traced memory endpoint (M5, state-layer.md §"The :2998 launcher
 // memory endpoint"). A second HTTP listener, started ONLY when
-// MEMORY_BACKEND_ADDR is injected (i.e. the agent has a MemoryBinding), that
+// MEMORY_BACKEND_ADDR is injected (i.e. the agent has spec.sessionMemory), that
 // gives any agent — with no SDK — a language-agnostic, traced door to session
 // memory. Every op emits a memory.get|put|append|search span.
 //

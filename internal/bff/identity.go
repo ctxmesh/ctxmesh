@@ -57,7 +57,6 @@ const (
 	resAgentRegistries    = "agentregistries"
 	resToolRegistries     = "toolregistries"
 	resMCPToolBindings    = "mcptoolbindings"
-	resMemoryBindings     = "memorybindings"
 	resAgentScalingPolicy = "agentscalingpolicies"
 	resEvalSuites         = "evalsuites"
 	resPromptVersions     = "promptversions"
@@ -98,7 +97,6 @@ var (
 		resAgentRegistries,
 		resToolRegistries,
 		resMCPToolBindings,
-		resMemoryBindings,
 		resAgentScalingPolicy,
 		resEvalSuites,
 		resPromptVersions,

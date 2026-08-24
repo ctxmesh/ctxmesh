@@ -49,9 +49,6 @@ func (*Tenant) Hub() {}
 // Hub marks MCPToolBinding as the conversion hub.
 func (*MCPToolBinding) Hub() {}
 
-// Hub marks MemoryBinding as the conversion hub.
-func (*MemoryBinding) Hub() {}
-
 // Hub marks ModelRoute as the conversion hub.
 func (*ModelRoute) Hub() {}
 

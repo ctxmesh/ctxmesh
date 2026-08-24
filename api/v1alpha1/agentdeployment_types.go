@@ -86,11 +86,10 @@ type ScalingSpec struct {
 	Max int32 `json:"max,omitempty"`
 }
 
-// SessionMemorySpec is the folded session-memory config (ADR 0037, m34.2): the former MemoryBinding
-// expressed as an AgentDeployment field, since a binding is always 1:1 with its agent and is never
-// shared as an object (the m33.3 "shared" scope is a data-layer key + a field value, not a shared
-// binding). Absent ⇒ the agent has no conversation memory (unless a legacy MemoryBinding CRD binds
-// it during the deprecation window).
+// SessionMemorySpec is the session-memory config expressed as an AgentDeployment field (ADR 0037,
+// m34.2; the folded home for what was the MemoryBinding CRD, now retired — ADR 0101), since a binding
+// is always 1:1 with its agent and is never shared as an object (the m33.3 "shared" scope is a
+// data-layer key + a field value, not a shared binding). Absent ⇒ the agent has no conversation memory.
 type SessionMemorySpec struct {
 	// scope selects the memory key layout. "session" (default) = PRIVATE per-agent
 	// (mem:{namespace}/{agent}:{conversationId}); "shared" (m33.3) = a team scratchpad keyed
@@ -119,8 +118,20 @@ type SessionMemorySpec struct {
 	Backend *MemoryBackend `json:"backend,omitempty"`
 }
 
+// MemoryBackend locates the Valkey backend used to store session memory. Relocated
+// here from the retired MemoryBinding CRD (ADR 0101) since sessionMemory is now its
+// only home.
+type MemoryBackend struct {
+	// addr is the host:port of the Valkey backend.
+	// If omitted the controller defaults to
+	// agent-engine-statelayer.agent-engine-system.svc:6379.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Addr string `json:"addr,omitempty"`
+}
+
 // KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-// (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+// (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
 // The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
 // un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
 // refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -213,10 +224,9 @@ type AgentDeploymentSpec struct {
 	// +optional
 	Scaling *ScalingSpec `json:"scaling,omitempty"`
 
-	// sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-	// agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-	// (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-	// deprecation window; this field wins when both are present.
+	// sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+	// the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+	// selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
 	// +optional
 	SessionMemory *SessionMemorySpec `json:"sessionMemory,omitempty"`
 

@@ -125,7 +125,7 @@ func main() {
 	}
 
 	// ── Memory endpoint (:2998) ───────────────────────────────────────────
-	// Started ONLY when a backend was injected (the agent has a MemoryBinding).
+	// Started ONLY when a backend was injected (the agent has spec.sessionMemory).
 	// It runs as a second listener beside the proxy with the SAME lifecycle
 	// discipline (goroutine ListenAndServe; graceful Shutdown on child exit;
 	// the child-exit still decides the process exit code — the memory listener
