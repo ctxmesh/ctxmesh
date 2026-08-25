@@ -172,7 +172,7 @@ const (
 	envMCPCapPublicKey = "MCP_CAPABILITY_PUBLIC_KEY"
 	envMCPCapAudience  = "MCP_CAPABILITY_AUDIENCE"
 
-	// memoryScopeShared is the MemoryBinding scope + MEMORY_SCOPE env value that selects the shared
+	// memoryScopeShared is the sessionMemory scope + MEMORY_SCOPE env value that selects the shared
 	// team scratchpad (ADR 0035, m33.3) instead of private per-agent memory.
 	memoryScopeShared = "shared"
 
@@ -1048,7 +1048,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
-	// PromptVersion's git pointer → prompt content, materialise it into the
+	// prompt version's git pointer → prompt content (the version is a Postgres-resident
+	// record since ADR 0044 retired the PromptVersion CRD), materialise it into the
 	// <agent>-prompt ConfigMap, mount it read-only into the user container, and
 	// inject PROMPT_FILE + PROMPT_VERSION as STATIC env (no valueFrom — the m5.7
 	// Knative ksvc landmine). The prompt folds into the combined binding digest
@@ -1165,16 +1166,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
-	// Memory (M5): resolve the agent's MemoryBinding (if any). When present,
-	// inject MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (downward
-	// API — pod namespace), and AGENT_NAME (for Valkey key composition).
-	// The single-writer rule applies: only this reconciler writes the pod
-	// template; the MemoryBinding controller only sets the binding's status.
-	memAddr, memScope, hasMemoryBinding, err := resolveMemory(ctx, r.Client, deploy)
-	if err != nil {
-		return podTemplate{}, fmt.Errorf("resolving memory binding: %w", err)
-	}
-	if hasMemoryBinding {
+	// Memory (M5): resolve the agent's session memory from spec.sessionMemory (ADR 0045;
+	// the standalone MemoryBinding CRD was retired in M127/ADR 0101). When present, inject
+	// MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (pod namespace), and AGENT_NAME
+	// (for Valkey key composition). The single-writer rule applies: only this reconciler
+	// writes the pod template.
+	memAddr, memScope, hasMemory := resolveMemory(deploy)
+	if hasMemory {
 		// MEMORY_BACKEND_ADDR is the DIRECT Valkey path. Injected ONLY when the
 		// state-layer proxy is NOT configured; once the proxy is on (the m53.7
 		// cutover, ADR 0050 §8 phase 3), the agent memory-forwards THROUGH it and
@@ -1365,13 +1363,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
 			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
 		)
-		// Shared memory scope (ADR 0035, m33.3): a MemoryBinding scope=shared keys the team
+		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
 		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
 		// conversation collaborate on ONE context. Injected ONLY here — inside the membership block —
-		// because the shared key needs a registry boundary; a scope=shared binding on a NON-member
+		// because the shared key needs a registry boundary; a scope=shared config on a NON-member
 		// agent gets no MEMORY_SCOPE and the launcher keeps its private layout (a visible misconfig,
 		// not a broken key).
-		if hasMemoryBinding && memScope == memoryScopeShared {
+		if hasMemory && memScope == memoryScopeShared {
 			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
 		}
 		// POD_NAMESPACE: the namespace A2A targets resolve in — the launcher's
@@ -1381,7 +1379,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Now injected
 		// UNCONDITIONALLY in the base env for the trace identity, so guard against a
 		// duplicate here (a duplicate container env var name is invalid); the base
-		// injection already covers a registry member without a MemoryBinding.
+		// injection already covers a registry member without session memory.
 		if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
 			env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
 		}
@@ -1490,7 +1488,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// at the proxy. STATELAYER_PROXY_URL itself is injected by the memory block above for
 	// any memory agent; this adds the token path + flips injectPodToken. The env-present
 	// guard keeps it duplicate-safe against the tenant-quota block.
-	if r.StatelayerProxyURL != "" && hasMemoryBinding {
+	if r.StatelayerProxyURL != "" && hasMemory {
 		if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
 			env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 		}
@@ -1671,7 +1669,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if toolPolicyMount != nil {
 		toolDigest += "p" + toolPolicyPresenceDigest()
 	}
-	memDigest := memoryBindingDigest(hasMemoryBinding, memAddr)
+	memDigest := memoryDigest(hasMemory, memAddr)
 	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the
 	// memory digest so enabling/disabling it or changing perUser/embeddingRoute rolls a new revision
 	// (even when the agent has no session memory, i.e. memDigest is "").
@@ -1705,7 +1703,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// SA this component already tracks (the "|sa" tag), so it folds in here: toggling
 	// spec.mountServiceAccountToken flips the SA's AutomountServiceAccountToken, which must
 	// reach a running pod — so it rolls a new revision like every other pod-template change.
-	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemoryBinding || injectPodToken, mountAPIToken(deploy))
+	proxyDig := statelayerProxyDigest(r.StatelayerProxyURL, hasMemory || injectPodToken, mountAPIToken(deploy))
 	// C7b (ADR 0090): every agent now runs its own identity SA. For a PROXY agent the SA + automount are
 	// ALREADY folded by statelayerProxyDigest ("|sa"), so proxyDig is non-empty. For a PLAIN agent
 	// (proxyDig==""), fold the SA + automount here — reusing proxyDig's SLOT (not a new digest field) so a
@@ -2388,15 +2386,15 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 	return ctrl.Result{}, nil
 }
 
-// memoryBindingDigest returns a short hash capturing whether a MemoryBinding
-// exists and what addr it resolves to. It is one COMPONENT of the combined
-// revision-name digest (combinedBindingDigest) so bind/unbind/addr-change each
-// roll a new revision.
+// memoryDigest returns a short hash capturing whether the agent has session
+// memory and what addr it resolves to. It is one COMPONENT of the combined
+// revision-name digest (combinedBindingDigest) so enabling/disabling memory or
+// an addr change each roll a new revision.
 //
-// Returns "" when hasBinding is false (no memory state → the component
+// Returns "" when hasMemory is false (no memory state → the component
 // contributes the empty string, symmetric with the tool-binding path).
-func memoryBindingDigest(hasBinding bool, addr string) string {
-	if !hasBinding {
+func memoryDigest(hasMemory bool, addr string) string {
+	if !hasMemory {
 		return ""
 	}
 	h := sha256.Sum256([]byte(addr))
@@ -2575,32 +2573,17 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 // The controller owns AgentVersion and Knative Service so that changes to either
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
 //
-// It also watches MCPToolBinding and MemoryBinding: add/remove/change events map
-// to a requeue of the referenced agent so this reconciler re-renders the pod
-// template (the STRUCTURAL side of a binding change — sidecar containers and
-// env injection). The annotation-free requeue mechanism reads spec.agentRef
-// straight off the event object; no field index is used.
+// It also watches MCPToolBinding: add/remove/change events map to a requeue of
+// the referenced agent so this reconciler re-renders the pod template (the
+// STRUCTURAL side of a binding change — sidecar containers and env injection).
+// The annotation-free requeue mechanism reads spec.agentRef straight off the
+// event object; no field index is used. (Session memory is now a spec field —
+// AgentDeployment spec.sessionMemory, ADR 0101 — so it rides the agent's own
+// reconcile and needs no secondary watch.)
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
 			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
-			if !ok || b.Spec.AgentRef == "" {
-				return nil
-			}
-			return []reconcile.Request{{
-				NamespacedName: client.ObjectKey{Namespace: b.Namespace, Name: b.Spec.AgentRef},
-			}}
-		},
-	)
-
-	// MemoryBinding → requeue the referenced AgentDeployment so this reconciler
-	// re-resolves memory bindings and re-renders the pod template (env injection).
-	// Delete events are included: the binding object remains readable until
-	// DeletionTimestamp is set, and listAgentMemoryBindings excludes it so the
-	// env drops on the re-render.
-	mapMemoryBindingToAgent := handler.EnqueueRequestsFromMapFunc(
-		func(_ context.Context, obj client.Object) []reconcile.Request {
-			b, ok := obj.(*agentsv1alpha1.MemoryBinding)
 			if !ok || b.Spec.AgentRef == "" {
 				return nil
 			}
@@ -2738,7 +2721,6 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
-		Watches(&agentsv1alpha1.MemoryBinding{}, mapMemoryBindingToAgent).
 		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
 		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
 		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).

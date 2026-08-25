@@ -281,7 +281,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -314,7 +313,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status
@@ -371,10 +369,29 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - create
+  - get
+  - list
+  - update
   - watch
 - apiGroups:
   - agents.ctxmesh.ai
@@ -388,7 +405,6 @@ rules:
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
-  - memorybindings
   - modelroutes
   - workflows
   verbs:
@@ -426,7 +442,6 @@ rules:
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status
-  - memorybindings/status
   - modelroutes/status
   - tenants/status
   - workflows/status
@@ -575,7 +590,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -597,7 +611,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status
@@ -684,7 +697,6 @@ rules:
   - mcptoolbindings
   - toolregistries
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -706,7 +718,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status
@@ -973,6 +984,10 @@ spec:
         command:
         - /manager
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: STATELAYER_PROXY_URL
           value: http://agent-engine-statelayer-proxy.{{ .Values.namespace }}.svc:8080
         - name: CONSOLE_URL
@@ -986,13 +1001,17 @@ spec:
         - name: EGRESS_SIDECAR_IMAGE
           value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}
         - name: MCP_CAPABILITY_PUBLIC_KEY
-          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}
+          valueFrom:
+            secretKeyRef:
+              key: MCP_CAPABILITY_PUBLIC_KEY
+              name: bff-capability
+              optional: true
         - name: MCP_CAPABILITY_AUDIENCE
           value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
-          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}
+          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
         - name: DEV_DATA_PLANE
           value: {{ .Values.devDataPlane.enabled | quote }}
         envFrom:
@@ -1011,6 +1030,9 @@ spec:
         ports:
         - containerPort: 8081
           name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: webhook
           protocol: TCP
         readinessProbe:
           httpGet:
@@ -1031,14 +1053,18 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-        volumeMounts: []
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: agent-engine-controller-manager
       terminationGracePeriodSeconds: 10
-      volumes: []
+      volumes:
+      - emptyDir: {}
+        name: webhook-certs
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1202,7 +1228,7 @@ spec:
       containers:
       - env:
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_TLS_CERT_FILE
           value: /etc/token-service/tls/tls.crt
         - name: TOKEN_SERVICE_TLS_KEY_FILE

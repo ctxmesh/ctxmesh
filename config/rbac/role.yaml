@@ -33,10 +33,29 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - create
+  - get
+  - list
+  - update
   - watch
 - apiGroups:
   - agents.ctxmesh.ai
@@ -50,7 +69,6 @@ rules:
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
-  - memorybindings
   - modelroutes
   - workflows
   verbs:
@@ -88,7 +106,6 @@ rules:
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status
-  - memorybindings/status
   - modelroutes/status
   - tenants/status
   - workflows/status

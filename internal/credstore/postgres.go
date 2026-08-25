@@ -29,6 +29,7 @@ import (
 	agentsv1alpha1 "github.com/ctxmesh/agent-engine/api/v1alpha1"
 	"github.com/ctxmesh/agent-engine/internal/credpostgres"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/dbpool"
 )
 
 // buildPostgresBackend constructs the Postgres reference backend: open the DB from the DSN
@@ -52,6 +53,7 @@ func buildPostgresBackend(ctx context.Context, spec *agentsv1alpha1.CredentialPr
 	if err != nil {
 		return nil, fmt.Errorf("credstore: open postgres: %w", err)
 	}
+	dbpool.Apply(db, "CREDSTORE_MAX_OPEN_CONNS", 5) // F-8: bound the pool (ADR 0097)
 	store, err := credpostgres.NewStore(ctx, db)
 	if err != nil {
 		_ = db.Close()

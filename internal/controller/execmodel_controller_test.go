@@ -262,7 +262,7 @@ func TestExecModel_Eventing_MemoryProxy_PerAgentSA(t *testing.T) {
 	)
 	createRegistry(t, "evt-mem-registry", namespace, registryID, "registry", registryID)
 	createExecAgent(t, name, namespace, "eventing", map[string]string{"registry": registryID})
-	_ = mkMemoryBinding(t, name+"-binding", namespace, name, "")
+	setAgentSessionMemory(t, namespace, name, "session", "")
 
 	r := newReconciler()
 	r.StatelayerProxyURL = proxyURL
@@ -377,10 +377,10 @@ func TestExecModel_Job_BareJob(t *testing.T) {
 // schedule policy produces a CronJob (with the policy schedule, Forbid
 // concurrency) instead of a bare Job.
 // TestExecModel_Job_MemoryProxy_PerAgentSA guards the per-agent identity SA on the
-// JOB PodSpec site (ADR 0052 §C6 RESOLUTION, m56.2a). The ksvc site is covered by
-// memorybinding_controller_test.go; this pins the batch-Job wrapping (execmodel.go
-// jobPodTemplateSpec) — a memory-bound job-model agent with the proxy configured must
-// run its pod as agent-<name> and get its identity SA created + owned.
+// JOB PodSpec site (ADR 0052 §C6 RESOLUTION, m56.2a). This pins the batch-Job
+// wrapping (execmodel.go jobPodTemplateSpec) — a memory-bound job-model agent
+// (spec.sessionMemory) with the proxy configured must run its pod as agent-<name>
+// and get its identity SA created + owned.
 func TestExecModel_Job_MemoryProxy_PerAgentSA(t *testing.T) {
 	const (
 		namespace = "default"
@@ -388,7 +388,7 @@ func TestExecModel_Job_MemoryProxy_PerAgentSA(t *testing.T) {
 		proxyURL  = "http://agent-engine-statelayer-proxy.agent-engine-system.svc:8080"
 	)
 	createExecAgent(t, name, namespace, "job", nil)
-	_ = mkMemoryBinding(t, name+"-binding", namespace, name, "")
+	setAgentSessionMemory(t, namespace, name, "session", "")
 
 	r := newReconciler()
 	r.StatelayerProxyURL = proxyURL

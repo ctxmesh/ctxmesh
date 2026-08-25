@@ -261,9 +261,10 @@ func TestPersonaClusterRoles_InstallAndValid(t *testing.T) {
 
 	// Every agent CRD must be covered by each persona's resource rule — a
 	// missing one is an authz gap.
+	// memorybindings removed: MemoryBinding retired (ADR 0101), no longer a CRD.
 	wantResources := []string{
 		"agentdeployments", "agentversions", "modelroutes", "secretbindings",
-		"mcptoolbindings", "toolregistries", "memorybindings", "agentregistries",
+		"mcptoolbindings", "toolregistries", "agentregistries",
 		"agentteams", "agentscalingpolicies", "evalsuites", "promptversions",
 	}
 

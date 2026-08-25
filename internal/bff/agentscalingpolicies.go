@@ -119,7 +119,7 @@ type AgentScalingPolicyListResponse struct {
 // agentRef immutability: AgentScalingPolicy.spec.agentRef has NO CRD XValidation
 // immutability rule (no oldSelf check). A PUT that changes agentRef is accepted
 // by the API server and applied. agentRef is MUTABLE at the API level — exactly
-// like MemoryBinding.spec.agentRef. The BFF does not enforce immutability because
+// like MCPToolBinding.spec.agentRef. The BFF does not enforce immutability because
 // the CRD does not.
 type AgentScalingPolicyCreateRequest struct {
 	// Name is the object's metadata.name. Required.

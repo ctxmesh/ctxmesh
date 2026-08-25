@@ -255,3 +255,54 @@ func TestEgressResolveErrorIsBadGateway(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
 	assert.Contains(t, rec.Body.String(), "resolve_failed")
 }
+
+// TestEgressToolTimeout_TypedNotHang is the F3 fix (M126/Gate C): a hung MCP server (connects but
+// never responds) must NOT wedge the run — the cloned Transport's ResponseHeaderTimeout fires and
+// the ErrorHandler returns a TYPED 504 tool_timeout the managed loop can react to, not an
+// indefinite hang / opaque 502.
+func TestEgressToolTimeout_TypedNotHang(t *testing.T) {
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release: // released by the test on cleanup
+		case <-r.Context().Done(): // or the proxy gave up (timeout closed the conn)
+		}
+	}))
+	defer hung.Close()
+	defer close(release) // runs BEFORE hung.Close() (LIFO) → unblocks any stuck handler
+
+	pub, priv, err := runcap.GenerateKeyPair()
+	require.NoError(t, err)
+	routes, err := ParseRouteTable(fmt.Appendf(nil, `[{"name":%q,"targetURL":%q,"oauth":true}]`, testServer, hung.URL))
+	require.NoError(t, err)
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 150 * time.Millisecond // F3 (short, for a fast test)
+
+	proxy := NewProxy(ProxyConfig{
+		Verifier:      runcap.NewVerifier(pub, testAudience, nil),
+		Resolver:      &mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "T"}},
+		Namespace:     testNS,
+		ExpectedAgent: testAgent,
+		Routes:        routes,
+		Transport:     tr,
+		Log:           logr.Discard(),
+	})
+	signer := runcap.NewSigner(priv, testAudience, nil)
+	tok, err := signer.Mint(runcap.MintRequest{User: "u", Agent: testAgent, RunID: "run-1", TTL: 5 * time.Minute})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/"+testServer, strings.NewReader(`{"jsonrpc":"2.0","method":"tools/call"}`))
+	req.Header.Set(runcap.HeaderName, tok)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() { proxy.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("F3: the proxy HUNG on a non-responding MCP server")
+	}
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code, "F3: a hung tool → typed 504 tool_timeout")
+	assert.Contains(t, rec.Body.String(), "tool_timeout")
+}

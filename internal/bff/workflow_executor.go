@@ -140,6 +140,10 @@ type workflowCursor struct {
 	// cursor JSON (the run already persists its Input) — the executor sets it from the loaded run before
 	// evaluating. Kept unexported (no JSON tag) so the persisted cursor shape stays stable across advances.
 	workflowInput json.RawMessage `json:"-"`
+	// workerID is the executing run-worker's lease id (L10 fence, F-3/M125). NOT serialized; captured
+	// per advance from the exec ctx so the executor's state writes (terminal / cursor / gate) are fenced
+	// on this worker still holding the lease. Empty for an inline (non-worker) execution ⇒ unfenced.
+	workerID string `json:"-"`
 }
 
 // gatePending reports whether the plan-approval gate is set and NOT yet approved — the executor must pause
@@ -186,7 +190,7 @@ func (c *workflowCursor) marshal() (string, error) {
 // node-launch failure would attempt queued→failed, which is illegal (the state machine only allows
 // running→failed). The Update is idempotent: Transition is a no-op when from==to, so a run already running
 // (the worker path) is unaffected.
-func (s *Server) executeWorkflow(runID string) {
+func (s *Server) executeWorkflow(ctx context.Context, runID string) {
 	if _, err := s.runStore.Update(runID, func(r *run.Run) error {
 		return r.Transition(run.StatusRunning, time.Now())
 	}); err != nil {
@@ -212,6 +216,13 @@ func (s *Server) executeWorkflow(runID string) {
 	}
 	// The workflow input feeds the CEL `input` variable for every edge + input binding this pass.
 	cursor.workflowInput = rn.Input
+	// L10 (F-3, M125/ADR 0097): capture the executing worker's lease id so the executor's state writes
+	// (terminal / cursor-checkpoint / gate) are FENCED — a zombie whose lease a peer reclaimed must not
+	// clobber the peer-owned run. Empty for an inline execution ⇒ unfenced, as before.
+	cursor.workerID = workerIDFromContext(ctx)
+	if ctx.Err() != nil {
+		return // our lease was cancelled (D3) — a peer owns this run now; stop before advancing.
+	}
 
 	// (0) PLAN-APPROVAL GATE (m67.7, ADR 0060 §6). On the FIRST advance of a run created with
 	// requireApproval, pause in `requires_action` (a plan_approval action) BEFORE launching node 1 — a
@@ -242,6 +253,9 @@ func (s *Server) executeWorkflow(runID string) {
 		return
 	}
 
+	if ctx.Err() != nil {
+		return // lease cancelled between resume and launch — do not spawn a node the peer will re-spawn.
+	}
 	// (2) LAUNCH PHASE. Enter the next node — kind-aware: a plain node launches one sub-run; a map node fans
 	// out over its list; a loop node launches its first iteration — then SUSPEND on the launched child(ren).
 	s.enterNode(runID, rn, cursor, next)
@@ -563,9 +577,16 @@ func (s *Server) suspendOnChildren(runID, nodeName string, childIDs []string, mo
 		return false
 	}
 	if _, err := s.runStore.Suspend(runID, childIDs, mode, func(r *run.Run) error {
+		if cursor.workerID != "" && r.WorkerID != cursor.workerID {
+			return errRunNotHeld // F-3: a peer reclaimed this run — do not overwrite the peer's cursor
+		}
 		r.Cursor = cursorJSON
 		return nil
 	}); err != nil {
+		if errors.Is(err, errRunNotHeld) {
+			s.log.Info("workflow: cursor suspend fenced — a peer reclaimed the lease (L10)", "run", runID, "worker", cursor.workerID)
+			return true // the peer owns the run + its cursor; treat as handled
+		}
 		if cur, gErr := s.runStore.Get(runID); gErr == nil && cur.Status == run.StatusWaiting {
 			return true // already waiting (a reclaim re-suspended) — idempotent.
 		}
@@ -1126,7 +1147,7 @@ func (s *Server) spawnWorkflowNode(
 func (s *Server) completeWorkflow(runID string, spec *agentsv1beta1.WorkflowSpec, cursor *workflowCursor) {
 	output := cursor.terminalOutput(spec)
 	_ = s.runStore.AppendEvent(runID, run.EventMessage, output)
-	if err := s.terminalTransition(runID, func(r *run.Run) error {
+	if err := s.terminalTransitionFenced(cursorFenceCtx(cursor), runID, func(r *run.Run) error {
 		r.Messages = append(r.Messages, run.Message{Role: roleAssistant, Content: output})
 		return r.Transition(run.StatusSucceeded, time.Now())
 	}); err != nil {
@@ -1147,6 +1168,9 @@ func (s *Server) gatePlanApproval(runID string, cursor *workflowCursor) {
 		return
 	}
 	if _, err := s.runStore.Update(runID, func(r *run.Run) error {
+		if cursor.workerID != "" && r.WorkerID != cursor.workerID {
+			return errRunNotHeld // F-3: a peer reclaimed this run — do not re-gate the peer's run
+		}
 		if r.Status.IsTerminal() {
 			return fmt.Errorf("already %s", r.Status) // a raced cancel — do not resurrect
 		}
@@ -1267,6 +1291,13 @@ func workerIDFromContext(ctx context.Context) string {
 // evicted zombie MUST NOT clobber a peer-owned run's state. (A genuine agent failure runs on a
 // still-held lease, so its fence passes and the run legitimately fails — fail-safe, not fail-open.)
 var errRunNotHeld = errors.New("run: terminal write fenced — lease reclaimed by a peer")
+
+// cursorFenceCtx reconstructs the L10 fence context from the workflow cursor's captured worker id, so
+// the executor's fenced writes reuse terminalTransitionFenced's fence without threading ctx through the
+// entire executor call graph (F-3, M125). An empty workerID (inline execution) ⇒ an unfenced ctx.
+func cursorFenceCtx(c *workflowCursor) context.Context {
+	return contextWithWorkerID(context.Background(), c.workerID)
+}
 
 // terminalTransitionFenced is terminalTransition FENCED on the executing worker still holding the
 // run's lease (L10). The zombie problem (ADR 0091 L7 review): when a peer reclaims a run (D3), M104's

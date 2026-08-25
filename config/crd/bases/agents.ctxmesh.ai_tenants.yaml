@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: Tenant
     listKind: TenantList
     plural: tenants
@@ -23,6 +25,7 @@ spec:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
       type: string
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -114,7 +117,11 @@ spec:
                   is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
                   isolation (same-tenant + platform only).
                 items:
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                   type: string
+                maxItems: 64
                 type: array
               quota:
                 description: |-
@@ -264,6 +271,287 @@ spec:
                   memberNamespaces is the count of namespaces actually reconciled for this
                   tenant (contested namespaces are excluded).
                 format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
+              totalCorpusBytes:
+                description: |-
+                  totalCorpusBytes is the sum of KnowledgeBase.status.sizeBytes across all member
+                  namespaces, updated on every reconcile when EITHER storage.corpusBytesSoftCap or
+                  storage.corpusBytesHardCap is set. Reported for observability and the hard-cap check.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
+    - jsonPath: .status.memberNamespaces
+      name: Namespaces
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Tenant is the v1beta1 schema — a field-identical graduation of the v1alpha1 Tenant (GA Gate D, M127,
+          audit C4 P0-1). The tenancy ROOT graduates to beta so a GA'd multi-tenant platform's governance object
+          no longer carries alpha "may be removed at any time" semantics while everything it governs already
+          stores at v1beta1. It reuses the v1alpha1 spec/status so conversion is a direct copy (None strategy,
+          hub-spoke, ADR 0037), CRD-parity CI-guarded (hack/check-crd-version-parity.sh). Cluster-scoped; the
+          agents.ctxmesh.ai/tenant label authority + the tenant-label ValidatingWebhook (which validates the
+          `namespaces` resource, not Tenant objects) + the finalizer-based GC all key on the OBJECT, not the
+          version string, so the graduation does not disturb them.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired tenant state.
+            properties:
+              model:
+                description: |-
+                  model is the model-usage ceiling (budget + rate + concurrency) enforced in
+                  the launcher gateway proxy. Omitted ⇒ no model quota is injected.
+                properties:
+                  budgetUSD:
+                    description: |-
+                      budgetUSD is the tenant-aggregate model-spend ceiling in USD (a decimal
+                      string for exact money, e.g. "100.00"). Exceeding it fails the next model
+                      call closed with a typed budget_exceeded (HTTP 402, dimension "tenant").
+                    pattern: ^[0-9]+(\.[0-9]{1,4})?$
+                    type: string
+                  maxConcurrent:
+                    description: |-
+                      maxConcurrent caps the tenant-aggregate in-flight model requests (a shared
+                      Valkey semaphore) — the streaming-concurrency guard that RPM does not cover.
+                      0 ⇒ no concurrency cap.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  rpm:
+                    description: |-
+                      rpm caps the tenant-aggregate model requests per minute across every agent
+                      and replica in the tenant (a shared Valkey token bucket). Over the cap the
+                      launcher returns HTTP 429. 0 ⇒ no rate cap.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              namespaces:
+                description: |-
+                  namespaces are the member namespaces this tenant owns. A namespace must
+                  belong to at most one tenant; the controller skips (and status-warns on) a
+                  namespace already claimed by another tenant — fail-safe, never double-stamp.
+                items:
+                  maxLength: 63
+                  minLength: 1
+                  type: string
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: set
+              networkIsolation:
+                default: true
+                description: |-
+                  networkIsolation, when true, stamps a cross-tenant-deny NetworkPolicy on every member namespace
+                  (defense-in-depth above the mesh boundary, ADR 0046): pods may reach same-tenant namespaces + the
+                  platform (knative/kourier/gateway/valkey/langfuse/DNS) + any tenant listed in peerTenants, but NOT
+                  other tenants. **SECURE BY DEFAULT (ADR 0073): a nil/absent field is served as TRUE** — a new tenant
+                  isolates from birth; an explicit `false` is a deliberate, condition-flagged opt-out. Existing tenants
+                  at the upgrade are grandfathered to explicit `false` by the ordered backfill (no upgrade incident).
+                  A pointer (not a bare bool) so "absent" is distinguishable at the API layer for the migration.
+                type: boolean
+              peerTenants:
+                description: |-
+                  peerTenants is an allowlist of OTHER tenant names whose member namespaces may exchange east-west
+                  traffic with this tenant's namespaces under isolation (ADR 0073). Without it the secure-default flip
+                  is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
+                  isolation (same-tenant + platform only).
+                items:
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                  type: string
+                maxItems: 64
+                type: array
+              quota:
+                description: |-
+                  quota is the compute ceiling reconciled onto each member namespace as a
+                  ResourceQuota + LimitRange. Omitted ⇒ no compute quota is stamped.
+                properties:
+                  cpu:
+                    description: |-
+                      cpu caps the tenant's total REQUESTED CPU across member namespaces (a Kubernetes
+                      quantity, e.g. "20" or "20000m"). Applied as requests.cpu on each member
+                      namespace's ResourceQuota.
+                      Validated as a quantity at admission (OTH-5): an invalid value used to parse-fail in
+                      computeHard and be SILENTLY dropped → the quota went unenforced with no signal. Now it is
+                      rejected up front. Empty is allowed (means "no CPU cap").
+                    type: string
+                    x-kubernetes-validations:
+                    - message: cpu must be a valid Kubernetes quantity (e.g. "20"
+                        or "20000m")
+                      rule: self == '' || isQuantity(self)
+                  memory:
+                    description: |-
+                      memory caps the tenant's total REQUESTED memory (a Kubernetes quantity, e.g.
+                      "40Gi"). Applied as requests.memory on each member namespace's ResourceQuota.
+                      Validated as a quantity at admission (OTH-5) — see cpu. Empty is allowed.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: memory must be a valid Kubernetes quantity (e.g. "40Gi")
+                      rule: self == '' || isQuantity(self)
+                  pods:
+                    description: pods caps the number of pods per member namespace.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
+              storage:
+                description: |-
+                  storage is the corpus storage quota (ADR 0061 governance #7). It carries two independent caps:
+                  corpusBytesSoftCap (M68 — WARNS via StorageSoftCapExceeded, never blocks) and corpusBytesHardCap
+                  (m80.3 — sets StorageHardCapExceeded AND blocks new corpus growth: 413 on upload + a fast typed
+                  ingestion failure at/over the cap). Either may be set independently.
+                  Omitted ⇒ no storage cap is tracked or enforced.
+                properties:
+                  corpusBytesHardCap:
+                    description: |-
+                      corpusBytesHardCap is the tenant-aggregate HARD cap on total KnowledgeBase corpus bytes
+                      (m80.3, ADR 0061 governance #7 hard-enforcement). It is a Kubernetes quantity string
+                      (e.g. "20Gi"). When totalCorpusBytes >= this value the controller sets a
+                      StorageHardCapExceeded condition AND enforcement blocks new corpus growth: an upload to an
+                      at-cap tenant returns HTTP 413 (typed storage_quota_exceeded) and an ingestion run fails
+                      fast (typed storage_quota_exceeded → phase Failed) before fetching documents.
+                      Enforcement reads the controller's PROJECTED at-cap state (ADR 0011 — no cross-namespace
+                      read at the enforcement point), so it is bounded-eventually-consistent: a burst between
+                      reconciles can overshoot by at most (burst × the 25 MiB per-upload cap). This is a storage
+                      governance guardrail, not a security boundary.
+                      Empty means no hard cap is enforced (backward-compatible default).
+                    type: string
+                    x-kubernetes-validations:
+                    - message: corpusBytesHardCap must be a valid Kubernetes quantity
+                        (e.g. "20Gi")
+                      rule: self == '' || isQuantity(self)
+                  corpusBytesSoftCap:
+                    description: |-
+                      corpusBytesSoftCap is the tenant-aggregate soft cap on total KnowledgeBase corpus bytes
+                      (the sum of KnowledgeBase.status.sizeBytes across all member namespaces). It is a
+                      Kubernetes quantity string (e.g. "10Gi", "50Gi"). When the aggregate exceeds this value
+                      the controller sets a StorageSoftCapExceeded condition on the Tenant and emits a Warning
+                      event. It NEVER blocks ingestion — that is corpusBytesHardCap's job.
+                      Empty means no soft cap is tracked.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: corpusBytesSoftCap must be a valid Kubernetes quantity
+                        (e.g. "10Gi")
+                      rule: self == '' || isQuantity(self)
+                type: object
+            type: object
+          status:
+            description: status defines the observed state of this tenant.
+            properties:
+              conditions:
+                description: |-
+                  conditions surface the tenant's health. Ready=true when every member
+                  namespace was reconciled; a "NamespaceConflict" warning condition lists any
+                  namespaces skipped because another tenant already claims them;
+                  "StorageSoftCapExceeded" warns when the corpus bytes exceed the soft cap;
+                  "StorageHardCapExceeded" fires when the corpus bytes reach the hard cap (which
+                  also blocks new uploads/ingestion — m80.3).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              memberNamespaces:
+                description: |-
+                  memberNamespaces is the count of namespaces actually reconciled for this
+                  tenant (contested namespaces are excluded).
+                format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
                 type: integer
               totalCorpusBytes:
                 description: |-

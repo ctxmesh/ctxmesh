@@ -577,7 +577,7 @@ func driveToGate(t *testing.T, s *Server, spec agentsv1beta1.WorkflowSpec) strin
 	// Claim (queued → running) then advance — the run hits the gate and pauses in requires_action.
 	_, err := s.runStore.Update(resp.ID, func(r *run.Run) error { return r.Transition(run.StatusRunning, time.Now()) })
 	require.NoError(t, err)
-	s.executeWorkflow(resp.ID)
+	s.executeWorkflow(context.Background(), resp.ID)
 	require.Equal(t, run.StatusRequiresAction, mustGetRun(t, s, resp.ID).Status, "the run must reach the plan-approval gate")
 	return resp.ID
 }

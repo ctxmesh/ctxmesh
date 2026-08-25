@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: EvalSuite
     listKind: EvalSuiteList
     plural: evalsuites

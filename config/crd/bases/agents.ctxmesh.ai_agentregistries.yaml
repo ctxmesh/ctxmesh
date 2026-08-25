@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentRegistry
     listKind: AgentRegistryList
     plural: agentregistries
@@ -243,6 +245,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -473,6 +481,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec

@@ -91,6 +91,11 @@ type AgentRegistryStatus struct {
 	// +kubebuilder:validation:MaxItems=256
 	Members []string `json:"members,omitempty"`
 
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// conditions reflect the registry's reconciliation state.
 	// Ready=True means memberSelector has been resolved, all member agents have
 	// been annotated with AGENT_REGISTRY_ID, and guard defaults have been
@@ -105,7 +110,7 @@ type AgentRegistryStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=ar
+// +kubebuilder:resource:scope=Namespaced,shortName=ar,categories={agents}
 // +kubebuilder:printcolumn:name="RegistryID",type="string",JSONPath=".spec.registryId"
 // +kubebuilder:printcolumn:name="Members",type="string",JSONPath=".status.members"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"

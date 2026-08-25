@@ -46,6 +46,14 @@ spec:
         - name: run-worker
           image: bff:latest
           imagePullPolicy: IfNotPresent
+          # Private run-pipeline metrics (M128/Gate E): the worker runs the SAME bff binary,
+          # so it exposes the exporter on :9092 (METRICS_ADDR default). This is where the
+          # worker-active / run-outcome / run-duration SLIs live — the dead-worker-pool alert
+          # scrapes THESE pods.
+          ports:
+            - name: metrics
+              containerPort: 9092
+              protocol: TCP
           env:
             # RUN_STORE_DSN points at the durable Postgres run store (operator-provided Secret).
             # The KEDA postgresql scaler reads the SAME env (connectionFromEnv) — one source of truth.

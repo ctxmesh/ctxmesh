@@ -20,9 +20,14 @@ metadata:
     app.kubernetes.io/component: run-worker
     app.kubernetes.io/managed-by: Helm
 spec:
-  # Replicas are owned by KEDA (the ScaledObject below); start at 0 (scale-to-zero in
-  # dev; the production overlay's minReplicaCount keeps a warm pool).
-  replicas: 0
+  # Warm floor: seed the Deployment at the worker's minReplicaCount so at least that many
+  # workers claim runs from t=0 — before KEDA's HPA reconciles, and even if KEDA is absent
+  # (otherwise a fresh durable-path install queues runs forever). KEDA (the ScaledObject
+  # below) then scales ABOVE the floor on the queued-run backlog. Default floor is 1 (any
+  # durable-path install gets a live worker — Gate A / ADR 0095 dec-3); the production
+  # overlay raises it to 2 (a warm pool, ADR 0051 Fork-C); set worker.minReplicaCount=0 to
+  # opt back into scale-to-zero.
+  replicas: {{ .Values.bff.runStore.worker.minReplicaCount }}
   selector:
     matchLabels:
       control-plane: run-worker
@@ -40,7 +45,12 @@ spec:
           type: RuntimeDefault
       containers:
         - name: run-worker
-          image: bff:latest
+          # The run-worker IS the bff binary in worker mode (RUN_WORKER_CONCURRENCY>0), so it must use
+          # the SAME overridable image as the BFF. A hardcoded `bff:latest` here (this template is
+          # hand-maintained, so it never got gen_helm_chart's image→value rewrite) ErrImagePull's on any
+          # real registry — and `profile: production` REQUIRES this Deployment (runStore.enabled), so the
+          # documented prod path was dead-on-arrival (GA audit Ops P0-1, M124/Gate A).
+          image: {{ printf "%s:%s" .Values.bff.image.repository (.Values.bff.image.tag | default .Chart.AppVersion) }}
           imagePullPolicy: IfNotPresent
           env:
             - name: RUN_STORE_DSN
@@ -52,6 +62,11 @@ spec:
             # is OFF here — the front-end BFF is what dispatches (RUN_WORKER_DISPATCH).
             - name: RUN_WORKER_CONCURRENCY
               value: {{ .Values.bff.runStore.worker.concurrency | quote }}
+            # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): the worker re-mints run capabilities, so it
+            # fails CLOSED the same as the BFF — when OBO egress is enabled but the capability seed is
+            # absent, refuse to start rather than let sub-runs silently use the shared org/public credential.
+            - name: MCP_OBO_REQUIRED
+              value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
           envFrom:
             # The worker runs the SAME bff binary, so it needs the SAME operator env the
             # BFF gets from bff-adapters — most importantly CONTROLPLANE_DSN (required at

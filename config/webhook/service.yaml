@@ -1,0 +1,22 @@
+# Webhook Service (M128/Gate E, ADR 0102) — the tenant-label ValidatingWebhook's
+# clientConfig target + the SAN the in-process cert-controller signs
+# (`webhook-service.<ns>.svc`). OPT-IN: like the VWC, this lives in config/webhook and is
+# NOT wired into config/default until m128.5 makes tenant-label enforcement default-ON.
+# Routes the standard admission port 443 → the manager's webhook TLS listener (9443).
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-service
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: agent-engine
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: agent-engine
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP

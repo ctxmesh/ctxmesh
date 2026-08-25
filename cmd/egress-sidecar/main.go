@@ -161,6 +161,12 @@ func run(log logr.Logger) error {
 		}
 	}
 
+	// F3 (M126/Gate C): bound the upstream tool forward so a hung MCP server cannot wedge the run's
+	// managed loop. ResponseHeaderTimeout catches "connects but never responds"; env-tunable and
+	// defaulted HIGHER than the model gateway's 60s (tool latency profiles are wider — a legit
+	// synchronous-JSON MCP tool may compute a while before responding).
+	toolTransport := http.DefaultTransport.(*http.Transport).Clone()
+	toolTransport.ResponseHeaderTimeout = egressResponseHeaderTimeout()
 	proxy := egress.NewProxy(egress.ProxyConfig{
 		Verifier:         runcap.NewVerifier(pub, audience, nil),
 		Resolver:         resolver,
@@ -172,6 +178,7 @@ func run(log logr.Logger) error {
 		Log:              log,
 		Recorder:         recorder,
 		Policy:           policyHolder,
+		Transport:        toolTransport,
 	})
 
 	mux := http.NewServeMux()
@@ -272,18 +279,41 @@ func buildResolver(
 }
 
 // delegatingHTTPClient builds the HTTP client the sidecar uses to reach the central token
-// service: mTLS from mounted certs when configured (EGRESS_MTLS_* + TOKEN_SERVICE_SERVER_NAME),
-// else a plain client with a loud warning (dev only).
+// service, in three postures (M128/Gate E, ADR 0102 §3):
+//   - E-2 (mutual mTLS): EGRESS_MTLS_CERT_FILE + KEY_FILE + CA_FILE all present — presents a
+//     client cert AND verifies the server. The strongest (sender-constrained) posture.
+//   - E-1 (server-auth TLS): CA_FILE (+ TOKEN_SERVICE_SERVER_NAME) present but NO client
+//     cert/key — verifies the server's serving cert against the platform CA, presents no client
+//     cert. Closes the plaintext-in-transit exposure + the x509 break without per-agent client
+//     leaves; client identity is the app-layer run capability (ADR 0030). The honest GA bar.
+//   - plain HTTP: no CA — dev only, with a loud warning (production is guarded).
 func delegatingHTTPClient(log logr.Logger) (*http.Client, error) {
 	certFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_KEY_FILE"))
 	caFile := strings.TrimSpace(os.Getenv("EGRESS_MTLS_CA_FILE"))
 	serverName := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_SERVER_NAME"))
-	if certFile == "" || keyFile == "" || caFile == "" {
-		log.Info("WARNING: delegating to the token service WITHOUT mTLS (no EGRESS_MTLS_* files) — " +
-			"provision platform certs before production (ADR 0030 §1)")
+
+	if caFile == "" {
+		log.Info("WARNING: delegating to the token service WITHOUT TLS (no EGRESS_MTLS_CA_FILE) — " +
+			"provision the platform CA before production (ADR 0030 §1 / ADR 0102 §3)")
 		return &http.Client{Timeout: delegationTimeout}, nil
 	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read TLS CA: %w", err)
+	}
+
+	// E-1: CA present, no client cert ⇒ server-authenticated TLS.
+	if certFile == "" || keyFile == "" {
+		tlsCfg, err := credplane.ServerAuthClientTLSConfig(caPEM, serverName)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("delegating to the token service over server-authenticated TLS (E-1, ADR 0102 §3)")
+		return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: delegationTimeout}, nil
+	}
+
+	// E-2: mutual mTLS.
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, fmt.Errorf("read mTLS cert: %w", err)
@@ -292,13 +322,22 @@ func delegatingHTTPClient(log logr.Logger) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read mTLS key: %w", err)
 	}
-	caPEM, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("read mTLS CA: %w", err)
-	}
 	tlsCfg, err := credplane.ClientTLSConfig(certPEM, keyPEM, caPEM, serverName)
 	if err != nil {
 		return nil, err
 	}
+	log.Info("delegating to the token service over mutual mTLS (E-2)")
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: delegationTimeout}, nil
+}
+
+// egressResponseHeaderTimeout resolves the F3 upstream-response-header timeout from
+// EGRESS_RESPONSE_HEADER_TIMEOUT (e.g. "120s","2m"); blank/invalid ⇒ 120s.
+func egressResponseHeaderTimeout() time.Duration {
+	const def = 120 * time.Second
+	if v := strings.TrimSpace(os.Getenv("EGRESS_RESPONSE_HEADER_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
 }

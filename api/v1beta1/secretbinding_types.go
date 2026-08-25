@@ -27,7 +27,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=sb
+// +kubebuilder:resource:scope=Namespaced,shortName=sb,categories={agents}
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.backend"
 // +kubebuilder:printcolumn:name="Resolved",type="string",JSONPath=".status.conditions[?(@.type=='Resolved')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

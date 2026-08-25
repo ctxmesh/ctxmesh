@@ -47,6 +47,41 @@ func ServerTLSConfig(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
 	}, nil
 }
 
+// ServerTLSConfigServerAuth builds the central service's TLS config for the E-1 posture
+// (M128/Gate E, ADR 0102 §3): it presents (certPEM, keyPEM) but does NOT require a client
+// certificate. This is server-AUTHENTICATED TLS — the wire is confidential + the server is
+// verifiable — while client authentication remains the app-layer run capability (ADR 0030),
+// not the transport. E-2 (mutual, ServerTLSConfig above) is the later hardening that adds
+// transport-level sender-constraint; ADR 0102 keeps E-1 as the honest GA bar.
+func ServerTLSConfigServerAuth(certPEM, keyPEM []byte) (*tls.Config, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("credplane: load server keypair: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.NoClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
+// ServerAuthClientTLSConfig builds a delegating sidecar's E-1 client config (M128/Gate E,
+// ADR 0102 §3): it verifies the central service's serving cert against caPEM but presents NO
+// client cert (server-auth only). serverName is the SAN the server cert must match. This is
+// the CA-only branch that closes the plaintext-in-transit exposure + the x509 break without
+// requiring per-agent client leaves (E-2's cost); client identity is the run capability.
+func ServerAuthClientTLSConfig(caPEM []byte, serverName string) (*tls.Config, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("credplane: no valid certs in the server CA bundle")
+	}
+	return &tls.Config{
+		RootCAs:    pool,
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS13,
+	}, nil
+}
+
 // ClientTLSConfig builds a delegating sidecar's TLS config: it presents (certPEM, keyPEM)
 // and verifies the central service's certificate against caPEM. serverName is the name the
 // server cert must match (the central service's in-cluster DNS name).

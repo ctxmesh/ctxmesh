@@ -16,6 +16,8 @@ limitations under the License.
 
 package budget
 
+import "context"
+
 // Dimension names the budget axis a decision refers to. It is the "dimension"
 // field of the budget_exceeded response and part of the trace attributes.
 type Dimension string
@@ -85,12 +87,35 @@ type PreCallDecision struct {
 // concurrent use (the Accountant is). One Enforcer is shared across all requests
 // in a launcher process.
 type Enforcer struct {
-	acct *Accountant
+	acct    *Accountant
+	backend SpendBackend
+	logf    func(string, ...any)
 }
 
-// NewEnforcer builds an Enforcer over a fresh Accountant.
+// NewEnforcer builds an in-memory Enforcer (dev / no shared seam).
 func NewEnforcer() *Enforcer {
-	return &Enforcer{acct: NewAccountant()}
+	return &Enforcer{acct: NewAccountant(), logf: func(string, ...any) {}}
+}
+
+// NewEnforcerWithBackend builds an Enforcer that ENFORCES against a durable, cross-replica spend store
+// (F2, ADR 0099) — so a per-agent/per-conversation cap is real under scale-out + survives restarts,
+// instead of the per-replica in-memory total that re-armed on every roll.
+func NewEnforcerWithBackend(b SpendBackend, logf func(string, ...any)) *Enforcer {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	return &Enforcer{acct: NewAccountant(), backend: b, logf: logf}
+}
+
+// SpendBackend is the durable cross-replica spend store the Enforcer reads/writes when configured (the
+// statelayer-proxy in prod). The per-AGENT identity is proxy-derived from the pod token (AgentSpent needs
+// no name); the conversation id is launcher-supplied. A read error makes PreCall FAIL CLOSED. The per-agent
+// key WRITE is the Q8 agent-spend accountant's job (booking it here too would double-count) — this books
+// only the conversation dimension.
+type SpendBackend interface {
+	AgentSpent(ctx context.Context) (Money, error)
+	ConvSpent(ctx context.Context, convID string) (Money, error)
+	AddConvSpend(ctx context.Context, convID string, delta Money) error
 }
 
 // Accountant exposes the underlying accountant (for tests / introspection).
@@ -106,30 +131,49 @@ func (e *Enforcer) Accountant() *Accountant { return e.acct }
 // estimate is a conservative cost for the pending call (a huge single call must
 // not slip through), supplied by the caller's estimator. It is used ONLY for the
 // hard comparison here — the ACTUAL cost is added by PostCall after the call.
-func (e *Enforcer) PreCall(c Caps, estimate Money) PreCallDecision {
+func (e *Enforcer) PreCall(ctx context.Context, c Caps, estimate Money) PreCallDecision {
+	conv, agent, ok := e.readSpent(ctx, c)
+	if !ok {
+		// F2: could not read the durable cross-replica budget — FAIL CLOSED (refuse) rather than allow
+		// on a stale/zero local total. (The backend adapter logs the underlying error.)
+		return PreCallDecision{Allowed: false, Dimension: DimensionConversation}
+	}
 	if c.ConvCap != nil && c.ConversationID != "" {
-		spent := e.acct.ConvSpent(c.ConversationID)
-		if spent.Add(estimate).GreaterThan(*c.ConvCap) {
-			return PreCallDecision{
-				Allowed:   false,
-				Dimension: DimensionConversation,
-				Spent:     spent,
-				Cap:       *c.ConvCap,
-			}
+		if conv.Add(estimate).GreaterThan(*c.ConvCap) {
+			return PreCallDecision{Allowed: false, Dimension: DimensionConversation, Spent: conv, Cap: *c.ConvCap}
 		}
 	}
 	if c.AgentCap != nil && c.AgentName != "" {
-		spent := e.acct.AgentSpent(c.AgentName)
-		if spent.Add(estimate).GreaterThan(*c.AgentCap) {
-			return PreCallDecision{
-				Allowed:   false,
-				Dimension: DimensionAgent,
-				Spent:     spent,
-				Cap:       *c.AgentCap,
-			}
+		if agent.Add(estimate).GreaterThan(*c.AgentCap) {
+			return PreCallDecision{Allowed: false, Dimension: DimensionAgent, Spent: agent, Cap: *c.AgentCap}
 		}
 	}
 	return PreCallDecision{Allowed: true}
+}
+
+// readSpent returns the current spend for both enforced dimensions — from the durable SpendBackend
+// (F2, cross-replica) when configured, else the in-memory accountant. ok=false ⇒ a backend READ failed
+// ⇒ the caller FAILS CLOSED (never fall back to a stale/zero local total for enforcement).
+func (e *Enforcer) readSpent(ctx context.Context, c Caps) (conv, agent Money, ok bool) {
+	if e.backend == nil {
+		return e.acct.ConvSpent(c.ConversationID), e.acct.AgentSpent(c.AgentName), true
+	}
+	conv, agent = Zero(), Zero()
+	if c.ConvCap != nil && c.ConversationID != "" {
+		v, err := e.backend.ConvSpent(ctx, c.ConversationID)
+		if err != nil {
+			return conv, agent, false
+		}
+		conv = v
+	}
+	if c.AgentCap != nil && c.AgentName != "" {
+		v, err := e.backend.AgentSpent(ctx)
+		if err != nil {
+			return conv, agent, false
+		}
+		agent = v
+	}
+	return conv, agent, true
 }
 
 // SoftAlert names one dimension whose one-shot soft alert fired on THIS call, or
@@ -152,8 +196,26 @@ type SoftAlert struct {
 //
 // The state/alert are computed from the freshly-booked totals so they reflect
 // reality after the call, and the soft latch guarantees the alert is one-shot.
-func (e *Enforcer) PostCall(c Caps, actual Money) (convSpent, agentSpent Money, state State, alert *SoftAlert) {
-	convSpent, agentSpent = e.acct.Add(c.ConversationID, c.AgentName, actual)
+func (e *Enforcer) PostCall(ctx context.Context, c Caps, actual Money) (convSpent, agentSpent Money, state State, alert *SoftAlert) {
+	if e.backend != nil {
+		// Book the CONVERSATION spend durably; the per-AGENT key is booked separately by the Q8 agent-spend
+		// accountant (booking it here too would double-count). Best-effort — a write error leaves enforcement
+		// to the next PreCall read (bounded overshoot, ADR 0099).
+		if c.ConvCap != nil && c.ConversationID != "" {
+			if err := e.backend.AddConvSpend(ctx, c.ConversationID, actual); err != nil {
+				e.logf("launcher: budget: durable conv-spend write failed (enforcement falls to the next read): %v", err)
+			}
+		}
+		// Re-read the durable totals for the state/alert + span annotation. Fail-OPEN here (the read is not
+		// the enforcement point — PreCall is): on a read error use the local view.
+		if conv, agent, ok := e.readSpent(ctx, c); ok {
+			convSpent, agentSpent = conv, agent
+		} else {
+			convSpent, agentSpent = e.acct.ConvSpent(c.ConversationID), e.acct.AgentSpent(c.AgentName)
+		}
+	} else {
+		convSpent, agentSpent = e.acct.Add(c.ConversationID, c.AgentName, actual)
+	}
 
 	state = StateOK
 

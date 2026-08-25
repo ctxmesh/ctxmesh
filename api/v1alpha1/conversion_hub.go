@@ -43,11 +43,11 @@ func (*ClusterCredentialStore) Hub() {}
 // Hub marks EvalSuite as the conversion hub.
 func (*EvalSuite) Hub() {}
 
+// Hub marks Tenant as the conversion hub (v1beta1 graduation, GA Gate D M127).
+func (*Tenant) Hub() {}
+
 // Hub marks MCPToolBinding as the conversion hub.
 func (*MCPToolBinding) Hub() {}
-
-// Hub marks MemoryBinding as the conversion hub.
-func (*MemoryBinding) Hub() {}
 
 // Hub marks ModelRoute as the conversion hub.
 func (*ModelRoute) Hub() {}

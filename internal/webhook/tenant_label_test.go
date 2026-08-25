@@ -74,8 +74,10 @@ func TestTenantLabelValidator(t *testing.T) {
 		{"attacker UPDATE setting the label (old had none) is denied", req("someuser", tenant, none), false},
 		{"attacker UPDATE changing the label is denied", req("someuser", tenant, other), false},
 		{"attacker UPDATE with an unchanged label is allowed (no-op)", req("someuser", tenant, tenant), true},
-		{"attacker REMOVING the label is allowed (not a spoof; controller re-stamps)", req("someuser", none, tenant), true},
+		{"attacker REMOVING the label is DENIED (ADR 0102: removal detaches quota scoping — controller-mediated only)", req("someuser", none, tenant), false},
 		{"attacker CREATE without the label is allowed", req("someuser", none, nil), true},
+		{"attacker UPDATE that never touches the label is allowed", req("someuser", none, map[string]string{"unrelated": "y"}), true},
+		{"the controller may REMOVE the label (reassignment)", req(controllerSA, none, tenant), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

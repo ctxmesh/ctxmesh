@@ -97,7 +97,7 @@ type Config struct {
 
 	// Memory holds the :2998 memory-endpoint configuration. The listener is
 	// started ONLY when Memory.BackendAddr is non-empty (i.e. MEMORY_BACKEND_ADDR
-	// is injected by the controller for an agent with a MemoryBinding).
+	// is injected by the controller for an agent with spec.sessionMemory).
 	Memory memoryConfig
 
 	// A2A holds the agent-to-agent mesh configuration. The outbound /a2a
@@ -263,7 +263,7 @@ func (c Config) ObjectStoreEnabled() bool {
 // Environment variables:
 //
 //	MEMORY_BACKEND_ADDR (gate): Valkey host:port. Empty ⇒ the listener is NOT
-//	  started at all (the agent has no MemoryBinding); every other memory env is
+//	  started at all (the agent has no spec.sessionMemory); every other memory env is
 //	  then irrelevant.
 //	MEMORY_PORT (optional): memory listener port (default 2998).
 //	MEMORY_KEY_NAMESPACE (optional): key-prefix namespace; falls back to

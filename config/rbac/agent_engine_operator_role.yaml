@@ -36,7 +36,6 @@ rules:
   # promptversions IS the authz policy. Omitting it fail-closes every PromptVersion
   # API call — the same contract as toolregistries above.
   - promptversions
-  - memorybindings
   - agentregistries
   - agentteams
   - workflows
@@ -73,7 +72,6 @@ rules:
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
-  - memorybindings/status
   - agentregistries/status
   - agentteams/status
   - workflows/status

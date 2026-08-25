@@ -64,21 +64,29 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/credplane"
 	"github.com/ctxmesh/agent-engine/internal/credresolve"
+	"github.com/ctxmesh/agent-engine/internal/dbpool"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/preflight"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	runstore "github.com/ctxmesh/agent-engine/internal/run"
 )
 
 func main() {
 	var (
-		addr      string
-		staticDir string
-		version   string
+		addr        string
+		staticDir   string
+		version     string
+		preflightUp bool
+		ensureKey   bool
 	)
 	flag.StringVar(&addr, "addr", ":9090", "The address the BFF listens on.")
 	flag.StringVar(&staticDir, "static-dir", "ui/dist",
 		"Directory of the built Vite SPA (dist/). Empty disables static serving.")
 	flag.StringVar(&version, "version", "dev", "Version string reported by /api/health.")
+	flag.BoolVar(&preflightUp, "preflight", false,
+		"Run install config-coherence checks (fail LOUD on misconfig) and exit — the Helm post-install hook / GA Gate A (ADR 0095).")
+	flag.BoolVar(&ensureKey, "ensure-capability-key", false,
+		"Generate the platform capability keypair into bff-capability iff absent (never re-key), restart consumers, and exit — the Helm keygen hook / GA Gate A (ADR 0095).")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -86,10 +94,62 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	log := ctrl.Log.WithName("bff")
 
+	if ensureKey {
+		os.Exit(runEnsureCapabilityKey(context.Background()))
+	}
+	if preflightUp {
+		os.Exit(runPreflight(context.Background()))
+	}
+
 	if err := run(addr, staticDir, version, log); err != nil {
 		log.Error(err, "BFF exited with error")
 		os.Exit(1)
 	}
+}
+
+// runPreflight validates that the install is coherently configured and returns a non-zero exit code
+// (failing the Helm post-install hook) with actionable messages on any misconfiguration — so the
+// "correct-when-configured, silent-when-not" failures the GA audit found surface at install, not at
+// runtime (M124/Gate A, ADR 0095). The OBO-specific env is required only when OBO egress is enabled.
+func runPreflight(ctx context.Context) int {
+	log := ctrl.Log.WithName("bff.preflight")
+	oboOn := strings.EqualFold(os.Getenv("MCP_OBO_EGRESS_ENABLED"), "true")
+	required := map[string]string{
+		// Always needed for a functional install (all derivable/defaulted by the chart, m124.3):
+		"TOKEN_SERVICE_URL":        os.Getenv("TOKEN_SERVICE_URL"),
+		"MCP_CREDENTIAL_NAMESPACE": os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
+		"COST_ROLLUP_ENABLED":      os.Getenv("COST_ROLLUP_ENABLED"),
+	}
+	if oboOn {
+		// OBO tool calls additionally need the sidecar image + the capability public key:
+		required["EGRESS_SIDECAR_IMAGE"] = os.Getenv("EGRESS_SIDECAR_IMAGE")
+		required["MCP_CAPABILITY_PUBLIC_KEY"] = os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")
+	}
+	cfg := preflight.Config{
+		RequiredEnv:           required,
+		CapabilityPrivateSeed: os.Getenv("MCP_CAPABILITY_PRIVATE_KEY"),
+		CapabilityPublicKey:   os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
+		ControlPlaneDSN:       os.Getenv("CONTROLPLANE_DSN"),
+	}
+	ping := func(ctx context.Context, dsn string) error {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		db, err := controlplane.Connect(cctx, dsn) // sql.Open("pgx") + PingContext
+		if err != nil {
+			return err
+		}
+		return db.Close()
+	}
+	errs := preflight.Check(ctx, cfg, ping)
+	if len(errs) == 0 {
+		log.Info("preflight OK — install configuration is coherent")
+		return 0
+	}
+	for _, e := range errs {
+		log.Error(e, "preflight FAILED")
+	}
+	fmt.Fprintf(os.Stderr, "\npreflight FAILED with %d problem(s) — fix the above and reinstall. See GA Gate A / ADR 0095.\n", len(errs))
+	return 1
 }
 
 func run(addr, staticDir, version string, log logr.Logger) error {
@@ -235,6 +295,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		if dbErr != nil {
 			return fmt.Errorf("open run-store postgres: %w", dbErr)
 		}
+		dbpool.Apply(db, "RUN_STORE_MAX_OPEN_CONNS", 15) // F-8: bound the run-store pool (ADR 0097)
 		defer func() { _ = db.Close() }()
 		runStore, err = runstore.NewPostgresStore(context.Background(), db)
 		if err != nil {
@@ -393,6 +454,15 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		Log:                         ctrl.Log.WithName("bff.server"),
 	})
 
+	// Fail CLOSED on a missing security-critical key (M124/Gate A, ADR 0095 §2): when the operator
+	// intends per-user OBO (MCP_OBO_REQUIRED — the chart wires it from oboEgress.enabled) but run-
+	// capability minting is disabled, REFUSE to serve. Else OBO tool calls silently downgrade to the
+	// shared org/public credential reporting success. Placed before the run-worker pool starts, so a
+	// durable worker (same process) refuses too. A no-OBO install (the default) is unaffected.
+	if err := bff.OBOMintingPrecondition(envTrue(os.Getenv("MCP_OBO_REQUIRED")), srv.CapabilityMintingEnabled()); err != nil {
+		return err
+	}
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Handler(),
@@ -403,6 +473,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// waitWorkers (F-1, M125/ADR 0097) joins the run-worker loops on shutdown so held leases are released
+	// before the process exits (else a peer waits a full lease-TTL to reclaim). nil when no pool runs.
+	var waitWorkers func()
 	// Run-worker pool (ADR 0034, m32.2): RUN_WORKER_CONCURRENCY>0 runs N claim loops in THIS process
 	// that drain the durable queue. A dedicated worker Deployment sets this (with serving idle); the
 	// front-end BFF can also run a few. Stops claiming when the shutdown signal fires.
@@ -410,7 +483,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		if runStore == nil {
 			return errors.New("RUN_WORKER_CONCURRENCY requires a durable run store (set RUN_STORE_DSN)")
 		}
-		srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
+		waitWorkers = srv.StartRunWorkers(ctx, bff.RunWorkerConfig{Concurrency: n})
 		log.Info("run-worker pool started (ADR 0034)", "concurrency", n)
 	}
 
@@ -426,12 +499,51 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		}
 	}()
 
+	// Private metrics listener (M128/Gate E): the run-pipeline SLIs on METRICS_ADDR
+	// (default :9090), OFF the public edge (ADR 0041) — a separate mux/server so /metrics
+	// never rides the SPA/api listener. METRICS_ADDR="off" disables it.
+	// Default :9092 — a DISTINCT port from the public BFF listener (:9090) so the two never
+	// collide (the metrics surface is private; ADR 0041).
+	metricsAddr := strings.TrimSpace(os.Getenv("METRICS_ADDR"))
+	if metricsAddr == "" {
+		metricsAddr = ":9092"
+	}
+	var metricsSrv *http.Server
+	if metricsAddr != "off" {
+		mmux := http.NewServeMux()
+		mmux.Handle("/metrics", srv.MetricsHandler())
+		metricsSrv = &http.Server{Addr: metricsAddr, Handler: mmux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Info("BFF metrics listening", "addr", metricsAddr)
+			if serveErr := metricsSrv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				log.Error(serveErr, "metrics listener failed")
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
+		httpErr := httpSrv.Shutdown(shutdownCtx)
+		// F-1: wait (bounded) for the worker loops to release their leases before exiting, so a peer
+		// reclaims promptly instead of after a full lease-TTL. The D4 drain grace ran concurrently with
+		// the HTTP shutdown above; the bound guards against a non-ctx-honoring executor outlasting it.
+		if waitWorkers != nil {
+			done := make(chan struct{})
+			go func() { waitWorkers(); close(done) }()
+			select {
+			case <-done:
+				log.Info("run-worker pool drained (leases released)")
+			case <-time.After(15 * time.Second): // ~drain grace (10s) + buffer
+				log.Info("run-worker drain timed out; exiting anyway")
+			}
+		}
+		return httpErr
 	case serveErr := <-errCh:
 		return serveErr
 	}

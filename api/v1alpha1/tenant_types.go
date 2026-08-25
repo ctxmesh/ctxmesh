@@ -179,11 +179,20 @@ type TenantSpec struct {
 	// is all-or-nothing; with it a tenant opens specific legitimate cross-tenant paths. Empty ⇒ strict
 	// isolation (same-tenant + platform only).
 	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	PeerTenants []string `json:"peerTenants,omitempty"`
 }
 
 // TenantStatus defines the observed state of a Tenant.
 type TenantStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// memberNamespaces is the count of namespaces actually reconciled for this
 	// tenant (contested namespaces are excluded).
 	// +optional
@@ -208,8 +217,9 @@ type TenantStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster,shortName=tnt
+// +kubebuilder:resource:scope=Cluster,shortName=tnt,categories={agents}
 // +kubebuilder:printcolumn:name="Namespaces",type="integer",JSONPath=".status.memberNamespaces"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 

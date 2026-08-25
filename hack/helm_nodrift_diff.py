@@ -20,6 +20,12 @@ from __future__ import annotations
 import re
 import sys
 
+# Helm HOOK resources (a `helm.sh/hook` annotation) are install/upgrade LIFECYCLE actions — a
+# preflight check, a keygen bootstrap — NOT steady-state manifests that `kustomize build config/default`
+# represents. They legitimately have no kustomize counterpart, so they are excluded from the no-drift
+# diff (else an always-rendered hook shows as "EXTRA in helm"). Matches quoted + unquoted key forms.
+_HOOK_RE = re.compile(r"""(?m)^\s*["']?helm\.sh/hook["']?\s*:""")
+
 
 def split_docs(text: str) -> list[str]:
     docs = []
@@ -60,6 +66,8 @@ def bucket(text: str) -> dict[tuple[str, str, str], list[str]]:
     for doc in split_docs(text):
         if not re.search(r"^kind:", doc, re.MULTILINE):
             continue
+        if _HOOK_RE.search(doc):
+            continue  # Helm hooks (preflight, keygen) are lifecycle actions, not steady-state resources
         out[key_of(doc)] = normalize(doc)
     return out
 

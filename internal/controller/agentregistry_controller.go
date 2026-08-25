@@ -639,6 +639,7 @@ func (r *AgentRegistryReconciler) setStatus(
 	reason, message string,
 ) error {
 	membersChanged := !slices.Equal(registry.Status.Members, members)
+	genChanged := registry.Status.ObservedGeneration != registry.Generation
 	condChanged := apimeta.SetStatusCondition(&registry.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             status,
@@ -646,10 +647,11 @@ func (r *AgentRegistryReconciler) setStatus(
 		Message:            message,
 		ObservedGeneration: registry.Generation,
 	})
-	if !membersChanged && !condChanged {
+	if !membersChanged && !condChanged && !genChanged {
 		return nil
 	}
 	registry.Status.Members = members
+	registry.Status.ObservedGeneration = registry.Generation
 
 	if err := r.Status().Update(ctx, registry); err != nil {
 		// Return the error (conflict included) so the reconcile REQUEUES — returning nil on

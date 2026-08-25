@@ -455,6 +455,9 @@ func newGatewayProxy(cfg gatewayConfig, tracer trace.Tracer, logf func(string, .
 	// (direct-Valkey legacy mode or unconfigured) gp.control stays nil ⇒ the cancel-check is a no-op and the
 	// model-call path is byte-for-byte unchanged (the durable status-flip cancel still applies).
 	if cfg.StatelayerProxyURL != "" {
+		// F2 (ADR 0099): ENFORCE the per-agent/per-conversation budget against the durable statelayer-proxy
+		// (real across replicas; survives restarts) instead of the per-replica in-memory total. Fail-closed.
+		gp.enforcer = budget.NewEnforcerWithBackend(newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath)), logf)
 		gp.control = newHTTPTenantStore(cfg.StatelayerProxyURL, resolvePodTokenPath(cfg.PodTokenPath))
 	}
 
@@ -623,7 +626,7 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 	est := gp.estimator.Estimate(route)
 	// M8 per-conversation/agent budget — only when a dimension is enforceable (cap set + identity key).
 	if caps.Enforced() {
-		if dec := gp.enforcer.PreCall(caps, est); !dec.Allowed {
+		if dec := gp.enforcer.PreCall(ctx, caps, est); !dec.Allowed {
 			gp.writeBudgetExceeded(w, span, dec)
 			return
 		}
@@ -726,6 +729,16 @@ func (gp *gatewayProxy) serve(w http.ResponseWriter, r *http.Request) {
 				r.Body = io.NopCloser(bytes.NewReader(nil))
 			}
 		}
+	}
+
+	// ── F1 (M126): stream the NON-guardrailed interposed class VERBATIM ─────
+	// A budget/tenant/record-off agent's stream:true call previously fell through to the buffered
+	// forward below (a 60s abort, a 4MiB truncation, and $0 spend on truncation). Route it through the
+	// verbatim relay instead. A guardrailed call already set `streaming` (serveStreaming, below); a
+	// recorded run stays buffered — the recorded stream:true 60s/4MiB wall is carded m52.G19.
+	if !streaming && pol.engine == nil && recordRunID == "" && requestIsStream(r) {
+		gp.serveStreamingVerbatim(fwdCtx, w, span, r, pol, caps, route, userHash)
+		return
 	}
 
 	// ── Streaming guarded path (K2, ADR 0086) ──────────────────────────────
@@ -834,7 +847,7 @@ func (gp *gatewayProxy) bookSpend(
 	if !caps.Enforced() {
 		return
 	}
-	convSpent, agentSpent, state, alert := gp.enforcer.PostCall(caps, actual)
+	convSpent, agentSpent, state, alert := gp.enforcer.PostCall(ctx, caps, actual)
 	gp.annotateSpan(span, caps, convSpent, agentSpent, state, actual)
 
 	if alert != nil {

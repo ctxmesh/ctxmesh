@@ -629,7 +629,7 @@ func TestReconcile_NonRecordAgentUnchanged(t *testing.T) {
 }
 
 // TestReconcile_BudgetPlusMemoryAgentNameOnce guards the inject-once contract:
-// a budgeted agent that ALSO has a MemoryBinding must get AGENT_NAME exactly once
+// a budgeted agent that ALSO has session memory must get AGENT_NAME exactly once
 // (both the M8 budget path and the M5 memory path inject it — a duplicate
 // container env var is invalid).
 func TestReconcile_BudgetPlusMemoryAgentNameOnce(t *testing.T) {
@@ -638,20 +638,19 @@ func TestReconcile_BudgetPlusMemoryAgentNameOnce(t *testing.T) {
 		namespace = "default"
 	)
 
+	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired);
+	// the memory path fires off spec.sessionMemory.
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image:  "ghcr.io/ctxmesh/example-agent:latest",
-			Budget: &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80},
+			Image:         "ghcr.io/ctxmesh/example-agent:latest",
+			Budget:        &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80},
+			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-
-	// A MemoryBinding for the same agent — its reconcile is not needed; the
-	// AgentDeployment reconciler resolves the binding itself when building the pod.
-	_ = mkMemoryBinding(t, "mem-for-budget", namespace, name, "")
 
 	reconcileNN(t, newReconciler(), name, namespace)
 
@@ -997,20 +996,19 @@ func TestReconcile_IdentitySAConflict_ReadyFalse(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, conflictingSA) })
 
 	// Create the AgentDeployment. The reconciler must use a non-empty
-	// StatelayerProxyURL + a MemoryBinding so ensureAgentIdentitySA is actually
-	// reached (injectPodToken = true when StatelayerProxyURL != "" && hasMemoryBinding).
+	// StatelayerProxyURL + session memory so ensureAgentIdentitySA is actually
+	// reached (injectPodToken = true when StatelayerProxyURL != "" && hasMemory).
+	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired).
 	deploy := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctxmesh/example-agent:latest",
+			Image:         "ghcr.io/ctxmesh/example-agent:latest",
+			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-
-	// Wire a MemoryBinding so hasMemoryBinding is true (triggers injectPodToken).
-	_ = mkMemoryBinding(t, "mem-conflict-test", namespace, name, "valkey:6379")
 
 	// The reconciler needs StatelayerProxyURL set to flip injectPodToken.
 	r := &AgentDeploymentReconciler{

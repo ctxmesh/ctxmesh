@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +30,30 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
-// runExecTimeout bounds a single run's execution in phase 1 (the hot, in-process driver). M32
-// replaces this in-process goroutine with a durable worker path; the run object + state machine
-// (ADR 0034) are unchanged by that swap.
-const runExecTimeout = 90 * time.Second
+// runExecTimeout bounds ONE run advance — the agent's whole managed loop for a turn (all model +
+// tool steps until it answers or suspends). Configurable per deployment (F4, M126/ADR 0098): the
+// fixed 90s killed long multi-step / streamed turns with `context deadline exceeded` — a hard
+// ceiling on the durable long-run story (ADR 0093). Env RUN_EXEC_TIMEOUT (default 10m), clamped to
+// RUN_EXEC_MAX_TIMEOUT (default 60m) so a truly-wedged run still dies. Workflow/ingestion/export
+// advances do not flow through executeRun (short by construction), so this is the plain/supervisor knob.
+func runExecTimeout() time.Duration {
+	const def, defMax = 10 * time.Minute, 60 * time.Minute
+	t := envDuration("RUN_EXEC_TIMEOUT", def)
+	if m := envDuration("RUN_EXEC_MAX_TIMEOUT", defMax); t > m {
+		t = m
+	}
+	return t
+}
+
+// envDuration reads a time.Duration from an env var (e.g. "10m", "90s"); blank/invalid ⇒ def.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // jsonNullLiteral is the JSON `null` token, checked when distinguishing an absent/null optional field
 // from a present one in a raw-message body (e.g. the handoff marker detection).
@@ -57,6 +78,7 @@ func (s *Server) registerRunRoutes(authed *http.ServeMux) {
 	if s.adapters.Invoke != nil && s.callerClients != nil {
 		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
 		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
+		authed.HandleFunc("GET /api/runs/{id}/tree", s.handleRunTree)
 		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
 		authed.HandleFunc("GET /api/runs/{id}/fixture", s.handleGetRunFixture)
 		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
@@ -348,7 +370,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 // worker. A structured consent_required (m25.9) becomes requires_action; any other agent failure is
 // an honest `failed` (never a swallowed success). Every terminal state is persisted to the store.
 func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input []byte) {
-	ctx, cancel := context.WithTimeout(ctx, runExecTimeout)
+	ctx, cancel := context.WithTimeout(ctx, runExecTimeout())
 	defer cancel()
 
 	started, err := s.runStore.Update(runID, func(rn *run.Run) error {
@@ -545,6 +567,84 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// RunTreeNodeDTO is one run in an orchestration tree (M124): a supervisor and each specialist it
+// delegated to. Input is the (sub-)task this agent was handed; Output is its result (last assistant
+// message). ParentRunID assembles the tree; the timestamps order the delegation timeline.
+type RunTreeNodeDTO struct {
+	ID          string    `json:"id"`
+	Agent       string    `json:"agent"`
+	Status      string    `json:"status"`
+	ParentRunID string    `json:"parentRunId,omitempty"`
+	RootRunID   string    `json:"rootRunId,omitempty"`
+	Input       string    `json:"input,omitempty"`
+	Output      string    `json:"output,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// RunTreeResponse is the GET /api/runs/{id}/tree body: the tree ROOT id + every run in it (the
+// supervisor + its delegate sub-runs), so the console can render "who orchestrated what" — the task,
+// its decomposition across agents, each agent's result, and the composition. Nodes[] is [] never null.
+type RunTreeResponse struct {
+	RootID string           `json:"rootId"`
+	Nodes  []RunTreeNodeDTO `json:"nodes"`
+}
+
+// handleRunTree serves GET /api/runs/{id}/tree — the orchestration run-tree rooted at this run's TRUE
+// root (a supervisor delegates to specialists as child sub-runs; ADR 0091). CALLER-SCOPED (ADR 0011):
+// authorizeRunAccess proves the caller can read the run's agent through their OWN RBAC before we serve
+// any node — a run id must never be a cross-tenant read oracle. The subtree read keys on the true root
+// id, so opening ANY run in the tree returns the whole tree.
+func (s *Server) handleRunTree(w http.ResponseWriter, r *http.Request) {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
+		return
+	}
+	rn, ok := s.authorizeRunAccess(w, r, caller, r.PathValue("id"), true)
+	if !ok {
+		return
+	}
+	rootID := rn.RootRunID
+	if rootID == "" {
+		rootID = rn.ID // a root run carries no RootRunID; the tree is keyed by its own id.
+	}
+	subtree, err := s.runStore.Subtree(rootID)
+	if err != nil {
+		s.log.Error(err, "run: load subtree", "root", rootID)
+		writeError(w, http.StatusInternalServerError, "failed to load the run tree")
+		return
+	}
+	nodes := make([]RunTreeNodeDTO, 0, len(subtree))
+	for _, n := range subtree {
+		nodes = append(nodes, RunTreeNodeDTO{
+			ID:          n.ID,
+			Agent:       n.Agent,
+			Status:      string(n.Status),
+			ParentRunID: n.ParentRunID,
+			RootRunID:   n.RootRunID,
+			Input:       runTreeText(n.Input),
+			Output:      lastAssistantMessage(n),
+			CreatedAt:   n.CreatedAt,
+			UpdatedAt:   n.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, RunTreeResponse{RootID: rootID, Nodes: nodes})
+}
+
+// runTreeText renders a run's Input as a human string for the tree node — a bare JSON string scalar is
+// unquoted (the common case: the sub-task the supervisor handed the agent); anything else is returned
+// as-is. Never fails.
+func runTreeText(input json.RawMessage) string {
+	s := strings.TrimSpace(string(input))
+	if len(s) >= 2 && s[0] == '"' {
+		var unquoted string
+		if err := json.Unmarshal([]byte(s), &unquoted); err == nil {
+			return unquoted
+		}
+	}
+	return s
 }
 
 // RunDetailDTO is the API projection of a run for GET /api/runs/{id}. It surfaces the standard run
@@ -852,7 +952,7 @@ func (s *Server) resumePlanApproval(w http.ResponseWriter, r *http.Request, rn *
 
 	// Drive the executor in-process (a low-frequency human action — the single-agent resume path drives
 	// executeRun in-process the same way, independent of dispatch mode) so the approved graph starts now.
-	go s.executeWorkflow(rn.ID)
+	go s.executeWorkflow(context.Background(), rn.ID) // inline resume — no worker lease to fence
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: rn.ID, Status: string(run.StatusRunning)})
 }

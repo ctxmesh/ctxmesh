@@ -225,7 +225,7 @@ export class PlaneConfig {
     const memoryPort = parsePort(env.MEMORY_PORT, DEFAULT_MEMORY_PORT, "MEMORY_PORT");
     const feedbackPort = parsePort(env.FEEDBACK_PORT, DEFAULT_FEEDBACK_PORT, "FEEDBACK_PORT");
 
-    // Memory is wired iff the launcher started the :2998 listener (MemoryBinding
+    // Memory is wired iff the launcher started the :2998 listener (spec.sessionMemory
     // injected MEMORY_PORT / MEMORY_BACKEND_ADDR). Feedback is wired iff
     // LANGFUSE_HOST/FEEDBACK_PORT were injected (M9). Tools/:2999 is always
     // addressable when a discovery sidecar is present.

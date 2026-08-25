@@ -21,6 +21,17 @@
 # file is self-consistent: it satisfies every invariant below.
 profile: production
 
+# GA Gate A (ADR 0096) — EXPLICIT acknowledgment of a deferred security enforcement.
+# The tenant-label admission webhook (blocks cross-tenant label repointing) ships its
+# PKI-backed default-ON in Gate E (M128); until then this overlay must acknowledge that
+# admission enforcement is OFF (the compensating control is namespace-UPDATE RBAC, which
+# no tenant principal holds). This value is deliberately self-incriminating so the reduced
+# posture is obvious in any values diff. Remove it once M128 enables the webhook.
+# (OBO egress stays disabled in production until M128 too — the ha-profile guard refuses
+#  controllerManager.oboEgress.enabled here, as the sidecar->token-service TLS wiring is M128.)
+security:
+  tenantLabelEnforcement: "unenforced-UNSAFE-acknowledged"
+
 # The state-layer proxy — the load-bearing one (ADR 0050 §5). >=2 + PDB is REQUIRED
 # at the default cutover.
 statelayerProxy:

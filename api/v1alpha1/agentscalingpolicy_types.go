@@ -124,6 +124,11 @@ type AgentScalingPolicyStatus struct {
 	// +optional
 	Backend string `json:"backend,omitempty"`
 
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// conditions reflect the policy's reconciliation state.
 	// Ready=True means the target AgentDeployment exists and the chosen backend
 	// resource has been created or updated successfully.
@@ -137,7 +142,7 @@ type AgentScalingPolicyStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=asp
+// +kubebuilder:resource:scope=Namespaced,shortName=asp,categories={agents}
 // +kubebuilder:printcolumn:name="Trigger",type="string",JSONPath=".spec.trigger"
 // +kubebuilder:printcolumn:name="Min",type="integer",JSONPath=".spec.min"
 // +kubebuilder:printcolumn:name="Max",type="integer",JSONPath=".spec.max"

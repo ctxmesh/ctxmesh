@@ -285,3 +285,104 @@ func TestUsageBodyForPricing(t *testing.T) {
 		}
 	})
 }
+
+// sseUpstreamPriced is like sseUpstream but sets the x-litellm-response-cost header so PriceCall books
+// a deterministic non-zero cost — proving the verbatim relay captures usage + books spend (F1).
+func sseUpstreamPriced(deltas []string, cost string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("x-litellm-response-cost", cost)
+		fl, _ := w.(http.Flusher)
+		for _, d := range deltas {
+			b, _ := json.Marshal(d)
+			_, _ = fmt.Fprintf(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\","+
+				"\"choices\":[{\"index\":0,\"delta\":{\"content\":%s},\"finish_reason\":null}]}\n\n", b)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+}
+
+// TestServeStreamingVerbatim_NonGuardrailedStreamsAndBooks is the F1 fix (M126): a NON-guardrailed
+// interposed agent (a budget cap, no guardrail ⇒ pol.engine == nil) with stream:true is now RELAYED
+// VERBATIM (incremental SSE tokens) and BOOKS spend from the usage frame — instead of the old buffered
+// forward (a 60s abort / 4MiB truncation / $0 spend). serveStreaming would panic on the nil engine, so
+// a clean pass here proves the verbatim path handled it.
+func TestServeStreamingVerbatim_NonGuardrailedStreamsAndBooks(t *testing.T) {
+	up := sseUpstreamPriced([]string{"Hello", " world"}, "0.0025")
+	defer up.Close()
+	cfg, err := loadGatewayConfig(mapLookup(map[string]string{
+		"GATEWAY_UPSTREAM_URL":        up.URL,
+		"BUDGET_PER_CONVERSATION_USD": "1.00", // a cap ⇒ interposed; NO guardrail ⇒ pol.engine == nil
+	}), "billing-agent")
+	require.NoError(t, err)
+	gp := newTestGatewayProxy(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions", strings.NewReader(streamReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer dummy")
+	req.Header.Set(hdrConversationID, "conv-1")
+	rr := httptest.NewRecorder()
+	gp.handler().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Content-Type"), "text/event-stream",
+		"F1: a non-guardrailed stream is RELAYED as SSE, not buffered to application/json")
+	out := rr.Body.String()
+	assert.Equal(t, "Hello world", collectStreamContent(out), "F1: tokens stream through verbatim")
+	assert.Contains(t, out, "[DONE]")
+	assert.Equal(t, "0.002500", gp.enforcer.Accountant().ConvSpent("conv-1").String(),
+		"F1: spend books from the usage/cost of a streamed call (was $0 via the buffered path)")
+}
+
+// TestServeStreamingVerbatim_StallEmitsErrorFrame is the F5 fix (M126): when the verbatim relay's K9
+// idle abort fires (upstream goes silent mid-stream, client still connected), the client gets an
+// error frame it can detect — NOT a clean [DONE] that would launder the truncation as success.
+func TestServeStreamingVerbatim_StallEmitsErrorFrame(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 50 * time.Millisecond
+	defer func() { streamIdleTimeout = old }()
+
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		<-release // go silent forever (until the test releases on cleanup)
+	}))
+	defer up.Close()
+	defer close(release)
+
+	cfg, err := loadGatewayConfig(mapLookup(map[string]string{
+		"GATEWAY_UPSTREAM_URL":        up.URL,
+		"BUDGET_PER_CONVERSATION_USD": "1.00",
+	}), "billing-agent")
+	require.NoError(t, err)
+	gp := newTestGatewayProxy(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions", strings.NewReader(streamReqBody))
+	req.Header.Set("Authorization", "Bearer dummy")
+	req.Header.Set(hdrConversationID, "conv-stall")
+	rr := httptest.NewRecorder()
+
+	doneCh := make(chan struct{})
+	go func() { gp.handler().ServeHTTP(rr, req); close(doneCh) }()
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("F5: the verbatim relay HUNG on a stalled upstream")
+	}
+	out := rr.Body.String()
+	assert.Contains(t, out, "partial", "the clean prefix streamed")
+	assert.Contains(t, out, "upstream_stalled", "F5: a stall emits a distinct error frame")
+	assert.NotContains(t, out, "[DONE]", "F5: no clean [DONE] on a stall")
+}

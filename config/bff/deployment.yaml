@@ -53,6 +53,11 @@ spec:
             - name: http
               containerPort: 9090
               protocol: TCP
+            # Private run-pipeline metrics (M128/Gate E) — the exporter listens on
+            # :9092 (METRICS_ADDR default), off the public :9090 edge (ADR 0041).
+            - name: metrics
+              containerPort: 9092
+              protocol: TCP
           # Non-secret feature flags. PROVIDER_CONNECT_ENABLED is the ADR 0015
           # connect-a-provider kill-switch: "true" (the default) exposes the
           # POST/GET /api/providers endpoints; "false" on a hardened install makes
@@ -74,6 +79,11 @@ spec:
             # the /api/tenants/{name}/usage endpoint 501s.
             - name: STATELAYER_ADDR
               value: agent-engine-statelayer.agent-engine-system.svc:6379
+            # COST_ROLLUP_ENABLED (M124/Gate A, ADR 0063 D1): "1" starts the cost-rollup worker that
+            # snapshots Valkey per-agent spend into cost_rollups (→ /api/cost + chargeback). Default ON
+            # so a fresh install aggregates cost by default (audit G11e); needs STATELAYER_ADDR (above).
+            - name: COST_ROLLUP_ENABLED
+              value: "1"
             # PLATFORM_GENERATION_MODELS is the ADR 0014 create-from-prompt
             # generation-model pin (comma-separated). "" (the default) leaves
             # generation using the caller's connected-provider model unpinned; an
@@ -114,7 +124,21 @@ spec:
             # dedicated namespace + credential-component RBAC (templates/mcp-credentials
             # .yaml) and routes grants there. Default renders "" (no drift).
             - name: MCP_CREDENTIAL_NAMESPACE
-              value: ""
+              value: agent-engine-system
+            # TOKEN_SERVICE_URL — the credential-plane token-service the BFF delegates MCP grant writes
+            # to (ADR 0029) and the launcher's KB/OBO proxies mint against. The in-cluster Service DNS;
+            # the chart derives it from tokenService.tls.required (https under prod) + the install ns.
+            # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
+            - name: TOKEN_SERVICE_URL
+              value: http://agent-engine-token-service.agent-engine-system.svc:8443
+            # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2) — the fail-CLOSED switch for per-user OBO.
+            # "false" (default) keeps a no-OBO install unaffected. The Helm chart templates it from
+            # controllerManager.oboEgress.enabled: when the operator enables OBO egress, the BFF/worker
+            # REFUSE to start if run-capability minting is disabled (MCP_CAPABILITY_PRIVATE_KEY unset),
+            # so OBO can't silently downgrade to the shared org/public credential. Default "false" ==
+            # the chart default (no drift).
+            - name: MCP_OBO_REQUIRED
+              value: "false"
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).

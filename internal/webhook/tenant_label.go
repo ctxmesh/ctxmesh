@@ -36,12 +36,14 @@ import (
 // Tenant controller + the state-layer tenant resolver).
 const tenantLabel = agentsv1alpha1.TenantLabel
 
-// TenantLabelValidator is a ValidatingWebhook on namespaces: it DENIES a create/update that SETS or CHANGES
-// the tenant label unless the request comes from the Tenant controller's ServiceAccount. Removal by a
-// non-controller is allowed (a namespace leaving a tenant is not a spoof, and the controller re-stamps the
-// label it owns on the next reconcile). This is the admission half of tenant isolation — the always-on
-// system-namespace denylist (m90.3) is the other; together they stop a Tenant from fencing the cluster or a
-// principal from joining a victim tenant.
+// TenantLabelValidator is a ValidatingWebhook on namespaces: it DENIES a create/update that changes the
+// tenant label — set, change, OR remove — unless the request comes from the Tenant controller's
+// ServiceAccount. **Ownership, not entitlement** (M128/Gate E, ADR 0102): tenant (re)assignment is
+// controller-mediated ONLY — a user changes a namespace's tenant by editing the cluster-scoped, RBAC-guarded
+// Tenant CR, never by editing the namespace label directly. Removal is denied too because it detaches the
+// namespace from tenant quota scoping (a downgrade, not cleanup). This is the admission half of tenant
+// isolation — the always-on system-namespace denylist (m90.3) is the other; together they stop a Tenant from
+// fencing the cluster or a principal from joining/leaving a tenant out-of-band.
 type TenantLabelValidator struct {
 	decoder admission.Decoder
 	// controllerUsername is the Tenant controller's SA username (system:serviceaccount:<ns>:<sa>) — the ONLY
@@ -76,12 +78,20 @@ func (v *TenantLabelValidator) Handle(_ context.Context, req admission.Request) 
 		oldVal = oldNs.Labels[tenantLabel]
 	}
 
-	// Deny a SET or CHANGE to a non-empty value by a non-controller (the spoof). A no-op (unchanged) or a
-	// removal (newVal == "") is allowed — neither joins a victim tenant.
-	if newVal != oldVal && newVal != "" {
+	// Deny ANY change to the tenant label by a non-controller — set, change, OR remove (ADR 0102:
+	// ownership-not-entitlement; removal detaches quota scoping, a downgrade). A no-op (unchanged,
+	// incl. a create/update that never touches the label) is allowed.
+	if newVal != oldVal {
+		verb := "set"
+		switch {
+		case oldVal != "" && newVal == "":
+			verb = "remove"
+		case oldVal != "" && newVal != "":
+			verb = "change"
+		}
 		return admission.Denied(fmt.Sprintf(
-			"the %q namespace label is controller-managed (audit P1-3): only the Tenant controller may set or change it; you tried to set %q",
-			tenantLabel, newVal))
+			"the %q namespace label is controller-managed (audit P1-3, ADR 0102): only the Tenant controller may set/change/remove it — reassign the namespace via the Tenant resource. You tried to %s it (old=%q new=%q)",
+			tenantLabel, verb, oldVal, newVal))
 	}
 	return admission.Allowed("")
 }

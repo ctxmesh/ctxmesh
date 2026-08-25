@@ -202,6 +202,121 @@ func (gp *gatewayProxy) serveStreaming(
 	gp.bookSpend(ctx, span, caps, route, userHash, pol, actual)
 }
 
+// streamStallErrorPayload is the F5 (M126) signal: on a mid-stream stall (the K9 idle abort fired while
+// the client is still connected) we emit this as an SSE `data:` frame instead of a clean finish. Both
+// official OpenAI SDKs raise APIError on a streamed data frame carrying an "error" key, so a truncated
+// stream is no longer wire-indistinguishable from a complete one (a `finish_reason:"stop"` would launder
+// the truncation as success). We also omit [DONE] on this path (belt-and-braces).
+const streamStallErrorPayload = `{"error":{"message":"upstream stalled mid-stream (no data within the idle window)","type":"upstream_stalled","code":"upstream_stalled"}}`
+
+// requestIsStream peeks whether the request asked for stream:true, RESTORING the body so the forward
+// re-reads it byte-for-byte. A non-JSON / unreadable body ⇒ false (it takes the buffered path, unchanged).
+func requestIsStream(r *http.Request) bool {
+	if r.Body == nil {
+		return false
+	}
+	buffered, _, err := readLimited(r.Body, maxGatewayReqBody)
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(buffered))
+	if err != nil {
+		return false
+	}
+	var top struct {
+		Stream bool `json:"stream"`
+	}
+	if json.Unmarshal(buffered, &top) != nil {
+		return false
+	}
+	return top.Stream
+}
+
+// serveStreamingVerbatim streams a stream:true call for the NON-guardrailed interposed class (budget /
+// tenant / record-off) — the class that previously fell through to the BUFFERED forward (a 60s abort, a
+// 4MiB truncation, and $0 spend on truncation because the usage frame is LAST; F1/M126). It relays each
+// upstream SSE line VERBATIM: serveStreaming's scan-and-synthesize assumes a guardrail engine (it panics
+// on a nil one) and its synthesized delta only carries Content — it would silently strip tool_calls /
+// role / refusal, so a verbatim relay is a correctness requirement, not an optimization. It sniffs the
+// final usage chunk to bookSpend at parity with the buffered path, applies the K9 idle abort, and emits
+// the F5 stall signal on a mid-stream stall.
+func (gp *gatewayProxy) serveStreamingVerbatim(
+	ctx context.Context, w http.ResponseWriter, span trace.Span, r *http.Request,
+	pol *guardrailBundle, caps budget.Caps, route, userHash string,
+) {
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	resp, err := gp.forwardStream(streamCtx, r)
+	if err != nil {
+		http.Error(w, "gateway upstream error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// A non-200 upstream is not a stream — relay its (small) error body verbatim, no framing.
+	if resp.StatusCode != http.StatusOK {
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, io.LimitReader(resp.Body, maxGatewayRespBody))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	var usageBody []byte
+	sawDone := false
+	// K9 idle deadline: armed now (covers the header→first-chunk gap) + RESET on every upstream line so
+	// a long-but-active stream never trips it; a stalled upstream trips it → cancelStream → read errors.
+	idle := time.AfterFunc(streamIdleTimeout, cancelStream)
+	defer idle.Stop()
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), maxSSELine)
+	for sc.Scan() {
+		idle.Reset(streamIdleTimeout)
+		raw := sc.Text()
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, sseDataPrefix) {
+			data := strings.TrimSpace(line[len(sseDataPrefix):])
+			if data == sseDone {
+				_, _ = io.WriteString(w, raw+"\n") // relay the terminator verbatim
+				if flusher != nil {
+					flusher.Flush()
+				}
+				sawDone = true
+				break
+			}
+			if chunk, ok := parseStreamChunk([]byte(data)); ok && len(chunk.Usage) > 0 && !bytes.Equal(chunk.Usage, []byte("null")) {
+				usageBody = append([]byte(nil), data...) // the final usage chunk prices the call
+			}
+		}
+		// Relay the line VERBATIM (data frames incl. the injected usage frame, event:/id: lines, comments,
+		// blank separators). The scanner strips the trailing \n, so add it back to preserve the SSE framing.
+		if _, werr := io.WriteString(w, raw+"\n"); werr != nil {
+			return // client disconnected — stop; spend is not booked on a client-side abort
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	switch {
+	case streamCtx.Err() != nil && ctx.Err() == nil:
+		// F5: a stalled upstream — signal the client with an error frame, DON'T fake a clean [DONE].
+		gp.logf("launcher: gateway: streaming upstream stalled (no data for %s) — aborted (K9), signalling the client", streamIdleTimeout)
+		writeSSEData(w, flusher, []byte(streamStallErrorPayload))
+	case !sawDone:
+		writeSSERaw(w, flusher, sseDone) // upstream closed without [DONE] — terminate the client stream cleanly
+	}
+
+	// POST-CALL accounting from the final usage chunk (empty ⇒ $0, the conservative PriceCall fallback).
+	// The SHARED bookSpend path, so a non-guardrailed streamed agent's spend now matches the buffered path.
+	actual := budget.PriceCall(resp.Header.Get(budget.LiteLLMCostHeader), usageBody)
+	gp.bookSpend(ctx, span, caps, route, userHash, pol, actual)
+}
+
 // emitStreamStep emits the PII-safe decisions and the released content of one scanner step as a
 // synthesized SSE delta chunk, and — on a block — emits the content_filter finish frame. It
 // returns true iff the step blocked (the caller stops emitting to the client after that).

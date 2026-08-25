@@ -303,7 +303,7 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	assert.Equal(t, "8", envMap["A2A_MAX_DEPTH"], "guard default maxDepth=8")
 	assert.Equal(t, "32", envMap["A2A_HOP_BUDGET"], "guard default hopBudget=32")
 	// A2A DNS discovery needs POD_NAMESPACE + AGENT_NAME on EVERY member (a member
-	// without a MemoryBinding gets them here, not via the memory path). Without
+	// without session memory gets them here, not via the memory path). Without
 	// POD_NAMESPACE the launcher builds {target}..svc.cluster.local → NXDOMAIN.
 	assert.Equal(t, namespace, envMap["POD_NAMESPACE"], "POD_NAMESPACE must be the agent's namespace (A2A DNS)")
 	assert.Equal(t, agentName, envMap["AGENT_NAME"], "AGENT_NAME must be the agent name (A2A senderAgentId)")
@@ -343,7 +343,7 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 }
 
 // TestRegistry_MemberWithMemory_AgentNameOnce verifies that an agent that is
-// BOTH a registry member AND has a MemoryBinding gets AGENT_NAME injected exactly
+// BOTH a registry member AND has session memory gets AGENT_NAME injected exactly
 // ONCE (the memory path injects it first; the registry path must not duplicate
 // it) and still gets POD_NAMESPACE (the memory path does NOT set POD_NAMESPACE,
 // so the registry path must add it for A2A DNS discovery).
@@ -357,6 +357,9 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 
+	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
+	// the memory path injects AGENT_NAME (but not POD_NAMESPACE); the registry path
+	// must then dedupe AGENT_NAME and add POD_NAMESPACE.
 	agent := &agentsv1alpha1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
@@ -368,15 +371,11 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
+			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
-
-	// Give the agent a MemoryBinding — the memory path injects AGENT_NAME (but not
-	// POD_NAMESPACE); the registry path must then dedupe AGENT_NAME and add
-	// POD_NAMESPACE.
-	mkMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
 
 	reconcileNN(t, newReconciler(), agentName, namespace)
 
@@ -428,11 +427,11 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
+			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
-	mkMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
 
 	r := newReconciler()
 	r.StatelayerProxyURL = proxyURL
@@ -469,22 +468,22 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 	assert.True(t, mounted, "the launcher container must mount the token")
 }
 
-// mkSharedMemoryBinding creates a MemoryBinding with scope=shared (ADR 0035, m33.3).
-func mkSharedMemoryBinding(t *testing.T, name, namespace, agentRef, addr string) {
+// setAgentSessionMemory patches the named agent's spec.sessionMemory to the given
+// scope/addr — the folded replacement for the retired MemoryBinding CRD (ADR 0101),
+// so resolveMemory sees the agent as memory-enabled. addr "" ⇒ cluster-default backend.
+func setAgentSessionMemory(t *testing.T, namespace, agentName, scope, addr string) {
 	t.Helper()
-	mb := &agentsv1alpha1.MemoryBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.MemoryBindingSpec{
-			AgentRef: agentRef,
-			Scope:    "shared",
-			Backend:  &agentsv1alpha1.MemoryBackend{Addr: addr},
-		},
+	var ad agentsv1alpha1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: agentName}, &ad))
+	sm := &agentsv1alpha1.SessionMemorySpec{Scope: scope}
+	if addr != "" {
+		sm.Backend = &agentsv1alpha1.MemoryBackend{Addr: addr}
 	}
-	require.NoError(t, k8sClient.Create(testCtx, mb))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, mb) })
+	ad.Spec.SessionMemory = sm
+	require.NoError(t, k8sClient.Update(testCtx, &ad))
 }
 
-// TestMemory_SharedScopeInjectedForMember: a scope=shared MemoryBinding on a REGISTRY MEMBER makes
+// TestMemory_SharedScopeInjectedForMember: a scope=shared sessionMemory on a REGISTRY MEMBER makes
 // the reconciler inject MEMORY_SCOPE=shared alongside AGENT_REGISTRY_ID, so the launcher keys the
 // team scratchpad under mem:shared:{registry}: (m33.3).
 func TestMemory_SharedScopeInjectedForMember(t *testing.T) {
@@ -506,18 +505,18 @@ func TestMemory_SharedScopeInjectedForMember(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
-	mkSharedMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+	setAgentSessionMemory(t, namespace, agentName, "shared", "valkey.mem.svc:6379")
 
 	reconcileNN(t, newReconciler(), agentName, namespace)
 
 	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
-	assert.Equal(t, "shared", envMap["MEMORY_SCOPE"], "a shared binding on a member injects MEMORY_SCOPE=shared")
+	assert.Equal(t, "shared", envMap["MEMORY_SCOPE"], "a shared scope on a member injects MEMORY_SCOPE=shared")
 	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"], "the shared scope keys under this registry")
 	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory path active")
 }
 
-// TestMemory_SharedScopeNotInjectedForNonMember: a scope=shared binding on a NON-member agent gets
-// NO MEMORY_SCOPE — there is no registry boundary to share within, so the launcher keeps its
+// TestMemory_SharedScopeNotInjectedForNonMember: a scope=shared sessionMemory on a NON-member agent
+// gets NO MEMORY_SCOPE — there is no registry boundary to share within, so the launcher keeps its
 // private per-agent layout (a visible misconfig, not a broken key).
 func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	const namespace = "default"
@@ -531,7 +530,7 @@ func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
-	mkSharedMemoryBinding(t, agentName+"-mem", namespace, agentName, "valkey.mem.svc:6379")
+	setAgentSessionMemory(t, namespace, agentName, "shared", "valkey.mem.svc:6379")
 
 	reconcileNN(t, newReconciler(), agentName, namespace)
 
@@ -540,8 +539,8 @@ func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	assert.Equal(t, "valkey.mem.svc:6379", envMap["MEMORY_BACKEND_ADDR"], "memory still works (private)")
 }
 
-// TestMemory_FoldedSessionMemoryField: the folded AgentDeployment.spec.sessionMemory (ADR 0037,
-// m34.2) injects the memory env WITHOUT a MemoryBinding CRD — the fold produces identical wiring.
+// TestMemory_FoldedSessionMemoryField: AgentDeployment.spec.sessionMemory (ADR 0037, m34.2) — the
+// sole memory authoring path since the MemoryBinding CRD was retired (ADR 0101) — injects the memory env.
 func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 	const namespace = "default"
 	const agentName = "folded-mem-agent"
@@ -563,7 +562,7 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 
 	envMap := envByName(getKsvc(t, agentName, namespace).Spec.Template.Spec.Containers[0].Env)
 	assert.Equal(t, "valkey.folded.svc:6379", envMap["MEMORY_BACKEND_ADDR"],
-		"the folded field injects the memory backend without a MemoryBinding CRD")
+		"the folded sessionMemory field injects the memory backend")
 	assert.Equal(t, namespace, envMap["MEMORY_KEY_NAMESPACE"])
 	assert.NotContains(t, envMap, "MEMORY_SCOPE", "private scope injects no MEMORY_SCOPE")
 	assert.NotContains(t, envMap, "MEMORY_PER_USER", "perUser off by default")

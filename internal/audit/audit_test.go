@@ -176,12 +176,13 @@ func TestAuditedTypes_CoversEveryAgentCRD(t *testing.T) {
 		t.Fatalf("adding agents scheme: %v", err)
 	}
 
-	// PromptVersion and ToolRegistry retired to Postgres (ADR 0044) — no longer
+	// PromptVersion and ToolRegistry retired to Postgres (ADR 0044); MemoryBinding
+	// folded into AgentDeployment.spec.sessionMemory + retired (ADR 0101) — no longer
 	// CRDs, so not audited.
 	wantKinds := map[string]bool{
 		"AgentDeployment": true, "AgentVersion": true, "ModelRoute": true,
 		"SecretBinding": true, "MCPToolBinding": true,
-		"MemoryBinding": true, "AgentRegistry": true, "AgentScalingPolicy": true,
+		"AgentRegistry": true, "AgentScalingPolicy": true,
 		"EvalSuite": true,
 	}
 	got := map[string]bool{}

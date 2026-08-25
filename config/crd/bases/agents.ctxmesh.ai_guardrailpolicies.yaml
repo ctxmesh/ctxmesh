@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: GuardrailPolicy
     listKind: GuardrailPolicyList
     plural: guardrailpolicies
