@@ -12,7 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { ForbiddenInline, SkeletonCard } from "@/components/kit";
-import { api, ApiError, type RunDetail } from "@/lib/api";
+import { api, ApiError, type RunDetail, type RunTree, type RunTreeNode } from "@/lib/api";
 import { formatRelativeTime, formatDateTime } from "@/lib/format";
 
 // RunDetailPage — per-run detail view (V5, M112). Route: /runs/:id
@@ -288,6 +288,9 @@ export function RunDetailPage() {
         })()}
       </div>
 
+      {/* ── Orchestration tree (M124): when this run delegated to specialists, show who did what ─── */}
+      <OrchestrationTree runId={detail.id} />
+
       {/* ── Nav-out row — the reviewer's exit (V16 F7a/F3) ─────────────────── */}
       {/* "← Approvals" shows for ANY approval run (not only while paused) so a run a colleague already   */}
       {/* resolved, reached by deep-link, still has a way back to the queue. "← Parent run" shows for a    */}
@@ -481,6 +484,81 @@ export function RunDetailPage() {
             </ul>
           </CardContent>
         </Card>
+      )}
+    </div>
+  );
+}
+
+// truncateText keeps a node's task/result readable in the tree card.
+function truncateText(s: string, n: number): string {
+  const t = s.trim();
+  return t.length > n ? t.slice(0, n).trimEnd() + "…" : t;
+}
+
+// OrchestrationTree (M124) renders the run-tree when this run delegated to specialists: the supervisor
+// at the top, then each specialist it handed a sub-task to, with what each was asked and what it
+// produced. Renders NOTHING for a plain single-agent run (a tree of one). Best-effort: a failed/absent
+// tree simply doesn't render (never an error banner — this is an enrichment, not the page's core).
+function OrchestrationTree({ runId }: { runId: string }) {
+  const [tree, setTree] = React.useState<RunTree | null>(null);
+  React.useEffect(() => {
+    const controller = new AbortController();
+    api
+      .getRunTree(runId, controller.signal)
+      .then(setTree)
+      .catch(() => setTree(null));
+    return () => controller.abort();
+  }, [runId]);
+
+  if (!tree || tree.nodes.length <= 1) return null; // not orchestrated — nothing to show.
+
+  // Show every agent the platform ran (the root run is the page itself; steps/delegates are the nodes),
+  // in execution order. Neutral for both a workflow pipeline and a supervisor's dynamic delegation.
+  const steps = tree.nodes.filter((n) => n.id !== tree.rootId);
+  const nodes = steps.length > 0 ? steps : tree.nodes;
+
+  return (
+    <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="run-orchestration">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+        Orchestration
+      </h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        The platform ran {nodes.length} agent{nodes.length === 1 ? "" : "s"} to complete this — here's who
+        did what, in order, and how the work flowed between them.
+      </p>
+      <div className="mt-4 space-y-3">
+        {nodes.map((n, i) => (
+          <OrchestrationNode key={n.id} node={n} step={i + 1} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OrchestrationNode({ node, step }: { node: RunTreeNode; step: number }) {
+  return (
+    <div
+      data-testid={`orchestration-node-${node.agent}`}
+      className="rounded-md border bg-background p-3"
+    >
+      <div className="flex items-center gap-2">
+        <Badge variant="secondary" className="text-[10px]">
+          Step {step}
+        </Badge>
+        <span className="text-sm font-medium">{node.agent}</span>
+        <Badge variant={statusVariant(node.status)} className="ml-auto text-[10px]">
+          {fmtStatus(node.status)}
+        </Badge>
+      </div>
+      {node.input && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">Task:</span> {truncateText(node.input, 180)}
+        </p>
+      )}
+      {node.output && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">Result:</span> {truncateText(node.output, 240)}
+        </p>
       )}
     </div>
   );

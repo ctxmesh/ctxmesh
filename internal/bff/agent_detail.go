@@ -96,17 +96,6 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 		toolBindings = list.Items
 	}
 
-	memoryBindings := []agentsv1alpha1.MemoryBinding{}
-	if list, err := listMemoryBindings(r.Context(), caller, inNS...); err != nil {
-		if !apierrors.IsForbidden(err) {
-			s.log.Error(err, "list MemoryBindings for detail failed", "namespace", ns)
-			writeError(w, http.StatusInternalServerError, "failed to read agent bindings")
-			return
-		}
-	} else {
-		memoryBindings = list.Items
-	}
-
 	versions := []agentsv1alpha1.AgentVersion{}
 	if list, err := listAgentVersions(r.Context(), caller, inNS...); err != nil {
 		if !apierrors.IsForbidden(err) {
@@ -127,7 +116,7 @@ func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
 	// detail page is a read and must not 500 on a stale annotation.
 	managedOutsideUI, drift := s.editModeFlags(&ad)
 
-	detail := newAgentDetail(&ad, toolBindings, memoryBindings, versions, managedOutsideUI, drift)
+	detail := newAgentDetail(&ad, toolBindings, versions, managedOutsideUI, drift)
 
 	// U13: read the agent's DURABLE published-template state so the "Published" badge + Unpublish
 	// survive a reload (they were in-session only). A store read on the BFF's own cpDB (the same

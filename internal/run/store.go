@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 )
@@ -167,6 +168,15 @@ type Store interface {
 	// TRUE root's id, so keying on a mid-tree run returns nothing (only the root the human watches
 	// surfaces the subtree's pauses). Read-only; a nil slice + nil error means "none paused".
 	DescendantsRequiringAction(rootRunID string) ([]DescendantAction, error)
+
+	// Subtree returns EVERY run in the tree rooted at rootRunID — the root run plus all its descendant
+	// sub-runs (delegate children and their nested descendants) — for the orchestration / run-tree view
+	// (M124). Derive-don't-denormalize: a `root_run_id=$1` read (a root run carries root_run_id == id,
+	// so descendants + the root all match), ordered by created_at so the caller can render the delegation
+	// timeline and assemble the parent→child tree from ParentRunID. Read-only; a nil slice means "no tree"
+	// (an unknown root, or a run that isn't a supervisor). Keying on a mid-tree run returns nothing — the
+	// tree is keyed by the TRUE root's id (same discipline as DescendantsRequiringAction).
+	Subtree(rootRunID string) ([]*Run, error)
 
 	// ListWaitingApproval returns the runs in namespace currently paused in requires_action whose Kind is
 	// in `kinds` (M75 approvalWaiting passes {plan_approval}; the M113 V5 unified console queue passes the
@@ -559,6 +569,7 @@ func (m *memStore) ClaimReclaimable(workerID string, lease time.Duration) (*Run,
 	exp := now.Add(lease)
 	pick.run.WorkerID = workerID
 	pick.run.LeaseExpiresAt = &exp
+	pick.run.Attempts++ // F-5: increment on reclaim (parity with the pg store)
 	return cloneRun(pick.run), nil
 }
 
@@ -597,6 +608,29 @@ func (m *memStore) DescendantsRequiringAction(rootRunID string) ([]DescendantAct
 			Message: r.RequiresAction.Message,
 		})
 	}
+	return out, nil
+}
+
+// Subtree — see the Store interface (M124 orchestration view). Returns every run whose RootRunID matches
+// (a root run also matches by id), cloned + ordered by CreatedAt so the caller can assemble the tree.
+func (m *memStore) Subtree(rootRunID string) ([]*Run, error) {
+	if rootRunID == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Run
+	for _, e := range m.entries {
+		if e.run.RootRunID == rootRunID || e.run.ID == rootRunID {
+			out = append(out, cloneRun(e.run))
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out, nil
 }
 

@@ -395,3 +395,80 @@ func decodeQuotaBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
+
+// handleQuotaGetAgentSpend returns the per-AGENT accumulated monthly spend (F2, M126) so the launcher
+// can ENFORCE a per-agent cap that is real across replicas + survives restarts (the in-memory Enforcer
+// re-armed on every roll). Pod-authed to the FULL agent identity, like the accrual endpoint.
+func (s *Server) handleQuotaGetAgentSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.quota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "quota is not configured on this proxy")
+		return
+	}
+	ns, name, err := s.authenticateAgentIdentity(ctx, bearerToken(r))
+	if err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	spent, err := s.quota.AgentSpend(ctx, ns+"/"+name)
+	if err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	writeJSON(w, quotaSpendResponse{SpentUSD: spent})
+}
+
+// handleQuotaGetConvSpend / handleQuotaAddConvSpend track a per-CONVERSATION budget across replicas
+// (F2, M126). Pod-authed to the agent's namespace; the launcher supplies the (opaque) conversation id
+// as a query param — the proxy cannot derive it (same trust model as user-spend's userHash).
+func (s *Server) handleQuotaGetConvSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.quota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	convID := r.URL.Query().Get("conversation")
+	if convID == "" {
+		writeJSONError(w, http.StatusBadRequest, "conversation is required")
+		return
+	}
+	spent, err := s.quota.ConvSpend(ctx, convID)
+	if err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	writeJSON(w, quotaSpendResponse{SpentUSD: spent})
+}
+
+func (s *Server) handleQuotaAddConvSpend(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), memoryOpTimeout)
+	defer cancel()
+	if s.quota == nil || s.podAuth == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "quota is not configured on this proxy")
+		return
+	}
+	if _, err := s.authenticateAgentNamespace(ctx, bearerToken(r)); err != nil {
+		writeAgentAuthError(w, err)
+		return
+	}
+	convID := r.URL.Query().Get("conversation")
+	if convID == "" {
+		writeJSONError(w, http.StatusBadRequest, "conversation is required")
+		return
+	}
+	var req quotaAddSpendRequest
+	if !decodeQuotaBody(w, r, &req) {
+		return
+	}
+	if err := s.quota.AddConvSpend(ctx, convID, req.DeltaUSD); err != nil {
+		quotaBackendError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

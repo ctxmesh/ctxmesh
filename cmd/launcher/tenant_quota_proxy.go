@@ -22,10 +22,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ctxmesh/agent-engine/internal/gateway/budget"
 )
 
 // ErrQuotaProxyRejected is returned when the proxy DEFINITIVELY rejects the
@@ -254,4 +259,60 @@ func (s *httpTenantStore) Control(ctx context.Context, runID string) (string, er
 		// Any non-200 (401 / 404 / 502 / 503) → no trusted verb; the caller fails open (no cancel).
 		return "", statusErr("control", resp.StatusCode)
 	}
+}
+
+// ── F2 (ADR 0099): budget.SpendBackend over the statelayer-proxy ──────────────
+// The per-AGENT identity is proxy-derived from the pod token (no name sent); the conversation id is
+// supplied as a query param. Reads FAIL CLOSED (any non-200 → error → the Enforcer refuses the call).
+
+func (s *httpTenantStore) AgentSpent(ctx context.Context) (budget.Money, error) {
+	resp, err := s.call(ctx, http.MethodGet, "/quota/agent-spend", nil)
+	if err != nil {
+		return budget.Zero(), err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return budget.Zero(), statusErr("agent-spend", resp.StatusCode)
+	}
+	return decodeSpendUSD(resp.Body)
+}
+
+func (s *httpTenantStore) ConvSpent(ctx context.Context, convID string) (budget.Money, error) {
+	resp, err := s.call(ctx, http.MethodGet, "/quota/conv-spend?conversation="+url.QueryEscape(convID), nil)
+	if err != nil {
+		return budget.Zero(), err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return budget.Zero(), statusErr("conv-spend", resp.StatusCode)
+	}
+	return decodeSpendUSD(resp.Body)
+}
+
+func (s *httpTenantStore) AddConvSpend(ctx context.Context, convID string, delta budget.Money) error {
+	//nolint:errcheck // a struct of scalar fields cannot fail to marshal.
+	body, _ := json.Marshal(struct {
+		DeltaUSD float64 `json:"deltaUSD"`
+	}{DeltaUSD: moneyToFloat(delta.String())})
+	resp, err := s.call(ctx, http.MethodPost, "/quota/conv-spend?conversation="+url.QueryEscape(convID), body)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		return statusErr("add-conv-spend", resp.StatusCode)
+	}
+	return nil
+}
+
+// decodeSpendUSD reads {"spentUSD":float} and converts to exact Money (float64 → big.Rat; the
+// accepted ADR-0099 precision trade — exact well past cents for realistic caps).
+func decodeSpendUSD(body io.Reader) (budget.Money, error) {
+	var r struct {
+		SpentUSD float64 `json:"spentUSD"`
+	}
+	if err := json.NewDecoder(body).Decode(&r); err != nil {
+		return budget.Zero(), err
+	}
+	return budget.MoneyFromRat(new(big.Rat).SetFloat64(r.SpentUSD)), nil
 }

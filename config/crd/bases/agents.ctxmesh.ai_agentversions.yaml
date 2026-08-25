@@ -8,13 +8,22 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentVersion
     listKind: AgentVersionList
     plural: agentversions
     singular: agentversion
   scope: Namespaced
   versions:
-  - deprecated: true
+  - additionalPrinterColumns:
+    - jsonPath: .spec.deploymentName
+      name: Deployment
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    deprecated: true
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -323,7 +332,7 @@ spec:
                     items:
                       description: |-
                         KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
                         The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -366,7 +375,10 @@ spec:
                         maxLength: 253
                         type: string
                       enabled:
-                        description: enabled turns on long-term memory for the agent.
+                        default: false
+                        description: |-
+                          enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                          need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                         type: boolean
                       perUser:
                         description: |-
@@ -374,8 +386,6 @@ spec:
                           caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                           isolation means one user's remembered facts never surface in another user's retrieved context.
                         type: boolean
-                    required:
-                    - enabled
                     type: object
                   mountServiceAccountToken:
                     description: |-
@@ -409,10 +419,11 @@ spec:
                     type: integer
                   promptRef:
                     description: |-
-                      promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                      prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                      revision with the new prompt without an image rebuild. When omitted, the
-                      image-bundled prompt is used (PRD §7).
+                      promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                      prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                      records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                      controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                      the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                     maxLength: 253
                     type: string
                   record:
@@ -690,10 +701,9 @@ spec:
                     type: object
                   sessionMemory:
                     description: |-
-                      sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-                      agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-                      (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-                      deprecation window; this field wins when both are present.
+                      sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+                      the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+                      selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
                     properties:
                       backend:
                         description: |-
@@ -795,6 +805,7 @@ spec:
         type: object
     served: true
     storage: false
+    subresources: {}
   - name: v1beta1
     schema:
       openAPIV3Schema:
@@ -1101,7 +1112,7 @@ spec:
                     items:
                       description: |-
                         KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+                        (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
                         The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
                         un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
                         refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -1144,7 +1155,10 @@ spec:
                         maxLength: 253
                         type: string
                       enabled:
-                        description: enabled turns on long-term memory for the agent.
+                        default: false
+                        description: |-
+                          enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+                          need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
                         type: boolean
                       perUser:
                         description: |-
@@ -1152,8 +1166,6 @@ spec:
                           caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
                           isolation means one user's remembered facts never surface in another user's retrieved context.
                         type: boolean
-                    required:
-                    - enabled
                     type: object
                   mountServiceAccountToken:
                     description: |-
@@ -1187,10 +1199,11 @@ spec:
                     type: integer
                   promptRef:
                     description: |-
-                      promptRef optionally names a PromptVersion (same namespace) whose git-backed
-                      prompt is injected into the agent. Swapping promptRef rolls a new Knative
-                      revision with the new prompt without an image rebuild. When omitted, the
-                      image-bundled prompt is used (PRD §7).
+                      promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+                      prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+                      records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+                      controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+                      the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
                     maxLength: 253
                     type: string
                   record:
@@ -1468,10 +1481,9 @@ spec:
                     type: object
                   sessionMemory:
                     description: |-
-                      sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-                      agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-                      (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-                      deprecation window; this field wins when both are present.
+                      sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+                      the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+                      selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
                     properties:
                       backend:
                         description: |-

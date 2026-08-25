@@ -61,6 +61,10 @@ spec:
     port: 9090
     protocol: TCP
     targetPort: 9090
+  - name: metrics
+    port: 9092
+    protocol: TCP
+    targetPort: 9092
   selector:
     app.kubernetes.io/name: agent-engine
     control-plane: bff
@@ -106,6 +110,8 @@ spec:
           value: /etc/agent-engine/recipes
         - name: STATELAYER_ADDR
           value: {{ .Values.statelayer.externalAddr | default (printf "agent-engine-statelayer.%s.svc:6379" .Values.namespace) }}
+        - name: COST_ROLLUP_ENABLED
+          value: {{ .Values.bff.costRollupEnabled | quote }}
         - name: PLATFORM_GENERATION_MODELS
           value: {{ .Values.bff.generation.platformModels | quote }}
         - name: MCP_ENABLED
@@ -115,7 +121,11 @@ spec:
         - name: CONSOLE_URL
           value: {{ .Values.bff.consoleURL | default "" | quote }}
         - name: MCP_CREDENTIAL_NAMESPACE
-          value: {{ .Values.bff.mcp.credentialNamespace | quote }}
+          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
+        - name: TOKEN_SERVICE_URL
+          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
+        - name: MCP_OBO_REQUIRED
+          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER
@@ -155,6 +165,9 @@ spec:
         ports:
         - containerPort: 9090
           name: http
+          protocol: TCP
+        - containerPort: 9092
+          name: metrics
           protocol: TCP
         readinessProbe:
           httpGet:

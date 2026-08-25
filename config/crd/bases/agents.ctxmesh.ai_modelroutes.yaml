@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: ModelRoute
     listKind: ModelRouteList
     plural: modelroutes
@@ -212,6 +214,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec
@@ -420,6 +428,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
             type: object
         required:
         - spec

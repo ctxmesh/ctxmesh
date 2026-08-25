@@ -311,6 +311,7 @@ func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 	if backendChanged {
 		policy.Status.Backend = backend
 	}
+	genChanged := policy.Status.ObservedGeneration != policy.Generation
 	condChanged := apimeta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             condStatus,
@@ -318,9 +319,10 @@ func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 		Message:            message,
 		ObservedGeneration: policy.Generation,
 	})
-	if !backendChanged && !condChanged {
+	if !backendChanged && !condChanged && !genChanged {
 		return nil
 	}
+	policy.Status.ObservedGeneration = policy.Generation
 	if err := r.Status().Update(ctx, policy); err != nil {
 		// Return the error (conflict included) so the reconcile REQUEUES — returning nil on
 		// conflict left status stale until an unrelated event (audit FUNC-6).

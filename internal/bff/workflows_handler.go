@@ -321,7 +321,7 @@ func (s *Server) createWorkflowInstanceRun(
 	// Worker-dispatch mode: leave `queued` for the pool. Dev/single-pod: execute in-process so the
 	// workflow advances without a running worker pool.
 	if !s.runWorkerDispatch {
-		go s.executeWorkflow(runID)
+		go s.executeWorkflow(context.Background(), runID) // inline (dev/single-pod) — unfenced
 	}
 
 	writeJSON(w, http.StatusAccepted, CreateRunResponse{ID: runID, Status: string(run.StatusQueued)})

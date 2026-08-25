@@ -569,7 +569,11 @@ export function ChatPanel({
         </p>
       ) : (
         <>
-          {!ready && (
+          {/* A pre-flight warning only: once the user has sent a turn, the actual result (a reply or an
+              error turn) is the real signal, so stop nagging. This also avoids a misleading "not Ready"
+              over a WORKING answer when the ksvc Ready is a transient-false (a Knative revision-creation
+              race leaves ConfigurationsReady=false while the latestReady revision already serves). */}
+          {!ready && turns.length === 0 && (
             <p
               className="mx-4 mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
               data-testid="chat-not-ready-note"

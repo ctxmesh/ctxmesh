@@ -255,7 +255,7 @@ type GuardrailPolicyStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=gp
+// +kubebuilder:resource:scope=Namespaced,shortName=gp,categories={agents}
 // +kubebuilder:printcolumn:name="FailMode",type="string",JSONPath=".spec.failMode"
 // +kubebuilder:printcolumn:name="Validated",type="string",JSONPath=".status.conditions[?(@.type=='Validated')].status"
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=guardrailpolicies,verbs=get;list;watch;create;update;patch;delete

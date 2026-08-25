@@ -1,5 +1,5 @@
-# ClusterIP Service for the Valkey State Layer. The MemoryBinding controller's
-# default backend addr is agent-engine-statelayer.agent-engine-system.svc:6379.
+# ClusterIP Service for the Valkey State Layer. The controller's default
+# sessionMemory backend addr is agent-engine-statelayer.agent-engine-system.svc:6379.
 apiVersion: v1
 kind: Service
 metadata:

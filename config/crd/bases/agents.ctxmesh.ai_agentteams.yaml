@@ -8,6 +8,8 @@ metadata:
 spec:
   group: agents.ctxmesh.ai
   names:
+    categories:
+    - agents
     kind: AgentTeam
     listKind: AgentTeamList
     plural: agentteams
@@ -237,6 +239,12 @@ spec:
                 maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation this status reflects — set by the
+                  controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+                format: int64
+                type: integer
               registry:
                 description: registry echoes the resolved registryRef (the trust boundary),
                   for convenience in listings.

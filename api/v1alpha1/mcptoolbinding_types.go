@@ -69,6 +69,11 @@ type MCPToolBindingSpec struct {
 
 // MCPToolBindingStatus defines the observed state of a MCPToolBinding.
 type MCPToolBindingStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// conditions reflect the binding's reconciliation state. Ready=True means
 	// the tool is registered, pin-matched, rendered into the agent's manifest,
 	// and pushed to the discovery sidecar. Failure reasons include
@@ -82,7 +87,7 @@ type MCPToolBindingStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=mtb
+// +kubebuilder:resource:scope=Namespaced,shortName=mtb,categories={agents}
 // +kubebuilder:printcolumn:name="Agent",type="string",JSONPath=".spec.agentRef"
 // +kubebuilder:printcolumn:name="Tool",type="string",JSONPath=".spec.toolName"
 // +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.mode"

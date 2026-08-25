@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -32,7 +33,17 @@ import (
 // long an idle worker waits before re-checking an empty queue.
 const (
 	defaultRunWorkerConcurrency = 4
-	defaultRunWorkerLease       = 2 * runExecTimeout
+	// poisonRedeliveryCap bounds how many times a run may be RECLAIMED (a prior holder died
+	// mid-hold) before it is dead-lettered instead of re-reclaimed forever (F-5, M125/ADR 0097).
+	poisonRedeliveryCap = 5
+	// reclaimInterval time-gates how often a worker loop probes reclaim FIRST (before the queue) so an
+	// abandoned run makes progress even under sustained backlog (F-4, M125/ADR 0097).
+	reclaimInterval = 5 * time.Second
+	// defaultRunWorkerLease is FIXED (F4/ADR 0098 decouples it from runExecTimeout — post-M125 the
+	// heartbeat, not lease>timeout, prevents false reclaim; deriving 2×a 10m timeout would make the
+	// pool-wide lease 20m and throw away M125's prompt reclaim). The self-fence in startHeartbeat
+	// bounds the sustained-outage duplicate-execution window a long turn would otherwise open.
+	defaultRunWorkerLease       = 180 * time.Second
 	defaultRunWorkerPollBackoff = time.Second
 	// defaultRunWorkerDrainGrace bounds how long a draining worker (SIGTERM → pool ctx cancelled)
 	// lets an in-flight run keep going before it hands the run off — cancels it + releases its lease
@@ -82,20 +93,33 @@ const sweepWaitingInterval = 30 * time.Second
 // re-queues `waiting` runs whose children have all gone terminal — the belt-and-braces safety net
 // for the crash window between CompleteAndWake and the actual wake (and the sole wake path for the
 // in-mem store across a restart). The goroutine is ctx-cancellable and terminates with the worker pool.
-func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) {
+func (s *Server) StartRunWorkers(ctx context.Context, cfg RunWorkerConfig) func() {
 	cfg = cfg.withDefaults()
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		host = "run-worker"
 	}
 	s.log.Info("run-worker pool starting (ADR 0034)", "concurrency", cfg.Concurrency, "lease", cfg.Lease)
+	// F-1 (M125/ADR 0097): join the worker loops on a WaitGroup so the shutdown path can wait for
+	// each in-flight run to release its lease (inline, in executeClaimedRun) BEFORE the process
+	// exits — else SIGKILL at terminationGracePeriod leaves leases held and a peer waits a full
+	// lease-TTL to reclaim. The returned Wait MUST be called time-bounded (a non-ctx-honoring
+	// executor can outlast the drain grace).
+	var wg sync.WaitGroup
 	for i := range cfg.Concurrency {
 		workerID := fmt.Sprintf("%s-%d", host, i)
-		go s.runWorkerLoop(ctx, workerID, cfg)
+		wg.Go(func() {
+			// Metrics (M128): count this loop live for the dead-worker-pool alert.
+			s.metrics.incWorkerActive()
+			defer s.metrics.decWorkerActive()
+			s.runWorkerLoop(ctx, workerID, cfg)
+		})
 	}
 	// SweepWaiting goroutine (m67.4, ADR 0060 §3): periodically re-queues waiting runs whose children
 	// are all-terminal — the belt-and-braces for the crash window + in-mem-store across restart.
+	// Left OUT of the WaitGroup (idempotent — nothing to drain on shutdown).
 	go s.sweepWaitingLoop(ctx)
+	return wg.Wait
 }
 
 // sweepWaitingLoop runs SweepWaiting on a ~30s tick until ctx is cancelled. It logs swept run ids at
@@ -126,11 +150,19 @@ func (s *Server) sweepWaitingLoop(ctx context.Context) {
 // On no work it backs off; on a claim error it logs and backs off (a transient DB blip must not
 // spin the loop hot).
 func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWorkerConfig) {
+	var lastReclaim time.Time
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		rn, err := s.claimNext(workerID, cfg.Lease)
+		// F-4 (M125/ADR 0097): periodically probe reclaim FIRST (before the queue) so an abandoned run
+		// makes progress even under sustained backlog — the pre-M125 code reclaimed only when the queue
+		// was EMPTY, starving reclaim exactly when the system is busiest. Time-gated to bound reclaim QPS.
+		reclaimFirst := time.Since(lastReclaim) > reclaimInterval
+		if reclaimFirst {
+			lastReclaim = time.Now()
+		}
+		rn, err := s.claimNext(workerID, cfg.Lease, reclaimFirst)
 		switch {
 		case errors.Is(err, run.ErrNoQueuedRun):
 			if !sleepCtx(ctx, cfg.PollBackoff) {
@@ -144,13 +176,29 @@ func (s *Server) runWorkerLoop(ctx context.Context, workerID string, cfg RunWork
 			}
 			continue
 		}
+		// F-5 (M125/ADR 0097): a poison run (reclaimed past the cap — a prior holder died mid-hold each
+		// time) is DEAD-LETTERED, not re-reclaimed, so one bad run can't crash-loop the whole pool.
+		if rn.Attempts > poisonRedeliveryCap {
+			s.deadLetterPoison(rn)
+			continue
+		}
 		s.executeClaimedRun(ctx, workerID, rn, cfg.Lease, cfg.DrainGrace)
 	}
 }
 
 // claimNext prefers a fresh queued run, then falls back to reclaiming an expired-lease running run
 // (a dead worker's). Both return ErrNoQueuedRun when there is nothing to do.
-func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, error) {
+func (s *Server) claimNext(workerID string, lease time.Duration, reclaimFirst bool) (*run.Run, error) {
+	// F-4: on the periodic reclaim-first tick, rescue an abandoned run BEFORE draining the queue so
+	// reclaim doesn't starve under backlog. A hit returns immediately; an empty reclaimable set falls
+	// through to the queue (the common case).
+	if reclaimFirst {
+		if reclaimed, rErr := s.reclaim(workerID, lease); rErr == nil {
+			return reclaimed, nil
+		} else if !errors.Is(rErr, run.ErrNoQueuedRun) {
+			return nil, rErr
+		}
+	}
 	rn, err := s.runStore.ClaimQueued(workerID, lease)
 	if err == nil {
 		return rn, nil
@@ -158,11 +206,41 @@ func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, erro
 	if !errors.Is(err, run.ErrNoQueuedRun) {
 		return nil, err
 	}
-	reclaimed, rErr := s.runStore.ClaimReclaimable(workerID, lease)
-	if rErr == nil {
+	// Queue empty → reclaim (also the sole reclaim path on non-reclaim-first ticks).
+	return s.reclaim(workerID, lease)
+}
+
+// reclaim re-leases the oldest abandoned (expired-lease) run + logs it (F-5's attempts increment
+// lives in the store). ErrNoQueuedRun ⇒ nothing to reclaim.
+func (s *Server) reclaim(workerID string, lease time.Duration) (*run.Run, error) {
+	reclaimed, err := s.runStore.ClaimReclaimable(workerID, lease)
+	if err == nil {
 		s.log.Info("run-worker: reclaimed an abandoned run (resume-on-pod-loss)", "run", reclaimed.ID, "worker", workerID)
 	}
-	return reclaimed, rErr
+	return reclaimed, err
+}
+
+// deadLetterPoison fails a run reclaimed past poisonRedeliveryCap (a prior holder died mid-hold each
+// time — a poison payload, or a bug an executor trips) instead of reclaiming it AGAIN and killing the
+// next worker forever (F-5, M125/ADR 0097). It terminates the run through the normal terminal path
+// (waking a `waiting` parent), and cascades a workflow instance's descendants so children don't
+// orphan-run. We hold the run's lease (just reclaimed it), so the write is exclusive.
+func (s *Server) deadLetterPoison(rn *run.Run) {
+	reason := fmt.Sprintf("poison: max redeliveries (%d) exceeded — a prior worker died mid-run each time", poisonRedeliveryCap)
+	s.log.Error(errors.New(reason), "run-worker: dead-lettering a poison run", "run", rn.ID, "attempts", rn.Attempts)
+	if err := s.terminalTransition(rn.ID, func(r *run.Run) error {
+		if r.Status.IsTerminal() {
+			return fmt.Errorf("already %s", r.Status)
+		}
+		r.Error = reason
+		return r.Transition(run.StatusFailed, time.Now())
+	}); err != nil {
+		s.log.Error(err, "run-worker: dead-letter transition failed", "run", rn.ID)
+		return
+	}
+	if rn.IsWorkflowInstance() {
+		s.cancelCascade(rn.ID, "cancelled: workflow dead-lettered (poison: max redeliveries)")
+	}
 }
 
 // executeClaimedRun drives a run claimed (or reclaimed) by a worker. It rebuilds the OBO execution
@@ -177,6 +255,18 @@ func (s *Server) claimNext(workerID string, lease time.Duration) (*run.Run, erro
 func (s *Server) executeClaimedRun(
 	ctx context.Context, workerID string, rn *run.Run, lease, drainGrace time.Duration,
 ) {
+	// Metrics (M128/Gate E): time this execution segment and record the outcome when the run
+	// reaches a TERMINAL state in THIS claim. Registered first so it runs LAST (after the lease
+	// release + heartbeat-stop defers), by which point the terminal status is committed. A run
+	// that SUSPENDS to `waiting` (HITL / child-wait) is not counted here — it is observed when a
+	// later claim drives it terminal, so the histogram measures active execution, not HITL waits.
+	execStart := time.Now()
+	defer func() {
+		if fin, err := s.runStore.Get(rn.ID); err == nil && fin != nil && fin.Status.IsTerminal() {
+			s.metrics.observeRun(string(fin.Status), time.Since(execStart).Seconds())
+		}
+	}()
+
 	execCtx := contextWithConversationID(context.Background(), rn.ConversationID)
 	if rn.CallerUsername != "" {
 		if token, ok := s.mintRunCapability(rn.CallerUsername, rn.Namespace, rn.Agent, rn.Boundary, rn.ID); ok {
@@ -209,6 +299,17 @@ func (s *Server) executeClaimedRun(
 	// blip does NOT cancel (see startHeartbeat) — a run we may still hold is not aborted on a DB hiccup.
 	execCtx, cancelExec := context.WithCancel(execCtx)
 	defer cancelExec()
+	// F-1 (M125/ADR 0097): release the lease INLINE on this (WaitGroup-joined) loop goroutine when we
+	// exit under a cancelled pool ctx (a drain), so a peer reclaims PROMPTLY and the process does not
+	// exit before the release lands. ReleaseLease is scoped to worker_id+running ⇒ a finished /
+	// suspended / reclaimed run is a safe no-op.
+	defer func() {
+		if ctx.Err() != nil {
+			if err := s.runStore.ReleaseLease(rn.ID, workerID); err != nil {
+				s.log.Error(err, "run-worker: release lease on drain failed", "run", rn.ID, "worker", workerID)
+			}
+		}
+	}()
 
 	// L10: stamp this worker's id on the exec context so executeRun's terminal writes are FENCED on
 	// this worker still holding the lease. If a peer reclaims the run (D3) while our invoke is
@@ -241,10 +342,7 @@ func (s *Server) executeClaimedRun(
 			case <-time.After(drainGrace):
 				s.log.Info("run-worker: draining — handing off an unfinished run for prompt reclaim (D4)",
 					"run", rn.ID, "worker", workerID)
-				cancelExec()
-				if err := s.runStore.ReleaseLease(rn.ID, workerID); err != nil {
-					s.log.Error(err, "run-worker: release lease on drain failed", "run", rn.ID, "worker", workerID)
-				}
+				cancelExec() // the lease is released inline on the loop goroutine after the executor returns (F-1)
 			}
 		}
 	}()
@@ -271,7 +369,7 @@ func (s *Server) executeClaimedRun(
 	// "advance" per claim (launch the next node → suspend), NOT the single-agent executeRun. The executor
 	// participates in this same claim/lease/reclaim machinery (it lives in the worker, not a new Deployment).
 	if rn.IsWorkflowInstance() {
-		s.executeWorkflow(rn.ID)
+		s.executeWorkflow(execCtx, rn.ID)
 		return
 	}
 
@@ -330,19 +428,50 @@ func (s *Server) startHeartbeat(
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		lastRenewed := time.Now() // F4/ADR 0098 self-fence clock
 		for {
 			select {
 			case <-hbCtx.Done():
 				return
 			case <-ticker.C:
-				if err := s.runStore.Heartbeat(runID, workerID, lease); err != nil {
-					// A DEFINITIVE lease loss (a peer reclaimed this run) ⇒ stop executing so we do
-					// not append duplicate events (D3). A transient error / ErrNotFound just stops
-					// renewing (the run continues under at-least-once, as before).
-					if errors.Is(err, run.ErrLeaseLost) && onLeaseLost != nil {
+				err := s.runStore.Heartbeat(runID, workerID, lease)
+				switch {
+				case err == nil:
+					lastRenewed = time.Now() // renewed — keep holding the lease.
+				case errors.Is(err, run.ErrLeaseLost):
+					// DEFINITIVE loss: a peer reclaimed this run (its worker_id changed) — or our own
+					// run went terminal. Either way stop renewing + cancel exec (D3) so a zombie stops
+					// appending duplicate events into the reclaiming worker's stream. If our run already
+					// finished, the cancel is a harmless no-op (execCtx is already done).
+					if onLeaseLost != nil {
 						onLeaseLost()
 					}
 					return
+				case errors.Is(err, run.ErrNotFound):
+					// The run row is gone (deleted / reaped): nothing for a peer to reclaim, so cancelling
+					// is duplicate-safe and stops wasted spend on a run that can no longer commit. Stop.
+					if onLeaseLost != nil {
+						onLeaseLost()
+					}
+					return
+				default:
+					// F-2 (M125/ADR 0097): a TRANSIENT error (a DB blip / pool-exhaustion hiccup, F-8) must NOT
+					// stop renewal — stopping lets the lease EXPIRE → a peer falsely reclaims → DUPLICATE execution.
+					// BUT (F4 self-fence, ADR 0098): if we have not renewed for a FULL lease interval (a sustained
+					// DB outage), we can no longer prove we hold the lease — a peer WILL reclaim it once it can
+					// reach the DB. Cancel exec so we don't run in parallel with the reclaiming peer. (The narrow
+					// window where our terminal write could clobber before the peer reclaims is self-mitigated —
+					// the same DB outage fails that write too; the full cause-suppression is carded m52.G17.)
+					if time.Since(lastRenewed) > lease {
+						s.log.Error(err, "run-worker: heartbeat could not renew for a full lease — self-fencing (stopping execution)",
+							"run", runID, "worker", workerID, "lease", lease)
+						if onLeaseLost != nil {
+							onLeaseLost()
+						}
+						return
+					}
+					s.log.Error(err, "run-worker: heartbeat renew failed (transient) — keeping the lease, will retry",
+						"run", runID, "worker", workerID)
 				}
 			}
 		}

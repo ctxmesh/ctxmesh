@@ -13,6 +13,23 @@
 # renders leniently, preserving the lean single-replica dev default + no-drift.
 profile: ""
 
+# Security enforcement acknowledgments (GA Gate A, ADR 0096). These have NO effect
+# under the default (dev) profile; under `profile: production` the HA guards
+# (templates/ha-profile-guards.yaml) require an EXPLICIT operator choice so a
+# reduced/deferred security posture can never ship SILENTLY.
+security:
+  # Tenant-label admission enforcement. The tenant-label ValidatingWebhook (which
+  # forbids a non-controller principal from repointing a namespace's tenant label — a
+  # cross-tenant boundary move) needs webhook-serving-cert infra that ships in Gate E
+  # (M128, ADR 0096). Until then a production install must EXPLICITLY acknowledge that
+  # admission enforcement is off by setting this to the exact string
+  # "unenforced-UNSAFE-acknowledged". Compensating control: repointing the label
+  # requires namespace-UPDATE RBAC, which no tenant principal holds in a sane tenancy
+  # model — the webhook is defence-in-depth against RBAC misconfiguration. Empty here
+  # (dev) → the production guard is dormant; the shipped values-production.yaml sets
+  # the acknowledgment so the reduced posture is visible in the operator's own diff.
+  tenantLabelEnforcement: ""
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (agent-engine-system) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
@@ -56,16 +73,16 @@ controllerManager:
     collector: ""
     discovery: ""
 
-  # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into
-  # agents with remote OBO tools so tool calls are made as the end-user. Default OFF. A WORKING OBO
-  # install needs the whole block: enabled=true + the sidecar image + the platform capability PUBLIC
-  # key (safe to expose in values — it only VERIFIES capabilities, never signs) + its audience + the
-  # token-service URL. The locked credential namespace is SHARED with the BFF via
-  # bff.mcp.credentialNamespace (they must be the same namespace), so it is not repeated here.
+  # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into agents
+  # with remote OBO tools so tool calls are made as the end-user. For a WORKING OBO install set
+  # enabled=true + sidecarImage. The capability PUBLIC key is NO LONGER set here — it comes from the
+  # bff-capability Secret (provisioned by the keygen hook, capabilityKey.generate; M124/ADR 0095).
+  # tokenServiceURL + the credential namespace are DERIVED by default (token-service Service DNS + the
+  # install ns); leave them empty unless overriding. Setting the retired capabilityPublicKey is a hard
+  # error (the tombstone in templates/capability-keygen-job.yaml) — put the key in the Secret instead.
   oboEgress:
     enabled: false
     sidecarImage: ""
-    capabilityPublicKey: ""
     capabilityAudience: ""
     tokenServiceURL: ""
 
@@ -79,6 +96,21 @@ controllerManager:
 componentPodDisruptionBudgets:
   enabled: false
   minAvailable: 1
+
+# GA Gate A capability keypair (M124, ADR 0095). A post-install/upgrade Helm hook (bff
+# -ensure-capability-key) generates the platform Ed25519 keypair into the bff-capability Secret iff
+# absent (NEVER re-keys) so OBO works out-of-box. Set false to BYO (pre-create the bff-capability Secret;
+# production should BYO a managed key — the generated key is a getting-started default).
+capabilityKey:
+  generate: true
+
+# GA Gate A install preflight (M124, ADR 0095). A post-install/upgrade Helm hook Job runs
+# `bff -preflight` to FAIL LOUD on an incoherent config (empty required env, a mismatched capability
+# keypair, an unreachable control-plane store) instead of the platform silently degrading at runtime.
+# ON by default now that the env is derived (Fork 2) + the keypair is provisioned (Fork 1) — a correct
+# install PASSES it; a wrong one fails at install. Helm hooks are excluded from the no-drift diff (Fork 3).
+preflight:
+  enabled: true
 
 # Horizontal-scale dials for the stateless request-servers (M50 hardening). The
 # gateway (config-rendered LiteLLM proxy) and token-service (credential-plane
@@ -194,6 +226,14 @@ prometheus:
       port: http-usermetric
       # Scrape interval for the queue-proxy request metrics.
       interval: 15s
+  # Run-pipeline SLIs (M128/Gate E): a PodMonitor scraping the BFF + run-worker `metrics` port
+  # (:9092) + a PrometheusRule with the dead-worker-pool alert. OFF by default (needs the
+  # Prometheus Operator CRDs). Enable on a monitored cluster to alert on a stalled run pipeline.
+  runPipeline:
+    enabled: false
+    interval: 30s
+    # Fire when NO run-worker claim loop is live for this long (the pool is dead / crash-looping).
+    deadPoolFor: 5m
 networkPolicy:
   # Install the NetworkPolicy that restricts /metrics ingress to namespaces
   # labeled `metrics: enabled` (requires a NetworkPolicy-enforcing CNI).
@@ -228,6 +268,10 @@ bff:
     # bff:latest in config/default. PRODUCTION: signed image, immutable digest (OPS-4b).
     repository: bff
     tag: ""
+  # COST_ROLLUP_ENABLED (M124/Gate A, audit G11e): "1" (default ON) starts the cost-rollup worker so
+  # a fresh install aggregates per-agent spend into cost_rollups (→ /api/cost + chargeback). A STRING,
+  # quoted; the gate is exactly "1" (cmd/bff/main.go). "0" disables it.
+  costRollupEnabled: "1"
   # The canonical, browser-reachable console origin (ADR 0040) — e.g.
   # "https://console.agents.example.com". Used as the ONE MCP-consent redirect_uri
   # registered with providers + the trusted cross-origin relay target, so "Connect"
@@ -264,10 +308,14 @@ bff:
     worker:
       # Concurrent claim loops per worker pod.
       concurrency: 4
-      # KEDA autoscale bounds on the queued-run backlog. Dev: 0 (scale-to-zero). The
-      # production overlay sets minReplicaCount: 2 (a WARM pool — avoid a scale-from-0
-      # cold start on an interactive run; a drain never zeroes the pool, ADR 0051 Fork-C).
-      minReplicaCount: 0
+      # KEDA autoscale bounds on the queued-run backlog. minReplicaCount is ALSO the
+      # Deployment's warm floor (run-worker.yaml seeds replicas from it), so the durable
+      # path always has >=1 live worker claiming runs — a fresh install's workflows
+      # complete instead of queuing (Gate A / ADR 0095 dec-3), and a KEDA-absent cluster
+      # still processes. Set 0 to opt into scale-to-zero. The production overlay raises it
+      # to 2 (a WARM pool — avoid a scale-from-0 cold start; a drain never zeroes the pool,
+      # ADR 0051 Fork-C).
+      minReplicaCount: 1
       maxReplicaCount: 10
   # The create-from-prompt generation-model pin (ADR 0014). Empty (the default)
   # leaves generation using the caller's connected-provider model unpinned — the

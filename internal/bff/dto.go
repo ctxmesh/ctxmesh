@@ -143,13 +143,13 @@ type AgentScaling struct {
 }
 
 // AgentBinding is one compact entry in the agent's bindings list — an
-// MCPToolBinding ("tool") or a MemoryBinding ("memory") that references this
-// agent. Detail is the human-facing subject (the tool name, or the memory scope);
-// Ready mirrors the binding's own Ready condition so the page can show a
-// per-binding health dot.
+// MCPToolBinding ("tool") or the folded session memory ("memory", ADR 0101 —
+// projected from AgentDeployment.spec.sessionMemory, no longer a CRD). Detail is
+// the human-facing subject (the tool name, or the memory scope); Ready mirrors the
+// binding's own Ready condition (always true for the folded memory field).
 type AgentBinding struct {
 	Kind string `json:"kind"` // "tool" | "memory"
-	Name string `json:"name"` // the binding object's own name
+	Name string `json:"name"` // the binding object's own name ("sessionMemory" for the folded field)
 	// Server is the MCP server (ToolRegistry) a "tool" binding belongs to — the group
 	// key the detail page collapses bindings under. Empty for non-tool bindings.
 	Server string `json:"server,omitempty"`
@@ -1367,7 +1367,6 @@ type AgentGateDetail struct {
 func newAgentDetail(
 	ad *agentsv1alpha1.AgentDeployment,
 	toolBindings []agentsv1alpha1.MCPToolBinding,
-	memoryBindings []agentsv1alpha1.MemoryBinding,
 	versions []agentsv1alpha1.AgentVersion,
 	managedOutsideUI bool,
 	drift bool,
@@ -1393,9 +1392,9 @@ func newAgentDetail(
 		})
 	}
 
-	// Bindings: only those whose spec.agentRef names this agent (the lists are
-	// namespace-scoped already). Tools first, then memory, each stably ordered.
-	bindings := make([]AgentBinding, 0, len(toolBindings)+len(memoryBindings))
+	// Bindings: tool bindings whose spec.agentRef names this agent (the list is
+	// namespace-scoped already), then session memory. Each stably ordered.
+	bindings := make([]AgentBinding, 0, len(toolBindings)+1)
 	for i := range toolBindings {
 		b := &toolBindings[i]
 		if b.Spec.AgentRef != ad.Name {
@@ -1409,16 +1408,20 @@ func newAgentDetail(
 			Ready:  conditionReady(b.Status.Conditions),
 		})
 	}
-	for i := range memoryBindings {
-		b := &memoryBindings[i]
-		if b.Spec.AgentRef != ad.Name {
-			continue
+	// Session memory is the FOLDED spec field (ADR 0101 — the MemoryBinding CRD was
+	// retired), so it is projected straight off ad.Spec.SessionMemory, not a sibling
+	// object. Surfaced as a "memory" row when configured so the detail page still shows
+	// the agent's memory at a glance; always Ready (a spec field has no controller status).
+	if sm := ad.Spec.SessionMemory; sm != nil {
+		scope := sm.Scope
+		if scope == "" {
+			scope = "session"
 		}
 		bindings = append(bindings, AgentBinding{
 			Kind:   "memory",
-			Name:   b.Name,
-			Detail: b.Spec.Scope,
-			Ready:  conditionReady(b.Status.Conditions),
+			Name:   "sessionMemory",
+			Detail: scope,
+			Ready:  true,
 		})
 	}
 

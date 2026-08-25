@@ -86,11 +86,10 @@ type ScalingSpec struct {
 	Max int32 `json:"max,omitempty"`
 }
 
-// SessionMemorySpec is the folded session-memory config (ADR 0037, m34.2): the former MemoryBinding
-// expressed as an AgentDeployment field, since a binding is always 1:1 with its agent and is never
-// shared as an object (the m33.3 "shared" scope is a data-layer key + a field value, not a shared
-// binding). Absent ⇒ the agent has no conversation memory (unless a legacy MemoryBinding CRD binds
-// it during the deprecation window).
+// SessionMemorySpec is the session-memory config expressed as an AgentDeployment field (ADR 0037,
+// m34.2; the folded home for what was the MemoryBinding CRD, now retired — ADR 0101), since a binding
+// is always 1:1 with its agent and is never shared as an object (the m33.3 "shared" scope is a
+// data-layer key + a field value, not a shared binding). Absent ⇒ the agent has no conversation memory.
 type SessionMemorySpec struct {
 	// scope selects the memory key layout. "session" (default) = PRIVATE per-agent
 	// (mem:{namespace}/{agent}:{conversationId}); "shared" (m33.3) = a team scratchpad keyed
@@ -119,8 +118,20 @@ type SessionMemorySpec struct {
 	Backend *MemoryBackend `json:"backend,omitempty"`
 }
 
+// MemoryBackend locates the Valkey backend used to store session memory. Relocated
+// here from the retired MemoryBinding CRD (ADR 0101) since sessionMemory is now its
+// only home.
+type MemoryBackend struct {
+	// addr is the host:port of the Valkey backend.
+	// If omitted the controller defaults to
+	// agent-engine-statelayer.agent-engine-system.svc:6379.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Addr string `json:"addr,omitempty"`
+}
+
 // KnowledgeBaseRef is a reference to a KnowledgeBase CR that this agent is granted access to
-// (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the MemoryBinding precedent applies).
+// (ADR 0061 Fork 3 — authz = folded spec field, NOT a binding CRD; the sessionMemory fold set the precedent).
 // The controller resolves the ref to inject KNOWLEDGE_BASES roster env; the launcher roster gate is the
 // un-forgeable enforcement boundary (mirroring DELEGATE_ROSTER). A namespace-local ref (no Namespace field)
 // refers to a KnowledgeBase in the same namespace as the AgentDeployment.
@@ -153,8 +164,11 @@ type KnowledgeBaseRef struct {
 // pods hold no DB credentials, ADR 0045 Amд 1); the launcher exposes memory.remember / memory.search_agent
 // that proxy there with the capability token.
 type LongTermMemorySpec struct {
-	// enabled turns on long-term memory for the agent.
-	Enabled bool `json:"enabled"`
+	// enabled turns on long-term memory for the agent. Optional-with-default so `enabled: false`
+	// need not be spelled out (P2-8a; matches AutoRollbackConfig.Enabled).
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 
 	// perUser scopes each memory to the invoking user (store scope "agent_user"; the launcher stamps the
 	// caller's identity as the subject) rather than agent-wide (store scope "agent", subject empty). Per-user
@@ -213,10 +227,9 @@ type AgentDeploymentSpec struct {
 	// +optional
 	Scaling *ScalingSpec `json:"scaling,omitempty"`
 
-	// sessionMemory folds the former MemoryBinding into the agent (ADR 0037, m34.2): when set, this
-	// agent has conversation memory — scope selects private-per-agent or a registry-shared scratchpad
-	// (m33.3), backend locates the Valkey. A sibling MemoryBinding CRD is still honoured during the
-	// deprecation window; this field wins when both are present.
+	// sessionMemory is the agent's conversation-memory config (ADR 0037, m34.2; the folded home for
+	// the retired MemoryBinding CRD, ADR 0101): when set, this agent has conversation memory — scope
+	// selects private-per-agent or a registry-shared scratchpad (m33.3), backend locates the Valkey.
 	// +optional
 	SessionMemory *SessionMemorySpec `json:"sessionMemory,omitempty"`
 
@@ -281,10 +294,11 @@ type AgentDeploymentSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	EvalSuiteRef string `json:"evalSuiteRef,omitempty"`
 
-	// promptRef optionally names a PromptVersion (same namespace) whose git-backed
-	// prompt is injected into the agent. Swapping promptRef rolls a new Knative
-	// revision with the new prompt without an image rebuild. When omitted, the
-	// image-bundled prompt is used (PRD §7).
+	// promptRef optionally names a prompt version (by name, same namespace) whose git-backed
+	// prompt is injected into the agent. Prompt versions are Postgres-resident control-plane
+	// records (ADR 0044 — the PromptVersion CRD was retired to the store), resolved by the
+	// controller via the prompt service. Swapping promptRef rolls a new Knative revision with
+	// the new prompt without an image rebuild. When omitted, the image-bundled prompt is used.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	PromptRef string `json:"promptRef,omitempty"`
@@ -737,6 +751,12 @@ type AgentDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:categories={agents}
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="URL",type="string",JSONPath=".status.url"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.latestVersion"
+// +kubebuilder:printcolumn:name="Gate",type="string",JSONPath=".status.gate.phase"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 44",message="metadata.name must be at most 44 characters: the controller appends a 19-character revision-name suffix and Knative revision names are DNS-1035 labels capped at 63 characters"
 
 // AgentDeployment is the Schema for the agentdeployments API.

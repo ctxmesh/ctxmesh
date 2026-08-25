@@ -80,6 +80,9 @@ func TestAgentDetailHappyPath(t *testing.T) {
 			PromptRef:      "system-prompt-v2",
 			Env:            []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "anthropic"}},
 			Scaling:        &agentsv1alpha1.ScalingSpec{Min: 1, Max: 5},
+			// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
+			// the detail projection surfaces it as a "memory" binding row.
+			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session"},
 		},
 		Status: agentsv1alpha1.AgentDeploymentStatus{
 			Conditions:    []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "serving")},
@@ -87,8 +90,8 @@ func TestAgentDetailHappyPath(t *testing.T) {
 			LatestVersion: "echo-abc123",
 		},
 	}
-	// A tool binding + a memory binding referencing echo, plus a decoy binding for
-	// a different agent that must NOT appear.
+	// A tool binding referencing echo, plus a decoy binding for a different agent
+	// that must NOT appear. (Memory comes from ad.Spec.SessionMemory above.)
 	toolBinding := &agentsv1alpha1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "team-a"},
 		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"}},
@@ -97,10 +100,6 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	decoyBinding := &agentsv1alpha1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-tool", Namespace: "team-a"},
 		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://y"}},
-	}
-	memBinding := &agentsv1alpha1.MemoryBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "echo-mem", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.MemoryBindingSpec{AgentRef: "echo", Scope: "session"},
 	}
 	version := &agentsv1alpha1.AgentVersion{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-abc123", Namespace: "team-a"},
@@ -112,7 +111,7 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(ad, toolBinding, decoyBinding, memBinding, version, decoyVersion).Build()
+		WithObjects(ad, toolBinding, decoyBinding, version, decoyVersion).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
 	rec := getDetail(t, s, "echo")
@@ -140,7 +139,7 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	assert.Equal(t, "True", got.Conditions[0].Status)
 	assert.Equal(t, "Deployed", got.Conditions[0].Reason)
 
-	// Bindings: only echo's tool + memory binding, not the decoy.
+	// Bindings: echo's tool binding + folded session memory, not the decoy.
 	require.Len(t, got.Bindings, 2)
 	kinds := map[string]AgentBinding{}
 	for _, b := range got.Bindings {

@@ -300,6 +300,10 @@ func (r *MCPToolBindingReconciler) writeBindingStatuses(
 			Message:            v.Message,
 			ObservedGeneration: b.Generation,
 		})
+		if b.Status.ObservedGeneration != b.Generation {
+			b.Status.ObservedGeneration = b.Generation
+			changed = true
+		}
 		if !changed {
 			continue
 		}

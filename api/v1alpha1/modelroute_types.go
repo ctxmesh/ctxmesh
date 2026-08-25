@@ -102,6 +102,11 @@ type ModelRouteSpec struct {
 
 // ModelRouteStatus defines the observed state of a ModelRoute.
 type ModelRouteStatus struct {
+	// observedGeneration is the .metadata.generation this status reflects — set by the
+	// controller each reconcile so kstatus / `kubectl get -o` can detect a stale status.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// conditions reflect the current reconciliation state of the ModelRoute.
 	// The "Ready" condition is set to True once the route has been successfully
 	// rendered into the live gateway ConfigMap and all referenced SecretBindings
@@ -115,7 +120,7 @@ type ModelRouteStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:deprecatedversion
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=mr
+// +kubebuilder:resource:scope=Namespaced,shortName=mr,categories={agents}
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

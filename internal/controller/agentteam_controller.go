@@ -138,6 +138,7 @@ func (r *AgentTeamReconciler) setStatus(
 	}
 	membersChanged := !slices.Equal(team.Status.Members, members)
 	registryChanged := team.Status.Registry != registry
+	genChanged := team.Status.ObservedGeneration != team.Generation
 	condChanged := apimeta.SetStatusCondition(&team.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             status,
@@ -145,11 +146,12 @@ func (r *AgentTeamReconciler) setStatus(
 		Message:            message,
 		ObservedGeneration: team.Generation,
 	})
-	if !membersChanged && !registryChanged && !condChanged {
+	if !membersChanged && !registryChanged && !condChanged && !genChanged {
 		return nil
 	}
 	team.Status.Members = members
 	team.Status.Registry = registry
+	team.Status.ObservedGeneration = team.Generation
 	if err := r.Status().Update(ctx, team); err != nil {
 		return fmt.Errorf("updating AgentTeam status: %w", err)
 	}

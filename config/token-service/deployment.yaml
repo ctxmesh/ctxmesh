@@ -52,7 +52,7 @@ spec:
             # keeps the legacy per-source-namespace grant path so kustomize/helm-default stay
             # valid. The Helm chart templates it from mcp.credentialNamespace (no drift).
             - name: MCP_CREDENTIAL_NAMESPACE
-              value: ""
+              value: agent-engine-system
             # TLS files live on the OPTIONAL token-service-tls mount. Present ⇒ mTLS; absent ⇒
             # plain HTTP (dev). No literal secret material here.
             - name: TOKEN_SERVICE_TLS_CERT_FILE

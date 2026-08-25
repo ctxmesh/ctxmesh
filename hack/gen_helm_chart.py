@@ -131,12 +131,43 @@ CONSOLE_URL_ENV_HELM = (
 # no extra namespace/RBAC). The chart templates it from `bff.mcp.credentialNamespace`;
 # setting it renders the dedicated namespace + RBAC (templates/mcp-credentials.yaml) and
 # routes grants there. values.yaml ships "" so the DEFAULT render == kustomize (no drift).
+# MCP_CREDENTIAL_NAMESPACE (M124/Gate A): config now hardcodes the install namespace so grant Secrets
+# live in ONE locked namespace the token-service already has RBAC for (config/token-service/role.yaml) —
+# a fresh install routes grants coherently instead of the legacy per-request-namespace path. The chart
+# DERIVES the env from bff.mcp.credentialNamespace ELSE the install namespace, but the *value* stays ""
+# (values.yaml) so templates/mcp-credentials.yaml's gate stays OFF — no extra Namespace/Role renders,
+# no drift + no broad-RBAC regression. Default render (value "", ns=agent-engine-system) == the literal.
 MCP_CREDENTIAL_NAMESPACE_ENV_KUSTOMIZE = (
-    '        - name: MCP_CREDENTIAL_NAMESPACE\n' '          value: ""'
+    "        - name: MCP_CREDENTIAL_NAMESPACE\n" "          value: agent-engine-system"
 )
 MCP_CREDENTIAL_NAMESPACE_ENV_HELM = (
     "        - name: MCP_CREDENTIAL_NAMESPACE\n"
-    "          value: {{ .Values.bff.mcp.credentialNamespace | quote }}"
+    "          value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}"
+)
+
+# COST_ROLLUP_ENABLED (M124/Gate A, audit G11e): config/bff hardcodes "1" so the cost-rollup worker
+# runs by default (→ cost_rollups → /api/cost + chargeback). Templated from bff.costRollupEnabled;
+# default "1" renders == kustomize (no drift). BFF-only literal (do NOT add to the run-worker — same
+# binary, two rollup writers). The gate is exactly "1" (cmd/bff/main.go), so it stays a quoted string.
+COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
+    '        - name: COST_ROLLUP_ENABLED\n' '          value: "1"'
+)
+COST_ROLLUP_ENABLED_ENV_HELM = (
+    "        - name: COST_ROLLUP_ENABLED\n"
+    "          value: {{ .Values.bff.costRollupEnabled | quote }}"
+)
+
+# MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): config/bff hardcodes "false" (no-OBO install
+# unaffected). Templated from controllerManager.oboEgress.enabled — when the operator turns ON OBO
+# egress, the BFF/worker fail CLOSED at start-up if capability minting is disabled (else per-user OBO
+# silently downgrades to the shared org/public credential). Default (enabled=false) renders "false"
+# == kustomize (no drift). Stays a quoted string (envTrue parses it).
+MCP_OBO_REQUIRED_ENV_KUSTOMIZE = (
+    '        - name: MCP_OBO_REQUIRED\n' '          value: "false"'
+)
+MCP_OBO_REQUIRED_ENV_HELM = (
+    "        - name: MCP_OBO_REQUIRED\n"
+    "          value: {{ .Values.controllerManager.oboEgress.enabled | quote }}"
 )
 
 # TOKEN_SERVICE_TLS_REQUIRED (SEC-5): config/token-service hardcodes "false" (dev degrades
@@ -214,13 +245,9 @@ EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
     '          value: {{ .Values.controllerManager.oboEgress.sidecarImage | default "" | quote }}'
 )
-MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE = (
-    '        - name: MCP_CAPABILITY_PUBLIC_KEY\n' '          value: ""'
-)
-MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM = (
-    "        - name: MCP_CAPABILITY_PUBLIC_KEY\n"
-    '          value: {{ .Values.controllerManager.oboEgress.capabilityPublicKey | default "" | quote }}'
-)
+# MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
+# bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
+# secretKeyRef block VERBATIM from kustomize — no value substitution, no drift, no committed key.
 MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE = (
     '        - name: MCP_CAPABILITY_AUDIENCE\n' '          value: ""'
 )
@@ -228,12 +255,18 @@ MCP_CAPABILITY_AUDIENCE_ENV_HELM = (
     "        - name: MCP_CAPABILITY_AUDIENCE\n"
     '          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}'
 )
+# TOKEN_SERVICE_URL (M124/Gate A): config now hardcodes the in-cluster token-service Service DNS (the
+# controller + BFF both delegate MCP grant writes / mint KB+OBO tokens against it — ADR 0029). The chart
+# DERIVES it from the install namespace + tokenService.tls.required (https under `profile: production`,
+# which SEC-5 requires). Default render (tls.required=false, ns=agent-engine-system) reproduces the
+# kustomize literal EXACTLY (unquoted) → no drift. Un-set env silently disabled KB retrieval (audit G13).
 TOKEN_SERVICE_URL_ENV_KUSTOMIZE = (
-    '        - name: TOKEN_SERVICE_URL\n' '          value: ""'
+    "        - name: TOKEN_SERVICE_URL\n"
+    "          value: http://agent-engine-token-service.agent-engine-system.svc:8443"
 )
 TOKEN_SERVICE_URL_ENV_HELM = (
     "        - name: TOKEN_SERVICE_URL\n"
-    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default "" | quote }}'
+    '          value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://agent-engine-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}'
 )
 
 # OPS-2 — the dev-data-plane gate on the manager. config/manager hardcodes "true" (== the kustomize
@@ -405,9 +438,11 @@ def substitute(doc: str) -> str:
     doc = doc.replace(DISCOVERY_IMAGE_ENV_KUSTOMIZE, DISCOVERY_IMAGE_ENV_HELM)
     doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
     doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
-    doc = doc.replace(MCP_CAPABILITY_PUBLIC_KEY_ENV_KUSTOMIZE, MCP_CAPABILITY_PUBLIC_KEY_ENV_HELM)
+    # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
+    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
+    doc = doc.replace(MCP_OBO_REQUIRED_ENV_KUSTOMIZE, MCP_OBO_REQUIRED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)

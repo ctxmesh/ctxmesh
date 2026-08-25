@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -61,6 +62,7 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/agent-engine/internal/kedatypes"
 	"github.com/ctxmesh/agent-engine/internal/objectstore"
+	"github.com/ctxmesh/agent-engine/internal/pki"
 	"github.com/ctxmesh/agent-engine/internal/prompt"
 	"github.com/ctxmesh/agent-engine/internal/promql"
 	"github.com/ctxmesh/agent-engine/internal/run"
@@ -128,6 +130,37 @@ var (
 // (a static "true" the chart/kustomize sets). One const so the several os.Getenv()=="true" gates
 // share a spelling (goconst).
 const envValueTrue = "true"
+
+// Platform PKI constants (M128/Gate E, ADR 0102): the in-process cert-controller's
+// artifact contract — the serving-cert Secret, the webhook Service (the cert SAN + the
+// VWC clientConfig target), and the default local cert dir the controller-runtime webhook
+// server reads (certwatcher hot-reload). These are GA-frozen wire contract (ADR 0102 §Consequences).
+const (
+	webhookCertSecretName = "agent-engine-webhook-server-cert"
+	webhookServiceName    = "webhook-service"
+	defaultWebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
+)
+
+// Platform cert-controller RBAC (M128/Gate E, ADR 0102): the in-process rotator manages its
+// own CA + serving-cert Secret and injects the caBundle into the tenant-label VWC. secrets
+// create/update is already granted elsewhere for the manager; the VWC verbs are new here.
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
+
+// managerNamespace resolves the manager's install namespace (where the cert Secret lives +
+// the webhook Service resolves): POD_NAMESPACE (downward API) first, then the ServiceAccount
+// namespace file, then the install default. Used by the cert-controller (ADR 0102).
+func managerNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "agent-engine-system"
+}
 
 // statelayerProxylessWarning returns a startup warning (and true) when the controller is proxy-less
 // (STATELAYER_PROXY_URL unset) — an UNSUPPORTED combination with the default network isolation (C21,
@@ -235,6 +268,14 @@ func main() {
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
+	}
+
+	// Platform PKI (M128/Gate E, ADR 0102): when the tenant-label webhook is enabled but no
+	// external cert path is supplied, default to the standard local cert dir. The in-process
+	// cert-controller (below) writes the serving cert THERE and controller-runtime's certwatcher
+	// hot-reloads it — no cert-manager, no external cert, no first-boot Secret-mount race.
+	if webhookCertPath == "" && os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
+		webhookCertPath = defaultWebhookCertDir
 	}
 
 	if len(webhookCertPath) > 0 {
@@ -447,13 +488,6 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
 	}
-	if err := (&controller.MemoryBindingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "memorybinding")
-		os.Exit(1)
-	}
 	if err := (&controller.AgentRegistryReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -658,8 +692,51 @@ func main() {
 				"refusing to enable the tenant-label webhook without the controller SA (would deny the controller itself)")
 			os.Exit(1)
 		}
+
+		// Platform PKI (M128/Gate E, ADR 0102): the in-process cert-controller generates + rotates
+		// the CA + the webhook serving cert (no cert-manager), writing them into webhookCertPath so
+		// the webhook server can serve TLS. certReady closes once the cert is bootstrapped — m128.5
+		// gates the VWC creation on it so a fail-closed webhook is never wired before its cert exists.
+		certReady, err := pki.SetupWebhookCertRotator(mgr, pki.WebhookCertConfig{
+			Namespace:          managerNamespace(),
+			ServiceName:        webhookServiceName,
+			CertDir:            webhookCertPath,
+			SecretName:         webhookCertSecretName,
+			CAName:             "agent-engine-ca",
+			CAOrganization:     "agent-engine",
+			CADuration:         5 * 365 * 24 * time.Hour, // ADR 0102: CA ~5y
+			ServerCertDuration: 90 * 24 * time.Hour,      // ADR 0102: leaf ~90d, rotates ahead of expiry
+			// The rotator keeps this VWC's caBundle current on rotation (M128/Gate E, ADR 0102 — no cert-manager).
+			ValidatingWebhookName: enginewebhook.TenantLabelVWCName,
+		})
+		if err != nil {
+			setupLog.Error(err, "unable to set up the webhook cert-controller (M128/ADR 0102)")
+			os.Exit(1)
+		}
+
 		enginewebhook.SetupTenantLabelWebhook(mgr, controllerSA)
-		setupLog.Info("tenant-label ValidatingWebhook registered (opt-in; activate via config/webhook + certs)")
+
+		// The manager OWNS the tenant-label VWC (ADR 0102 §2): create it only AFTER the cert is ready,
+		// so there is no uncertified-VWC window and the namespace/exemption are correct for ANY install
+		// namespace (no chart templating). The cert-controller maintains the caBundle thereafter.
+		vwcNS := managerNamespace()
+		if addErr := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-certReady:
+			}
+			if err := enginewebhook.ApplyTenantLabelVWC(ctx, mgr.GetClient(), vwcNS, webhookServiceName, nil); err != nil {
+				setupLog.Error(err, "applying the manager-owned tenant-label VWC (M128/ADR 0102)")
+				return err
+			}
+			setupLog.Info("tenant-label VWC applied (manager-owned; cert-controller maintains the caBundle)")
+			return nil
+		})); addErr != nil {
+			setupLog.Error(addErr, "unable to register the tenant-label VWC applier")
+			os.Exit(1)
+		}
+		setupLog.Info("tenant-label ValidatingWebhook + in-process cert-controller registered (M128/Gate E)")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

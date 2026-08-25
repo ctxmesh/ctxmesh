@@ -383,38 +383,6 @@ func TestAgentReferencesForbiddenListIs403(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "forbidden")
 }
 
-// TestAgentReferencesIncludesMemoryBinding proves MemoryBindings referencing the
-// agent are included in the classification (in addition to MCPToolBinding and
-// AgentScalingPolicy). An owned MemoryBinding (ownerRef present) is GC'd.
-func TestAgentReferencesIncludesMemoryBinding(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-	}
-	// An owned MemoryBinding.
-	mem := &agentsv1alpha1.MemoryBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "echo-mem",
-			Namespace: detailNS,
-			OwnerReferences: []metav1.OwnerReference{
-				{Kind: agentDeploymentOwnerKind, Name: "echo", APIVersion: "agents.ctxmesh.ai/v1alpha1"},
-			},
-		},
-		Spec: agentsv1alpha1.MemoryBindingSpec{AgentRef: "echo", Scope: "session"},
-	}
-
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad, mem).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
-
-	rec := getReferences(t, s, "echo")
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var got AgentReferencesResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	require.Len(t, got.References, 1)
-	assert.Equal(t, "MemoryBinding", got.References[0].Kind)
-	assert.Equal(t, "echo-mem", got.References[0].Name)
-	assert.True(t, got.References[0].OwnedByAgent, "owned MemoryBinding must be classified as GC'd")
-	assert.Equal(t, 1, got.GCCount)
-	assert.Equal(t, 0, got.OrphanCount)
-}
+// (TestAgentReferencesIncludesMemoryBinding removed — MemoryBinding retired in
+// M127/ADR 0101; session memory is now the folded AgentDeployment.spec.sessionMemory
+// field, deleted with the agent, not an independent delete-preview reference.)
