@@ -294,3 +294,25 @@ func TestClampSpawnBudget(t *testing.T) {
 		assert.Equal(t, tc.wantTotal, tot, "total in=%d", tc.inTotal)
 	}
 }
+
+// TestLastAssistantMessage_StripsSpotlightDelimiters guards that a leaked K1 spotlight delimiter
+// (ADR 0059 — ⟦tool-output:TOKEN⟧) never surfaces in a sub-run's answer (the orchestration tree, a
+// delegate result). A model can echo one into its output after copying a wrapped tool result into a
+// delegated task; the surfacing helper must strip them.
+func TestLastAssistantMessage_StripsSpotlightDelimiters(t *testing.T) {
+	cases := []struct{ name, content, want string }{
+		{"clean answer unchanged", "Final polished copy.", "Final polished copy."},
+		{"leading open delimiter + newline stripped", "⟦tool-output:9f905f4914d05d1547b20643fd4e9ac1⟧\nFinal copy.", "Final copy."},
+		{"wrapping delimiters stripped", "⟦tool-output:abc123⟧inner text⟦/tool-output:abc123⟧", "inner text"},
+		{"no assistant turn yields empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := []run.Message{{Role: "user", Content: "x"}}
+			if tc.name != "no assistant turn yields empty" {
+				msgs = append(msgs, run.Message{Role: "assistant", Content: tc.content})
+			}
+			assert.Equal(t, tc.want, lastAssistantMessage(&run.Run{Messages: msgs}))
+		})
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -131,11 +132,20 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 // roleAssistant is the chat-message role of a model turn (the sub-run's answer lives in the last one).
 const roleAssistant = "assistant"
 
-// lastAssistantMessage returns the final assistant turn's content (the sub-run's answer), or "".
+// spotlightDelimiterRe matches the SDK's K1 prompt-injection spotlight delimiters (ADR 0059) —
+// ⟦tool-output:TOKEN⟧ … ⟦/tool-output:TOKEN⟧ — that wrap untrusted tool results inside a run's message
+// history. They are INTERNAL machinery, never meant for a user's eyes. A model that copied a wrapped
+// tool result into a delegated task can echo a delimiter into the sub-run's answer, so we strip them
+// wherever a sub-run's answer is surfaced (the orchestration tree, a delegate result, a workflow node
+// answer) — otherwise a leaked ⟦tool-output:…⟧ shows up in the console's run-tree.
+var spotlightDelimiterRe = regexp.MustCompile(`⟦/?tool-output:[^⟧]*⟧`)
+
+// lastAssistantMessage returns the final assistant turn's content (the sub-run's answer), or "", with
+// any leaked K1 spotlight delimiters stripped (they are internal — never shown to a user).
 func lastAssistantMessage(rn *run.Run) string {
 	for _, m := range slices.Backward(rn.Messages) {
 		if m.Role == roleAssistant {
-			return m.Content
+			return strings.TrimSpace(spotlightDelimiterRe.ReplaceAllString(m.Content, ""))
 		}
 	}
 	return ""
