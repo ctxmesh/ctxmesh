@@ -291,6 +291,29 @@ export function RunDetailPage() {
       {/* ── Orchestration tree (M124): when this run delegated to specialists, show who did what ─── */}
       <OrchestrationTree runId={detail.id} />
 
+      {/* ── Result (m130): a COMPLETED run shows what it produced — the final answer. Previously the ── */}
+      {/* detail page rendered the request/answer only for an approval pause, so a finished run's own    */}
+      {/* output was never shown (you saw the tree but not the composed result). Strip any leaked K1     */}
+      {/* spotlight delimiter (ADR 0059) defensively — internal markers are never shown to a user.       */}
+      {detail.status === "succeeded" && (() => {
+        const answer = [...(detail.messages ?? [])]
+          .reverse()
+          .find((m) => m.role === "assistant")
+          ?.content?.replace(/⟦\/?tool-output:[^⟧]*⟧/g, "")
+          .trim();
+        return answer ? (
+          <Card data-testid="run-result">
+            <CardHeader>
+              <CardTitle className="text-base">Result</CardTitle>
+              <CardDescription>What this run produced.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p className="whitespace-pre-wrap text-sm text-foreground">{answer}</p>
+            </CardContent>
+          </Card>
+        ) : null;
+      })()}
+
       {/* ── Nav-out row — the reviewer's exit (V16 F7a/F3) ─────────────────── */}
       {/* "← Approvals" shows for ANY approval run (not only while paused) so a run a colleague already   */}
       {/* resolved, reached by deep-link, still has a way back to the queue. "← Parent run" shows for a    */}
@@ -510,7 +533,9 @@ function OrchestrationTree({ runId }: { runId: string }) {
     return () => controller.abort();
   }, [runId]);
 
-  if (!tree || tree.nodes.length <= 1) return null; // not orchestrated — nothing to show.
+  // Best-effort enrichment: never crash the page on an absent/malformed tree (a partial response
+  // must render nothing, not throw on tree.nodes.length). Single-node tree ⇒ not orchestrated.
+  if (!tree || !Array.isArray(tree.nodes) || tree.nodes.length <= 1) return null;
 
   // Show every agent the platform ran (the root run is the page itself; steps/delegates are the nodes),
   // in execution order. Neutral for both a workflow pipeline and a supervisor's dynamic delegation.
