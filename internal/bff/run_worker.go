@@ -387,18 +387,32 @@ func (s *Server) executeClaimedRun(
 
 // resumeInvokeBody injects the L7 supervisor-loop checkpoint (ADR 0091) into an invoke body as a
 // platform `checkpoint` field, returning (body, true) when the cursor is a VALID supervisor envelope
-// (run.ParseSupervisorCheckpoint) AND the body is a JSON object. It returns (input, false) — a full
-// re-invoke, the fail-safe — for a non-supervisor cursor (a fresh run, a workflow's per-node cursor, a
-// corrupt / version-skewed blob) or a non-object body. The checkpoint is embedded as the envelope JSON
-// so the SDK RE-verifies it (defense in depth) before restoring; consent/OBO are re-derived server-side
+// (run.ParseSupervisorCheckpoint). It returns (input, false) — a full re-invoke, the fail-safe — for a
+// non-supervisor cursor (a fresh run, a workflow's per-node cursor, a corrupt / version-skewed blob) or
+// an input that is not valid JSON. The checkpoint is embedded as the envelope JSON so the SDK
+// RE-verifies it (defense in depth) before restoring; consent/OBO are re-derived server-side
 // (headers/store), NEVER from the blob. It NEVER disturbs the user's `input`/`approvals` fields.
+//
+// The run's stored Input is the BARE prompt, not the full invoke body — POST /api/runs persists
+// req.Input verbatim (a JSON string, run.New) and the fresh invoke sends it raw (the SDK reads a
+// non-object body as the prompt, serve.py _parse_body). So to carry the checkpoint we WRAP that bare
+// value into the object form the SDK reads `checkpoint` from: {"input": <verbatim>, "checkpoint": …}.
+// A body that already IS a JSON object (a future/alternate shape) is preserved and just gets the field
+// added. Without this wrap the resume silently ran fresh on every wake — the supervisor re-delegated to
+// its first roster member until the spawn budget was exhausted (the ADR 0091 durable-resume bug).
 func resumeInvokeBody(input []byte, cursor string) ([]byte, bool) {
 	if _, ok := run.ParseSupervisorCheckpoint(cursor); !ok {
 		return input, false
 	}
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(input, &body); err != nil || body == nil {
-		return input, false // not a JSON object → full re-invoke (fail-safe)
+		// Not a JSON object — the run's Input is the bare prompt (a JSON string value, the standard
+		// storage). `input` is a valid JSON value, so it is the `input` field verbatim; anything that
+		// isn't valid JSON can't be wrapped safely → full re-invoke (fail-safe).
+		if !json.Valid(input) {
+			return input, false
+		}
+		body = map[string]json.RawMessage{"input": json.RawMessage(input)}
 	}
 	body["checkpoint"] = json.RawMessage(cursor)
 	out, err := json.Marshal(body)

@@ -26,10 +26,12 @@ import (
 	"github.com/ctxmesh/agent-engine/internal/run"
 )
 
-// TestResumeInvokeBody covers the L7 worker-side resume injection (ADR 0091, m108.3): a valid
-// supervisor-loop checkpoint is embedded as a `checkpoint` field in the invoke body (user fields
-// preserved, the envelope re-verifiable); a non-supervisor / corrupt cursor or a non-object body leaves
-// the body untouched → a full re-invoke (the fail-safe).
+// TestResumeInvokeBody covers the L7 worker-side resume injection (ADR 0091, m108.3 + the m130
+// bare-input fix): a valid supervisor-loop checkpoint is embedded as a `checkpoint` field in the invoke
+// body (user fields preserved, the envelope re-verifiable). A non-supervisor / corrupt cursor leaves the
+// body untouched → a full re-invoke (the fail-safe). A BARE-STRING body (the standard storage — run.New
+// persists req.Input as a JSON string) is WRAPPED into {"input":…,"checkpoint":…} so the checkpoint
+// still rides; only a body that is not valid JSON at all falls back to a full re-invoke.
 func TestResumeInvokeBody(t *testing.T) {
 	env, err := run.NewSupervisorCheckpoint(`{"step":3,"messages":[]}`)
 	require.NoError(t, err)
@@ -53,8 +55,23 @@ func TestResumeInvokeBody(t *testing.T) {
 		assert.JSONEq(t, `{"input":"hi"}`, string(out))
 	}
 
-	// A non-object body with a valid checkpoint → fail-safe (never inject into a non-object).
-	out, ok := resumeInvokeBody([]byte(`"raw"`), env)
+	// A BARE-STRING body (run.New stores req.Input as a JSON string) with a valid checkpoint → WRAP it
+	// into an object so the checkpoint rides alongside the prompt (the m130 ADR 0091 durable-resume
+	// fix). The prompt is preserved verbatim under "input"; without this the supervisor re-delegated to
+	// its first roster member every wake until the spawn budget was exhausted.
+	wrapped, ok := resumeInvokeBody([]byte(`"Prepare a briefing"`), env)
+	require.True(t, ok)
+	var w map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wrapped, &w))
+	require.Contains(t, w, "checkpoint")
+	require.Contains(t, w, "input")
+	assert.JSONEq(t, `"Prepare a briefing"`, string(w["input"]))
+	payload2, pok2 := run.ParseSupervisorCheckpoint(string(w["checkpoint"]))
+	require.True(t, pok2, "the injected checkpoint re-verifies after wrapping a bare-string input")
+	assert.Equal(t, `{"step":3,"messages":[]}`, payload2)
+
+	// A body that is not valid JSON at all cannot be wrapped safely → fail-safe (no injection).
+	out, ok := resumeInvokeBody([]byte(`not json at all`), env)
 	assert.False(t, ok)
-	assert.Equal(t, `"raw"`, string(out))
+	assert.Equal(t, `not json at all`, string(out))
 }

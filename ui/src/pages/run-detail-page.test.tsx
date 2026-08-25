@@ -555,4 +555,48 @@ describe("RunDetailPage (V5, M112)", () => {
       expect(screen.queryByTestId("run-waiting-since")).toBeNull();
     });
   });
+
+  // ── (g) m130: Result card — a completed run shows its final answer (+ spotlight strip) ──────────
+  describe("Result card (m130)", () => {
+    it("renders the final assistant answer for a succeeded run", async () => {
+      stubFetch({
+        run: {
+          id: "run-result-1",
+          status: "succeeded",
+          messages: [
+            { role: "user", content: "Prepare a briefing." },
+            { role: "assistant", content: "Here is your final briefing, ready to publish." },
+          ],
+        },
+      });
+      renderPage("run-result-1");
+      const card = await screen.findByTestId("run-result");
+      expect(card).toHaveTextContent("Here is your final briefing, ready to publish.");
+    });
+
+    it("strips leaked K1 spotlight delimiters from the answer", async () => {
+      stubFetch({
+        run: {
+          id: "run-result-2",
+          status: "succeeded",
+          messages: [
+            { role: "assistant", content: "⟦tool-output:abc123⟧\nFinal polished copy.⟦/tool-output:abc123⟧" },
+          ],
+        },
+      });
+      renderPage("run-result-2");
+      const card = await screen.findByTestId("run-result");
+      expect(card).toHaveTextContent("Final polished copy.");
+      expect(card).not.toHaveTextContent("tool-output:");
+    });
+
+    it("does NOT render a Result card for a non-succeeded run", async () => {
+      stubFetch({
+        run: { id: "run-running", status: "running", messages: [{ role: "assistant", content: "partial" }] },
+      });
+      renderPage("run-running");
+      await screen.findByTestId("run-detail-header");
+      expect(screen.queryByTestId("run-result")).toBeNull();
+    });
+  });
 });
