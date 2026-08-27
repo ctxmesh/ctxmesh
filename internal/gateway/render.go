@@ -384,6 +384,16 @@ func buildConfigYAML(entries []modelEntry) string {
 		if e.hasRPM {
 			fmt.Fprintf(&buf, "      rpm: %d\n", e.rpm)
 		}
+		// Cost attribution (M132 / audit G11f): the client calls by the route ALIAS (model_name), so
+		// LiteLLM's default cost lookup + response echo key on the alias — which has no price in any cost
+		// map, so per-agent/per-trace cost reads $0. `model_info.base_model` is LiteLLM's mechanism to
+		// attribute an aliased/passthrough route to its real provider model for pricing. Set it to the
+		// provider model for REAL entries (mock/api_base upstreams have no provider cost). This fixes the
+		// gateway's own cost-tracking (its GENERATION span); the SDK-span echo path is carded (G11f live
+		// verification against Langfuse needs a configured trace store).
+		if !e.isMock && e.apiBase == "" {
+			fmt.Fprintf(&buf, "    model_info:\n      base_model: %s/%s\n", e.provider, e.model)
+		}
 	}
 	return buf.String()
 }
