@@ -108,6 +108,10 @@ type AlertPolicyReconciler struct {
 	// a 5 s per-attempt timeout is used. Override in tests to point at an httptest.Server.
 	HTTPClient *http.Client
 
+	// SMTPSend delivers an email alert (M132, audit V1). nil ⇒ the default net/smtp sender reading the
+	// SMTP_* env is used. Override in tests to capture the message without a real relay.
+	SMTPSend func(cfg smtpConfig, to []string, subject, body string) error
+
 	// Runs is the read side of the durable run store (from cpDB), used ONLY by the approvalWaiting
 	// condition (M75, ADR 0069 §3) to list runs currently paused on plan_approval. nil ⇒ approval-
 	// waiting evaluation is skipped (a dev deployment without cpDB, or a policy with no approvalWaiting
