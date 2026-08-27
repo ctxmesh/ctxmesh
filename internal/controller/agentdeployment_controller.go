@@ -1304,6 +1304,32 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
 	}
 
+	// KnowledgeReady condition (M131 / audit G13, the ADR 0095 zero-config "never silently degrade" bar):
+	// a bound KnowledgeBase needs a reachable knowledge proxy (:2998), which needs TOKEN_SERVICE_URL. If
+	// none is available ANYWHERE — not derived onto OBOEgress by the chart (the default), not injected by
+	// the memory/OBO path above, not on the agent's own spec.Env — newKnowledgeProxy fail-closes and
+	// retrieval SILENTLY returns nothing ("TOKEN_SERVICE_URL unset — disabling"). Surface it LOUD as a
+	// status condition (the same visible-degrade pattern as the dangling-ref condition above; no Recorder
+	// is wired on this reconciler) instead of a silently-wrong RAG answer. Set True when configured so a
+	// prior False clears on the next reconcile once the URL is provided.
+	if len(kbRes.env) > 0 {
+		tsAvailable := envVarPresent(env, envTokenServiceURL) || envVarPresent(deploy.Spec.Env, envTokenServiceURL)
+		cond := metav1.Condition{Type: "KnowledgeReady", ObservedGeneration: deploy.Generation}
+		if tsAvailable {
+			cond.Status, cond.Reason = metav1.ConditionTrue, "ProxyConfigured"
+			cond.Message = "Knowledge retrieval is configured (TOKEN_SERVICE_URL present)."
+		} else {
+			cond.Status, cond.Reason = metav1.ConditionFalse, "TokenServiceUnavailable"
+			cond.Message = "KnowledgeBase bound but TOKEN_SERVICE_URL is unavailable — the knowledge proxy " +
+				"will be disabled and retrieval will return nothing. Set controllerManager.oboEgress." +
+				"tokenServiceURL (the chart derives it by default)."
+		}
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, cond)
+		if err := r.Status().Update(ctx, deploy); err != nil {
+			return podTemplate{}, fmt.Errorf("updating KnowledgeReady status: %w", err)
+		}
+	}
+
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
