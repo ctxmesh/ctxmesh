@@ -181,6 +181,24 @@ func Render(
 		return strings.Compare(ka, kb)
 	})
 
+	// ── Cross-namespace alias-collision guard (M133, Fable security review) ────
+	// The gateway model_list is keyed by the route NAME alone (model_name: <r.Name>), but routes are
+	// aggregated across ALL namespaces. Two tenants that each name a route "anthropic" would render two
+	// `model_name: anthropic` entries — which LiteLLM treats as a LOAD-BALANCING POOL, so tenant A's call
+	// could land on tenant B's provider key (cross-tenant spend + attribution pollution). A route name is
+	// unique within a namespace, so any name appearing in >1 namespace is a collision. EXCLUDE every
+	// colliding route (reported in Result.Excluded → a loud operator signal to rename) rather than serve a
+	// silently cross-tenant pool — fail-closed, the safe default. (The richer fix — namespace-qualified
+	// aliases so both routes work isolated — is carded as a multi-tenancy hardening follow-on.)
+	nameNamespaces := map[string]map[string]struct{}{}
+	for i := range sorted {
+		r := &sorted[i]
+		if nameNamespaces[r.Name] == nil {
+			nameNamespaces[r.Name] = map[string]struct{}{}
+		}
+		nameNamespaces[r.Name][r.Namespace] = struct{}{}
+	}
+
 	// ── Resolve each route's providers ────────────────────────────────────────
 	var (
 		entries  []modelEntry
@@ -191,6 +209,12 @@ func Render(
 	for i := range sorted {
 		r := &sorted[i]
 		routeKey := r.Namespace + "/" + r.Name
+
+		// Fail-closed on a cross-namespace name collision (see the guard above).
+		if len(nameNamespaces[r.Name]) > 1 {
+			excluded = append(excluded, routeKey)
+			continue
+		}
 
 		// Validate: can every non-mock provider be fully resolved?
 		isExcluded := false

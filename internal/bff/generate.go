@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 
@@ -222,8 +223,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// is never returned or logged. A rejected key → 422 (an upstream key rejection,
 	// NOT the caller's session — FUNC-9/ADR 0027), an unreachable provider → 502
 	// (honest, never a 500).
-	output, err := chatComplete(r.Context(), s.providerHTTP,
-		gen.provider, gen.apiKey, gen.baseURL, gen.model, sysPrompt, req.Description, generationCostTag)
+	// Per-caller spend attribution (a "user" tag on the gateway request) is carded with the per-tenant
+	// virtual-keys work (m52) — it needs a SelfSubjectReview per generation and lands better alongside
+	// LiteLLM virtual keys; pass "" for now.
+	output, err := s.generationChat(r.Context(), gen, sysPrompt, req.Description, generationCostTag, "")
 	if err != nil {
 		if pe, isPE := isProviderError(err); isPE {
 			writeError(w, pe.status, pe.msg)
@@ -272,11 +275,35 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 // generationTarget bundles the resolved provider + model + the caller-scoped key
 // for the one chat call. apiKey is never surfaced beyond chatComplete.
+//
+// viaGateway (M133, Fable security review): when true, generation is routed THROUGH the LiteLLM gateway
+// by the route NAME (model) at baseURL — the gateway holds the provider key, so no caller-scoped
+// secret-read is needed (apiKey is empty). This is what lets a non-admin persona (which cannot read
+// Secrets) use prompt-to-agent/team: the authz gate becomes "can GET the connect-managed ModelRoute"
+// (which resolveConnectedRoute already enforced), not "can read the key". Safe against cross-tenant
+// aliasing because the gateway render EXCLUDES cross-namespace name collisions (internal/gateway).
 type generationTarget struct {
-	provider string
-	model    string
-	baseURL  string
-	apiKey   string
+	provider   string
+	model      string
+	baseURL    string
+	apiKey     string
+	viaGateway bool
+}
+
+// generationGatewayURL is the LiteLLM gateway base URL used to route generation without the caller
+// reading the provider key. Empty ⇒ fall back to the direct caller-scoped-key path. Same env seam the
+// KB embedder uses (MODEL_GATEWAY_URL); a process-startup constant.
+func generationGatewayURL() string { return strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")) }
+
+// generationChat runs ONE generation chat completion, routing through the gateway (no caller key) when
+// gen.viaGateway, else the direct caller-scoped-key provider call. One seam so agent-generate,
+// team-generate, and refine share identical authz semantics (Fable review). callerTag rides the gateway
+// request for per-caller spend attribution.
+func (s *Server) generationChat(ctx context.Context, gen generationTarget, systemPrompt, userMsg, costTag, callerTag string) (string, error) {
+	if gen.viaGateway {
+		return chatCompleteViaGateway(ctx, s.providerHTTP, gen.baseURL, gen.model, systemPrompt, userMsg, costTag, callerTag)
+	}
+	return chatComplete(ctx, s.providerHTTP, gen.provider, gen.apiKey, gen.baseURL, gen.model, systemPrompt, userMsg, costTag)
 }
 
 // resolveGeneration determines which provider + model to generate through and
@@ -314,6 +341,19 @@ func (s *Server) resolveGeneration(ctx context.Context, caller client.Client, ns
 		return generationTarget{}, rerr
 	}
 	provider, secretBindingRef, baseURL := routeProbeInputs(route)
+
+	// Gateway-routed (M133, Fable review): when the model gateway is configured, route generation THROUGH
+	// it by the route NAME — the gateway holds the provider key, so the caller needs only the connect-
+	// managed ModelRoute GET above (which succeeded), NOT secret-read. This is what lets developer/operator
+	// personas (which cannot read Secrets) use prompt-to-agent/team. resolveConnectedRoute already
+	// restricted to the caller's connect-managed route; the gateway render EXCLUDES cross-namespace name
+	// collisions, so the bare route name is unambiguous on the wire.
+	if gw := generationGatewayURL(); gw != "" {
+		return generationTarget{provider: provider, model: route.Name, baseURL: gw, viaGateway: true}, nil
+	}
+
+	// Direct fallback (no gateway configured): read the key CALLER-SCOPED — the legacy path, which
+	// requires the caller to have secret-read RBAC (admin-only on the default persona set).
 	if secretBindingRef == "" {
 		return generationTarget{}, &createError{
 			status: http.StatusConflict,
