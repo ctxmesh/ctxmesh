@@ -435,3 +435,42 @@ func TestRender_OTelEnabledAddsCallbackAndEnv(t *testing.T) {
 		assert.NotContains(t, e.Name, "OTEL_", "no OTEL_ env when disabled")
 	}
 }
+
+// TestRender_ExcludesCrossNamespaceNameCollision guards the M133 multi-tenancy fix (Fable review): two
+// routes with the SAME name in DIFFERENT namespaces must both be EXCLUDED (fail-closed), never rendered
+// as a shared LiteLLM load-balancing pool (which would let one tenant spend on another's provider key).
+func TestRender_ExcludesCrossNamespaceNameCollision(t *testing.T) {
+	mk := func(name, ns, binding string) agentsv1alpha1.ModelRoute {
+		return agentsv1alpha1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: agentsv1alpha1.ModelRouteSpec{
+				Providers: []agentsv1alpha1.ProviderRef{
+					{Provider: "anthropic", Model: "claude-x", Priority: 1, SecretBindingRef: binding},
+				},
+			},
+		}
+	}
+	sb := func(name, ns, secret string) agentsv1alpha1.SecretBinding {
+		return agentsv1alpha1.SecretBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       agentsv1alpha1.SecretBindingSpec{Backend: "kubernetes", SecretRef: agentsv1alpha1.SecretKeyRef{Name: secret, Key: "api-key"}},
+		}
+	}
+	routes := []agentsv1alpha1.ModelRoute{
+		mk("anthropic", "tenant-a", "sb-a"),
+		mk("anthropic", "tenant-b", "sb-b"),
+		mk("solo", "tenant-a", "sb-a"),
+	}
+	bindings := map[string]agentsv1alpha1.SecretBinding{
+		"tenant-a/sb-a": sb("sb-a", "tenant-a", "s-a"),
+		"tenant-b/sb-b": sb("sb-b", "tenant-b", "s-b"),
+	}
+	rvs := map[string]string{"tenant-a/s-a": "rv", "tenant-b/s-b": "rv"}
+
+	result := gateway.Render(routes, bindings, rvs, gateway.OTelConfig{})
+
+	assert.NotContains(t, result.ConfigYAML, "model_name: anthropic", "colliding name must be excluded, not pooled")
+	assert.Contains(t, result.ConfigYAML, "model_name: solo", "the non-colliding route still renders")
+	assert.Contains(t, result.Excluded, "tenant-a/anthropic")
+	assert.Contains(t, result.Excluded, "tenant-b/anthropic")
+}

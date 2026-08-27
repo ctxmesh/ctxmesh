@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -230,6 +231,60 @@ func openaiChat(ctx context.Context, c *http.Client, apiKey, baseURL, model, sys
 	}
 	if len(out.Choices) == 0 {
 		return "", &providerError{status: http.StatusBadGateway, msg: "the openai generation response had no choices"}
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+// chatCompleteViaGateway routes a generation chat completion THROUGH the LiteLLM gateway (M133, Fable
+// review): it POSTs the OpenAI-compatible request to <gatewayURL>/v1/chat/completions with
+// model=<route name>, so the gateway — which HOLDS the provider key — authorizes the call and the caller
+// never reads the key (fixing prompt-to-agent/team for non-admin personas). An optional
+// MODEL_GATEWAY_KEY (LiteLLM master key) is attached when set; a per-caller `user` metadata tag rides
+// the request for spend attribution. Same response shape + error mapping as openaiChat.
+func chatCompleteViaGateway(ctx context.Context, c *http.Client, gatewayURL, model, systemPrompt, description, costTag, callerTag string) (string, error) {
+	if strings.TrimSpace(model) == "" {
+		return "", &providerError{status: http.StatusBadRequest, msg: "a generation model is required"}
+	}
+	if c == nil {
+		c = &http.Client{Timeout: defaultProviderTimeout}
+	}
+	if strings.TrimSpace(costTag) == "" {
+		costTag = generationCostTag
+	}
+	msgs := make([]openaiChatMessage, 0, 2)
+	if systemPrompt != "" {
+		msgs = append(msgs, openaiChatMessage{Role: "system", Content: systemPrompt})
+	}
+	msgs = append(msgs, openaiChatMessage{Role: chatRoleUser, Content: description})
+	meta := map[string]string{"purpose": costTag}
+	if strings.TrimSpace(callerTag) != "" {
+		meta["user"] = callerTag // per-caller spend attribution in the gateway's logs
+	}
+	payload := openaiChatRequest{Model: model, MaxTokens: maxGenerationTokens, Messages: msgs, Metadata: meta}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", &providerError{status: http.StatusInternalServerError, msg: "failed to build generation request"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", &providerError{status: http.StatusBadGateway, msg: msgBuildProviderReq}
+	}
+	if key := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_KEY")); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	raw, err := doChat(c, req, providerOpenAI)
+	if err != nil {
+		return "", err
+	}
+	var out openaiChatResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", &providerError{status: http.StatusBadGateway, msg: "could not parse the gateway generation response"}
+	}
+	if len(out.Choices) == 0 {
+		return "", &providerError{status: http.StatusBadGateway, msg: "the gateway generation response had no choices"}
 	}
 	return out.Choices[0].Message.Content, nil
 }

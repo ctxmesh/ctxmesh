@@ -655,3 +655,35 @@ func TestGenerateNilFactoryIs501(t *testing.T) {
 	s.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 }
+
+// TestResolveGeneration_GatewayRoutedSkipsSecret proves the M133 fix: with MODEL_GATEWAY_URL set,
+// generation routes THROUGH the gateway by the route NAME — viaGateway=true, no caller key resolved —
+// so a persona that cannot read the provider Secret still generates (the secret-read wall is removed).
+func TestResolveGeneration_GatewayRoutedSkipsSecret(t *testing.T) {
+	t.Setenv("MODEL_GATEWAY_URL", "http://gw.test:4000")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(connectRouteObjects("anthropic", "claude-sonnet-4-6", "")...).Build()
+	s, _, _ := newGenerateServer(t, c, nil)
+
+	gen, gerr := s.resolveGeneration(context.Background(), c, "prod", &GenerateAgentRequest{})
+	require.Nil(t, gerr, "gateway-routed generation must resolve without reading the Secret")
+	assert.True(t, gen.viaGateway, "MODEL_GATEWAY_URL set ⇒ route via the gateway")
+	assert.Equal(t, "http://gw.test:4000", gen.baseURL)
+	assert.Equal(t, "anthropic", gen.model, "gateway path uses the route NAME as the model alias")
+	assert.Empty(t, gen.apiKey, "gateway path must not carry a caller-read key")
+}
+
+// TestResolveGeneration_DirectPathReadsKey proves the fallback: with no gateway configured, the legacy
+// direct path resolves the caller-scoped key + the provider model (unchanged behavior).
+func TestResolveGeneration_DirectPathReadsKey(t *testing.T) {
+	t.Setenv("MODEL_GATEWAY_URL", "")
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(connectRouteObjects("anthropic", "claude-sonnet-4-6", "")...).Build()
+	s, _, _ := newGenerateServer(t, c, nil)
+
+	gen, gerr := s.resolveGeneration(context.Background(), c, "prod", &GenerateAgentRequest{})
+	require.Nil(t, gerr)
+	assert.False(t, gen.viaGateway)
+	assert.Equal(t, theTestKey, gen.apiKey, "direct path reads the caller-scoped key")
+	assert.Equal(t, "claude-sonnet-4-6", gen.model, "direct path uses the provider model")
+}
