@@ -195,9 +195,8 @@ func (s *Server) handleGenerateTeam(w http.ResponseWriter, r *http.Request) {
 	userMsg := buildTeamGenerationMessage(req.Description, registryRef, eligible)
 
 	// --- Step 4: call the model (one attempt; one retry on hallucination) ------
-	output, chatErr := chatComplete(r.Context(), s.providerHTTP,
-		gen.provider, gen.apiKey, gen.baseURL, gen.model,
-		teamGenerationSystemPrompt, userMsg, teamGenCostTag)
+	// (caller "user" attribution tag carded with per-tenant virtual keys, m52 — pass "" for now.)
+	output, chatErr := s.generationChat(r.Context(), gen, teamGenerationSystemPrompt, userMsg, teamGenCostTag, "")
 	if chatErr != nil {
 		if pe, isPE := isProviderError(chatErr); isPE {
 			writeError(w, pe.status, pe.msg)
@@ -214,9 +213,7 @@ func (s *Server) handleGenerateTeam(w http.ResponseWriter, r *http.Request) {
 	if !valid {
 		// One internal retry: feed the error back to the model.
 		retryMsg := buildTeamRetryMessage(req.Description, registryRef, eligible, reason)
-		retryOutput, retryErr := chatComplete(r.Context(), s.providerHTTP,
-			gen.provider, gen.apiKey, gen.baseURL, gen.model,
-			teamGenerationSystemPrompt, retryMsg, teamGenCostTag)
+		retryOutput, retryErr := s.generationChat(r.Context(), gen, teamGenerationSystemPrompt, retryMsg, teamGenCostTag, "")
 		if retryErr != nil {
 			// Retry call failed — surface the original validation failure as 422.
 			writeJSON(w, http.StatusUnprocessableEntity, GenerateTeamInvalidResponse{

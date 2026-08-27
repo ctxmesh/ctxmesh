@@ -212,9 +212,9 @@ func (s *Server) handleRefine(w http.ResponseWriter, r *http.Request) {
 // nil, err) so the caller can attach the raw output to the 422 or retry with the
 // error.
 func (s *Server) refineAttempt(ctx context.Context, gen generationTarget, userMsg string) (string, []byte, error) {
-	// Replace the Anthropic metadata user_id with the refine cost tag so the spend
-	// is attributable separately from create-from-prompt generation.
-	output, err := refineChat(ctx, s.providerHTTP, gen.provider, gen.apiKey, gen.baseURL, gen.model, refineSystemPrompt, userMsg)
+	// Route via the gateway (no caller key) when gen.viaGateway, else the direct provider call — one
+	// seam with generate/team-generate (M133). refineCostTag keeps refine spend separately attributable.
+	output, err := s.generationChat(ctx, gen, refineSystemPrompt, userMsg, refineCostTag, "")
 	if err != nil {
 		return "", nil, err
 	}
@@ -246,13 +246,6 @@ func (s *Server) registerRefineRoute(mux *http.ServeMux) {
 	} else {
 		mux.Handle("POST /api/agents/refine", notImplemented("pure spec-editing refine"))
 	}
-}
-
-// refineChat issues ONE chat/completions request for the refine endpoint. It delegates to
-// chatComplete (the shared Anthropic/OpenAI dispatcher) with refineCostTag, so refine spend is
-// independently attributable from generate (create-from-prompt) in the provider's cost analytics.
-func refineChat(ctx context.Context, httpClient *http.Client, provider, apiKey, baseURL, model, systemPrompt, userMsg string) (string, error) {
-	return chatComplete(ctx, httpClient, provider, apiKey, baseURL, model, systemPrompt, userMsg, refineCostTag)
 }
 
 // cappedTranscript returns the last n turns from transcript (the server-side cap).
