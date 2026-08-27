@@ -130,14 +130,37 @@ spec:
                     items:
                       description: AlertChannel describes a single notification destination.
                       properties:
+                        email:
+                          description: |-
+                            email configures SMTP delivery to the named recipients. Required when type=email; ignored
+                            otherwise. The SMTP TRANSPORT (host/port/from/credentials) is platform config on the controller
+                            (SMTP_HOST / SMTP_PORT / SMTP_FROM / SMTP_USERNAME / SMTP_PASSWORD); an unconfigured relay skips
+                            the dispatch (logged), never wedging alerting — the same fail-safe posture as a bad webhook.
+                          properties:
+                            subject:
+                              description: subject optionally overrides the default
+                                alert subject line.
+                              type: string
+                            to:
+                              description: to is the list of recipient email addresses
+                                (at least one).
+                              items:
+                                type: string
+                              minItems: 1
+                              type: array
+                          required:
+                          - to
+                          type: object
                         type:
                           description: |-
                             type selects the channel kind.
                               webhook — external POST, signed with the HMAC key from secretRef.
                               console — the durable console alert feed (cpDB alert_events table).
+                              email   — SMTP delivery to the named recipients via the platform relay (M132).
                           enum:
                           - webhook
                           - console
+                          - email
                           type: string
                         webhook:
                           description: webhook configures the external POST endpoint.

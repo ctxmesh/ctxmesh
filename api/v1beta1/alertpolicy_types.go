@@ -100,12 +100,32 @@ type AlertChannel struct {
 	// type selects the channel kind.
 	//   webhook — external POST, signed with the HMAC key from secretRef.
 	//   console — the durable console alert feed (cpDB alert_events table).
-	// +kubebuilder:validation:Enum=webhook;console
+	//   email   — SMTP delivery to the named recipients via the platform relay (M132).
+	// +kubebuilder:validation:Enum=webhook;console;email
 	Type string `json:"type"`
 
 	// webhook configures the external POST endpoint. Required when type=webhook; ignored otherwise.
 	// +optional
 	Webhook *WebhookChannel `json:"webhook,omitempty"`
+
+	// email configures SMTP delivery to the named recipients. Required when type=email; ignored
+	// otherwise. The SMTP TRANSPORT (host/port/from/credentials) is platform config on the controller
+	// (SMTP_HOST / SMTP_PORT / SMTP_FROM / SMTP_USERNAME / SMTP_PASSWORD); an unconfigured relay skips
+	// the dispatch (logged), never wedging alerting — the same fail-safe posture as a bad webhook.
+	// +optional
+	Email *EmailChannel `json:"email,omitempty"`
+}
+
+// EmailChannel configures email delivery of a fired alert (M132, audit V1). The platform SMTP relay
+// (controller env) is the transport; the policy only names the recipients + an optional subject.
+type EmailChannel struct {
+	// to is the list of recipient email addresses (at least one).
+	// +kubebuilder:validation:MinItems=1
+	To []string `json:"to"`
+
+	// subject optionally overrides the default alert subject line.
+	// +optional
+	Subject string `json:"subject,omitempty"`
 }
 
 // AlertRoute describes where fired alerts are delivered.

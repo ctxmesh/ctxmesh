@@ -39,7 +39,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/smtp"
+	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +63,7 @@ const webhookNotifyTimeout = 5 * time.Second
 const (
 	channelTypeWebhook = "webhook"
 	channelTypeConsole = "console"
+	channelTypeEmail   = "email"
 )
 
 // webhookRetryDelays lists the inter-attempt back-off durations. len(webhookRetryDelays)+1 == total
@@ -153,6 +158,17 @@ func (r *AlertPolicyReconciler) dispatchChannels(
 				// Already logged inside dispatchWebhook with full context.
 				log.Error(err, "webhook dispatch failed (continuing)",
 					"alertpolicy", ap.Name, "condition", cond.Name, "url", ch.Webhook.URL)
+			}
+
+		case channelTypeEmail:
+			if ch.Email == nil || len(ch.Email.To) == 0 {
+				log.V(1).Info("email channel has no recipients — skipping",
+					"alertpolicy", ap.Name, "condition", cond.Name, "channelIndex", i)
+				continue
+			}
+			if err := r.dispatchEmail(ctx, ap, cond, ch.Email, payload); err != nil {
+				log.Error(err, "email dispatch failed (continuing)",
+					"alertpolicy", ap.Name, "condition", cond.Name, "to", ch.Email.To)
 			}
 
 		default:
@@ -287,4 +303,102 @@ func (r *AlertPolicyReconciler) dispatchWebhook(
 	}
 
 	return lastErr
+}
+
+// ── Email channel (M132, audit V1) ─────────────────────────────────────────────
+
+// smtpConfig is the platform SMTP relay config for email alert delivery. Read from the controller
+// env; an empty Host means "no relay configured" → email channels skip (logged, never wedge alerting).
+type smtpConfig struct {
+	Host, Port, From, Username, Password string
+}
+
+// smtpConfigFromEnv reads SMTP_* into an smtpConfig (Host empty ⇒ unconfigured; Port defaults to 587).
+func smtpConfigFromEnv() smtpConfig {
+	port := os.Getenv("SMTP_PORT")
+	if port == "" {
+		port = "587"
+	}
+	return smtpConfig{
+		Host:     os.Getenv("SMTP_HOST"),
+		Port:     port,
+		From:     os.Getenv("SMTP_FROM"),
+		Username: os.Getenv("SMTP_USERNAME"),
+		Password: os.Getenv("SMTP_PASSWORD"),
+	}
+}
+
+// smtpSender returns the injected sender or the default net/smtp sender.
+func (r *AlertPolicyReconciler) smtpSender() func(cfg smtpConfig, to []string, subject, body string) error {
+	if r.SMTPSend != nil {
+		return r.SMTPSend
+	}
+	return defaultSMTPSend
+}
+
+// defaultSMTPSend delivers via net/smtp, using PLAIN auth when credentials are present. From falls back
+// to SMTP_USERNAME then a platform default.
+func defaultSMTPSend(cfg smtpConfig, to []string, subject, body string) error {
+	from := cfg.From
+	if from == "" {
+		from = cfg.Username
+	}
+	if from == "" {
+		from = "alerts@agent-engine.local"
+	}
+	msg := buildEmailMessage(from, to, subject, body)
+	var auth smtp.Auth
+	if cfg.Username != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
+	return smtp.SendMail(net.JoinHostPort(cfg.Host, cfg.Port), auth, from, to, []byte(msg))
+}
+
+// buildEmailMessage assembles a minimal RFC 5322 text/plain message (headers + body).
+func buildEmailMessage(from string, to []string, subject, body string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
+	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
+	b.WriteString(body)
+	return b.String()
+}
+
+// dispatchEmail delivers a fired-alert notification via the platform SMTP relay. An unconfigured relay
+// (no SMTP_HOST) SKIPS with a log — the same fail-safe posture as a bad webhook, never wedging alerting.
+func (r *AlertPolicyReconciler) dispatchEmail(
+	ctx context.Context,
+	ap *agentsv1beta1.AlertPolicy,
+	cond agentsv1beta1.AlertCondition,
+	em *agentsv1beta1.EmailChannel,
+	payload webhookPayload,
+) error {
+	log := logf.FromContext(ctx)
+	cfg := smtpConfigFromEnv()
+	if cfg.Host == "" {
+		log.V(1).Info("SMTP relay not configured (SMTP_HOST unset) — skipping email channel",
+			"alertpolicy", ap.Name, "condition", cond.Name, "to", em.To)
+		return nil
+	}
+	subject := em.Subject
+	if subject == "" {
+		subject = fmt.Sprintf("[agent-engine] alert: %s/%s (%s)", payload.Namespace, payload.Policy, payload.Condition)
+	}
+	body := fmt.Sprintf(
+		"AlertPolicy %s/%s fired.\n\nCondition: %s (%s)\nValue: %s\nMessage: %s\nFired at: %s\n",
+		payload.Namespace, payload.Policy, payload.Condition, payload.Type, payload.Value, payload.Message, payload.FiredAt,
+	)
+	if payload.RunID != "" {
+		body += fmt.Sprintf("Run: %s\n", payload.RunID)
+	}
+	if payload.Link != "" {
+		body += fmt.Sprintf("Review: %s\n", payload.Link)
+	}
+	if err := r.smtpSender()(cfg, em.To, subject, body); err != nil {
+		return fmt.Errorf("sending alert email to %v: %w", em.To, err)
+	}
+	log.V(1).Info("alert email sent", "alertpolicy", ap.Name, "condition", cond.Name, "to", em.To)
+	return nil
 }

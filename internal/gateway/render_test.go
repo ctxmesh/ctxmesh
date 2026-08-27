@@ -125,6 +125,8 @@ func TestRender_GoldenConfig(t *testing.T) {
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/SB_ANTHROPIC_KEY
       rpm: 600
+    model_info:
+      base_model: anthropic/claude-sonnet-4-6
   - model_name: a-route
     litellm_params:
       model: openai/mock-default
