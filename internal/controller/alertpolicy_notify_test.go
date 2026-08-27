@@ -210,3 +210,49 @@ func TestAlertPolicyNotify_UnsignedWebhook(t *testing.T) {
 	assert.True(t, gotRequest.Load(), "unsigned webhook must still POST")
 	assert.Empty(t, receivedSig, "unsigned webhook must not include X-Ctxmesh-Signature header")
 }
+
+// TestAlertPolicyNotify_Email verifies an email channel delivers via the injected SMTP sender with the
+// configured recipients + a well-formed subject/body (M132, audit V1).
+func TestAlertPolicyNotify_Email(t *testing.T) {
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	var gotTo []string
+	var gotSubject, gotBody string
+	var called atomic.Bool
+
+	ap := mkNotifyAP("email-ap", "default", []agentsv1beta1.AlertChannel{
+		{Type: "email", Email: &agentsv1beta1.EmailChannel{To: []string{"ops@example.com", "sre@example.com"}}},
+	})
+	fakeClient := fake.NewClientBuilder().WithScheme(notifyTestScheme(t)).Build()
+	r := &AlertPolicyReconciler{
+		Client: fakeClient,
+		SMTPSend: func(_ smtpConfig, to []string, subject, body string) error {
+			called.Store(true)
+			gotTo, gotSubject, gotBody = to, subject, body
+			return nil
+		},
+	}
+	r.notifyChannels(context.Background(), ap, notifyCond, "0.9", "regression detected", time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC))
+
+	require.True(t, called.Load(), "the SMTP sender must be invoked for an email channel with a configured relay")
+	assert.Equal(t, []string{"ops@example.com", "sre@example.com"}, gotTo)
+	assert.Contains(t, gotSubject, "email-ap")
+	assert.Contains(t, gotBody, "regression detected")
+	assert.Contains(t, gotBody, "c1")
+}
+
+// TestAlertPolicyNotify_EmailUnconfiguredSkips verifies an unconfigured relay (no SMTP_HOST) SKIPS the
+// email dispatch (fail-safe — never wedges alerting), leaving the sender uncalled.
+func TestAlertPolicyNotify_EmailUnconfiguredSkips(t *testing.T) {
+	t.Setenv("SMTP_HOST", "")
+	var called atomic.Bool
+	ap := mkNotifyAP("email-ap", "default", []agentsv1beta1.AlertChannel{
+		{Type: "email", Email: &agentsv1beta1.EmailChannel{To: []string{"ops@example.com"}}},
+	})
+	fakeClient := fake.NewClientBuilder().WithScheme(notifyTestScheme(t)).Build()
+	r := &AlertPolicyReconciler{
+		Client:   fakeClient,
+		SMTPSend: func(_ smtpConfig, _ []string, _, _ string) error { called.Store(true); return nil },
+	}
+	r.notifyChannels(context.Background(), ap, notifyCond, "0.9", "msg", time.Now())
+	assert.False(t, called.Load(), "an unconfigured SMTP relay must SKIP, not call the sender")
+}
