@@ -1,0 +1,9 @@
+# Tenant-label ValidatingWebhook Service (M128/Gate E, ADR 0102; ACTIVATED in M134).
+# Wired into config/default → flows into `make deploy` + the generated Helm chart (no-drift).
+# Only the Service ships here; the VWC itself is created at RUNTIME by the manager
+# (internal/webhook.ApplyTenantLabelVWC) after the cert-controller bootstraps the serving cert,
+# so the caBundle is never stale. README.md is documentation, not a resource.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- service.yaml

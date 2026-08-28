@@ -175,14 +175,23 @@ spec:
             cpu: 10m
             memory: 64Mi
         volumeMounts:
-          # Webhook serving certs (M128/Gate E, ADR 0102): an emptyDir the in-process
-          # cert-controller writes the CA + serving cert into (readOnlyRootFilesystem=true, so
-          # the cert dir MUST be a writable mount). controller-runtime's certwatcher reads +
-          # hot-reloads from here. Empty + harmless when the webhook is off (the default).
+          # Webhook serving certs (M128/Gate E, ADR 0102 + the M134 first-boot fix): the in-process
+          # cert-controller (open-policy-agent/cert-controller) POPULATES an existing Secret's data via
+          # the API — it does NOT create the Secret (v0.16.0 rotator errors "acquiring secret ... not
+          # found" and exits if it's absent), and it writes only to the API, never to this disk. Its
+          # contract is that that Secret is VOLUME-MOUNTED here so the KUBELET projects the cert files;
+          # controller-runtime's certwatcher then reads + hot-reloads them (read-only mount). The empty
+          # Secret is SHIPPED (config/manager/webhook-cert-secret.yaml) — an emptyDir (the old wiring) or
+          # a missing Secret both wedge the fresh boot (the M134 bug, caught live on a throwaway cluster).
           - name: webhook-certs
             mountPath: /tmp/k8s-webhook-server/serving-certs
+            readOnly: true
       volumes:
+        # NON-optional: the empty `webhook-server-cert` Secret is shipped unconditionally (namePrefix
+        # → agent-engine-webhook-server-cert = pki.SecretName), so it always exists (empty or populated).
+        # A truly missing Secret then surfaces as a legible MountVolume event, not a Go crash-loop.
         - name: webhook-certs
-          emptyDir: {}
+          secret:
+            secretName: webhook-server-cert
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

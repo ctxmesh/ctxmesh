@@ -79,6 +79,12 @@ func (c WebhookCertConfig) rotatorFor(ready chan struct{}) *rotator.CertRotator 
 		// The controller-runtime webhook server hot-reloads the CertDir via certwatcher, so a
 		// rotation does NOT require a pod restart (rotation binds at the next TLS handshake).
 		RestartOnSecretRefresh: false,
+		// RequireLeaderElection stays FALSE (unset) — LOAD-BEARING, do not "harden" to leader-only.
+		// cmd/main.go closes `certReady` (→ registers the webhook handlers + passes the webhook-server
+		// readyz check) on EVERY replica. If the rotator ran only on the leader, non-leader replicas
+		// would never see the cert on disk, never pass readyz, and every rollout would wedge on
+		// readiness. Multi-replica first-boot races on the Secret are benign (validCACert guard +
+		// Update-conflict retry). The VWC caBundle apply is separately leader-gated (mgr.Add).
 	}
 	if c.CADuration > 0 {
 		cr.CaCertDuration = c.CADuration
