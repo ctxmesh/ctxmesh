@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -32,10 +33,15 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -168,6 +174,45 @@ func managerNamespace() string {
 	return "agent-engine-system"
 }
 
+// selfControllerUsername asks the API server for the manager's OWN identity via SelfSubjectReview
+// (authentication.k8s.io/v1) — the exact username the API server stamps into admission requests. This
+// derives the tenant-label webhook's allowed principal BY CONSTRUCTION (M134, ADR 0102), removing the
+// namePrefix-fragile TENANT_WEBHOOK_CONTROLLER_SA env literal as a wedge source. Uses a direct clientset
+// (the manager cache isn't started yet). Granted to all authenticated principals via system:basic-user.
+func selfControllerUsername(ctx context.Context, cfg *rest.Config) (string, error) {
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", fmt.Errorf("build clientset for SelfSubjectReview: %w", err)
+	}
+	ssr, err := cs.AuthenticationV1().SelfSubjectReviews().Create(
+		ctx, &authnv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("SelfSubjectReview: %w", err)
+	}
+	u := strings.TrimSpace(ssr.Status.UserInfo.Username)
+	if u == "" {
+		return "", errors.New("SelfSubjectReview returned an empty username")
+	}
+	return u, nil
+}
+
+// runCleanupTenantVWC deletes the manager-owned tenant-label VWC and returns nil on success OR NotFound
+// (M134, ADR 0102 — the Helm pre-delete hook). The VWC is created at runtime, so Helm can't GC it on
+// uninstall; without this a fail-closed webhook with a dead backend would linger cluster-wide.
+func runCleanupTenantVWC(ctx context.Context) error {
+	cs, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
+	if err != nil {
+		return fmt.Errorf("build clientset for VWC cleanup: %w", err)
+	}
+	name := enginewebhook.TenantLabelVWCName
+	err = cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ValidatingWebhookConfiguration %q: %w", name, err)
+	}
+	setupLog.Info("tenant-label VWC cleanup complete (deleted or already absent)", "vwc", name)
+	return nil
+}
+
 // statelayerProxylessWarning returns a startup warning (and true) when the controller is proxy-less
 // (STATELAYER_PROXY_URL unset) — an UNSUPPORTED combination with the default network isolation (C21,
 // m52 / Fable audit P2-7). Proxy-less injects a DIRECT MEMORY_BACKEND_ADDR/TENANT_QUOTA_ADDR, but the
@@ -244,6 +289,13 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// cleanup-tenant-vwc (M134, ADR 0102): one-shot mode for the Helm pre-delete hook — delete the
+	// manager-owned tenant-label VWC and exit, so `helm uninstall` never orphans a fail-closed webhook
+	// (the VWC is created at runtime, not a Helm resource, so Helm can't GC it). Idempotent (NotFound
+	// is success); runs whether or not the webhook was ever enabled.
+	var cleanupTenantVWC bool
+	flag.BoolVar(&cleanupTenantVWC, "cleanup-tenant-vwc", false,
+		"Delete the tenant-label ValidatingWebhookConfiguration and exit (Helm pre-delete hook).")
 	// Production-safe logging by default (OTH-5): Development=true uses a console encoder +
 	// DPanic-level stacktraces meant for local dev, not the prod manager. Default to structured
 	// (JSON) production logging; an operator can still opt into dev logging via --zap-devel.
@@ -254,6 +306,15 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// M134 pre-delete hook: run the one-shot VWC cleanup BEFORE any manager wiring, then exit.
+	if cleanupTenantVWC {
+		if err := runCleanupTenantVWC(context.Background()); err != nil {
+			setupLog.Error(err, "cleanup-tenant-vwc failed")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -693,14 +754,27 @@ func main() {
 	// cert-ready goroutine below can abort on shutdown; mgr.Start blocks on the same context.
 	signalCtx := ctrl.SetupSignalHandler()
 	if os.Getenv("ENABLE_TENANT_LABEL_WEBHOOK") == envValueTrue {
-		// audit P2-2: an empty controller SA would deny EVERYONE — including the Tenant controller's own
-		// label stamping — wedging every Tenant reconcile once the VWC is applied. Refuse to start rather
-		// than ship a self-inflicted lockout.
+		// The ONLY principal the webhook allows to set/change the tenant label. Precedence (M134, ADR 0102):
+		//   1. TENANT_WEBHOOK_CONTROLLER_SA (verbatim) — the envtest/integration + exotic-identity override.
+		//   2. Self-derive via SelfSubjectReview: ask the API server for the manager's OWN username — the
+		//      EXACT string it stamps into admission.Request.UserInfo.Username — so the allow-check is an
+		//      invariant BY CONSTRUCTION (the allowed principal is definitionally the manager), not a
+		//      namePrefix-fragile env literal that can silently drift from the real SA and self-wedge every
+		//      install. SelfSubjectReview (authentication.k8s.io/v1, GA 1.28) is granted to all authenticated
+		//      principals via system:basic-user — no RBAC add.
+		// audit P2-2: an empty/unknown SA would deny EVERYONE — including the controller's own label stamping
+		// — wedging every Tenant reconcile once the VWC is applied; so refuse to start rather than self-lock.
 		controllerSA := strings.TrimSpace(os.Getenv("TENANT_WEBHOOK_CONTROLLER_SA"))
 		if controllerSA == "" {
-			setupLog.Error(errors.New("TENANT_WEBHOOK_CONTROLLER_SA is required when the webhook is enabled"),
-				"refusing to enable the tenant-label webhook without the controller SA (would deny the controller itself)")
-			os.Exit(1)
+			derived, derr := selfControllerUsername(signalCtx, mgr.GetConfig())
+			if derr != nil {
+				setupLog.Error(derr, "could not self-derive the controller SA for the tenant-label webhook "+
+					"(set TENANT_WEBHOOK_CONTROLLER_SA to override) — refusing to start (would deny the controller itself)")
+				os.Exit(1)
+			}
+			controllerSA = derived
+			setupLog.Info("tenant-label webhook: self-derived the controller principal via SelfSubjectReview",
+				"user", controllerSA)
 		}
 
 		// Platform PKI (M128/Gate E, ADR 0102): the in-process cert-controller generates + rotates

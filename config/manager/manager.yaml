@@ -127,6 +127,17 @@ spec:
           # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
           - name: DEV_DATA_PLANE
             value: "true"
+          # ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON. The fail-closed tenant-label
+          # ValidatingWebhook forbids a non-controller principal from repointing a namespace's tenant
+          # label (a cross-tenant boundary move). Proven no-wedge fresh (cert bootstrap + restart +
+          # cert-kill + uninstall) on a throwaway cluster before this flip. The manager SELF-DERIVES the
+          # allowed controller principal via SelfSubjectReview (no TENANT_WEBHOOK_CONTROLLER_SA needed —
+          # removes the namePrefix-fragile wedge). gen_helm_chart templates this to
+          # {{ ternary "true" "false" .Values.security.tenantLabelWebhook.enabled }} so an operator can
+          # opt OUT (with the values.yaml ack); the webhook is inert unless a tenant-label write happens
+          # (matchConditions-scoped, system-ns-exempt).
+          - name: ENABLE_TENANT_LABEL_WEBHOOK
+            value: "true"
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
